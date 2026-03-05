@@ -27,6 +27,8 @@ pub struct HotLoop<S: Strategy> {
     pub farm_conn: Option<Connection>,
     /// CCP connection for order management.
     pub ccp_conn: Option<Connection>,
+    /// HMDS farm connection for historical data (optional).
+    pub hmds_conn: Option<Connection>,
     /// Next client order ID for FIX tag 11.
     next_clord_id: u64,
     /// Next market data request ID for FIX tag 262.
@@ -85,6 +87,7 @@ impl<S: Strategy> HotLoop<S> {
             core_id,
             farm_conn: None,
             ccp_conn: None,
+            hmds_conn: None,
             next_clord_id: 1,
             next_md_req_id: 1,
             md_req_to_instrument: Vec::new(),

@@ -47,7 +47,7 @@ fn main() {
     };
 
     println!("Connecting to IB (paper={})...", config.paper);
-    let (gw, farm_conn, ccp_conn) = match Gateway::connect(&config) {
+    let (gw, farm_conn, ccp_conn, hmds_conn) = match Gateway::connect(&config) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("Connection failed: {}", e);
@@ -61,7 +61,7 @@ fn main() {
         order_size: 100,
     };
 
-    let (mut hot_loop, _control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, None);
+    let (mut hot_loop, _control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, None);
 
     // Register instruments (example: AAPL conId)
     let _aapl = hot_loop.context_mut().register_instrument(265598);
