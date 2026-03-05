@@ -176,3 +176,37 @@ Created 6 GitHub issues (#11-#16) for each step, implemented sequentially. Used 
 - All 5 hot loop TODOs implemented
 - All protocol modules complete: fix, fixcomp, ns, xyz, tick_decoder, connection
 - Next step: Connection establishment/auth handshake (SRP flow), then real integration testing against IB gateway
+
+## 2026-03-05 - Gateway: CCP + Farm Connection Orchestration
+
+### Goal
+Implement the Gateway struct that orchestrates CCP auth → FIX logon → farm DH → encrypted FIX logon → SOFT_TOKEN → HotLoop creation. Wire everything together so main.rs can connect to IB.
+
+### Approach Taken
+Created 3 GitHub issues (#17-#19). Researched ibgw-headless gateway.py, handler_farm.py, and proto_auth.py for exact FIX tag layouts and startup sequence. Implemented all three in a single gateway.rs module.
+
+### What Worked
+- **Gateway::connect()**: Full startup sequence — TLS→DH→SRP for CCP, TCP→DH→encrypted logon→SOFT_TOKEN for farm
+- **CCP FIX logon**: Tags 6034, 6968, 6490, 6266, 6351, 6397, 6947, 8361, 8098. Parses response for account ID (tag 1), session ID (tag 8035), CCP token (tag 6386)
+- **Farm encrypted logon**: DH channel encrypt_fresh() → base64 → tags 90/91 wrapper. Inner logon has tags 95/96 (farm_id), 8035 (server session ID), 8285 (NS version range), 8483 (token hash)
+- **token_short_hash()**: SHA1(strip_zeros(token_bytes)), take last 4 bytes as u32 hex — matches Java BigInteger.intValue()
+- **Connection refactored**: Stream enum (Tls/Raw) supports both CCP (TLS) and farm (raw TCP + HMAC signing)
+- **farm_logon_exchange()**: Handles AUTH_START (35=S) → SOFT_TOKEN → logon ACK, syncs HMAC read IV with AES read IV after decryption
+- **chrono_free_timestamp()**: YYYYMMDD-HH:MM:SS without chrono dependency, Howard Hinnant algorithm for date conversion
+
+### Key Decisions
+- **Farm uses raw TCP** (not TLS): DH-derived AES for logon encryption, HMAC-SHA1 for message signing — Connection::new_raw() added
+- **Tags 90/91 for outer wrapper, 95/96 for inner farm_id**: Matches ibgw-headless handler_farm.py exactly
+- **Inline CCP logon** in Gateway::connect() instead of separate function: avoids borrowing the TLS stream through a separate function
+- **No chrono dependency**: Simple Gregorian date math from days since epoch
+
+### What Failed
+- Initially tried to send CCP FIX logon through raw TCP clone, but logon must go through the TLS stream directly
+- Connection originally only supported TLS — had to add Stream enum for raw TCP farm support
+
+### Current State
+- 210 total tests passing (173 unit + 14 control plane + 21 protocol vectors + 2 strategy lifecycle)
+- Gateway wiring complete: CCP auth + logon + farm auth + logon
+- main.rs reads IB_USERNAME/IB_PASSWORD from env, connects, creates HotLoop, runs
+- All issues closed: #10 (control plane wire), #17 (CCP logon), #18 (farm logon), #19 (Gateway struct)
+- Next step: Real integration testing against IB gateway, market data subscription flow verification
