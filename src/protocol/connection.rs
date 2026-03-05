@@ -1,4 +1,4 @@
-//! Non-blocking connection wrapping a TLS stream with read/write buffers.
+//! Non-blocking connection wrapping a TLS or raw TCP stream with read/write buffers.
 //!
 //! Mirrors ibgw-headless FarmConn: per-connection buffer, seq counter,
 //! HMAC sign/read IVs (chained per message).
@@ -25,9 +25,40 @@ pub enum Frame {
     Binary(Vec<u8>),
 }
 
+/// Stream wrapper supporting both TLS and raw TCP.
+enum Stream {
+    Tls(TlsStream<TcpStream>),
+    Raw(TcpStream),
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tls(s) => s.read(buf),
+            Self::Raw(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tls(s) => s.write(buf),
+            Self::Raw(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Tls(s) => s.flush(),
+            Self::Raw(s) => s.flush(),
+        }
+    }
+}
+
 /// Per-connection state for a CCP or farm socket.
 pub struct Connection {
-    stream: TlsStream<TcpStream>,
+    stream: Stream,
     buf: Vec<u8>,
     /// FIX message sequence number (6-digit zero-padded).
     pub seq: u32,
@@ -47,7 +78,22 @@ impl Connection {
     pub fn new(stream: TlsStream<TcpStream>) -> io::Result<Self> {
         stream.get_ref().set_nonblocking(true)?;
         Ok(Self {
-            stream,
+            stream: Stream::Tls(stream),
+            buf: Vec::with_capacity(RECV_BUF_SIZE),
+            seq: 0,
+            sign_key: Vec::new(),
+            sign_iv: Vec::new(),
+            read_key: Vec::new(),
+            read_iv: Vec::new(),
+        })
+    }
+
+    /// Create a new connection from a raw TCP stream (for farm connections).
+    /// Sets the stream to non-blocking mode.
+    pub fn new_raw(stream: TcpStream) -> io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        Ok(Self {
+            stream: Stream::Raw(stream),
             buf: Vec::with_capacity(RECV_BUF_SIZE),
             seq: 0,
             sign_key: Vec::new(),
