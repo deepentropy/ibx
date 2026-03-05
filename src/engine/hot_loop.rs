@@ -3,7 +3,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{InstrumentId, PRICE_SCALE};
+use crate::types::{InstrumentId, OrderRequest, Price, Side, PRICE_SCALE};
 
 /// The pinned-core hot loop. Runs strategy inline with decode and order send.
 /// Generic over S to monomorphize the strategy — zero vtable overhead.
@@ -14,6 +14,10 @@ pub struct HotLoop<S: Strategy> {
     core_id: Option<usize>,
     /// Farm connection for market data (usfarm).
     pub farm_conn: Option<Connection>,
+    /// CCP connection for order management.
+    pub ccp_conn: Option<Connection>,
+    /// Next client order ID for FIX tag 11.
+    next_clord_id: u64,
 }
 
 impl<S: Strategy> HotLoop<S> {
@@ -23,6 +27,8 @@ impl<S: Strategy> HotLoop<S> {
             context: Context::new(),
             core_id,
             farm_conn: None,
+            ccp_conn: None,
+            next_clord_id: 1,
         }
     }
 
@@ -199,11 +205,93 @@ impl<S: Strategy> HotLoop<S> {
     }
 
     fn drain_and_send_orders(&mut self) {
-        for order_req in self.context.drain_pending_orders() {
-            // TODO: Build FIX message from OrderRequest
-            // TODO: HMAC sign
-            // TODO: Send to CCP socket
-            let _ = order_req;
+        let orders: Vec<OrderRequest> = self.context.drain_pending_orders().collect();
+        let conn = match self.ccp_conn.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        for order_req in orders {
+            let result = match order_req {
+                OrderRequest::SubmitLimit { instrument, side, qty, price } => {
+                    let clord = self.next_clord_id;
+                    self.next_clord_id += 1;
+                    let clord_str = clord.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (11, &clord_str),   // ClOrdID
+                        (55, &instrument.to_string()), // Symbol (instrument ID as placeholder)
+                        (54, side_str),     // Side
+                        (38, &qty_str),     // OrderQty
+                        (40, "2"),          // OrdType = Limit
+                        (44, &price_str),   // Price
+                        (59, "0"),          // TIF = DAY
+                    ])
+                }
+                OrderRequest::SubmitMarket { instrument, side, qty } => {
+                    let clord = self.next_clord_id;
+                    self.next_clord_id += 1;
+                    let clord_str = clord.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (11, &clord_str),
+                        (55, &instrument.to_string()),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "1"),          // OrdType = Market
+                        (59, "0"),          // TIF = DAY
+                    ])
+                }
+                OrderRequest::Cancel { order_id } => {
+                    let clord_str = format!("C{}", order_id);
+                    let orig_clord = order_id.to_string();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
+                        (11, &clord_str),   // ClOrdID (cancel)
+                        (41, &orig_clord),  // OrigClOrdID
+                    ])
+                }
+                OrderRequest::CancelAll { instrument } => {
+                    // Cancel all open orders for this instrument by iterating
+                    let open_ids: Vec<u64> = self.context.open_orders_for(instrument)
+                        .iter()
+                        .map(|o| o.order_id)
+                        .collect();
+                    let mut last_result = Ok(());
+                    for oid in open_ids {
+                        let clord_str = format!("C{}", oid);
+                        let orig_clord = oid.to_string();
+                        last_result = conn.send_fix(&[
+                            (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
+                            (11, &clord_str),
+                            (41, &orig_clord),
+                        ]);
+                    }
+                    last_result
+                }
+                OrderRequest::Modify { order_id, price, qty } => {
+                    let clord = self.next_clord_id;
+                    self.next_clord_id += 1;
+                    let clord_str = clord.to_string();
+                    let orig_clord = order_id.to_string();
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
+                        (11, &clord_str),
+                        (41, &orig_clord),  // OrigClOrdID
+                        (38, &qty_str),
+                        (44, &price_str),
+                    ])
+                }
+            };
+            if let Err(e) = result {
+                log::error!("Failed to send order: {}", e);
+            }
         }
     }
 
@@ -226,6 +314,28 @@ impl<S: Strategy> HotLoop<S> {
         // Farm heartbeat: every 30s
     }
 
+}
+
+/// Convert Side to FIX tag 54 value.
+fn fix_side(side: Side) -> &'static str {
+    match side {
+        Side::Buy => "1",
+        Side::Sell => "2",
+    }
+}
+
+/// Format a fixed-point Price as a decimal string for FIX tags.
+fn format_price(price: Price) -> String {
+    let whole = price / PRICE_SCALE;
+    let frac = (price % PRICE_SCALE).unsigned_abs();
+    if frac == 0 {
+        whole.to_string()
+    } else {
+        // Trim trailing zeros
+        let frac_str = format!("{:08}", frac);
+        let trimmed = frac_str.trim_end_matches('0');
+        format!("{}.{}", whole, trimmed)
+    }
 }
 
 /// Find the body content after a specific tag marker in a FIX/binary message.
@@ -469,6 +579,24 @@ mod tests {
 
         // No strategy notification (unknown server_tag)
         assert!(engine.strategy.ticks.is_empty());
+    }
+
+    #[test]
+    fn format_price_whole() {
+        assert_eq!(format_price(150 * PRICE_SCALE), "150");
+        assert_eq!(format_price(0), "0");
+    }
+
+    #[test]
+    fn format_price_decimal() {
+        assert_eq!(format_price(15025 * (PRICE_SCALE / 100)), "150.25");
+        assert_eq!(format_price(PRICE_SCALE / 2), "0.5");
+    }
+
+    #[test]
+    fn fix_side_mapping() {
+        assert_eq!(fix_side(Side::Buy), "1");
+        assert_eq!(fix_side(Side::Sell), "2");
     }
 
     #[test]
