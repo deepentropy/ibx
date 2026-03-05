@@ -550,6 +550,8 @@ impl<S: Strategy> HotLoop<S> {
                     self.hb.last_ccp_sent = Instant::now();
                 }
             }
+            "UT" | "UM" | "RL" => self.handle_account_update(msg),
+            "UP" => self.handle_position_update(&parsed),
             _ => {}
         }
     }
@@ -634,6 +636,76 @@ impl<S: Strategy> HotLoop<S> {
         if let Some(oid) = orig_clord {
             // Ensure order stays in Submitted state
             self.context.update_order_status(oid, crate::types::OrderStatus::Submitted);
+        }
+    }
+
+    /// Handle 8=O UT/UM/RL account value messages.
+    /// Format: repeated 8001=key\x018004=value entries.
+    fn handle_account_update(&mut self, msg: &[u8]) {
+        let text = match std::str::from_utf8(msg) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        let mut key: Option<&str> = None;
+        for part in text.split('\x01') {
+            if let Some(val) = part.strip_prefix("8001=") {
+                key = Some(val);
+            } else if let Some(val) = part.strip_prefix("8004=") {
+                if let Some(k) = key {
+                    match k {
+                        "NetLiquidation" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.net_liquidation = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "BuyingPower" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.buying_power = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "MaintMarginReq" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.margin_used = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "UnrealizedPnL" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.unrealized_pnl = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "RealizedPnL" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.realized_pnl = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        _ => {}
+                    }
+                    key = None;
+                }
+            }
+        }
+    }
+
+    /// Handle 8=O UP position messages.
+    /// Tags: 6008=conId, 6064=position, 6065=avgCost.
+    fn handle_position_update(&mut self, parsed: &std::collections::HashMap<u32, String>) {
+        let con_id: i64 = match parsed.get(&6008).and_then(|s| s.parse().ok()) {
+            Some(v) => v,
+            None => return,
+        };
+        let position: i64 = parsed.get(&6064)
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|v| v as i64)
+            .unwrap_or(0);
+
+        if let Some(instrument) = self.context.market.instrument_by_con_id(con_id) {
+            // Set absolute position (UP gives absolute, not delta)
+            let current = self.context.position(instrument);
+            let delta = position - current;
+            if delta != 0 {
+                self.context.update_position(instrument, delta);
+            }
         }
     }
 
@@ -1294,6 +1366,67 @@ mod tests {
 
         assert_eq!(engine.context_mut().market.instrument_by_server_tag(99), Some(0));
         assert_eq!(engine.context_mut().market.min_tick(0), 0.01);
+    }
+
+    #[test]
+    fn account_update_ut_parses_values() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+
+        // Simulate 8=O UT message
+        let msg = b"8=O\x019=999\x0135=UT\x018001=NetLiquidation\x018004=100000.50\x018001=BuyingPower\x018004=200000.00\x01";
+        engine.inject_ccp_message(msg);
+
+        assert_eq!(engine.context_mut().account().net_liquidation,
+                   (100000.50 * PRICE_SCALE as f64) as Price);
+        assert_eq!(engine.context_mut().account().buying_power,
+                   (200000.0 * PRICE_SCALE as f64) as Price);
+    }
+
+    #[test]
+    fn account_update_um_parses_pnl() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+
+        let msg = b"8=O\x019=999\x0135=UM\x018001=UnrealizedPnL\x018004=1500.25\x018001=RealizedPnL\x018004=-200.00\x01";
+        engine.inject_ccp_message(msg);
+
+        assert_eq!(engine.context_mut().account().unrealized_pnl,
+                   (1500.25 * PRICE_SCALE as f64) as Price);
+        assert_eq!(engine.context_mut().account().realized_pnl,
+                   (-200.0 * PRICE_SCALE as f64) as Price);
+    }
+
+    #[test]
+    fn position_update_sets_absolute() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598); // instrument 0
+
+        // UP message with position = 100
+        let msg = fix::fix_build(&[
+            (35, "UP"), (6008, "265598"), (6064, "100"), (6065, "150.25"),
+        ], 1);
+        // Wrap as 8=O format for fix_parse compatibility
+        let o_msg = format!("8=O\x019=999\x0135=UP\x016008=265598\x016064=100\x016065=150.25\x01");
+        engine.inject_ccp_message(o_msg.as_bytes());
+
+        assert_eq!(engine.context_mut().position(0), 100);
+
+        // Second UP with position = 70 (sold 30)
+        let o_msg2 = format!("8=O\x019=999\x0135=UP\x016008=265598\x016064=70\x01");
+        engine.inject_ccp_message(o_msg2.as_bytes());
+
+        assert_eq!(engine.context_mut().position(0), 70);
+    }
+
+    #[test]
+    fn position_update_unknown_con_id_ignored() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        let msg = format!("8=O\x019=999\x0135=UP\x016008=999999\x016064=50\x01");
+        engine.inject_ccp_message(msg.as_bytes());
+
+        // No position change for instrument 0
+        assert_eq!(engine.context_mut().position(0), 0);
     }
 
     #[test]
