@@ -147,7 +147,8 @@ impl Context {
     pub fn open_orders_for(&self, id: InstrumentId) -> Vec<&Order> {
         self.open_orders
             .values()
-            .filter(|o| o.instrument == id && o.status == OrderStatus::Submitted)
+            .filter(|o| o.instrument == id && matches!(o.status,
+                OrderStatus::PendingSubmit | OrderStatus::Submitted | OrderStatus::PartiallyFilled))
             .collect()
     }
 
@@ -193,6 +194,25 @@ impl Context {
             instrument,
             side,
             qty,
+        });
+        id
+    }
+
+    pub fn submit_stop(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        stop_price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitStop {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            stop_price,
         });
         id
     }
@@ -272,6 +292,12 @@ impl Context {
     pub fn update_order_status(&mut self, order_id: OrderId, status: OrderStatus) {
         if let Some(order) = self.open_orders.get_mut(&order_id) {
             order.status = status;
+        }
+    }
+
+    pub fn update_order_filled(&mut self, order_id: OrderId, last_shares: u32) {
+        if let Some(order) = self.open_orders.get_mut(&order_id) {
+            order.filled += last_shares;
         }
     }
 
@@ -830,5 +856,61 @@ mod tests {
     fn remove_order_nonexistent_no_panic() {
         let mut ctx = Context::new();
         ctx.remove_order(999); // should not panic
+    }
+
+    #[test]
+    fn submit_stop_returns_id_and_drains() {
+        let mut ctx = Context::new();
+        let id = ctx.submit_stop(0, Side::Sell, 50, 140 * PRICE_SCALE);
+
+        let orders: Vec<_> = ctx.drain_pending_orders().collect();
+        assert_eq!(orders.len(), 1);
+        match orders[0] {
+            OrderRequest::SubmitStop { order_id, instrument, side, qty, stop_price } => {
+                assert_eq!(order_id, id);
+                assert_eq!(instrument, 0);
+                assert_eq!(side, Side::Sell);
+                assert_eq!(qty, 50);
+                assert_eq!(stop_price, 140 * PRICE_SCALE);
+            }
+            _ => panic!("Expected SubmitStop"),
+        }
+    }
+
+    #[test]
+    fn update_order_filled_accumulates() {
+        let mut ctx = Context::new();
+        ctx.insert_order(Order {
+            order_id: 1, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::PendingSubmit,
+        });
+        ctx.update_order_filled(1, 30);
+        assert_eq!(ctx.order(1).unwrap().filled, 30);
+        ctx.update_order_filled(1, 50);
+        assert_eq!(ctx.order(1).unwrap().filled, 80);
+    }
+
+    #[test]
+    fn open_orders_for_includes_pending_and_partial() {
+        let mut ctx = Context::new();
+        ctx.insert_order(Order {
+            order_id: 1, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::PendingSubmit,
+        });
+        ctx.insert_order(Order {
+            order_id: 2, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: 100, filled: 50,
+            status: OrderStatus::PartiallyFilled,
+        });
+        ctx.insert_order(Order {
+            order_id: 3, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: 100, filled: 100,
+            status: OrderStatus::Filled,
+        });
+        let open = ctx.open_orders_for(0);
+        // PendingSubmit and PartiallyFilled count as open; Filled does not
+        assert_eq!(open.len(), 2);
     }
 }

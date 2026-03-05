@@ -30,6 +30,9 @@ pub enum Side {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderStatus {
+    /// Locally queued, not yet acknowledged by server.
+    PendingSubmit,
+    /// Acknowledged by server (FIX 39=0 or 39=A).
     Submitted,
     Filled,
     PartiallyFilled,
@@ -125,6 +128,13 @@ pub enum OrderRequest {
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+    },
+    SubmitStop {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        stop_price: Price,
     },
     Cancel {
         order_id: OrderId,
