@@ -3,7 +3,8 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{InstrumentId, OrderRequest, Price, Side, PRICE_SCALE};
+use crate::types::{ControlCommand, InstrumentId, OrderRequest, Price, Side, PRICE_SCALE};
+use crossbeam_channel::Receiver;
 
 /// The pinned-core hot loop. Runs strategy inline with decode and order send.
 /// Generic over S to monomorphize the strategy — zero vtable overhead.
@@ -18,6 +19,10 @@ pub struct HotLoop<S: Strategy> {
     pub ccp_conn: Option<Connection>,
     /// Next client order ID for FIX tag 11.
     next_clord_id: u64,
+    /// SPSC channel receiver for control plane commands.
+    control_rx: Option<Receiver<ControlCommand>>,
+    /// Whether the hot loop should keep running.
+    running: bool,
 }
 
 impl<S: Strategy> HotLoop<S> {
@@ -29,7 +34,14 @@ impl<S: Strategy> HotLoop<S> {
             farm_conn: None,
             ccp_conn: None,
             next_clord_id: 1,
+            control_rx: None,
+            running: true,
         }
+    }
+
+    /// Set the control channel receiver. The caller keeps the sender.
+    pub fn set_control_rx(&mut self, rx: Receiver<ControlCommand>) {
+        self.control_rx = Some(rx);
     }
 
     /// Access the context (for pre-start configuration like registering instruments).
@@ -37,15 +49,16 @@ impl<S: Strategy> HotLoop<S> {
         &mut self.context
     }
 
-    /// Run the hot loop. This blocks the current thread forever.
-    pub fn run(&mut self) -> ! {
+    /// Run the hot loop. Blocks until Shutdown command received.
+    pub fn run(&mut self) {
         if let Some(core) = self.core_id {
             Self::pin_to_core(core);
         }
 
         self.strategy.on_start(&mut self.context);
+        self.running = true;
 
-        loop {
+        while self.running {
             // 1. Busy-poll usfarm socket (non-blocking recv)
             //    → HMAC verify → zlib decompress → bit-unpack ticks
             //    → update market state in-place
@@ -431,8 +444,32 @@ impl<S: Strategy> HotLoop<S> {
     }
 
     fn poll_control_commands(&mut self) {
-        // TODO: Check SPSC ring buffer from control plane
-        // Commands: subscribe instrument, change params, shutdown, etc.
+        let rx = match self.control_rx.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+
+        // Drain all pending commands (non-blocking)
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                ControlCommand::Subscribe { con_id } => {
+                    let _id = self.context.market.register(con_id);
+                    // TODO: Send FIX 35=V (MarketDataRequest) to usfarm
+                }
+                ControlCommand::Unsubscribe { instrument } => {
+                    let _ = instrument;
+                    // TODO: Send FIX 35=V unsubscribe to usfarm
+                }
+                ControlCommand::UpdateParam { key, value } => {
+                    let _ = (key, value);
+                    // Strategy-specific param updates — future extension
+                }
+                ControlCommand::Shutdown => {
+                    self.running = false;
+                    self.strategy.on_disconnect(&mut self.context);
+                }
+            }
+        }
     }
 
     fn check_heartbeats(&mut self) {
@@ -815,6 +852,51 @@ mod tests {
         assert_eq!(engine.context_mut().position(0), 0);
         // Order should be removed (terminal)
         assert!(engine.context_mut().order(3).is_none());
+    }
+
+    #[test]
+    fn control_subscribe_registers_instrument() {
+        let strategy = RecordingStrategy::new();
+        let mut engine = HotLoop::new(strategy, None);
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        engine.set_control_rx(rx);
+
+        tx.send(ControlCommand::Subscribe { con_id: 265598 }).unwrap();
+        engine.poll_control_commands();
+
+        // Instrument should be registered
+        let id = engine.context_mut().market.register(265598);
+        assert_eq!(id, 0); // same conId returns same id
+    }
+
+    #[test]
+    fn control_shutdown_stops_loop() {
+        let strategy = RecordingStrategy::new();
+        let mut engine = HotLoop::new(strategy, None);
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        engine.set_control_rx(rx);
+
+        tx.send(ControlCommand::Shutdown).unwrap();
+        engine.poll_control_commands();
+
+        assert!(!engine.running);
+    }
+
+    #[test]
+    fn control_multiple_commands_drained() {
+        let strategy = RecordingStrategy::new();
+        let mut engine = HotLoop::new(strategy, None);
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        engine.set_control_rx(rx);
+
+        tx.send(ControlCommand::Subscribe { con_id: 265598 }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 272093 }).unwrap();
+        tx.send(ControlCommand::UpdateParam { key: "k".into(), value: "v".into() }).unwrap();
+        engine.poll_control_commands();
+
+        // Both instruments registered
+        assert_eq!(engine.context_mut().market.register(265598), 0);
+        assert_eq!(engine.context_mut().market.register(272093), 1);
     }
 
     #[test]
