@@ -50,6 +50,16 @@ impl MarketState {
         self.server_tag_to_instrument.push((server_tag, instrument));
     }
 
+    /// Look up InstrumentId by con_id. Returns None if not registered.
+    pub fn instrument_by_con_id(&self, con_id: i64) -> Option<InstrumentId> {
+        for &(cid, iid) in &self.con_id_to_instrument {
+            if cid == con_id {
+                return Some(iid);
+            }
+        }
+        None
+    }
+
     /// Look up InstrumentId by server_tag. Returns None if not registered.
     pub fn instrument_by_server_tag(&self, server_tag: u32) -> Option<InstrumentId> {
         for &(st, iid) in &self.server_tag_to_instrument {
