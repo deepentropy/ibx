@@ -1,6 +1,7 @@
 use crate::engine::market_state::MarketState;
 use crate::types::*;
 use std::collections::HashMap;
+use std::time::Instant;
 
 /// The strategy trait. Generic type parameter S: Strategy is monomorphized into
 /// the engine loop — no Box<dyn>, no vtable, no indirection.
@@ -66,6 +67,10 @@ pub struct Context {
     pub(crate) account: AccountState,
     clock: Clock,
     next_order_id: OrderId,
+    /// Timestamp when the last farm socket recv returned data (for decode latency measurement).
+    pub(crate) recv_at: Instant,
+    /// Total hot loop iterations since start.
+    pub(crate) loop_iterations: u64,
 }
 
 impl Context {
@@ -78,6 +83,8 @@ impl Context {
             account: AccountState::default(),
             clock: Clock::new(),
             next_order_id: 1,
+            recv_at: Instant::now(),
+            loop_iterations: 0,
         }
     }
 
@@ -207,6 +214,18 @@ impl Context {
 
     pub fn now_utc(&self) -> i64 {
         self.clock.now_utc()
+    }
+
+    /// Timestamp when the last farm socket recv returned data.
+    #[inline(always)]
+    pub fn recv_timestamp(&self) -> Instant {
+        self.recv_at
+    }
+
+    /// Total hot loop iterations since start.
+    #[inline(always)]
+    pub fn loop_iterations(&self) -> u64 {
+        self.loop_iterations
     }
 
     // ── Instrument management ──
@@ -612,5 +631,189 @@ mod tests {
             }
             _ => panic!("expected SubmitLimit"),
         }
+    }
+
+    // --- register_instrument ---
+
+    #[test]
+    fn register_instrument_returns_id() {
+        let mut ctx = Context::new();
+        let id = ctx.register_instrument(265598);
+        assert_eq!(id, 0);
+        let id2 = ctx.register_instrument(272093);
+        assert_eq!(id2, 1);
+    }
+
+    #[test]
+    fn register_instrument_idempotent() {
+        let mut ctx = Context::new();
+        let id1 = ctx.register_instrument(265598);
+        let id2 = ctx.register_instrument(265598);
+        assert_eq!(id1, id2);
+    }
+
+    // --- set_quote ---
+
+    #[test]
+    fn set_quote_replaces_entire_quote() {
+        let mut ctx = Context::new();
+        let id = ctx.register_instrument(265598);
+        let q = Quote {
+            bid: 150 * PRICE_SCALE,
+            ask: 151 * PRICE_SCALE,
+            last: 150_50 * (PRICE_SCALE / 100),
+            bid_size: 500,
+            ask_size: 300,
+            ..Quote::default()
+        };
+        ctx.set_quote(id, q);
+        assert_eq!(ctx.bid(id), 150 * PRICE_SCALE);
+        assert_eq!(ctx.ask(id), 151 * PRICE_SCALE);
+        assert_eq!(ctx.bid_size(id), 500);
+        assert_eq!(ctx.ask_size(id), 300);
+    }
+
+    // --- quote_mut ---
+
+    #[test]
+    fn quote_mut_modifies_in_place() {
+        let mut ctx = Context::new();
+        let id = ctx.register_instrument(265598);
+        ctx.quote_mut(id).bid = 42 * PRICE_SCALE;
+        assert_eq!(ctx.bid(id), 42 * PRICE_SCALE);
+    }
+
+    // --- bid_size, ask_size ---
+
+    #[test]
+    fn bid_size_ask_size_delegates() {
+        let mut ctx = Context::new();
+        let id = ctx.register_instrument(265598);
+        ctx.quote_mut(id).bid_size = 123;
+        ctx.quote_mut(id).ask_size = 456;
+        assert_eq!(ctx.bid_size(id), 123);
+        assert_eq!(ctx.ask_size(id), 456);
+    }
+
+    // --- account ---
+
+    #[test]
+    fn account_default_zeros() {
+        let ctx = Context::new();
+        let a = ctx.account();
+        assert_eq!(a.net_liquidation, 0);
+        assert_eq!(a.buying_power, 0);
+    }
+
+    #[test]
+    fn account_writable() {
+        let mut ctx = Context::new();
+        ctx.account.net_liquidation = 100_000 * PRICE_SCALE;
+        assert_eq!(ctx.account().net_liquidation, 100_000 * PRICE_SCALE);
+    }
+
+    // --- on_order_update callback ---
+
+    #[test]
+    fn strategy_on_order_update() {
+        struct UpdateTracker { updates: Vec<OrderId> }
+        impl Strategy for UpdateTracker {
+            fn on_tick(&mut self, _: InstrumentId, _: &mut Context) {}
+            fn on_order_update(&mut self, update: &OrderUpdate, _: &mut Context) {
+                self.updates.push(update.order_id);
+            }
+        }
+
+        let mut s = UpdateTracker { updates: Vec::new() };
+        let mut ctx = Context::new();
+        let update = OrderUpdate {
+            order_id: 42,
+            instrument: 0,
+            status: OrderStatus::Filled,
+            filled_qty: 100,
+            remaining_qty: 0,
+            timestamp_ns: 0,
+        };
+        s.on_order_update(&update, &mut ctx);
+        assert_eq!(s.updates, vec![42]);
+    }
+
+    // --- on_disconnect callback ---
+
+    #[test]
+    fn strategy_on_disconnect() {
+        struct DisconnectTracker { called: bool }
+        impl Strategy for DisconnectTracker {
+            fn on_tick(&mut self, _: InstrumentId, _: &mut Context) {}
+            fn on_disconnect(&mut self, _: &mut Context) {
+                self.called = true;
+            }
+        }
+
+        let mut s = DisconnectTracker { called: false };
+        let mut ctx = Context::new();
+        s.on_disconnect(&mut ctx);
+        assert!(s.called);
+    }
+
+    // --- Timing ---
+
+    #[test]
+    fn now_ns_monotonic() {
+        let ctx = Context::new();
+        let t1 = ctx.now_ns();
+        let t2 = ctx.now_ns();
+        assert!(t2 >= t1);
+    }
+
+    #[test]
+    fn now_utc_positive() {
+        let ctx = Context::new();
+        let ts = ctx.now_utc();
+        // Should be after 2024-01-01 in seconds since epoch
+        assert!(ts > 1704067200);
+    }
+
+    // --- Multiple orders per instrument ---
+
+    #[test]
+    fn multiple_orders_same_instrument() {
+        let mut ctx = Context::new();
+        ctx.register_instrument(265598);
+
+        ctx.insert_order(Order {
+            order_id: 1, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+        });
+        ctx.insert_order(Order {
+            order_id: 2, instrument: 0, side: Side::Sell,
+            price: 155 * PRICE_SCALE, qty: 50, filled: 0,
+            status: OrderStatus::Submitted,
+        });
+        ctx.insert_order(Order {
+            order_id: 3, instrument: 0, side: Side::Buy,
+            price: 149 * PRICE_SCALE, qty: 200, filled: 0,
+            status: OrderStatus::Filled,
+        });
+
+        // open_orders_for only returns Submitted
+        let open = ctx.open_orders_for(0);
+        assert_eq!(open.len(), 2);
+    }
+
+    // --- Update order status edge case ---
+
+    #[test]
+    fn update_order_status_nonexistent_no_panic() {
+        let mut ctx = Context::new();
+        // Should not panic when order doesn't exist
+        ctx.update_order_status(999, OrderStatus::Cancelled);
+    }
+
+    #[test]
+    fn remove_order_nonexistent_no_panic() {
+        let mut ctx = Context::new();
+        ctx.remove_order(999); // should not panic
     }
 }

@@ -216,6 +216,10 @@ impl Connection {
         if self.read_key.is_empty() {
             return (msg.to_vec(), true); // no signing configured
         }
+        // Only unsign if 8349= HMAC tag is present (matching Python _unsign_conn)
+        if !msg.windows(5).any(|w| w == b"8349=") {
+            return (msg.to_vec(), true);
+        }
         let (undistorted, new_iv, valid) = fix::fix_unsign(msg, &self.read_key, &self.read_iv);
         self.read_iv = new_iv;
         (undistorted, valid)
@@ -236,6 +240,22 @@ impl Connection {
         Ok(())
     }
 
+    /// Build a FIX message, wrap in FIXCOMP, sign, and send. For farm non-heartbeat messages.
+    pub fn send_fixcomp(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
+        self.seq += 1;
+        let msg = fix::fix_build(fields, self.seq);
+        let wrapped = fixcomp::fixcomp_build(&msg);
+        let to_send = if self.sign_key.is_empty() {
+            wrapped
+        } else {
+            let (signed, new_iv) = fix::fix_sign(&wrapped, &self.sign_key, &self.sign_iv);
+            self.sign_iv = new_iv;
+            signed
+        };
+        self.stream.write_all(&to_send)?;
+        Ok(())
+    }
+
     /// Send raw bytes (pre-built message).
     pub fn send_raw(&mut self, data: &[u8]) -> io::Result<()> {
         self.stream.write_all(data)?;
@@ -245,6 +265,11 @@ impl Connection {
     /// Number of buffered bytes not yet extracted as frames.
     pub fn buffered(&self) -> usize {
         self.buf.len()
+    }
+
+    /// Inject pre-read bytes into the buffer (e.g., leftover from routing response).
+    pub fn inject_buf(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
     }
 }
 
@@ -372,5 +397,118 @@ mod tests {
         assert_eq!(find_subsequence(b"hello world", b"world"), Some(6));
         assert_eq!(find_subsequence(b"hello world", b"xyz"), None);
         assert_eq!(find_subsequence(b"8=FIX.4.1\x01", b"8=FIX."), Some(0));
+    }
+
+    /// Helper: create a Connection with a dummy TCP stream for buffer tests.
+    /// We connect to a local listener so we get a valid TcpStream.
+    fn test_connection_with_buf(buf: Vec<u8>) -> Connection {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = std::net::TcpStream::connect(addr).unwrap();
+        stream.set_nonblocking(true).unwrap();
+        Connection {
+            stream: Stream::Raw(stream),
+            buf,
+            seq: 0,
+            sign_key: Vec::new(),
+            sign_iv: Vec::new(),
+            read_key: Vec::new(),
+            read_iv: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn frame_extraction_fixcomp() {
+        let inner = fix_build(&[(35, "0")], 1);
+        let comp = fixcomp_build(&inner);
+        let mut conn = test_connection_with_buf(comp.clone());
+        let frames = conn.extract_frames();
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            Frame::FixComp(data) => assert_eq!(data, &comp),
+            other => panic!("expected Frame::FixComp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn frame_extraction_garbage_before_fix() {
+        let msg = fix_build(&[(35, "A"), (108, "10")], 1);
+        let mut buf = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xFF];
+        buf.extend_from_slice(&msg);
+        let mut conn = test_connection_with_buf(buf);
+        let frames = conn.extract_frames();
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            Frame::Fix(data) => assert_eq!(data, &msg),
+            other => panic!("expected Frame::Fix, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn frame_extraction_incomplete_fix() {
+        let msg = fix_build(&[(35, "D"), (55, "AAPL")], 1);
+        // Take only first half of the message
+        let half = msg.len() / 2;
+        let buf = msg[..half].to_vec();
+        let mut conn = test_connection_with_buf(buf);
+        let frames = conn.extract_frames();
+        assert!(frames.is_empty(), "incomplete message should not produce a frame");
+    }
+
+    #[test]
+    fn frame_extraction_two_fix_back_to_back() {
+        let msg1 = fix_build(&[(35, "0")], 1);
+        let msg2 = fix_build(&[(35, "D"), (55, "MSFT"), (54, "1")], 2);
+        let mut buf = msg1.clone();
+        buf.extend_from_slice(&msg2);
+        let mut conn = test_connection_with_buf(buf);
+        let frames = conn.extract_frames();
+        assert_eq!(frames.len(), 2);
+        match &frames[0] {
+            Frame::Fix(data) => assert_eq!(data, &msg1),
+            other => panic!("expected Frame::Fix for msg1, got {:?}", other),
+        }
+        match &frames[1] {
+            Frame::Fix(data) => assert_eq!(data, &msg2),
+            other => panic!("expected Frame::Fix for msg2, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn frame_extraction_binary_8o() {
+        let body = b"35=P\x01somedata";
+        let header = format!("8=O\x019={}\x01", body.len());
+        let mut msg = header.into_bytes();
+        msg.extend_from_slice(body);
+        let mut conn = test_connection_with_buf(msg.clone());
+        let frames = conn.extract_frames();
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            Frame::Binary(data) => assert_eq!(data, &msg),
+            other => panic!("expected Frame::Binary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn find_subsequence_needle_at_start() {
+        assert_eq!(find_subsequence(b"hello world", b"hello"), Some(0));
+    }
+
+    #[test]
+    fn find_subsequence_needle_at_end() {
+        assert_eq!(find_subsequence(b"hello world", b"world"), Some(6));
+    }
+
+    #[test]
+    fn find_subsequence_overlapping() {
+        // "aaa" in "aaaa" — should find at position 0 (first match)
+        assert_eq!(find_subsequence(b"aaaa", b"aaa"), Some(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "window size must be non-zero")]
+    fn find_subsequence_empty_needle() {
+        // windows(0) panics, so empty needle panics
+        find_subsequence(b"hello", b"");
     }
 }

@@ -190,7 +190,7 @@ pub fn fix_sign(msg: &[u8], mac_key: &[u8], iv: &[u8]) -> (Vec<u8>, Vec<u8>) {
     if is_fix41 {
         end -= 7; // also skip 10=XXX SOH
     }
-    if start <= end as usize {
+    if end >= start as isize {
         let rng = end as usize - start + 1;
         for i in 0..8 {
             let pos = (iv[i * 2] as usize) % rng;
@@ -226,7 +226,7 @@ pub fn fix_unsign(msg: &[u8], mac_key: &[u8], iv: &[u8]) -> (Vec<u8>, Vec<u8>, b
     if is_fix41 {
         end -= 7;
     }
-    if start <= end as usize {
+    if end >= start as isize {
         let rng = end as usize - start + 1;
         for i in (0..8).rev() {
             let pos = (iv[i * 2] as usize) % rng;
@@ -293,7 +293,7 @@ pub fn fix_read<R: Read>(reader: &mut R) -> io::Result<Vec<u8>> {
         }
         buf.extend_from_slice(&tmp[..n]);
         // Look for checksum tag ending: \x0110=XXX\x01
-        if let Some(idx) = buf.windows(3).position(|w| w == b"\x0110=") {
+        if let Some(idx) = buf.windows(4).position(|w| w == b"\x0110=") {
             if let Some(end) = buf[idx + 4..].iter().position(|&b| b == SOH) {
                 let total = idx + 4 + end + 1;
                 return Ok(buf[..total].to_vec());
@@ -412,5 +412,237 @@ mod tests {
         let (signed, _) = fix_sign(&msg, &mac_key, &iv);
         let (_, _, valid) = fix_unsign(&signed, &wrong_key, &iv);
         assert!(!valid);
+    }
+
+    #[test]
+    fn fix_parse_empty_value_raw() {
+        // "35=\x01" should parse tag 35 with empty string
+        let data = b"35=\x01";
+        let parsed = fix_parse(data);
+        assert_eq!(parsed.get(&35), Some(&String::new()));
+    }
+
+    #[test]
+    fn fix_parse_non_fix_prefix() {
+        // Random bytes before valid tag=value pairs should still parse
+        let data = b"\xDE\xAD\xBE\xEF\x0155=AAPL\x0154=1\x01";
+        let parsed = fix_parse(data);
+        assert_eq!(parsed.get(&55), Some(&"AAPL".to_string()));
+        assert_eq!(parsed.get(&54), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn fix_build_many_tags_all_present() {
+        let fields: Vec<(u32, &str)> = vec![
+            (35, "D"),
+            (11, "CLO001"),
+            (55, "MSFT"),
+            (54, "2"),
+            (38, "500"),
+            (40, "2"),
+            (44, "350.50"),
+            (59, "0"),
+        ];
+        let msg = fix_build(&fields, 10);
+        let parsed = fix_parse(&msg);
+        for (tag, val) in &fields {
+            assert_eq!(
+                parsed.get(tag),
+                Some(&val.to_string()),
+                "tag {} missing or wrong",
+                tag
+            );
+        }
+        // Auto-generated tags must also be present
+        assert!(parsed.contains_key(&8));
+        assert!(parsed.contains_key(&9));
+        assert!(parsed.contains_key(&10));
+        assert!(parsed.contains_key(&34));
+    }
+
+    #[test]
+    fn fix_build_seq_zero_pads_to_6_digits() {
+        let msg1 = fix_build(&[(35, "0")], 1);
+        let parsed1 = fix_parse(&msg1);
+        assert_eq!(parsed1[&34], "000001");
+
+        let msg2 = fix_build(&[(35, "0")], 999999);
+        let parsed2 = fix_parse(&msg2);
+        assert_eq!(parsed2[&34], "999999");
+    }
+
+    #[test]
+    fn fix_checksum_wraps_at_256() {
+        // 256 bytes of value 1 → sum = 256, mod 256 = 0
+        let data = vec![1u8; 256];
+        assert_eq!(fix_checksum(&data), "000");
+
+        // 255 bytes of value 1 → sum = 255, mod 256 = 255
+        let data2 = vec![1u8; 255];
+        assert_eq!(fix_checksum(&data2), "255");
+
+        // 257 bytes of value 1 → sum = 257, mod 256 = 1
+        let data3 = vec![1u8; 257];
+        assert_eq!(fix_checksum(&data3), "001");
+    }
+
+    #[test]
+    fn sign_unsign_iv_chaining_three_messages() {
+        let mac_key: Vec<u8> = (0..20).collect();
+        let iv: Vec<u8> = (0..16).collect();
+
+        let msg1 = fix_build(&[(35, "D"), (55, "AAPL")], 1);
+        let msg2 = fix_build(&[(35, "0")], 2);
+        let msg3 = fix_build(&[(35, "A"), (108, "10")], 3);
+
+        // Sign sequentially
+        let (signed1, iv_after1) = fix_sign(&msg1, &mac_key, &iv);
+        let (signed2, iv_after2) = fix_sign(&msg2, &mac_key, &iv_after1);
+        let (signed3, iv_after3) = fix_sign(&msg3, &mac_key, &iv_after2);
+
+        // Unsign in same order with same initial IV
+        let (_, unsign_iv1, valid1) = fix_unsign(&signed1, &mac_key, &iv);
+        assert!(valid1, "message 1 signature invalid");
+        let (_, unsign_iv2, valid2) = fix_unsign(&signed2, &mac_key, &unsign_iv1);
+        assert!(valid2, "message 2 signature invalid");
+        let (_, unsign_iv3, valid3) = fix_unsign(&signed3, &mac_key, &unsign_iv2);
+        assert!(valid3, "message 3 signature invalid");
+
+        // IVs must match between sign and unsign chains
+        assert_eq!(iv_after1, unsign_iv1);
+        assert_eq!(iv_after2, unsign_iv2);
+        assert_eq!(iv_after3, unsign_iv3);
+    }
+
+    #[test]
+    fn unsign_wrong_iv_returns_invalid() {
+        let mac_key: Vec<u8> = (0..20).collect();
+        let iv: Vec<u8> = (0..16).collect();
+        let wrong_iv: Vec<u8> = (16..32).collect();
+
+        let msg = fix_build(&[(35, "D"), (55, "AAPL")], 1);
+        let (signed, _) = fix_sign(&msg, &mac_key, &iv);
+
+        let (_, _, valid) = fix_unsign(&signed, &mac_key, &wrong_iv);
+        assert!(!valid);
+    }
+
+    #[test]
+    fn unsign_empty_key_returns_original() {
+        // When mac_key is empty, HMAC-SHA1 still works (empty key is valid).
+        // The test verifies that sign → unsign with the same empty key is valid.
+        let mac_key: Vec<u8> = vec![];
+        let iv: Vec<u8> = (0..16).collect();
+
+        let msg = fix_build(&[(35, "0")], 1);
+        let (signed, _) = fix_sign(&msg, &mac_key, &iv);
+        let (_, _, valid) = fix_unsign(&signed, &mac_key, &iv);
+        assert!(valid);
+    }
+
+    // ── fix_read tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn fix_read_single_message() {
+        let msg = fix_build(&[(35, "0")], 1);
+        let mut cursor = std::io::Cursor::new(msg.clone());
+        let result = fix_read(&mut cursor).unwrap();
+        assert_eq!(result, msg);
+    }
+
+    #[test]
+    fn fix_read_logon_message() {
+        let msg = fix_build(&[(35, "A"), (108, "30"), (98, "0")], 1);
+        let mut cursor = std::io::Cursor::new(msg.clone());
+        let result = fix_read(&mut cursor).unwrap();
+        assert_eq!(result, msg);
+        let parsed = fix_parse(&result);
+        assert_eq!(parsed[&35], "A");
+        assert_eq!(parsed[&108], "30");
+    }
+
+    #[test]
+    fn fix_read_returns_first_message_from_buffer() {
+        // fix_read is a single-message reader (used during handshake).
+        // When two messages arrive together, it returns only the first.
+        let msg1 = fix_build(&[(35, "0")], 1);
+        let msg2 = fix_build(&[(35, "D"), (55, "AAPL")], 2);
+        let mut buf = msg1.clone();
+        buf.extend_from_slice(&msg2);
+        let mut cursor = std::io::Cursor::new(buf);
+        let r1 = fix_read(&mut cursor).unwrap();
+        assert_eq!(r1, msg1);
+    }
+
+    #[test]
+    fn fix_read_eof_returns_error() {
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let err = fix_read(&mut cursor).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+    }
+
+    #[test]
+    fn fix_read_incomplete_then_eof() {
+        // Partial message (no checksum tag) then EOF
+        let partial = b"8=FIX.4.1\x019=0010\x0135=0\x01".to_vec();
+        let mut cursor = std::io::Cursor::new(partial);
+        let err = fix_read(&mut cursor).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+    }
+
+    // ── fix_unsign edge case tests ────────────────────────────────────
+
+    #[test]
+    fn unsign_empty_data_no_panic() {
+        let mac_key: Vec<u8> = (0..20).collect();
+        let iv: Vec<u8> = (0..16).collect();
+        let (_, _, valid) = fix_unsign(&[], &mac_key, &iv);
+        assert!(!valid);
+    }
+
+    #[test]
+    fn unsign_short_data_no_panic() {
+        let mac_key: Vec<u8> = (0..20).collect();
+        let iv: Vec<u8> = (0..16).collect();
+        let (_, _, valid) = fix_unsign(b"8=FIX.4.1\x01", &mac_key, &iv);
+        assert!(!valid);
+    }
+
+    #[test]
+    fn unsign_tiny_fixcomp_no_panic() {
+        let mac_key: Vec<u8> = (0..20).collect();
+        let iv: Vec<u8> = (0..16).collect();
+        let (_, _, valid) = fix_unsign(b"8=FIXCOMP\x01", &mac_key, &iv);
+        assert!(!valid);
+    }
+
+    #[test]
+    fn xor_fold_all_zero_digest() {
+        let digest = [0u8; 20];
+        let result = xor_fold(&digest);
+        assert_eq!(result, "00000000");
+    }
+
+    #[test]
+    fn xor_fold_known_values() {
+        // Manually compute: 5 groups of 4 bytes each, XOR-folded
+        // Group 0: [0x01, 0x02, 0x03, 0x04]
+        // Group 1: [0x10, 0x20, 0x30, 0x40]
+        // Group 2: [0x05, 0x06, 0x07, 0x08]
+        // Group 3: [0xFF, 0x00, 0xFF, 0x00]
+        // Group 4: [0xAA, 0xBB, 0xCC, 0xDD]
+        let digest: [u8; 20] = [
+            0x01, 0x02, 0x03, 0x04, // group 0
+            0x10, 0x20, 0x30, 0x40, // group 1
+            0x05, 0x06, 0x07, 0x08, // group 2
+            0xFF, 0x00, 0xFF, 0x00, // group 3
+            0xAA, 0xBB, 0xCC, 0xDD, // group 4
+        ];
+        let r0 = 0x01 ^ 0x10 ^ 0x05 ^ 0xFF ^ 0xAA;
+        let r1 = 0x02 ^ 0x20 ^ 0x06 ^ 0x00 ^ 0xBB;
+        let r2 = 0x03 ^ 0x30 ^ 0x07 ^ 0xFF ^ 0xCC;
+        let r3 = 0x04 ^ 0x40 ^ 0x08 ^ 0x00 ^ 0xDD;
+        let expected = format!("{:02X}{:02X}{:02X}{:02X}", r0, r1, r2, r3);
+        assert_eq!(xor_fold(&digest), expected);
     }
 }

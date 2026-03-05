@@ -88,6 +88,9 @@ pub fn is_ns_text(payload: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    // ── Existing tests ──────────────────────────────────────────────
 
     #[test]
     fn build_structure() {
@@ -142,5 +145,126 @@ mod tests {
         assert!(is_ns_text(b"50;521;user;"));
         assert!(!is_ns_text(b"\x00\x00\x00\x17")); // XYZ binary
         assert!(!is_ns_text(b""));
+    }
+
+    // ── New tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn build_empty_fields() {
+        let msg = ns_build(1, 2, &[], "");
+        let payload = std::str::from_utf8(&msg[8..]).unwrap();
+        assert_eq!(payload, "1;2;");
+    }
+
+    #[test]
+    fn build_many_fields() {
+        let fields: Vec<&str> = (0..20).map(|_| "x").collect();
+        let msg = ns_build(10, 99, &fields, "");
+        let payload = std::str::from_utf8(&msg[8..]).unwrap();
+        // version;msg_type; plus 20 "x;" entries
+        assert!(payload.starts_with("10;99;"));
+        assert_eq!(payload.matches("x;").count(), 20);
+    }
+
+    #[test]
+    fn parse_empty_payload_returns_none() {
+        assert!(ns_parse(b"").is_none());
+    }
+
+    #[test]
+    fn parse_single_field_no_trailing_semicolon_returns_none() {
+        // "50" with no semicolons → split yields ["50"], len < 2 → None
+        assert!(ns_parse(b"50").is_none());
+    }
+
+    #[test]
+    fn parse_non_numeric_version_returns_none() {
+        assert!(ns_parse(b"abc;521;field;").is_none());
+    }
+
+    #[test]
+    fn parse_misc_prefix_lowercase() {
+        // "misc" in lowercase — to_uppercase converts to "MISC", so it should still strip.
+        let payload = b"misc38;529;val;";
+        let (version, msg_type, fields) = ns_parse(payload).unwrap();
+        assert_eq!(version, 38);
+        assert_eq!(msg_type, 529);
+        assert_eq!(fields, vec!["val"]);
+    }
+
+    #[test]
+    fn recv_bad_magic_returns_error() {
+        let bad = b"AAAA\x00\x00\x00\x02ok";
+        let mut cursor = std::io::Cursor::new(&bad[..]);
+        let result = ns_recv(&mut cursor);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("#%#%"));
+    }
+
+    #[test]
+    fn recv_zero_length_payload() {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(NS_MAGIC);
+        msg.extend_from_slice(&0u32.to_be_bytes());
+        let mut cursor = std::io::Cursor::new(&msg);
+        let (payload, total) = ns_recv(&mut cursor).unwrap();
+        assert!(payload.is_empty());
+        assert_eq!(total, 8);
+    }
+
+    #[test]
+    fn is_ns_text_digit() {
+        assert!(is_ns_text(b"0rest"));
+        assert!(is_ns_text(b"9rest"));
+    }
+
+    #[test]
+    fn is_ns_text_letter() {
+        assert!(!is_ns_text(b"Atext"));
+        assert!(!is_ns_text(b"z"));
+    }
+
+    #[test]
+    fn is_ns_text_null_byte() {
+        assert!(!is_ns_text(b"\x00"));
+    }
+
+    #[test]
+    fn is_ns_text_space() {
+        assert!(!is_ns_text(b" "));
+    }
+
+    #[test]
+    fn ns_magic_value() {
+        assert_eq!(NS_MAGIC, b"#%#%");
+        assert_eq!(NS_MAGIC.len(), 4);
+    }
+
+    #[test]
+    fn all_ns_constants_unique() {
+        let values: Vec<u32> = vec![
+            NS_ERROR_RESPONSE,
+            NS_AUTH_START,
+            NS_CONNECT_REQUEST,
+            NS_CONNECT_RESPONSE,
+            NS_REDIRECT,
+            NS_FIX_START,
+            NS_NEWCOMMPORTTYPE,
+            NS_BACKUP_HOST,
+            NS_MISC_URLS_REQUEST,
+            NS_MISC_URLS_RESPONSE,
+            NS_SECURE_CONNECT,
+            NS_SECURE_CONNECTION_START,
+            NS_SECURE_MESSAGE,
+            NS_SECURE_ERROR,
+        ];
+        let set: HashSet<u32> = values.iter().copied().collect();
+        assert_eq!(
+            values.len(),
+            set.len(),
+            "Duplicate values found among NS_* constants"
+        );
     }
 }

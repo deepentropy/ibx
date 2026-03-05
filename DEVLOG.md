@@ -1,3 +1,45 @@
+## 2026-03-05 - CCP Order Submission Fix + Heartbeat Tag 52
+
+### Goal
+Fix CCP order submission (35=D) which caused immediate disconnect, and measure order round-trip time.
+
+### Approach Taken
+Compared Rust order FIX messages with Python reference implementation, found multiple issues through systematic debugging.
+
+### What Worked
+- Debug logging of CCP messages revealed server sending 35=3 Rejects: "Message must contain field # 52"
+- All heartbeats were missing tag 52 (SendingTime) — CCP requires it on every message
+- Comparing Python's `_build_fix_fields` vs our order format identified tag differences
+- Extracting account ID (DU5479259) from CCP init response data
+
+### What Failed
+- Initial assumption that tag 6008 (conId) could be used in CCP orders — Python doesn't use it
+- Using username as account ID — IB paper accounts use DUxxxxxx format
+- Sending orders without CCP post-logon init sequence (101 messages) — server not ready
+- Using `167=CS` instead of `167=STK` for SecurityType in orders
+
+### Fixes Applied
+1. **Heartbeats missing tag 52**: Added `(fix::TAG_SENDING_TIME, &ts)` to all heartbeats, test requests, and test request responses
+2. **CCP post-logon init sequence**: Added 101-message init sequence matching Python's `_fix_init()` (6040=91,193,101,209,72,74,76,6 + 92x 6040=80 + 35=H status request)
+3. **Account ID extraction**: Parse init response for DU/DF/U account patterns instead of using username
+4. **Order format**: Removed tag 6008, use stored symbol for tag 55, changed 167=CS to 167=STK
+5. **Symbol storage**: Added `symbol` field to `ControlCommand::Subscribe` and `MarketState`
+6. **Order tracking**: Insert orders into Context before sending so fill handler can find them
+7. **Dead test cleanup**: Removed `parse_routing_table` tests (function was deleted), fixed `handle_subscription_ack`/`handle_ticker_setup` tests to use raw bytes
+
+### Current State
+- Orders work: confirmed fill at $678.63 on ARCA (SPY market buy, 4:17 PM ET)
+- After-hours orders rejected with 150=8,39=8 (DAY TIF not valid after 4PM ET)
+- Need to run during market hours (9:30-16:00 ET) for order RTT benchmark
+- 455 tests passing (418 unit + 14 control + 21 protocol + 2 lifecycle)
+
+### Key Decisions
+- CCP init sequence is mandatory for orders — without it, server accepts heartbeats but rejects orders
+- Tag 52 required on ALL CCP FIX messages, not just orders
+- Symbol names stored in MarketState for order submission (CCP uses symbol not conId)
+
+---
+
 ## 2026-03-04 - Architecture Research for Ultra-Low-Latency Rust Trading Engine
 
 ### Goal
@@ -242,3 +284,66 @@ Implemented 6 issues sequentially (#20-#25), each with commit/push/close cycle.
 - All issues #20-#25 closed
 - Engine is feature-complete for live trading: CCP auth, farm auth, market data, order management, account sync, error recovery
 - Next step: Run integration test against IB paper account to validate end-to-end flow
+
+## 2026-03-05 - Comprehensive Test Suite Expansion
+
+### Goal
+Expand test coverage across ALL modules before going live. The engine is a critical application — every module needs thorough unit and integration testing.
+
+### Approach Taken
+Audited per-module test counts, identified weak spots (session.rs=2, account.rs=3, ns.rs=6, xyz.rs=6), used 3 parallel background agents for the weakest modules while directly adding tests to gateway.rs and hot_loop.rs.
+
+### What Worked
+- **session.rs**: 2→18 tests. Added extract_srp_data edge cases, RecvMsg variants, AuthResult fields, FLAG_* constants, session_id/hw_info randomness
+- **account.rs**: 3→29 tests. Added all parse_account_value tags, AccountSummary defaults/clone/debug, PositionTracker multiple/all/empty, PositionUpdate fields, AccountCommand variants
+- **ns.rs**: 6→20 tests. Added ns_build empty/many fields, ns_parse empty/bad/non-numeric, ns_recv bad magic, is_ns_text edges, NS_* constant uniqueness
+- **xyz.rs**: 6→17 tests. Added parse edge cases (16 bytes header-only, <16 bytes), write alignment for various lengths, srp_v20 multiple/unknown fields, soft_token roundtrip, constants
+- **gateway.rs**: 15→27 tests. Added routing_table with 6556 field, exchange passthrough (ARCA not mapped), days_to_ymd leap year/end-of-year/Y2K, try_frame multiple sequential, token_short_hash edges, chrono_free_timestamp, GatewayConfig
+- **hot_loop.rs**: 30→52 tests. Added subscription_ack no tag/malformed CSV/unknown req_id, ticker_setup no tag/unknown conId, cancel_reject keeps order, account_update invalid/unknown, exec_report cancelled removes order, format_price negative/cents/sub-penny, find_body_after_tag, multiple subscriptions same instrument, unsubscribe nonexistent, process_farm_message no type/heartbeat, position_update zero delta, exec_report unknown status
+
+### Key Decisions
+- **build_farm_encrypted_logon not unit-testable**: Requires DH-initialized SecureChannel. Tested via integration tests only.
+- **Background agents for independent modules**: session.rs, account.rs, ns.rs+xyz.rs each handled by separate agent in parallel with direct edits to gateway.rs and hot_loop.rs
+
+### Current State
+- **449 total tests passing** (412 unit + 14 control plane + 21 protocol vectors + 2 strategy lifecycle) + 5 ignored (IB paper integration)
+- All 18 source files have test modules
+- Zero compilation warnings
+- Per-module breakdown: types=40, context=36, tick_decoder=35, hot_loop=52, account=29, gateway=27, market_state=24, fix=20, ns=20, crypto=19, session=18, connection=17, xyz=17, dh=14, srp=14, historical=11, contracts=10, fixcomp=9
+- Next step: Run integration tests against IB paper account
+
+## 2026-03-05 - Benchmark: End-to-End Tick Flow + HMAC Fix
+
+### Goal
+Run a live benchmark against IB paper account measuring tick decode latency, inter-tick time, and loop iteration throughput.
+
+### Approach Taken
+Created `src/bin/benchmark.rs` with a BenchmarkStrategy that collects timing samples through the full pipeline. Fixed multiple protocol bugs discovered during live testing.
+
+### What Worked
+- **Benchmark binary**: Connects to IB, subscribes to SPY, collects N tick samples with decode latency + inter-tick timing
+- **Live results (SPY, paper account, 472 samples)**:
+  - Tick decode latency: P50=14.2us, P99=25.4us, Max=41.6us
+  - Inter-tick time: P50=250ms (~4 ticks/sec on paper)
+  - Loop iterations per tick: ~235k (hot loop spins between ticks)
+- Connection time: ~18s (CCP + 2 farms)
+
+### What Failed
+1. **HMAC read_iv wrong after decrypt** (root cause of all HMAC failures): `farm_logon_exchange` reset read_iv to `key_block[48:64]` after AES decrypt, but should use `channel.read_iv()` (CBC-chained IV from ciphertext[-16:]). Added `read_iv()` getter to SecureChannel.
+2. **8349= detection bug in logon exchange**: `msg.windows(6).any(|w| w == b"8349=")` — 5-byte pattern never matches 6-byte window! Changed to use consistent `msg.windows(5).any(|w| w == b"8349=")` check.
+3. **Connection::unsign called on unsigned messages**: Python skips unsign entirely if `8349=` not in message. Added same check to `Connection::unsign()`.
+4. **fix_sign/fix_unsign isize wrap**: `start <= end as usize` with negative end wraps to huge usize → panic on empty/short data. Fixed: `end >= start as isize`.
+5. **Farm disconnect at ~8.7s**: Missing routing table request after logon. Added 6040=112 routing request (FIXCOMP-wrapped, HMAC-signed).
+6. **Wrong sign_iv for routing**: Used initial key_block IV instead of post-encryption write_iv. Fixed by using `channel.write_iv()`.
+7. **Subscription not FIXCOMP-wrapped**: `send_raw` sent unsigned, unwrapped FIX. Added `send_fixcomp` method to Connection.
+8. **35=Q body is raw CSV**: Not in FIX tag 6119 as assumed. Body after `35=Q\x01` marker is `serverTag,reqId,minTick,...`.
+
+### Key Decisions
+- **Routing response must be fully consumed**: All frames unsigned to advance read_iv chain before hot loop starts
+- **8349= check before unsign**: Matching Python behavior — skip XOR distortion + IV chain if message isn't signed
+- **read_iv syncs from channel after decrypt**: AES-CBC IV chaining updates the channel's internal IV, must use that for HMAC IV sync
+
+### Current State
+- Benchmark runs end-to-end: connect → subscribe → receive ticks → decode → strategy callback → report
+- 14us median tick decode latency (socket recv → on_tick callback)
+- Dead code cleaned up (send_routing_request, parse_routing_table, unused gateway import)
