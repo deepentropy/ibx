@@ -114,12 +114,14 @@ pub struct Order {
 #[derive(Debug, Clone, Copy)]
 pub enum OrderRequest {
     SubmitLimit {
+        order_id: OrderId,
         instrument: InstrumentId,
         side: Side,
         qty: u32,
         price: Price,
     },
     SubmitMarket {
+        order_id: OrderId,
         instrument: InstrumentId,
         side: Side,
         qty: u32,
@@ -131,6 +133,7 @@ pub enum OrderRequest {
         instrument: InstrumentId,
     },
     Modify {
+        new_order_id: OrderId,
         order_id: OrderId,
         price: Price,
         qty: u32,
@@ -260,6 +263,7 @@ mod tests {
     fn order_buffer_push_and_drain() {
         let mut buf = OrderBuffer::new();
         buf.push(OrderRequest::SubmitLimit {
+            order_id: 1,
             instrument: 0,
             side: Side::Buy,
             qty: 100,
@@ -288,6 +292,7 @@ mod tests {
     fn order_buffer_drain_reusable() {
         let mut buf = OrderBuffer::new();
         buf.push(OrderRequest::SubmitMarket {
+            order_id: 1,
             instrument: 0,
             side: Side::Sell,
             qty: 50,
@@ -305,6 +310,7 @@ mod tests {
     #[test]
     fn order_request_is_copy() {
         let req = OrderRequest::Modify {
+            new_order_id: 2,
             order_id: 1,
             price: 100 * PRICE_SCALE,
             qty: 200,
@@ -448,13 +454,14 @@ mod tests {
     #[test]
     fn order_request_submit_limit_fields() {
         let req = OrderRequest::SubmitLimit {
+            order_id: 1,
             instrument: 42,
             side: Side::Buy,
             qty: 100,
             price: 150 * PRICE_SCALE,
         };
         match req {
-            OrderRequest::SubmitLimit { instrument, side, qty, price } => {
+            OrderRequest::SubmitLimit { instrument, side, qty, price, .. } => {
                 assert_eq!(instrument, 42);
                 assert_eq!(side, Side::Buy);
                 assert_eq!(qty, 100);
@@ -467,12 +474,13 @@ mod tests {
     #[test]
     fn order_request_submit_market_fields() {
         let req = OrderRequest::SubmitMarket {
+            order_id: 1,
             instrument: 0,
             side: Side::Sell,
             qty: 50,
         };
         match req {
-            OrderRequest::SubmitMarket { instrument, side, qty } => {
+            OrderRequest::SubmitMarket { instrument, side, qty, .. } => {
                 assert_eq!(instrument, 0);
                 assert_eq!(side, Side::Sell);
                 assert_eq!(qty, 50);
@@ -483,9 +491,9 @@ mod tests {
 
     #[test]
     fn order_request_modify_fields() {
-        let req = OrderRequest::Modify { order_id: 99, price: 200 * PRICE_SCALE, qty: 10 };
+        let req = OrderRequest::Modify { new_order_id: 100, order_id: 99, price: 200 * PRICE_SCALE, qty: 10 };
         match req {
-            OrderRequest::Modify { order_id, price, qty } => {
+            OrderRequest::Modify { order_id, price, qty, .. } => {
                 assert_eq!(order_id, 99);
                 assert_eq!(price, 200 * PRICE_SCALE);
                 assert_eq!(qty, 10);

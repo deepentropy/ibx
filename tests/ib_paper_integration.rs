@@ -633,16 +633,15 @@ impl Strategy for LimitOrderStrategy {
 
         // After 5 ticks, submit a deep limit buy (far below market)
         if self.tick_count == 5 && !self.submitted.load(Ordering::Relaxed) {
-            let bid = ctx.bid(instrument);
-            // Place limit 10% below bid — should not fill
-            let limit_price = bid * 90 / 100;
+            // Use a very low price ($1.00) to ensure it won't fill
+            // (tick decoder bid values may be incorrect, so don't compute from bid)
+            let limit_price = 1_00_000_000i64; // $1.00 in PRICE_SCALE
             let id = ctx.submit_limit(instrument, Side::Buy, 1, limit_price);
             self.order_id = Some(id);
             self.submitted.store(true, Ordering::Relaxed);
-            println!("[{:.3}s] Submitted LMT BUY at ${:.2} (bid=${:.2})",
+            println!("[{:.3}s] Submitted LMT BUY at ${:.2}",
                 self.start.elapsed().as_secs_f64(),
-                limit_price as f64 / PRICE_SCALE as f64,
-                bid as f64 / PRICE_SCALE as f64);
+                limit_price as f64 / PRICE_SCALE as f64);
         }
 
         // After order is acked, cancel it

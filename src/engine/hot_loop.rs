@@ -29,8 +29,6 @@ pub struct HotLoop<S: Strategy> {
     pub ccp_conn: Option<Connection>,
     /// HMDS farm connection for historical data (optional).
     pub hmds_conn: Option<Connection>,
-    /// Next client order ID for FIX tag 11.
-    next_clord_id: u64,
     /// Next market data request ID for FIX tag 262.
     next_md_req_id: u32,
     /// Pending subscriptions: MDReqID → InstrumentId (awaiting 35=Q ack).
@@ -94,7 +92,6 @@ impl<S: Strategy> HotLoop<S> {
             farm_conn: None,
             ccp_conn: None,
             hmds_conn: None,
-            next_clord_id: 1,
             next_md_req_id: 1,
             md_req_to_instrument: Vec::new(),
             instrument_md_reqs: Vec::new(),
@@ -451,14 +448,12 @@ impl<S: Strategy> HotLoop<S> {
         };
         for order_req in orders {
             let result = match order_req {
-                OrderRequest::SubmitLimit { instrument, side, qty, price } => {
-                    let clord = self.next_clord_id;
-                    self.next_clord_id += 1;
+                OrderRequest::SubmitLimit { order_id, instrument, side, qty, price } => {
                     self.context.insert_order(crate::types::Order {
-                        order_id: clord, instrument, side, price, qty, filled: 0,
+                        order_id, instrument, side, price, qty, filled: 0,
                         status: crate::types::OrderStatus::Submitted,
                     });
-                    let clord_str = clord.to_string();
+                    let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
                     let price_str = format_price(price);
@@ -483,18 +478,18 @@ impl<S: Strategy> HotLoop<S> {
                         (204, "0"),         // CustomerOrFirm
                     ])
                 }
-                OrderRequest::SubmitMarket { instrument, side, qty } => {
-                    let clord = self.next_clord_id;
-                    self.next_clord_id += 1;
+                OrderRequest::SubmitMarket { order_id, instrument, side, qty } => {
                     self.context.insert_order(crate::types::Order {
-                        order_id: clord, instrument, side, price: 0, qty, filled: 0,
+                        order_id, instrument, side, price: 0, qty, filled: 0,
                         status: crate::types::OrderStatus::Submitted,
                     });
-                    let clord_str = clord.to_string();
+                    let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
                     let symbol = self.context.market.symbol(instrument).to_string();
                     let now = chrono_free_timestamp();
+                    log::info!("Sending MKT order: clord={} acct={} sym={} side={} qty={}",
+                        clord_str, self.account_id, symbol, side_str, qty_str);
                     conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                         (fix::TAG_SENDING_TIME, &now),
@@ -516,10 +511,13 @@ impl<S: Strategy> HotLoop<S> {
                 OrderRequest::Cancel { order_id } => {
                     let clord_str = format!("C{}", order_id);
                     let orig_clord = order_id.to_string();
+                    let now = chrono_free_timestamp();
                     conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
+                        (fix::TAG_SENDING_TIME, &now),
                         (11, &clord_str),   // ClOrdID (cancel)
                         (41, &orig_clord),  // OrigClOrdID
+                        (60, &now),         // TransactTime
                     ])
                 }
                 OrderRequest::CancelAll { instrument } => {
@@ -532,23 +530,26 @@ impl<S: Strategy> HotLoop<S> {
                     for oid in open_ids {
                         let clord_str = format!("C{}", oid);
                         let orig_clord = oid.to_string();
+                        let now = chrono_free_timestamp();
                         last_result = conn.send_fix(&[
                             (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
+                            (fix::TAG_SENDING_TIME, &now),
                             (11, &clord_str),
                             (41, &orig_clord),
+                            (60, &now),
                         ]);
                     }
                     last_result
                 }
-                OrderRequest::Modify { order_id, price, qty } => {
-                    let clord = self.next_clord_id;
-                    self.next_clord_id += 1;
-                    let clord_str = clord.to_string();
+                OrderRequest::Modify { new_order_id, order_id, price, qty } => {
+                    let clord_str = new_order_id.to_string();
                     let orig_clord = order_id.to_string();
                     let qty_str = qty.to_string();
                     let price_str = format_price(price);
+                    let now = chrono_free_timestamp();
                     conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
+                        (fix::TAG_SENDING_TIME, &now),
                         (11, &clord_str),
                         (41, &orig_clord),  // OrigClOrdID
                         (38, &qty_str),
@@ -617,6 +618,8 @@ impl<S: Strategy> HotLoop<S> {
             None => return,
         };
 
+        log::debug!("CCP msg 35={}", msg_type);
+
         match msg_type {
             fix::MSG_EXEC_REPORT => self.handle_exec_report(&parsed),
             fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed),
@@ -648,12 +651,17 @@ impl<S: Strategy> HotLoop<S> {
         let leaves_qty = parsed.get(&151).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let clord_id = parsed.get(&11).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
 
+        log::info!("ExecReport: 39={} 150={} 11={} 58={} 103={}",
+            ord_status, exec_type, clord_id,
+            parsed.get(&58).map(|s| s.as_str()).unwrap_or(""),
+            parsed.get(&103).map(|s| s.as_str()).unwrap_or(""));
+
         // Map FIX OrdStatus (tag 39) to our OrderStatus
         let status = match ord_status {
             "0" | "A" | "E" => crate::types::OrderStatus::Submitted,
             "1" => crate::types::OrderStatus::PartiallyFilled,
             "2" => crate::types::OrderStatus::Filled,
-            "4" | "6" => crate::types::OrderStatus::Cancelled,
+            "4" | "6" | "C" => crate::types::OrderStatus::Cancelled,
             "8" => crate::types::OrderStatus::Rejected,
             _ => return,
         };
@@ -684,31 +692,26 @@ impl<S: Strategy> HotLoop<S> {
             }
         }
 
-        // On terminal status, notify strategy
+        // Notify strategy of all status changes
+        if let Some(order) = self.context.order(clord_id).copied() {
+            let update = crate::types::OrderUpdate {
+                order_id: clord_id,
+                instrument: order.instrument,
+                status,
+                filled_qty: order.filled as i64,
+                remaining_qty: leaves_qty,
+                timestamp_ns: self.context.now_ns(),
+            };
+            self.strategy.on_order_update(&update, &mut self.context);
+        }
+
+        // Remove fully terminal orders
         if matches!(status,
             crate::types::OrderStatus::Filled |
             crate::types::OrderStatus::Cancelled |
             crate::types::OrderStatus::Rejected
         ) {
-            if let Some(order) = self.context.order(clord_id).copied() {
-                let update = crate::types::OrderUpdate {
-                    order_id: clord_id,
-                    instrument: order.instrument,
-                    status,
-                    filled_qty: order.filled as i64,
-                    remaining_qty: leaves_qty,
-                    timestamp_ns: self.context.now_ns(),
-                };
-                self.strategy.on_order_update(&update, &mut self.context);
-            }
-            // Remove fully terminal orders
-            if matches!(status,
-                crate::types::OrderStatus::Filled |
-                crate::types::OrderStatus::Cancelled |
-                crate::types::OrderStatus::Rejected
-            ) {
-                self.context.remove_order(clord_id);
-            }
+            self.context.remove_order(clord_id);
         }
     }
 
@@ -969,7 +972,6 @@ impl<S: Strategy> HotLoop<S> {
         self.hb.last_ccp_sent = Instant::now();
         self.hb.last_ccp_recv = Instant::now();
         self.hb.pending_ccp_test = None;
-        self.next_clord_id = 1; // Reset sequence after reconnect
         log::info!("CCP reconnected");
     }
 

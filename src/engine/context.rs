@@ -82,7 +82,14 @@ impl Context {
             pending_orders: OrderBuffer::new(),
             account: AccountState::default(),
             clock: Clock::new(),
-            next_order_id: 1,
+            next_order_id: {
+                // Epoch-based to avoid "Duplicate ID" across IB sessions
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                secs * 1000
+            },
             recv_at: Instant::now(),
             loop_iterations: 0,
         }
@@ -164,6 +171,7 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitLimit {
+            order_id: id,
             instrument,
             side,
             qty,
@@ -181,6 +189,7 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitMarket {
+            order_id: id,
             instrument,
             side,
             qty,
@@ -197,12 +206,16 @@ impl Context {
             .push(OrderRequest::CancelAll { instrument });
     }
 
-    pub fn modify(&mut self, order_id: OrderId, price: Price, qty: u32) {
+    pub fn modify(&mut self, order_id: OrderId, price: Price, qty: u32) -> OrderId {
+        let new_id = self.next_order_id;
+        self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::Modify {
+            new_order_id: new_id,
             order_id,
             price,
             qty,
         });
+        new_id
     }
 
     // ── Timing ──
@@ -278,8 +291,7 @@ mod tests {
         let mut ctx = Context::new();
         let id1 = ctx.submit_limit(0, Side::Buy, 100, 150 * PRICE_SCALE);
         let id2 = ctx.submit_limit(0, Side::Sell, 50, 151 * PRICE_SCALE);
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
+        assert_eq!(id2, id1 + 1, "IDs should be sequential");
     }
 
     #[test]
@@ -295,6 +307,7 @@ mod tests {
                 side,
                 qty,
                 price,
+                ..
             } => {
                 assert_eq!(instrument, 0);
                 assert_eq!(side, Side::Buy);
@@ -317,6 +330,7 @@ mod tests {
                 instrument,
                 side,
                 qty,
+                ..
             } => {
                 assert_eq!(instrument, 1);
                 assert_eq!(side, Side::Sell);
@@ -361,6 +375,7 @@ mod tests {
                 order_id,
                 price,
                 qty,
+                ..
             } => {
                 assert_eq!(order_id, 7);
                 assert_eq!(price, 200 * PRICE_SCALE);
