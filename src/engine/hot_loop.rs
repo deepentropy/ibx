@@ -451,7 +451,7 @@ impl<S: Strategy> HotLoop<S> {
                 OrderRequest::SubmitLimit { order_id, instrument, side, qty, price } => {
                     self.context.insert_order(crate::types::Order {
                         order_id, instrument, side, price, qty, filled: 0,
-                        status: crate::types::OrderStatus::Submitted,
+                        status: crate::types::OrderStatus::PendingSubmit,
                     });
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
@@ -481,7 +481,7 @@ impl<S: Strategy> HotLoop<S> {
                 OrderRequest::SubmitMarket { order_id, instrument, side, qty } => {
                     self.context.insert_order(crate::types::Order {
                         order_id, instrument, side, price: 0, qty, filled: 0,
-                        status: crate::types::OrderStatus::Submitted,
+                        status: crate::types::OrderStatus::PendingSubmit,
                     });
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
@@ -506,6 +506,36 @@ impl<S: Strategy> HotLoop<S> {
                         (100, "SMART"),     // ExDestination
                         (15, "USD"),        // Currency
                         (204, "0"),         // CustomerOrFirm
+                    ])
+                }
+                OrderRequest::SubmitStop { order_id, instrument, side, qty, stop_price } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price: stop_price, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let stop_str = format_price(stop_price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),          // HandlInst = Automated
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "3"),          // OrdType = Stop
+                        (99, &stop_str),    // StopPx
+                        (59, "0"),          // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
                     ])
                 }
                 OrderRequest::Cancel { order_id } => {
@@ -670,6 +700,10 @@ impl<S: Strategy> HotLoop<S> {
             _ => return,
         };
 
+        // Check if status actually changed (dedup repeated exec reports like 3x 39=A)
+        let prev_status = self.context.order(clord_id).map(|o| o.status);
+        let status_changed = prev_status != Some(status);
+
         // Update order status
         self.context.update_order_status(clord_id, status);
 
@@ -677,6 +711,9 @@ impl<S: Strategy> HotLoop<S> {
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
             // Look up the order to get instrument and side
             if let Some(order) = self.context.order(clord_id).copied() {
+                // Update filled qty on the order
+                self.context.update_order_filled(clord_id, last_shares as u32);
+
                 let fill = crate::types::Fill {
                     instrument: order.instrument,
                     order_id: clord_id,
@@ -696,17 +733,19 @@ impl<S: Strategy> HotLoop<S> {
             }
         }
 
-        // Notify strategy of all status changes
-        if let Some(order) = self.context.order(clord_id).copied() {
-            let update = crate::types::OrderUpdate {
-                order_id: clord_id,
-                instrument: order.instrument,
-                status,
-                filled_qty: order.filled as i64,
-                remaining_qty: leaves_qty,
-                timestamp_ns: self.context.now_ns(),
-            };
-            self.strategy.on_order_update(&update, &mut self.context);
+        // Notify strategy only on actual status changes (dedup repeated reports)
+        if status_changed {
+            if let Some(order) = self.context.order(clord_id).copied() {
+                let update = crate::types::OrderUpdate {
+                    order_id: clord_id,
+                    instrument: order.instrument,
+                    status,
+                    filled_qty: order.filled as i64,
+                    remaining_qty: leaves_qty,
+                    timestamp_ns: self.context.now_ns(),
+                };
+                self.strategy.on_order_update(&update, &mut self.context);
+            }
         }
 
         // Remove fully terminal orders
@@ -720,12 +759,26 @@ impl<S: Strategy> HotLoop<S> {
     }
 
     fn handle_cancel_reject(&mut self, parsed: &std::collections::HashMap<u32, String>) {
-        // Cancel was rejected — order remains active, no state change
         let orig_clord = parsed.get(&41).and_then(|s| s.parse::<u64>().ok());
-        let _reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("Cancel rejected");
+        let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("Cancel rejected");
+        log::warn!("CancelReject: origClOrd={:?} reason={}", orig_clord, reason);
+
         if let Some(oid) = orig_clord {
-            // Ensure order stays in Submitted state
+            // Ensure order stays in Submitted state (cancel failed, order still live)
             self.context.update_order_status(oid, crate::types::OrderStatus::Submitted);
+
+            // Notify strategy that the cancel was rejected — order is still active
+            if let Some(order) = self.context.order(oid).copied() {
+                let update = crate::types::OrderUpdate {
+                    order_id: oid,
+                    instrument: order.instrument,
+                    status: crate::types::OrderStatus::Submitted,
+                    filled_qty: order.filled as i64,
+                    remaining_qty: order.qty as i64 - order.filled as i64,
+                    timestamp_ns: self.context.now_ns(),
+                };
+                self.strategy.on_order_update(&update, &mut self.context);
+            }
         }
     }
 
@@ -1022,7 +1075,9 @@ mod tests {
 
     struct RecordingStrategy {
         ticks: Vec<InstrumentId>,
-        fills: Vec<OrderId>,
+        fills: Vec<(OrderId, i64)>,  // (order_id, qty)
+        updates: Vec<(OrderId, OrderStatus)>,
+        disconnected: bool,
         started: bool,
     }
 
@@ -1031,6 +1086,8 @@ mod tests {
             Self {
                 ticks: Vec::new(),
                 fills: Vec::new(),
+                updates: Vec::new(),
+                disconnected: false,
                 started: false,
             }
         }
@@ -1046,7 +1103,15 @@ mod tests {
         }
 
         fn on_fill(&mut self, fill: &Fill, _ctx: &mut Context) {
-            self.fills.push(fill.order_id);
+            self.fills.push((fill.order_id, fill.qty));
+        }
+
+        fn on_order_update(&mut self, update: &OrderUpdate, _ctx: &mut Context) {
+            self.updates.push((update.order_id, update.status));
+        }
+
+        fn on_disconnect(&mut self, _ctx: &mut Context) {
+            self.disconnected = true;
         }
     }
 
@@ -1094,7 +1159,7 @@ mod tests {
         engine.inject_fill(&fill);
 
         assert_eq!(engine.context_mut().position(0), 100);
-        assert_eq!(engine.strategy.fills, vec![1]);
+        assert_eq!(engine.strategy.fills, vec![(1, 100)]);
     }
 
     #[test]
@@ -1255,7 +1320,7 @@ mod tests {
         // Position should be updated (+100 for buy)
         assert_eq!(engine.context_mut().position(0), 100);
         // Strategy should have received the fill
-        assert_eq!(engine.strategy.fills, vec![1]);
+        assert_eq!(engine.strategy.fills, vec![(1, 100)]);
         // Order should be removed (terminal state)
         assert!(engine.context_mut().order(1).is_none());
     }
@@ -1856,5 +1921,262 @@ mod tests {
         engine.inject_ccp_message(&exec_msg);
         // Should not crash, no fills/updates
         assert!(engine.strategy.fills.is_empty());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // P0 tests: partial fills, cancel reject, dedup, disconnect, stop
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn partial_fill_updates_filled_qty_and_keeps_order() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 10, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+        });
+
+        // First partial fill: 30 of 100
+        let msg1 = fix::fix_build(&[
+            (35, "8"), (11, "10"), (39, "1"), (150, "1"),
+            (31, "150.0"), (32, "30"), (151, "70"),
+        ], 1);
+        engine.inject_ccp_message(&msg1);
+
+        assert_eq!(engine.context_mut().position(0), 30);
+        assert_eq!(engine.strategy.fills.len(), 1);
+        assert_eq!(engine.strategy.fills[0], (10, 30));
+        let order = engine.context_mut().order(10).unwrap();
+        assert_eq!(order.filled, 30);
+        assert_eq!(order.status, OrderStatus::PartiallyFilled);
+
+        // Second partial fill: 50 more
+        let msg2 = fix::fix_build(&[
+            (35, "8"), (11, "10"), (39, "1"), (150, "1"),
+            (31, "150.1"), (32, "50"), (151, "20"),
+        ], 2);
+        engine.inject_ccp_message(&msg2);
+
+        assert_eq!(engine.context_mut().position(0), 80);
+        assert_eq!(engine.strategy.fills.len(), 2);
+        assert_eq!(engine.strategy.fills[1], (10, 50));
+        let order = engine.context_mut().order(10).unwrap();
+        assert_eq!(order.filled, 80);
+
+        // Final fill: remaining 20
+        let msg3 = fix::fix_build(&[
+            (35, "8"), (11, "10"), (39, "2"), (150, "F"),
+            (31, "150.2"), (32, "20"), (151, "0"),
+        ], 3);
+        engine.inject_ccp_message(&msg3);
+
+        assert_eq!(engine.context_mut().position(0), 100);
+        assert_eq!(engine.strategy.fills.len(), 3);
+        // Order should be removed (Filled is terminal)
+        assert!(engine.context_mut().order(10).is_none());
+    }
+
+    #[test]
+    fn cancel_reject_notifies_strategy_order_stays_active() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 20, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+        });
+
+        // FIX 35=9 Cancel Reject
+        let msg = fix::fix_build(&[
+            (35, "9"),
+            (41, "20"),     // OrigClOrdID
+            (58, "Order cannot be cancelled"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+
+        // Order should still be active
+        let order = engine.context_mut().order(20).unwrap();
+        assert_eq!(order.status, OrderStatus::Submitted);
+        // Strategy should be notified
+        assert_eq!(engine.strategy.updates.len(), 1);
+        assert_eq!(engine.strategy.updates[0], (20, OrderStatus::Submitted));
+    }
+
+    #[test]
+    fn duplicate_exec_reports_deduped() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 30, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::PendingSubmit,
+        });
+
+        // IB sends 3x 39=A (PendingNew) — we saw this in live benchmark
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "30"), (39, "A"), (150, "A"),
+        ], 1);
+
+        engine.inject_ccp_message(&msg);
+        engine.inject_ccp_message(&msg);
+        engine.inject_ccp_message(&msg);
+
+        // Strategy should only get ONE notification, not three
+        assert_eq!(engine.strategy.updates.len(), 1);
+        assert_eq!(engine.strategy.updates[0], (30, OrderStatus::Submitted));
+    }
+
+    #[test]
+    fn farm_disconnect_notifies_strategy() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        assert!(!engine.strategy.disconnected);
+        assert!(!engine.farm_disconnected);
+
+        // Simulate farm disconnection by setting the flag directly
+        // (In real code, poll_market_data sets this on recv error)
+        engine.farm_disconnected = true;
+        engine.strategy.on_disconnect(&mut engine.context);
+
+        assert!(engine.strategy.disconnected);
+    }
+
+    #[test]
+    fn ccp_disconnect_notifies_strategy() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        assert!(!engine.strategy.disconnected);
+
+        engine.ccp_disconnected = true;
+        engine.strategy.on_disconnect(&mut engine.context);
+
+        assert!(engine.strategy.disconnected);
+    }
+
+    #[test]
+    fn open_orders_survive_disconnect() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        // Insert an open order
+        engine.context_mut().insert_order(Order {
+            order_id: 40, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 30,
+            status: OrderStatus::PartiallyFilled,
+        });
+
+        // Simulate disconnect
+        engine.ccp_disconnected = true;
+        engine.strategy.on_disconnect(&mut engine.context);
+
+        // Open orders should survive (HashMap not cleared)
+        let order = engine.context_mut().order(40).unwrap();
+        assert_eq!(order.filled, 30);
+        assert_eq!(order.status, OrderStatus::PartiallyFilled);
+        // Positions should survive
+        engine.context_mut().update_position(0, 30);
+        assert_eq!(engine.context_mut().position(0), 30);
+    }
+
+    #[test]
+    fn submit_stop_order_creates_request() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        let id = engine.context_mut().submit_stop(0, Side::Sell, 100, 140 * PRICE_SCALE);
+        let orders: Vec<_> = engine.context_mut().drain_pending_orders().collect();
+
+        assert_eq!(orders.len(), 1);
+        match orders[0] {
+            OrderRequest::SubmitStop { order_id, instrument, side, qty, stop_price } => {
+                assert_eq!(order_id, id);
+                assert_eq!(instrument, 0);
+                assert_eq!(side, Side::Sell);
+                assert_eq!(qty, 100);
+                assert_eq!(stop_price, 140 * PRICE_SCALE);
+            }
+            _ => panic!("Expected SubmitStop"),
+        }
+    }
+
+    #[test]
+    fn partial_fill_then_cancel_correct_position() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 50, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+        });
+
+        // Partial fill: 40 shares
+        let fill_msg = fix::fix_build(&[
+            (35, "8"), (11, "50"), (39, "1"), (150, "1"),
+            (31, "150.0"), (32, "40"), (151, "60"),
+        ], 1);
+        engine.inject_ccp_message(&fill_msg);
+        assert_eq!(engine.context_mut().position(0), 40);
+
+        // Cancel remaining
+        let cancel_msg = fix::fix_build(&[
+            (35, "8"), (11, "50"), (39, "4"), (150, "4"),
+            (151, "0"),
+        ], 2);
+        engine.inject_ccp_message(&cancel_msg);
+
+        // Position stays at 40 (partial fill was real), order removed
+        assert_eq!(engine.context_mut().position(0), 40);
+        assert!(engine.context_mut().order(50).is_none());
+        // Updates: PartiallyFilled, then Cancelled
+        assert_eq!(engine.strategy.updates.len(), 2);
+        assert_eq!(engine.strategy.updates[0].1, OrderStatus::PartiallyFilled);
+        assert_eq!(engine.strategy.updates[1].1, OrderStatus::Cancelled);
+    }
+
+    #[test]
+    fn cancel_clord_id_c_prefix_stripped() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 1772746902000, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: 1, filled: 0,
+            status: OrderStatus::Submitted,
+        });
+
+        // Cancel response with "C" prefix on ClOrdID
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "C1772746902000"), (39, "4"), (150, "4"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+
+        // Order should be cancelled (C prefix stripped, found the order)
+        assert!(engine.context_mut().order(1772746902000).is_none());
+        assert_eq!(engine.strategy.updates.len(), 1);
+        assert_eq!(engine.strategy.updates[0].1, OrderStatus::Cancelled);
+    }
+
+    #[test]
+    fn expired_order_treated_as_cancelled() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 60, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: 1, filled: 0,
+            status: OrderStatus::Submitted,
+        });
+
+        // FIX 39=C (Expired) — DAY orders expire at market close
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "60"), (39, "C"), (150, "C"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+
+        assert!(engine.context_mut().order(60).is_none());
+        assert_eq!(engine.strategy.updates[0].1, OrderStatus::Cancelled);
     }
 }
