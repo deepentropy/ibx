@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::engine::context::{Context, Strategy};
 use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
@@ -5,6 +7,13 @@ use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
 use crate::types::{ControlCommand, InstrumentId, OrderRequest, Price, Side, PRICE_SCALE};
 use crossbeam_channel::Receiver;
+
+/// CCP heartbeat interval (10 seconds, configurable via FIX tag 108).
+const CCP_HEARTBEAT_SECS: u64 = 10;
+/// Farm heartbeat interval (30 seconds).
+const FARM_HEARTBEAT_SECS: u64 = 30;
+/// Grace period before declaring timeout (1 second).
+const HEARTBEAT_GRACE_SECS: u64 = 1;
 
 /// The pinned-core hot loop. Runs strategy inline with decode and order send.
 /// Generic over S to monomorphize the strategy — zero vtable overhead.
@@ -23,6 +32,42 @@ pub struct HotLoop<S: Strategy> {
     control_rx: Option<Receiver<ControlCommand>>,
     /// Whether the hot loop should keep running.
     running: bool,
+    /// Heartbeat state.
+    hb: HeartbeatState,
+}
+
+/// Tracks last send/recv times and pending test requests for heartbeat management.
+pub struct HeartbeatState {
+    pub last_ccp_sent: Instant,
+    pub last_ccp_recv: Instant,
+    pub last_farm_sent: Instant,
+    pub last_farm_recv: Instant,
+    /// Pending test request for CCP: (test_req_id, sent_at).
+    pub pending_ccp_test: Option<(String, Instant)>,
+    /// Pending test request for farm: (test_req_id, sent_at).
+    pub pending_farm_test: Option<(String, Instant)>,
+    /// Counter for generating unique test request IDs.
+    test_req_counter: u32,
+}
+
+impl HeartbeatState {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            last_ccp_sent: now,
+            last_ccp_recv: now,
+            last_farm_sent: now,
+            last_farm_recv: now,
+            pending_ccp_test: None,
+            pending_farm_test: None,
+            test_req_counter: 0,
+        }
+    }
+
+    fn next_test_id(&mut self) -> String {
+        self.test_req_counter += 1;
+        format!("T{}", self.test_req_counter)
+    }
 }
 
 impl<S: Strategy> HotLoop<S> {
@@ -36,6 +81,7 @@ impl<S: Strategy> HotLoop<S> {
             next_clord_id: 1,
             control_rx: None,
             running: true,
+            hb: HeartbeatState::new(),
         }
     }
 
@@ -91,7 +137,10 @@ impl<S: Strategy> HotLoop<S> {
                 match conn.try_recv() {
                     Ok(0) => return,  // WouldBlock
                     Err(_) => return, // Connection error
-                    Ok(_) => {}
+                    Ok(_) => {
+                        self.hb.last_farm_recv = Instant::now();
+                        self.hb.pending_farm_test = None; // data received, clear pending test
+                    }
                 }
                 let frames = conn.extract_frames();
                 let mut msgs = Vec::new();
@@ -130,8 +179,18 @@ impl<S: Strategy> HotLoop<S> {
         match msg_type {
             "P" => self.handle_tick_data(msg),
             "Q" => self.handle_subscription_ack(&parsed),
-            "0" => {} // heartbeat — no-op, timestamp updated in try_recv
-            "1" => {} // test request — TODO: respond with heartbeat
+            "0" => {} // heartbeat — timestamp already updated in try_recv
+            "1" => {
+                // Test request — respond with heartbeat containing the test req ID
+                let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
+                if let Some(conn) = self.farm_conn.as_mut() {
+                    let _ = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                        (fix::TAG_TEST_REQ_ID, &test_id),
+                    ]);
+                    self.hb.last_farm_sent = Instant::now();
+                }
+            }
             _ => {}   // other farm messages (35=L, 35=G, etc.)
         }
     }
@@ -302,8 +361,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
             };
-            if let Err(e) = result {
-                log::error!("Failed to send order: {}", e);
+            match result {
+                Ok(()) => self.hb.last_ccp_sent = Instant::now(),
+                Err(e) => log::error!("Failed to send order: {}", e),
             }
         }
     }
@@ -315,7 +375,10 @@ impl<S: Strategy> HotLoop<S> {
                 match conn.try_recv() {
                     Ok(0) => return,
                     Err(_) => return,
-                    Ok(_) => {}
+                    Ok(_) => {
+                        self.hb.last_ccp_recv = Instant::now();
+                        self.hb.pending_ccp_test = None;
+                    }
                 }
                 let frames = conn.extract_frames();
                 let mut msgs = Vec::new();
@@ -354,8 +417,17 @@ impl<S: Strategy> HotLoop<S> {
         match msg_type {
             fix::MSG_EXEC_REPORT => self.handle_exec_report(&parsed),
             fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed),
-            fix::MSG_HEARTBEAT => {}  // no-op
-            fix::MSG_TEST_REQUEST => {} // TODO: respond with heartbeat
+            fix::MSG_HEARTBEAT => {} // timestamp already updated in try_recv
+            fix::MSG_TEST_REQUEST => {
+                let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
+                if let Some(conn) = self.ccp_conn.as_mut() {
+                    let _ = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                        (fix::TAG_TEST_REQ_ID, &test_id),
+                    ]);
+                    self.hb.last_ccp_sent = Instant::now();
+                }
+            }
             _ => {}
         }
     }
@@ -473,9 +545,69 @@ impl<S: Strategy> HotLoop<S> {
     }
 
     fn check_heartbeats(&mut self) {
-        // TODO: Track last send/recv times
-        // CCP heartbeat: every 10s
-        // Farm heartbeat: every 30s
+        let now = Instant::now();
+
+        // --- CCP heartbeat ---
+        if let Some(conn) = self.ccp_conn.as_mut() {
+            let since_sent = now.duration_since(self.hb.last_ccp_sent).as_secs();
+            let since_recv = now.duration_since(self.hb.last_ccp_recv).as_secs();
+
+            // Send heartbeat if idle too long
+            if since_sent >= CCP_HEARTBEAT_SECS {
+                let _ = conn.send_fix(&[(fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT)]);
+                self.hb.last_ccp_sent = now;
+            }
+
+            // Check for timeout
+            if since_recv > CCP_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
+                if let Some((_, sent_at)) = &self.hb.pending_ccp_test {
+                    if now.duration_since(*sent_at).as_secs() > CCP_HEARTBEAT_SECS {
+                        // TestRequest timed out — connection lost
+                        log::error!("CCP heartbeat timeout — connection lost");
+                        self.running = false;
+                        self.strategy.on_disconnect(&mut self.context);
+                    }
+                } else {
+                    // Send TestRequest
+                    let test_id = self.hb.next_test_id();
+                    let _ = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                        (fix::TAG_TEST_REQ_ID, &test_id),
+                    ]);
+                    self.hb.pending_ccp_test = Some((test_id, now));
+                    self.hb.last_ccp_sent = now;
+                }
+            }
+        }
+
+        // --- Farm heartbeat ---
+        if let Some(conn) = self.farm_conn.as_mut() {
+            let since_sent = now.duration_since(self.hb.last_farm_sent).as_secs();
+            let since_recv = now.duration_since(self.hb.last_farm_recv).as_secs();
+
+            if since_sent >= FARM_HEARTBEAT_SECS {
+                let _ = conn.send_fix(&[(fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT)]);
+                self.hb.last_farm_sent = now;
+            }
+
+            if since_recv > FARM_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
+                if let Some((_, sent_at)) = &self.hb.pending_farm_test {
+                    if now.duration_since(*sent_at).as_secs() > FARM_HEARTBEAT_SECS {
+                        log::error!("Farm heartbeat timeout — connection lost");
+                        self.running = false;
+                        self.strategy.on_disconnect(&mut self.context);
+                    }
+                } else {
+                    let test_id = self.hb.next_test_id();
+                    let _ = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                        (fix::TAG_TEST_REQ_ID, &test_id),
+                    ]);
+                    self.hb.pending_farm_test = Some((test_id, now));
+                    self.hb.last_farm_sent = now;
+                }
+            }
+        }
     }
 
 }
@@ -515,6 +647,16 @@ impl<S: Strategy> HotLoop<S> {
         if let Some(id) = core_ids.get(core) {
             core_affinity::set_for_current(*id);
         }
+    }
+
+    /// Access heartbeat state for testing.
+    pub fn heartbeat_state(&self) -> &HeartbeatState {
+        &self.hb
+    }
+
+    /// Mutably access heartbeat state for testing (e.g., setting timestamps).
+    pub fn heartbeat_state_mut(&mut self) -> &mut HeartbeatState {
+        &mut self.hb
     }
 
     /// Inject a raw farm message for testing. Processes it through the full decode pipeline.
@@ -897,6 +1039,35 @@ mod tests {
         // Both instruments registered
         assert_eq!(engine.context_mut().market.register(265598), 0);
         assert_eq!(engine.context_mut().market.register(272093), 1);
+    }
+
+    #[test]
+    fn heartbeat_state_initialized() {
+        let engine = HotLoop::new(RecordingStrategy::new(), None);
+        let hb = engine.heartbeat_state();
+        // All timestamps should be recent (within 1 second of now)
+        let now = Instant::now();
+        assert!(now.duration_since(hb.last_ccp_sent).as_secs() < 1);
+        assert!(now.duration_since(hb.last_farm_recv).as_secs() < 1);
+        assert!(hb.pending_ccp_test.is_none());
+        assert!(hb.pending_farm_test.is_none());
+    }
+
+    #[test]
+    fn heartbeat_test_id_increments() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let id1 = engine.heartbeat_state_mut().next_test_id();
+        let id2 = engine.heartbeat_state_mut().next_test_id();
+        assert_eq!(id1, "T1");
+        assert_eq!(id2, "T2");
+    }
+
+    #[test]
+    fn check_heartbeats_no_connections_no_panic() {
+        // No connections set — check_heartbeats should be a no-op
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.check_heartbeats(); // should not panic
+        assert!(engine.running);
     }
 
     #[test]
