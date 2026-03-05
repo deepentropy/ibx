@@ -259,6 +259,85 @@ pub struct Gateway {
     encoded: String,
 }
 
+/// Connect to a farm (usfarm or ushmds): DH → encrypted logon → SOFT_TOKEN → routing → Connection.
+fn connect_farm(
+    host: &str,
+    farm_id: &str,
+    username: &str,
+    paper: bool,
+    server_session_id: &str,
+    session_key: &BigUint,
+    hw_info: &str,
+    encoded: &str,
+) -> io::Result<Connection> {
+    log::info!("Connecting to {} {}:{}", farm_id, host, MISC_PORT);
+    let farm_tcp = TcpStream::connect_timeout(
+        &format!("{}:{}", host, MISC_PORT).parse().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("bad address: {}", e))
+        })?,
+        Duration::from_secs(TIMEOUT_FARM_CONNECT),
+    )?;
+
+    // DH key exchange (raw TCP)
+    let mut channel = SecureChannel::new();
+    let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
+    let mut stream = farm_tcp;
+    stream.write_all(&dh_msg)?;
+
+    let (payload, _) = ns::ns_recv(&mut stream)?;
+    let text = String::from_utf8_lossy(&payload);
+    let parts: Vec<&str> = text.split(';').collect();
+    let msg_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    if msg_type != ns::NS_SECURE_CONNECTION_START {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} DH: expected 533, got {}", farm_id, msg_type),
+        ));
+    }
+    channel.process_server_hello(&parts[2..]);
+    log::info!("{} DH complete", farm_id);
+
+    // Encrypted FIX logon
+    let farm_session_id = if server_session_id.is_empty() {
+        session::get_session_id()
+    } else {
+        server_session_id.to_string()
+    };
+    let logon_bytes = build_farm_encrypted_logon(
+        &channel, username, paper, farm_id,
+        &farm_session_id, session_key, hw_info, encoded,
+    );
+    stream.write_all(&logon_bytes)?;
+    log::info!("{} encrypted logon sent", farm_id);
+
+    // Logon exchange: AUTH_START → SOFT_TOKEN → logon ACK
+    let read_mac_key = channel.key_block().map(|kb| kb[84..104].to_vec()).unwrap_or_default();
+    let initial_read_iv = channel.key_block().map(|kb| kb[48..64].to_vec()).unwrap_or_default();
+    let (read_iv, sign_iv) = farm_logon_exchange(
+        &mut stream, &mut channel, session_key, &read_mac_key, &initial_read_iv,
+    )?;
+    log::info!("{} logon exchange complete", farm_id);
+
+    // Routing table request
+    let sign_mac_key = channel.key_block().map(|kb| kb[64..84].to_vec()).unwrap_or_default();
+    let routing_result = send_routing_request(
+        &mut stream, &sign_mac_key, &sign_iv, &read_mac_key, &read_iv,
+    );
+    let (final_sign_iv, final_read_iv) = match &routing_result {
+        Ok((hosts, siv, riv)) => {
+            for (name, host) in hosts {
+                log::info!("{} routing: {} → {}", farm_id, name, host);
+            }
+            (siv.clone(), riv.clone())
+        }
+        Err(_) => (sign_iv, read_iv),
+    };
+
+    let mut conn = Connection::new_raw(stream)?;
+    conn.set_keys(sign_mac_key, final_sign_iv, read_mac_key, final_read_iv);
+    Ok(conn)
+}
+
 /// Configuration for connecting to IB.
 pub struct GatewayConfig {
     pub username: String,
@@ -268,9 +347,9 @@ pub struct GatewayConfig {
 }
 
 impl Gateway {
-    /// Connect to IB: CCP auth + FIX logon + farm connection.
-    /// Returns Gateway + farm Connection + CCP Connection ready for HotLoop.
-    pub fn connect(config: &GatewayConfig) -> io::Result<(Self, Connection, Connection)> {
+    /// Connect to IB: CCP auth + FIX logon + farm connections.
+    /// Returns Gateway + farm Connection + CCP Connection + optional hmds Connection.
+    pub fn connect(config: &GatewayConfig) -> io::Result<(Self, Connection, Connection, Option<Connection>)> {
         let hw_info = session::get_hw_info();
         let encoded = IB_ENCODED.to_string();
 
@@ -409,94 +488,28 @@ impl Gateway {
         // CCP Connection (non-blocking TLS for hot loop)
         let ccp_conn = Connection::new(tls)?;
 
-        // --- Phase 3: Farm connection ---
-        log::info!("Connecting to farm {}:{}", config.host, MISC_PORT);
-        let farm_tcp = TcpStream::connect_timeout(
-            &format!("{}:{}", config.host, MISC_PORT).parse().map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidInput, format!("bad address: {}", e))
-            })?,
-            Duration::from_secs(TIMEOUT_FARM_CONNECT),
+        // --- Phase 3: Farm connections ---
+        let farm_conn = connect_farm(
+            &config.host, "usfarm",
+            &config.username, config.paper,
+            &server_session_id, &session_key, &hw_info, &encoded,
         )?;
 
-        // Farm DH key exchange (raw TCP, no TLS)
-        let mut farm_channel = SecureChannel::new();
-        let farm_dh = farm_channel.build_secure_connect(NS_VERSION, NS_VERSION);
-        let mut farm_stream = farm_tcp;
-        farm_stream.write_all(&farm_dh)?;
-
-        let (farm_payload, _) = ns::ns_recv(&mut farm_stream)?;
-        let farm_text = String::from_utf8_lossy(&farm_payload);
-        let farm_parts: Vec<&str> = farm_text.split(';').collect();
-        let farm_msg_type: u32 = farm_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        if farm_msg_type != ns::NS_SECURE_CONNECTION_START {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Farm DH: expected 533, got {}", farm_msg_type),
-            ));
-        }
-        farm_channel.process_server_hello(&farm_parts[2..]);
-        log::info!("Farm DH complete");
-
-        // Send encrypted FIX logon
-        let farm_session_id = if server_session_id.is_empty() {
-            session::get_session_id()
-        } else {
-            server_session_id.clone()
-        };
-        let logon_bytes = build_farm_encrypted_logon(
-            &farm_channel,
-            &config.username,
-            config.paper,
-            "usfarm",
-            &farm_session_id,
-            &session_key,
-            &hw_info,
-            &encoded,
-        );
-        farm_stream.write_all(&logon_bytes)?;
-        log::info!("Farm encrypted logon sent");
-
-        // Farm logon exchange: AUTH_START → SOFT_TOKEN → logon ACK
-        let read_mac_key = farm_channel
-            .key_block()
-            .map(|kb| kb[84..104].to_vec())
-            .unwrap_or_default();
-        let initial_read_iv = farm_channel
-            .key_block()
-            .map(|kb| kb[48..64].to_vec())
-            .unwrap_or_default();
-        let (read_iv, sign_iv) = farm_logon_exchange(
-            &mut farm_stream,
-            &mut farm_channel,
-            &session_key,
-            &read_mac_key,
-            &initial_read_iv,
-        )?;
-        log::info!("Farm logon exchange complete");
-
-        // Send routing table request (35=U, 6040=112) before switching to non-blocking
-        let sign_mac_key = farm_channel
-            .key_block()
-            .map(|kb| kb[64..84].to_vec())
-            .unwrap_or_default();
-        let routing_hosts = send_routing_request(
-            &mut farm_stream, &sign_mac_key, &sign_iv, &read_mac_key, &read_iv,
-        );
-        // Routing updates sign_iv/read_iv but Connection re-starts from post-logon IVs,
-        // so we create Connection with the IVs returned from routing.
-        let (final_sign_iv, final_read_iv) = match &routing_hosts {
-            Ok((_, siv, riv)) => (siv.clone(), riv.clone()),
-            Err(_) => (sign_iv, read_iv),
-        };
-        if let Ok((hosts, _, _)) = &routing_hosts {
-            for (name, host) in hosts {
-                log::info!("Routing: {} → {}", name, host);
+        // ushmds farm (optional — for historical data)
+        let hmds_conn = match connect_farm(
+            &config.host, "ushmds",
+            &config.username, config.paper,
+            &server_session_id, &session_key, &hw_info, &encoded,
+        ) {
+            Ok(c) => {
+                log::info!("ushmds farm connected");
+                Some(c)
             }
-        }
-
-        // Create farm Connection (raw TCP + HMAC signing)
-        let mut farm_conn = Connection::new_raw(farm_stream)?;
-        farm_conn.set_keys(sign_mac_key, final_sign_iv, read_mac_key, final_read_iv);
+            Err(e) => {
+                log::warn!("ushmds farm connection failed (non-fatal): {}", e);
+                None
+            }
+        };
 
         let gw = Gateway {
             account_id,
@@ -507,7 +520,7 @@ impl Gateway {
             hw_info,
             encoded,
         };
-        Ok((gw, farm_conn, ccp_conn))
+        Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
 
     /// Create the control channel and build a HotLoop with connected sockets.
@@ -516,6 +529,7 @@ impl Gateway {
         strategy: S,
         farm_conn: Connection,
         ccp_conn: Connection,
+        hmds_conn: Option<Connection>,
         core_id: Option<usize>,
     ) -> (HotLoop<S>, Sender<ControlCommand>) {
         let (tx, rx) = bounded(64);
@@ -523,6 +537,7 @@ impl Gateway {
         hot_loop.set_control_rx(rx);
         hot_loop.farm_conn = Some(farm_conn);
         hot_loop.ccp_conn = Some(ccp_conn);
+        hot_loop.hmds_conn = hmds_conn;
         (hot_loop, tx)
     }
 }
