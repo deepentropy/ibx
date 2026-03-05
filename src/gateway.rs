@@ -474,13 +474,29 @@ impl Gateway {
         )?;
         log::info!("Farm logon exchange complete");
 
-        // Create farm Connection (raw TCP + HMAC signing)
+        // Send routing table request (35=U, 6040=112) before switching to non-blocking
         let sign_mac_key = farm_channel
             .key_block()
             .map(|kb| kb[64..84].to_vec())
             .unwrap_or_default();
+        let routing_hosts = send_routing_request(
+            &mut farm_stream, &sign_mac_key, &sign_iv, &read_mac_key, &read_iv,
+        );
+        // Routing updates sign_iv/read_iv but Connection re-starts from post-logon IVs,
+        // so we create Connection with the IVs returned from routing.
+        let (final_sign_iv, final_read_iv) = match &routing_hosts {
+            Ok((_, siv, riv)) => (siv.clone(), riv.clone()),
+            Err(_) => (sign_iv, read_iv),
+        };
+        if let Ok((hosts, _, _)) = &routing_hosts {
+            for (name, host) in hosts {
+                log::info!("Routing: {} → {}", name, host);
+            }
+        }
+
+        // Create farm Connection (raw TCP + HMAC signing)
         let mut farm_conn = Connection::new_raw(farm_stream)?;
-        farm_conn.set_keys(sign_mac_key, sign_iv, read_mac_key, read_iv);
+        farm_conn.set_keys(sign_mac_key, final_sign_iv, read_mac_key, final_read_iv);
 
         let gw = Gateway {
             account_id,
@@ -550,6 +566,90 @@ pub fn build_mktdata_unsubscribe(md_req_id: &str, seq: u32) -> Vec<u8> {
         ],
         seq,
     )
+}
+
+/// Send 35=U routing request (6040=112) and parse 35=T response.
+/// Returns Vec of (farm_name, host) pairs and updated sign/read IVs.
+/// Runs in blocking mode (before Connection switches to non-blocking).
+fn send_routing_request(
+    stream: &mut TcpStream,
+    sign_key: &[u8],
+    sign_iv: &[u8],
+    read_key: &[u8],
+    read_iv: &[u8],
+) -> io::Result<(Vec<(String, String)>, Vec<u8>, Vec<u8>)> {
+    let now = chrono_free_timestamp();
+    let msg = fix_build(&[
+        (fix::TAG_MSG_TYPE, "U"),
+        (fix::TAG_SENDING_TIME, &now),
+        (6040, "112"),
+        (6556, "1"), // usfarm channel
+    ], 1); // seq doesn't matter, farm ignores it for routing
+
+    // Sign and send
+    let (signed, new_sign_iv) = fix::fix_sign(&msg, sign_key, sign_iv);
+    stream.write_all(&signed)?;
+
+    // Read response with timeout
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut buf = vec![0u8; 32768];
+    let mut total = Vec::new();
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => total.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => break,
+            Err(e) => return Err(e),
+        }
+    }
+    stream.set_read_timeout(None)?;
+
+    // Unsign
+    let (unsigned, new_read_iv, _valid) = fix::fix_unsign(&total, read_key, read_iv);
+
+    // Parse 35=T routing table
+    let hosts = parse_routing_table(&unsigned);
+    Ok((hosts, new_sign_iv, new_read_iv))
+}
+
+/// Parse 8=O 35=T routing table body.
+/// Body: semicolon-delimited entries, each comma-delimited:
+///   {exchange},{sectype},{datatypes},{filter},{wildcard},{host},{port},{farmname};...
+fn parse_routing_table(data: &[u8]) -> Vec<(String, String)> {
+    let text = String::from_utf8_lossy(data);
+
+    // Find body after "35=T\x01"
+    let marker = "35=T\x01";
+    let body = match text.find(marker) {
+        Some(pos) => &text[pos + marker.len()..],
+        None => return Vec::new(),
+    };
+
+    // Skip 6556= field if present
+    let body = if body.starts_with("6556=") {
+        match body.find('\x01') {
+            Some(p) => &body[p + 1..],
+            None => return Vec::new(),
+        }
+    } else {
+        body
+    };
+
+    let mut hosts = Vec::new();
+    for entry in body.split(';') {
+        if entry.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = entry.split(',').collect();
+        if parts.len() >= 8 && !parts[5].is_empty() {
+            let host = parts[5].to_string();
+            let farm_name = parts[7].to_string();
+            if !farm_name.is_empty() {
+                hosts.push((farm_name, host));
+            }
+        }
+    }
+    hosts
 }
 
 /// Format timestamp as YYYYMMDD-HH:MM:SS (no chrono dependency).
@@ -703,5 +803,35 @@ mod tests {
         let (extracted, consumed) = try_frame_farm_msg(&buf).unwrap();
         assert_eq!(extracted, msg1);
         assert_eq!(consumed, msg1.len());
+    }
+
+    #[test]
+    fn parse_routing_table_extracts_hosts() {
+        // Simulate 8=O 35=T body
+        // Format: exchange,sectype,datatypes,filter,wildcard,host,port,farmname
+        let body = b"8=O\x019=999\x0135=T\x016556=1\x01\
+ARCA,STK,AllLast|BidAsk|Top,0,,cashhmds.ibllc.com,4001,cashhmds;\
+ISLAND,STK,Deep|Deep2,0,,usopt.ibllc.com,4002,usopt;\
+EMPTY,,,,,,,;\x01";
+        let hosts = parse_routing_table(body);
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].0, "cashhmds");
+        assert_eq!(hosts[0].1, "cashhmds.ibllc.com");
+        assert_eq!(hosts[1].0, "usopt");
+        assert_eq!(hosts[1].1, "usopt.ibllc.com");
+    }
+
+    #[test]
+    fn parse_routing_table_empty() {
+        let data = b"8=O\x019=10\x0135=T\x016556=1\x01\x01";
+        let hosts = parse_routing_table(data);
+        assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn parse_routing_table_no_35t() {
+        let data = b"8=O\x019=10\x0135=A\x01stuff";
+        let hosts = parse_routing_table(data);
+        assert!(hosts.is_empty());
     }
 }
