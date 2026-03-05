@@ -168,7 +168,7 @@ impl OrderBuffer {
 #[derive(Debug, Clone)]
 pub enum ControlCommand {
     /// Subscribe to market data for a contract.
-    Subscribe { con_id: i64 },
+    Subscribe { con_id: i64, symbol: String },
     /// Unsubscribe from market data for an instrument.
     Unsubscribe { instrument: InstrumentId },
     /// Update a strategy parameter.
@@ -317,5 +317,305 @@ mod tests {
             ) => assert_eq!(a, b),
             _ => panic!("should both be Modify"),
         }
+    }
+
+    // --- Quote field independence ---
+
+    #[test]
+    fn quote_default_all_zeros() {
+        let q = Quote::default();
+        assert_eq!(q.bid, 0);
+        assert_eq!(q.ask, 0);
+        assert_eq!(q.last, 0);
+        assert_eq!(q.bid_size, 0);
+        assert_eq!(q.ask_size, 0);
+        assert_eq!(q.last_size, 0);
+        assert_eq!(q.volume, 0);
+        assert_eq!(q.open, 0);
+        assert_eq!(q.high, 0);
+        assert_eq!(q.low, 0);
+        assert_eq!(q.close, 0);
+        assert_eq!(q.timestamp_ns, 0);
+    }
+
+    #[test]
+    fn quote_field_independence() {
+        let mut q = Quote::default();
+        q.bid = 100 * PRICE_SCALE;
+        assert_eq!(q.ask, 0); // other fields untouched
+        assert_eq!(q.last, 0);
+        q.ask = 101 * PRICE_SCALE;
+        assert_eq!(q.bid, 100 * PRICE_SCALE); // bid unchanged
+    }
+
+    #[test]
+    fn quote_in_array_no_false_sharing() {
+        // Two adjacent quotes should be on different cache lines
+        let quotes = [Quote::default(); 4];
+        let ptr0 = &quotes[0] as *const Quote as usize;
+        let ptr1 = &quotes[1] as *const Quote as usize;
+        // Each quote is 128 bytes (2 cache lines), so stride should be 128
+        assert_eq!(ptr1 - ptr0, 128);
+    }
+
+    // --- Price edge cases ---
+
+    #[test]
+    fn price_zero() {
+        let p: Price = 0;
+        assert_eq!(p as f64 / PRICE_SCALE as f64, 0.0);
+    }
+
+    #[test]
+    fn price_one_cent() {
+        let p: Price = PRICE_SCALE / 100; // $0.01
+        let f = p as f64 / PRICE_SCALE as f64;
+        assert!((f - 0.01).abs() < 1e-10);
+    }
+
+    #[test]
+    fn price_sub_penny() {
+        // $0.0001 (minimum tick for some instruments)
+        let p: Price = PRICE_SCALE / 10_000;
+        assert_eq!(p, 10_000); // 10^4
+        let f = p as f64 / PRICE_SCALE as f64;
+        assert!((f - 0.0001).abs() < 1e-12);
+    }
+
+    #[test]
+    fn price_large_value() {
+        // $100,000.00 (like BRK.A)
+        let p: Price = 100_000 * PRICE_SCALE;
+        assert_eq!(p, 10_000_000_000_000);
+        // Should be well within i64 range (max ~9.2 * 10^18)
+        assert!(p < i64::MAX);
+    }
+
+    #[test]
+    fn price_max_representable() {
+        // Maximum price: i64::MAX / PRICE_SCALE = ~92,233,720,368
+        let max_price = i64::MAX / PRICE_SCALE;
+        let p: Price = max_price * PRICE_SCALE;
+        // Should not overflow
+        assert!(p > 0);
+    }
+
+    // --- Qty edge cases ---
+
+    #[test]
+    fn qty_zero() {
+        let q: Qty = 0;
+        assert_eq!(q, 0);
+    }
+
+    #[test]
+    fn qty_negative() {
+        let q: Qty = -100 * QTY_SCALE;
+        assert_eq!(q, -1_000_000);
+    }
+
+    #[test]
+    fn qty_one_ten_thousandth() {
+        let q: Qty = 1; // smallest representable: 0.0001 shares
+        let f = q as f64 / QTY_SCALE as f64;
+        assert!((f - 0.0001).abs() < 1e-10);
+    }
+
+    // --- OrderBuffer edge cases ---
+
+    #[test]
+    fn order_buffer_multiple_drain_cycles() {
+        let mut buf = OrderBuffer::new();
+        for cycle in 0..10 {
+            for i in 0..5 {
+                buf.push(OrderRequest::Cancel { order_id: (cycle * 5 + i) as u64 });
+            }
+            let drained: Vec<_> = buf.drain().collect();
+            assert_eq!(drained.len(), 5);
+            assert!(buf.is_empty());
+        }
+    }
+
+    #[test]
+    fn order_buffer_drain_empty() {
+        let mut buf = OrderBuffer::new();
+        let drained: Vec<_> = buf.drain().collect();
+        assert!(drained.is_empty());
+    }
+
+    // --- All OrderRequest variants ---
+
+    #[test]
+    fn order_request_submit_limit_fields() {
+        let req = OrderRequest::SubmitLimit {
+            instrument: 42,
+            side: Side::Buy,
+            qty: 100,
+            price: 150 * PRICE_SCALE,
+        };
+        match req {
+            OrderRequest::SubmitLimit { instrument, side, qty, price } => {
+                assert_eq!(instrument, 42);
+                assert_eq!(side, Side::Buy);
+                assert_eq!(qty, 100);
+                assert_eq!(price, 150 * PRICE_SCALE);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn order_request_submit_market_fields() {
+        let req = OrderRequest::SubmitMarket {
+            instrument: 0,
+            side: Side::Sell,
+            qty: 50,
+        };
+        match req {
+            OrderRequest::SubmitMarket { instrument, side, qty } => {
+                assert_eq!(instrument, 0);
+                assert_eq!(side, Side::Sell);
+                assert_eq!(qty, 50);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn order_request_modify_fields() {
+        let req = OrderRequest::Modify { order_id: 99, price: 200 * PRICE_SCALE, qty: 10 };
+        match req {
+            OrderRequest::Modify { order_id, price, qty } => {
+                assert_eq!(order_id, 99);
+                assert_eq!(price, 200 * PRICE_SCALE);
+                assert_eq!(qty, 10);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn order_request_cancel_all_fields() {
+        let req = OrderRequest::CancelAll { instrument: 7 };
+        match req {
+            OrderRequest::CancelAll { instrument } => assert_eq!(instrument, 7),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    // --- AccountState ---
+
+    #[test]
+    fn account_state_default() {
+        let a = AccountState::default();
+        assert_eq!(a.net_liquidation, 0);
+        assert_eq!(a.buying_power, 0);
+        assert_eq!(a.margin_used, 0);
+        assert_eq!(a.unrealized_pnl, 0);
+        assert_eq!(a.realized_pnl, 0);
+    }
+
+    #[test]
+    fn account_state_copy() {
+        let mut a = AccountState::default();
+        a.net_liquidation = 100_000 * PRICE_SCALE;
+        let b = a; // Copy
+        assert_eq!(b.net_liquidation, 100_000 * PRICE_SCALE);
+    }
+
+    // --- ControlCommand ---
+
+    #[test]
+    fn control_command_subscribe() {
+        let cmd = ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() };
+        match cmd {
+            ControlCommand::Subscribe { con_id, .. } => assert_eq!(con_id, 265598),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn control_command_unsubscribe() {
+        let cmd = ControlCommand::Unsubscribe { instrument: 3 };
+        match cmd {
+            ControlCommand::Unsubscribe { instrument } => assert_eq!(instrument, 3),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn control_command_update_param() {
+        let cmd = ControlCommand::UpdateParam { key: "k".into(), value: "v".into() };
+        match cmd {
+            ControlCommand::UpdateParam { key, value } => {
+                assert_eq!(key, "k");
+                assert_eq!(value, "v");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn control_command_clone() {
+        let cmd = ControlCommand::Subscribe { con_id: 42, symbol: "TEST".into() };
+        let cmd2 = cmd.clone();
+        match cmd2 {
+            ControlCommand::Subscribe { con_id, .. } => assert_eq!(con_id, 42),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    // --- Fill ---
+
+    #[test]
+    fn fill_is_copy() {
+        let f = Fill {
+            instrument: 0,
+            order_id: 1,
+            side: Side::Buy,
+            price: 150 * PRICE_SCALE,
+            qty: 100,
+            remaining: 0,
+            timestamp_ns: 123456789,
+        };
+        let f2 = f; // Copy
+        assert_eq!(f.order_id, f2.order_id);
+        assert_eq!(f.timestamp_ns, f2.timestamp_ns);
+    }
+
+    // --- Order ---
+
+    #[test]
+    fn order_is_copy() {
+        let o = Order {
+            order_id: 42,
+            instrument: 0,
+            side: Side::Sell,
+            price: 200 * PRICE_SCALE,
+            qty: 50,
+            filled: 10,
+            status: OrderStatus::PartiallyFilled,
+        };
+        let o2 = o; // Copy
+        assert_eq!(o.order_id, o2.order_id);
+        assert_eq!(o.filled, o2.filled);
+    }
+
+    // --- Side ---
+
+    #[test]
+    fn side_equality() {
+        assert_eq!(Side::Buy, Side::Buy);
+        assert_eq!(Side::Sell, Side::Sell);
+        assert_ne!(Side::Buy, Side::Sell);
+    }
+
+    // --- OrderStatus ---
+
+    #[test]
+    fn order_status_equality() {
+        assert_eq!(OrderStatus::Submitted, OrderStatus::Submitted);
+        assert_ne!(OrderStatus::Filled, OrderStatus::Cancelled);
+        assert_ne!(OrderStatus::PartiallyFilled, OrderStatus::Filled);
     }
 }

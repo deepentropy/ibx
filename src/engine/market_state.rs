@@ -12,6 +12,8 @@ pub struct MarketState {
     server_tag_to_instrument: Vec<(u32, InstrumentId)>,
     /// Per-instrument minTick (from 35=Q). Used to scale tick magnitudes to prices.
     min_ticks: [f64; MAX_INSTRUMENTS],
+    /// Per-instrument symbol name (e.g. "AAPL"). Used for CCP orders (tag 55).
+    symbols: Vec<(InstrumentId, String)>,
 }
 
 impl MarketState {
@@ -22,6 +24,7 @@ impl MarketState {
             con_id_to_instrument: Vec::new(),
             server_tag_to_instrument: Vec::new(),
             min_ticks: [0.0; MAX_INSTRUMENTS],
+            symbols: Vec::new(),
         }
     }
 
@@ -55,6 +58,16 @@ impl MarketState {
         self.con_id_to_instrument.iter().map(|&(con_id, iid)| (iid, con_id))
     }
 
+    /// Look up con_id by InstrumentId. Returns None if not registered.
+    pub fn con_id(&self, instrument: InstrumentId) -> Option<i64> {
+        for &(cid, iid) in &self.con_id_to_instrument {
+            if iid == instrument {
+                return Some(cid);
+            }
+        }
+        None
+    }
+
     /// Look up InstrumentId by con_id. Returns None if not registered.
     pub fn instrument_by_con_id(&self, con_id: i64) -> Option<InstrumentId> {
         for &(cid, iid) in &self.con_id_to_instrument {
@@ -73,6 +86,27 @@ impl MarketState {
             }
         }
         None
+    }
+
+    /// Set symbol name for an instrument (e.g. "AAPL"). Used for CCP orders.
+    pub fn set_symbol(&mut self, id: InstrumentId, symbol: String) {
+        for entry in &mut self.symbols {
+            if entry.0 == id {
+                entry.1 = symbol;
+                return;
+            }
+        }
+        self.symbols.push((id, symbol));
+    }
+
+    /// Get symbol name for an instrument. Returns "?" if not set.
+    pub fn symbol(&self, id: InstrumentId) -> &str {
+        for (iid, sym) in &self.symbols {
+            if *iid == id {
+                return sym;
+            }
+        }
+        "?"
     }
 
     /// Set minTick for an instrument (from 35=Q). Price ticks = magnitude * min_tick.
@@ -266,5 +300,129 @@ mod tests {
         let id = ms.register(265598);
         ms.set_min_tick(id, 0.01);
         assert!((ms.min_tick(id) - 0.01).abs() < 1e-10);
+    }
+
+    // --- instrument_by_con_id ---
+
+    #[test]
+    fn instrument_by_con_id_found() {
+        let mut ms = MarketState::new();
+        ms.register(265598);
+        assert_eq!(ms.instrument_by_con_id(265598), Some(0));
+    }
+
+    #[test]
+    fn instrument_by_con_id_not_found() {
+        let ms = MarketState::new();
+        assert_eq!(ms.instrument_by_con_id(999999), None);
+    }
+
+    #[test]
+    fn instrument_by_con_id_multiple() {
+        let mut ms = MarketState::new();
+        ms.register(265598);
+        ms.register(272093);
+        ms.register(756733);
+        assert_eq!(ms.instrument_by_con_id(272093), Some(1));
+        assert_eq!(ms.instrument_by_con_id(756733), Some(2));
+    }
+
+    // --- active_instruments ---
+
+    #[test]
+    fn active_instruments_empty() {
+        let ms = MarketState::new();
+        assert_eq!(ms.active_instruments().count(), 0);
+    }
+
+    #[test]
+    fn active_instruments_returns_all() {
+        let mut ms = MarketState::new();
+        ms.register(265598);
+        ms.register(272093);
+        ms.register(756733);
+        let active: Vec<_> = ms.active_instruments().collect();
+        assert_eq!(active.len(), 3);
+        assert_eq!(active[0], (0, 265598));
+        assert_eq!(active[1], (1, 272093));
+        assert_eq!(active[2], (2, 756733));
+    }
+
+    #[test]
+    fn active_instruments_iterable_twice() {
+        let mut ms = MarketState::new();
+        ms.register(265598);
+        let first: Vec<_> = ms.active_instruments().collect();
+        let second: Vec<_> = ms.active_instruments().collect();
+        assert_eq!(first, second);
+    }
+
+    // --- Multiple server tags ---
+
+    #[test]
+    fn multiple_server_tags_different_instruments() {
+        let mut ms = MarketState::new();
+        let a = ms.register(265598);
+        let b = ms.register(272093);
+        ms.register_server_tag(10, a);
+        ms.register_server_tag(20, b);
+        assert_eq!(ms.instrument_by_server_tag(10), Some(a));
+        assert_eq!(ms.instrument_by_server_tag(20), Some(b));
+    }
+
+    // --- Quote OHLCV fields ---
+
+    #[test]
+    fn quote_ohlcv_fields() {
+        let mut ms = MarketState::new();
+        let id = ms.register(265598);
+        let q = ms.quote_mut(id);
+        q.open = 148 * PRICE_SCALE;
+        q.high = 155 * PRICE_SCALE;
+        q.low = 147 * PRICE_SCALE;
+        q.close = 152 * PRICE_SCALE;
+        q.volume = 50_000_000;
+        q.timestamp_ns = 1709654400_000_000_000;
+
+        let q_ref = ms.quote(id);
+        assert_eq!(q_ref.open, 148 * PRICE_SCALE);
+        assert_eq!(q_ref.high, 155 * PRICE_SCALE);
+        assert_eq!(q_ref.low, 147 * PRICE_SCALE);
+        assert_eq!(q_ref.close, 152 * PRICE_SCALE);
+        assert_eq!(q_ref.volume, 50_000_000);
+        assert_eq!(q_ref.timestamp_ns, 1709654400_000_000_000);
+    }
+
+    // --- Spread edge cases ---
+
+    #[test]
+    fn spread_with_zero_bid_ask() {
+        let ms = MarketState::new();
+        // Before any data, spread is 0
+        assert_eq!(ms.spread(0), 0);
+    }
+
+    #[test]
+    fn mid_with_odd_spread() {
+        let mut ms = MarketState::new();
+        let id = ms.register(265598);
+        let q = ms.quote_mut(id);
+        q.bid = 99;
+        q.ask = 100;
+        // Mid = (99 + 100) / 2 = 99 (integer division truncates)
+        assert_eq!(ms.mid(id), 99);
+    }
+
+    // --- Min tick for different instruments ---
+
+    #[test]
+    fn min_tick_per_instrument() {
+        let mut ms = MarketState::new();
+        let a = ms.register(265598);
+        let b = ms.register(272093);
+        ms.set_min_tick(a, 0.01);
+        ms.set_min_tick(b, 0.05);
+        assert!((ms.min_tick(a) - 0.01).abs() < 1e-10);
+        assert!((ms.min_tick(b) - 0.05).abs() < 1e-10);
     }
 }

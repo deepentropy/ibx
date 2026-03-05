@@ -1,11 +1,11 @@
 use std::time::Instant;
 
 use crate::engine::context::{Context, Strategy};
+use crate::gateway::chrono_free_timestamp;
 use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::gateway;
 use crate::types::{ControlCommand, InstrumentId, OrderRequest, Price, Side, PRICE_SCALE};
 use crossbeam_channel::Receiver;
 
@@ -47,6 +47,8 @@ pub struct HotLoop<S: Strategy> {
     ccp_disconnected: bool,
     /// Heartbeat state.
     hb: HeartbeatState,
+    /// Account ID for order submission.
+    account_id: String,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -101,6 +103,7 @@ impl<S: Strategy> HotLoop<S> {
             farm_disconnected: false,
             ccp_disconnected: false,
             hb: HeartbeatState::new(),
+            account_id: String::new(),
         }
     }
 
@@ -109,9 +112,19 @@ impl<S: Strategy> HotLoop<S> {
         self.control_rx = Some(rx);
     }
 
+    /// Set the account ID for order submission.
+    pub fn set_account_id(&mut self, account_id: String) {
+        self.account_id = account_id;
+    }
+
     /// Access the context (for pre-start configuration like registering instruments).
     pub fn context_mut(&mut self) -> &mut Context {
         &mut self.context
+    }
+
+    /// Access the strategy (for reading results after run completes).
+    pub fn strategy(&self) -> &S {
+        &self.strategy
     }
 
     /// Run the hot loop. Blocks until Shutdown command received.
@@ -124,6 +137,8 @@ impl<S: Strategy> HotLoop<S> {
         self.running = true;
 
         while self.running {
+            self.context.loop_iterations += 1;
+
             // 1. Busy-poll usfarm socket (non-blocking recv)
             //    → HMAC verify → zlib decompress → bit-unpack ticks
             //    → update market state in-place
@@ -165,7 +180,9 @@ impl<S: Strategy> HotLoop<S> {
                         return;
                     }
                     Ok(_) => {
-                        self.hb.last_farm_recv = Instant::now();
+                        let now = Instant::now();
+                        self.hb.last_farm_recv = now;
+                        self.context.recv_at = now;
                         self.hb.pending_farm_test = None; // data received, clear pending test
                     }
                 }
@@ -205,7 +222,7 @@ impl<S: Strategy> HotLoop<S> {
 
         match msg_type {
             "P" => self.handle_tick_data(msg),
-            "Q" => self.handle_subscription_ack(&parsed),
+            "Q" => self.handle_subscription_ack(msg),
             "0" => {} // heartbeat — timestamp already updated in try_recv
             "1" => {
                 // Test request — respond with heartbeat containing the test req ID
@@ -218,7 +235,7 @@ impl<S: Strategy> HotLoop<S> {
                     self.hb.last_farm_sent = Instant::now();
                 }
             }
-            "L" => self.handle_ticker_setup(&parsed),
+            "L" => self.handle_ticker_setup(msg),
             _ => {}   // other farm messages (35=G, etc.)
         }
     }
@@ -297,15 +314,16 @@ impl<S: Strategy> HotLoop<S> {
     /// Handle 35=Q subscription acknowledgement: map server_tag → instrument.
     /// Body format (ibgw-headless handler_mktdata.py): CSV fields in tag 6119.
     /// Fields: serverTag,reqId,minTick,...
-    fn handle_subscription_ack(&mut self, parsed: &std::collections::HashMap<u32, String>) {
-        // Tag 6119 contains the CSV body
-        let body = match parsed.get(&6119) {
+    fn handle_subscription_ack(&mut self, msg: &[u8]) {
+        // 35=Q body is raw CSV after FIX header: serverTag,reqId,minTick,...
+        let body = match find_body_after_tag(msg, b"35=Q\x01") {
             Some(b) => b,
             None => return,
         };
-
-        // Parse CSV: serverTag,reqId,minTick,...
-        let parts: Vec<&str> = body.split(',').collect();
+        let text = String::from_utf8_lossy(body);
+        // Strip trailing HMAC signature if present (8349=...)
+        let text = text.split("\x018349=").next().unwrap_or(&text);
+        let parts: Vec<&str> = text.trim().split(',').collect();
         if parts.len() < 3 {
             return;
         }
@@ -335,14 +353,15 @@ impl<S: Strategy> HotLoop<S> {
         log::info!("Subscribed instrument {} → server_tag {}, minTick {}", instrument, server_tag, min_tick);
     }
 
-    /// Handle 35=L ticker setup: CSV body in tag 6119: conId,minTick,serverTag,,1
-    fn handle_ticker_setup(&mut self, parsed: &std::collections::HashMap<u32, String>) {
-        let body = match parsed.get(&6119) {
+    /// Handle 35=L ticker setup: CSV body after header: conId,minTick,serverTag,,1
+    fn handle_ticker_setup(&mut self, msg: &[u8]) {
+        let body = match find_body_after_tag(msg, b"35=L\x01") {
             Some(b) => b,
             None => return,
         };
-
-        let parts: Vec<&str> = body.split(',').collect();
+        let text = String::from_utf8_lossy(body);
+        let text = text.split("\x018349=").next().unwrap_or(&text);
+        let parts: Vec<&str> = text.trim().split(',').collect();
         if parts.len() < 3 {
             return;
         }
@@ -380,11 +399,18 @@ impl<S: Strategy> HotLoop<S> {
 
         if let Some(conn) = self.farm_conn.as_mut() {
             let req_id_str = req_id.to_string();
-            conn.seq += 1;
-            let msg = gateway::build_mktdata_subscribe(
-                con_id as u32, "SMART", "CS", &req_id_str, conn.seq,
-            );
-            let _ = conn.send_raw(&msg);
+            let con_id_str = (con_id as u32).to_string();
+            let _ = conn.send_fixcomp(&[
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+                (262, &req_id_str),
+                (263, "1"), // Subscribe
+                (146, "1"), // NumRelatedSym
+                (6008, &con_id_str),
+                (207, "BEST"),
+                (167, "CS"),
+                (264, "442"), // BidAsk
+                (9830, "1"),
+            ]);
             self.hb.last_farm_sent = Instant::now();
         }
     }
@@ -408,9 +434,11 @@ impl<S: Strategy> HotLoop<S> {
 
         for req_id in reqs {
             let req_id_str = req_id.to_string();
-            conn.seq += 1;
-            let msg = gateway::build_mktdata_unsubscribe(&req_id_str, conn.seq);
-            let _ = conn.send_raw(&msg);
+            let _ = conn.send_fixcomp(&[
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+                (262, &req_id_str),
+                (263, "2"), // Unsubscribe
+            ]);
         }
         self.hb.last_farm_sent = Instant::now();
     }
@@ -426,35 +454,63 @@ impl<S: Strategy> HotLoop<S> {
                 OrderRequest::SubmitLimit { instrument, side, qty, price } => {
                     let clord = self.next_clord_id;
                     self.next_clord_id += 1;
+                    self.context.insert_order(crate::types::Order {
+                        order_id: clord, instrument, side, price, qty, filled: 0,
+                        status: crate::types::OrderStatus::Submitted,
+                    });
                     let clord_str = clord.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
                     let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
                     conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
                         (11, &clord_str),   // ClOrdID
-                        (55, &instrument.to_string()), // Symbol (instrument ID as placeholder)
+                        (1, &self.account_id), // Account
+                        (21, "2"),          // HandlInst = Automated
+                        (55, &symbol),      // Symbol
                         (54, side_str),     // Side
                         (38, &qty_str),     // OrderQty
                         (40, "2"),          // OrdType = Limit
                         (44, &price_str),   // Price
                         (59, "0"),          // TIF = DAY
+                        (60, &now),         // TransactTime
+                        (167, "STK"),       // SecurityType = CommonStock
+                        (100, "SMART"),     // ExDestination
+                        (15, "USD"),        // Currency
+                        (204, "0"),         // CustomerOrFirm
                     ])
                 }
                 OrderRequest::SubmitMarket { instrument, side, qty } => {
                     let clord = self.next_clord_id;
                     self.next_clord_id += 1;
+                    self.context.insert_order(crate::types::Order {
+                        order_id: clord, instrument, side, price: 0, qty, filled: 0,
+                        status: crate::types::OrderStatus::Submitted,
+                    });
                     let clord_str = clord.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
                     conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
                         (11, &clord_str),
-                        (55, &instrument.to_string()),
+                        (1, &self.account_id), // Account
+                        (21, "2"),          // HandlInst = Automated
+                        (55, &symbol),      // Symbol
                         (54, side_str),
                         (38, &qty_str),
                         (40, "1"),          // OrdType = Market
                         (59, "0"),          // TIF = DAY
+                        (60, &now),         // TransactTime
+                        (167, "STK"),       // SecurityType
+                        (100, "SMART"),     // ExDestination
+                        (15, "USD"),        // Currency
+                        (204, "0"),         // CustomerOrFirm
                     ])
                 }
                 OrderRequest::Cancel { order_id } => {
@@ -568,8 +624,10 @@ impl<S: Strategy> HotLoop<S> {
             fix::MSG_TEST_REQUEST => {
                 let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
                 if let Some(conn) = self.ccp_conn.as_mut() {
+                    let ts = chrono_free_timestamp();
                     let _ = conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                        (fix::TAG_SENDING_TIME, &ts),
                         (fix::TAG_TEST_REQ_ID, &test_id),
                     ]);
                     self.hb.last_ccp_sent = Instant::now();
@@ -743,8 +801,9 @@ impl<S: Strategy> HotLoop<S> {
 
         for cmd in cmds {
             match cmd {
-                ControlCommand::Subscribe { con_id } => {
+                ControlCommand::Subscribe { con_id, symbol } => {
                     let id = self.context.market.register(con_id);
+                    self.context.market.set_symbol(id, symbol);
                     self.send_mktdata_subscribe(con_id, id);
                 }
                 ControlCommand::Unsubscribe { instrument } => {
@@ -763,6 +822,7 @@ impl<S: Strategy> HotLoop<S> {
 
     fn check_heartbeats(&mut self) {
         let now = Instant::now();
+        let ts = chrono_free_timestamp();
 
         // --- CCP heartbeat ---
         if let Some(conn) = self.ccp_conn.as_mut() {
@@ -771,7 +831,10 @@ impl<S: Strategy> HotLoop<S> {
 
             // Send heartbeat if idle too long
             if since_sent >= CCP_HEARTBEAT_SECS {
-                let _ = conn.send_fix(&[(fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT)]);
+                let _ = conn.send_fix(&[
+                    (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                    (fix::TAG_SENDING_TIME, &ts),
+                ]);
                 self.hb.last_ccp_sent = now;
             }
 
@@ -789,6 +852,7 @@ impl<S: Strategy> HotLoop<S> {
                     let test_id = self.hb.next_test_id();
                     let _ = conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                        (fix::TAG_SENDING_TIME, &ts),
                         (fix::TAG_TEST_REQ_ID, &test_id),
                     ]);
                     self.hb.pending_ccp_test = Some((test_id, now));
@@ -803,7 +867,10 @@ impl<S: Strategy> HotLoop<S> {
             let since_recv = now.duration_since(self.hb.last_farm_recv).as_secs();
 
             if since_sent >= FARM_HEARTBEAT_SECS {
-                let _ = conn.send_fix(&[(fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT)]);
+                let _ = conn.send_fix(&[
+                    (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                    (fix::TAG_SENDING_TIME, &ts),
+                ]);
                 self.hb.last_farm_sent = now;
             }
 
@@ -818,6 +885,7 @@ impl<S: Strategy> HotLoop<S> {
                     let test_id = self.hb.next_test_id();
                     let _ = conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                        (fix::TAG_SENDING_TIME, &ts),
                         (fix::TAG_TEST_REQ_ID, &test_id),
                     ]);
                     self.hb.pending_farm_test = Some((test_id, now));
@@ -1259,7 +1327,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
-        tx.send(ControlCommand::Subscribe { con_id: 265598 }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
         engine.poll_control_commands();
 
         // Instrument should be registered
@@ -1287,8 +1355,8 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
-        tx.send(ControlCommand::Subscribe { con_id: 265598 }).unwrap();
-        tx.send(ControlCommand::Subscribe { con_id: 272093 }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 272093, symbol: "MSFT".into() }).unwrap();
         tx.send(ControlCommand::UpdateParam { key: "k".into(), value: "v".into() }).unwrap();
         engine.poll_control_commands();
 
@@ -1381,7 +1449,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
-        tx.send(ControlCommand::Subscribe { con_id: 265598 }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
         engine.poll_control_commands();
 
         // Should have a pending subscription with req_id=1
@@ -1403,16 +1471,14 @@ mod tests {
         // Simulate pending subscription for req_id=1 → instrument 0
         engine.md_req_to_instrument.push((1, 0));
 
-        // Build 35=Q ack with tag 6119 CSV
-        let mut parsed = std::collections::HashMap::new();
-        parsed.insert(35, "Q".to_string());
-        parsed.insert(6119, "42,1,0.01,extra".to_string());
+        // Build raw 35=Q message: CSV body = serverTag,reqId,minTick,...
+        let msg = b"8=O\x019=999\x0135=Q\x0142,1,0.01,extra\x01";
 
-        engine.handle_subscription_ack(&parsed);
+        engine.handle_subscription_ack(msg);
 
         // server_tag 42 should map to instrument 0
         assert_eq!(engine.context_mut().market.instrument_by_server_tag(42), Some(0));
-        assert_eq!(engine.context_mut().market.min_tick(0), 0.01);
+        assert!((engine.context_mut().market.min_tick(0) - 0.01).abs() < 1e-10);
         // Pending subscription should be consumed
         assert!(engine.md_req_to_instrument.is_empty());
     }
@@ -1422,14 +1488,13 @@ mod tests {
         let mut engine = HotLoop::new(RecordingStrategy::new(), None);
         engine.context_mut().market.register(265598);
 
-        let mut parsed = std::collections::HashMap::new();
-        parsed.insert(35, "L".to_string());
-        parsed.insert(6119, "265598,0.01,99,,1".to_string());
+        // Build raw 35=L message: CSV body = conId,minTick,serverTag,,1
+        let msg = b"8=O\x019=999\x0135=L\x01265598,0.01,99,,1\x01";
 
-        engine.handle_ticker_setup(&parsed);
+        engine.handle_ticker_setup(msg);
 
         assert_eq!(engine.context_mut().market.instrument_by_server_tag(99), Some(0));
-        assert_eq!(engine.context_mut().market.min_tick(0), 0.01);
+        assert!((engine.context_mut().market.min_tick(0) - 0.01).abs() < 1e-10);
     }
 
     #[test]
@@ -1526,5 +1591,264 @@ mod tests {
         assert!(engine.is_farm_disconnected());
         engine.farm_disconnected = false;
         assert!(!engine.is_farm_disconnected());
+    }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn subscription_ack_no_body() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        // 35=Q with no CSV body — should be a no-op
+        let msg = b"8=O\x019=999\x0135=Q\x01\x01";
+        engine.handle_subscription_ack(msg);
+        assert!(engine.md_req_to_instrument.is_empty());
+    }
+
+    #[test]
+    fn subscription_ack_malformed_csv() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        // 35=Q with malformed CSV (not 3+ fields)
+        let msg = b"8=O\x019=999\x0135=Q\x01bad_data\x01";
+        engine.handle_subscription_ack(msg);
+        // No crash
+    }
+
+    #[test]
+    fn subscription_ack_unknown_req_id() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+        // Don't add to md_req_to_instrument
+
+        // req_id 999 not pending
+        let msg = b"8=O\x019=999\x0135=Q\x0142,999,0.01,extra\x01";
+        engine.handle_subscription_ack(msg);
+        // Should be silently ignored
+        assert_eq!(engine.context_mut().market.instrument_by_server_tag(42), None);
+    }
+
+    #[test]
+    fn ticker_setup_no_body() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        // 35=L with no CSV body
+        let msg = b"8=O\x019=999\x0135=L\x01\x01";
+        engine.handle_ticker_setup(msg);
+        // No crash
+    }
+
+    #[test]
+    fn ticker_setup_unknown_con_id() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        // con_id 999999 not registered
+        let msg = b"8=O\x019=999\x0135=L\x01999999,0.01,50,,1\x01";
+        engine.handle_ticker_setup(msg);
+        // server_tag 50 should not be registered
+        assert_eq!(engine.context_mut().market.instrument_by_server_tag(50), None);
+    }
+
+    #[test]
+    fn handle_cancel_reject_keeps_order() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 10,
+            instrument: 0,
+            side: Side::Buy,
+            price: 150 * PRICE_SCALE,
+            qty: 100,
+            filled: 0,
+            status: crate::types::OrderStatus::Submitted,
+        });
+
+        let cancel_reject = fix::fix_build(&[
+            (35, "9"),
+            (41, "10"),
+            (58, "Order cannot be cancelled"),
+        ], 1);
+        engine.inject_ccp_message(&cancel_reject);
+
+        // Order should still exist
+        assert!(engine.context_mut().order(10).is_some());
+    }
+
+    #[test]
+    fn handle_account_update_invalid_values_ignored() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+
+        // 8001=NetLiquidation but 8004= is not a valid float
+        let msg = b"8=O\x019=999\x0135=UT\x018001=NetLiquidation\x018004=not_a_number\x01";
+        engine.inject_ccp_message(msg);
+        // Should not crash, net_liquidation stays 0
+        assert_eq!(engine.context_mut().account().net_liquidation, 0);
+    }
+
+    #[test]
+    fn handle_account_update_unknown_key_ignored() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+
+        let msg = b"8=O\x019=999\x0135=UT\x018001=SomeUnknownKey\x018004=12345.67\x01";
+        engine.inject_ccp_message(msg);
+        // Should not crash, no fields changed
+    }
+
+    #[test]
+    fn exec_report_cancelled_removes_order() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 5,
+            instrument: 0,
+            side: Side::Buy,
+            price: 100 * PRICE_SCALE,
+            qty: 50,
+            filled: 0,
+            status: crate::types::OrderStatus::Submitted,
+        });
+
+        let exec_msg = fix::fix_build(&[
+            (35, "8"),
+            (11, "5"),
+            (39, "4"),  // Cancelled
+            (150, "4"),
+        ], 1);
+        engine.inject_ccp_message(&exec_msg);
+
+        // Order should be removed
+        assert!(engine.context_mut().order(5).is_none());
+    }
+
+    #[test]
+    fn format_price_negative() {
+        assert_eq!(format_price(-150 * PRICE_SCALE), "-150");
+    }
+
+    #[test]
+    fn format_price_cents() {
+        // $0.01
+        assert_eq!(format_price(PRICE_SCALE / 100), "0.01");
+    }
+
+    #[test]
+    fn format_price_sub_penny() {
+        // $0.005
+        assert_eq!(format_price(PRICE_SCALE / 200), "0.005");
+    }
+
+    #[test]
+    fn find_body_after_tag_found() {
+        let msg = b"8=O\x019=10\x0135=P\x01stuff";
+        let body = find_body_after_tag(msg, b"35=P\x01");
+        assert_eq!(body, Some(b"stuff".as_ref()));
+    }
+
+    #[test]
+    fn find_body_after_tag_not_found() {
+        let msg = b"8=O\x019=10\x0135=Q\x01stuff";
+        let body = find_body_after_tag(msg, b"35=P\x01");
+        assert!(body.is_none());
+    }
+
+    #[test]
+    fn multiple_subscriptions_same_instrument() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        engine.set_control_rx(rx);
+
+        // Subscribe same instrument twice
+        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
+        engine.poll_control_commands();
+
+        // register() deduplicates, so both should map to instrument 0
+        // But we should have 2 MDReqIDs
+        assert_eq!(engine.next_md_req_id, 3); // started at 1, allocated 2
+        assert_eq!(engine.instrument_md_reqs.len(), 1); // one instrument
+        assert_eq!(engine.instrument_md_reqs[0].1.len(), 2); // two req_ids
+    }
+
+    #[test]
+    fn unsubscribe_nonexistent_instrument_noop() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.send_mktdata_unsubscribe(99); // no tracked subscription
+        // Should not panic
+    }
+
+    #[test]
+    fn on_start_called() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        assert!(!engine.strategy.started);
+        engine.strategy.on_start(&mut engine.context);
+        assert!(engine.strategy.started);
+    }
+
+    #[test]
+    fn control_unsubscribe_command() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        engine.set_control_rx(rx);
+
+        // Setup: subscribe first
+        engine.context_mut().market.register(265598);
+        engine.instrument_md_reqs.push((0, vec![1]));
+
+        // Now unsubscribe
+        tx.send(ControlCommand::Unsubscribe { instrument: 0 }).unwrap();
+        engine.poll_control_commands();
+
+        assert!(engine.instrument_md_reqs.is_empty());
+    }
+
+    #[test]
+    fn process_farm_message_no_msg_type() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        // Message without 35= tag
+        let bad_msg = b"8=O\x019=5\x01junk\x01";
+        engine.inject_farm_message(bad_msg);
+        // Should not panic
+        assert!(engine.strategy.ticks.is_empty());
+    }
+
+    #[test]
+    fn process_farm_message_heartbeat_noop() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let heartbeat = fix::fix_build(&[(35, "0")], 1);
+        engine.inject_farm_message(&heartbeat);
+        // Should not trigger on_tick
+        assert!(engine.strategy.ticks.is_empty());
+    }
+
+    #[test]
+    fn position_update_zero_delta_no_change() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+        engine.context_mut().update_position(0, 50);
+
+        // UP with same position → no delta applied
+        let msg = format!("8=O\x019=999\x0135=UP\x016008=265598\x016064=50\x01");
+        engine.inject_ccp_message(msg.as_bytes());
+
+        assert_eq!(engine.context_mut().position(0), 50);
+    }
+
+    #[test]
+    fn exec_report_unknown_ord_status_ignored() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        let exec_msg = fix::fix_build(&[
+            (35, "8"),
+            (11, "1"),
+            (39, "X"),  // Unknown status
+            (150, "X"),
+        ], 1);
+        engine.inject_ccp_message(&exec_msg);
+        // Should not crash, no fills/updates
+        assert!(engine.strategy.fills.is_empty());
     }
 }

@@ -16,14 +16,17 @@ use native_tls::TlsConnector;
 use num_bigint::BigUint;
 use sha1::{Digest, Sha1};
 
+use std::net::ToSocketAddrs;
+
 use crate::auth::crypto::strip_leading_zeros;
 use crate::auth::dh::SecureChannel;
-use crate::auth::session::{self, RecvMsg, do_srp, do_soft_token};
+use crate::auth::session::{self, do_srp, do_soft_token};
 use crate::config::*;
 use crate::engine::context::Strategy;
 use crate::engine::hot_loop::HotLoop;
 use crate::protocol::connection::Connection;
 use crate::protocol::fix::{self, fix_build, fix_parse, fix_read, SOH};
+use crate::protocol::fixcomp;
 use crate::protocol::ns;
 use crate::types::ControlCommand;
 
@@ -69,7 +72,7 @@ pub fn build_ccp_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32) -
 ///
 /// Wire format: `8=FIX.4.1|9=<bodylen>|90=<b64_len>|91=<b64_ciphertext>|10=<cksum>`
 pub fn build_farm_encrypted_logon(
-    channel: &SecureChannel,
+    channel: &mut SecureChannel,
     username: &str,
     paper: bool,
     farm_name: &str,
@@ -116,7 +119,7 @@ pub fn build_farm_encrypted_logon(
         0,
     );
 
-    let encrypted_raw = channel.encrypt_fresh(&inner);
+    let encrypted_raw = channel.encrypt(&inner);
     let b64_str = B64.encode(&encrypted_raw);
 
     // Outer wrapper: 8=FIX.4.1|9=<bodylen>|90=<b64_len>|91=<b64>|10=<cksum>
@@ -164,8 +167,9 @@ pub fn farm_logon_exchange(
 
         // FIX.4.1 message
         if msg.starts_with(b"8=FIX.4.1\x01") {
+            let has_sig = msg.windows(5).any(|w| w == b"8349=");
             // Check for HMAC signature → unsign
-            let parsed_msg = if msg.windows(6).any(|w| w == b"8349=\x01" || w == b"8349=") {
+            let parsed_msg = if has_sig {
                 let (unsigned, new_iv, _valid) = fix::fix_unsign(&msg, read_mac_key, &read_iv);
                 read_iv = new_iv;
                 unsigned
@@ -184,9 +188,9 @@ pub fn farm_logon_exchange(
                     io::Error::new(io::ErrorKind::InvalidData, e)
                 })?;
 
-                // Sync HMAC read IV with AES read IV after decryption
-                if let Some(kb) = channel.key_block() {
-                    read_iv = kb[48..64].to_vec();
+                // Sync HMAC read IV with AES read IV after decryption (CBC chaining)
+                if let Some(iv) = channel.read_iv() {
+                    read_iv = iv.to_vec();
                 }
 
                 // Check for AUTH_START (35=S) → do SOFT_TOKEN
@@ -194,10 +198,10 @@ pub fn farm_logon_exchange(
                     do_soft_token(stream, session_token)?;
                 }
             } else if fields.get(&35).map(|s| s.as_str()) == Some("A") {
-                // Logon ACK
+                // Logon ACK — sign_iv is the current write_iv (mutated by encrypt)
                 let sign_iv = channel
-                    .key_block()
-                    .map(|kb| kb[32..48].to_vec())
+                    .write_iv()
+                    .map(|iv| iv.to_vec())
                     .unwrap_or_default();
                 return Ok((read_iv, sign_iv));
             } else if fields.get(&35).map(|s| s.as_str()) == Some("3") {
@@ -271,12 +275,11 @@ fn connect_farm(
     encoded: &str,
 ) -> io::Result<Connection> {
     log::info!("Connecting to {} {}:{}", farm_id, host, MISC_PORT);
-    let farm_tcp = TcpStream::connect_timeout(
-        &format!("{}:{}", host, MISC_PORT).parse().map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("bad address: {}", e))
-        })?,
-        Duration::from_secs(TIMEOUT_FARM_CONNECT),
-    )?;
+    let addr = format!("{}:{}", host, MISC_PORT)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DNS resolution failed"))?;
+    let farm_tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(TIMEOUT_FARM_CONNECT))?;
 
     // DH key exchange (raw TCP)
     let mut channel = SecureChannel::new();
@@ -304,7 +307,7 @@ fn connect_farm(
         server_session_id.to_string()
     };
     let logon_bytes = build_farm_encrypted_logon(
-        &channel, username, paper, farm_id,
+        &mut channel, username, paper, farm_id,
         &farm_session_id, session_key, hw_info, encoded,
     );
     stream.write_all(&logon_bytes)?;
@@ -318,23 +321,56 @@ fn connect_farm(
     )?;
     log::info!("{} logon exchange complete", farm_id);
 
-    // Routing table request
     let sign_mac_key = channel.key_block().map(|kb| kb[64..84].to_vec()).unwrap_or_default();
-    let routing_result = send_routing_request(
-        &mut stream, &sign_mac_key, &sign_iv, &read_mac_key, &read_iv,
-    );
-    let (final_sign_iv, final_read_iv) = match &routing_result {
-        Ok((hosts, siv, riv)) => {
-            for (name, host) in hosts {
-                log::info!("{} routing: {} → {}", farm_id, name, host);
-            }
-            (siv.clone(), riv.clone())
-        }
-        Err(_) => (sign_iv, read_iv),
-    };
 
+    // Send routing table request (6040=112) — farm expects this after logon.
+    // Must be FIXCOMP-wrapped and HMAC-signed (matching Python _farm_init).
+    let channel_id = if farm_id == "ushmds" { "2" } else { "1" };
+    let now = chrono_free_timestamp();
+    let routing_msg = fix_build(&[
+        (fix::TAG_MSG_TYPE, "U"),
+        (fix::TAG_SENDING_TIME, &now),
+        (6040, "112"),
+        (6556, channel_id),
+    ], 1);
+    let wrapped = fixcomp::fixcomp_build(&routing_msg);
+    let (signed, new_sign_iv) = fix::fix_sign(&wrapped, &sign_mac_key, &sign_iv);
+    stream.write_all(&signed)?;
+    log::info!("{} sent routing request (6556={})", farm_id, channel_id);
+
+    // Read routing response (stream is still blocking)
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    let mut resp_buf = Vec::new();
+    loop {
+        let mut tmp = [0u8; 8192];
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => resp_buf.extend_from_slice(&tmp[..n]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                || e.kind() == io::ErrorKind::TimedOut => break,
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Create Connection (switches to non-blocking), inject routing bytes
     let mut conn = Connection::new_raw(stream)?;
-    conn.set_keys(sign_mac_key, final_sign_iv, read_mac_key, final_read_iv);
+    conn.set_keys(sign_mac_key, new_sign_iv, read_mac_key, read_iv);
+    conn.seq = 1; // routing request used seq 1
+
+    if !resp_buf.is_empty() {
+        conn.inject_buf(&resp_buf);
+        // Extract and unsign all routing frames to advance read_iv chain
+        let frames = conn.extract_frames();
+        for frame in &frames {
+            let raw = match frame {
+                crate::protocol::connection::Frame::FixComp(d) => d,
+                crate::protocol::connection::Frame::Binary(d) => d,
+                crate::protocol::connection::Frame::Fix(d) => d,
+            };
+            conn.unsign(raw);
+        }
+        log::info!("{} routing response: {} bytes, {} frames", farm_id, resp_buf.len(), frames.len());
+    }
     Ok(conn)
 }
 
@@ -355,12 +391,11 @@ impl Gateway {
 
         // --- Phase 1: CCP TLS + SRP auth ---
         log::info!("Connecting to CCP {}:{}", config.host, AUTH_PORT);
-        let tcp = TcpStream::connect_timeout(
-            &format!("{}:{}", config.host, AUTH_PORT).parse().map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidInput, format!("bad address: {}", e))
-            })?,
-            Duration::from_secs(TIMEOUT_SSL_AUTH),
-        )?;
+        let addr = format!("{}:{}", config.host, AUTH_PORT)
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DNS resolution failed"))?;
+        let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(TIMEOUT_SSL_AUTH))?;
 
         let connector = TlsConnector::builder()
             .danger_accept_invalid_certs(true)
@@ -399,94 +434,233 @@ impl Gateway {
             | session::FLAG_VERSION
             | session::FLAG_VERSION_PRESENT
             | session::FLAG_DEVICE_INFO
+            | session::FLAG_UNKNOWN_U
             | session::FLAG_UNKNOWN_19
             | session::FLAG_UNKNOWN_20
             | if config.paper { session::FLAG_PAPER_CONNECT } else { 0 };
+        let display_name = if config.paper {
+            format!("S{}", config.username)
+        } else {
+            config.username.clone()
+        };
+        let session_id = session::get_session_id();
         let connect_req = format!(
-            "{};{};{};{};{};",
-            NS_VERSION,
+            "{};{};{};{};{};27;{};{};{};",
+            NS_VERSION_MIN,
             ns::NS_CONNECT_REQUEST,
+            display_name,
             flags,
-            config.username,
-            hw_info
+            NS_VERSION,
+            hw_info,
+            session_id,
+            encoded
         );
-        session::send_secure(tls.get_mut(), &mut channel, connect_req.as_bytes())?;
+        session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
 
         // Receive AUTH_START
-        let _auth_start = session::recv_secure(tls.get_mut(), &mut channel)?;
+        let _auth_start = session::recv_secure(&mut tls, &mut channel)?;
 
         // SRP-6 authentication
         log::info!("Starting SRP auth for {}", config.username);
-        let session_key = do_srp(tls.get_mut(), &config.username, &config.password)?;
+        let session_key = do_srp(&mut tls, &config.username, &config.password)?;
         log::info!("SRP auth complete");
 
-        // Receive post-auth messages (CONNECT_RESPONSE, FIX_START)
-        for _ in 0..5 {
-            match session::recv_msg(tls.get_mut()) {
-                Ok(RecvMsg::Ns { msg_type, .. }) => {
-                    if msg_type == ns::NS_FIX_START {
-                        log::info!("FIX_START received — CCP ready for FIX");
-                        break;
-                    }
-                }
-                Ok(_) => {}
+        // Receive post-auth messages (encrypted via 534)
+        let mut fix_ready = false;
+        for _ in 0..10 {
+            let (payload, _) = match ns::ns_recv(&mut tls) {
+                Ok(r) => r,
                 Err(e) => {
                     log::warn!("Post-auth recv error: {}", e);
                     break;
                 }
+            };
+            let text = String::from_utf8_lossy(&payload);
+            let parts: Vec<&str> = text.split(';').collect();
+            let raw_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+            // Decrypt if encrypted, otherwise use raw
+            let inner = if raw_type == ns::NS_SECURE_MESSAGE {
+                let ct = B64.decode(parts[2])
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                channel.decrypt(&ct)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            } else if raw_type == ns::NS_SECURE_ERROR {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Post-auth secure error: {}", parts[2..].join(";")),
+                ));
+            } else {
+                payload
+            };
+
+            let inner_text = String::from_utf8_lossy(&inner);
+            let inner_parts: Vec<&str> = inner_text.split(';').collect();
+            let msg_type: u32 = inner_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+            if msg_type == ns::NS_CONNECT_RESPONSE {
+                log::info!("NS_CONNECT_RESPONSE: {}", inner_text);
+                // Send NEWCOMMPORTTYPE (required before FIX_START)
+                let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
+                session::send_secure(&mut tls, &mut channel, newcomm.as_bytes())?;
+                log::info!("NEWCOMMPORTTYPE sent");
+            } else if msg_type == ns::NS_FIX_START {
+                log::info!("FIX_START: {}", inner_text);
+                fix_ready = true;
+                break;
+            } else if msg_type == ns::NS_ERROR_RESPONSE {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Post-auth error: {}", inner_parts[2..].join(";")),
+                ));
+            } else {
+                log::info!("Post-auth msg type={}: {}", msg_type, inner_text);
             }
+        }
+        if !fix_ready {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Never received FIX_START after auth",
+            ));
         }
 
         // --- Phase 2: CCP FIX logon (over TLS) ---
         let logon_msg = build_ccp_logon(&hw_info, &encoded, CCP_HEARTBEAT, 1);
+        log::info!("Sending CCP FIX logon ({} bytes)", logon_msg.len());
         tls.write_all(&logon_msg)?;
+        tls.flush()?;
 
-        // Read logon response
+        // Read FIX messages until we get the logon ACK (35=A) with session info
         tls.get_ref().set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)))?;
-        let response = fix_read(&mut tls)?;
-        tls.get_ref().set_read_timeout(None)?;
+        let mut account_id = String::new();
+        let mut heartbeat_interval = CCP_HEARTBEAT;
+        let mut server_session_id = String::new();
+        let mut ccp_token = String::new();
 
-        let fields = fix_parse(&response);
-        let msg_type = fields.get(&35).map(|s| s.as_str()).unwrap_or("");
-        match msg_type {
-            "A" | "B" | "U" => {}
-            "3" | "5" => {
-                let reason = fields.get(&58).map(|s| s.as_str()).unwrap_or("unknown");
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("FIX Logon rejected: {}", reason),
-                ));
-            }
-            _ => {
-                log::warn!("Unexpected FIX logon response type: {}", msg_type);
-            }
-        }
+        for _ in 0..5 {
+            let response = fix_read(&mut tls)?;
+            let fields = fix_parse(&response);
+            let msg_type = fields.get(&35).map(|s| s.as_str()).unwrap_or("");
+            log::info!("CCP FIX msg type={}", msg_type);
 
-        let account_id = fields.get(&1).cloned().unwrap_or_default();
-        let heartbeat_interval: u64 = fields
-            .get(&108)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(CCP_HEARTBEAT);
-        let server_session_id = fields.get(&8035).cloned().unwrap_or_else(|| {
-            let marker = b"\x018035=";
-            if let Some(pos) = response.windows(marker.len()).position(|w| w == marker) {
-                let val_start = pos + marker.len();
-                if let Some(end) = response[val_start..].iter().position(|&b| b == SOH) {
-                    return String::from_utf8_lossy(&response[val_start..val_start + end])
-                        .to_string();
+            match msg_type {
+                "3" | "5" => {
+                    let reason = fields.get(&58).map(|s| s.as_str()).unwrap_or("unknown");
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("FIX Logon rejected: {}", reason),
+                    ));
+                }
+                _ => {}
+            }
+
+            if let Some(v) = fields.get(&1) {
+                if account_id.is_empty() { account_id = v.clone(); }
+            }
+            if let Some(v) = fields.get(&108) {
+                if let Ok(hb) = v.parse() { heartbeat_interval = hb; }
+            }
+            if let Some(v) = fields.get(&6386) {
+                if ccp_token.is_empty() { ccp_token = v.clone(); }
+            }
+            // Tag 8035: try parsed fields first, then raw byte search
+            if server_session_id.is_empty() {
+                if let Some(v) = fields.get(&8035) {
+                    server_session_id = v.clone();
+                } else {
+                    let marker = b"\x018035=";
+                    if let Some(pos) = response.windows(marker.len()).position(|w| w == marker) {
+                        let val_start = pos + marker.len();
+                        if let Some(end) = response[val_start..].iter().position(|&b| b == SOH) {
+                            server_session_id = String::from_utf8_lossy(
+                                &response[val_start..val_start + end],
+                            ).to_string();
+                        }
+                    }
                 }
             }
-            String::new()
-        });
-        let ccp_token = fields.get(&6386).cloned().unwrap_or_default();
+
+            // Stop once we have the logon ACK or server config message
+            if msg_type == "A" || msg_type == "U" {
+                break;
+            }
+        }
+        tls.get_ref().set_read_timeout(None)?;
+
+        // Fall back to our auth session_id if server didn't provide one (Python does the same)
+        if server_session_id.is_empty() {
+            server_session_id = session_id.clone();
+        }
 
         log::info!(
             "CCP FIX logon: account={} session_id={} hb={}s",
             account_id, server_session_id, heartbeat_interval
         );
 
+        // --- CCP post-logon init sequence (mirrors real Gateway / Python _fix_init) ---
+        let account = if account_id.is_empty() { config.username.clone() } else { account_id.clone() };
+        let mut ccp_seq: u32 = 1; // logon was seq 1
+        let now = chrono_free_timestamp();
+        let today_start = format!("{}-00:00:00", &now[..8]);
+
+        // Helper: send_ib_msg builds 35=U with 6040=<comm_type> + extra tags
+        let mut send_init = |fields: &[(u32, &str)]| -> io::Result<()> {
+            ccp_seq += 1;
+            let msg = fix_build(fields, ccp_seq);
+            tls.write_all(&msg)?;
+            Ok(())
+        };
+
+        send_init(&[(35, "U"), (52, &now), (6040, "91"), (1, &account), (6556, "DR.1"), (6712, "1")])?;
+        send_init(&[(35, "U"), (52, &now), (6040, "193"), (6556, "OPR.2"), (8166, "L"), (8176, "1")])?;
+        send_init(&[(35, "U"), (52, &now), (6040, "101")])?;
+        send_init(&[(35, "U"), (52, &now), (6040, "209"), (1, &account), (6556, "AcctConfig3")])?;
+        send_init(&[(35, "U"), (52, &now), (6040, "72"), (6536, &today_start), (6537, &now), (6556, "today4")])?;
+        send_init(&[(35, "U"), (52, &now), (6040, "74"), (1, ""), (6544, "2")])?;
+        send_init(&[(35, "U"), (52, &now), (6040, "76"), (1, ""), (6565, "1")])?;
+        send_init(&[(35, "U"), (52, &now), (6040, "6"), (6036, "1"), (6095, &account), (6529, "AR.3")])?;
+        for _ in 0..92 {
+            send_init(&[(35, "U"), (52, &now), (6040, "80")])?;
+        }
+        // Order status request
+        ccp_seq += 1;
+        let status_req = fix_build(&[(35, "H"), (52, &now), (11, "*"), (54, "*"), (55, "*")], ccp_seq);
+        tls.write_all(&status_req)?;
+        tls.flush()?;
+        log::info!("CCP init sequence sent ({} messages, seq now {})", 101, ccp_seq);
+
+        // Drain init responses — extract account ID if found
+        tls.get_ref().set_read_timeout(Some(Duration::from_secs(3)))?;
+        let mut init_data = Vec::new();
+        let mut tmp_buf = vec![0u8; 65536];
+        loop {
+            match tls.read(&mut tmp_buf) {
+                Ok(0) => break,
+                Ok(n) => init_data.extend_from_slice(&tmp_buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => break,
+                Err(e) => return Err(e),
+            }
+        }
+        log::info!("CCP init response: {} bytes", init_data.len());
+        // Search for account ID patterns (DU/DF/U + digits for paper, or from tag 1)
+        let init_str = String::from_utf8_lossy(&init_data);
+        for part in init_str.split('\x01') {
+            if part.starts_with("1=") && part.len() > 2 {
+                let val = &part[2..];
+                // IB account IDs: DU/DF/U + digits, or similar patterns
+                if val.starts_with("DU") || val.starts_with("DF") || val.starts_with("U") {
+                    if account_id.is_empty() || account_id == config.username {
+                        account_id = val.to_string();
+                        log::info!("Found account ID from init response: {}", account_id);
+                    }
+                }
+            }
+        }
+        tls.get_ref().set_read_timeout(None)?;
+
         // CCP Connection (non-blocking TLS for hot loop)
-        let ccp_conn = Connection::new(tls)?;
+        let mut ccp_conn = Connection::new(tls)?;
+        ccp_conn.seq = ccp_seq;
 
         // --- Phase 3: Farm connections ---
         let farm_conn = connect_farm(
@@ -512,7 +686,7 @@ impl Gateway {
         };
 
         let gw = Gateway {
-            account_id,
+            account_id: if account_id.is_empty() { config.username.clone() } else { account_id },
             session_token: session_key,
             server_session_id,
             ccp_token,
@@ -535,6 +709,7 @@ impl Gateway {
         let (tx, rx) = bounded(64);
         let mut hot_loop = HotLoop::new(strategy, core_id);
         hot_loop.set_control_rx(rx);
+        hot_loop.set_account_id(self.account_id.clone());
         hot_loop.farm_conn = Some(farm_conn);
         hot_loop.ccp_conn = Some(ccp_conn);
         hot_loop.hmds_conn = hmds_conn;
@@ -583,92 +758,8 @@ pub fn build_mktdata_unsubscribe(md_req_id: &str, seq: u32) -> Vec<u8> {
     )
 }
 
-/// Send 35=U routing request (6040=112) and parse 35=T response.
-/// Returns Vec of (farm_name, host) pairs and updated sign/read IVs.
-/// Runs in blocking mode (before Connection switches to non-blocking).
-fn send_routing_request(
-    stream: &mut TcpStream,
-    sign_key: &[u8],
-    sign_iv: &[u8],
-    read_key: &[u8],
-    read_iv: &[u8],
-) -> io::Result<(Vec<(String, String)>, Vec<u8>, Vec<u8>)> {
-    let now = chrono_free_timestamp();
-    let msg = fix_build(&[
-        (fix::TAG_MSG_TYPE, "U"),
-        (fix::TAG_SENDING_TIME, &now),
-        (6040, "112"),
-        (6556, "1"), // usfarm channel
-    ], 1); // seq doesn't matter, farm ignores it for routing
-
-    // Sign and send
-    let (signed, new_sign_iv) = fix::fix_sign(&msg, sign_key, sign_iv);
-    stream.write_all(&signed)?;
-
-    // Read response with timeout
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let mut buf = vec![0u8; 32768];
-    let mut total = Vec::new();
-    loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => total.extend_from_slice(&buf[..n]),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => break,
-            Err(e) => return Err(e),
-        }
-    }
-    stream.set_read_timeout(None)?;
-
-    // Unsign
-    let (unsigned, new_read_iv, _valid) = fix::fix_unsign(&total, read_key, read_iv);
-
-    // Parse 35=T routing table
-    let hosts = parse_routing_table(&unsigned);
-    Ok((hosts, new_sign_iv, new_read_iv))
-}
-
-/// Parse 8=O 35=T routing table body.
-/// Body: semicolon-delimited entries, each comma-delimited:
-///   {exchange},{sectype},{datatypes},{filter},{wildcard},{host},{port},{farmname};...
-fn parse_routing_table(data: &[u8]) -> Vec<(String, String)> {
-    let text = String::from_utf8_lossy(data);
-
-    // Find body after "35=T\x01"
-    let marker = "35=T\x01";
-    let body = match text.find(marker) {
-        Some(pos) => &text[pos + marker.len()..],
-        None => return Vec::new(),
-    };
-
-    // Skip 6556= field if present
-    let body = if body.starts_with("6556=") {
-        match body.find('\x01') {
-            Some(p) => &body[p + 1..],
-            None => return Vec::new(),
-        }
-    } else {
-        body
-    };
-
-    let mut hosts = Vec::new();
-    for entry in body.split(';') {
-        if entry.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = entry.split(',').collect();
-        if parts.len() >= 8 && !parts[5].is_empty() {
-            let host = parts[5].to_string();
-            let farm_name = parts[7].to_string();
-            if !farm_name.is_empty() {
-                hosts.push((farm_name, host));
-            }
-        }
-    }
-    hosts
-}
-
 /// Format timestamp as YYYYMMDD-HH:MM:SS (no chrono dependency).
-fn chrono_free_timestamp() -> String {
+pub(crate) fn chrono_free_timestamp() -> String {
     use std::time::SystemTime;
     let dur = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -818,33 +909,114 @@ mod tests {
         assert_eq!(consumed, msg1.len());
     }
 
+    // Note: build_farm_encrypted_logon requires a DH-initialized SecureChannel
+    // which can't be created in unit tests. Tested via integration tests instead.
+
     #[test]
-    fn parse_routing_table_extracts_hosts() {
-        // Simulate 8=O 35=T body
-        // Format: exchange,sectype,datatypes,filter,wildcard,host,port,farmname
-        let body = b"8=O\x019=999\x0135=T\x016556=1\x01\
-ARCA,STK,AllLast|BidAsk|Top,0,,cashhmds.ibllc.com,4001,cashhmds;\
-ISLAND,STK,Deep|Deep2,0,,usopt.ibllc.com,4002,usopt;\
-EMPTY,,,,,,,;\x01";
-        let hosts = parse_routing_table(body);
-        assert_eq!(hosts.len(), 2);
-        assert_eq!(hosts[0].0, "cashhmds");
-        assert_eq!(hosts[0].1, "cashhmds.ibllc.com");
-        assert_eq!(hosts[1].0, "usopt");
-        assert_eq!(hosts[1].1, "usopt.ibllc.com");
+    fn build_mktdata_subscribe_exchange_passthrough() {
+        // Non-SMART exchanges should pass through as-is
+        let msg = build_mktdata_subscribe(265598, "ARCA", "CS", "REQ2", 3);
+        let fields = fix_parse(&msg);
+        assert_eq!(fields[&207], "ARCA"); // not mapped to BEST
     }
 
     #[test]
-    fn parse_routing_table_empty() {
-        let data = b"8=O\x019=10\x0135=T\x016556=1\x01\x01";
-        let hosts = parse_routing_table(data);
-        assert!(hosts.is_empty());
+    fn build_mktdata_subscribe_has_correct_tags() {
+        let msg = build_mktdata_subscribe(756733, "SMART", "ETF", "REQ5", 10);
+        let fields = fix_parse(&msg);
+        assert_eq!(fields[&35], "V");
+        assert_eq!(fields[&6008], "756733");
+        assert_eq!(fields[&207], "BEST");
+        assert_eq!(fields[&167], "ETF");
+        assert_eq!(fields[&263], "1"); // subscribe
+        assert_eq!(fields[&146], "1"); // NumRelatedSym
     }
 
     #[test]
-    fn parse_routing_table_no_35t() {
-        let data = b"8=O\x019=10\x0135=A\x01stuff";
-        let hosts = parse_routing_table(data);
-        assert!(hosts.is_empty());
+    fn days_to_ymd_leap_year() {
+        let (y, m, d) = days_to_ymd(19782); // 2024-02-29
+        assert_eq!((y, m, d), (2024, 2, 29));
+    }
+
+    #[test]
+    fn days_to_ymd_end_of_year() {
+        // 2025-12-31
+        let (y, m, d) = days_to_ymd(20453); // 2025-12-31
+        assert_eq!((y, m, d), (2025, 12, 31));
+    }
+
+    #[test]
+    fn days_to_ymd_start_of_2000() {
+        // 2000-01-01 = 10957 days from epoch
+        let (y, m, d) = days_to_ymd(10957);
+        assert_eq!((y, m, d), (2000, 1, 1));
+    }
+
+    #[test]
+    fn try_frame_farm_msg_garbage_prefix() {
+        let mut buf = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let msg = fix_build(&[(35, "A")], 1);
+        buf.extend_from_slice(&msg);
+        // Should skip garbage and return (empty, skip_count)
+        let (extracted, consumed) = try_frame_farm_msg(&buf).unwrap();
+        if extracted.is_empty() {
+            // garbage skipped, need to retry from remaining
+            let rest = &buf[consumed..];
+            let (msg2, _) = try_frame_farm_msg(rest).unwrap();
+            assert!(!msg2.is_empty());
+        }
+    }
+
+    #[test]
+    fn try_frame_farm_msg_multiple_sequential() {
+        // Two FIX messages back to back
+        let msg1 = fix_build(&[(35, "S")], 1);
+        let msg2 = fix_build(&[(35, "A"), (108, "30")], 2);
+        let mut buf = msg1.clone();
+        buf.extend_from_slice(&msg2);
+        let (extracted, consumed) = try_frame_farm_msg(&buf).unwrap();
+        assert_eq!(extracted, msg1);
+        assert_eq!(consumed, msg1.len());
+        // Second message
+        let (extracted2, consumed2) = try_frame_farm_msg(&buf[consumed..]).unwrap();
+        assert_eq!(extracted2, msg2);
+        assert_eq!(consumed2, msg2.len());
+    }
+
+    #[test]
+    fn token_short_hash_nonzero_output() {
+        let token = BigUint::from(1u64);
+        let hash = token_short_hash(&token);
+        assert!(!hash.is_empty());
+        // Should be hex string
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn token_short_hash_large_token() {
+        let token = BigUint::from(u64::MAX);
+        let hash = token_short_hash(&token);
+        assert!(!hash.is_empty());
+        assert!(hash.len() <= 8); // u32 hex is at most 8 chars
+    }
+
+    #[test]
+    fn chrono_free_timestamp_not_empty() {
+        let ts = chrono_free_timestamp();
+        assert!(!ts.is_empty());
+        // Year should start with 20xx
+        assert!(ts.starts_with("20"));
+    }
+
+    #[test]
+    fn gateway_config_fields() {
+        let config = GatewayConfig {
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            host: "cdc1.ibllc.com".to_string(),
+            paper: true,
+        };
+        assert_eq!(config.username, "user");
+        assert!(config.paper);
     }
 }

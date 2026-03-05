@@ -223,4 +223,104 @@ mod tests {
         let comp = fixcomp_build(&inner);
         assert_eq!(fixcomp_length(&comp[..10]), None);
     }
+
+    #[test]
+    fn roundtrip_large_message() {
+        // Build a FIX message with body > 1000 bytes
+        let long_value = "X".repeat(1000);
+        let inner = fix_build(&[(35, "B"), (58, &long_value)], 1);
+        assert!(inner.len() > 1000);
+
+        let comp = fixcomp_build(&inner);
+        let messages = fixcomp_decompress(&comp);
+        assert_eq!(messages.len(), 1);
+        let parsed = fix_parse(&messages[0]);
+        assert_eq!(parsed[&35], "B");
+        assert_eq!(parsed[&58], long_value);
+    }
+
+    #[test]
+    fn decompress_multiple_inner_fix_messages() {
+        // Compress two FIX messages together into one FIXCOMP wrapper
+        let msg1 = fix_build(&[(35, "0")], 1);
+        let msg2 = fix_build(&[(35, "D"), (55, "GOOG")], 2);
+        let mut combined = msg1.clone();
+        combined.extend_from_slice(&msg2);
+
+        let comp = fixcomp_build(&combined);
+        let messages = fixcomp_decompress(&comp);
+        assert_eq!(messages.len(), 2, "expected 2 inner messages");
+
+        let parsed1 = fix_parse(&messages[0]);
+        assert_eq!(parsed1[&35], "0");
+
+        let parsed2 = fix_parse(&messages[1]);
+        assert_eq!(parsed2[&35], "D");
+        assert_eq!(parsed2[&55], "GOOG");
+    }
+
+    #[test]
+    fn fixcomp_length_missing_tag9() {
+        // A buffer starting with 8=FIXCOMP but no tag 9 → should return None
+        let data = b"8=FIXCOMP\x0195=5\x01";
+        assert_eq!(fixcomp_length(data), None);
+    }
+
+    #[test]
+    fn fixcomp_length_body_shorter_than_declared() {
+        // Build a valid FIXCOMP, then check that fixcomp_length returns
+        // the expected total even if the actual data is shorter (returns None).
+        let inner = fix_build(&[(35, "0")], 1);
+        let comp = fixcomp_build(&inner);
+        let expected_total = fixcomp_length(&comp).unwrap();
+
+        // Truncate: provide only half the body
+        let half = comp.len() / 2;
+        assert!(half < expected_total);
+        assert_eq!(fixcomp_length(&comp[..half]), None);
+    }
+
+    #[test]
+    fn fixcomp_build_produces_valid_zlib() {
+        use flate2::read::ZlibDecoder;
+        use std::io::Read as _;
+
+        let inner = fix_build(&[(35, "A"), (108, "30")], 1);
+        let comp = fixcomp_build(&inner);
+
+        // Extract the zlib data from tag 96
+        let tag96_pos = comp
+            .windows(3)
+            .position(|w| w == b"96=")
+            .expect("tag 96 not found");
+        let zlib_start = tag96_pos + 3;
+
+        // Find tag 95 value for length
+        let tag95_pos = comp
+            .windows(3)
+            .position(|w| w == b"95=")
+            .expect("tag 95 not found");
+        let soh_after_95 = comp[tag95_pos + 3..]
+            .iter()
+            .position(|&b| b == SOH)
+            .unwrap()
+            + tag95_pos
+            + 3;
+        let zlib_len: usize = std::str::from_utf8(&comp[tag95_pos + 3..soh_after_95])
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        let zlib_data = &comp[zlib_start..zlib_start + zlib_len];
+
+        // Decompress with raw flate2 to verify it's valid zlib
+        let mut decoder = ZlibDecoder::new(zlib_data);
+        let mut decompressed = Vec::new();
+        decoder
+            .read_to_end(&mut decompressed)
+            .expect("zlib decompression failed");
+
+        // Decompressed data should equal the original inner FIX message
+        assert_eq!(decompressed, inner);
+    }
 }

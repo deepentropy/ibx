@@ -5,7 +5,7 @@
 //! 2. Phase 2: SSL + DH + SRP-6 against CCP (port 4001)
 //! 3. Farm connections: DH + SOFT_TOKEN auth
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -86,8 +86,8 @@ pub fn get_hw_info() -> String {
 }
 
 /// Send an NS message encrypted via the DH channel (534).
-pub fn send_secure(
-    stream: &mut TcpStream,
+pub fn send_secure<W: Write>(
+    stream: &mut W,
     channel: &mut SecureChannel,
     inner: &[u8],
 ) -> io::Result<()> {
@@ -104,8 +104,8 @@ pub fn send_secure(
 }
 
 /// Receive an encrypted 534 response and decrypt.
-pub fn recv_secure(
-    stream: &mut TcpStream,
+pub fn recv_secure<R: Read>(
+    stream: &mut R,
     channel: &mut SecureChannel,
 ) -> io::Result<Vec<u8>> {
     let (payload, _) = ns::ns_recv(stream)?;
@@ -129,7 +129,7 @@ pub fn recv_secure(
     if msg_type != NS_SECURE_MESSAGE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Expected 534, got {}", msg_type),
+            format!("Expected 534, got {}: {}", msg_type, text),
         ));
     }
 
@@ -142,7 +142,7 @@ pub fn recv_secure(
 }
 
 /// Receive a `#%#%` framed message and classify as NS text or XYZ binary.
-pub fn recv_msg(stream: &mut TcpStream) -> io::Result<RecvMsg> {
+pub fn recv_msg<R: Read>(stream: &mut R) -> io::Result<RecvMsg> {
     let (payload, _) = ns::ns_recv(stream)?;
 
     // Try NS text first
@@ -201,7 +201,7 @@ fn extract_srp_data(fields: &[String], username: &str) -> Vec<String> {
 /// Execute SRP-6 protocol (XYZ msg 777, states 1-6) via raw binary.
 ///
 /// Returns the session key K as BigUint.
-pub fn do_srp(stream: &mut TcpStream, username: &str, password: &str) -> io::Result<BigUint> {
+pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -> io::Result<BigUint> {
     let n = srp::srp_n();
     let g = BigUint::from(srp::SRP_G);
 
@@ -352,24 +352,74 @@ pub fn do_srp(stream: &mut TcpStream, username: &str, password: &str) -> io::Res
 }
 
 /// Execute SOFT_TOKEN authentication (XYZ msg 772) for farm connections.
+/// Wrap XYZ binary in `8=1|35=X` FIX framing (farm protocol).
+fn wrap_xyz_fix(xyz_payload: &[u8]) -> Vec<u8> {
+    let tag35 = b"35=X\x01";
+    let body_len = tag35.len() + xyz_payload.len();
+    let header = format!("8=1\x019={:04}\x01", body_len);
+    let mut msg = Vec::with_capacity(header.len() + tag35.len() + xyz_payload.len());
+    msg.extend_from_slice(header.as_bytes());
+    msg.extend_from_slice(tag35);
+    msg.extend_from_slice(xyz_payload);
+    msg
+}
+
+/// Read one `8=1` FIX message from a farm stream.
+fn recv_8eq1(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut tmp)?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "farm connection closed during SOFT_TOKEN",
+            ));
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        // Look for complete 8=1 message: starts with "8=1\x01" and has a body
+        if buf.starts_with(b"8=1\x01") {
+            // Parse body length from 9=NNNN
+            if let Some(nine_pos) = buf.windows(2).position(|w| w == b"9=") {
+                let val_start = nine_pos + 2;
+                if let Some(soh_pos) = buf[val_start..].iter().position(|&b| b == 0x01) {
+                    let body_len: usize = std::str::from_utf8(&buf[val_start..val_start + soh_pos])
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let header_end = val_start + soh_pos + 1;
+                    let total = header_end + body_len;
+                    if buf.len() >= total {
+                        return Ok(buf[..total].to_vec());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Extract XYZ binary from `8=1|35=X` FIX message.
+fn extract_xyz(msg: &[u8]) -> &[u8] {
+    let marker = b"35=X\x01";
+    if let Some(idx) = msg.windows(marker.len()).position(|w| w == marker) {
+        &msg[idx + marker.len()..]
+    } else {
+        msg
+    }
+}
+
 pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Result<()> {
     use sha1::{Digest, Sha1};
 
-    // State 1: Send empty init
+    // State 1: Send empty init (FIX-framed for farm)
     let msg1 = xyz::xyz_build_soft_token(1, "", "", "");
-    stream.write_all(&xyz::xyz_wrap(&msg1))?;
+    stream.write_all(&wrap_xyz_fix(&msg1))?;
 
-    // State 2: Receive challenge
-    let recv2 = recv_msg(stream)?;
-    let (state2, fields2) = match recv2 {
-        RecvMsg::Xyz { state, fields, .. } => (state, fields),
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SOFT_TOKEN: expected XYZ response",
-            ));
-        }
-    };
+    // State 2: Receive challenge (FIX-framed)
+    let recv2 = recv_8eq1(stream)?;
+    let xyz2 = extract_xyz(&recv2);
+    let (_, _, state2, fields2) = xyz::xyz_parse_response(xyz2)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SOFT_TOKEN: invalid XYZ state 2"))?;
 
     if state2 != 2 {
         return Err(io::Error::new(
@@ -398,21 +448,15 @@ pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Res
     let response_int = BigUint::from_bytes_be(&digest);
     let response_hex = format!("{:x}", response_int);
 
-    // State 3: Send hash response (in y field)
+    // State 3: Send hash response (FIX-framed)
     let msg3 = xyz::xyz_build_soft_token(3, "", &response_hex, "");
-    stream.write_all(&xyz::xyz_wrap(&msg3))?;
+    stream.write_all(&wrap_xyz_fix(&msg3))?;
 
-    // State 4: Receive result
-    let recv4 = recv_msg(stream)?;
-    let fields4 = match recv4 {
-        RecvMsg::Xyz { fields, .. } => fields,
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "SOFT_TOKEN: expected XYZ response for state 4",
-            ));
-        }
-    };
+    // State 4: Receive result (FIX-framed)
+    let recv4 = recv_8eq1(stream)?;
+    let xyz4 = extract_xyz(&recv4);
+    let (_, _, _, fields4) = xyz::xyz_parse_response(xyz4)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SOFT_TOKEN: invalid XYZ state 4"))?;
 
     let result = fields4
         .get(3)
@@ -435,6 +479,8 @@ pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Res
 mod tests {
     use super::*;
 
+    // ── get_session_id ──────────────────────────────────────────────────
+
     #[test]
     fn session_id_format() {
         let id = get_session_id();
@@ -447,11 +493,194 @@ mod tests {
     }
 
     #[test]
+    fn session_id_two_calls_differ() {
+        // Time-based: successive calls should produce different IDs
+        // (sleep 1ms to guarantee millisecond tick)
+        let id1 = get_session_id();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let id2 = get_session_id();
+        assert_ne!(id1, id2, "Two session IDs generated at different times must differ");
+    }
+
+    #[test]
+    fn session_id_hex_lengths() {
+        let id = get_session_id();
+        let parts: Vec<&str> = id.split('.').collect();
+        // Seconds part: lowercase hex, at least 1 char
+        assert!(!parts[0].is_empty());
+        // Millis part: always 4 hex chars (format {:04x}, range 0..999)
+        assert_eq!(parts[1].len(), 4, "Millis part must be zero-padded to 4 hex chars");
+    }
+
+    // ── get_hw_info ─────────────────────────────────────────────────────
+
+    #[test]
     fn hw_info_format() {
         let info = get_hw_info();
         assert!(info.contains('|'));
         let parts: Vec<&str> = info.split('|').collect();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].len(), 8); // 4-byte hex
+    }
+
+    #[test]
+    fn hw_info_two_calls_differ() {
+        let info1 = get_hw_info();
+        let info2 = get_hw_info();
+        let machine1 = info1.split('|').next().unwrap();
+        let machine2 = info2.split('|').next().unwrap();
+        // Random machine IDs should differ (8-hex-char random, collision negligible)
+        assert_ne!(machine1, machine2, "Two random machine IDs should differ");
+    }
+
+    #[test]
+    fn hw_info_mac_always_zeroed() {
+        for _ in 0..5 {
+            let info = get_hw_info();
+            let mac = info.split('|').nth(1).unwrap();
+            assert_eq!(mac, "00:00:00:00:00:00");
+        }
+    }
+
+    // ── extract_srp_data ────────────────────────────────────────────────
+
+    #[test]
+    fn extract_srp_data_empty_fields() {
+        let fields: Vec<String> = vec![];
+        let result = extract_srp_data(&fields, "user");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_srp_data_only_username() {
+        let fields = vec!["user".to_string()];
+        let result = extract_srp_data(&fields, "user");
+        assert!(result.is_empty(), "Username should be filtered out");
+    }
+
+    #[test]
+    fn extract_srp_data_username_and_empties() {
+        let fields = vec![
+            "".to_string(),
+            "user".to_string(),
+            "".to_string(),
+        ];
+        let result = extract_srp_data(&fields, "user");
+        assert!(result.is_empty(), "Empty strings and username should all be filtered");
+    }
+
+    #[test]
+    fn extract_srp_data_returns_non_empty_non_username() {
+        let fields = vec![
+            "".to_string(),
+            "user".to_string(),
+            "abc123".to_string(),
+            "".to_string(),
+            "def456".to_string(),
+        ];
+        let result = extract_srp_data(&fields, "user");
+        assert_eq!(result, vec!["abc123", "def456"]);
+    }
+
+    // ── RecvMsg enum ────────────────────────────────────────────────────
+
+    #[test]
+    fn recv_msg_ns_variant() {
+        let msg = RecvMsg::Ns {
+            version: 534,
+            msg_type: 99,
+            fields: vec!["a".into(), "b".into()],
+        };
+        match msg {
+            RecvMsg::Ns { version, msg_type, fields } => {
+                assert_eq!(version, 534);
+                assert_eq!(msg_type, 99);
+                assert_eq!(fields.len(), 2);
+            }
+            _ => panic!("Expected Ns variant"),
+        }
+    }
+
+    #[test]
+    fn recv_msg_xyz_variant() {
+        let msg = RecvMsg::Xyz {
+            msg_id: 777,
+            sub_id: 1,
+            state: 6,
+            fields: vec!["PASSED".into()],
+        };
+        match msg {
+            RecvMsg::Xyz { msg_id, sub_id, state, fields } => {
+                assert_eq!(msg_id, 777);
+                assert_eq!(sub_id, 1);
+                assert_eq!(state, 6);
+                assert_eq!(fields, vec!["PASSED"]);
+            }
+            _ => panic!("Expected Xyz variant"),
+        }
+    }
+
+    // ── AuthResult struct ───────────────────────────────────────────────
+
+    #[test]
+    fn auth_result_default_like_init() {
+        let ar = AuthResult {
+            session_token: BigUint::ZERO,
+            token_type: String::new(),
+            session_id: String::new(),
+            features: Vec::new(),
+            authenticated: false,
+        };
+        assert_eq!(ar.session_token, BigUint::ZERO);
+        assert!(ar.token_type.is_empty());
+        assert!(ar.session_id.is_empty());
+        assert!(ar.features.is_empty());
+        assert!(!ar.authenticated);
+    }
+
+    #[test]
+    fn auth_result_all_fields_accessible() {
+        let ar = AuthResult {
+            session_token: BigUint::from(42u32),
+            token_type: "SRP".to_string(),
+            session_id: "abc.0001".to_string(),
+            features: vec!["feat1".into(), "feat2".into()],
+            authenticated: true,
+        };
+        assert_eq!(ar.session_token, BigUint::from(42u32));
+        assert_eq!(ar.token_type, "SRP");
+        assert_eq!(ar.session_id, "abc.0001");
+        assert_eq!(ar.features.len(), 2);
+        assert!(ar.authenticated);
+    }
+
+    // ── Constants ───────────────────────────────────────────────────────
+
+    #[test]
+    fn flag_ok_to_redirect_value() {
+        assert_eq!(FLAG_OK_TO_REDIRECT, 1);
+    }
+
+    #[test]
+    fn flag_paper_connect_value() {
+        assert_eq!(FLAG_PAPER_CONNECT, 8192);
+    }
+
+    #[test]
+    fn flag_soft_token_value() {
+        assert_eq!(FLAG_SOFT_TOKEN, 16);
+    }
+
+    #[test]
+    fn flags_can_be_ored() {
+        let combined = FLAG_OK_TO_REDIRECT | FLAG_PAPER_CONNECT | FLAG_SOFT_TOKEN;
+        assert_eq!(combined, 1 | 8192 | 16);
+        assert_eq!(combined, 8209);
+        // Each flag bit is independent
+        assert_ne!(combined & FLAG_OK_TO_REDIRECT, 0);
+        assert_ne!(combined & FLAG_PAPER_CONNECT, 0);
+        assert_ne!(combined & FLAG_SOFT_TOKEN, 0);
+        // A flag we did NOT set should be absent
+        assert_eq!(combined & FLAG_IS_FARM, 0);
     }
 }
