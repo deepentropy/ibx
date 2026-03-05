@@ -1465,10 +1465,6 @@ mod tests {
         engine.context_mut().market.register(265598); // instrument 0
 
         // UP message with position = 100
-        let msg = fix::fix_build(&[
-            (35, "UP"), (6008, "265598"), (6064, "100"), (6065, "150.25"),
-        ], 1);
-        // Wrap as 8=O format for fix_parse compatibility
         let o_msg = format!("8=O\x019=999\x0135=UP\x016008=265598\x016064=100\x016065=150.25\x01");
         engine.inject_ccp_message(o_msg.as_bytes());
 

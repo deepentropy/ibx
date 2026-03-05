@@ -745,8 +745,6 @@ mod tests {
 
     #[test]
     fn build_farm_logon_has_required_tags() {
-        use crate::auth::dh::SecureChannel;
-        // We can't fully test without real DH, but verify inner structure
         let token = BigUint::from(999u64);
         let hash = token_short_hash(&token);
         assert!(!hash.is_empty());
