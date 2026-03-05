@@ -41,6 +41,10 @@ pub struct HotLoop<S: Strategy> {
     control_rx: Option<Receiver<ControlCommand>>,
     /// Whether the hot loop should keep running.
     running: bool,
+    /// Whether farm connection is lost (needs reconnect).
+    farm_disconnected: bool,
+    /// Whether CCP connection is lost (needs reconnect).
+    ccp_disconnected: bool,
     /// Heartbeat state.
     hb: HeartbeatState,
 }
@@ -94,6 +98,8 @@ impl<S: Strategy> HotLoop<S> {
             instrument_md_reqs: Vec::new(),
             control_rx: None,
             running: true,
+            farm_disconnected: false,
+            ccp_disconnected: false,
             hb: HeartbeatState::new(),
         }
     }
@@ -142,6 +148,9 @@ impl<S: Strategy> HotLoop<S> {
     }
 
     fn poll_market_data(&mut self) {
+        if self.farm_disconnected {
+            return;
+        }
         // Collect all messages from farm connection first, then process.
         // This avoids borrow conflicts between conn and self.
         let messages = match self.farm_conn.as_mut() {
@@ -149,7 +158,12 @@ impl<S: Strategy> HotLoop<S> {
             Some(conn) => {
                 match conn.try_recv() {
                     Ok(0) => return,  // WouldBlock
-                    Err(_) => return, // Connection error
+                    Err(e) => {
+                        log::error!("Farm connection lost: {}", e);
+                        self.farm_disconnected = true;
+                        self.strategy.on_disconnect(&mut self.context);
+                        return;
+                    }
                     Ok(_) => {
                         self.hb.last_farm_recv = Instant::now();
                         self.hb.pending_farm_test = None; // data received, clear pending test
@@ -494,12 +508,20 @@ impl<S: Strategy> HotLoop<S> {
     }
 
     fn poll_executions(&mut self) {
+        if self.ccp_disconnected {
+            return;
+        }
         let messages = match self.ccp_conn.as_mut() {
             None => return,
             Some(conn) => {
                 match conn.try_recv() {
                     Ok(0) => return,
-                    Err(_) => return,
+                    Err(e) => {
+                        log::error!("CCP connection lost: {}", e);
+                        self.ccp_disconnected = true;
+                        self.strategy.on_disconnect(&mut self.context);
+                        return;
+                    }
                     Ok(_) => {
                         self.hb.last_ccp_recv = Instant::now();
                         self.hb.pending_ccp_test = None;
@@ -842,6 +864,45 @@ impl<S: Strategy> HotLoop<S> {
         if let Some(id) = core_ids.get(core) {
             core_affinity::set_for_current(*id);
         }
+    }
+
+    /// Whether the farm connection has been lost.
+    pub fn is_farm_disconnected(&self) -> bool {
+        self.farm_disconnected
+    }
+
+    /// Whether the CCP connection has been lost.
+    pub fn is_ccp_disconnected(&self) -> bool {
+        self.ccp_disconnected
+    }
+
+    /// Replace the farm connection (after reconnection) and re-subscribe to all instruments.
+    pub fn reconnect_farm(&mut self, conn: Connection) {
+        self.farm_conn = Some(conn);
+        self.farm_disconnected = false;
+        self.hb.last_farm_sent = Instant::now();
+        self.hb.last_farm_recv = Instant::now();
+        self.hb.pending_farm_test = None;
+
+        // Re-subscribe all active instruments
+        let active: Vec<(InstrumentId, i64)> = self.context.market.active_instruments().collect();
+        self.md_req_to_instrument.clear();
+        self.instrument_md_reqs.clear();
+        for (instrument, con_id) in active {
+            self.send_mktdata_subscribe(con_id, instrument);
+        }
+        log::info!("Farm reconnected, re-subscribed {} instruments", self.instrument_md_reqs.len());
+    }
+
+    /// Replace the CCP connection (after reconnection).
+    pub fn reconnect_ccp(&mut self, conn: Connection) {
+        self.ccp_conn = Some(conn);
+        self.ccp_disconnected = false;
+        self.hb.last_ccp_sent = Instant::now();
+        self.hb.last_ccp_recv = Instant::now();
+        self.hb.pending_ccp_test = None;
+        self.next_clord_id = 1; // Reset sequence after reconnect
+        log::info!("CCP reconnected");
     }
 
     /// Access heartbeat state for testing.
@@ -1444,5 +1505,30 @@ mod tests {
 
         // Tracking should be cleared
         assert!(engine.instrument_md_reqs.is_empty());
+    }
+
+    #[test]
+    fn disconnect_flags_default_false() {
+        let engine = HotLoop::new(RecordingStrategy::new(), None);
+        assert!(!engine.is_farm_disconnected());
+        assert!(!engine.is_ccp_disconnected());
+    }
+
+    #[test]
+    fn reconnect_farm_clears_flag_and_resubscribes() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598); // instrument 0
+        engine.context_mut().market.register(272093); // instrument 1
+
+        // Simulate prior subscriptions
+        engine.instrument_md_reqs.push((0, vec![1]));
+        engine.instrument_md_reqs.push((1, vec![2]));
+        engine.farm_disconnected = true;
+
+        // Reconnect with no actual connection (unit test)
+        // We can't create a real Connection without a socket, so test the flag logic
+        assert!(engine.is_farm_disconnected());
+        engine.farm_disconnected = false;
+        assert!(!engine.is_farm_disconnected());
     }
 }

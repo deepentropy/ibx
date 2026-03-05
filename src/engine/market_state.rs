@@ -50,6 +50,11 @@ impl MarketState {
         self.server_tag_to_instrument.push((server_tag, instrument));
     }
 
+    /// Iterate over all registered (InstrumentId, con_id) pairs.
+    pub fn active_instruments(&self) -> impl Iterator<Item = (InstrumentId, i64)> + '_ {
+        self.con_id_to_instrument.iter().map(|&(con_id, iid)| (iid, con_id))
+    }
+
     /// Look up InstrumentId by con_id. Returns None if not registered.
     pub fn instrument_by_con_id(&self, con_id: i64) -> Option<InstrumentId> {
         for &(cid, iid) in &self.con_id_to_instrument {
