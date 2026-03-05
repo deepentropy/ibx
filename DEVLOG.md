@@ -28,13 +28,22 @@ Compared Rust order FIX messages with Python reference implementation, found mul
 7. **Dead test cleanup**: Removed `parse_routing_table` tests (function was deleted), fixed `handle_subscription_ack`/`handle_ticker_setup` tests to use raw bytes
 
 ### Current State
-- Orders work: confirmed fill at $678.63 on ARCA (SPY market buy, 4:17 PM ET)
-- After-hours orders rejected with 150=8,39=8 (DAY TIF not valid after 4PM ET)
-- Integration tests for orders added: `test_market_order_round_trip` and `test_limit_order_submit_and_cancel`
-- Both order tests gracefully handle after-hours rejection (SKIP instead of FAIL)
-- Fixed `test_ccp_auth_and_farm_logon`: relaxed ccp_token assertion (tag 6386 optional), increased timeout to 60s
+- **Market order round-trip confirmed during market hours (3:50 PM EST):**
+  - BUY 1 SPY filled at $681.01 (RTT 1627ms)
+  - SELL 1 SPY filled at $681.10 (RTT 599ms)
+  - Mean RTT: 1113ms, Slippage: $0.09
+- **Limit order round-trip confirmed (post-market):**
+  - Submit→Ack: 114.8ms, Cancel→Conf: 125.7ms, Total: 240.5ms
+- **Benchmark vs Official IB Gateway (C++ TWS API):**
+  - Limit submit→ack: 114.8ms vs 632.9ms (**5.5x faster**)
+  - Limit total: 240.5ms vs 781.1ms (**3.2x faster**)
+  - Tick P50: 14.2us vs 8.9us (1.6x slower — expected, we do full protocol stack)
+  - Full results: `.tmp/benchmark-results.md`
+- DAY orders expire with 39=C at market close — handled as Cancelled
+- Cancel response ClOrdID has "C" prefix (e.g. "C1772746902000") — stripped before lookup
+- Unified order IDs: Context generates epoch-based IDs used directly as FIX ClOrdIDs
 - 455 tests passing (418 unit + 14 control + 21 protocol + 2 lifecycle + 7 ignored integration)
-- Need to run order tests during market hours (9:30-16:00 ET) for full RTT benchmark
+- TODO: Investigate tick decoder bid/ask display (shows $2042 for SPY instead of ~$681)
 
 ### Key Decisions
 - CCP init sequence is mandatory for orders — without it, server accepts heartbeats but rejects orders

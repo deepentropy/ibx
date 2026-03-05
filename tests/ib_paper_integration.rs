@@ -591,8 +591,12 @@ struct LimitOrderStrategy {
     cancel_sent: Arc<AtomicBool>,
     order_cancelled: Arc<AtomicBool>,
     order_rejected: Arc<AtomicBool>,
+    submit_ack_us: Arc<AtomicU64>,
+    cancel_conf_us: Arc<AtomicU64>,
     tick_count: u32,
     order_id: Option<OrderId>,
+    submit_time: Option<Instant>,
+    cancel_time: Option<Instant>,
     start: Instant,
 }
 
@@ -602,6 +606,8 @@ struct LimitOrderHandle {
     cancel_sent: Arc<AtomicBool>,
     order_cancelled: Arc<AtomicBool>,
     order_rejected: Arc<AtomicBool>,
+    submit_ack_us: Arc<AtomicU64>,
+    cancel_conf_us: Arc<AtomicU64>,
 }
 
 impl LimitOrderStrategy {
@@ -611,16 +617,22 @@ impl LimitOrderStrategy {
         let cancel_sent = Arc::new(AtomicBool::new(false));
         let order_cancelled = Arc::new(AtomicBool::new(false));
         let order_rejected = Arc::new(AtomicBool::new(false));
+        let submit_ack_us = Arc::new(AtomicU64::new(0));
+        let cancel_conf_us = Arc::new(AtomicU64::new(0));
         let handle = LimitOrderHandle {
             submitted: submitted.clone(),
             order_acked: order_acked.clone(),
             cancel_sent: cancel_sent.clone(),
             order_cancelled: order_cancelled.clone(),
             order_rejected: order_rejected.clone(),
+            submit_ack_us: submit_ack_us.clone(),
+            cancel_conf_us: cancel_conf_us.clone(),
         };
         (Self {
             submitted, order_acked, cancel_sent, order_cancelled, order_rejected,
-            tick_count: 0, order_id: None, start: Instant::now(),
+            submit_ack_us, cancel_conf_us,
+            tick_count: 0, order_id: None, submit_time: None, cancel_time: None,
+            start: Instant::now(),
         }, handle)
     }
 }
@@ -638,6 +650,7 @@ impl Strategy for LimitOrderStrategy {
             let limit_price = 1_00_000_000i64; // $1.00 in PRICE_SCALE
             let id = ctx.submit_limit(instrument, Side::Buy, 1, limit_price);
             self.order_id = Some(id);
+            self.submit_time = Some(Instant::now());
             self.submitted.store(true, Ordering::Relaxed);
             println!("[{:.3}s] Submitted LMT BUY at ${:.2}",
                 self.start.elapsed().as_secs_f64(),
@@ -648,6 +661,7 @@ impl Strategy for LimitOrderStrategy {
         if self.order_acked.load(Ordering::Relaxed) && !self.cancel_sent.load(Ordering::Relaxed) {
             if let Some(id) = self.order_id {
                 ctx.cancel(id);
+                self.cancel_time = Some(Instant::now());
                 self.cancel_sent.store(true, Ordering::Relaxed);
                 println!("[{:.3}s] Cancel sent for order {}",
                     self.start.elapsed().as_secs_f64(), id);
@@ -660,9 +674,19 @@ impl Strategy for LimitOrderStrategy {
             self.start.elapsed().as_secs_f64(), update.order_id, update.status);
         match update.status {
             OrderStatus::Submitted => {
+                if !self.order_acked.load(Ordering::Relaxed) {
+                    let rtt = self.submit_time.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                    self.submit_ack_us.store(rtt, Ordering::Relaxed);
+                    println!("[{:.3}s] Submit→Ack RTT: {:.3}ms",
+                        self.start.elapsed().as_secs_f64(), rtt as f64 / 1000.0);
+                }
                 self.order_acked.store(true, Ordering::Relaxed);
             }
             OrderStatus::Cancelled => {
+                let rtt = self.cancel_time.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+                self.cancel_conf_us.store(rtt, Ordering::Relaxed);
+                println!("[{:.3}s] Cancel→Conf RTT: {:.3}ms",
+                    self.start.elapsed().as_secs_f64(), rtt as f64 / 1000.0);
                 self.order_cancelled.store(true, Ordering::Relaxed);
             }
             OrderStatus::Rejected => {
@@ -730,5 +754,12 @@ fn test_limit_order_submit_and_cancel() {
     assert!(handle.order_acked.load(Ordering::Relaxed), "Order was never acknowledged by server");
     assert!(handle.cancel_sent.load(Ordering::Relaxed), "Cancel was never sent");
     assert!(handle.order_cancelled.load(Ordering::Relaxed), "Order was never cancelled");
+
+    let ack_us = handle.submit_ack_us.load(Ordering::Relaxed);
+    let cancel_us = handle.cancel_conf_us.load(Ordering::Relaxed);
+    println!("\n=== Limit Order Round-Trip Results ===");
+    println!("  Submit→Ack:   {:.3}ms", ack_us as f64 / 1000.0);
+    println!("  Cancel→Conf:  {:.3}ms", cancel_us as f64 / 1000.0);
+    println!("  Total:        {:.3}ms", (ack_us + cancel_us) as f64 / 1000.0);
     println!("PASS: Limit order submit + cancel round-trip");
 }
