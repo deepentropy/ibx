@@ -296,11 +296,138 @@ impl<S: Strategy> HotLoop<S> {
     }
 
     fn poll_executions(&mut self) {
-        // TODO: Non-blocking recv from CCP socket
-        // When execution report arrives:
-        //   1. Decode FIX message
-        //   2. Update self.context positions/orders
-        //   3. Call self.strategy.on_fill() or on_order_update()
+        let messages = match self.ccp_conn.as_mut() {
+            None => return,
+            Some(conn) => {
+                match conn.try_recv() {
+                    Ok(0) => return,
+                    Err(_) => return,
+                    Ok(_) => {}
+                }
+                let frames = conn.extract_frames();
+                let mut msgs = Vec::new();
+                for frame in frames {
+                    match frame {
+                        Frame::FixComp(raw) => {
+                            let (unsigned, _) = conn.unsign(&raw);
+                            msgs.extend(fixcomp::fixcomp_decompress(&unsigned));
+                        }
+                        Frame::Fix(raw) => {
+                            let (unsigned, _) = conn.unsign(&raw);
+                            msgs.push(unsigned);
+                        }
+                        Frame::Binary(raw) => {
+                            let (unsigned, _) = conn.unsign(&raw);
+                            msgs.push(unsigned);
+                        }
+                    }
+                }
+                msgs
+            }
+        };
+
+        for msg in &messages {
+            self.process_ccp_message(msg);
+        }
+    }
+
+    fn process_ccp_message(&mut self, msg: &[u8]) {
+        let parsed = fix::fix_parse(msg);
+        let msg_type = match parsed.get(&fix::TAG_MSG_TYPE) {
+            Some(t) => t.as_str(),
+            None => return,
+        };
+
+        match msg_type {
+            fix::MSG_EXEC_REPORT => self.handle_exec_report(&parsed),
+            fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed),
+            fix::MSG_HEARTBEAT => {}  // no-op
+            fix::MSG_TEST_REQUEST => {} // TODO: respond with heartbeat
+            _ => {}
+        }
+    }
+
+    /// Handle FIX 35=8 ExecutionReport from CCP.
+    fn handle_exec_report(&mut self, parsed: &std::collections::HashMap<u32, String>) {
+        let ord_status = parsed.get(&39).map(|s| s.as_str()).unwrap_or("");
+        let exec_type = parsed.get(&150).map(|s| s.as_str()).unwrap_or("");
+        let last_px = parsed.get(&31).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let last_shares = parsed.get(&32).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let leaves_qty = parsed.get(&151).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let clord_id = parsed.get(&11).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+
+        // Map FIX OrdStatus (tag 39) to our OrderStatus
+        let status = match ord_status {
+            "0" | "A" | "E" => crate::types::OrderStatus::Submitted,
+            "1" => crate::types::OrderStatus::PartiallyFilled,
+            "2" => crate::types::OrderStatus::Filled,
+            "4" | "6" => crate::types::OrderStatus::Cancelled,
+            "8" => crate::types::OrderStatus::Rejected,
+            _ => return,
+        };
+
+        // Update order status
+        self.context.update_order_status(clord_id, status);
+
+        // On fill (exec_type: F=Fill, 1=Partial, 2=Filled)
+        if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
+            // Look up the order to get instrument and side
+            if let Some(order) = self.context.order(clord_id).copied() {
+                let fill = crate::types::Fill {
+                    instrument: order.instrument,
+                    order_id: clord_id,
+                    side: order.side,
+                    price: (last_px * PRICE_SCALE as f64) as i64,
+                    qty: last_shares,
+                    remaining: leaves_qty,
+                    timestamp_ns: self.context.now_ns(),
+                };
+
+                let delta = match order.side {
+                    Side::Buy => last_shares,
+                    Side::Sell => -last_shares,
+                };
+                self.context.update_position(order.instrument, delta);
+                self.strategy.on_fill(&fill, &mut self.context);
+            }
+        }
+
+        // On terminal status, notify strategy
+        if matches!(status,
+            crate::types::OrderStatus::Filled |
+            crate::types::OrderStatus::Cancelled |
+            crate::types::OrderStatus::Rejected
+        ) {
+            if let Some(order) = self.context.order(clord_id).copied() {
+                let update = crate::types::OrderUpdate {
+                    order_id: clord_id,
+                    instrument: order.instrument,
+                    status,
+                    filled_qty: order.filled as i64,
+                    remaining_qty: leaves_qty,
+                    timestamp_ns: self.context.now_ns(),
+                };
+                self.strategy.on_order_update(&update, &mut self.context);
+            }
+            // Remove fully terminal orders
+            if matches!(status,
+                crate::types::OrderStatus::Filled |
+                crate::types::OrderStatus::Cancelled |
+                crate::types::OrderStatus::Rejected
+            ) {
+                self.context.remove_order(clord_id);
+            }
+        }
+    }
+
+    fn handle_cancel_reject(&mut self, parsed: &std::collections::HashMap<u32, String>) {
+        // Cancel was rejected — order remains active, no state change
+        let orig_clord = parsed.get(&41).and_then(|s| s.parse::<u64>().ok());
+        let _reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("Cancel rejected");
+        if let Some(oid) = orig_clord {
+            // Ensure order stays in Submitted state
+            self.context.update_order_status(oid, crate::types::OrderStatus::Submitted);
+        }
     }
 
     fn poll_control_commands(&mut self) {
@@ -356,6 +483,11 @@ impl<S: Strategy> HotLoop<S> {
     /// Inject a raw farm message for testing. Processes it through the full decode pipeline.
     pub fn inject_farm_message(&mut self, msg: &[u8]) {
         self.process_farm_message(msg);
+    }
+
+    /// Inject a raw CCP message for testing. Processes execution reports, etc.
+    pub fn inject_ccp_message(&mut self, msg: &[u8]) {
+        self.process_ccp_message(msg);
     }
 
     /// Inject a simulated tick for testing. Calls on_tick with the given instrument.
@@ -579,6 +711,110 @@ mod tests {
 
         // No strategy notification (unknown server_tag)
         assert!(engine.strategy.ticks.is_empty());
+    }
+
+    #[test]
+    fn exec_report_fill_updates_position_and_notifies() {
+        let strategy = RecordingStrategy::new();
+        let mut engine = HotLoop::new(strategy, None);
+        engine.context_mut().market.register(265598);
+
+        // Insert an open order so the exec report can find it
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 1,
+            instrument: 0,
+            side: Side::Buy,
+            price: 150 * PRICE_SCALE,
+            qty: 100,
+            filled: 0,
+            status: crate::types::OrderStatus::Submitted,
+        });
+
+        // Build FIX 35=8 execution report (filled)
+        let exec_msg = fix::fix_build(&[
+            (35, "8"),      // ExecReport
+            (11, "1"),      // ClOrdID
+            (39, "2"),      // OrdStatus = Filled
+            (150, "F"),     // ExecType = Fill
+            (31, "150.0"),  // LastPx
+            (32, "100"),    // LastShares
+            (151, "0"),     // LeavesQty
+        ], 1);
+
+        engine.inject_ccp_message(&exec_msg);
+
+        // Position should be updated (+100 for buy)
+        assert_eq!(engine.context_mut().position(0), 100);
+        // Strategy should have received the fill
+        assert_eq!(engine.strategy.fills, vec![1]);
+        // Order should be removed (terminal state)
+        assert!(engine.context_mut().order(1).is_none());
+    }
+
+    #[test]
+    fn exec_report_partial_fill() {
+        let strategy = RecordingStrategy::new();
+        let mut engine = HotLoop::new(strategy, None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 2,
+            instrument: 0,
+            side: Side::Sell,
+            price: 200 * PRICE_SCALE,
+            qty: 100,
+            filled: 0,
+            status: crate::types::OrderStatus::Submitted,
+        });
+
+        let exec_msg = fix::fix_build(&[
+            (35, "8"),
+            (11, "2"),
+            (39, "1"),      // OrdStatus = Partially Filled
+            (150, "1"),     // ExecType = Partial
+            (31, "200.5"),
+            (32, "30"),     // 30 shares filled
+            (151, "70"),    // 70 remaining
+        ], 1);
+
+        engine.inject_ccp_message(&exec_msg);
+
+        // Position should be -30 (sell)
+        assert_eq!(engine.context_mut().position(0), -30);
+        // Order should still exist (not terminal)
+        assert!(engine.context_mut().order(2).is_some());
+    }
+
+    #[test]
+    fn exec_report_rejected() {
+        let strategy = RecordingStrategy::new();
+        let mut engine = HotLoop::new(strategy, None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 3,
+            instrument: 0,
+            side: Side::Buy,
+            price: 100 * PRICE_SCALE,
+            qty: 50,
+            filled: 0,
+            status: crate::types::OrderStatus::Submitted,
+        });
+
+        let exec_msg = fix::fix_build(&[
+            (35, "8"),
+            (11, "3"),
+            (39, "8"),      // OrdStatus = Rejected
+            (150, "8"),
+            (58, "Insufficient margin"),
+        ], 1);
+
+        engine.inject_ccp_message(&exec_msg);
+
+        // No position change (rejected, no fill)
+        assert_eq!(engine.context_mut().position(0), 0);
+        // Order should be removed (terminal)
+        assert!(engine.context_mut().order(3).is_none());
     }
 
     #[test]
