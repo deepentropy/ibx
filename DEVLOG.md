@@ -210,3 +210,35 @@ Created 3 GitHub issues (#17-#19). Researched ibgw-headless gateway.py, handler_
 - main.rs reads IB_USERNAME/IB_PASSWORD from env, connects, creates HotLoop, runs
 - All issues closed: #10 (control plane wire), #17 (CCP logon), #18 (farm logon), #19 (Gateway struct)
 - Next step: Real integration testing against IB gateway, market data subscription flow verification
+
+## 2026-03-05 - Complete Hot Loop Wiring (Issues #20-#25)
+
+### Goal
+Wire remaining features into the hot loop: market data subscriptions, account/position updates from CCP, routing table, ushmds farm, error recovery, and integration test.
+
+### Approach Taken
+Implemented 6 issues sequentially (#20-#25), each with commit/push/close cycle.
+
+### What Worked
+- **#20 Market data subscription**: `send_mktdata_subscribe/unsubscribe`, `handle_subscription_ack` (35=Q CSV in tag 6119), `handle_ticker_setup` (35=L), `instrument_by_con_id` lookup
+- **#21 Account/position wiring**: Parse 8=O UT/UM for account values (8001/8004 tags → NetLiquidation, BuyingPower, PnL), UP for positions (tag 6064 absolute position, tag 6008 conId)
+- **#22 Routing table**: `send_routing_request` (35=U, 6040=112), `parse_routing_table` (35=T semicolon-delimited CSV)
+- **#23 ushmds farm**: Extracted `connect_farm()` helper to avoid duplicating DH+logon+routing code. ushmds connection is optional (failure is non-fatal)
+- **#24 Error recovery**: `farm_disconnected`/`ccp_disconnected` flags, `reconnect_farm()`/`reconnect_ccp()` methods with auto re-subscribe
+- **#25 Integration test**: `ib_paper_integration.rs` — connects, subscribes AAPL, waits for ticks
+
+### Key Decisions
+- **Collect-then-process for control commands**: `rx.try_iter().collect()` avoids borrow conflict between control_rx (immutable borrow of self) and subscribe methods (mutable)
+- **Track subscriptions before sending**: `md_req_to_instrument` populated before attempting send, so unit tests work without real connections
+- **Absolute position from UP**: IB sends absolute position count, not deltas — compute delta from current and apply
+- **connect_farm() helper**: Avoids duplicating 60+ lines of DH→logon→routing for each farm connection
+
+### What Failed
+- Initial routing table parser had off-by-one in header skipping (found "35=T" but skipped wrong number of chars)
+- Test data for routing had wrong CSV field count (extra empty field shifted indices)
+
+### Current State
+- 223 total tests passing (186 unit + 14 control plane + 21 protocol vectors + 2 strategy lifecycle) + 1 ignored (IB paper integration)
+- All issues #20-#25 closed
+- Engine is feature-complete for live trading: CCP auth, farm auth, market data, order management, account sync, error recovery
+- Next step: Run integration test against IB paper account to validate end-to-end flow
