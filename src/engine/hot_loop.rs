@@ -5,6 +5,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
+use crate::gateway;
 use crate::types::{ControlCommand, InstrumentId, OrderRequest, Price, Side, PRICE_SCALE};
 use crossbeam_channel::Receiver;
 
@@ -28,6 +29,12 @@ pub struct HotLoop<S: Strategy> {
     pub ccp_conn: Option<Connection>,
     /// Next client order ID for FIX tag 11.
     next_clord_id: u64,
+    /// Next market data request ID for FIX tag 262.
+    next_md_req_id: u32,
+    /// Pending subscriptions: MDReqID → InstrumentId (awaiting 35=Q ack).
+    md_req_to_instrument: Vec<(u32, InstrumentId)>,
+    /// Active subscriptions: InstrumentId → MDReqIDs (for unsubscribe).
+    instrument_md_reqs: Vec<(InstrumentId, Vec<u32>)>,
     /// SPSC channel receiver for control plane commands.
     control_rx: Option<Receiver<ControlCommand>>,
     /// Whether the hot loop should keep running.
@@ -79,6 +86,9 @@ impl<S: Strategy> HotLoop<S> {
             farm_conn: None,
             ccp_conn: None,
             next_clord_id: 1,
+            next_md_req_id: 1,
+            md_req_to_instrument: Vec::new(),
+            instrument_md_reqs: Vec::new(),
             control_rx: None,
             running: true,
             hb: HeartbeatState::new(),
@@ -191,7 +201,8 @@ impl<S: Strategy> HotLoop<S> {
                     self.hb.last_farm_sent = Instant::now();
                 }
             }
-            _ => {}   // other farm messages (35=L, 35=G, etc.)
+            "L" => self.handle_ticker_setup(&parsed),
+            _ => {}   // other farm messages (35=G, etc.)
         }
     }
 
@@ -267,13 +278,124 @@ impl<S: Strategy> HotLoop<S> {
     }
 
     /// Handle 35=Q subscription acknowledgement: map server_tag → instrument.
+    /// Body format (ibgw-headless handler_mktdata.py): CSV fields in tag 6119.
+    /// Fields: serverTag,reqId,minTick,...
     fn handle_subscription_ack(&mut self, parsed: &std::collections::HashMap<u32, String>) {
-        // 35=Q body is CSV: serverTag,reqId,minTick,...
-        // The body text is typically in a custom tag or the raw content
-        // For now, we look for tag 262 (MDReqID) and tag 6040 fields
-        // The actual parsing depends on the 8=O binary format
-        // This will be refined when testing against real data
-        let _ = parsed;
+        // Tag 6119 contains the CSV body
+        let body = match parsed.get(&6119) {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Parse CSV: serverTag,reqId,minTick,...
+        let parts: Vec<&str> = body.split(',').collect();
+        if parts.len() < 3 {
+            return;
+        }
+        let server_tag: u32 = match parts[0].parse() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let req_id: u32 = match parts[1].parse() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let min_tick: f64 = parts[2].parse().unwrap_or(0.01);
+
+        // Look up InstrumentId from pending subscription
+        let instrument = match self.md_req_to_instrument.iter()
+            .position(|(id, _)| *id == req_id)
+        {
+            Some(idx) => {
+                let (_, instr) = self.md_req_to_instrument.remove(idx);
+                instr
+            }
+            None => return,
+        };
+
+        self.context.market.register_server_tag(server_tag, instrument);
+        self.context.market.set_min_tick(instrument, min_tick);
+        log::info!("Subscribed instrument {} → server_tag {}, minTick {}", instrument, server_tag, min_tick);
+    }
+
+    /// Handle 35=L ticker setup: CSV body in tag 6119: conId,minTick,serverTag,,1
+    fn handle_ticker_setup(&mut self, parsed: &std::collections::HashMap<u32, String>) {
+        let body = match parsed.get(&6119) {
+            Some(b) => b,
+            None => return,
+        };
+
+        let parts: Vec<&str> = body.split(',').collect();
+        if parts.len() < 3 {
+            return;
+        }
+        let con_id: i64 = match parts[0].parse() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let min_tick: f64 = parts[1].parse().unwrap_or(0.01);
+        let server_tag: u32 = match parts[2].parse() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        // Find the instrument by con_id
+        if let Some(instrument) = self.context.market.instrument_by_con_id(con_id) {
+            self.context.market.register_server_tag(server_tag, instrument);
+            self.context.market.set_min_tick(instrument, min_tick);
+            log::info!("Ticker setup: con_id {} → server_tag {}, minTick {}", con_id, server_tag, min_tick);
+        }
+    }
+
+    /// Send FIX 35=V market data subscribe for an instrument.
+    fn send_mktdata_subscribe(&mut self, con_id: i64, instrument: InstrumentId) {
+        let req_id = self.next_md_req_id;
+        self.next_md_req_id += 1;
+
+        // Track pending subscription
+        self.md_req_to_instrument.push((req_id, instrument));
+
+        // Track active subscription for this instrument
+        match self.instrument_md_reqs.iter_mut().find(|(id, _)| *id == instrument) {
+            Some((_, reqs)) => reqs.push(req_id),
+            None => self.instrument_md_reqs.push((instrument, vec![req_id])),
+        }
+
+        if let Some(conn) = self.farm_conn.as_mut() {
+            let req_id_str = req_id.to_string();
+            conn.seq += 1;
+            let msg = gateway::build_mktdata_subscribe(
+                con_id as u32, "SMART", "CS", &req_id_str, conn.seq,
+            );
+            let _ = conn.send_raw(&msg);
+            self.hb.last_farm_sent = Instant::now();
+        }
+    }
+
+    /// Send FIX 35=V market data unsubscribe for all active subscriptions of an instrument.
+    fn send_mktdata_unsubscribe(&mut self, instrument: InstrumentId) {
+        let reqs: Vec<u32> = match self.instrument_md_reqs.iter()
+            .position(|(id, _)| *id == instrument)
+        {
+            Some(idx) => {
+                let (_, reqs) = self.instrument_md_reqs.remove(idx);
+                reqs
+            }
+            None => return,
+        };
+
+        let conn = match self.farm_conn.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+
+        for req_id in reqs {
+            let req_id_str = req_id.to_string();
+            conn.seq += 1;
+            let msg = gateway::build_mktdata_unsubscribe(&req_id_str, conn.seq);
+            let _ = conn.send_raw(&msg);
+        }
+        self.hb.last_farm_sent = Instant::now();
     }
 
     fn drain_and_send_orders(&mut self) {
@@ -516,25 +638,23 @@ impl<S: Strategy> HotLoop<S> {
     }
 
     fn poll_control_commands(&mut self) {
-        let rx = match self.control_rx.as_ref() {
-            Some(r) => r,
+        // Collect commands first to avoid borrow conflict (rx borrows self immutably).
+        let cmds: Vec<ControlCommand> = match self.control_rx.as_ref() {
+            Some(rx) => rx.try_iter().collect(),
             None => return,
         };
 
-        // Drain all pending commands (non-blocking)
-        while let Ok(cmd) = rx.try_recv() {
+        for cmd in cmds {
             match cmd {
                 ControlCommand::Subscribe { con_id } => {
-                    let _id = self.context.market.register(con_id);
-                    // TODO: Send FIX 35=V (MarketDataRequest) to usfarm
+                    let id = self.context.market.register(con_id);
+                    self.send_mktdata_subscribe(con_id, id);
                 }
                 ControlCommand::Unsubscribe { instrument } => {
-                    let _ = instrument;
-                    // TODO: Send FIX 35=V unsubscribe to usfarm
+                    self.send_mktdata_unsubscribe(instrument);
                 }
                 ControlCommand::UpdateParam { key, value } => {
                     let _ = (key, value);
-                    // Strategy-specific param updates — future extension
                 }
                 ControlCommand::Shutdown => {
                     self.running = false;
@@ -1117,5 +1237,76 @@ mod tests {
 
         let orders: Vec<_> = engine.context_mut().drain_pending_orders().collect();
         assert!(orders.is_empty());
+    }
+
+    #[test]
+    fn subscribe_tracks_md_req_id() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        engine.set_control_rx(rx);
+
+        tx.send(ControlCommand::Subscribe { con_id: 265598 }).unwrap();
+        engine.poll_control_commands();
+
+        // Should have a pending subscription with req_id=1
+        assert_eq!(engine.md_req_to_instrument.len(), 1);
+        assert_eq!(engine.md_req_to_instrument[0], (1, 0));
+        // Should track active subscription
+        assert_eq!(engine.instrument_md_reqs.len(), 1);
+        assert_eq!(engine.instrument_md_reqs[0].0, 0);
+        assert_eq!(engine.instrument_md_reqs[0].1, vec![1]);
+        // Next req_id should be 2
+        assert_eq!(engine.next_md_req_id, 2);
+    }
+
+    #[test]
+    fn subscription_ack_registers_server_tag() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        // Simulate pending subscription for req_id=1 → instrument 0
+        engine.md_req_to_instrument.push((1, 0));
+
+        // Build 35=Q ack with tag 6119 CSV
+        let mut parsed = std::collections::HashMap::new();
+        parsed.insert(35, "Q".to_string());
+        parsed.insert(6119, "42,1,0.01,extra".to_string());
+
+        engine.handle_subscription_ack(&parsed);
+
+        // server_tag 42 should map to instrument 0
+        assert_eq!(engine.context_mut().market.instrument_by_server_tag(42), Some(0));
+        assert_eq!(engine.context_mut().market.min_tick(0), 0.01);
+        // Pending subscription should be consumed
+        assert!(engine.md_req_to_instrument.is_empty());
+    }
+
+    #[test]
+    fn ticker_setup_registers_server_tag() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        let mut parsed = std::collections::HashMap::new();
+        parsed.insert(35, "L".to_string());
+        parsed.insert(6119, "265598,0.01,99,,1".to_string());
+
+        engine.handle_ticker_setup(&parsed);
+
+        assert_eq!(engine.context_mut().market.instrument_by_server_tag(99), Some(0));
+        assert_eq!(engine.context_mut().market.min_tick(0), 0.01);
+    }
+
+    #[test]
+    fn unsubscribe_clears_tracking() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        // Manually populate tracking (simulating prior subscribe)
+        engine.instrument_md_reqs.push((0, vec![1, 2]));
+
+        engine.send_mktdata_unsubscribe(0);
+
+        // Tracking should be cleared
+        assert!(engine.instrument_md_reqs.is_empty());
     }
 }
