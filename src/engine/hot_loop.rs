@@ -649,7 +649,11 @@ impl<S: Strategy> HotLoop<S> {
         let last_px = parsed.get(&31).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         let last_shares = parsed.get(&32).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let leaves_qty = parsed.get(&151).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-        let clord_id = parsed.get(&11).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let clord_id = parsed.get(&11).and_then(|s| {
+            // Cancel responses have "C" prefix (e.g. "C1772746902000")
+            let stripped = s.strip_prefix('C').unwrap_or(s);
+            stripped.parse::<u64>().ok()
+        }).unwrap_or(0);
 
         log::info!("ExecReport: 39={} 150={} 11={} 58={} 103={}",
             ord_status, exec_type, clord_id,
