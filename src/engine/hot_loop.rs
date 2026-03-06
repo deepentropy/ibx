@@ -478,6 +478,38 @@ impl<S: Strategy> HotLoop<S> {
                         (204, "0"),         // CustomerOrFirm
                     ])
                 }
+                OrderRequest::SubmitStopLimit { order_id, instrument, side, qty, price, stop_price } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let stop_str = format_price(stop_price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "4"),          // OrdType = Stop Limit
+                        (44, &price_str),   // Limit Price
+                        (99, &stop_str),    // StopPx
+                        (59, "0"),          // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
                 OrderRequest::SubmitLimitGtc { order_id, instrument, side, qty, price, outside_rth } => {
                     self.context.insert_order(crate::types::Order {
                         order_id, instrument, side, price, qty, filled: 0,
