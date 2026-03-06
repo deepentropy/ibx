@@ -757,6 +757,7 @@ impl<S: Strategy> HotLoop<S> {
         let last_px = parsed.get(&31).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         let last_shares = parsed.get(&32).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let leaves_qty = parsed.get(&151).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let commission = parsed.get(&12).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         let clord_id = parsed.get(&11).and_then(|s| {
             // Cancel responses have "C" prefix (e.g. "C1772746902000")
             let stripped = s.strip_prefix('C').unwrap_or(s);
@@ -799,6 +800,7 @@ impl<S: Strategy> HotLoop<S> {
                     price: (last_px * PRICE_SCALE as f64) as i64,
                     qty: last_shares,
                     remaining: leaves_qty,
+                    commission: (commission * PRICE_SCALE as f64) as i64,
                     timestamp_ns: self.context.now_ns(),
                 };
 
@@ -1232,6 +1234,7 @@ mod tests {
             price: 150 * PRICE_SCALE,
             qty: 100,
             remaining: 0,
+            commission: 0,
             timestamp_ns: 0,
         };
         engine.inject_fill(&fill);
@@ -1254,6 +1257,7 @@ mod tests {
             price: 152 * PRICE_SCALE,
             qty: 30,
             remaining: 0,
+            commission: 0,
             timestamp_ns: 0,
         };
         engine.inject_fill(&fill);

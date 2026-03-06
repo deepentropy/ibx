@@ -1929,3 +1929,169 @@ fn test_subscribe_unsubscribe_cleanup() {
     println!("Total ticks received: {}", total_ticks);
     println!("PASS: Subscribe + unsubscribe cleanup (no crash, clean shutdown)");
 }
+
+// ─── Test 17: Commission tracking via GTC+OutsideRTH fill ───
+// Submits an aggressive limit buy during extended hours to get a fill,
+// then verifies commission > 0 in the Fill struct. Sells to flatten.
+
+struct CommissionStrategy {
+    buy_commission: Arc<AtomicI64>,
+    sell_commission: Arc<AtomicI64>,
+    buy_fill_price: Arc<AtomicI64>,
+    sell_fill_price: Arc<AtomicI64>,
+    order_rejected: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+    phase: u8, // 0=submitted buy, 1=buy filled, 2=submitted sell, 3=done
+    instrument: InstrumentId,
+    start: Instant,
+}
+
+struct CommissionHandle {
+    buy_commission: Arc<AtomicI64>,
+    sell_commission: Arc<AtomicI64>,
+    buy_fill_price: Arc<AtomicI64>,
+    sell_fill_price: Arc<AtomicI64>,
+    order_rejected: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+}
+
+impl CommissionStrategy {
+    fn new() -> (Self, CommissionHandle) {
+        let buy_commission = Arc::new(AtomicI64::new(0));
+        let sell_commission = Arc::new(AtomicI64::new(0));
+        let buy_fill_price = Arc::new(AtomicI64::new(0));
+        let sell_fill_price = Arc::new(AtomicI64::new(0));
+        let order_rejected = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let handle = CommissionHandle {
+            buy_commission: buy_commission.clone(),
+            sell_commission: sell_commission.clone(),
+            buy_fill_price: buy_fill_price.clone(),
+            sell_fill_price: sell_fill_price.clone(),
+            order_rejected: order_rejected.clone(),
+            done: done.clone(),
+        };
+        (Self {
+            buy_commission, sell_commission, buy_fill_price, sell_fill_price,
+            order_rejected, done,
+            phase: 0, instrument: 0, start: Instant::now(),
+        }, handle)
+    }
+}
+
+impl Strategy for CommissionStrategy {
+    fn on_start(&mut self, ctx: &mut Context) {
+        // Submit aggressive GTC+OutsideRTH limit buy at $999 (will fill at market during extended hours)
+        let price = 999_00_000_000i64; // $999.00 — well above SPY ~$680
+        ctx.submit_limit_gtc(0, Side::Buy, 1, price, true);
+        self.phase = 0;
+        println!("[{:.3}s] Submitted aggressive GTC+OutsideRTH LMT BUY at $999.00",
+            self.start.elapsed().as_secs_f64());
+    }
+
+    fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {}
+
+    fn on_fill(&mut self, fill: &Fill, ctx: &mut Context) {
+        println!("[{:.3}s] FILL: side={:?} qty={} price=${:.4} commission=${:.4}",
+            self.start.elapsed().as_secs_f64(), fill.side, fill.qty,
+            fill.price as f64 / PRICE_SCALE as f64,
+            fill.commission as f64 / PRICE_SCALE as f64);
+
+        if self.phase == 0 && fill.side == Side::Buy {
+            self.buy_fill_price.store(fill.price, Ordering::Relaxed);
+            self.buy_commission.store(fill.commission, Ordering::Relaxed);
+            self.phase = 1;
+
+            // Sell to flatten — also aggressive to ensure fill
+            let sell_price = 1_00_000_000i64; // $1.00 — well below market
+            ctx.submit_limit_gtc(0, Side::Sell, 1, sell_price, true);
+            self.phase = 2;
+            println!("[{:.3}s] Submitted aggressive GTC+OutsideRTH LMT SELL at $1.00",
+                self.start.elapsed().as_secs_f64());
+        } else if self.phase == 2 && fill.side == Side::Sell {
+            self.sell_fill_price.store(fill.price, Ordering::Relaxed);
+            self.sell_commission.store(fill.commission, Ordering::Relaxed);
+            self.phase = 3;
+            self.done.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn on_order_update(&mut self, update: &OrderUpdate, _ctx: &mut Context) {
+        println!("[{:.3}s] OrderUpdate: id={} status={:?}",
+            self.start.elapsed().as_secs_f64(), update.order_id, update.status);
+        if update.status == OrderStatus::Rejected {
+            self.order_rejected.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn on_disconnect(&mut self, _ctx: &mut Context) {
+        println!("[{:.3}s] DISCONNECTED", self.start.elapsed().as_secs_f64());
+    }
+}
+
+#[test]
+#[ignore]
+fn test_commission_tracking() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== Test: Commission Tracking (GTC+OutsideRTH fill) ===");
+
+    let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
+        .expect("Gateway::connect() failed");
+    println!("Connected. Account: {}", gw.account_id);
+
+    let (strategy, handle) = CommissionStrategy::new();
+    let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, None);
+
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = std::thread::spawn(move || {
+        hot_loop.run();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if handle.done.load(Ordering::Relaxed) || handle.order_rejected.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let _ = join.join();
+
+    if handle.order_rejected.load(Ordering::Relaxed) {
+        println!("Order REJECTED — extended hours may not be active");
+        println!("SKIP: Commission test requires extended hours or RTH");
+        return;
+    }
+
+    let buy_price = handle.buy_fill_price.load(Ordering::Relaxed);
+    let sell_price = handle.sell_fill_price.load(Ordering::Relaxed);
+    let buy_comm = handle.buy_commission.load(Ordering::Relaxed);
+    let sell_comm = handle.sell_commission.load(Ordering::Relaxed);
+
+    if buy_price == 0 {
+        println!("No buy fill received — market may not have liquidity");
+        println!("SKIP: Commission test requires active market");
+        return;
+    }
+
+    println!("\n=== Commission Results ===");
+    println!("  Buy fill:  ${:.4} commission=${:.4}",
+        buy_price as f64 / PRICE_SCALE as f64, buy_comm as f64 / PRICE_SCALE as f64);
+    println!("  Sell fill: ${:.4} commission=${:.4}",
+        sell_price as f64 / PRICE_SCALE as f64, sell_comm as f64 / PRICE_SCALE as f64);
+    println!("  Total commission: ${:.4}",
+        (buy_comm + sell_comm) as f64 / PRICE_SCALE as f64);
+
+    assert!(buy_comm > 0, "Buy commission should be > 0, got {}", buy_comm);
+    println!("PASS: Commission tracking verified");
+}

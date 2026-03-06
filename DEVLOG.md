@@ -1,3 +1,35 @@
+## 2026-03-06 - Integration Test Expansion (#10-#16)
+
+### Goal
+Add remaining P1/P2 integration tests: outside RTH, historical data, contract details, heartbeat, PnL, stop limit, unsubscribe.
+
+### What Worked
+- **test_outside_rth_limit_order**: GTC+OutsideRTH accepted at 2 AM, ack 143ms, cancel 284ms
+- **test_historical_data_bars**: 78 bars of SPY 5-min data via HMDS in <1s
+- **test_contract_details_lookup**: SPY secdef returns symbol, exchanges, metadata
+- **test_heartbeat_keepalive**: Connection survives 20s (past CCP 10s heartbeat interval)
+- **test_stop_limit_order_submit_and_cancel**: STP LMT BUY ack 134ms, cancel 270ms
+- **test_subscribe_unsubscribe_cleanup**: Subscribe+unsubscribe+shutdown, no crash
+
+### What Failed / Limitations
+- **test_account_pnl_reception**: SKIPs at 2 AM — no 8=O UT messages arrive outside market hours
+- **Order modify test**: SKIPs outside market hours (modify rejected)
+- ONELOGON restriction requires ~30s between test runs
+
+### Key Decisions
+- FIX tag 6433=1 for OutsideRTH, TIF=1 for GTC
+- SecurityType::from_fix now accepts "STK" (server uses TWS format, not FIX "CS")
+- Historical requests require explicit endTime (empty string rejected by HMDS)
+- CCP secdef requests need tag 52 (SendingTime) like all CCP messages
+- PnL test uses probe GTC order to trigger on_order_update callback (works without ticks)
+
+### Current State
+- 16 integration tests total (was 9), all pass or skip gracefully
+- Order types: MKT, LMT, STP, STP LMT, LMT GTC+OutsideRTH
+- Commits: fa7519f → f466d57 → d16e06c
+
+---
+
 ## 2026-03-06 - P0 Safety + Integration Tests (#8, #9)
 
 ### Goal
