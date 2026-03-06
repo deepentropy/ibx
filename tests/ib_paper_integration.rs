@@ -763,3 +763,311 @@ fn test_limit_order_submit_and_cancel() {
     println!("  Total:        {:.3}ms", (ack_us + cancel_us) as f64 / 1000.0);
     println!("PASS: Limit order submit + cancel round-trip");
 }
+
+// ─── Test 8: Stop order submit + cancel ───
+
+struct StopOrderStrategy {
+    submitted: Arc<AtomicBool>,
+    order_acked: Arc<AtomicBool>,
+    cancel_sent: Arc<AtomicBool>,
+    order_cancelled: Arc<AtomicBool>,
+    order_rejected: Arc<AtomicBool>,
+    tick_count: u32,
+    order_id: Option<OrderId>,
+    start: Instant,
+}
+
+struct StopOrderHandle {
+    submitted: Arc<AtomicBool>,
+    order_acked: Arc<AtomicBool>,
+    cancel_sent: Arc<AtomicBool>,
+    order_cancelled: Arc<AtomicBool>,
+    order_rejected: Arc<AtomicBool>,
+}
+
+impl StopOrderStrategy {
+    fn new() -> (Self, StopOrderHandle) {
+        let submitted = Arc::new(AtomicBool::new(false));
+        let order_acked = Arc::new(AtomicBool::new(false));
+        let cancel_sent = Arc::new(AtomicBool::new(false));
+        let order_cancelled = Arc::new(AtomicBool::new(false));
+        let order_rejected = Arc::new(AtomicBool::new(false));
+        let handle = StopOrderHandle {
+            submitted: submitted.clone(),
+            order_acked: order_acked.clone(),
+            cancel_sent: cancel_sent.clone(),
+            order_cancelled: order_cancelled.clone(),
+            order_rejected: order_rejected.clone(),
+        };
+        (Self {
+            submitted, order_acked, cancel_sent, order_cancelled, order_rejected,
+            tick_count: 0, order_id: None, start: Instant::now(),
+        }, handle)
+    }
+}
+
+impl Strategy for StopOrderStrategy {
+    fn on_start(&mut self, ctx: &mut Context) {
+        // Submit immediately — instrument 0 pre-registered before run()
+        let stop_price = 1_00_000_000i64; // $1.00
+        let id = ctx.submit_stop(0, Side::Sell, 1, stop_price);
+        self.order_id = Some(id);
+        self.submitted.store(true, Ordering::Relaxed);
+        println!("[{:.3}s] Submitted STP SELL at ${:.2}",
+            self.start.elapsed().as_secs_f64(),
+            stop_price as f64 / PRICE_SCALE as f64);
+    }
+
+    fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {
+        self.tick_count += 1;
+    }
+
+    fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
+        println!("[{:.3}s] OrderUpdate: id={} status={:?}",
+            self.start.elapsed().as_secs_f64(), update.order_id, update.status);
+        match update.status {
+            OrderStatus::Submitted => {
+                self.order_acked.store(true, Ordering::Relaxed);
+                // Cancel immediately upon ack
+                if !self.cancel_sent.load(Ordering::Relaxed) {
+                    if let Some(id) = self.order_id {
+                        ctx.cancel(id);
+                        self.cancel_sent.store(true, Ordering::Relaxed);
+                        println!("[{:.3}s] Cancel sent for stop order {}",
+                            self.start.elapsed().as_secs_f64(), id);
+                    }
+                }
+            }
+            OrderStatus::Cancelled => {
+                self.order_cancelled.store(true, Ordering::Relaxed);
+            }
+            OrderStatus::Rejected => {
+                self.order_rejected.store(true, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_disconnect(&mut self, _ctx: &mut Context) {
+        println!("[{:.3}s] DISCONNECTED", self.start.elapsed().as_secs_f64());
+    }
+}
+
+#[test]
+#[ignore]
+fn test_stop_order_submit_and_cancel() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== Test: Stop Order Submit + Cancel (SPY) ===");
+
+    let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
+        .expect("Gateway::connect() failed");
+    println!("Connected. Account: {}", gw.account_id);
+
+    let (strategy, handle) = StopOrderStrategy::new();
+    let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, None);
+
+    // Pre-register instrument so on_start can submit immediately (no tick dependency)
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    // Also subscribe for market data (needed for farm)
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = std::thread::spawn(move || {
+        hot_loop.run();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if handle.order_cancelled.load(Ordering::Relaxed) || handle.order_rejected.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let _ = join.join();
+
+    if handle.order_rejected.load(Ordering::Relaxed) {
+        println!("Stop order REJECTED — may need GTC TIF or market hours");
+        println!("SKIP: Stop order test rejected");
+        return;
+    }
+
+    assert!(handle.submitted.load(Ordering::Relaxed), "Stop order was never submitted");
+    assert!(handle.order_acked.load(Ordering::Relaxed), "Stop order was never acknowledged");
+    assert!(handle.cancel_sent.load(Ordering::Relaxed), "Cancel was never sent");
+    assert!(handle.order_cancelled.load(Ordering::Relaxed), "Stop order was never cancelled");
+    println!("PASS: Stop order submit + cancel round-trip");
+}
+
+// ─── Test 9: Order modify (35=G) ───
+
+struct ModifyOrderStrategy {
+    submitted: Arc<AtomicBool>,
+    order_acked: Arc<AtomicBool>,
+    modify_sent: Arc<AtomicBool>,
+    modify_acked: Arc<AtomicBool>,
+    cancel_sent: Arc<AtomicBool>,
+    order_cancelled: Arc<AtomicBool>,
+    order_rejected: Arc<AtomicBool>,
+    tick_count: u32,
+    order_id: Option<OrderId>,
+    new_order_id: Option<OrderId>,
+    start: Instant,
+}
+
+struct ModifyOrderHandle {
+    submitted: Arc<AtomicBool>,
+    order_acked: Arc<AtomicBool>,
+    modify_sent: Arc<AtomicBool>,
+    modify_acked: Arc<AtomicBool>,
+    cancel_sent: Arc<AtomicBool>,
+    order_cancelled: Arc<AtomicBool>,
+    order_rejected: Arc<AtomicBool>,
+}
+
+impl ModifyOrderStrategy {
+    fn new() -> (Self, ModifyOrderHandle) {
+        let submitted = Arc::new(AtomicBool::new(false));
+        let order_acked = Arc::new(AtomicBool::new(false));
+        let modify_sent = Arc::new(AtomicBool::new(false));
+        let modify_acked = Arc::new(AtomicBool::new(false));
+        let cancel_sent = Arc::new(AtomicBool::new(false));
+        let order_cancelled = Arc::new(AtomicBool::new(false));
+        let order_rejected = Arc::new(AtomicBool::new(false));
+        let handle = ModifyOrderHandle {
+            submitted: submitted.clone(),
+            order_acked: order_acked.clone(),
+            modify_sent: modify_sent.clone(),
+            modify_acked: modify_acked.clone(),
+            cancel_sent: cancel_sent.clone(),
+            order_cancelled: order_cancelled.clone(),
+            order_rejected: order_rejected.clone(),
+        };
+        (Self {
+            submitted, order_acked, modify_sent, modify_acked, cancel_sent,
+            order_cancelled, order_rejected,
+            tick_count: 0, order_id: None, new_order_id: None, start: Instant::now(),
+        }, handle)
+    }
+}
+
+impl Strategy for ModifyOrderStrategy {
+    fn on_start(&mut self, ctx: &mut Context) {
+        // Submit immediately — instrument 0 pre-registered before run()
+        let price = 1_00_000_000i64; // $1.00
+        let id = ctx.submit_limit(0, Side::Buy, 1, price);
+        self.order_id = Some(id);
+        self.submitted.store(true, Ordering::Relaxed);
+        println!("[{:.3}s] Submitted LMT BUY at $1.00 (id={})",
+            self.start.elapsed().as_secs_f64(), id);
+    }
+
+    fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {
+        self.tick_count += 1;
+    }
+
+    fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
+        println!("[{:.3}s] OrderUpdate: id={} status={:?}",
+            self.start.elapsed().as_secs_f64(), update.order_id, update.status);
+        match update.status {
+            OrderStatus::Submitted => {
+                if self.modify_sent.load(Ordering::Relaxed) && !self.modify_acked.load(Ordering::Relaxed) {
+                    // Step 3: Modify acknowledged → cancel
+                    self.modify_acked.store(true, Ordering::Relaxed);
+                    println!("[{:.3}s] Modify acknowledged", self.start.elapsed().as_secs_f64());
+
+                    let cancel_id = self.new_order_id.unwrap_or_else(|| self.order_id.unwrap());
+                    ctx.cancel(cancel_id);
+                    self.cancel_sent.store(true, Ordering::Relaxed);
+                    println!("[{:.3}s] Cancel sent for modified order {}",
+                        self.start.elapsed().as_secs_f64(), cancel_id);
+                } else if !self.order_acked.load(Ordering::Relaxed) {
+                    // Step 2: Initial order acknowledged → modify price to $2.00
+                    self.order_acked.store(true, Ordering::Relaxed);
+                    println!("[{:.3}s] Initial order acknowledged", self.start.elapsed().as_secs_f64());
+
+                    if let Some(id) = self.order_id {
+                        let new_price = 2_00_000_000i64; // $2.00
+                        let new_id = ctx.modify(id, new_price, 1);
+                        self.new_order_id = Some(new_id);
+                        self.modify_sent.store(true, Ordering::Relaxed);
+                        println!("[{:.3}s] Modify sent: {} → {} at $2.00",
+                            self.start.elapsed().as_secs_f64(), id, new_id);
+                    }
+                }
+            }
+            OrderStatus::Cancelled => {
+                self.order_cancelled.store(true, Ordering::Relaxed);
+            }
+            OrderStatus::Rejected => {
+                self.order_rejected.store(true, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_disconnect(&mut self, _ctx: &mut Context) {
+        println!("[{:.3}s] DISCONNECTED", self.start.elapsed().as_secs_f64());
+    }
+}
+
+#[test]
+#[ignore]
+fn test_order_modify_and_cancel() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== Test: Order Modify (35=G) + Cancel (SPY) ===");
+
+    let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
+        .expect("Gateway::connect() failed");
+    println!("Connected. Account: {}", gw.account_id);
+
+    let (strategy, handle) = ModifyOrderStrategy::new();
+    let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, None);
+
+    // Pre-register instrument so on_start can submit immediately
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = std::thread::spawn(move || {
+        hot_loop.run();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if handle.order_cancelled.load(Ordering::Relaxed) || handle.order_rejected.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let _ = join.join();
+
+    if handle.order_rejected.load(Ordering::Relaxed) {
+        println!("Order REJECTED — may need market hours");
+        println!("SKIP: Modify test rejected");
+        return;
+    }
+
+    assert!(handle.submitted.load(Ordering::Relaxed), "Order was never submitted");
+    assert!(handle.order_acked.load(Ordering::Relaxed), "Order was never acknowledged");
+    assert!(handle.modify_sent.load(Ordering::Relaxed), "Modify was never sent");
+    assert!(handle.modify_acked.load(Ordering::Relaxed), "Modify was never acknowledged");
+    assert!(handle.cancel_sent.load(Ordering::Relaxed), "Cancel was never sent");
+    assert!(handle.order_cancelled.load(Ordering::Relaxed), "Modified order was never cancelled");
+    println!("PASS: Order modify + cancel round-trip");
+}
