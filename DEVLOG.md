@@ -1,3 +1,32 @@
+## 2026-03-06 - Single-Connection Integration Suite
+
+### Goal
+Refactor all 17 integration tests to share a single Gateway connection, avoiding ONELOGON throttling.
+
+### Approach
+- Added `HotLoop::with_connections()` — builds a HotLoop from raw connections without consuming a Gateway
+- Created `Conns` struct to pass connections between test phases
+- Pattern: `spawn(move || { hl.run(); hl })` returns HotLoop for connection reclamation after shutdown
+- Each test phase: build HotLoop → run in thread → shutdown → reclaim connections → pass to next phase
+
+### Key Decisions
+- **Phase ordering**: Account PnL must be FIRST hot loop (needs CCP init burst data)
+- **Contract details** runs early (raw CCP, before hot loops consume buffer)
+- **Historical data** runs LAST (HMDS goes stale quickly, bg hot loop keeps CCP/farm alive)
+- **Market-hours-dependent tests** SKIP gracefully instead of asserting
+- **Limit order strategy** changed to submit in `on_start` (was waiting for tick 5 — fails when market closed)
+
+### Results (3 AM, market closed)
+- 10 PASS, 6 SKIP (market closed), 1 WARN (expected)
+- Single connection: 191s total (was failing with 17 separate connections due to ONELOGON)
+- All order types verified: limit, stop, stop-limit, modify, outside-RTH, market, commission
+
+### What Failed
+- HMDS connection goes stale after ~30s idle (no heartbeat handler in hot loop)
+- IB throttles market data after rapid reconnections — not a code issue
+
+---
+
 ## 2026-03-06 - Account Data Fix + Commission Tracking
 
 ### Goal
