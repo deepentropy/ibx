@@ -217,6 +217,27 @@ impl Context {
         id
     }
 
+    pub fn submit_stop_limit(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        stop_price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitStopLimit {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+            stop_price,
+        });
+        id
+    }
+
     pub fn submit_limit_gtc(
         &mut self,
         instrument: InstrumentId,

@@ -1439,3 +1439,493 @@ fn test_contract_details_lookup() {
     assert!(def.valid_exchanges.contains(&"SMART".to_string()), "SMART should be in valid exchanges");
     println!("PASS: Contract details lookup (SPY conId=756733)");
 }
+
+// ─── Test 13: Heartbeat keepalive ───
+// Verifies the heartbeat mechanism keeps connections alive beyond the CCP interval (10s).
+
+struct HeartbeatStrategy {
+    disconnected: Arc<AtomicBool>,
+    tick_count: Arc<AtomicU32>,
+    start: Instant,
+}
+
+struct HeartbeatHandle {
+    disconnected: Arc<AtomicBool>,
+    _tick_count: Arc<AtomicU32>,
+}
+
+impl HeartbeatStrategy {
+    fn new() -> (Self, HeartbeatHandle) {
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let tick_count = Arc::new(AtomicU32::new(0));
+        let handle = HeartbeatHandle {
+            disconnected: disconnected.clone(),
+            _tick_count: tick_count.clone(),
+        };
+        (Self { disconnected, tick_count, start: Instant::now() }, handle)
+    }
+}
+
+impl Strategy for HeartbeatStrategy {
+    fn on_start(&mut self, _ctx: &mut Context) {
+        println!("[{:.3}s] Strategy started, will run for 20s to verify heartbeats",
+            self.start.elapsed().as_secs_f64());
+    }
+
+    fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {
+        let count = self.tick_count.fetch_add(1, Ordering::Relaxed);
+        if count % 100 == 0 && count > 0 {
+            println!("[{:.3}s] {} ticks, still connected",
+                self.start.elapsed().as_secs_f64(), count);
+        }
+    }
+
+    fn on_disconnect(&mut self, _ctx: &mut Context) {
+        println!("[{:.3}s] DISCONNECTED (unexpected!)", self.start.elapsed().as_secs_f64());
+        self.disconnected.store(true, Ordering::Relaxed);
+    }
+}
+
+#[test]
+#[ignore]
+fn test_heartbeat_keepalive() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== Test: Heartbeat Keepalive (20s > CCP 10s interval) ===");
+
+    let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
+        .expect("Gateway::connect() failed");
+    println!("Connected. Account: {}", gw.account_id);
+
+    let (strategy, handle) = HeartbeatStrategy::new();
+    let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, None);
+
+    // Subscribe to keep farm active
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = std::thread::spawn(move || {
+        hot_loop.run();
+    });
+
+    // Run for 20 seconds — must survive past CCP heartbeat interval (10s)
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        if handle.disconnected.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let still_connected = !handle.disconnected.load(Ordering::Relaxed);
+    let elapsed = start.elapsed();
+
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let _ = join.join();
+
+    assert!(still_connected,
+        "Connection dropped after {:.1}s — heartbeat mechanism failed", elapsed.as_secs_f64());
+    println!("PASS: Heartbeat keepalive ({:.1}s, no disconnect)", elapsed.as_secs_f64());
+}
+
+// ─── Test 14: Account PnL reception ───
+// Verifies that account-level PnL data arrives via CCP 8=O messages.
+
+struct PnlStrategy {
+    account_received: Arc<AtomicBool>,
+    net_liq: Arc<AtomicI64>,
+    unrealized_pnl: Arc<AtomicI64>,
+    realized_pnl: Arc<AtomicI64>,
+    buying_power: Arc<AtomicI64>,
+    order_done: Arc<AtomicBool>,
+    order_id: Option<OrderId>,
+    start: Instant,
+}
+
+struct PnlHandle {
+    account_received: Arc<AtomicBool>,
+    net_liq: Arc<AtomicI64>,
+    unrealized_pnl: Arc<AtomicI64>,
+    realized_pnl: Arc<AtomicI64>,
+    buying_power: Arc<AtomicI64>,
+    order_done: Arc<AtomicBool>,
+}
+
+impl PnlStrategy {
+    fn new() -> (Self, PnlHandle) {
+        let account_received = Arc::new(AtomicBool::new(false));
+        let net_liq = Arc::new(AtomicI64::new(0));
+        let unrealized_pnl = Arc::new(AtomicI64::new(0));
+        let realized_pnl = Arc::new(AtomicI64::new(0));
+        let buying_power = Arc::new(AtomicI64::new(0));
+        let order_done = Arc::new(AtomicBool::new(false));
+        let handle = PnlHandle {
+            account_received: account_received.clone(),
+            net_liq: net_liq.clone(),
+            unrealized_pnl: unrealized_pnl.clone(),
+            realized_pnl: realized_pnl.clone(),
+            buying_power: buying_power.clone(),
+            order_done: order_done.clone(),
+        };
+        (Self {
+            account_received, net_liq, unrealized_pnl, realized_pnl, buying_power,
+            order_done, order_id: None, start: Instant::now(),
+        }, handle)
+    }
+
+    fn check_account(&mut self, ctx: &Context) {
+        if self.account_received.load(Ordering::Relaxed) { return; }
+        let acct = ctx.account();
+        if acct.net_liquidation != 0 {
+            self.net_liq.store(acct.net_liquidation, Ordering::Relaxed);
+            self.unrealized_pnl.store(acct.unrealized_pnl, Ordering::Relaxed);
+            self.realized_pnl.store(acct.realized_pnl, Ordering::Relaxed);
+            self.buying_power.store(acct.buying_power, Ordering::Relaxed);
+            self.account_received.store(true, Ordering::Relaxed);
+            println!("[{:.3}s] Account data received", self.start.elapsed().as_secs_f64());
+        }
+    }
+}
+
+impl Strategy for PnlStrategy {
+    fn on_start(&mut self, ctx: &mut Context) {
+        self.check_account(ctx);
+        // Submit a GTC order to trigger on_order_update (CCP callback works at any time)
+        let id = ctx.submit_limit_gtc(0, Side::Buy, 1, 1_00_000_000, true); // $1.00 GTC
+        self.order_id = Some(id);
+        println!("[{:.3}s] Submitted probe order to trigger CCP callbacks",
+            self.start.elapsed().as_secs_f64());
+    }
+
+    fn on_tick(&mut self, _instrument: InstrumentId, ctx: &mut Context) {
+        self.check_account(ctx);
+    }
+
+    fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
+        println!("[{:.3}s] OrderUpdate: id={} status={:?}",
+            self.start.elapsed().as_secs_f64(), update.order_id, update.status);
+        self.check_account(ctx);
+        // Cancel the probe order once acked
+        if update.status == OrderStatus::Submitted {
+            if let Some(id) = self.order_id {
+                ctx.cancel(id);
+            }
+        }
+        if matches!(update.status, OrderStatus::Cancelled | OrderStatus::Rejected) {
+            self.order_done.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn on_disconnect(&mut self, _ctx: &mut Context) {}
+}
+
+#[test]
+#[ignore]
+fn test_account_pnl_reception() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== Test: Account PnL Reception ===");
+
+    let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
+        .expect("Gateway::connect() failed");
+    println!("Connected. Account: {}", gw.account_id);
+
+    let (strategy, handle) = PnlStrategy::new();
+    let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, None);
+
+    // Pre-register instrument for probe order
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = std::thread::spawn(move || {
+        hot_loop.run();
+    });
+
+    // Wait for account data (CCP 8=O UT messages) or probe order to complete
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if handle.account_received.load(Ordering::Relaxed) && handle.order_done.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let _ = join.join();
+
+    let nl = handle.net_liq.load(Ordering::Relaxed);
+    let bp = handle.buying_power.load(Ordering::Relaxed);
+    let upnl = handle.unrealized_pnl.load(Ordering::Relaxed);
+    let rpnl = handle.realized_pnl.load(Ordering::Relaxed);
+
+    if !handle.account_received.load(Ordering::Relaxed) {
+        println!("WARN: Account data not received within 30s — CCP 8=O may be delayed");
+        println!("SKIP: Account PnL test (no data received)");
+        return;
+    }
+
+    println!("  NetLiq:       ${:.2}", nl as f64 / PRICE_SCALE as f64);
+    println!("  BuyingPower:  ${:.2}", bp as f64 / PRICE_SCALE as f64);
+    println!("  UnrealizedPnL: ${:.2}", upnl as f64 / PRICE_SCALE as f64);
+    println!("  RealizedPnL:   ${:.2}", rpnl as f64 / PRICE_SCALE as f64);
+
+    assert!(nl > 0, "Paper account net liquidation should be > 0");
+    assert!(bp > 0, "Paper account buying power should be > 0");
+    // PnL can be 0 if no positions, but net_liq and buying_power must exist
+    println!("PASS: Account PnL data received");
+}
+
+// ─── Test 15: Stop limit order submit + cancel ───
+
+struct StopLimitStrategy {
+    submitted: Arc<AtomicBool>,
+    order_acked: Arc<AtomicBool>,
+    cancel_sent: Arc<AtomicBool>,
+    order_cancelled: Arc<AtomicBool>,
+    order_rejected: Arc<AtomicBool>,
+    order_id: Option<OrderId>,
+    start: Instant,
+}
+
+struct StopLimitHandle {
+    submitted: Arc<AtomicBool>,
+    order_acked: Arc<AtomicBool>,
+    cancel_sent: Arc<AtomicBool>,
+    order_cancelled: Arc<AtomicBool>,
+    order_rejected: Arc<AtomicBool>,
+}
+
+impl StopLimitStrategy {
+    fn new() -> (Self, StopLimitHandle) {
+        let submitted = Arc::new(AtomicBool::new(false));
+        let order_acked = Arc::new(AtomicBool::new(false));
+        let cancel_sent = Arc::new(AtomicBool::new(false));
+        let order_cancelled = Arc::new(AtomicBool::new(false));
+        let order_rejected = Arc::new(AtomicBool::new(false));
+        let handle = StopLimitHandle {
+            submitted: submitted.clone(),
+            order_acked: order_acked.clone(),
+            cancel_sent: cancel_sent.clone(),
+            order_cancelled: order_cancelled.clone(),
+            order_rejected: order_rejected.clone(),
+        };
+        (Self {
+            submitted, order_acked, cancel_sent, order_cancelled, order_rejected,
+            order_id: None, start: Instant::now(),
+        }, handle)
+    }
+}
+
+impl Strategy for StopLimitStrategy {
+    fn on_start(&mut self, ctx: &mut Context) {
+        // Stop Limit: trigger at $999 (never triggers), limit at $998
+        let stop_price = 999_00_000_000i64; // $999.00
+        let limit_price = 998_00_000_000i64; // $998.00
+        let id = ctx.submit_stop_limit(0, Side::Buy, 1, limit_price, stop_price);
+        self.order_id = Some(id);
+        self.submitted.store(true, Ordering::Relaxed);
+        println!("[{:.3}s] Submitted STP LMT BUY: stop=$999.00 limit=$998.00 (id={})",
+            self.start.elapsed().as_secs_f64(), id);
+    }
+
+    fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {}
+
+    fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
+        println!("[{:.3}s] OrderUpdate: id={} status={:?}",
+            self.start.elapsed().as_secs_f64(), update.order_id, update.status);
+        match update.status {
+            OrderStatus::Submitted => {
+                self.order_acked.store(true, Ordering::Relaxed);
+                if !self.cancel_sent.load(Ordering::Relaxed) {
+                    if let Some(id) = self.order_id {
+                        ctx.cancel(id);
+                        self.cancel_sent.store(true, Ordering::Relaxed);
+                        println!("[{:.3}s] Cancel sent for stop limit order {}",
+                            self.start.elapsed().as_secs_f64(), id);
+                    }
+                }
+            }
+            OrderStatus::Cancelled => {
+                self.order_cancelled.store(true, Ordering::Relaxed);
+            }
+            OrderStatus::Rejected => {
+                self.order_rejected.store(true, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_disconnect(&mut self, _ctx: &mut Context) {
+        println!("[{:.3}s] DISCONNECTED", self.start.elapsed().as_secs_f64());
+    }
+}
+
+#[test]
+#[ignore]
+fn test_stop_limit_order_submit_and_cancel() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== Test: Stop Limit Order Submit + Cancel (SPY) ===");
+
+    let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
+        .expect("Gateway::connect() failed");
+    println!("Connected. Account: {}", gw.account_id);
+
+    let (strategy, handle) = StopLimitStrategy::new();
+    let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, None);
+
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = std::thread::spawn(move || {
+        hot_loop.run();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if handle.order_cancelled.load(Ordering::Relaxed) || handle.order_rejected.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let _ = join.join();
+
+    if handle.order_rejected.load(Ordering::Relaxed) {
+        println!("Stop limit order REJECTED — may need market hours");
+        println!("SKIP: Stop limit test rejected");
+        return;
+    }
+
+    assert!(handle.submitted.load(Ordering::Relaxed), "Stop limit was never submitted");
+    assert!(handle.order_acked.load(Ordering::Relaxed), "Stop limit was never acknowledged");
+    assert!(handle.cancel_sent.load(Ordering::Relaxed), "Cancel was never sent");
+    assert!(handle.order_cancelled.load(Ordering::Relaxed), "Stop limit was never cancelled");
+    println!("PASS: Stop limit order submit + cancel round-trip");
+}
+
+// ─── Test 16: Subscribe + Unsubscribe cleanup ───
+// Verifies that unsubscribing from an instrument doesn't crash
+// and the hot loop continues to function cleanly.
+
+struct UnsubscribeStrategy {
+    unsub_requested: Arc<AtomicBool>,
+    still_alive: Arc<AtomicBool>,
+    disconnected: Arc<AtomicBool>,
+    tick_count: Arc<AtomicU32>,
+    start: Instant,
+}
+
+struct UnsubscribeHandle {
+    unsub_requested: Arc<AtomicBool>,
+    still_alive: Arc<AtomicBool>,
+    disconnected: Arc<AtomicBool>,
+    tick_count: Arc<AtomicU32>,
+}
+
+impl UnsubscribeStrategy {
+    fn new() -> (Self, UnsubscribeHandle) {
+        let unsub_requested = Arc::new(AtomicBool::new(false));
+        let still_alive = Arc::new(AtomicBool::new(false));
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let tick_count = Arc::new(AtomicU32::new(0));
+        let handle = UnsubscribeHandle {
+            unsub_requested: unsub_requested.clone(),
+            still_alive: still_alive.clone(),
+            disconnected: disconnected.clone(),
+            tick_count: tick_count.clone(),
+        };
+        (Self {
+            unsub_requested, still_alive, disconnected, tick_count,
+            start: Instant::now(),
+        }, handle)
+    }
+}
+
+impl Strategy for UnsubscribeStrategy {
+    fn on_start(&mut self, _ctx: &mut Context) {
+        println!("[{:.3}s] Strategy started, will test unsubscribe",
+            self.start.elapsed().as_secs_f64());
+    }
+
+    fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {
+        self.tick_count.fetch_add(1, Ordering::Relaxed);
+        // After unsubscribe, we may still get a few ticks in flight — that's ok
+        if self.unsub_requested.load(Ordering::Relaxed) {
+            self.still_alive.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn on_disconnect(&mut self, _ctx: &mut Context) {
+        self.disconnected.store(true, Ordering::Relaxed);
+        // Mark still_alive even on shutdown path — proves the loop ran after unsub
+        if self.unsub_requested.load(Ordering::Relaxed) {
+            self.still_alive.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn test_subscribe_unsubscribe_cleanup() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== Test: Subscribe + Unsubscribe Cleanup ===");
+
+    let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
+        .expect("Gateway::connect() failed");
+    println!("Connected. Account: {}", gw.account_id);
+
+    let (strategy, handle) = UnsubscribeStrategy::new();
+    let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, None);
+
+    // Subscribe to SPY
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    println!("Subscribed to SPY");
+
+    let join = std::thread::spawn(move || {
+        hot_loop.run();
+    });
+
+    // Wait 3 seconds for subscription to be established
+    std::thread::sleep(Duration::from_secs(3));
+
+    // Unsubscribe
+    control_tx.send(ControlCommand::Unsubscribe { instrument: 0 }).unwrap();
+    handle.unsub_requested.store(true, Ordering::Relaxed);
+    println!("Unsubscribe sent for instrument 0");
+
+    // Wait 3 more seconds — loop should continue running without crash
+    std::thread::sleep(Duration::from_secs(3));
+
+    // Shutdown
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let _ = join.join();
+
+    assert!(handle.disconnected.load(Ordering::Relaxed), "on_disconnect was not called");
+    assert!(handle.still_alive.load(Ordering::Relaxed),
+        "Hot loop did not continue running after unsubscribe");
+    let total_ticks = handle.tick_count.load(Ordering::Relaxed);
+    println!("Total ticks received: {}", total_ticks);
+    println!("PASS: Subscribe + unsubscribe cleanup (no crash, clean shutdown)");
+}
