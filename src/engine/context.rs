@@ -688,6 +688,7 @@ mod tests {
             price: 150 * PRICE_SCALE,
             qty: 100,
             remaining: 0,
+            commission: 0,
             timestamp_ns: 0,
         };
         s.on_fill(&fill, &mut ctx);

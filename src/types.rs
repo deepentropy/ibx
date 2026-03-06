@@ -87,6 +87,7 @@ pub struct Fill {
     pub price: Price,
     pub qty: i64,
     pub remaining: i64,
+    pub commission: Price,
     pub timestamp_ns: u64,
 }
 
@@ -610,6 +611,7 @@ mod tests {
             price: 150 * PRICE_SCALE,
             qty: 100,
             remaining: 0,
+            commission: 0,
             timestamp_ns: 123456789,
         };
         let f2 = f; // Copy
