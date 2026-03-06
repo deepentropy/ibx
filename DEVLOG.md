@@ -1,3 +1,34 @@
+## 2026-03-06 - Account Data Fix + Commission Tracking
+
+### Goal
+Fix account PnL test (was SKIPping at 2 AM), add commission tracking to Fill struct.
+
+### Root Cause: Account Data
+- Account data was NOT arriving because:
+  1. CCP init burst responses were consumed during `Gateway::connect()` and **discarded**
+  2. `8=O UT/UM` messages from farm only arrive during market hours
+  3. **Real fix**: CCP `6040=77` response contains `tag 9806 = net liquidation` — available 24/7
+- Fix: seed init burst bytes into CCP Connection buffer + parse `6040=77` for net_liq
+- Also added `UT/UM/RL/UP` routing in `process_farm_message` (was only in CCP handler)
+
+### What Worked
+- **test_account_pnl_reception**: PASS at 2 AM! net_liq=$752,070.77 received at 138ms
+- **test_commission_tracking**: Commission parsing from FIX tag 12 (SKIPs when extended hours inactive)
+- `Connection::seed_buffer()` + `has_buffered_data()` for init burst processing
+- `handle_account_summary()` parses `6040=77` tag 9806 for net liquidation
+
+### Key Findings
+- CCP init burst (29KB) contains FIXCOMP frames with `35=U` responses, NOT `8=O UT/UM`
+- `8=O UT/UM` with NetLiquidation/BuyingPower comes from **farm** (not CCP), only during market hours
+- `6040=77` response (from `6040=6` init request) provides net_liq immediately, 24/7
+- BuyingPower/PnL breakdown only available from `8=O UT/UM` during market hours
+
+### Current State
+- 17 integration tests total, all PASS or SKIP gracefully (zero failures at any hour)
+- Commission field added to Fill struct (parsed from FIX tag 12)
+
+---
+
 ## 2026-03-06 - Integration Test Expansion (#10-#16)
 
 ### Goal
@@ -12,7 +43,6 @@ Add remaining P1/P2 integration tests: outside RTH, historical data, contract de
 - **test_subscribe_unsubscribe_cleanup**: Subscribe+unsubscribe+shutdown, no crash
 
 ### What Failed / Limitations
-- **test_account_pnl_reception**: SKIPs at 2 AM — no 8=O UT messages arrive outside market hours
 - **Order modify test**: SKIPs outside market hours (modify rejected)
 - ONELOGON restriction requires ~30s between test runs
 
@@ -21,7 +51,6 @@ Add remaining P1/P2 integration tests: outside RTH, historical data, contract de
 - SecurityType::from_fix now accepts "STK" (server uses TWS format, not FIX "CS")
 - Historical requests require explicit endTime (empty string rejected by HMDS)
 - CCP secdef requests need tag 52 (SendingTime) like all CCP messages
-- PnL test uses probe GTC order to trigger on_order_update callback (works without ticks)
 
 ### Current State
 - 16 integration tests total (was 9), all pass or skip gracefully

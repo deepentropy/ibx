@@ -117,6 +117,16 @@ impl Connection {
         self.read_iv = read_iv;
     }
 
+    /// Pre-load data into the read buffer (e.g. init burst bytes read before Connection was created).
+    pub fn seed_buffer(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+    }
+
+    /// Whether the internal buffer contains unprocessed data.
+    pub fn has_buffered_data(&self) -> bool {
+        !self.buf.is_empty()
+    }
+
     /// Non-blocking read from the socket into the internal buffer.
     /// Returns the number of bytes read, or 0 if no data available (WouldBlock).
     pub fn try_recv(&mut self) -> io::Result<usize> {
