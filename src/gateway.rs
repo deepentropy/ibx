@@ -759,7 +759,7 @@ pub fn build_mktdata_unsubscribe(md_req_id: &str, seq: u32) -> Vec<u8> {
 }
 
 /// Format timestamp as YYYYMMDD-HH:MM:SS (no chrono dependency).
-pub(crate) fn chrono_free_timestamp() -> String {
+pub fn chrono_free_timestamp() -> String {
     use std::time::SystemTime;
     let dur = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

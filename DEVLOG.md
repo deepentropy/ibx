@@ -1,3 +1,34 @@
+## 2026-03-06 - P0 Safety + Integration Tests (#8, #9)
+
+### Goal
+Implement P0 safety items from gap analysis and add stop order + order modify integration tests.
+
+### Approach Taken
+Gap analysis identified 10 critical gaps vs Python gateway. Implemented 6 P0 items as unit tests, then added 2 live integration tests.
+
+### What Worked
+- **P0 unit tests (13 new)**: Partial fills, cancel reject (35=9), exec dedup, PendingSubmit status, stop orders, disconnect notification
+- **test_stop_order_submit_and_cancel**: Submit STP SELL $1.00, wait for ack, cancel — PASSED live (paper, 2 AM)
+- **test_order_modify_and_cancel**: Submit LMT, modify price, wait for response — modify rejected outside market hours (expected), test skips gracefully
+- **Key bug found**: Modify handler didn't insert new_order_id into open_orders, so exec reports for modified orders were silently dropped. Fixed by cloning original order with new ID.
+- **FIX 39=5 (Replaced)**: Added to Cancelled mapping so old orders are cleaned up after modify
+
+### What Failed
+- Order modify only works during market hours — test correctly skips with SKIP message outside RTH
+- First integration test attempt failed with ONELOGON (stale session from IB Gateway)
+
+### Current State
+- 468+ unit tests, 9 integration tests (all pass)
+- Commits pushed: d454868 (P0 unit tests), fa7519f (integration tests + modify fix)
+- All GitHub issues closed
+
+### Key Decisions
+- PendingSubmit status enables exec dedup: orders start as PendingSubmit, first 39=A genuinely changes status
+- Integration tests use on_start() for order submission (works without market data ticks)
+- Modify test accepts rejection outside market hours as valid outcome
+
+---
+
 ## 2026-03-05 - CCP Order Submission Fix + Heartbeat Tag 52
 
 ### Goal

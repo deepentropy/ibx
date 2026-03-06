@@ -66,7 +66,7 @@ impl SecurityType {
     /// Parse from FIX wire format.
     pub fn from_fix(s: &str) -> Self {
         match s {
-            "CS" => Self::Stock,
+            "CS" | "STK" => Self::Stock,
             "OPT" => Self::Option,
             "FUT" => Self::Future,
             "CASH" => Self::Forex,

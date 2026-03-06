@@ -217,6 +217,27 @@ impl Context {
         id
     }
 
+    pub fn submit_limit_gtc(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        outside_rth: bool,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitLimitGtc {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+            outside_rth,
+        });
+        id
+    }
+
     pub fn cancel(&mut self, order_id: OrderId) {
         self.pending_orders.push(OrderRequest::Cancel { order_id });
     }

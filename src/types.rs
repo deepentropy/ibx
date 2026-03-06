@@ -136,6 +136,14 @@ pub enum OrderRequest {
         qty: u32,
         stop_price: Price,
     },
+    SubmitLimitGtc {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        outside_rth: bool,
+    },
     Cancel {
         order_id: OrderId,
     },
