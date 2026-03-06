@@ -17,8 +17,13 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ib_engine::control::contracts;
+use ib_engine::control::historical::{self, BarDataType, BarSize, HistoricalRequest};
 use ib_engine::engine::context::{Context, Strategy};
 use ib_engine::gateway::{Gateway, GatewayConfig};
+use ib_engine::protocol::connection::Frame;
+use ib_engine::protocol::fix;
+use ib_engine::protocol::fixcomp;
 use ib_engine::types::*;
 
 fn get_config() -> Option<GatewayConfig> {
@@ -1070,4 +1075,367 @@ fn test_order_modify_and_cancel() {
     assert!(handle.cancel_sent.load(Ordering::Relaxed), "Cancel was never sent");
     assert!(handle.order_cancelled.load(Ordering::Relaxed), "Modified order was never cancelled");
     println!("PASS: Order modify + cancel round-trip");
+}
+
+// ─── Test 10: Outside RTH limit order (GTC + OutsideRTH) ───
+
+struct OutsideRthStrategy {
+    submitted: Arc<AtomicBool>,
+    order_acked: Arc<AtomicBool>,
+    cancel_sent: Arc<AtomicBool>,
+    order_cancelled: Arc<AtomicBool>,
+    order_rejected: Arc<AtomicBool>,
+    order_id: Option<OrderId>,
+    start: Instant,
+}
+
+struct OutsideRthHandle {
+    submitted: Arc<AtomicBool>,
+    order_acked: Arc<AtomicBool>,
+    cancel_sent: Arc<AtomicBool>,
+    order_cancelled: Arc<AtomicBool>,
+    order_rejected: Arc<AtomicBool>,
+}
+
+impl OutsideRthStrategy {
+    fn new() -> (Self, OutsideRthHandle) {
+        let submitted = Arc::new(AtomicBool::new(false));
+        let order_acked = Arc::new(AtomicBool::new(false));
+        let cancel_sent = Arc::new(AtomicBool::new(false));
+        let order_cancelled = Arc::new(AtomicBool::new(false));
+        let order_rejected = Arc::new(AtomicBool::new(false));
+        let handle = OutsideRthHandle {
+            submitted: submitted.clone(),
+            order_acked: order_acked.clone(),
+            cancel_sent: cancel_sent.clone(),
+            order_cancelled: order_cancelled.clone(),
+            order_rejected: order_rejected.clone(),
+        };
+        (Self {
+            submitted, order_acked, cancel_sent, order_cancelled, order_rejected,
+            order_id: None, start: Instant::now(),
+        }, handle)
+    }
+}
+
+impl Strategy for OutsideRthStrategy {
+    fn on_start(&mut self, ctx: &mut Context) {
+        // Submit GTC+OutsideRTH limit order at $1.00 — should be accepted any time
+        let price = 1_00_000_000i64; // $1.00
+        let id = ctx.submit_limit_gtc(0, Side::Buy, 1, price, true);
+        self.order_id = Some(id);
+        self.submitted.store(true, Ordering::Relaxed);
+        println!("[{:.3}s] Submitted LMT GTC+OutsideRTH BUY at $1.00 (id={})",
+            self.start.elapsed().as_secs_f64(), id);
+    }
+
+    fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {}
+
+    fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
+        println!("[{:.3}s] OrderUpdate: id={} status={:?}",
+            self.start.elapsed().as_secs_f64(), update.order_id, update.status);
+        match update.status {
+            OrderStatus::Submitted => {
+                self.order_acked.store(true, Ordering::Relaxed);
+                if !self.cancel_sent.load(Ordering::Relaxed) {
+                    if let Some(id) = self.order_id {
+                        ctx.cancel(id);
+                        self.cancel_sent.store(true, Ordering::Relaxed);
+                        println!("[{:.3}s] Cancel sent for GTC order {}",
+                            self.start.elapsed().as_secs_f64(), id);
+                    }
+                }
+            }
+            OrderStatus::Cancelled => {
+                self.order_cancelled.store(true, Ordering::Relaxed);
+            }
+            OrderStatus::Rejected => {
+                self.order_rejected.store(true, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_disconnect(&mut self, _ctx: &mut Context) {
+        println!("[{:.3}s] DISCONNECTED", self.start.elapsed().as_secs_f64());
+    }
+}
+
+#[test]
+#[ignore]
+fn test_outside_rth_limit_order() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== Test: Outside RTH Limit Order (GTC + OutsideRTH, SPY) ===");
+
+    let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
+        .expect("Gateway::connect() failed");
+    println!("Connected. Account: {}", gw.account_id);
+
+    let (strategy, handle) = OutsideRthStrategy::new();
+    let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, None);
+
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = std::thread::spawn(move || {
+        hot_loop.run();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if handle.order_cancelled.load(Ordering::Relaxed) || handle.order_rejected.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let _ = join.join();
+
+    if handle.order_rejected.load(Ordering::Relaxed) {
+        println!("Order REJECTED — unexpected for GTC+OutsideRTH");
+        panic!("GTC+OutsideRTH order should not be rejected");
+    }
+
+    assert!(handle.submitted.load(Ordering::Relaxed), "Order was never submitted");
+    assert!(handle.order_acked.load(Ordering::Relaxed), "Order was never acknowledged");
+    assert!(handle.cancel_sent.load(Ordering::Relaxed), "Cancel was never sent");
+    assert!(handle.order_cancelled.load(Ordering::Relaxed), "Order was never cancelled");
+    println!("PASS: Outside RTH limit order submit + cancel");
+}
+
+// ─── Test 11: Historical data bars via HMDS ───
+
+#[test]
+#[ignore]
+fn test_historical_data_bars() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== Test: Historical Data Bars (SPY, 1 day of 5-min bars) ===");
+
+    let (gw, _farm_conn, _ccp_conn, hmds_conn) = Gateway::connect(&config)
+        .expect("Gateway::connect() failed");
+    println!("Connected. Account: {}", gw.account_id);
+
+    let mut hmds = match hmds_conn {
+        Some(c) => c,
+        None => {
+            println!("SKIP: ushmds farm not connected");
+            return;
+        }
+    };
+    println!("HMDS connection available");
+
+    // Build and send historical data request
+    // endTime format: YYYYMMDD-HH:MM:SS (UTC)
+    // Use yesterday's close to ensure we always get data
+    // Format endTime as "YYYYMMDD-HH:MM:SS" (UTC) from epoch
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let secs_per_day = 86400u64;
+    let end_time = {
+        // Days since epoch
+        let days = now / secs_per_day;
+        // Simple date calc (good enough for 2026)
+        let mut y = 1970i64;
+        let mut remaining = days as i64;
+        loop {
+            let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+            if remaining < days_in_year { break; }
+            remaining -= days_in_year;
+            y += 1;
+        }
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 0;
+        for (i, &d) in month_days.iter().enumerate() {
+            if remaining < d as i64 { m = i + 1; break; }
+            remaining -= d as i64;
+        }
+        let day = remaining + 1;
+        let hour = (now % secs_per_day) / 3600;
+        let min = (now % 3600) / 60;
+        let sec = now % 60;
+        format!("{:04}{:02}{:02}-{:02}:{:02}:{:02}", y, m, day, hour, min, sec)
+    };
+    println!("Using endTime: {}", end_time);
+
+    let req = HistoricalRequest {
+        query_id: "test1".to_string(),
+        con_id: 756733,     // SPY
+        symbol: "SPY".to_string(),
+        sec_type: "CS",
+        exchange: "SMART",
+        data_type: BarDataType::Trades,
+        end_time,
+        duration: "1 d".to_string(),
+        bar_size: BarSize::Min5,
+        use_rth: true,
+    };
+
+    let xml = historical::build_query_xml(&req);
+    hmds.send_fixcomp(&[
+        (fix::TAG_MSG_TYPE, "W"),
+        (historical::TAG_HISTORICAL_XML, &xml),
+    ]).expect("Failed to send historical request");
+    println!("Sent historical bar request");
+
+    // Poll for response
+    let mut all_bars = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut complete = false;
+
+    while Instant::now() < deadline && !complete {
+        match hmds.try_recv() {
+            Ok(0) => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(e) => {
+                println!("HMDS recv error: {}", e);
+                break;
+            }
+            Ok(_) => {}
+        }
+
+        for frame in hmds.extract_frames() {
+            let data = match &frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = hmds.unsign(raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw.clone()],
+                _ => continue,
+            };
+
+            for msg in data {
+                let tags = fix::fix_parse(&msg);
+                if let Some(xml_resp) = tags.get(&historical::TAG_HISTORICAL_XML) {
+                    if let Some(resp) = historical::parse_bar_response(xml_resp) {
+                        println!("Received {} bars (complete={})", resp.bars.len(), resp.is_complete);
+                        all_bars.extend(resp.bars);
+                        if resp.is_complete {
+                            complete = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Total bars received: {}", all_bars.len());
+    assert!(!all_bars.is_empty(), "No historical bars received");
+
+    // Verify bar data is sane
+    let first = &all_bars[0];
+    println!("First bar: time={} O={:.2} H={:.2} L={:.2} C={:.2} V={}",
+        first.time, first.open, first.high, first.low, first.close, first.volume);
+
+    assert!(first.open > 0.0, "Open price should be positive");
+    assert!(first.high >= first.low, "High should be >= Low");
+    assert!(first.high >= first.open, "High should be >= Open");
+    assert!(first.high >= first.close, "High should be >= Close");
+    assert!(first.low <= first.open, "Low should be <= Open");
+    assert!(first.low <= first.close, "Low should be <= Close");
+    assert!(first.volume > 0, "Volume should be positive");
+
+    println!("PASS: Historical data bars ({} bars received)", all_bars.len());
+}
+
+// ─── Test 12: Contract details lookup via CCP ───
+
+#[test]
+#[ignore]
+fn test_contract_details_lookup() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== Test: Contract Details Lookup (SPY, conId=756733) ===");
+
+    let (gw, _farm_conn, mut ccp_conn, _hmds_conn) = Gateway::connect(&config)
+        .expect("Gateway::connect() failed");
+    println!("Connected. Account: {}", gw.account_id);
+
+    // Send secdef request for SPY (CCP requires tag 52 on all messages)
+    let now = ib_engine::gateway::chrono_free_timestamp();
+    ccp_conn.send_fix(&[
+        (fix::TAG_MSG_TYPE, "c"),
+        (fix::TAG_SENDING_TIME, &now),
+        (contracts::TAG_SECURITY_REQ_ID, "R1"),
+        (contracts::TAG_SECURITY_REQ_TYPE, "2"),
+        (contracts::TAG_IB_CON_ID, "756733"),
+        (contracts::TAG_IB_SOURCE, "Socket"),
+    ]).expect("Failed to send secdef request");
+    println!("Sent secdef request for conId=756733");
+
+    // Poll for 35=d response
+    let mut contract: Option<contracts::ContractDefinition> = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    while Instant::now() < deadline && contract.is_none() {
+        match ccp_conn.try_recv() {
+            Ok(0) => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(e) => {
+                println!("CCP recv error: {}", e);
+                break;
+            }
+            Ok(_) => {}
+        }
+
+        for frame in ccp_conn.extract_frames() {
+            let messages = match frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = ccp_conn.unsign(&raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw],
+                _ => continue,
+            };
+
+            for msg in messages {
+                let tags = fix::fix_parse(&msg);
+                let msg_type = tags.get(&fix::TAG_MSG_TYPE).map(|s| s.as_str()).unwrap_or("?");
+                if msg_type == "d" {
+                    if let Some(def) = contracts::parse_secdef_response(&msg) {
+                        if def.con_id == 756733 {
+                            println!("Received contract: {} ({}) conId={}", def.symbol, def.long_name, def.con_id);
+                            println!("  SecType={:?} Exchange={} Currency={}", def.sec_type, def.exchange, def.currency);
+                            println!("  MinTick={} PrimaryExchange={}", def.min_tick, def.primary_exchange);
+                            if !def.valid_exchanges.is_empty() {
+                                println!("  ValidExchanges: {}", def.valid_exchanges.join(","));
+                            }
+                            contract = Some(def);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let def = contract.expect("No contract details received for SPY (756733)");
+    assert_eq!(def.con_id, 756733);
+    assert_eq!(def.symbol, "SPY");
+    assert_eq!(def.sec_type, contracts::SecurityType::Stock);
+    assert_eq!(def.currency, "USD");
+    assert!(!def.long_name.is_empty(), "Long name should not be empty");
+    assert!(!def.valid_exchanges.is_empty(), "Valid exchanges should not be empty");
+    assert!(def.valid_exchanges.contains(&"SMART".to_string()), "SMART should be in valid exchanges");
+    println!("PASS: Contract details lookup (SPY conId=756733)");
 }
