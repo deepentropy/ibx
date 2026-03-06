@@ -7,7 +7,7 @@ use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
 use crate::types::{ControlCommand, InstrumentId, OrderRequest, Price, Side, PRICE_SCALE};
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{bounded, Receiver, Sender};
 
 /// CCP heartbeat interval (10 seconds, configurable via FIX tag 108).
 const CCP_HEARTBEAT_SECS: u64 = 10;
@@ -117,6 +117,25 @@ impl<S: Strategy> HotLoop<S> {
     /// Access the context (for pre-start configuration like registering instruments).
     pub fn context_mut(&mut self) -> &mut Context {
         &mut self.context
+    }
+
+    /// Build a HotLoop with connections and control channel, without requiring a Gateway.
+    pub fn with_connections(
+        strategy: S,
+        account_id: String,
+        farm_conn: Connection,
+        ccp_conn: Connection,
+        hmds_conn: Option<Connection>,
+        core_id: Option<usize>,
+    ) -> (Self, Sender<ControlCommand>) {
+        let (tx, rx) = bounded(64);
+        let mut hl = Self::new(strategy, core_id);
+        hl.set_control_rx(rx);
+        hl.set_account_id(account_id);
+        hl.farm_conn = Some(farm_conn);
+        hl.ccp_conn = Some(ccp_conn);
+        hl.hmds_conn = hmds_conn;
+        (hl, tx)
     }
 
     /// Access the strategy (for reading results after run completes).
