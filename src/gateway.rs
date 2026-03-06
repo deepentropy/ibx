@@ -661,6 +661,8 @@ impl Gateway {
         // CCP Connection (non-blocking TLS for hot loop)
         let mut ccp_conn = Connection::new(tls)?;
         ccp_conn.seq = ccp_seq;
+        // Seed init burst into connection buffer so the hot loop processes 8=O account data
+        ccp_conn.seed_buffer(&init_data);
 
         // --- Phase 3: Farm connections ---
         let farm_conn = connect_farm(

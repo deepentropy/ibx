@@ -233,6 +233,8 @@ impl<S: Strategy> HotLoop<S> {
                 }
             }
             "L" => self.handle_ticker_setup(msg),
+            "UT" | "UM" | "RL" => self.handle_account_update(msg),
+            "UP" => self.handle_position_update(&parsed),
             _ => {}   // other farm messages (35=G, etc.)
         }
     }
@@ -680,7 +682,8 @@ impl<S: Strategy> HotLoop<S> {
             None => return,
             Some(conn) => {
                 match conn.try_recv() {
-                    Ok(0) => return,
+                    Ok(0) if !conn.has_buffered_data() => return,
+                    Ok(0) => {} // no new bytes but buffer has seeded data
                     Err(e) => {
                         log::error!("CCP connection lost: {}", e);
                         self.ccp_disconnected = true;
@@ -742,6 +745,14 @@ impl<S: Strategy> HotLoop<S> {
                         (fix::TAG_TEST_REQ_ID, &test_id),
                     ]);
                     self.hb.last_ccp_sent = Instant::now();
+                }
+            }
+            "U" => {
+                // IB custom message — route by 6040 comm type
+                if let Some(comm) = parsed.get(&6040) {
+                    if comm == "77" {
+                        self.handle_account_summary(&parsed);
+                    }
                 }
             }
             "UT" | "UM" | "RL" => self.handle_account_update(msg),
@@ -859,6 +870,15 @@ impl<S: Strategy> HotLoop<S> {
                 };
                 self.strategy.on_order_update(&update, &mut self.context);
             }
+        }
+    }
+
+    /// Handle CCP 35=U 6040=77 account summary (init burst response).
+    /// Contains tag 9806 = net liquidation value.
+    fn handle_account_summary(&mut self, parsed: &std::collections::HashMap<u32, String>) {
+        if let Some(val) = parsed.get(&9806).and_then(|s| s.parse::<f64>().ok()) {
+            self.context.account.net_liquidation = (val * PRICE_SCALE as f64) as Price;
+            log::info!("Account summary: net_liq=${:.2}", val);
         }
     }
 

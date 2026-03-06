@@ -1532,7 +1532,7 @@ fn test_heartbeat_keepalive() {
 }
 
 // ─── Test 14: Account PnL reception ───
-// Verifies that account-level PnL data arrives via CCP 8=O messages.
+// Verifies that account data arrives via CCP 8=O init burst (seeded into connection buffer).
 
 struct PnlStrategy {
     account_received: Arc<AtomicBool>,
@@ -1540,7 +1540,7 @@ struct PnlStrategy {
     unrealized_pnl: Arc<AtomicI64>,
     realized_pnl: Arc<AtomicI64>,
     buying_power: Arc<AtomicI64>,
-    order_done: Arc<AtomicBool>,
+    probe_done: Arc<AtomicBool>,
     order_id: Option<OrderId>,
     start: Instant,
 }
@@ -1551,7 +1551,7 @@ struct PnlHandle {
     unrealized_pnl: Arc<AtomicI64>,
     realized_pnl: Arc<AtomicI64>,
     buying_power: Arc<AtomicI64>,
-    order_done: Arc<AtomicBool>,
+    probe_done: Arc<AtomicBool>,
 }
 
 impl PnlStrategy {
@@ -1561,18 +1561,18 @@ impl PnlStrategy {
         let unrealized_pnl = Arc::new(AtomicI64::new(0));
         let realized_pnl = Arc::new(AtomicI64::new(0));
         let buying_power = Arc::new(AtomicI64::new(0));
-        let order_done = Arc::new(AtomicBool::new(false));
+        let probe_done = Arc::new(AtomicBool::new(false));
         let handle = PnlHandle {
             account_received: account_received.clone(),
             net_liq: net_liq.clone(),
             unrealized_pnl: unrealized_pnl.clone(),
             realized_pnl: realized_pnl.clone(),
             buying_power: buying_power.clone(),
-            order_done: order_done.clone(),
+            probe_done: probe_done.clone(),
         };
         (Self {
             account_received, net_liq, unrealized_pnl, realized_pnl, buying_power,
-            order_done, order_id: None, start: Instant::now(),
+            probe_done, order_id: None, start: Instant::now(),
         }, handle)
     }
 
@@ -1585,19 +1585,19 @@ impl PnlStrategy {
             self.realized_pnl.store(acct.realized_pnl, Ordering::Relaxed);
             self.buying_power.store(acct.buying_power, Ordering::Relaxed);
             self.account_received.store(true, Ordering::Relaxed);
-            println!("[{:.3}s] Account data received", self.start.elapsed().as_secs_f64());
+            println!("[{:.3}s] Account data received: net_liq=${:.2}",
+                self.start.elapsed().as_secs_f64(), acct.net_liquidation as f64 / PRICE_SCALE as f64);
         }
     }
 }
 
 impl Strategy for PnlStrategy {
     fn on_start(&mut self, ctx: &mut Context) {
-        self.check_account(ctx);
-        // Submit a GTC order to trigger on_order_update (CCP callback works at any time)
+        // Submit a GTC probe order to trigger on_order_update callback
+        // (account data from init burst is processed before the ack arrives)
         let id = ctx.submit_limit_gtc(0, Side::Buy, 1, 1_00_000_000, true); // $1.00 GTC
         self.order_id = Some(id);
-        println!("[{:.3}s] Submitted probe order to trigger CCP callbacks",
-            self.start.elapsed().as_secs_f64());
+        println!("[{:.3}s] Submitted probe order", self.start.elapsed().as_secs_f64());
     }
 
     fn on_tick(&mut self, _instrument: InstrumentId, ctx: &mut Context) {
@@ -1608,14 +1608,13 @@ impl Strategy for PnlStrategy {
         println!("[{:.3}s] OrderUpdate: id={} status={:?}",
             self.start.elapsed().as_secs_f64(), update.order_id, update.status);
         self.check_account(ctx);
-        // Cancel the probe order once acked
         if update.status == OrderStatus::Submitted {
             if let Some(id) = self.order_id {
                 ctx.cancel(id);
             }
         }
         if matches!(update.status, OrderStatus::Cancelled | OrderStatus::Rejected) {
-            self.order_done.store(true, Ordering::Relaxed);
+            self.probe_done.store(true, Ordering::Relaxed);
         }
     }
 
@@ -1640,23 +1639,21 @@ fn test_account_pnl_reception() {
     let (strategy, handle) = PnlStrategy::new();
     let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, None);
 
-    // Pre-register instrument for probe order
+    // Pre-register instrument for probe order (triggers on_order_update → check_account)
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
-
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
 
     let join = std::thread::spawn(move || {
         hot_loop.run();
     });
 
-    // Wait for account data (CCP 8=O UT messages) or probe order to complete
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // Wait for probe order to complete AND account data from init burst
+    let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
-        if handle.account_received.load(Ordering::Relaxed) && handle.order_done.load(Ordering::Relaxed) {
+        if handle.probe_done.load(Ordering::Relaxed) {
             break;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     let _ = control_tx.send(ControlCommand::Shutdown);
@@ -1667,11 +1664,8 @@ fn test_account_pnl_reception() {
     let upnl = handle.unrealized_pnl.load(Ordering::Relaxed);
     let rpnl = handle.realized_pnl.load(Ordering::Relaxed);
 
-    if !handle.account_received.load(Ordering::Relaxed) {
-        println!("WARN: Account data not received within 30s — CCP 8=O may be delayed");
-        println!("SKIP: Account PnL test (no data received)");
-        return;
-    }
+    assert!(handle.account_received.load(Ordering::Relaxed),
+        "Account data not received — 6040=77 may not contain tag 9806");
 
     println!("  NetLiq:       ${:.2}", nl as f64 / PRICE_SCALE as f64);
     println!("  BuyingPower:  ${:.2}", bp as f64 / PRICE_SCALE as f64);
@@ -1679,9 +1673,8 @@ fn test_account_pnl_reception() {
     println!("  RealizedPnL:   ${:.2}", rpnl as f64 / PRICE_SCALE as f64);
 
     assert!(nl > 0, "Paper account net liquidation should be > 0");
-    assert!(bp > 0, "Paper account buying power should be > 0");
-    // PnL can be 0 if no positions, but net_liq and buying_power must exist
-    println!("PASS: Account PnL data received");
+    // BuyingPower/PnL come from 8=O UT/UM (farm, during market hours) — may be 0 off-hours
+    println!("PASS: Account data received (6040=77 init burst)");
 }
 
 // ─── Test 15: Stop limit order submit + cancel ───
@@ -1942,7 +1935,6 @@ struct CommissionStrategy {
     order_rejected: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     phase: u8, // 0=submitted buy, 1=buy filled, 2=submitted sell, 3=done
-    instrument: InstrumentId,
     start: Instant,
 }
 
@@ -1974,7 +1966,7 @@ impl CommissionStrategy {
         (Self {
             buy_commission, sell_commission, buy_fill_price, sell_fill_price,
             order_rejected, done,
-            phase: 0, instrument: 0, start: Instant::now(),
+            phase: 0, start: Instant::now(),
         }, handle)
     }
 }
