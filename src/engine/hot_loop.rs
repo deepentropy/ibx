@@ -572,6 +572,18 @@ impl<S: Strategy> HotLoop<S> {
                     last_result
                 }
                 OrderRequest::Modify { new_order_id, order_id, price, qty } => {
+                    // Insert new order entry so exec reports for new_order_id are tracked
+                    if let Some(orig) = self.context.order(order_id).copied() {
+                        self.context.insert_order(crate::types::Order {
+                            order_id: new_order_id,
+                            instrument: orig.instrument,
+                            side: orig.side,
+                            qty,
+                            price,
+                            status: crate::types::OrderStatus::PendingSubmit,
+                            filled: 0,
+                        });
+                    }
                     let clord_str = new_order_id.to_string();
                     let orig_clord = order_id.to_string();
                     let qty_str = qty.to_string();
@@ -695,7 +707,7 @@ impl<S: Strategy> HotLoop<S> {
             "0" | "A" | "E" => crate::types::OrderStatus::Submitted,
             "1" => crate::types::OrderStatus::PartiallyFilled,
             "2" => crate::types::OrderStatus::Filled,
-            "4" | "6" | "C" => crate::types::OrderStatus::Cancelled,
+            "4" | "5" | "6" | "C" => crate::types::OrderStatus::Cancelled,
             "8" => crate::types::OrderStatus::Rejected,
             _ => return,
         };

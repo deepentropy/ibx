@@ -267,6 +267,10 @@ impl Context {
         self.market.register(con_id)
     }
 
+    pub fn set_symbol(&mut self, id: InstrumentId, symbol: String) {
+        self.market.set_symbol(id, symbol);
+    }
+
     pub fn set_quote(&mut self, id: InstrumentId, quote: Quote) {
         *self.market.quote_mut(id) = quote;
     }
