@@ -87,9 +87,8 @@ pub fn build_farm_encrypted_logon(
         username.to_string()
     };
     let slot = match farm_name {
-        "ushmds" | "cashhmds" => 18,
-        "secdefil" => 19,
-        _ => 17,
+        "usfarm" => 18,
+        _ => 17, // ushmds, cashhmds, secdefil, fundfarm, usopt
     };
     let farm_id = format!("{}/{}/{}", display_name, slot, farm_name);
     let farm_id_len = farm_id.len().to_string();
@@ -135,14 +134,14 @@ pub fn build_farm_encrypted_logon(
 
 /// Execute farm logon exchange: recv encrypted msgs → SOFT_TOKEN → logon ACK.
 ///
-/// Returns (read_iv, sign_iv) for HMAC message signing/verification.
+/// Returns (read_iv, sign_iv, remaining_buf) for HMAC message signing/verification.
 pub fn farm_logon_exchange(
     stream: &mut TcpStream,
     channel: &mut SecureChannel,
     session_token: &BigUint,
     read_mac_key: &[u8],
     initial_read_iv: &[u8],
-) -> io::Result<(Vec<u8>, Vec<u8>)> {
+) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     stream.set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FARM_LOGON)))?;
     let mut buf = Vec::new();
     let mut read_iv = initial_read_iv.to_vec();
@@ -203,7 +202,11 @@ pub fn farm_logon_exchange(
                     .write_iv()
                     .map(|iv| iv.to_vec())
                     .unwrap_or_default();
-                return Ok((read_iv, sign_iv));
+                if !buf.is_empty() {
+                    log::warn!("{} bytes remaining in buffer after logon ACK",
+                        buf.len());
+                }
+                return Ok((read_iv, sign_iv, buf));
             } else if fields.get(&35).map(|s| s.as_str()) == Some("3") {
                 let text = fields.get(&58).map(|s| s.as_str()).unwrap_or("unknown");
                 return Err(io::Error::new(
@@ -280,6 +283,7 @@ fn connect_farm(
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DNS resolution failed"))?;
     let farm_tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(TIMEOUT_FARM_CONNECT))?;
+    farm_tcp.set_nodelay(true)?;
 
     // DH key exchange (raw TCP)
     let mut channel = SecureChannel::new();
@@ -316,15 +320,14 @@ fn connect_farm(
     // Logon exchange: AUTH_START → SOFT_TOKEN → logon ACK
     let read_mac_key = channel.key_block().map(|kb| kb[84..104].to_vec()).unwrap_or_default();
     let initial_read_iv = channel.key_block().map(|kb| kb[48..64].to_vec()).unwrap_or_default();
-    let (read_iv, sign_iv) = farm_logon_exchange(
+    let (read_iv, sign_iv, logon_remaining) = farm_logon_exchange(
         &mut stream, &mut channel, session_key, &read_mac_key, &initial_read_iv,
     )?;
-    log::info!("{} logon exchange complete", farm_id);
+    log::info!("{} logon exchange complete, {} bytes remaining", farm_id, logon_remaining.len());
 
     let sign_mac_key = channel.key_block().map(|kb| kb[64..84].to_vec()).unwrap_or_default();
 
     // Send routing table request (6040=112) — farm expects this after logon.
-    // Must be FIXCOMP-wrapped and HMAC-signed (matching Python _farm_init).
     let channel_id = if farm_id == "ushmds" { "2" } else { "1" };
     let now = chrono_free_timestamp();
     let routing_msg = fix_build(&[
@@ -334,12 +337,14 @@ fn connect_farm(
         (6556, channel_id),
     ], 1);
     let wrapped = fixcomp::fixcomp_build(&routing_msg);
+
     let (signed, new_sign_iv) = fix::fix_sign(&wrapped, &sign_mac_key, &sign_iv);
     stream.write_all(&signed)?;
+    let final_sign_iv = new_sign_iv;
     log::info!("{} sent routing request (6556={})", farm_id, channel_id);
 
     // Read routing response (stream is still blocking)
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut resp_buf = Vec::new();
     loop {
         let mut tmp = [0u8; 8192];
@@ -351,25 +356,66 @@ fn connect_farm(
             Err(e) => return Err(e),
         }
     }
+    log::info!("{} routing response: {} bytes", farm_id, resp_buf.len());
 
     // Create Connection (switches to non-blocking), inject routing bytes
     let mut conn = Connection::new_raw(stream)?;
-    conn.set_keys(sign_mac_key, new_sign_iv, read_mac_key, read_iv);
+    conn.set_keys(sign_mac_key, final_sign_iv, read_mac_key, read_iv);
     conn.seq = 1; // routing request used seq 1
 
+    // Inject logon remaining bytes + routing response into connection buffer.
+    // Python processes logon remaining before routing, but both need read_iv chaining.
+    if !logon_remaining.is_empty() {
+        conn.inject_buf(&logon_remaining);
+    }
     if !resp_buf.is_empty() {
         conn.inject_buf(&resp_buf);
-        // Extract and unsign all routing frames to advance read_iv chain
-        let frames = conn.extract_frames();
-        for frame in &frames {
-            let raw = match frame {
-                crate::protocol::connection::Frame::FixComp(d) => d,
-                crate::protocol::connection::Frame::Binary(d) => d,
-                crate::protocol::connection::Frame::Fix(d) => d,
-            };
-            conn.unsign(raw);
+    }
+    // Extract and process all frames (unsign + respond to TestRequests, like Python).
+    let frames = conn.extract_frames();
+    for frame in &frames {
+        match frame {
+            crate::protocol::connection::Frame::FixComp(raw) => {
+                let (unsigned, _valid) = conn.unsign(raw);
+                let inner = fixcomp::fixcomp_decompress(&unsigned);
+                for m in &inner {
+                    let parsed = fix_parse(m);
+                    let mt = parsed.get(&35).map(|s| s.as_str()).unwrap_or("");
+                    log::debug!("{} routing FIXCOMP inner 35={}", farm_id, mt);
+                    if mt == "1" {
+                        let test_id = parsed.get(&112).cloned().unwrap_or_default();
+                        let ts = chrono_free_timestamp();
+                        let _ = conn.send_fix(&[
+                            (fix::TAG_MSG_TYPE, "0"),
+                            (fix::TAG_SENDING_TIME, &ts),
+                            (112, &test_id),
+                        ]);
+                    }
+                }
+            }
+            crate::protocol::connection::Frame::Fix(raw) => {
+                let (unsigned, _valid) = conn.unsign(raw);
+                let parsed = fix_parse(&unsigned);
+                let mt = parsed.get(&35).map(|s| s.as_str()).unwrap_or("");
+                log::debug!("{} routing FIX 35={}", farm_id, mt);
+                if mt == "1" {
+                    let test_id = parsed.get(&112).cloned().unwrap_or_default();
+                    let ts = chrono_free_timestamp();
+                    let _ = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, "0"),
+                        (fix::TAG_SENDING_TIME, &ts),
+                        (112, &test_id),
+                    ]);
+                }
+            }
+            crate::protocol::connection::Frame::Binary(raw) => {
+                let (_unsigned, _valid) = conn.unsign(raw);
+                log::info!("{} routing 8=O: {} bytes", farm_id, raw.len());
+            }
         }
-        log::info!("{} routing response: {} bytes, {} frames", farm_id, resp_buf.len(), frames.len());
+    }
+    if !frames.is_empty() {
+        log::info!("{} post-logon frames: {} frames, seq now {}", farm_id, frames.len(), conn.seq);
     }
     Ok(conn)
 }

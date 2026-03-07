@@ -94,6 +94,76 @@ fn integration_suite() {
         account_id: gw.account_id.clone(),
     };
 
+    // Raw subscribe test: send subscribe directly on farm connection, no hot loop
+    {
+        println!("--- RAW SUBSCRIBE TEST ---");
+        let conn = &mut conns.farm;
+        let result = conn.send_fixcomp(&[
+            (fix::TAG_MSG_TYPE, "V"),
+            (fix::TAG_SENDING_TIME, &ib_engine::gateway::chrono_free_timestamp()),
+            (263, "1"),
+            (146, "2"),
+            (262, "1"),
+            (6008, "756733"),
+            (207, "BEST"),
+            (167, "CS"),
+            (264, "442"),
+            (6088, "Socket"),
+            (9830, "1"),
+            (9839, "1"),
+            (262, "2"),
+            (6008, "756733"),
+            (207, "BEST"),
+            (167, "CS"),
+            (264, "443"),
+            (6088, "Socket"),
+            (9830, "1"),
+            (9839, "1"),
+        ]);
+        println!("  subscribe sent: {:?}, seq={}", result, conn.seq);
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut got_data = false;
+        while Instant::now() < deadline {
+            match conn.try_recv() {
+                Ok(0) => {} // WouldBlock
+                Ok(n) => {
+                    println!("  recv {} bytes, total buffered: {}", n, conn.buffered());
+                    let frames = conn.extract_frames();
+                    println!("  {} frames extracted", frames.len());
+                    for frame in &frames {
+                        let (raw, label) = match frame {
+                            Frame::FixComp(r) => (r, "FIXCOMP"),
+                            Frame::Binary(r) => (r, "Binary"),
+                            Frame::Fix(r) => (r, "FIX"),
+                        };
+                        let (unsigned, valid) = conn.unsign(raw);
+                        if label == "FIXCOMP" {
+                            let inner = fixcomp::fixcomp_decompress(&unsigned);
+                            for m in &inner {
+                                let preview = String::from_utf8_lossy(&m[..std::cmp::min(150, m.len())]);
+                                println!("  {} inner (valid={}): {}", label, valid, preview);
+                            }
+                        } else {
+                            let preview = String::from_utf8_lossy(&unsigned[..std::cmp::min(150, unsigned.len())]);
+                            println!("  {} (valid={}): {}", label, valid, preview);
+                        }
+                        got_data = true;
+                    }
+                }
+                Err(e) => {
+                    println!("  recv error: {}", e);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !got_data {
+            println!("  NO DATA received in 15s");
+        }
+        println!();
+    }
+
     // Phase 14: Account PnL — MUST be first hot loop to receive CCP init burst
     conns = phase_account_pnl(conns);
 

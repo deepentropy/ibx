@@ -1,3 +1,37 @@
+## 2026-03-06 - Farm Subscription Debug: Market Hours Confirmed
+
+### Goal
+Debug why farm doesn't respond to 35=V market data subscribe messages.
+
+### Investigation
+- Cross-validated fix_sign: byte-for-byte identical to Python reference
+- Fixed farm slot IDs: usfarm=18 (was 17)
+- Added TCP_NODELAY to farm sockets
+- Preserved logon remaining bytes in buffer
+- Added routing response processing with TestRequest handling
+- Verified FIXCOMP format, field tags/values, NS_VERSION, key block offsets all match Python
+
+### Root Cause
+**Not a protocol bug — market hours issue.** Test ran at 5:08 PM ET (after 4 PM close).
+- Farm connection is solid: stays alive 210+ seconds, heartbeats flow correctly
+- Orders work perfectly: Limit ack 113ms, Cancel 126ms, Stop/StopLimit all confirmed
+- Subscribe messages match Python format exactly (verified via hex decode)
+- Farm simply doesn't respond with 35=Q/35=L/35=P after market close on paper accounts
+
+### Evidence
+- 2026-03-05 benchmarks showed ticks flowing during market hours (P50=8-14us, ~4 ticks/sec)
+- 2026-03-06 test: 0 ticks in all phases, but all orders work, connection stable
+- HMDS also unavailable (connection closed) — consistent with after-hours
+
+### Cleaned Up
+- Removed debug hex logging from send_fix/send_fixcomp
+- Downgraded routing frame logging from warn to info/debug
+
+### Next
+- Re-run integration test during market hours (Mon-Fri 9:30-16:00 ET) to confirm ticks flow
+
+---
+
 ## 2026-03-06 - Single-Connection Integration Suite
 
 ### Goal
