@@ -195,7 +195,8 @@ impl<S: Strategy> HotLoop<S> {
                         self.strategy.on_disconnect(&mut self.context);
                         return;
                     }
-                    Ok(_) => {
+                    Ok(n) => {
+                        log::info!("Farm recv: {} bytes, buffered: {}", n, conn.buffered());
                         let now = Instant::now();
                         self.hb.last_farm_recv = now;
                         self.context.recv_at = now;
@@ -203,19 +204,29 @@ impl<S: Strategy> HotLoop<S> {
                     }
                 }
                 let frames = conn.extract_frames();
+                log::info!("Farm frames: {}", frames.len());
                 let mut msgs = Vec::new();
-                for frame in frames {
+                for frame in &frames {
                     match frame {
                         Frame::FixComp(raw) => {
-                            let (unsigned, _valid) = conn.unsign(&raw);
-                            msgs.extend(fixcomp::fixcomp_decompress(&unsigned));
+                            let (unsigned, _valid) = conn.unsign(raw);
+                            let inner = fixcomp::fixcomp_decompress(&unsigned);
+                            for m in &inner {
+                                log::info!("Farm FIXCOMP inner: {:?}",
+                                    String::from_utf8_lossy(&m[..std::cmp::min(120, m.len())]));
+                            }
+                            msgs.extend(inner);
                         }
                         Frame::Binary(raw) => {
-                            let (unsigned, _valid) = conn.unsign(&raw);
+                            let (unsigned, _valid) = conn.unsign(raw);
+                            log::info!("Farm Binary: {:?}",
+                                String::from_utf8_lossy(&unsigned[..std::cmp::min(120, unsigned.len())]));
                             msgs.push(unsigned);
                         }
                         Frame::Fix(raw) => {
-                            let (unsigned, _valid) = conn.unsign(&raw);
+                            let (unsigned, _valid) = conn.unsign(raw);
+                            log::info!("Farm FIX: {:?}",
+                                String::from_utf8_lossy(&unsigned[..std::cmp::min(120, unsigned.len())]));
                             msgs.push(unsigned);
                         }
                     }
@@ -238,16 +249,23 @@ impl<S: Strategy> HotLoop<S> {
 
         match msg_type {
             "P" => self.handle_tick_data(msg),
-            "Q" => self.handle_subscription_ack(msg),
+            "Q" => {
+                log::info!("Farm 35=Q subscription ack received");
+                self.handle_subscription_ack(msg);
+            }
             "0" => {} // heartbeat — timestamp already updated in try_recv
             "1" => {
                 // Test request — respond with heartbeat containing the test req ID
                 let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
                 if let Some(conn) = self.farm_conn.as_mut() {
-                    let _ = conn.send_fix(&[
+                    let ts = chrono_free_timestamp();
+                    let result = conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                        (fix::TAG_SENDING_TIME, &ts),
                         (fix::TAG_TEST_REQ_ID, &test_id),
                     ]);
+                    log::info!("Farm TestReq '{}' → heartbeat response seq={} result={:?}",
+                        test_id, conn.seq, result);
                     self.hb.last_farm_sent = Instant::now();
                 }
             }
@@ -402,33 +420,53 @@ impl<S: Strategy> HotLoop<S> {
     }
 
     /// Send FIX 35=V market data subscribe for an instrument.
+    /// Sends two entries: BidAsk (264=442) and Last (264=443), matching IB protocol.
     fn send_mktdata_subscribe(&mut self, con_id: i64, instrument: InstrumentId) {
-        let req_id = self.next_md_req_id;
-        self.next_md_req_id += 1;
+        let bid_ask_id = self.next_md_req_id;
+        let last_id = self.next_md_req_id + 1;
+        self.next_md_req_id += 2;
 
-        // Track pending subscription
-        self.md_req_to_instrument.push((req_id, instrument));
+        // Track pending subscriptions (both req_ids map to same instrument)
+        self.md_req_to_instrument.push((bid_ask_id, instrument));
+        self.md_req_to_instrument.push((last_id, instrument));
 
-        // Track active subscription for this instrument
+        // Track active subscriptions for this instrument
         match self.instrument_md_reqs.iter_mut().find(|(id, _)| *id == instrument) {
-            Some((_, reqs)) => reqs.push(req_id),
-            None => self.instrument_md_reqs.push((instrument, vec![req_id])),
+            Some((_, reqs)) => { reqs.push(bid_ask_id); reqs.push(last_id); }
+            None => self.instrument_md_reqs.push((instrument, vec![bid_ask_id, last_id])),
         }
 
         if let Some(conn) = self.farm_conn.as_mut() {
-            let req_id_str = req_id.to_string();
+            let bid_ask_str = bid_ask_id.to_string();
+            let last_str = last_id.to_string();
             let con_id_str = (con_id as u32).to_string();
+            let ts = chrono_free_timestamp();
             let _ = conn.send_fixcomp(&[
                 (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                (262, &req_id_str),
+                (fix::TAG_SENDING_TIME, &ts),
                 (263, "1"), // Subscribe
-                (146, "1"), // NumRelatedSym
+                (146, "2"), // 2 entries: BidAsk + Last
+                // Entry 1: BidAsk
+                (262, &bid_ask_str),
                 (6008, &con_id_str),
                 (207, "BEST"),
                 (167, "CS"),
                 (264, "442"), // BidAsk
+                (6088, "Socket"),
                 (9830, "1"),
+                (9839, "1"),
+                // Entry 2: Last
+                (262, &last_str),
+                (6008, &con_id_str),
+                (207, "BEST"),
+                (167, "CS"),
+                (264, "443"), // Last
+                (6088, "Socket"),
+                (9830, "1"),
+                (9839, "1"),
             ]);
+            log::info!("Sent 35=V subscribe: con_id={} ids={},{} seq={}",
+                con_id, bid_ask_id, last_id, conn.seq);
             self.hb.last_farm_sent = Instant::now();
         }
     }
@@ -992,6 +1030,12 @@ impl<S: Strategy> HotLoop<S> {
                     let _ = (key, value);
                 }
                 ControlCommand::Shutdown => {
+                    // Unsubscribe all active market data before stopping
+                    let instruments: Vec<InstrumentId> = self.instrument_md_reqs
+                        .iter().map(|(id, _)| *id).collect();
+                    for instrument in instruments {
+                        self.send_mktdata_unsubscribe(instrument);
+                    }
                     self.running = false;
                     self.strategy.on_disconnect(&mut self.context);
                 }
@@ -1644,15 +1688,16 @@ mod tests {
         tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
         engine.poll_control_commands();
 
-        // Should have a pending subscription with req_id=1
-        assert_eq!(engine.md_req_to_instrument.len(), 1);
+        // Should have 2 pending subscriptions (BidAsk + Last) with req_id=1,2
+        assert_eq!(engine.md_req_to_instrument.len(), 2);
         assert_eq!(engine.md_req_to_instrument[0], (1, 0));
+        assert_eq!(engine.md_req_to_instrument[1], (2, 0));
         // Should track active subscription
         assert_eq!(engine.instrument_md_reqs.len(), 1);
         assert_eq!(engine.instrument_md_reqs[0].0, 0);
-        assert_eq!(engine.instrument_md_reqs[0].1, vec![1]);
-        // Next req_id should be 2
-        assert_eq!(engine.next_md_req_id, 2);
+        assert_eq!(engine.instrument_md_reqs[0].1, vec![1, 2]);
+        // Next req_id should be 3
+        assert_eq!(engine.next_md_req_id, 3);
     }
 
     #[test]
@@ -1958,10 +2003,10 @@ mod tests {
         engine.poll_control_commands();
 
         // register() deduplicates, so both should map to instrument 0
-        // But we should have 2 MDReqIDs
-        assert_eq!(engine.next_md_req_id, 3); // started at 1, allocated 2
+        // Each subscribe allocates 2 req_ids (BidAsk + Last)
+        assert_eq!(engine.next_md_req_id, 5); // started at 1, allocated 2+2
         assert_eq!(engine.instrument_md_reqs.len(), 1); // one instrument
-        assert_eq!(engine.instrument_md_reqs[0].1.len(), 2); // two req_ids
+        assert_eq!(engine.instrument_md_reqs[0].1.len(), 4); // four req_ids (2 per subscribe)
     }
 
     #[test]

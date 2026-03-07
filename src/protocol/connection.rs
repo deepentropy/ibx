@@ -89,8 +89,9 @@ impl Connection {
     }
 
     /// Create a new connection from a raw TCP stream (for farm connections).
-    /// Sets the stream to non-blocking mode.
+    /// Sets the stream to non-blocking mode and enables TCP_NODELAY.
     pub fn new_raw(stream: TcpStream) -> io::Result<Self> {
+        stream.set_nodelay(true)?;
         stream.set_nonblocking(true)?;
         Ok(Self {
             stream: Stream::Raw(stream),
