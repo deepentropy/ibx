@@ -260,14 +260,12 @@ pub struct Gateway {
     pub ccp_token: String,
     pub heartbeat_interval: u64,
     /// Stored for farm reconnection.
-    #[allow(dead_code)]
-    hw_info: String,
-    #[allow(dead_code)]
-    encoded: String,
+    pub hw_info: String,
+    pub encoded: String,
 }
 
 /// Connect to a farm (usfarm or ushmds): DH → encrypted logon → SOFT_TOKEN → routing → Connection.
-fn connect_farm(
+pub fn connect_farm(
     host: &str,
     farm_id: &str,
     username: &str,

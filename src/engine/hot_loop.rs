@@ -698,7 +698,8 @@ impl<S: Strategy> HotLoop<S> {
                 }
                 OrderRequest::Modify { new_order_id, order_id, price, qty } => {
                     // Insert new order entry so exec reports for new_order_id are tracked
-                    if let Some(orig) = self.context.order(order_id).copied() {
+                    let orig = self.context.order(order_id).copied();
+                    if let Some(orig) = orig {
                         self.context.insert_order(crate::types::Order {
                             order_id: new_order_id,
                             instrument: orig.instrument,
@@ -714,13 +715,27 @@ impl<S: Strategy> HotLoop<S> {
                     let qty_str = qty.to_string();
                     let price_str = format_price(price);
                     let now = chrono_free_timestamp();
+                    let side_str = orig.map(|o| fix_side(o.side)).unwrap_or("1");
+                    let symbol = orig.map(|o| self.context.market.symbol(o.instrument).to_string())
+                        .unwrap_or_default();
                     conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
                         (fix::TAG_SENDING_TIME, &now),
-                        (11, &clord_str),
+                        (11, &clord_str),   // ClOrdID
                         (41, &orig_clord),  // OrigClOrdID
-                        (38, &qty_str),
-                        (44, &price_str),
+                        (1, &self.account_id), // Account
+                        (21, "2"),          // HandlInst = Automated
+                        (55, &symbol),      // Symbol
+                        (54, side_str),     // Side
+                        (38, &qty_str),     // OrderQty
+                        (40, "2"),          // OrdType = Limit
+                        (44, &price_str),   // Price
+                        (59, "0"),          // TIF = DAY
+                        (60, &now),         // TransactTime
+                        (167, "STK"),       // SecurityType
+                        (100, "SMART"),     // ExDestination
+                        (15, "USD"),        // Currency
+                        (204, "0"),         // CustomerOrFirm
                     ])
                 }
             };
@@ -838,12 +853,15 @@ impl<S: Strategy> HotLoop<S> {
             parsed.get(&103).map(|s| s.as_str()).unwrap_or(""));
 
         // Map FIX OrdStatus (tag 39) to our OrderStatus
+        // 39=5 (Replaced) means the modify succeeded — the new order is now live
+        // 39=6 (PendingCancel) is intermediate — ignore, wait for terminal state
         let status = match ord_status {
-            "0" | "A" | "E" => crate::types::OrderStatus::Submitted,
+            "0" | "A" | "E" | "5" => crate::types::OrderStatus::Submitted,
             "1" => crate::types::OrderStatus::PartiallyFilled,
             "2" => crate::types::OrderStatus::Filled,
-            "4" | "5" | "6" | "C" => crate::types::OrderStatus::Cancelled,
+            "4" | "C" => crate::types::OrderStatus::Cancelled,
             "8" => crate::types::OrderStatus::Rejected,
+            "6" => return, // PendingCancel — not terminal
             _ => return,
         };
 
