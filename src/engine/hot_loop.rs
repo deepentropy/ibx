@@ -663,6 +663,318 @@ impl<S: Strategy> HotLoop<S> {
                         (204, "0"),
                     ])
                 }
+                OrderRequest::SubmitStopGtc { order_id, instrument, side, qty, stop_price, outside_rth } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price: stop_price, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let stop_str = format_price(stop_price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    let mut fields: Vec<(u32, &str)> = vec![
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "3"),          // OrdType = Stop
+                        (99, &stop_str),
+                        (59, "1"),          // TIF = GTC
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ];
+                    if outside_rth {
+                        fields.push((6433, "1"));
+                    }
+                    conn.send_fix(&fields)
+                }
+                OrderRequest::SubmitStopLimitGtc { order_id, instrument, side, qty, price, stop_price, outside_rth } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let stop_str = format_price(stop_price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    let mut fields: Vec<(u32, &str)> = vec![
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "4"),          // OrdType = Stop Limit
+                        (44, &price_str),
+                        (99, &stop_str),
+                        (59, "1"),          // TIF = GTC
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ];
+                    if outside_rth {
+                        fields.push((6433, "1"));
+                    }
+                    conn.send_fix(&fields)
+                }
+                OrderRequest::SubmitLimitIoc { order_id, instrument, side, qty, price } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "2"),          // OrdType = Limit
+                        (44, &price_str),
+                        (59, "3"),          // TIF = IOC
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitLimitFok { order_id, instrument, side, qty, price } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "2"),          // OrdType = Limit
+                        (44, &price_str),
+                        (59, "4"),          // TIF = FOK
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitTrailingStop { order_id, instrument, side, qty, trail_amt } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price: 0, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let trail_str = format_price(trail_amt);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "P"),          // OrdType = Trailing Stop
+                        (99, &trail_str),   // StopPx = trail amount
+                        (59, "0"),          // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitTrailingStopLimit { order_id, instrument, side, qty, price, trail_amt } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let trail_str = format_price(trail_amt);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "P"),          // OrdType = Trailing Stop (IB uses P for both)
+                        (44, &price_str),   // Limit price
+                        (99, &trail_str),   // StopPx = trail amount
+                        (59, "0"),          // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitMoc { order_id, instrument, side, qty } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price: 0, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "5"),          // OrdType = Market on Close
+                        (59, "0"),          // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitLoc { order_id, instrument, side, qty, price } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "B"),          // OrdType = Limit on Close
+                        (44, &price_str),   // Limit price
+                        (59, "0"),          // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitMit { order_id, instrument, side, qty, stop_price } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price: stop_price, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let stop_str = format_price(stop_price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "J"),          // OrdType = Market if Touched
+                        (99, &stop_str),    // StopPx = trigger price
+                        (59, "0"),          // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitLit { order_id, instrument, side, qty, price, stop_price } => {
+                    self.context.insert_order(crate::types::Order {
+                        order_id, instrument, side, price, qty, filled: 0,
+                        status: crate::types::OrderStatus::PendingSubmit,
+                    });
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let stop_str = format_price(stop_price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "K"),          // OrdType = Limit if Touched
+                        (44, &price_str),   // Limit price
+                        (99, &stop_str),    // StopPx = trigger price
+                        (59, "0"),          // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
                 OrderRequest::Cancel { order_id } => {
                     let clord_str = format!("C{}", order_id);
                     let orig_clord = order_id.to_string();
@@ -819,6 +1131,12 @@ impl<S: Strategy> HotLoop<S> {
                     self.hb.last_ccp_sent = Instant::now();
                 }
             }
+            "3" => {
+                // Session Reject
+                let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("unknown");
+                let ref_tag = parsed.get(&371).map(|s| s.as_str()).unwrap_or("?");
+                log::warn!("SessionReject: reason='{}' refTag={}", reason, ref_tag);
+            }
             "U" => {
                 // IB custom message — route by 6040 comm type
                 if let Some(comm) = parsed.get(&6040) {
@@ -847,10 +1165,17 @@ impl<S: Strategy> HotLoop<S> {
             stripped.parse::<u64>().ok()
         }).unwrap_or(0);
 
-        log::info!("ExecReport: 39={} 150={} 11={} 58={} 103={}",
-            ord_status, exec_type, clord_id,
-            parsed.get(&58).map(|s| s.as_str()).unwrap_or(""),
-            parsed.get(&103).map(|s| s.as_str()).unwrap_or(""));
+        if ord_status == "8" {
+            log::warn!("ExecReport REJECTED: clord={} reason='{}' 103={}",
+                clord_id,
+                parsed.get(&58).map(|s| s.as_str()).unwrap_or("?"),
+                parsed.get(&103).map(|s| s.as_str()).unwrap_or("?"));
+        } else {
+            log::info!("ExecReport: 39={} 150={} 11={} 58={} 103={}",
+                ord_status, exec_type, clord_id,
+                parsed.get(&58).map(|s| s.as_str()).unwrap_or(""),
+                parsed.get(&103).map(|s| s.as_str()).unwrap_or(""));
+        }
 
         // Map FIX OrdStatus (tag 39) to our OrderStatus
         // 39=5 (Replaced) means the modify succeeded — the new order is now live

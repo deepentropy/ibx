@@ -289,6 +289,25 @@ fn integration_suite() {
     conns = phase_stop_limit_order(conns);
     conns = phase_modify_order(conns);
 
+    // New order type phases — always
+    conns = phase_trailing_stop(conns);
+    conns = phase_trailing_stop_limit(conns);
+    conns = phase_limit_ioc(conns);
+    conns = phase_limit_fok(conns);
+    conns = phase_stop_gtc(conns);
+    conns = phase_stop_limit_gtc(conns);
+    conns = phase_mit_order(conns);
+    conns = phase_lit_order(conns);
+
+    // MOC/LOC only during regular hours (IB rejects outside regular hours)
+    if needs_ticks {
+        conns = phase_moc_order(conns);
+        conns = phase_loc_order(conns);
+    } else {
+        println!("--- Phase 27: MOC Order (SPY) ---\n  SKIP: {:?} — only during regular hours\n", session);
+        println!("--- Phase 28: LOC Order (SPY) ---\n  SKIP: {:?} — only during regular hours\n", session);
+    }
+
     // Infrastructure phases — always
     conns = phase_subscribe_unsubscribe(conns);
     conns = phase_heartbeat_keepalive(conns);
@@ -304,9 +323,10 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let skipped = if needs_ticks { 0 } else { 6 };
+    let total_phases = 28;
+    let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
-        18 - skipped, 18, skipped, session, suite_start.elapsed().as_secs_f64());
+        total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
 }
 
 // ─── Phase 1: CCP auth + farm logon (no hot loop) ───
@@ -1891,6 +1911,322 @@ impl Strategy for CommissionStrategy {
 
     fn on_disconnect(&mut self, _ctx: &mut Context) {}
 }
+
+// ─── Generic submit+cancel strategy for new order types ───
+
+struct SubmitCancelStrategy<F: Fn(&mut Context) -> OrderId + Send> {
+    submit_fn: F,
+    submitted: Arc<AtomicBool>,
+    order_acked: Arc<AtomicBool>,
+    cancel_sent: Arc<AtomicBool>,
+    order_cancelled: Arc<AtomicBool>,
+    order_rejected: Arc<AtomicBool>,
+    order_id: Option<OrderId>,
+}
+
+struct SubmitCancelHandle {
+    submitted: Arc<AtomicBool>,
+    order_acked: Arc<AtomicBool>,
+    order_cancelled: Arc<AtomicBool>,
+    order_rejected: Arc<AtomicBool>,
+}
+
+fn make_submit_cancel<F: Fn(&mut Context) -> OrderId + Send>(f: F) -> (SubmitCancelStrategy<F>, SubmitCancelHandle) {
+    let submitted = Arc::new(AtomicBool::new(false));
+    let order_acked = Arc::new(AtomicBool::new(false));
+    let cancel_sent = Arc::new(AtomicBool::new(false));
+    let order_cancelled = Arc::new(AtomicBool::new(false));
+    let order_rejected = Arc::new(AtomicBool::new(false));
+    let handle = SubmitCancelHandle {
+        submitted: submitted.clone(),
+        order_acked: order_acked.clone(),
+        order_cancelled: order_cancelled.clone(),
+        order_rejected: order_rejected.clone(),
+    };
+    (SubmitCancelStrategy {
+        submit_fn: f,
+        submitted, order_acked, cancel_sent, order_cancelled, order_rejected,
+        order_id: None,
+    }, handle)
+}
+
+impl<F: Fn(&mut Context) -> OrderId + Send> Strategy for SubmitCancelStrategy<F> {
+    fn on_start(&mut self, ctx: &mut Context) {
+        let id = (self.submit_fn)(ctx);
+        self.order_id = Some(id);
+        self.submitted.store(true, Ordering::Relaxed);
+    }
+
+    fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {}
+
+    fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
+        match update.status {
+            OrderStatus::Submitted => {
+                self.order_acked.store(true, Ordering::Relaxed);
+                if !self.cancel_sent.load(Ordering::Relaxed) {
+                    if let Some(id) = self.order_id {
+                        ctx.cancel(id);
+                        self.cancel_sent.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+            OrderStatus::Cancelled => {
+                self.order_cancelled.store(true, Ordering::Relaxed);
+            }
+            OrderStatus::Rejected => {
+                self.order_rejected.store(true, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_disconnect(&mut self, _ctx: &mut Context) {}
+}
+
+fn run_submit_cancel_phase<F: Fn(&mut Context) -> OrderId + Send + 'static>(
+    conns: Conns,
+    phase_name: &str,
+    submit_fn: F,
+) -> Conns {
+    println!("--- {} ---", phase_name);
+
+    let account_id = conns.account_id;
+    let (strategy, handle) = make_submit_cancel(submit_fn);
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if handle.order_cancelled.load(Ordering::Relaxed) || handle.order_rejected.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if handle.order_rejected.load(Ordering::Relaxed) {
+        println!("  SKIP: Order rejected\n");
+        return conns;
+    }
+
+    assert!(handle.submitted.load(Ordering::Relaxed), "Order was never submitted");
+    assert!(handle.order_acked.load(Ordering::Relaxed), "Order was never acknowledged");
+    assert!(handle.order_cancelled.load(Ordering::Relaxed), "Order was never cancelled");
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 19: Trailing Stop order ───
+
+fn phase_trailing_stop(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 19: Trailing Stop Order (SPY)", |ctx| {
+        ctx.submit_trailing_stop(0, Side::Sell, 1, 5_00_000_000) // $5.00 trail
+    })
+}
+
+// ─── Phase 20: Trailing Stop Limit order ───
+
+fn phase_trailing_stop_limit(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 20: Trailing Stop Limit Order (SPY)", |ctx| {
+        ctx.submit_trailing_stop_limit(0, Side::Sell, 1, 1_00_000_000, 5_00_000_000) // $1 lmt offset, $5 trail
+    })
+}
+
+// ─── Phase 21: Limit IOC order ───
+
+fn phase_limit_ioc(conns: Conns) -> Conns {
+    // IOC at $1 will be immediately cancelled (no fill at that price)
+    println!("--- Phase 21: Limit IOC Order (SPY) ---");
+
+    let account_id = conns.account_id;
+    let submitted = Arc::new(AtomicBool::new(false));
+    let order_cancelled = Arc::new(AtomicBool::new(false));
+    let order_rejected = Arc::new(AtomicBool::new(false));
+    let order_acked = Arc::new(AtomicBool::new(false));
+
+    let sub = submitted.clone();
+    let can = order_cancelled.clone();
+    let rej = order_rejected.clone();
+    let ack = order_acked.clone();
+
+    struct IocStrategy {
+        submitted: Arc<AtomicBool>,
+        order_cancelled: Arc<AtomicBool>,
+        order_rejected: Arc<AtomicBool>,
+        order_acked: Arc<AtomicBool>,
+    }
+
+    impl Strategy for IocStrategy {
+        fn on_start(&mut self, ctx: &mut Context) {
+            ctx.submit_limit_ioc(0, Side::Buy, 1, 1_00_000_000); // $1.00
+            self.submitted.store(true, Ordering::Relaxed);
+        }
+        fn on_tick(&mut self, _: InstrumentId, _: &mut Context) {}
+        fn on_order_update(&mut self, update: &OrderUpdate, _: &mut Context) {
+            match update.status {
+                OrderStatus::Submitted => self.order_acked.store(true, Ordering::Relaxed),
+                OrderStatus::Cancelled => self.order_cancelled.store(true, Ordering::Relaxed),
+                OrderStatus::Rejected => self.order_rejected.store(true, Ordering::Relaxed),
+                _ => {}
+            }
+        }
+        fn on_disconnect(&mut self, _: &mut Context) {}
+    }
+
+    let strategy = IocStrategy { submitted: sub, order_cancelled: can.clone(), order_rejected: rej.clone(), order_acked: ack.clone() };
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if can.load(Ordering::Relaxed) || rej.load(Ordering::Relaxed) { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if rej.load(Ordering::Relaxed) {
+        println!("  SKIP: IOC order rejected\n");
+        return conns;
+    }
+
+    // IOC at $1 should either be acked then cancelled, or just cancelled immediately
+    assert!(submitted.load(Ordering::Relaxed), "Order was never submitted");
+    assert!(can.load(Ordering::Relaxed), "IOC order was not cancelled (should expire immediately at $1)");
+    println!("  PASS (IOC cancelled as expected — no fill at $1)\n");
+    conns
+}
+
+// ─── Phase 22: Limit FOK order ───
+
+fn phase_limit_fok(conns: Conns) -> Conns {
+    println!("--- Phase 22: Limit FOK Order (SPY) ---");
+
+    let account_id = conns.account_id;
+    let submitted = Arc::new(AtomicBool::new(false));
+    let order_cancelled = Arc::new(AtomicBool::new(false));
+    let order_rejected = Arc::new(AtomicBool::new(false));
+
+    let sub = submitted.clone();
+    let can = order_cancelled.clone();
+    let rej = order_rejected.clone();
+
+    struct FokStrategy {
+        submitted: Arc<AtomicBool>,
+        order_cancelled: Arc<AtomicBool>,
+        order_rejected: Arc<AtomicBool>,
+    }
+
+    impl Strategy for FokStrategy {
+        fn on_start(&mut self, ctx: &mut Context) {
+            ctx.submit_limit_fok(0, Side::Buy, 1, 1_00_000_000); // $1.00
+            self.submitted.store(true, Ordering::Relaxed);
+        }
+        fn on_tick(&mut self, _: InstrumentId, _: &mut Context) {}
+        fn on_order_update(&mut self, update: &OrderUpdate, _: &mut Context) {
+            match update.status {
+                OrderStatus::Cancelled => self.order_cancelled.store(true, Ordering::Relaxed),
+                OrderStatus::Rejected => self.order_rejected.store(true, Ordering::Relaxed),
+                _ => {}
+            }
+        }
+        fn on_disconnect(&mut self, _: &mut Context) {}
+    }
+
+    let strategy = FokStrategy { submitted: sub, order_cancelled: can.clone(), order_rejected: rej.clone() };
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if can.load(Ordering::Relaxed) || rej.load(Ordering::Relaxed) { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if rej.load(Ordering::Relaxed) {
+        println!("  SKIP: FOK order rejected\n");
+        return conns;
+    }
+
+    assert!(submitted.load(Ordering::Relaxed), "Order was never submitted");
+    assert!(can.load(Ordering::Relaxed), "FOK order was not cancelled (should expire immediately at $1)");
+    println!("  PASS (FOK cancelled as expected — no fill at $1)\n");
+    conns
+}
+
+// ─── Phase 23: Stop GTC order ───
+
+fn phase_stop_gtc(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 23: Stop GTC Order (SPY)", |ctx| {
+        ctx.submit_stop_gtc(0, Side::Sell, 1, 1_00_000_000, true) // $1.00 stop, outside RTH
+    })
+}
+
+// ─── Phase 24: Stop Limit GTC order ───
+
+fn phase_stop_limit_gtc(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 24: Stop Limit GTC Order (SPY)", |ctx| {
+        ctx.submit_stop_limit_gtc(0, Side::Sell, 1, 1_00_000_000, 1_00_000_000, true) // $1 limit, $1 stop, outside RTH
+    })
+}
+
+// ─── Phase 25: Market if Touched order ───
+
+fn phase_mit_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 25: Market if Touched Order (SPY)", |ctx| {
+        ctx.submit_mit(0, Side::Buy, 1, 1_00_000_000) // $1.00 trigger
+    })
+}
+
+// ─── Phase 26: Limit if Touched order ───
+
+fn phase_lit_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 26: Limit if Touched Order (SPY)", |ctx| {
+        // LIT BUY: trigger at $1, then buy at limit $2
+        ctx.submit_lit(0, Side::Buy, 1, 2_00_000_000, 1_00_000_000) // $2 limit, $1 trigger
+    })
+}
+
+// ─── Phase 27: Market on Close order ───
+
+fn phase_moc_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 27: MOC Order (SPY)", |ctx| {
+        ctx.submit_moc(0, Side::Buy, 1)
+    })
+}
+
+// ─── Phase 28: Limit on Close order ───
+
+fn phase_loc_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 28: LOC Order (SPY)", |ctx| {
+        ctx.submit_loc(0, Side::Buy, 1, 1_00_000_000) // $1.00 limit
+    })
+}
+
+// ─── Phase 17: Commission tracking ───
 
 fn phase_commission(conns: Conns) -> Conns {
     println!("--- Phase 17: Commission Tracking (GTC+OutsideRTH fill) ---");

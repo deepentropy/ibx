@@ -259,6 +259,204 @@ impl Context {
         id
     }
 
+    pub fn submit_stop_gtc(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        stop_price: Price,
+        outside_rth: bool,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitStopGtc {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            stop_price,
+            outside_rth,
+        });
+        id
+    }
+
+    pub fn submit_stop_limit_gtc(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        stop_price: Price,
+        outside_rth: bool,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitStopLimitGtc {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+            stop_price,
+            outside_rth,
+        });
+        id
+    }
+
+    pub fn submit_limit_ioc(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitLimitIoc {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+        });
+        id
+    }
+
+    pub fn submit_limit_fok(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitLimitFok {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+        });
+        id
+    }
+
+    pub fn submit_trailing_stop(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        trail_amt: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitTrailingStop {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            trail_amt,
+        });
+        id
+    }
+
+    pub fn submit_trailing_stop_limit(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        trail_amt: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitTrailingStopLimit {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+            trail_amt,
+        });
+        id
+    }
+
+    pub fn submit_moc(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitMoc {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+        });
+        id
+    }
+
+    pub fn submit_loc(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitLoc {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+        });
+        id
+    }
+
+    pub fn submit_mit(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        stop_price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitMit {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            stop_price,
+        });
+        id
+    }
+
+    pub fn submit_lit(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        stop_price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitLit {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+            stop_price,
+        });
+        id
+    }
+
     pub fn cancel(&mut self, order_id: OrderId) {
         self.pending_orders.push(OrderRequest::Cancel { order_id });
     }

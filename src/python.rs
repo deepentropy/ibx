@@ -310,6 +310,118 @@ impl IbEngine {
         Ok(order_id)
     }
 
+    /// Submit a GTC stop order. Returns OrderId.
+    fn submit_stop_gtc(&self, instrument: u32, side: &str, qty: u32, stop_price: f64, outside_rth: bool) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let stop_fixed = (stop_price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitStopGtc {
+            order_id, instrument, side, qty, stop_price: stop_fixed, outside_rth,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a GTC stop-limit order. Returns OrderId.
+    fn submit_stop_limit_gtc(&self, instrument: u32, side: &str, qty: u32, price: f64, stop_price: f64, outside_rth: bool) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        let stop_fixed = (stop_price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitStopLimitGtc {
+            order_id, instrument, side, qty, price: price_fixed, stop_price: stop_fixed, outside_rth,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit an IOC limit order. Returns OrderId.
+    fn submit_limit_ioc(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitIoc {
+            order_id, instrument, side, qty, price: price_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a FOK limit order. Returns OrderId.
+    fn submit_limit_fok(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitFok {
+            order_id, instrument, side, qty, price: price_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a trailing stop order. Returns OrderId.
+    fn submit_trailing_stop(&self, instrument: u32, side: &str, qty: u32, trail_amt: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let trail_fixed = (trail_amt * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitTrailingStop {
+            order_id, instrument, side, qty, trail_amt: trail_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a trailing stop-limit order. Returns OrderId.
+    fn submit_trailing_stop_limit(&self, instrument: u32, side: &str, qty: u32, price: f64, trail_amt: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        let trail_fixed = (trail_amt * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitTrailingStopLimit {
+            order_id, instrument, side, qty, price: price_fixed, trail_amt: trail_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Market on Close order. Returns OrderId.
+    fn submit_moc(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitMoc {
+            order_id, instrument, side, qty,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Limit on Close order. Returns OrderId.
+    fn submit_loc(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLoc {
+            order_id, instrument, side, qty, price: price_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Market if Touched order. Returns OrderId.
+    fn submit_mit(&self, instrument: u32, side: &str, qty: u32, stop_price: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let stop_fixed = (stop_price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitMit {
+            order_id, instrument, side, qty, stop_price: stop_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Limit if Touched order. Returns OrderId.
+    fn submit_lit(&self, instrument: u32, side: &str, qty: u32, price: f64, stop_price: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        let stop_fixed = (stop_price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLit {
+            order_id, instrument, side, qty, price: price_fixed, stop_price: stop_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
     /// Cancel an order by OrderId.
     fn cancel(&self, order_id: u64) -> PyResult<()> {
         self.control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }))
