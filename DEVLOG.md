@@ -1,3 +1,49 @@
+## 2026-03-10 - Order Types Gap: 3 Rounds of Implementation
+
+### Goal
+Implement order type gaps from `.tmp/order-types-gap-assessment.md`, verified against ibgw-headless FIX mappings.
+
+### Round 1 — High-Priority (commits 703a667, 006fb0b, fdc3972)
+1. Trailing Stop / Trailing Stop Limit — OrdType=P, tag 99
+2. IOC / FOK — TIF=3/4
+3. Stop GTC / Stop Limit GTC — TIF=1
+4. MIT / LIT — OrdType=J/K
+5. MOC / LOC — OrdType=5/B
+6. Bracket Orders — OCA group (tags 583/6107/6209)
+7. Adaptive Algo — tags 847/5957/5958/5960
+8. Modify Bug Fix — Order struct extended with ord_type/tif/stop_price
+
+### Round 2 — Medium-Priority (commits c0083ed, cd7a6b0)
+9. Relative (REL) — OrdType=R, tag 99 for offset
+10. OPG (At the Opening) — TIF=2
+11. SubmitLimitEx: iceberg (tag 111), hidden (tag 6135), GAT (tag 168), GTD (tag 126)
+
+### Round 3 — Remaining Equity Features (commits 7708060, 16b9daa, bf2ddfc)
+12. Side::ShortSell — FIX tag 54="5"
+13. MinQty (tag 110), DTC TIF (tag 59="6")
+14. Trailing Stop Percent — tag 6268
+15. Standalone OCA Groups — OrderAttrs.oca_group
+
+### Round 4 — Tier 1 from ib-agent#43 FIX tag mappings
+16. Market to Limit (MTL) — OrdType=K — **PASS (filled)**
+17. Market with Protection (MKT PRT) — OrdType=U — rejected (futures-only)
+18. Stop with Protection (STP PRT) — OrdType=SP — rejected (futures-only)
+19. Mid-Price (MIDPX) — OrdType=MIDPX — rejected, see ib-agent#44
+20. Snap to Market — OrdType=SMKT — rejected, see ib-agent#44
+21. Snap to Midpoint — OrdType=SMID — rejected, see ib-agent#44
+22. Snap to Primary — OrdType=SREL — rejected, see ib-agent#44
+23. Pegged to Market — OrdType=E + ExecInst=P — rejected, see ib-agent#44
+24. Pegged to Midpoint — OrdType=E + ExecInst=M — rejected, see ib-agent#44
+Multi-char OrdType: discriminant constants (ORD_STP_PRT etc.) + ord_type_fix_str() lookup
+
+### Current State
+- 46 integration test phases, 475 unit tests, all passing
+- Coverage: order types ~88% (22/25, 8 rejected pending ib-agent#44), TIF 100%, attributes 65%, algos 8%
+- Remaining gaps: PEG BENCH (unknown companion tags), VOL (options-only), conditional orders, multi-asset
+- Filed ib-agent#44 for missing companion tags on rejected order types
+
+---
+
 ## 2026-03-10 - PyO3 Library Refactoring
 
 ### Goal

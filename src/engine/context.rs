@@ -589,6 +589,136 @@ impl Context {
         id
     }
 
+    pub fn submit_mtl(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitMtl {
+            order_id: id, instrument, side, qty,
+        });
+        id
+    }
+
+    pub fn submit_mkt_prt(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitMktPrt {
+            order_id: id, instrument, side, qty,
+        });
+        id
+    }
+
+    pub fn submit_stp_prt(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        stop_price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitStpPrt {
+            order_id: id, instrument, side, qty, stop_price,
+        });
+        id
+    }
+
+    pub fn submit_mid_price(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price_cap: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitMidPrice {
+            order_id: id, instrument, side, qty, price_cap,
+        });
+        id
+    }
+
+    pub fn submit_snap_mkt(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitSnapMkt {
+            order_id: id, instrument, side, qty,
+        });
+        id
+    }
+
+    pub fn submit_snap_mid(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitSnapMid {
+            order_id: id, instrument, side, qty,
+        });
+        id
+    }
+
+    pub fn submit_snap_pri(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitSnapPri {
+            order_id: id, instrument, side, qty,
+        });
+        id
+    }
+
+    pub fn submit_peg_mkt(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        offset: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitPegMkt {
+            order_id: id, instrument, side, qty, offset,
+        });
+        id
+    }
+
+    pub fn submit_peg_mid(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        offset: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitPegMid {
+            order_id: id, instrument, side, qty, offset,
+        });
+        id
+    }
+
     pub fn cancel(&mut self, order_id: OrderId) {
         self.pending_orders.push(OrderRequest::Cancel { order_id });
     }

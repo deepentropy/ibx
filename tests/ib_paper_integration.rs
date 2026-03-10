@@ -309,6 +309,17 @@ fn integration_suite() {
     conns = phase_trailing_stop_pct(conns);
     conns = phase_oca_group(conns);
 
+    // Tier 1 order types (from issue #43 FIX tag mappings)
+    conns = phase_mtl_order(conns);
+    conns = phase_mkt_prt_order(conns);
+    conns = phase_stp_prt_order(conns);
+    conns = phase_mid_price_order(conns);
+    conns = phase_snap_mkt_order(conns);
+    conns = phase_snap_mid_order(conns);
+    conns = phase_snap_pri_order(conns);
+    conns = phase_peg_mkt_order(conns);
+    conns = phase_peg_mid_order(conns);
+
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
         conns = phase_moc_order(conns);
@@ -333,7 +344,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 37;
+    let total_phases = 46;
     let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -1931,6 +1942,7 @@ struct SubmitCancelStrategy<F: Fn(&mut Context) -> OrderId + Send> {
     cancel_sent: Arc<AtomicBool>,
     order_cancelled: Arc<AtomicBool>,
     order_rejected: Arc<AtomicBool>,
+    order_filled: Arc<AtomicBool>,
     order_id: Option<OrderId>,
 }
 
@@ -1939,6 +1951,7 @@ struct SubmitCancelHandle {
     order_acked: Arc<AtomicBool>,
     order_cancelled: Arc<AtomicBool>,
     order_rejected: Arc<AtomicBool>,
+    order_filled: Arc<AtomicBool>,
 }
 
 fn make_submit_cancel<F: Fn(&mut Context) -> OrderId + Send>(f: F) -> (SubmitCancelStrategy<F>, SubmitCancelHandle) {
@@ -1947,15 +1960,17 @@ fn make_submit_cancel<F: Fn(&mut Context) -> OrderId + Send>(f: F) -> (SubmitCan
     let cancel_sent = Arc::new(AtomicBool::new(false));
     let order_cancelled = Arc::new(AtomicBool::new(false));
     let order_rejected = Arc::new(AtomicBool::new(false));
+    let order_filled = Arc::new(AtomicBool::new(false));
     let handle = SubmitCancelHandle {
         submitted: submitted.clone(),
         order_acked: order_acked.clone(),
         order_cancelled: order_cancelled.clone(),
         order_rejected: order_rejected.clone(),
+        order_filled: order_filled.clone(),
     };
     (SubmitCancelStrategy {
         submit_fn: f,
-        submitted, order_acked, cancel_sent, order_cancelled, order_rejected,
+        submitted, order_acked, cancel_sent, order_cancelled, order_rejected, order_filled,
         order_id: None,
     }, handle)
 }
@@ -1986,11 +2001,66 @@ impl<F: Fn(&mut Context) -> OrderId + Send> Strategy for SubmitCancelStrategy<F>
             OrderStatus::Rejected => {
                 self.order_rejected.store(true, Ordering::Relaxed);
             }
+            OrderStatus::Filled => {
+                self.order_filled.store(true, Ordering::Relaxed);
+            }
             _ => {}
         }
     }
 
     fn on_disconnect(&mut self, _ctx: &mut Context) {}
+}
+
+/// Like run_submit_cancel_phase but accepts both fill and cancel as success.
+/// Use for market-like orders (MTL, MKT PRT, SNAP*) that may fill before cancel arrives.
+fn run_submit_fill_or_cancel_phase<F: Fn(&mut Context) -> OrderId + Send + 'static>(
+    conns: Conns,
+    phase_name: &str,
+    submit_fn: F,
+) -> Conns {
+    println!("--- {} ---", phase_name);
+
+    let account_id = conns.account_id;
+    let (strategy, handle) = make_submit_cancel(submit_fn);
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if handle.order_cancelled.load(Ordering::Relaxed)
+            || handle.order_rejected.load(Ordering::Relaxed)
+            || handle.order_filled.load(Ordering::Relaxed)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if handle.order_rejected.load(Ordering::Relaxed) {
+        println!("  SKIP: Order rejected\n");
+        return conns;
+    }
+
+    assert!(handle.submitted.load(Ordering::Relaxed), "Order was never submitted");
+    let filled = handle.order_filled.load(Ordering::Relaxed);
+    let cancelled = handle.order_cancelled.load(Ordering::Relaxed);
+    assert!(filled || cancelled, "Order was neither filled nor cancelled");
+    if filled {
+        println!("  PASS (filled)\n");
+    } else {
+        println!("  PASS (cancelled)\n");
+    }
+    conns
 }
 
 fn run_submit_cancel_phase<F: Fn(&mut Context) -> OrderId + Send + 'static>(
@@ -2570,4 +2640,76 @@ fn phase_commission(conns: Conns) -> Conns {
         println!("  PASS (commission=${:.4})\n", buy_comm as f64 / PRICE_SCALE as f64);
     }
     conns
+}
+
+// ─── Phase 38: Market to Limit (MTL) ───
+
+fn phase_mtl_order(conns: Conns) -> Conns {
+    run_submit_fill_or_cancel_phase(conns, "Phase 38: Market to Limit Order (SPY)", |ctx| {
+        ctx.submit_mtl(0, Side::Buy, 1)
+    })
+}
+
+// ─── Phase 39: Market with Protection ───
+
+fn phase_mkt_prt_order(conns: Conns) -> Conns {
+    run_submit_fill_or_cancel_phase(conns, "Phase 39: Market with Protection Order (SPY)", |ctx| {
+        ctx.submit_mkt_prt(0, Side::Buy, 1)
+    })
+}
+
+// ─── Phase 40: Stop with Protection ───
+
+fn phase_stp_prt_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 40: Stop with Protection Order (SPY)", |ctx| {
+        ctx.submit_stp_prt(0, Side::Sell, 1, 1_00_000_000) // $1.00 stop
+    })
+}
+
+// ─── Phase 41: Mid-Price ───
+
+fn phase_mid_price_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 41: Mid-Price Order (SPY)", |ctx| {
+        ctx.submit_mid_price(0, Side::Buy, 1, 1_00_000_000) // $1.00 price cap
+    })
+}
+
+// ─── Phase 42: Snap to Market ───
+
+fn phase_snap_mkt_order(conns: Conns) -> Conns {
+    run_submit_fill_or_cancel_phase(conns, "Phase 42: Snap to Market Order (SPY)", |ctx| {
+        ctx.submit_snap_mkt(0, Side::Buy, 1)
+    })
+}
+
+// ─── Phase 43: Snap to Midpoint ───
+
+fn phase_snap_mid_order(conns: Conns) -> Conns {
+    run_submit_fill_or_cancel_phase(conns, "Phase 43: Snap to Midpoint Order (SPY)", |ctx| {
+        ctx.submit_snap_mid(0, Side::Buy, 1)
+    })
+}
+
+// ─── Phase 44: Snap to Primary ───
+
+fn phase_snap_pri_order(conns: Conns) -> Conns {
+    run_submit_fill_or_cancel_phase(conns, "Phase 44: Snap to Primary Order (SPY)", |ctx| {
+        ctx.submit_snap_pri(0, Side::Buy, 1)
+    })
+}
+
+// ─── Phase 45: Pegged to Market ───
+
+fn phase_peg_mkt_order(conns: Conns) -> Conns {
+    run_submit_fill_or_cancel_phase(conns, "Phase 45: Pegged to Market Order (SPY)", |ctx| {
+        ctx.submit_peg_mkt(0, Side::Buy, 1, 0) // no offset
+    })
+}
+
+// ─── Phase 46: Pegged to Midpoint ───
+
+fn phase_peg_mid_order(conns: Conns) -> Conns {
+    run_submit_fill_or_cancel_phase(conns, "Phase 46: Pegged to Midpoint Order (SPY)", |ctx| {
+        ctx.submit_peg_mid(0, Side::Buy, 1, 0) // no offset
+    })
 }

@@ -104,6 +104,33 @@ pub struct OrderUpdate {
     pub timestamp_ns: u64,
 }
 
+/// Multi-char OrdType discriminants (values < 32 to avoid collision with ASCII single-char types).
+/// Used in `Order.ord_type` for order types whose FIX tag 40 value is more than one character.
+pub const ORD_STP_PRT: u8 = 1;   // FIX "SP"  — Stop with Protection
+pub const ORD_MIDPX: u8 = 2;     // FIX "MIDPX" — Mid-Price
+pub const ORD_SNAP_MKT: u8 = 3;  // FIX "SMKT" — Snap to Market
+pub const ORD_SNAP_MID: u8 = 4;  // FIX "SMID" — Snap to Midpoint
+pub const ORD_SNAP_PRI: u8 = 5;  // FIX "SREL" — Snap to Primary
+pub const ORD_PEG_MKT: u8 = 6;   // FIX "E" + ExecInst "P" — Pegged to Market
+pub const ORD_PEG_MID: u8 = 7;   // FIX "E" + ExecInst "M" — Pegged to Midpoint
+
+/// Convert an `ord_type` discriminant to the FIX tag 40 string.
+/// Single-char types (ASCII >= 32) are stored as-is; multi-char types use constants above.
+pub fn ord_type_fix_str(t: u8) -> &'static str {
+    match t {
+        ORD_STP_PRT => "SP",
+        ORD_MIDPX => "MIDPX",
+        ORD_SNAP_MKT => "SMKT",
+        ORD_SNAP_MID => "SMID",
+        ORD_SNAP_PRI => "SREL",
+        ORD_PEG_MKT | ORD_PEG_MID => "E",
+        b'1' => "1", b'2' => "2", b'3' => "3", b'4' => "4", b'5' => "5",
+        b'B' => "B", b'E' => "E", b'J' => "J", b'K' => "K",
+        b'P' => "P", b'R' => "R", b'U' => "U",
+        _ => "2",
+    }
+}
+
 /// A tracked open order.
 #[derive(Debug, Clone, Copy)]
 pub struct Order {
@@ -115,6 +142,7 @@ pub struct Order {
     pub filled: u32,
     pub status: OrderStatus,
     /// FIX tag 40 OrdType: b'1'=MKT, b'2'=LMT, b'3'=STP, b'4'=STPLMT, b'P'=TRAIL, etc.
+    /// For multi-char OrdTypes (MIDPX, SP, SMKT, etc.), uses ORD_* constants (values < 32).
     pub ord_type: u8,
     /// FIX tag 59 TimeInForce: b'0'=DAY, b'1'=GTC, b'3'=IOC, b'4'=FOK
     pub tif: u8,
@@ -337,6 +365,73 @@ pub enum OrderRequest {
         qty: u32,
         price: Price,
         priority: AdaptivePriority,
+    },
+    /// Market to Limit: fills at market, remainder converts to limit at fill price. OrdType K.
+    SubmitMtl {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    },
+    /// Market with Protection: market order with price protection for futures. OrdType U.
+    SubmitMktPrt {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    },
+    /// Stop with Protection: stop order with price protection. OrdType SP.
+    SubmitStpPrt {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        stop_price: Price,
+    },
+    /// Mid-Price: pegs to midpoint with optional price cap. OrdType MIDPX.
+    SubmitMidPrice {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price_cap: Price, // 0 = no cap
+    },
+    /// Snap to Market: snaps to market price. OrdType SMKT.
+    SubmitSnapMkt {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    },
+    /// Snap to Midpoint: snaps to midpoint. OrdType SMID.
+    SubmitSnapMid {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    },
+    /// Snap to Primary: snaps to primary (NBBO). OrdType SREL.
+    SubmitSnapPri {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    },
+    /// Pegged to Market: pegs to market with optional offset. OrdType E + ExecInst P.
+    SubmitPegMkt {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        offset: Price, // peg offset, 0 = no offset
+    },
+    /// Pegged to Midpoint: pegs to midpoint with optional offset. OrdType E + ExecInst M.
+    SubmitPegMid {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        offset: Price, // peg offset, 0 = no offset
     },
     Cancel {
         order_id: OrderId,

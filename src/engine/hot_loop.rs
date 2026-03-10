@@ -1232,6 +1232,271 @@ impl<S: Strategy> HotLoop<S> {
                         (5960, priority_str),   // AlgoParamValue
                     ])
                 }
+                OrderRequest::SubmitMtl { order_id, instrument, side, qty } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, b'K', b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "K"),          // OrdType = Market to Limit
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitMktPrt { order_id, instrument, side, qty } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, b'U', b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "U"),          // OrdType = Market with Protection
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitStpPrt { order_id, instrument, side, qty, stop_price } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, crate::types::ORD_STP_PRT, b'0', stop_price,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let stop_str = format_price(stop_price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "SP"),         // OrdType = Stop with Protection
+                        (99, &stop_str),    // StopPx
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitMidPrice { order_id, instrument, side, qty, price_cap } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price_cap, crate::types::ORD_MIDPX, b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    let mut fields: Vec<(u32, &str)> = vec![
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "MIDPX"),      // OrdType = Mid-Price
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ];
+                    let cap_str;
+                    if price_cap > 0 {
+                        cap_str = format_price(price_cap);
+                        fields.push((44, &cap_str)); // Price cap
+                    }
+                    conn.send_fix(&fields)
+                }
+                OrderRequest::SubmitSnapMkt { order_id, instrument, side, qty } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MKT, b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "SMKT"),       // OrdType = Snap to Market
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitSnapMid { order_id, instrument, side, qty } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MID, b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "SMID"),       // OrdType = Snap to Midpoint
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitSnapPri { order_id, instrument, side, qty } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_PRI, b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "SREL"),       // OrdType = Snap to Primary
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitPegMkt { order_id, instrument, side, qty, offset } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, crate::types::ORD_PEG_MKT, b'0', offset,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    let mut fields: Vec<(u32, &str)> = vec![
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "E"),          // OrdType = Pegged
+                        (18, "P"),          // ExecInst = Market Peg
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ];
+                    let offset_str;
+                    if offset > 0 {
+                        offset_str = format_price(offset);
+                        fields.push((211, &offset_str)); // PegOffsetValue
+                    }
+                    conn.send_fix(&fields)
+                }
+                OrderRequest::SubmitPegMid { order_id, instrument, side, qty, offset } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, crate::types::ORD_PEG_MID, b'0', offset,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    let mut fields: Vec<(u32, &str)> = vec![
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "E"),          // OrdType = Pegged
+                        (18, "M"),          // ExecInst = Mid-price Peg
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ];
+                    let offset_str;
+                    if offset > 0 {
+                        offset_str = format_price(offset);
+                        fields.push((211, &offset_str)); // PegOffsetValue
+                    }
+                    conn.send_fix(&fields)
+                }
                 OrderRequest::Cancel { order_id } => {
                     let clord_str = format!("C{}", order_id);
                     let orig_clord = order_id.to_string();
@@ -1282,7 +1547,7 @@ impl<S: Strategy> HotLoop<S> {
                     let side_str = orig.map(|o| fix_side(o.side)).unwrap_or("1");
                     let symbol = orig.map(|o| self.context.market.symbol(o.instrument).to_string())
                         .unwrap_or_default();
-                    let ord_type_str = std::str::from_utf8(&[orig.map(|o| o.ord_type).unwrap_or(b'2')]).unwrap_or("2").to_string();
+                    let ord_type_str = crate::types::ord_type_fix_str(orig.map(|o| o.ord_type).unwrap_or(b'2')).to_string();
                     let tif_str = std::str::from_utf8(&[orig.map(|o| o.tif).unwrap_or(b'0')]).unwrap_or("0").to_string();
                     let mut fields: Vec<(u32, &str)> = vec![
                         (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
