@@ -616,6 +616,7 @@ impl<S: Strategy> HotLoop<S> {
                     let min_qty_str = attrs.min_qty.to_string();
                     let gat_str = if attrs.good_after > 0 { unix_to_ib_datetime(attrs.good_after) } else { String::new() };
                     let gtd_str = if attrs.good_till > 0 { unix_to_ib_datetime(attrs.good_till) } else { String::new() };
+                    let oca_str = if attrs.oca_group > 0 { format!("OCA_{}", attrs.oca_group) } else { String::new() };
                     let mut fields: Vec<(u32, &str)> = vec![
                         (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                         (fix::TAG_SENDING_TIME, &now),
@@ -651,6 +652,10 @@ impl<S: Strategy> HotLoop<S> {
                     }
                     if attrs.good_till > 0 {
                         fields.push((126, &gtd_str));
+                    }
+                    if attrs.oca_group > 0 {
+                        fields.push((583, &oca_str));
+                        fields.push((6209, "CancelOnFillWBlock"));
                     }
                     conn.send_fix(&fields)
                 }

@@ -307,6 +307,7 @@ fn integration_suite() {
     conns = phase_hidden_order(conns);
     conns = phase_short_sell(conns);
     conns = phase_trailing_stop_pct(conns);
+    conns = phase_oca_group(conns);
 
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
@@ -332,7 +333,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 36;
+    let total_phases = 37;
     let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -2375,6 +2376,115 @@ fn phase_short_sell(conns: Conns) -> Conns {
     run_submit_cancel_phase(conns, "Phase 35: Short Sell Limit Order (SPY)", |ctx| {
         ctx.submit_limit_ex(0, Side::ShortSell, 1, 1_00_000_000, b'0', OrderAttrs::default())
     })
+}
+
+// ─── Phase 37: Standalone OCA Group ───
+
+fn phase_oca_group(conns: Conns) -> Conns {
+    println!("--- Phase 37: OCA Group (SPY) ---");
+
+    let account_id = conns.account_id;
+    let order1_acked = Arc::new(AtomicBool::new(false));
+    let order2_acked = Arc::new(AtomicBool::new(false));
+    let any_rejected = Arc::new(AtomicBool::new(false));
+    let cancelled_count = Arc::new(AtomicU32::new(0));
+
+    let a1 = order1_acked.clone();
+    let a2 = order2_acked.clone();
+    let rej = any_rejected.clone();
+    let can = cancelled_count.clone();
+
+    struct OcaStrategy {
+        order1_acked: Arc<AtomicBool>,
+        order2_acked: Arc<AtomicBool>,
+        any_rejected: Arc<AtomicBool>,
+        cancelled_count: Arc<AtomicU32>,
+        order1_id: Option<OrderId>,
+        order2_id: Option<OrderId>,
+        cancel_sent: bool,
+    }
+
+    impl Strategy for OcaStrategy {
+        fn on_start(&mut self, ctx: &mut Context) {
+            let oca = ctx.now_ns(); // unique OCA group ID
+            let id1 = ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
+                oca_group: oca, outside_rth: true, ..OrderAttrs::default()
+            });
+            let id2 = ctx.submit_limit_ex(0, Side::Buy, 1, 2_00_000_000, b'1', OrderAttrs {
+                oca_group: oca, outside_rth: true, ..OrderAttrs::default()
+            });
+            self.order1_id = Some(id1);
+            self.order2_id = Some(id2);
+        }
+        fn on_tick(&mut self, _: InstrumentId, _: &mut Context) {}
+        fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
+            match update.status {
+                OrderStatus::Submitted => {
+                    if Some(update.order_id) == self.order1_id {
+                        self.order1_acked.store(true, Ordering::Relaxed);
+                    } else if Some(update.order_id) == self.order2_id {
+                        self.order2_acked.store(true, Ordering::Relaxed);
+                    }
+                    // Cancel order1 once both acked
+                    if self.order1_acked.load(Ordering::Relaxed)
+                        && self.order2_acked.load(Ordering::Relaxed)
+                        && !self.cancel_sent
+                    {
+                        if let Some(id) = self.order1_id {
+                            ctx.cancel(id);
+                            self.cancel_sent = true;
+                        }
+                    }
+                }
+                OrderStatus::Cancelled => {
+                    self.cancelled_count.fetch_add(1, Ordering::Relaxed);
+                }
+                OrderStatus::Rejected => {
+                    self.any_rejected.store(true, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let strategy = OcaStrategy {
+        order1_acked: a1, order2_acked: a2,
+        any_rejected: rej.clone(), cancelled_count: can.clone(),
+        order1_id: None, order2_id: None, cancel_sent: false,
+    };
+
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if rej.load(Ordering::Relaxed) { break; }
+        if can.load(Ordering::Relaxed) >= 1 { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if any_rejected.load(Ordering::Relaxed) {
+        println!("  SKIP: OCA order rejected\n");
+        return conns;
+    }
+
+    assert!(order1_acked.load(Ordering::Relaxed), "Order 1 never acked");
+    assert!(order2_acked.load(Ordering::Relaxed), "Order 2 never acked");
+    let cancelled = cancelled_count.load(Ordering::Relaxed);
+    println!("  Order1 acked: {}, Order2 acked: {}, Cancelled: {}",
+        order1_acked.load(Ordering::Relaxed),
+        order2_acked.load(Ordering::Relaxed),
+        cancelled);
+    println!("  PASS\n");
+    conns
 }
 
 // ─── Phase 36: Trailing Stop Percent ───

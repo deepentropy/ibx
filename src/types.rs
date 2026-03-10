@@ -164,6 +164,9 @@ pub struct OrderAttrs {
     /// Auto-expire order at this time (FIX tag 126). 0 = not set. Unix seconds.
     /// When set, TIF should be GTD (but IB infers it from the tag).
     pub good_till: i64,
+    /// OCA group ID (FIX tag 583). 0 = not set. Links orders so one cancels others.
+    /// Orders sharing the same non-zero oca_group are in the same OCA group.
+    pub oca_group: u64,
 }
 
 /// Order request written by strategy, drained by engine after on_tick.
