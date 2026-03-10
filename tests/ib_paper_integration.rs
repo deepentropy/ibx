@@ -300,6 +300,7 @@ fn integration_suite() {
     conns = phase_lit_order(conns);
 
     conns = phase_bracket_order(conns);
+    conns = phase_adaptive_order(conns);
 
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
@@ -325,7 +326,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 29;
+    let total_phases = 30;
     let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -2335,6 +2336,14 @@ fn phase_moc_order(conns: Conns) -> Conns {
 fn phase_loc_order(conns: Conns) -> Conns {
     run_submit_cancel_phase(conns, "Phase 28: LOC Order (SPY)", |ctx| {
         ctx.submit_loc(0, Side::Buy, 1, 1_00_000_000) // $1.00 limit
+    })
+}
+
+// ─── Phase 30: Adaptive Algo Limit Order ───
+
+fn phase_adaptive_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 30: Adaptive Algo Limit Order (SPY)", |ctx| {
+        ctx.submit_adaptive(0, Side::Buy, 1, 1_00_000_000, AdaptivePriority::Normal) // $1.00, Normal priority
     })
 }
 

@@ -438,6 +438,23 @@ impl IbEngine {
         Ok((parent_id, tp_id, sl_id))
     }
 
+    /// Submit an adaptive algo limit order. Priority: "Patient", "Normal", or "Urgent".
+    fn submit_adaptive(&self, instrument: u32, side: &str, qty: u32, price: f64, priority: &str) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        let priority = match priority {
+            "Patient" => AdaptivePriority::Patient,
+            "Normal" => AdaptivePriority::Normal,
+            "Urgent" => AdaptivePriority::Urgent,
+            _ => return Err(PyRuntimeError::new_err(format!("Invalid priority: {}. Use Patient, Normal, or Urgent", priority))),
+        };
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitAdaptive {
+            order_id, instrument, side, qty, price: price_fixed, priority,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
     /// Cancel an order by OrderId.
     fn cancel(&self, order_id: u64) -> PyResult<()> {
         self.control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }))

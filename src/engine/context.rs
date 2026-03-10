@@ -486,6 +486,27 @@ impl Context {
         (parent_id, tp_id, sl_id)
     }
 
+    pub fn submit_adaptive(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        priority: AdaptivePriority,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitAdaptive {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+            priority,
+        });
+        id
+    }
+
     pub fn cancel(&mut self, order_id: OrderId) {
         self.pending_orders.push(OrderRequest::Cancel { order_id });
     }

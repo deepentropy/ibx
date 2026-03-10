@@ -1052,6 +1052,40 @@ impl<S: Strategy> HotLoop<S> {
                         (6209, "CancelOnFillWBlock"), // OCA cancel-on-fill
                     ])
                 }
+                OrderRequest::SubmitAdaptive { order_id, instrument, side, qty, price, priority } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'2', b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    let priority_str = priority.as_str();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "2"),              // OrdType = Limit
+                        (44, &price_str),
+                        (59, "0"),              // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                        (847, "Adaptive"),      // AlgoStrategy
+                        (5957, "1"),            // AlgoParamCount
+                        (5958, "adaptivePriority"), // AlgoParamTag
+                        (5960, priority_str),   // AlgoParamValue
+                    ])
+                }
                 OrderRequest::Cancel { order_id } => {
                     let clord_str = format!("C{}", order_id);
                     let orig_clord = order_id.to_string();

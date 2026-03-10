@@ -127,6 +127,24 @@ impl Order {
     }
 }
 
+/// Adaptive algo priority level (IB's "adaptivePriority" parameter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptivePriority {
+    Patient,
+    Normal,
+    Urgent,
+}
+
+impl AdaptivePriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AdaptivePriority::Patient => "Patient",
+            AdaptivePriority::Normal => "Normal",
+            AdaptivePriority::Urgent => "Urgent",
+        }
+    }
+}
+
 /// Order request written by strategy, drained by engine after on_tick.
 #[derive(Debug, Clone, Copy)]
 pub enum OrderRequest {
@@ -252,6 +270,15 @@ pub enum OrderRequest {
         entry_price: Price,
         take_profit: Price,
         stop_loss: Price,
+    },
+    /// Adaptive algo limit order: LMT with IB Adaptive algorithm overlay.
+    SubmitAdaptive {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        priority: AdaptivePriority,
     },
     Cancel {
         order_id: OrderId,
