@@ -320,6 +320,9 @@ fn integration_suite() {
     conns = phase_peg_mkt_order(conns);
     conns = phase_peg_mid_order(conns);
 
+    // Order attribute phases
+    conns = phase_discretionary_order(conns);
+
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
         conns = phase_moc_order(conns);
@@ -344,7 +347,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 46;
+    let total_phases = 47;
     let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -2711,5 +2714,17 @@ fn phase_peg_mkt_order(conns: Conns) -> Conns {
 fn phase_peg_mid_order(conns: Conns) -> Conns {
     run_submit_fill_or_cancel_phase(conns, "Phase 46: Pegged to Midpoint Order (SPY)", |ctx| {
         ctx.submit_peg_mid(0, Side::Buy, 1, 0) // no offset
+    })
+}
+
+// ─── Phase 47: Discretionary Amount Order ───
+
+fn phase_discretionary_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 47: Discretionary Amount Order (SPY)", |ctx| {
+        ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
+            discretionary_amt: 50_000_000, // $0.50 discretion above $1 limit
+            outside_rth: true,
+            ..OrderAttrs::default()
+        })
     })
 }

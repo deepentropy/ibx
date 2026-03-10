@@ -195,6 +195,9 @@ pub struct OrderAttrs {
     /// OCA group ID (FIX tag 583). 0 = not set. Links orders so one cancels others.
     /// Orders sharing the same non-zero oca_group are in the same OCA group.
     pub oca_group: u64,
+    /// Discretionary amount (IB tag 9813). 0 = not set. Fixed-point Price value.
+    /// The amount above the limit price that the order may trade at.
+    pub discretionary_amt: Price,
 }
 
 /// Order request written by strategy, drained by engine after on_tick.

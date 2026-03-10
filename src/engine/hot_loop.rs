@@ -657,6 +657,11 @@ impl<S: Strategy> HotLoop<S> {
                         fields.push((583, &oca_str));
                         fields.push((6209, "CancelOnFillWBlock"));
                     }
+                    let disc_str;
+                    if attrs.discretionary_amt > 0 {
+                        disc_str = format_price(attrs.discretionary_amt);
+                        fields.push((9813, &disc_str));
+                    }
                     conn.send_fix(&fields)
                 }
                 OrderRequest::SubmitMarket { order_id, instrument, side, qty } => {
