@@ -508,10 +508,9 @@ impl<S: Strategy> HotLoop<S> {
         for order_req in orders {
             let result = match order_req {
                 OrderRequest::SubmitLimit { order_id, instrument, side, qty, price } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'2', b'0', 0,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -538,10 +537,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitStopLimit { order_id, instrument, side, qty, price, stop_price } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'4', b'0', stop_price,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -570,10 +568,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitLimitGtc { order_id, instrument, side, qty, price, outside_rth } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'2', b'1', 0,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -604,10 +601,9 @@ impl<S: Strategy> HotLoop<S> {
                     conn.send_fix(&fields)
                 }
                 OrderRequest::SubmitMarket { order_id, instrument, side, qty } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price: 0, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, b'1', b'0', 0,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -634,10 +630,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitStop { order_id, instrument, side, qty, stop_price } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price: stop_price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, stop_price, b'3', b'0', stop_price,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -664,10 +659,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitStopGtc { order_id, instrument, side, qty, stop_price, outside_rth } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price: stop_price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, stop_price, b'3', b'1', stop_price,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -698,10 +692,9 @@ impl<S: Strategy> HotLoop<S> {
                     conn.send_fix(&fields)
                 }
                 OrderRequest::SubmitStopLimitGtc { order_id, instrument, side, qty, price, stop_price, outside_rth } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'4', b'1', stop_price,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -734,10 +727,9 @@ impl<S: Strategy> HotLoop<S> {
                     conn.send_fix(&fields)
                 }
                 OrderRequest::SubmitLimitIoc { order_id, instrument, side, qty, price } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'2', b'3', 0,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -764,10 +756,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitLimitFok { order_id, instrument, side, qty, price } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'2', b'4', 0,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -794,10 +785,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitTrailingStop { order_id, instrument, side, qty, trail_amt } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price: 0, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, b'P', b'0', 0,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -824,10 +814,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitTrailingStopLimit { order_id, instrument, side, qty, price, trail_amt } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'P', b'0', 0,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -856,10 +845,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitMoc { order_id, instrument, side, qty } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price: 0, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, b'5', b'0', 0,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -884,10 +872,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitLoc { order_id, instrument, side, qty, price } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'B', b'0', 0,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -914,10 +901,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitMit { order_id, instrument, side, qty, stop_price } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price: stop_price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, stop_price, b'J', b'0', stop_price,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -944,10 +930,9 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitLit { order_id, instrument, side, qty, price, stop_price } => {
-                    self.context.insert_order(crate::types::Order {
-                        order_id, instrument, side, price, qty, filled: 0,
-                        status: crate::types::OrderStatus::PendingSubmit,
-                    });
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'K', b'0', stop_price,
+                    ));
                     let clord_str = order_id.to_string();
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -973,6 +958,98 @@ impl<S: Strategy> HotLoop<S> {
                         (100, "SMART"),
                         (15, "USD"),
                         (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitBracket { parent_id, tp_id, sl_id, instrument, side, qty, entry_price, take_profit, stop_loss } => {
+                    let exit_side = match side { Side::Buy => Side::Sell, Side::Sell => Side::Buy };
+                    let exit_side_str = fix_side(exit_side);
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let parent_str = parent_id.to_string();
+                    let tp_str = tp_id.to_string();
+                    let sl_str = sl_id.to_string();
+                    let entry_str = format_price(entry_price);
+                    let tp_price_str = format_price(take_profit);
+                    let sl_price_str = format_price(stop_loss);
+                    let oca_group = format!("OCA_{}", parent_id);
+
+                    // 1. Parent order: limit entry
+                    self.context.insert_order(crate::types::Order::new(
+                        parent_id, instrument, side, qty, entry_price, b'2', b'0', 0,
+                    ));
+                    let now = chrono_free_timestamp();
+                    let _ = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &parent_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "2"),          // Limit
+                        (44, &entry_str),
+                        (59, "0"),          // DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ]);
+
+                    // 2. Take-profit child: limit exit, linked to parent, in OCA group
+                    self.context.insert_order(crate::types::Order::new(
+                        tp_id, instrument, exit_side, qty, take_profit, b'2', b'1', 0,
+                    ));
+                    let now = chrono_free_timestamp();
+                    let _ = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &tp_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, exit_side_str),
+                        (38, &qty_str),
+                        (40, "2"),          // Limit
+                        (44, &tp_price_str),
+                        (59, "1"),          // GTC
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                        (6107, &parent_str),       // ParentOrderID
+                        (583, &oca_group),         // OCAGroup
+                        (6209, "CancelOnFillWBlock"), // OCA cancel-on-fill
+                    ]);
+
+                    // 3. Stop-loss child: stop exit, linked to parent, in OCA group
+                    self.context.insert_order(crate::types::Order::new(
+                        sl_id, instrument, exit_side, qty, stop_loss, b'3', b'1', stop_loss,
+                    ));
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &sl_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, exit_side_str),
+                        (38, &qty_str),
+                        (40, "3"),          // Stop
+                        (99, &sl_price_str),
+                        (59, "1"),          // GTC
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                        (6107, &parent_str),       // ParentOrderID
+                        (583, &oca_group),         // OCAGroup
+                        (6209, "CancelOnFillWBlock"), // OCA cancel-on-fill
                     ])
                 }
                 OrderRequest::Cancel { order_id } => {
@@ -1012,15 +1089,10 @@ impl<S: Strategy> HotLoop<S> {
                     // Insert new order entry so exec reports for new_order_id are tracked
                     let orig = self.context.order(order_id).copied();
                     if let Some(orig) = orig {
-                        self.context.insert_order(crate::types::Order {
-                            order_id: new_order_id,
-                            instrument: orig.instrument,
-                            side: orig.side,
-                            qty,
-                            price,
-                            status: crate::types::OrderStatus::PendingSubmit,
-                            filled: 0,
-                        });
+                        self.context.insert_order(crate::types::Order::new(
+                            new_order_id, orig.instrument, orig.side, qty, price,
+                            orig.ord_type, orig.tif, orig.stop_price,
+                        ));
                     }
                     let clord_str = new_order_id.to_string();
                     let orig_clord = order_id.to_string();
@@ -1030,7 +1102,9 @@ impl<S: Strategy> HotLoop<S> {
                     let side_str = orig.map(|o| fix_side(o.side)).unwrap_or("1");
                     let symbol = orig.map(|o| self.context.market.symbol(o.instrument).to_string())
                         .unwrap_or_default();
-                    conn.send_fix(&[
+                    let ord_type_str = std::str::from_utf8(&[orig.map(|o| o.ord_type).unwrap_or(b'2')]).unwrap_or("2").to_string();
+                    let tif_str = std::str::from_utf8(&[orig.map(|o| o.tif).unwrap_or(b'0')]).unwrap_or("0").to_string();
+                    let mut fields: Vec<(u32, &str)> = vec![
                         (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
                         (fix::TAG_SENDING_TIME, &now),
                         (11, &clord_str),   // ClOrdID
@@ -1040,15 +1114,24 @@ impl<S: Strategy> HotLoop<S> {
                         (55, &symbol),      // Symbol
                         (54, side_str),     // Side
                         (38, &qty_str),     // OrderQty
-                        (40, "2"),          // OrdType = Limit
+                        (40, &ord_type_str), // OrdType from original order
                         (44, &price_str),   // Price
-                        (59, "0"),          // TIF = DAY
+                        (59, &tif_str),     // TIF from original order
                         (60, &now),         // TransactTime
                         (167, "STK"),       // SecurityType
                         (100, "SMART"),     // ExDestination
                         (15, "USD"),        // Currency
                         (204, "0"),         // CustomerOrFirm
-                    ])
+                    ];
+                    // Include stop price for order types that need it
+                    let stop_str;
+                    if let Some(o) = orig {
+                        if o.stop_price != 0 {
+                            stop_str = format_price(o.stop_price);
+                            fields.push((99, &stop_str));
+                        }
+                    }
+                    conn.send_fix(&fields)
                 }
             };
             match result {
@@ -1816,6 +1899,7 @@ mod tests {
             qty: 100,
             filled: 0,
             status: crate::types::OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         // Build FIX 35=8 execution report (filled)
@@ -1853,6 +1937,7 @@ mod tests {
             qty: 100,
             filled: 0,
             status: crate::types::OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         let exec_msg = fix::fix_build(&[
@@ -1887,6 +1972,7 @@ mod tests {
             qty: 50,
             filled: 0,
             status: crate::types::OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         let exec_msg = fix::fix_build(&[
@@ -2249,6 +2335,7 @@ mod tests {
             qty: 100,
             filled: 0,
             status: crate::types::OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         let cancel_reject = fix::fix_build(&[
@@ -2295,6 +2382,7 @@ mod tests {
             qty: 50,
             filled: 0,
             status: crate::types::OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         let exec_msg = fix::fix_build(&[
@@ -2451,6 +2539,7 @@ mod tests {
             order_id: 10, instrument: 0, side: Side::Buy,
             price: 150 * PRICE_SCALE, qty: 100, filled: 0,
             status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         // First partial fill: 30 of 100
@@ -2502,6 +2591,7 @@ mod tests {
             order_id: 20, instrument: 0, side: Side::Buy,
             price: 150 * PRICE_SCALE, qty: 100, filled: 0,
             status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         // FIX 35=9 Cancel Reject
@@ -2529,6 +2619,7 @@ mod tests {
             order_id: 30, instrument: 0, side: Side::Buy,
             price: 150 * PRICE_SCALE, qty: 100, filled: 0,
             status: OrderStatus::PendingSubmit,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         // IB sends 3x 39=A (PendingNew) — we saw this in live benchmark
@@ -2580,6 +2671,7 @@ mod tests {
             order_id: 40, instrument: 0, side: Side::Buy,
             price: 150 * PRICE_SCALE, qty: 100, filled: 30,
             status: OrderStatus::PartiallyFilled,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         // Simulate disconnect
@@ -2625,6 +2717,7 @@ mod tests {
             order_id: 50, instrument: 0, side: Side::Buy,
             price: 150 * PRICE_SCALE, qty: 100, filled: 0,
             status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         // Partial fill: 40 shares
@@ -2660,6 +2753,7 @@ mod tests {
             order_id: 1772746902000, instrument: 0, side: Side::Buy,
             price: PRICE_SCALE, qty: 1, filled: 0,
             status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         // Cancel response with "C" prefix on ClOrdID
@@ -2683,6 +2777,7 @@ mod tests {
             order_id: 60, instrument: 0, side: Side::Buy,
             price: PRICE_SCALE, qty: 1, filled: 0,
             status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
         // FIX 39=C (Expired) — DAY orders expire at market close

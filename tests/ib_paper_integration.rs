@@ -299,6 +299,8 @@ fn integration_suite() {
     conns = phase_mit_order(conns);
     conns = phase_lit_order(conns);
 
+    conns = phase_bracket_order(conns);
+
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
         conns = phase_moc_order(conns);
@@ -323,7 +325,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 28;
+    let total_phases = 29;
     let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -2208,6 +2210,116 @@ fn phase_lit_order(conns: Conns) -> Conns {
         // LIT BUY: trigger at $1, then buy at limit $2
         ctx.submit_lit(0, Side::Buy, 1, 2_00_000_000, 1_00_000_000) // $2 limit, $1 trigger
     })
+}
+
+// ─── Phase 29: Bracket Order (parent + TP + SL) ───
+
+fn phase_bracket_order(conns: Conns) -> Conns {
+    println!("--- Phase 29: Bracket Order (SPY) ---");
+
+    let account_id = conns.account_id;
+    let parent_acked = Arc::new(AtomicBool::new(false));
+    let tp_acked = Arc::new(AtomicBool::new(false));
+    let sl_acked = Arc::new(AtomicBool::new(false));
+    let any_rejected = Arc::new(AtomicBool::new(false));
+    let all_cancelled = Arc::new(AtomicU32::new(0));
+
+    let pa = parent_acked.clone();
+    let ta = tp_acked.clone();
+    let sa = sl_acked.clone();
+    let rej = any_rejected.clone();
+    let can = all_cancelled.clone();
+
+    struct BracketStrategy {
+        parent_acked: Arc<AtomicBool>,
+        tp_acked: Arc<AtomicBool>,
+        sl_acked: Arc<AtomicBool>,
+        any_rejected: Arc<AtomicBool>,
+        all_cancelled: Arc<AtomicU32>,
+        parent_id: Option<OrderId>,
+        tp_id: Option<OrderId>,
+        sl_id: Option<OrderId>,
+        cancel_sent: bool,
+    }
+
+    impl Strategy for BracketStrategy {
+        fn on_start(&mut self, ctx: &mut Context) {
+            // BUY bracket: entry at $1 (won't fill), TP at $2, SL at $0.50
+            let (pid, tid, sid) = ctx.submit_bracket(0, Side::Buy, 1,
+                1_00_000_000, 2_00_000_000, 50_000_000);
+            self.parent_id = Some(pid);
+            self.tp_id = Some(tid);
+            self.sl_id = Some(sid);
+        }
+        fn on_tick(&mut self, _: InstrumentId, _: &mut Context) {}
+        fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
+            match update.status {
+                OrderStatus::Submitted => {
+                    if Some(update.order_id) == self.parent_id {
+                        self.parent_acked.store(true, Ordering::Relaxed);
+                    } else if Some(update.order_id) == self.tp_id {
+                        self.tp_acked.store(true, Ordering::Relaxed);
+                    } else if Some(update.order_id) == self.sl_id {
+                        self.sl_acked.store(true, Ordering::Relaxed);
+                    }
+                    // Cancel parent once acked (children should cancel via OCA/parent link)
+                    if self.parent_acked.load(Ordering::Relaxed) && !self.cancel_sent {
+                        if let Some(pid) = self.parent_id {
+                            ctx.cancel(pid);
+                            self.cancel_sent = true;
+                        }
+                    }
+                }
+                OrderStatus::Cancelled => {
+                    self.all_cancelled.fetch_add(1, Ordering::Relaxed);
+                }
+                OrderStatus::Rejected => {
+                    self.any_rejected.store(true, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
+        fn on_disconnect(&mut self, _: &mut Context) {}
+    }
+
+    let strategy = BracketStrategy {
+        parent_acked: pa, tp_acked: ta, sl_acked: sa,
+        any_rejected: rej.clone(), all_cancelled: can.clone(),
+        parent_id: None, tp_id: None, sl_id: None, cancel_sent: false,
+    };
+
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if rej.load(Ordering::Relaxed) { break; }
+        if can.load(Ordering::Relaxed) >= 1 { break; } // at least parent cancelled
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if any_rejected.load(Ordering::Relaxed) {
+        println!("  SKIP: Bracket order rejected\n");
+        return conns;
+    }
+
+    assert!(parent_acked.load(Ordering::Relaxed), "Parent order was never acknowledged");
+    let cancelled = all_cancelled.load(Ordering::Relaxed);
+    println!("  Parent acked: {}, TP acked: {}, SL acked: {}",
+        parent_acked.load(Ordering::Relaxed),
+        tp_acked.load(Ordering::Relaxed),
+        sl_acked.load(Ordering::Relaxed));
+    println!("  Cancelled: {} orders", cancelled);
+    println!("  PASS\n");
+    conns
 }
 
 // ─── Phase 27: Market on Close order ───

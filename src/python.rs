@@ -422,6 +422,22 @@ impl IbEngine {
         Ok(order_id)
     }
 
+    /// Submit a bracket order (entry + take-profit + stop-loss). Returns (parent_id, tp_id, sl_id).
+    fn submit_bracket(&self, instrument: u32, side: &str, qty: u32, entry_price: f64, take_profit: f64, stop_loss: f64) -> PyResult<(u64, u64, u64)> {
+        let parent_id = self.next_order_id.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+        let tp_id = parent_id + 1;
+        let sl_id = parent_id + 2;
+        let side = parse_side(side)?;
+        let entry_fixed = (entry_price * PRICE_SCALE_F) as i64;
+        let tp_fixed = (take_profit * PRICE_SCALE_F) as i64;
+        let sl_fixed = (stop_loss * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitBracket {
+            parent_id, tp_id, sl_id, instrument, side, qty,
+            entry_price: entry_fixed, take_profit: tp_fixed, stop_loss: sl_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok((parent_id, tp_id, sl_id))
+    }
+
     /// Cancel an order by OrderId.
     fn cancel(&self, order_id: u64) -> PyResult<()> {
         self.control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }))

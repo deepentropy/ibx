@@ -112,6 +112,19 @@ pub struct Order {
     pub qty: u32,
     pub filled: u32,
     pub status: OrderStatus,
+    /// FIX tag 40 OrdType: b'1'=MKT, b'2'=LMT, b'3'=STP, b'4'=STPLMT, b'P'=TRAIL, etc.
+    pub ord_type: u8,
+    /// FIX tag 59 TimeInForce: b'0'=DAY, b'1'=GTC, b'3'=IOC, b'4'=FOK
+    pub tif: u8,
+    /// FIX tag 99 stop price (for Stop/StopLimit/MIT/LIT orders)
+    pub stop_price: Price,
+}
+
+impl Order {
+    /// Create a new tracked order with FIX type metadata.
+    pub fn new(order_id: OrderId, instrument: InstrumentId, side: Side, qty: u32, price: Price, ord_type: u8, tif: u8, stop_price: Price) -> Self {
+        Self { order_id, instrument, side, price, qty, filled: 0, status: OrderStatus::PendingSubmit, ord_type, tif, stop_price }
+    }
 }
 
 /// Order request written by strategy, drained by engine after on_tick.
@@ -226,6 +239,19 @@ pub enum OrderRequest {
         qty: u32,
         price: Price,
         stop_price: Price,
+    },
+    /// Bracket order: parent entry + take-profit + stop-loss, linked via OCA.
+    /// Generates 3 FIX messages: parent (35=D), TP child (35=D with 6107+583), SL child (35=D with 6107+583).
+    SubmitBracket {
+        parent_id: OrderId,
+        tp_id: OrderId,
+        sl_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        entry_price: Price,
+        take_profit: Price,
+        stop_loss: Price,
     },
     Cancel {
         order_id: OrderId,
@@ -709,6 +735,9 @@ mod tests {
             qty: 50,
             filled: 10,
             status: OrderStatus::PartiallyFilled,
+            ord_type: b'2',
+            tif: b'0',
+            stop_price: 0,
         };
         let o2 = o; // Copy
         assert_eq!(o.order_id, o2.order_id);
