@@ -19,16 +19,40 @@ IBX connects directly to Interactive Brokers servers using IB's native protocol 
 
 ## Benchmarks
 
-Measured against SPY on IB paper account. Compared to the official C++ TWS API connecting through IB Gateway.
+SPY on IB paper account, public internet (not colocated). Compared to the official C++ TWS API connecting through IB Gateway on localhost.
 
-| Metric | IBX | Official C++ TWS API | Difference |
+### Order Latency
+
+| Metric | IBX | C++ TWS API | Ratio |
 |---|---|---|---|
-| **Limit order submit-to-ack** | 114.8ms | 633ms | **5.5x faster** |
-| **Limit order full round-trip** | 240.5ms | 781ms | **3.2x faster** |
-| **Tick decode latency (P50)** | 14.2us | 9us | 1.6x slower* |
-| **Tick decode latency (P99)** | 25.4us | — | — |
+| Limit submit → ack | 114.8ms | 632.9ms | **5.5x faster** |
+| Limit cancel → confirm | 125.7ms | 148.2ms | 1.2x faster |
+| **Limit full round-trip** | **240.5ms** | **781.1ms** | **3.2x faster** |
+| Market order mean RTT | 1,113ms | — | — |
+| Market order slippage | $0.09 | — | — |
 
-*Expected: IB Gateway pre-parses ticks over localhost, IBX decodes the full protocol stack (TLS + HMAC + FIXCOMP + binary decode).
+### Tick Decode Latency
+
+| Percentile | IBX | C++ TWS API | Ratio |
+|---|---|---|---|
+| P50 | 14.2us | 8.9us | 1.6x* |
+| P99 | 25.4us | 22.4us | 1.1x* |
+| Max | 41.6us | 27.6us | — |
+
+*IBX decodes the full protocol stack (TLS → HMAC → FIXCOMP → binary ticks). IB Gateway pre-parses and feeds callbacks over localhost — no crypto, no decompression.
+
+### Connection
+
+| | IBX | C++ TWS API |
+|---|---|---|
+| Time | ~21s | 33ms |
+| What | Full DH + SRP + FIX logon + init over internet | Socket to pre-authenticated local Java gateway |
+
+### Analysis
+
+The biggest win is **order latency**: IBX saves ~500ms per order vs the official gateway. The IB Gateway Java app adds overhead from GC pauses, FIX serialization through the Java stack, and the extra localhost socket hop.
+
+Tick decode is 1.6x slower — expected and acceptable. At IB's ~4 ticks/sec paper rate, the 5us difference is negligible. The real win is eliminating the Java gateway as a dependency entirely.
 
 ## Rust Usage
 
