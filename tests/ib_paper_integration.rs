@@ -329,6 +329,12 @@ fn integration_suite() {
     conns = phase_all_or_none_order(conns);
     conns = phase_trigger_method_order(conns);
 
+    // Conditional order phases
+    conns = phase_price_condition_order(conns);
+    conns = phase_time_condition_order(conns);
+    conns = phase_volume_condition_order(conns);
+    conns = phase_multi_condition_order(conns);
+
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
         conns = phase_moc_order(conns);
@@ -361,7 +367,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 56;
+    let total_phases = 60;
     let skipped = if needs_ticks { 0 } else { 10 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -3362,4 +3368,81 @@ fn phase_heartbeat_timeout_detection(conns: Conns) -> Conns {
 
     // Return real CCP (may be stale, but this is last phase before shutdown)
     Conns { farm: reclaimed.farm, ccp: real_ccp, hmds: reclaimed.hmds, account_id }
+}
+
+// ─── Phase 57: Price Condition Order ───
+
+fn phase_price_condition_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 57: Price Condition Order (SPY)", |ctx| {
+        ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
+            outside_rth: true,
+            conditions: vec![OrderCondition::Price {
+                con_id: 756733, // SPY
+                exchange: "BEST".into(),
+                price: 1_00_000_000, // $1 — won't trigger
+                is_more: false,      // trigger when SPY <= $1
+                trigger_method: 0,
+            }],
+            ..OrderAttrs::default()
+        })
+    })
+}
+
+// ─── Phase 58: Time Condition Order ───
+
+fn phase_time_condition_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 58: Time Condition Order (SPY)", |ctx| {
+        ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
+            outside_rth: true,
+            conditions: vec![OrderCondition::Time {
+                time: "20991231-23:59:59".into(), // far future — won't trigger
+                is_more: false,
+            }],
+            ..OrderAttrs::default()
+        })
+    })
+}
+
+// ─── Phase 59: Volume Condition Order ───
+
+fn phase_volume_condition_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 59: Volume Condition Order (SPY)", |ctx| {
+        ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
+            outside_rth: true,
+            conditions: vec![OrderCondition::Volume {
+                con_id: 756733,
+                exchange: "BEST".into(),
+                volume: 999_999_999, // unreachable volume — won't trigger
+                is_more: true,
+            }],
+            ..OrderAttrs::default()
+        })
+    })
+}
+
+// ─── Phase 60: Multi-Condition Order (Price AND Volume) ───
+
+fn phase_multi_condition_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 60: Multi-Condition Order (SPY)", |ctx| {
+        ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
+            outside_rth: true,
+            conditions: vec![
+                OrderCondition::Price {
+                    con_id: 756733,
+                    exchange: "BEST".into(),
+                    price: 1_00_000_000, // $1
+                    is_more: false,
+                    trigger_method: 2, // bid/ask
+                },
+                OrderCondition::Volume {
+                    con_id: 756733,
+                    exchange: "BEST".into(),
+                    volume: 999_999_999,
+                    is_more: true,
+                },
+            ],
+            conditions_cancel_order: true,
+            ..OrderAttrs::default()
+        })
+    })
 }

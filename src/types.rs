@@ -191,8 +191,8 @@ impl AdaptivePriority {
 }
 
 /// Optional attributes for extended order submissions.
-/// All fields default to "not set" (0/false). Copy-friendly (no heap allocation).
-#[derive(Debug, Clone, Copy, Default)]
+/// All fields default to "not set" (0/false).
+#[derive(Debug, Clone, Default)]
 pub struct OrderAttrs {
     /// Show on book as this many shares (tag 111). 0 = not set (show full qty).
     pub display_size: u32,
@@ -221,10 +221,63 @@ pub struct OrderAttrs {
     /// 0=default, 1=double-bid-ask, 2=last, 3=double-last, 4=bid-ask,
     /// 7=last-or-bid-ask, 8=mid-point.
     pub trigger_method: u8,
+    /// Conditions that must be met before the order activates (IB tag 6136+).
+    pub conditions: Vec<OrderCondition>,
+    /// Cancel order if conditions are no longer met (IB tag 6128). Default false.
+    pub conditions_cancel_order: bool,
+    /// Evaluate conditions outside regular trading hours (IB tag 6151). Default false.
+    pub conditions_ignore_rth: bool,
+}
+
+/// A condition that must be met before an order activates.
+/// IB evaluates conditions server-side; order stays PreSubmitted until triggered.
+#[derive(Debug, Clone)]
+pub enum OrderCondition {
+    /// Trigger when an instrument's price crosses a threshold.
+    Price {
+        con_id: i64,
+        exchange: String,
+        price: Price,
+        is_more: bool,
+        /// 0=default, 1=last, 2=bid/ask, 3=bid, 4=ask
+        trigger_method: u8,
+    },
+    /// Trigger at a specific time.
+    Time {
+        /// Format: YYYYMMDD-HH:MM:SS
+        time: String,
+        is_more: bool,
+    },
+    /// Trigger based on margin cushion percentage.
+    Margin {
+        /// Percentage (e.g., 10 = 10%).
+        percent: u32,
+        is_more: bool,
+    },
+    /// Trigger when a trade executes on a specific instrument.
+    Execution {
+        symbol: String,
+        exchange: String,
+        sec_type: String,
+    },
+    /// Trigger when volume exceeds a threshold.
+    Volume {
+        con_id: i64,
+        exchange: String,
+        volume: i64,
+        is_more: bool,
+    },
+    /// Trigger on percentage price change.
+    PercentChange {
+        con_id: i64,
+        exchange: String,
+        percent: f64,
+        is_more: bool,
+    },
 }
 
 /// Order request written by strategy, drained by engine after on_tick.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum OrderRequest {
     SubmitLimit {
         order_id: OrderId,
@@ -652,7 +705,7 @@ mod tests {
             price: 100 * PRICE_SCALE,
             qty: 200,
         };
-        let req2 = req; // Copy
+        let req2 = req.clone();
         match (req, req2) {
             (
                 OrderRequest::Modify { order_id: a, .. },

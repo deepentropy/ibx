@@ -1,3 +1,40 @@
+## 2026-03-10 - Issue #34: Conditional Orders (Price, Time, Volume, Margin, Execution, % Change)
+
+### Goal
+Implement IB conditional order support — orders that activate only when specified conditions are met. Server-side evaluation by IB.
+
+### FIX Tag Discovery
+Filed ib-agent#46 to capture CCP FIX tags via packet capture. Findings:
+- **Framework tags**: 6136 (conditionsCount), 6128 (conditionsCancelOrder), 6151 (conditionsIgnoreRth)
+- **Per-condition tags**: 6222 (condType), 6137 (conjunction), 6126 (operator), 6123 (conId), 6124 (exchange), 6127 (triggerMethod), 6125 (price), 6223 (time), 6245 (percent), 6263 (volume), 6246 (execution)
+- Multi-condition: tags repeat per condition block, conjunction `a`=AND, `n`=last
+
+### What Was Implemented
+- `OrderCondition` enum: Price, Time, Margin, Execution, Volume, PercentChange
+- Added `conditions: Vec<OrderCondition>`, `conditions_cancel_order`, `conditions_ignore_rth` to `OrderAttrs`
+- `build_condition_strings()` serializer: produces FIX tag values for all 6 condition types
+- FIX serialization in `SubmitLimitEx` handler appends condition tags to `35=D`
+- Removed `Copy` from `OrderRequest` and `OrderAttrs` (conditions need heap-allocated strings)
+- 7 unit tests for condition serialization (all types + multi-condition + empty)
+- 4 integration test phases: Price (#57), Time (#58), Volume (#59), Multi-condition (#60)
+
+### Files Changed
+- `src/types.rs` — Added `OrderCondition` enum, conditions fields on `OrderAttrs`, removed `Copy` from `OrderRequest`/`OrderAttrs`
+- `src/engine/hot_loop.rs` — Added `build_condition_strings()`, condition tag serialization in `SubmitLimitEx`, 7 unit tests
+- `tests/ib_paper_integration.rs` — 4 new integration phases (57-60)
+
+### Test Results
+496 passed, 0 failed (+7 new unit tests). Integration phases: 56 → 60.
+
+### What Was NOT Built
+- Margin condition integration test (needs margin state — hard to set up on paper)
+- Execution condition integration test (requires another fill to trigger)
+- PercentChange condition integration test (requires price movement)
+- Condition parsing from inbound exec reports (IB sends condition status back)
+- OR conjunction (only AND captured; OR may use `o` but not verified)
+
+---
+
 ## 2026-03-10 - Issue #30: Heartbeat Timeout Live Integration Tests
 
 ### Goal

@@ -7,7 +7,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{ControlCommand, InstrumentId, OrderRequest, Price, Side, PRICE_SCALE};
+use crate::types::{ControlCommand, InstrumentId, OrderCondition, OrderRequest, Price, Side, PRICE_SCALE};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 /// CCP heartbeat interval (10 seconds, configurable via FIX tag 108).
@@ -676,6 +676,33 @@ impl<S: Strategy> HotLoop<S> {
                     if attrs.trigger_method > 0 {
                         trigger_str = attrs.trigger_method.to_string();
                         fields.push((6115, &trigger_str));
+                    }
+                    // Condition tags (6136+ framework)
+                    let cond_strs = build_condition_strings(&attrs.conditions);
+                    if !attrs.conditions.is_empty() {
+                        let count_str = &cond_strs[0]; // first element is count
+                        fields.push((6136, count_str));
+                        if attrs.conditions_cancel_order {
+                            fields.push((6128, "1"));
+                        }
+                        if attrs.conditions_ignore_rth {
+                            fields.push((6151, "1"));
+                        }
+                        // Per-condition tags start at index 1, 11 strings per condition
+                        for i in 0..attrs.conditions.len() {
+                            let base = 1 + i * 11;
+                            fields.push((6222, &cond_strs[base]));      // condType
+                            fields.push((6137, &cond_strs[base + 1]));  // conjunction
+                            fields.push((6126, &cond_strs[base + 2]));  // operator
+                            fields.push((6123, &cond_strs[base + 3]));  // conId
+                            fields.push((6124, &cond_strs[base + 4]));  // exchange
+                            fields.push((6127, &cond_strs[base + 5]));  // triggerMethod
+                            fields.push((6125, &cond_strs[base + 6]));  // price
+                            fields.push((6223, &cond_strs[base + 7]));  // time
+                            fields.push((6245, &cond_strs[base + 8]));  // percent
+                            fields.push((6263, &cond_strs[base + 9]));  // volume
+                            fields.push((6246, &cond_strs[base + 10])); // execution
+                        }
                     }
                     conn.send_fix(&fields)
                 }
@@ -2064,6 +2091,102 @@ fn find_body_after_tag<'a>(msg: &'a [u8], tag_marker: &[u8]) -> Option<&'a [u8]>
         .map(|pos| &msg[pos + tag_marker.len()..])
 }
 
+/// Build string values for condition FIX tags.
+/// Returns: [count, cond1_type, cond1_conj, cond1_op, cond1_conid, cond1_exch,
+///           cond1_trigger, cond1_price, cond1_time, cond1_pct, cond1_vol, cond1_exec, ...]
+/// 1 + 11 * N strings total.
+fn build_condition_strings(conditions: &[OrderCondition]) -> Vec<String> {
+    let mut out = Vec::with_capacity(1 + conditions.len() * 11);
+    out.push(conditions.len().to_string());
+    for (i, cond) in conditions.iter().enumerate() {
+        let is_last = i == conditions.len() - 1;
+        let conj = if is_last { "n" } else { "a" };
+        let op = |is_more: bool| if is_more { ">=" } else { "<=" };
+        match cond {
+            OrderCondition::Price { con_id, exchange, price, is_more, trigger_method } => {
+                out.push("1".into());                              // condType
+                out.push(conj.into());                             // conjunction
+                out.push(op(*is_more).into());                     // operator
+                out.push(con_id.to_string());                      // conId
+                out.push(exchange.clone());                        // exchange
+                out.push(trigger_method.to_string());              // triggerMethod
+                out.push(format_price(*price));                    // price
+                out.push(String::new());                           // time (unused)
+                out.push(String::new());                           // percent (unused)
+                out.push(String::new());                           // volume (unused)
+                out.push(String::new());                           // execution (unused)
+            }
+            OrderCondition::Time { time, is_more } => {
+                out.push("3".into());
+                out.push(conj.into());
+                out.push(op(*is_more).into());
+                out.push(String::new());                           // conId (unused)
+                out.push(String::new());                           // exchange (unused)
+                out.push(String::new());                           // triggerMethod (unused)
+                out.push(String::new());                           // price (unused)
+                out.push(time.clone());                            // time
+                out.push(String::new());                           // percent (unused)
+                out.push(String::new());                           // volume (unused)
+                out.push(String::new());                           // execution (unused)
+            }
+            OrderCondition::Margin { percent, is_more } => {
+                out.push("4".into());
+                out.push(conj.into());
+                out.push(op(*is_more).into());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(percent.to_string());                     // percent
+                out.push(String::new());
+                out.push(String::new());
+            }
+            OrderCondition::Execution { symbol, exchange, sec_type } => {
+                out.push("5".into());
+                out.push(conj.into());
+                out.push(String::new());                           // operator (unused)
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                let exch = if exchange == "SMART" { "*" } else { exchange.as_str() };
+                out.push(format!("symbol={};exchange={};securityType={};", symbol, exch, sec_type));
+            }
+            OrderCondition::Volume { con_id, exchange, volume, is_more } => {
+                out.push("6".into());
+                out.push(conj.into());
+                out.push(op(*is_more).into());
+                out.push(con_id.to_string());
+                out.push(exchange.clone());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(volume.to_string());                      // volume
+                out.push(String::new());
+            }
+            OrderCondition::PercentChange { con_id, exchange, percent, is_more } => {
+                out.push("7".into());
+                out.push(conj.into());
+                out.push(op(*is_more).into());
+                out.push(con_id.to_string());
+                out.push(exchange.clone());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(String::new());
+                out.push(format!("{}", percent));                   // percent
+                out.push(String::new());
+                out.push(String::new());
+            }
+        }
+    }
+    out
+}
+
 impl<S: Strategy> HotLoop<S> {
     fn pin_to_core(core: usize) {
         let core_ids = core_affinity::get_core_ids().unwrap_or_default();
@@ -2606,6 +2729,103 @@ mod tests {
         engine.check_heartbeats();
         // Strategy should NOT have received on_disconnect (already disconnected)
         assert!(!engine.strategy().disconnected);
+    }
+
+    #[test]
+    fn build_condition_strings_price() {
+        let conds = vec![OrderCondition::Price {
+            con_id: 265598,
+            exchange: "BEST".into(),
+            price: 31103 * (PRICE_SCALE / 100), // 311.03
+            is_more: true,
+            trigger_method: 2,
+        }];
+        let s = build_condition_strings(&conds);
+        assert_eq!(s[0], "1");     // count
+        assert_eq!(s[1], "1");     // condType = Price
+        assert_eq!(s[2], "n");     // conjunction = last
+        assert_eq!(s[3], ">=");    // operator
+        assert_eq!(s[4], "265598"); // conId
+        assert_eq!(s[5], "BEST");  // exchange
+        assert_eq!(s[6], "2");     // triggerMethod
+        assert_eq!(s[7], "311.03"); // price
+        assert_eq!(s[8], "");      // time (unused)
+    }
+
+    #[test]
+    fn build_condition_strings_multi_price_and_volume() {
+        let conds = vec![
+            OrderCondition::Price {
+                con_id: 265598, exchange: "BEST".into(),
+                price: 300 * PRICE_SCALE, is_more: true, trigger_method: 0,
+            },
+            OrderCondition::Volume {
+                con_id: 265598, exchange: "BEST".into(),
+                volume: 1000000, is_more: true,
+            },
+        ];
+        let s = build_condition_strings(&conds);
+        assert_eq!(s[0], "2");    // count = 2
+        // Condition 1 (Price)
+        assert_eq!(s[1], "1");    // condType
+        assert_eq!(s[2], "a");    // conjunction = AND (not last)
+        assert_eq!(s[3], ">=");
+        // Condition 2 (Volume) — starts at index 12
+        assert_eq!(s[12], "6");   // condType = Volume
+        assert_eq!(s[13], "n");   // conjunction = last
+        assert_eq!(s[14], ">=");  // operator
+        assert_eq!(s[21], "1000000"); // volume
+    }
+
+    #[test]
+    fn build_condition_strings_time() {
+        let conds = vec![OrderCondition::Time {
+            time: "20260310-14:30:00".into(),
+            is_more: true,
+        }];
+        let s = build_condition_strings(&conds);
+        assert_eq!(s[1], "3");                  // condType = Time
+        assert_eq!(s[8], "20260310-14:30:00");  // time
+    }
+
+    #[test]
+    fn build_condition_strings_margin() {
+        let conds = vec![OrderCondition::Margin { percent: 5, is_more: false }];
+        let s = build_condition_strings(&conds);
+        assert_eq!(s[1], "4");   // condType = Margin
+        assert_eq!(s[3], "<=");  // operator (is_more=false)
+        assert_eq!(s[9], "5");   // percent
+    }
+
+    #[test]
+    fn build_condition_strings_execution() {
+        let conds = vec![OrderCondition::Execution {
+            symbol: "AAPL".into(),
+            exchange: "SMART".into(),
+            sec_type: "CS".into(),
+        }];
+        let s = build_condition_strings(&conds);
+        assert_eq!(s[1], "5");   // condType = Execution
+        assert_eq!(s[3], "");    // operator (unused)
+        assert_eq!(s[11], "symbol=AAPL;exchange=*;securityType=CS;");
+    }
+
+    #[test]
+    fn build_condition_strings_percent_change() {
+        let conds = vec![OrderCondition::PercentChange {
+            con_id: 265598, exchange: "BEST".into(),
+            percent: 5.5, is_more: true,
+        }];
+        let s = build_condition_strings(&conds);
+        assert_eq!(s[1], "7");    // condType = PercentChange
+        assert_eq!(s[9], "5.5");  // percent
+    }
+
+    #[test]
+    fn build_condition_strings_empty() {
+        let s = build_condition_strings(&[]);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0], "0");
     }
 
     #[test]
