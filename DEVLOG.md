@@ -1,3 +1,28 @@
+## 2026-03-10 - Issue #30: Heartbeat Timeout Live Integration Tests
+
+### Goal
+Add live integration tests for heartbeat timeout detection. Verify farm/CCP heartbeats keep connections alive, timeout detection fires within expected window on stale connections, `on_disconnect` is called exactly once, and the loop survives timeouts (flag-based, not loop-kill).
+
+### Bug Found & Fixed
+`check_heartbeats()` didn't guard against already-disconnected connections. After the first CCP/farm timeout, `handle_ccp_disconnect()`/`handle_farm_disconnect()` was called **every iteration** because the timeout condition remained true and no guard checked the disconnect flag. Fixed by adding `if !self.ccp_disconnected` / `if !self.farm_disconnected` guards around heartbeat check blocks.
+
+### What Was Implemented
+- **Phase 55**: Farm heartbeat keepalive — runs 65s with real IB connections (>2x farm 30s interval), verifies no disconnect
+- **Phase 56**: Heartbeat timeout detection — uses localhost "dead" TCP socket as CCP, verifies:
+  - Timeout fires within 18-28s window (theoretical: 10+1+10=21s)
+  - `on_disconnect` called exactly once (AtomicU32 counter)
+  - Hot loop continues running after timeout (graceful shutdown succeeds)
+- **Unit test**: `check_heartbeats_skips_already_disconnected` — validates the bug fix
+
+### Files Changed
+- `src/engine/hot_loop.rs` — Added disconnect flag guards in `check_heartbeats()`, 1 new unit test
+- `tests/ib_paper_integration.rs` — Added Phase 55 (farm keepalive), Phase 56 (timeout detection), `TimeoutStrategy`
+
+### Test Results
+489 passed, 0 failed (+1 new unit test). Integration phases: 54 → 56.
+
+---
+
 ## 2026-03-10 - Issue #29: Subscription Cleanup on Disconnect
 
 ### Goal

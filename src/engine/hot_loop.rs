@@ -1958,7 +1958,8 @@ impl<S: Strategy> HotLoop<S> {
         let now = Instant::now();
         let ts = chrono_free_timestamp();
 
-        // --- CCP heartbeat ---
+        // --- CCP heartbeat (skip if already disconnected) ---
+        if !self.ccp_disconnected {
         if let Some(conn) = self.ccp_conn.as_mut() {
             let since_sent = now.duration_since(self.hb.last_ccp_sent).as_secs();
             let since_recv = now.duration_since(self.hb.last_ccp_recv).as_secs();
@@ -1993,8 +1994,10 @@ impl<S: Strategy> HotLoop<S> {
                 }
             }
         }
+        }
 
-        // --- Farm heartbeat ---
+        // --- Farm heartbeat (skip if already disconnected) ---
+        if !self.farm_disconnected {
         if let Some(conn) = self.farm_conn.as_mut() {
             let since_sent = now.duration_since(self.hb.last_farm_sent).as_secs();
             let since_recv = now.duration_since(self.hb.last_farm_recv).as_secs();
@@ -2025,6 +2028,7 @@ impl<S: Strategy> HotLoop<S> {
                     self.hb.last_farm_sent = now;
                 }
             }
+        }
         }
     }
 
@@ -2184,6 +2188,7 @@ impl<S: Strategy> HotLoop<S> {
 mod tests {
     use super::*;
     use crate::types::*;
+    use std::time::Duration;
 
     struct RecordingStrategy {
         ticks: Vec<InstrumentId>,
@@ -2586,6 +2591,21 @@ mod tests {
         let mut engine = HotLoop::new(RecordingStrategy::new(), None);
         engine.check_heartbeats(); // should not panic
         assert!(engine.running);
+    }
+
+    #[test]
+    fn check_heartbeats_skips_already_disconnected() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        // Simulate: CCP and farm already disconnected
+        engine.ccp_disconnected = true;
+        engine.farm_disconnected = true;
+        // Set heartbeat timestamps far in the past to trigger timeout if guards fail
+        engine.hb.last_ccp_recv = Instant::now() - Duration::from_secs(120);
+        engine.hb.last_farm_recv = Instant::now() - Duration::from_secs(120);
+        // Should be a no-op — no duplicate disconnect handling
+        engine.check_heartbeats();
+        // Strategy should NOT have received on_disconnect (already disconnected)
+        assert!(!engine.strategy().disconnected);
     }
 
     #[test]

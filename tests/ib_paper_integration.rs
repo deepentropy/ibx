@@ -7,6 +7,7 @@
 //! Each phase builds a fresh HotLoop, runs it, then reclaims connections.
 
 use std::env;
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -340,6 +341,7 @@ fn integration_suite() {
     // Infrastructure phases — always
     conns = phase_subscribe_unsubscribe(conns);
     conns = phase_heartbeat_keepalive(conns);
+    conns = phase_farm_heartbeat_keepalive(conns);
 
     // Fill-dependent phases — regular hours only
     if needs_ticks {
@@ -354,9 +356,12 @@ fn integration_suite() {
         println!("--- Phase 52: PnL After Round Trip (SPY) ---\n  SKIP: {:?} — needs fills\n", session);
     }
 
+    // Heartbeat timeout detection — last before shutdown (CCP goes stale during this test)
+    conns = phase_heartbeat_timeout_detection(conns);
+
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 54;
+    let total_phases = 56;
     let skipped = if needs_ticks { 0 } else { 10 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -3236,4 +3241,125 @@ fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
         println!("  PASS (PnL not yet updated — paper account delay is expected)\n");
     }
     conns
+}
+
+// ─── Phase 55: Farm heartbeat keepalive (65s > 2x farm 30s interval) ───
+
+fn phase_farm_heartbeat_keepalive(conns: Conns) -> Conns {
+    println!("--- Phase 55: Farm Heartbeat Keepalive (65s > 2x farm 30s interval) ---");
+
+    let account_id = conns.account_id;
+    let (strategy, handle) = HeartbeatStrategy::new();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    let join = run_hot_loop(hot_loop);
+
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(65) {
+        if handle.disconnected.load(Ordering::Relaxed) { break; }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    let still_connected = !handle.disconnected.load(Ordering::Relaxed);
+    let elapsed = start.elapsed();
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    assert!(still_connected,
+        "Farm disconnected after {:.1}s — heartbeat failed (expected to survive 2x 30s farm interval)",
+        elapsed.as_secs_f64());
+    println!("  PASS ({:.1}s, no disconnect, survived 2x farm heartbeat interval)\n",
+        elapsed.as_secs_f64());
+    conns
+}
+
+// ─── Phase 56: Heartbeat timeout detection (simulated stale CCP) ───
+
+struct TimeoutStrategy {
+    disconnect_count: Arc<AtomicU32>,
+}
+
+struct TimeoutHandle {
+    disconnect_count: Arc<AtomicU32>,
+}
+
+impl TimeoutStrategy {
+    fn new() -> (Self, TimeoutHandle) {
+        let disconnect_count = Arc::new(AtomicU32::new(0));
+        let handle = TimeoutHandle { disconnect_count: disconnect_count.clone() };
+        (Self { disconnect_count }, handle)
+    }
+}
+
+impl Strategy for TimeoutStrategy {
+    fn on_start(&mut self, _ctx: &mut Context) {}
+
+    fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {}
+
+    fn on_disconnect(&mut self, _ctx: &mut Context) {
+        self.disconnect_count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn phase_heartbeat_timeout_detection(conns: Conns) -> Conns {
+    println!("--- Phase 56: Heartbeat Timeout Detection (simulated stale CCP) ---");
+
+    let account_id = conns.account_id;
+
+    // Create "dead" CCP: localhost TCP pair where server never responds.
+    // The hot loop will send heartbeats into the void and eventually timeout.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind localhost");
+    let addr = listener.local_addr().unwrap();
+    let client = std::net::TcpStream::connect(addr).expect("connect to localhost");
+    let _server = listener.accept().expect("accept dead socket").0; // keep alive, never write
+    let dead_ccp = Connection::new_raw(client).expect("wrap dead socket as Connection");
+
+    // Store real CCP aside — it will go stale during this test (~25s idle)
+    let real_ccp = conns.ccp;
+
+    let (strategy, handle) = TimeoutStrategy::new();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, dead_ccp, conns.hmds, None,
+    );
+
+    let join = run_hot_loop(hot_loop);
+
+    // CCP timeout: 10s heartbeat + 1s grace + 10s TestRequest timeout = ~21s
+    let start = Instant::now();
+    let timeout = Duration::from_secs(30);
+    while start.elapsed() < timeout {
+        if handle.disconnect_count.load(Ordering::Relaxed) > 0 { break; }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let elapsed = start.elapsed();
+    let dc_count = handle.disconnect_count.load(Ordering::Relaxed);
+
+    // Verify: disconnect was detected
+    assert!(dc_count > 0,
+        "No disconnect after {:.1}s — heartbeat timeout should fire at ~21s",
+        elapsed.as_secs_f64());
+
+    // Verify: timeout fired within expected window (18-28s, generous bounds)
+    assert!(elapsed.as_secs() >= 18 && elapsed.as_secs() <= 28,
+        "Disconnect at {:.1}s — expected 18-28s (10+1+10=21s theoretical)",
+        elapsed.as_secs_f64());
+
+    // Verify: loop still alive after timeout (flag-based, not loop-kill).
+    // If the loop had died, shutdown_and_reclaim would panic on join.
+    let reclaimed = shutdown_and_reclaim(&control_tx, join, account_id.clone());
+
+    // Verify: on_disconnect called exactly once
+    let final_dc = handle.disconnect_count.load(Ordering::Relaxed);
+    assert_eq!(final_dc, 1, "on_disconnect called {} times, expected exactly 1", final_dc);
+
+    println!("  Timeout at {:.1}s (expected ~21s)", elapsed.as_secs_f64());
+    println!("  on_disconnect called exactly once");
+    println!("  Loop survived timeout (graceful shutdown succeeded)");
+    println!("  PASS\n");
+
+    // Return real CCP (may be stale, but this is last phase before shutdown)
+    Conns { farm: reclaimed.farm, ccp: real_ccp, hmds: reclaimed.hmds, account_id }
 }
