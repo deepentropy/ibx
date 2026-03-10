@@ -613,6 +613,7 @@ impl<S: Strategy> HotLoop<S> {
                     let symbol = self.context.market.symbol(instrument).to_string();
                     let now = chrono_free_timestamp();
                     let display_str = attrs.display_size.to_string();
+                    let min_qty_str = attrs.min_qty.to_string();
                     let gat_str = if attrs.good_after > 0 { unix_to_ib_datetime(attrs.good_after) } else { String::new() };
                     let gtd_str = if attrs.good_till > 0 { unix_to_ib_datetime(attrs.good_till) } else { String::new() };
                     let mut fields: Vec<(u32, &str)> = vec![
@@ -635,6 +636,9 @@ impl<S: Strategy> HotLoop<S> {
                     ];
                     if attrs.display_size > 0 {
                         fields.push((111, &display_str));
+                    }
+                    if attrs.min_qty > 0 {
+                        fields.push((110, &min_qty_str));
                     }
                     if attrs.outside_rth {
                         fields.push((6433, "1"));
@@ -1011,7 +1015,7 @@ impl<S: Strategy> HotLoop<S> {
                     ])
                 }
                 OrderRequest::SubmitBracket { parent_id, tp_id, sl_id, instrument, side, qty, entry_price, take_profit, stop_loss } => {
-                    let exit_side = match side { Side::Buy => Side::Sell, Side::Sell => Side::Buy };
+                    let exit_side = match side { Side::Buy => Side::Sell, Side::Sell | Side::ShortSell => Side::Buy };
                     let exit_side_str = fix_side(exit_side);
                     let side_str = fix_side(side);
                     let qty_str = qty.to_string();
@@ -1442,7 +1446,7 @@ impl<S: Strategy> HotLoop<S> {
 
                 let delta = match order.side {
                     Side::Buy => last_shares,
-                    Side::Sell => -last_shares,
+                    Side::Sell | Side::ShortSell => -last_shares,
                 };
                 self.context.update_position(order.instrument, delta);
                 self.strategy.on_fill(&fill, &mut self.context);
@@ -1699,6 +1703,7 @@ fn fix_side(side: Side) -> &'static str {
     match side {
         Side::Buy => "1",
         Side::Sell => "2",
+        Side::ShortSell => "5",
     }
 }
 
@@ -1798,7 +1803,7 @@ impl<S: Strategy> HotLoop<S> {
     pub fn inject_fill(&mut self, fill: &crate::types::Fill) {
         let delta = match fill.side {
             crate::types::Side::Buy => fill.qty,
-            crate::types::Side::Sell => -fill.qty,
+            crate::types::Side::Sell | crate::types::Side::ShortSell => -fill.qty,
         };
         self.context.update_position(fill.instrument, delta);
         self.strategy.on_fill(fill, &mut self.context);
@@ -2223,6 +2228,7 @@ mod tests {
     fn fix_side_mapping() {
         assert_eq!(fix_side(Side::Buy), "1");
         assert_eq!(fix_side(Side::Sell), "2");
+        assert_eq!(fix_side(Side::ShortSell), "5");
     }
 
     #[test]

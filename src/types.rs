@@ -26,6 +26,8 @@ const MAX_PENDING_ORDERS: usize = 64;
 pub enum Side {
     Buy,
     Sell,
+    /// Short sell (FIX tag 54 = "5"). Used for short-selling stocks.
+    ShortSell,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +153,8 @@ impl AdaptivePriority {
 pub struct OrderAttrs {
     /// Show on book as this many shares (tag 111). 0 = not set (show full qty).
     pub display_size: u32,
+    /// Minimum fill quantity (FIX tag 110). 0 = not set.
+    pub min_qty: u32,
     /// Hidden order — not displayed on book (IB tag 6135).
     pub hidden: bool,
     /// Allow trading outside regular hours (IB tag 6433).

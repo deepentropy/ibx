@@ -114,7 +114,7 @@ impl From<Fill> for PyFill {
         Self {
             instrument: f.instrument,
             order_id: f.order_id,
-            side: match f.side { Side::Buy => "BUY".into(), Side::Sell => "SELL".into() },
+            side: match f.side { Side::Buy => "BUY".into(), Side::Sell => "SELL".into(), Side::ShortSell => "SSHORT".into() },
             price: f.price as f64 / PRICE_SCALE_F,
             qty: f.qty,
             remaining: f.remaining,
@@ -441,10 +441,10 @@ impl IbEngine {
     /// Submit a limit order with extended attributes.
     /// tif: "DAY", "GTC", or "GTD". Optional: display_size (iceberg), hidden, outside_rth,
     /// good_after (unix secs), good_till (unix secs).
-    #[pyo3(signature = (instrument, side, qty, price, tif="DAY", display_size=0, hidden=false, outside_rth=false, good_after=0, good_till=0))]
+    #[pyo3(signature = (instrument, side, qty, price, tif="DAY", display_size=0, min_qty=0, hidden=false, outside_rth=false, good_after=0, good_till=0))]
     fn submit_limit_ex(
         &self, instrument: u32, side: &str, qty: u32, price: f64,
-        tif: &str, display_size: u32, hidden: bool, outside_rth: bool,
+        tif: &str, display_size: u32, min_qty: u32, hidden: bool, outside_rth: bool,
         good_after: i64, good_till: i64,
     ) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -454,11 +454,12 @@ impl IbEngine {
             "DAY" => b'0',
             "GTC" => b'1',
             "GTD" => b'6',
-            _ => return Err(PyRuntimeError::new_err(format!("Invalid TIF: {}. Use DAY, GTC, or GTD", tif))),
+            "DTC" => b'6',
+            _ => return Err(PyRuntimeError::new_err(format!("Invalid TIF: {}. Use DAY, GTC, GTD, or DTC", tif))),
         };
         self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitEx {
             order_id, instrument, side, qty, price: price_fixed, tif: tif_byte,
-            attrs: OrderAttrs { display_size, hidden, outside_rth, good_after, good_till },
+            attrs: OrderAttrs { display_size, min_qty, hidden, outside_rth, good_after, good_till },
         })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(order_id)
     }
@@ -544,6 +545,7 @@ fn parse_side(s: &str) -> PyResult<Side> {
     match s.to_uppercase().as_str() {
         "BUY" | "B" => Ok(Side::Buy),
         "SELL" | "S" => Ok(Side::Sell),
+        "SSHORT" | "SS" => Ok(Side::ShortSell),
         _ => Err(PyRuntimeError::new_err(format!("Invalid side '{}': use 'BUY' or 'SELL'", s))),
     }
 }

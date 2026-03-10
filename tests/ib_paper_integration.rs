@@ -305,6 +305,7 @@ fn integration_suite() {
     conns = phase_limit_opg(conns);
     conns = phase_iceberg_order(conns);
     conns = phase_hidden_order(conns);
+    conns = phase_short_sell(conns);
 
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
@@ -330,7 +331,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 34;
+    let total_phases = 35;
     let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -2364,6 +2365,14 @@ fn phase_rel_order(conns: Conns) -> Conns {
 fn phase_limit_opg(conns: Conns) -> Conns {
     run_submit_cancel_phase(conns, "Phase 32: Limit OPG Order (SPY)", |ctx| {
         ctx.submit_limit_opg(0, Side::Buy, 1, 1_00_000_000) // $1.00
+    })
+}
+
+// ─── Phase 35: Short Sell Limit Order ───
+
+fn phase_short_sell(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 35: Short Sell Limit Order (SPY)", |ctx| {
+        ctx.submit_limit_ex(0, Side::ShortSell, 1, 1_00_000_000, b'0', OrderAttrs::default())
     })
 }
 
