@@ -11,15 +11,15 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ib_engine::control::contracts;
-use ib_engine::control::historical::{self, BarDataType, BarSize, HistoricalRequest};
-use ib_engine::engine::context::{Context, Strategy};
-use ib_engine::engine::hot_loop::HotLoop;
-use ib_engine::gateway::{connect_farm, Gateway, GatewayConfig};
-use ib_engine::protocol::connection::{Connection, Frame};
-use ib_engine::protocol::fix;
-use ib_engine::protocol::fixcomp;
-use ib_engine::types::*;
+use ibx::control::contracts;
+use ibx::control::historical::{self, BarDataType, BarSize, HistoricalRequest};
+use ibx::engine::context::{Context, Strategy};
+use ibx::engine::hot_loop::HotLoop;
+use ibx::gateway::{connect_farm, Gateway, GatewayConfig};
+use ibx::protocol::connection::{Connection, Frame};
+use ibx::protocol::fix;
+use ibx::protocol::fixcomp;
+use ibx::types::*;
 
 fn get_config() -> Option<GatewayConfig> {
     let username = env::var("IB_USERNAME").ok()?;
@@ -196,7 +196,7 @@ fn integration_suite() {
         let conn = &mut conns.farm;
         let result = conn.send_fixcomp(&[
             (fix::TAG_MSG_TYPE, "V"),
-            (fix::TAG_SENDING_TIME, &ib_engine::gateway::chrono_free_timestamp()),
+            (fix::TAG_SENDING_TIME, &ibx::gateway::chrono_free_timestamp()),
             (263, "1"),
             (146, "2"),
             (262, "1"),
@@ -350,7 +350,7 @@ fn phase_extra_farms(gw: &Gateway, config: &GatewayConfig) {
 
     for farm in &farms {
         let start = Instant::now();
-        match ib_engine::gateway::connect_farm(
+        match ibx::gateway::connect_farm(
             &config.host, farm,
             &config.username, config.paper,
             &gw.server_session_id, &gw.session_token,
@@ -375,7 +375,7 @@ fn phase_extra_farms(gw: &Gateway, config: &GatewayConfig) {
 fn phase_contract_details(conns: &mut Conns) {
     println!("--- Phase 12: Contract Details Lookup (SPY, conId=756733) ---");
 
-    let now = ib_engine::gateway::chrono_free_timestamp();
+    let now = ibx::gateway::chrono_free_timestamp();
     conns.ccp.send_fix(&[
         (fix::TAG_MSG_TYPE, "c"),
         (fix::TAG_SENDING_TIME, &now),
@@ -752,7 +752,7 @@ fn phase_account_data(conns: Conns) -> Conns {
     // Send 6040=76 on CCP to trigger a fresh account summary (6040=77) response.
     // The init burst was already consumed by earlier phases.
     let mut ccp = conns.ccp;
-    let ts = ib_engine::gateway::chrono_free_timestamp();
+    let ts = ibx::gateway::chrono_free_timestamp();
     let _ = ccp.send_fix(&[
         (fix::TAG_MSG_TYPE, "U"),
         (fix::TAG_SENDING_TIME, &ts),

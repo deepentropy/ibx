@@ -1,14 +1,14 @@
 [package]
-name = "ib-engine"
+name = "ibx"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "ib_engine"
+name = "ibx"
 crate-type = ["lib", "cdylib"]
 
 [[bin]]
-name = "ib-engine-bin"
+name = "ibx"
 path = "src/main.rs"
 
 [features]

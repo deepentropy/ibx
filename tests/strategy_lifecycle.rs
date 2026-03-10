@@ -1,8 +1,8 @@
 //! Integration test: full strategy lifecycle (start → tick → fill → position update).
 
-use ib_engine::engine::context::{Context, Strategy};
-use ib_engine::engine::hot_loop::HotLoop;
-use ib_engine::types::*;
+use ibx::engine::context::{Context, Strategy};
+use ibx::engine::hot_loop::HotLoop;
+use ibx::types::*;
 
 /// Strategy that buys on first tick, places take-profit on fill.
 struct MomentumStrategy {

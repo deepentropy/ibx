@@ -20,9 +20,9 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ib_engine::engine::context::{Context, Strategy};
-use ib_engine::gateway::{Gateway, GatewayConfig};
-use ib_engine::types::*;
+use ibx::engine::context::{Context, Strategy};
+use ibx::gateway::{Gateway, GatewayConfig};
+use ibx::types::*;
 
 // ─── Benchmark phases ───
 

@@ -1,9 +1,9 @@
-//! PyO3 bindings for ib-engine. Feature-gated behind `python`.
+//! PyO3 bindings for ibx. Feature-gated behind `python`.
 //!
 //! Exposes `IbEngine` as the main entry point for Python:
 //! ```python
-//! import ib_engine
-//! engine = ib_engine.connect(username="user", password="pass", paper=True)
+//! import ibx
+//! engine = ibx.connect(username="user", password="pass", paper=True)
 //! spy = engine.subscribe(conid=756733, symbol="SPY")
 //! quote = engine.quote(spy)
 //! order_id = engine.submit_limit(spy, "BUY", qty=1, price=680.50)
@@ -408,7 +408,7 @@ fn connect(
 
 /// Python module definition.
 #[pymodule]
-fn ib_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn ibx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(connect, m)?)?;
     m.add_class::<IbEngine>()?;
     m.add_class::<PyQuote>()?;

@@ -1,8 +1,8 @@
 use std::env;
 
-use ib_engine::engine::context::{Context, Strategy};
-use ib_engine::gateway::{Gateway, GatewayConfig};
-use ib_engine::types::*;
+use ibx::engine::context::{Context, Strategy};
+use ibx::gateway::{Gateway, GatewayConfig};
+use ibx::types::*;
 
 /// Example strategy: buys when spread exceeds threshold, places take-profit on fill.
 struct SimpleMomentum {
@@ -26,7 +26,7 @@ impl Strategy for SimpleMomentum {
 
 fn main() {
     env_logger::init();
-    println!("ib-engine v{}", env!("CARGO_PKG_VERSION"));
+    println!("ibx v{}", env!("CARGO_PKG_VERSION"));
 
     let username = env::var("IB_USERNAME").unwrap_or_else(|_| {
         eprintln!("Set IB_USERNAME and IB_PASSWORD environment variables");
