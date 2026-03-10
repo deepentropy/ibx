@@ -1337,7 +1337,7 @@ impl<S: Strategy> HotLoop<S> {
                         (59, "0"),
                         (60, &now),
                         (167, "STK"),
-                        (100, "SMART"),
+                        (100, "ISLAND"),    // Requires directed exchange (not SMART)
                         (15, "USD"),
                         (204, "0"),
                     ];
@@ -1370,7 +1370,7 @@ impl<S: Strategy> HotLoop<S> {
                         (59, "0"),
                         (60, &now),
                         (167, "STK"),
-                        (100, "SMART"),
+                        (100, "ISLAND"),    // Requires directed exchange
                         (15, "USD"),
                         (204, "0"),
                     ])
@@ -1397,7 +1397,7 @@ impl<S: Strategy> HotLoop<S> {
                         (59, "0"),
                         (60, &now),
                         (167, "STK"),
-                        (100, "SMART"),
+                        (100, "ISLAND"),    // Requires directed exchange
                         (15, "USD"),
                         (204, "0"),
                     ])
@@ -1424,7 +1424,7 @@ impl<S: Strategy> HotLoop<S> {
                         (59, "0"),
                         (60, &now),
                         (167, "STK"),
-                        (100, "SMART"),
+                        (100, "ISLAND"),    // Requires directed exchange
                         (15, "USD"),
                         (204, "0"),
                     ])
@@ -1447,12 +1447,11 @@ impl<S: Strategy> HotLoop<S> {
                         (55, &symbol),
                         (54, side_str),
                         (38, &qty_str),
-                        (40, "E"),          // OrdType = Pegged
-                        (18, "P"),          // ExecInst = Market Peg
+                        (40, "E"),          // OrdType = Pegged (no mid-offset tags = PEGMKT)
                         (59, "0"),
                         (60, &now),
                         (167, "STK"),
-                        (100, "SMART"),
+                        (100, "ISLAND"),    // Requires directed exchange
                         (15, "USD"),
                         (204, "0"),
                     ];
@@ -1481,14 +1480,15 @@ impl<S: Strategy> HotLoop<S> {
                         (55, &symbol),
                         (54, side_str),
                         (38, &qty_str),
-                        (40, "E"),          // OrdType = Pegged
-                        (18, "M"),          // ExecInst = Mid-price Peg
+                        (40, "E"),          // OrdType = Pegged (tags 8403/8404 = PEGMID)
                         (59, "0"),
                         (60, &now),
                         (167, "STK"),
-                        (100, "SMART"),
+                        (100, "ISLAND"),    // Requires directed exchange
                         (15, "USD"),
                         (204, "0"),
+                        (8403, "0.0"),      // midOffsetAtWhole — differentiates PEGMID from PEGMKT
+                        (8404, "0.0"),      // midOffsetAtHalf
                     ];
                     let offset_str;
                     if offset > 0 {
