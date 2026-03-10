@@ -19,6 +19,8 @@ IBX connects directly to Interactive Brokers servers using IB's native protocol 
 
 ## Benchmarks
 
+> **Note:** These benchmarks were run on a paper trading account with limited sample sizes and no full statistical coverage. Results are indicative, not definitive. Comprehensive benchmarking on a live account is a TODO.
+
 SPY on IB paper account, public internet (not colocated). Compared to the official C++ TWS API connecting through IB Gateway on localhost.
 
 ### Order Latency
