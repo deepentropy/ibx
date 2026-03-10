@@ -1,3 +1,46 @@
+## 2026-03-10 - PyO3 Library Refactoring
+
+### Goal
+Refactor ib-engine to work as both a Rust library and a Python library via PyO3 bindings, replacing IB Gateway with a low-latency engine.
+
+### Approach Taken
+- Polling model (no Python callbacks): Rust HotLoop runs on background thread, Python reads shared state
+- SeqLock for quotes (writer never blocks), Mutex queues for fills/order updates
+- Feature-gated: `cargo build` = Rust lib only, `maturin develop --features python` = Python .pyd
+
+### What Was Done
+1. Moved `chrono_free_timestamp` from gateway.rs → config.rs (broke circular hot_loop → gateway dep)
+2. Added `ControlCommand::Order` and `ControlCommand::RegisterInstrument` for external order injection
+3. Created `src/bridge.rs`: `SharedState` (SeqLock quotes, concurrent queues) + `BridgeStrategy`
+4. Created `src/python.rs`: PyO3 module with `IbEngine`, `PyQuote`, `PyFill`, `PyOrderUpdate`, `PyAccountState`
+5. Added `pyproject.toml` for maturin build
+6. Feature-gated python module behind `[features] python = ["pyo3"]`
+
+### Python API
+```python
+import ib_engine
+engine = ib_engine.connect(username="user", password="pass", paper=True)
+spy = engine.subscribe(conid=756733, symbol="SPY")
+quote = engine.quote(spy)  # SeqLock read, returns PyQuote with float fields
+order_id = engine.submit_limit(spy, "BUY", qty=1, price=680.50)
+fills = engine.fills()  # drains queue
+engine.shutdown()
+```
+
+### Current State
+- All 475 Rust tests pass
+- Python module imports and exposes full API
+- Not yet tested with live IB connection from Python
+- Build: `maturin develop --features python` in .venv
+
+### Key Decisions
+- SeqLock over Mutex for quotes: writer (hot loop) never blocks
+- Float conversion in Python binding layer: negligible overhead vs GIL cost
+- Orders go through ControlCommand channel (reusing existing SPSC infra)
+- Binary renamed to `ib-engine-bin` to avoid PDB collision with cdylib
+
+---
+
 ## 2026-03-06 - Farm Subscription Debug: Market Hours Confirmed
 
 ### Goal

@@ -63,7 +63,7 @@ pub struct Context {
     pub(crate) market: MarketState,
     positions: [i64; MAX_INSTRUMENTS],
     open_orders: HashMap<OrderId, Order>,
-    pending_orders: OrderBuffer,
+    pub(crate) pending_orders: OrderBuffer,
     pub(crate) account: AccountState,
     clock: Clock,
     next_order_id: OrderId,

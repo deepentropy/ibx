@@ -203,6 +203,10 @@ pub enum ControlCommand {
     Unsubscribe { instrument: InstrumentId },
     /// Update a strategy parameter.
     UpdateParam { key: String, value: String },
+    /// Submit an order from external caller (bridge mode).
+    Order(OrderRequest),
+    /// Register an instrument from external caller (bridge mode).
+    RegisterInstrument { con_id: i64 },
     /// Graceful shutdown.
     Shutdown,
 }

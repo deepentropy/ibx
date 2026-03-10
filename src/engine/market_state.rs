@@ -53,6 +53,11 @@ impl MarketState {
         self.server_tag_to_instrument.push((server_tag, instrument));
     }
 
+    /// Number of registered instruments.
+    pub fn count(&self) -> u32 {
+        self.active_count
+    }
+
     /// Iterate over all registered (InstrumentId, con_id) pairs.
     pub fn active_instruments(&self) -> impl Iterator<Item = (InstrumentId, i64)> + '_ {
         self.con_id_to_instrument.iter().map(|&(con_id, iid)| (iid, con_id))

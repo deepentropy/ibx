@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::engine::context::{Context, Strategy};
-use crate::gateway::chrono_free_timestamp;
+use crate::config::chrono_free_timestamp;
 use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
@@ -1046,6 +1046,12 @@ impl<S: Strategy> HotLoop<S> {
                 }
                 ControlCommand::UpdateParam { key, value } => {
                     let _ = (key, value);
+                }
+                ControlCommand::Order(req) => {
+                    self.context.pending_orders.push(req);
+                }
+                ControlCommand::RegisterInstrument { con_id } => {
+                    self.context.market.register(con_id);
                 }
                 ControlCommand::Shutdown => {
                     // Unsubscribe all active market data before stopping

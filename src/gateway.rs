@@ -805,42 +805,8 @@ pub fn build_mktdata_unsubscribe(md_req_id: &str, seq: u32) -> Vec<u8> {
 }
 
 /// Format timestamp as YYYYMMDD-HH:MM:SS (no chrono dependency).
-pub fn chrono_free_timestamp() -> String {
-    use std::time::SystemTime;
-    let dur = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap();
-    let secs = dur.as_secs();
-    // Simple UTC breakdown
-    let days = secs / 86400;
-    let time_secs = secs % 86400;
-    let hours = time_secs / 3600;
-    let minutes = (time_secs % 3600) / 60;
-    let seconds = time_secs % 60;
-
-    // Days since epoch to Y/M/D (simplified Gregorian)
-    let (year, month, day) = days_to_ymd(days);
-    format!(
-        "{:04}{:02}{:02}-{:02}:{:02}:{:02}",
-        year, month, day, hours, minutes, seconds
-    )
-}
-
-/// Convert days since Unix epoch to (year, month, day).
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm from Howard Hinnant
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
-}
+/// Re-exports for backward compatibility.
+pub use crate::config::{chrono_free_timestamp, days_to_ymd};
 
 #[cfg(test)]
 mod tests {

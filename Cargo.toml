@@ -3,6 +3,18 @@ name = "ib-engine"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "ib_engine"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "ib-engine-bin"
+path = "src/main.rs"
+
+[features]
+default = []
+python = ["pyo3"]
+
 [dependencies]
 # Hot loop
 quanta = "0.12"
@@ -38,3 +50,6 @@ crossbeam-channel = "0.5"
 # Logging
 log = "0.4"
 env_logger = "0.11"
+
+# Python bindings (optional)
+pyo3 = { version = "0.24", features = ["extension-module"], optional = true }
