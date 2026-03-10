@@ -32,13 +32,16 @@ pub fn fixcomp_build(inner_msg: &[u8]) -> Vec<u8> {
 
 /// Decompress a FIXCOMP message into individual FIX / 8=O messages.
 pub fn fixcomp_decompress(data: &[u8]) -> Vec<Vec<u8>> {
-    // Find tag 95 (RawDataLength)
-    let raw = if let Some(idx95) = find_tag(data, b"95=") {
-        let soh = data[idx95..].iter().position(|&b| b == SOH).unwrap() + idx95;
-        let raw_len: usize = std::str::from_utf8(&data[idx95 + 3..soh])
-            .unwrap()
-            .parse()
-            .unwrap();
+    // Find tag 95 (RawDataLength) — must be preceded by SOH to avoid matching binary data
+    let raw = if let Some(idx95) = find_tag(data, b"\x0195=").map(|p| p + 1) {
+        let soh = match data[idx95..].iter().position(|&b| b == SOH) {
+            Some(p) => idx95 + p,
+            None => return Vec::new(),
+        };
+        let raw_len: usize = match std::str::from_utf8(&data[idx95 + 3..soh]).ok().and_then(|s| s.parse().ok()) {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
         if let Some(idx96) = find_tag(&data[soh..], b"96=") {
             let start = soh + idx96 + 3;
             &data[start..start + raw_len]
