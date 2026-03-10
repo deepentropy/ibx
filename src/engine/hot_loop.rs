@@ -898,6 +898,35 @@ impl<S: Strategy> HotLoop<S> {
                         (204, "0"),
                     ])
                 }
+                OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_pct } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, b'P', b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let pct_str = trail_pct.to_string(); // basis points: 100 = 1%
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "P"),              // OrdType = Trailing Stop
+                        (6268, &pct_str),       // TrailingPercent (basis points)
+                        (59, "0"),              // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
                 OrderRequest::SubmitMoc { order_id, instrument, side, qty } => {
                     self.context.insert_order(crate::types::Order::new(
                         order_id, instrument, side, qty, 0, b'5', b'0', 0,

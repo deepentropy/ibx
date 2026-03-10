@@ -381,6 +381,25 @@ impl Context {
         id
     }
 
+    pub fn submit_trailing_stop_pct(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        trail_pct: u32,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitTrailingStopPct {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            trail_pct,
+        });
+        id
+    }
+
     pub fn submit_moc(
         &mut self,
         instrument: InstrumentId,

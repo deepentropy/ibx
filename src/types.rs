@@ -251,6 +251,14 @@ pub enum OrderRequest {
         price: Price,
         trail_amt: Price,
     },
+    /// Trailing stop by percentage (tag 6268). Trail percent is in basis points (1% = 100).
+    SubmitTrailingStopPct {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        trail_pct: u32, // basis points: 100 = 1%, 250 = 2.5%
+    },
     SubmitMoc {
         order_id: OrderId,
         instrument: InstrumentId,

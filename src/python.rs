@@ -378,6 +378,16 @@ impl IbEngine {
         Ok(order_id)
     }
 
+    /// Submit a Trailing Stop by percentage. trail_pct is in basis points (100 = 1%).
+    fn submit_trailing_stop_pct(&self, instrument: u32, side: &str, qty: u32, trail_pct: u32) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitTrailingStopPct {
+            order_id, instrument, side, qty, trail_pct,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
     /// Submit a Market on Close order. Returns OrderId.
     fn submit_moc(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

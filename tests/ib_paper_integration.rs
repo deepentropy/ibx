@@ -306,6 +306,7 @@ fn integration_suite() {
     conns = phase_iceberg_order(conns);
     conns = phase_hidden_order(conns);
     conns = phase_short_sell(conns);
+    conns = phase_trailing_stop_pct(conns);
 
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
@@ -331,7 +332,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 35;
+    let total_phases = 36;
     let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -2373,6 +2374,14 @@ fn phase_limit_opg(conns: Conns) -> Conns {
 fn phase_short_sell(conns: Conns) -> Conns {
     run_submit_cancel_phase(conns, "Phase 35: Short Sell Limit Order (SPY)", |ctx| {
         ctx.submit_limit_ex(0, Side::ShortSell, 1, 1_00_000_000, b'0', OrderAttrs::default())
+    })
+}
+
+// ─── Phase 36: Trailing Stop Percent ───
+
+fn phase_trailing_stop_pct(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 36: Trailing Stop Percent Order (SPY)", |ctx| {
+        ctx.submit_trailing_stop_pct(0, Side::Sell, 1, 100) // 1% trail
     })
 }
 
