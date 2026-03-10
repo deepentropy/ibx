@@ -52,6 +52,21 @@ pub fn chrono_free_timestamp() -> String {
     )
 }
 
+/// Format unix timestamp (seconds) to IB's "YYYYMMDD HH:MM:SS" format (UTC).
+pub fn unix_to_ib_datetime(secs: i64) -> String {
+    let secs = secs as u64;
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+    let (year, month, day) = days_to_ymd(days);
+    format!(
+        "{:04}{:02}{:02} {:02}:{:02}:{:02}",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
 /// Convert days since Unix epoch to (year, month, day).
 pub fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     // Algorithm from Howard Hinnant

@@ -486,6 +486,31 @@ impl Context {
         (parent_id, tp_id, sl_id)
     }
 
+    /// Submit a limit order with extended attributes (display size, hidden, GAT, GTD, outside RTH).
+    /// Use `tif`: b'0' = DAY, b'1' = GTC, b'6' = GTD (auto-set if good_till > 0).
+    pub fn submit_limit_ex(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        tif: u8,
+        attrs: OrderAttrs,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitLimitEx {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+            tif,
+            attrs,
+        });
+        id
+    }
+
     pub fn submit_rel(
         &mut self,
         instrument: InstrumentId,

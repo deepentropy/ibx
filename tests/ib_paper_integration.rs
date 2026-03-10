@@ -303,6 +303,8 @@ fn integration_suite() {
     conns = phase_adaptive_order(conns);
     conns = phase_rel_order(conns);
     conns = phase_limit_opg(conns);
+    conns = phase_iceberg_order(conns);
+    conns = phase_hidden_order(conns);
 
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
@@ -328,7 +330,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 32;
+    let total_phases = 34;
     let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -2362,6 +2364,30 @@ fn phase_rel_order(conns: Conns) -> Conns {
 fn phase_limit_opg(conns: Conns) -> Conns {
     run_submit_cancel_phase(conns, "Phase 32: Limit OPG Order (SPY)", |ctx| {
         ctx.submit_limit_opg(0, Side::Buy, 1, 1_00_000_000) // $1.00
+    })
+}
+
+// ─── Phase 33: Iceberg Order (display size) ───
+
+fn phase_iceberg_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 33: Iceberg Order (SPY)", |ctx| {
+        ctx.submit_limit_ex(0, Side::Buy, 10, 1_00_000_000, b'1', OrderAttrs {
+            display_size: 1,
+            outside_rth: true,
+            ..OrderAttrs::default()
+        })
+    })
+}
+
+// ─── Phase 34: Hidden Order ───
+
+fn phase_hidden_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 34: Hidden Order (SPY)", |ctx| {
+        ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
+            hidden: true,
+            outside_rth: true,
+            ..OrderAttrs::default()
+        })
     })
 }
 

@@ -145,6 +145,23 @@ impl AdaptivePriority {
     }
 }
 
+/// Optional attributes for extended order submissions.
+/// All fields default to "not set" (0/false). Copy-friendly (no heap allocation).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OrderAttrs {
+    /// Show on book as this many shares (tag 111). 0 = not set (show full qty).
+    pub display_size: u32,
+    /// Hidden order — not displayed on book (IB tag 6135).
+    pub hidden: bool,
+    /// Allow trading outside regular hours (IB tag 6433).
+    pub outside_rth: bool,
+    /// Delay order activation until this time (FIX tag 168). 0 = not set. Unix seconds.
+    pub good_after: i64,
+    /// Auto-expire order at this time (FIX tag 126). 0 = not set. Unix seconds.
+    /// When set, TIF should be GTD (but IB infers it from the tag).
+    pub good_till: i64,
+}
+
 /// Order request written by strategy, drained by engine after on_tick.
 #[derive(Debug, Clone, Copy)]
 pub enum OrderRequest {
@@ -270,6 +287,16 @@ pub enum OrderRequest {
         entry_price: Price,
         take_profit: Price,
         stop_loss: Price,
+    },
+    /// Extended limit order with optional attributes (display size, hidden, GAT, GTD).
+    SubmitLimitEx {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        tif: u8,
+        attrs: OrderAttrs,
     },
     /// Relative / Pegged-to-Primary order: pegs to NBBO with optional offset.
     SubmitRel {

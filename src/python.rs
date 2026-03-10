@@ -438,6 +438,31 @@ impl IbEngine {
         Ok((parent_id, tp_id, sl_id))
     }
 
+    /// Submit a limit order with extended attributes.
+    /// tif: "DAY", "GTC", or "GTD". Optional: display_size (iceberg), hidden, outside_rth,
+    /// good_after (unix secs), good_till (unix secs).
+    #[pyo3(signature = (instrument, side, qty, price, tif="DAY", display_size=0, hidden=false, outside_rth=false, good_after=0, good_till=0))]
+    fn submit_limit_ex(
+        &self, instrument: u32, side: &str, qty: u32, price: f64,
+        tif: &str, display_size: u32, hidden: bool, outside_rth: bool,
+        good_after: i64, good_till: i64,
+    ) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        let tif_byte = match tif {
+            "DAY" => b'0',
+            "GTC" => b'1',
+            "GTD" => b'6',
+            _ => return Err(PyRuntimeError::new_err(format!("Invalid TIF: {}. Use DAY, GTC, or GTD", tif))),
+        };
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitEx {
+            order_id, instrument, side, qty, price: price_fixed, tif: tif_byte,
+            attrs: OrderAttrs { display_size, hidden, outside_rth, good_after, good_till },
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
     /// Submit a Relative / Pegged-to-Primary order. Offset is the peg offset from NBBO.
     fn submit_rel(&self, instrument: u32, side: &str, qty: u32, offset: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::engine::context::{Context, Strategy};
-use crate::config::chrono_free_timestamp;
+use crate::config::{chrono_free_timestamp, unix_to_ib_datetime};
 use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
@@ -597,6 +597,56 @@ impl<S: Strategy> HotLoop<S> {
                     ];
                     if outside_rth {
                         fields.push((6433, "1")); // OutsideRTH
+                    }
+                    conn.send_fix(&fields)
+                }
+                OrderRequest::SubmitLimitEx { order_id, instrument, side, qty, price, tif, attrs } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'2', tif, 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let tif_byte = [tif];
+                    let tif_str = std::str::from_utf8(&tif_byte).unwrap_or("0");
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    let display_str = attrs.display_size.to_string();
+                    let gat_str = if attrs.good_after > 0 { unix_to_ib_datetime(attrs.good_after) } else { String::new() };
+                    let gtd_str = if attrs.good_till > 0 { unix_to_ib_datetime(attrs.good_till) } else { String::new() };
+                    let mut fields: Vec<(u32, &str)> = vec![
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "2"),              // OrdType = Limit
+                        (44, &price_str),
+                        (59, tif_str),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ];
+                    if attrs.display_size > 0 {
+                        fields.push((111, &display_str));
+                    }
+                    if attrs.outside_rth {
+                        fields.push((6433, "1"));
+                    }
+                    if attrs.hidden {
+                        fields.push((6135, "1"));
+                    }
+                    if attrs.good_after > 0 {
+                        fields.push((168, &gat_str));
+                    }
+                    if attrs.good_till > 0 {
+                        fields.push((126, &gtd_str));
                     }
                     conn.send_fix(&fields)
                 }
