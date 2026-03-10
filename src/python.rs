@@ -438,6 +438,28 @@ impl IbEngine {
         Ok((parent_id, tp_id, sl_id))
     }
 
+    /// Submit a Relative / Pegged-to-Primary order. Offset is the peg offset from NBBO.
+    fn submit_rel(&self, instrument: u32, side: &str, qty: u32, offset: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let offset_fixed = (offset * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitRel {
+            order_id, instrument, side, qty, offset: offset_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Limit order for the opening auction (TIF=OPG).
+    fn submit_limit_opg(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitOpg {
+            order_id, instrument, side, qty, price: price_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
     /// Submit an adaptive algo limit order. Priority: "Patient", "Normal", or "Urgent".
     fn submit_adaptive(&self, instrument: u32, side: &str, qty: u32, price: f64, priority: &str) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

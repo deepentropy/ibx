@@ -486,6 +486,44 @@ impl Context {
         (parent_id, tp_id, sl_id)
     }
 
+    pub fn submit_rel(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        offset: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitRel {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            offset,
+        });
+        id
+    }
+
+    pub fn submit_limit_opg(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitLimitOpg {
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+        });
+        id
+    }
+
     pub fn submit_adaptive(
         &mut self,
         instrument: InstrumentId,

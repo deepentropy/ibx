@@ -271,6 +271,22 @@ pub enum OrderRequest {
         take_profit: Price,
         stop_loss: Price,
     },
+    /// Relative / Pegged-to-Primary order: pegs to NBBO with optional offset.
+    SubmitRel {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        offset: Price, // peg offset in tag 99
+    },
+    /// Limit order for opening auction (TIF=OPG).
+    SubmitLimitOpg {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+    },
     /// Adaptive algo limit order: LMT with IB Adaptive algorithm overlay.
     SubmitAdaptive {
         order_id: OrderId,

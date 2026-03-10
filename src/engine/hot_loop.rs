@@ -1052,6 +1052,64 @@ impl<S: Strategy> HotLoop<S> {
                         (6209, "CancelOnFillWBlock"), // OCA cancel-on-fill
                     ])
                 }
+                OrderRequest::SubmitRel { order_id, instrument, side, qty, offset } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, b'R', b'0', offset,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let offset_str = format_price(offset);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "R"),              // OrdType = Relative
+                        (99, &offset_str),      // Peg offset (auxPrice)
+                        (59, "0"),              // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitLimitOpg { order_id, instrument, side, qty, price } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'2', b'2', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "2"),              // OrdType = Limit
+                        (44, &price_str),
+                        (59, "2"),              // TIF = OPG (At the Opening)
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
                 OrderRequest::SubmitAdaptive { order_id, instrument, side, qty, price, priority } => {
                     self.context.insert_order(crate::types::Order::new(
                         order_id, instrument, side, qty, price, b'2', b'0', 0,

@@ -301,6 +301,8 @@ fn integration_suite() {
 
     conns = phase_bracket_order(conns);
     conns = phase_adaptive_order(conns);
+    conns = phase_rel_order(conns);
+    conns = phase_limit_opg(conns);
 
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
@@ -326,7 +328,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 30;
+    let total_phases = 32;
     let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -2344,6 +2346,22 @@ fn phase_loc_order(conns: Conns) -> Conns {
 fn phase_adaptive_order(conns: Conns) -> Conns {
     run_submit_cancel_phase(conns, "Phase 30: Adaptive Algo Limit Order (SPY)", |ctx| {
         ctx.submit_adaptive(0, Side::Buy, 1, 1_00_000_000, AdaptivePriority::Normal) // $1.00, Normal priority
+    })
+}
+
+// ─── Phase 31: Relative / Pegged-to-Primary Order ───
+
+fn phase_rel_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 31: Relative Order (SPY)", |ctx| {
+        ctx.submit_rel(0, Side::Buy, 1, 1_000_000) // $0.01 offset
+    })
+}
+
+// ─── Phase 32: Limit OPG (At the Opening) ───
+
+fn phase_limit_opg(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 32: Limit OPG Order (SPY)", |ctx| {
+        ctx.submit_limit_opg(0, Side::Buy, 1, 1_00_000_000) // $1.00
     })
 }
 
