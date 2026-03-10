@@ -662,6 +662,17 @@ impl<S: Strategy> HotLoop<S> {
                         disc_str = format_price(attrs.discretionary_amt);
                         fields.push((9813, &disc_str));
                     }
+                    if attrs.sweep_to_fill {
+                        fields.push((6102, "1"));
+                    }
+                    if attrs.all_or_none {
+                        fields.push((18, "G"));
+                    }
+                    let trigger_str;
+                    if attrs.trigger_method > 0 {
+                        trigger_str = attrs.trigger_method.to_string();
+                        fields.push((6115, &trigger_str));
+                    }
                     conn.send_fix(&fields)
                 }
                 OrderRequest::SubmitMarket { order_id, instrument, side, qty } => {

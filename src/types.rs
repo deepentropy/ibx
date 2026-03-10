@@ -198,6 +198,14 @@ pub struct OrderAttrs {
     /// Discretionary amount (IB tag 9813). 0 = not set. Fixed-point Price value.
     /// The amount above the limit price that the order may trade at.
     pub discretionary_amt: Price,
+    /// Sweep to fill (IB tag 6102). Routes aggressively across exchanges.
+    pub sweep_to_fill: bool,
+    /// All or none (FIX tag 18=G ExecInst). Fill entire qty or nothing.
+    pub all_or_none: bool,
+    /// Trigger method for stop/MIT/LIT orders (IB tag 6115).
+    /// 0=default, 1=double-bid-ask, 2=last, 3=double-last, 4=bid-ask,
+    /// 7=last-or-bid-ask, 8=mid-point.
+    pub trigger_method: u8,
 }
 
 /// Order request written by strategy, drained by engine after on_tick.

@@ -322,6 +322,9 @@ fn integration_suite() {
 
     // Order attribute phases
     conns = phase_discretionary_order(conns);
+    conns = phase_sweep_to_fill_order(conns);
+    conns = phase_all_or_none_order(conns);
+    conns = phase_trigger_method_order(conns);
 
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
@@ -347,7 +350,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 47;
+    let total_phases = 50;
     let skipped = if needs_ticks { 0 } else { 8 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -2723,6 +2726,43 @@ fn phase_discretionary_order(conns: Conns) -> Conns {
     run_submit_cancel_phase(conns, "Phase 47: Discretionary Amount Order (SPY)", |ctx| {
         ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
             discretionary_amt: 50_000_000, // $0.50 discretion above $1 limit
+            outside_rth: true,
+            ..OrderAttrs::default()
+        })
+    })
+}
+
+// ─── Phase 48: Sweep to Fill ───
+
+fn phase_sweep_to_fill_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 48: Sweep to Fill Order (SPY)", |ctx| {
+        ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
+            sweep_to_fill: true,
+            outside_rth: true,
+            ..OrderAttrs::default()
+        })
+    })
+}
+
+// ─── Phase 49: All or None ───
+
+fn phase_all_or_none_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 49: All or None Order (SPY)", |ctx| {
+        ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
+            all_or_none: true,
+            outside_rth: true,
+            ..OrderAttrs::default()
+        })
+    })
+}
+
+// ─── Phase 50: Trigger Method (Last price) ───
+
+fn phase_trigger_method_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 50: Trigger Method Order (SPY)", |ctx| {
+        // Stop order at $1 with trigger method = 2 (Last price)
+        ctx.submit_limit_ex(0, Side::Buy, 1, 1_00_000_000, b'1', OrderAttrs {
+            trigger_method: 2, // Last price trigger
             outside_rth: true,
             ..OrderAttrs::default()
         })

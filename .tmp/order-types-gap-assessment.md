@@ -59,16 +59,16 @@
 | Good After Time | Yes | Yes (via SubmitLimitEx) | — |
 | Good Til Date | Yes | Yes (via SubmitLimitEx) | — |
 | Minimum Quantity | Yes | Yes (via SubmitLimitEx) | — |
-| All or None | Yes | **No** | Gap (unknown FIX tag, see ib-agent#45) |
+| All or None | Yes | Yes | — (FIX tag 18=G ExecInst) |
 | Discretionary Amount | Yes | Yes* | Implemented (tag 9813), rejected on paper |
-| Sweep to Fill | Yes | **No** | Gap (unknown FIX tag, see ib-agent#45) |
+| Sweep to Fill | Yes | Yes | — (IB tag 6102) |
 | What-If (margin/commission preview) | Yes | **No** | Gap (different message flow, not an attribute) |
 | Cash Quantity (notional orders) | Yes | **No** | Gap (unknown CCP FIX tag) |
 | Fractional Shares | Yes | **No** | Gap (unknown CCP FIX tag) |
 | Scale Orders | Yes | **No** | Gap (complex multi-leg) |
 | Hedge Orders (delta/beta/FX/pair) | Yes | **No** | Gap (options/multi-asset) |
 | Adjustable Stops | Yes | **No** | Gap (complex conditional) |
-| Trigger Method (stop trigger logic) | Yes | **No** | Gap (unknown FIX tag, see ib-agent#45) |
+| Trigger Method (stop trigger logic) | Yes | Yes | — (IB tag 6115, values 0-8) |
 | Transmit Control (stage orders) | Yes | **No** | Gap (different paradigm) |
 
 ## Conditional Orders
@@ -118,7 +118,7 @@ ibx is stock-only (hardcoded `167=STK`, exchange `SMART`, currency `USD`).
 |---|---|---|---|
 | Order types | 25+ | 22 (9 new, 8 rejected on paper*) | ~88% |
 | TIF options | 7 | 7 | **100%** |
-| Order attributes | 20+ | 14 | ~70% |
+| Order attributes | 20+ | 17 | ~85% |
 | Algo strategies | 12+ | 1 | ~8% |
 | Conditional orders | 6 types | 0 | 0% |
 | Asset classes | 7+ | 1 | ~14% |

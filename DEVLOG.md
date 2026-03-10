@@ -40,12 +40,13 @@ Multi-char OrdType: discriminant constants (ORD_STP_PRT etc.) + ord_type_fix_str
 25. Discretionary Amount (tag 9813) — rejected on paper, correct per bytecode
 26. Exchange routing fix: MIDPX/SNAP*/PEG* use directed exchange (ISLAND) per ib-agent#44
 27. PEGMID differentiation: tags 8403/8404 (midOffsetAtWhole/Half) instead of ExecInst
-Filed ib-agent#45 for unknown tags: SweepToFill, AllOrNone, TriggerMethod
+28. Sweep to Fill (tag 6102) — **PASS**
+29. All or None (tag 18=G ExecInst) — **PASS**
+30. Trigger Method (tag 6115, values 0-8) — **PASS**
 
 ### Current State
-- 47 integration test phases, 475 unit tests, all passing
-- Coverage: order types ~88%, TIF 100%, attributes ~70% (14/20), algos 8%
-- Blocked: SweepToFill/AllOrNone/TriggerMethod (ib-agent#45), PEG BENCH (#39), VOL (options)
+- 50 integration test phases, 475 unit tests, all passing
+- Coverage: order types ~88%, TIF 100%, attributes ~85% (17/20), algos 8%
 - Complex gaps deferred: What-If, Scale, Hedge, Adjustable Stops, Transmit Control, Cash Qty
 
 ---
