@@ -43,13 +43,6 @@ SPY on IB paper account, public internet (not colocated). Compared to the offici
 
 *IBX decodes the full protocol stack (TLS → HMAC → FIXCOMP → binary ticks). IB Gateway pre-parses and feeds callbacks over localhost — no crypto, no decompression.
 
-### Connection
-
-| | IBX | C++ TWS API |
-|---|---|---|
-| Time | ~21s | 33ms |
-| What | Full DH + SRP + FIX logon + init over internet | Socket to pre-authenticated local Java gateway |
-
 ### Analysis
 
 The biggest win is **order latency**: IBX saves ~500ms per order vs the official gateway. The IB Gateway Java app adds overhead from GC pauses, FIX serialization through the Java stack, and the extra localhost socket hop.
