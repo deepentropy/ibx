@@ -171,6 +171,18 @@ impl MarketState {
         let q = &self.quotes[id as usize];
         q.ask - q.bid
     }
+
+    /// Clear server tag mappings (called on farm disconnect — old tags are invalid).
+    pub fn clear_server_tags(&mut self) {
+        self.server_tag_to_instrument.clear();
+    }
+
+    /// Zero all quote data to prevent stale price trading after farm disconnect.
+    pub fn zero_all_quotes(&mut self) {
+        for i in 0..self.active_count as usize {
+            self.quotes[i] = Quote::default();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -429,5 +441,41 @@ mod tests {
         ms.set_min_tick(b, 0.05);
         assert!((ms.min_tick(a) - 0.01).abs() < 1e-10);
         assert!((ms.min_tick(b) - 0.05).abs() < 1e-10);
+    }
+
+    // --- clear_server_tags ---
+
+    #[test]
+    fn clear_server_tags_removes_all() {
+        let mut ms = MarketState::new();
+        let a = ms.register(265598);
+        let b = ms.register(272093);
+        ms.register_server_tag(10, a);
+        ms.register_server_tag(20, b);
+        ms.clear_server_tags();
+        assert_eq!(ms.instrument_by_server_tag(10), None);
+        assert_eq!(ms.instrument_by_server_tag(20), None);
+    }
+
+    // --- zero_all_quotes ---
+
+    #[test]
+    fn zero_all_quotes_clears_active() {
+        let mut ms = MarketState::new();
+        let a = ms.register(265598);
+        let b = ms.register(272093);
+        ms.quote_mut(a).bid = 150 * PRICE_SCALE;
+        ms.quote_mut(a).ask = 151 * PRICE_SCALE;
+        ms.quote_mut(b).last = 400 * PRICE_SCALE;
+        ms.zero_all_quotes();
+        assert_eq!(ms.bid(a), 0);
+        assert_eq!(ms.ask(a), 0);
+        assert_eq!(ms.last(b), 0);
+    }
+
+    #[test]
+    fn zero_all_quotes_no_registered_is_noop() {
+        let mut ms = MarketState::new();
+        ms.zero_all_quotes(); // should not panic
     }
 }

@@ -60,6 +60,7 @@ pub struct SharedState {
     quotes: Box<[SeqQuote; MAX_INSTRUMENTS]>,
     fills: Mutex<Vec<Fill>>,
     order_updates: Mutex<Vec<OrderUpdate>>,
+    cancel_rejects: Mutex<Vec<CancelReject>>,
     positions: [AtomicU64; MAX_INSTRUMENTS],
     account: Mutex<AccountState>,
     /// InstrumentId counter — set by hot loop on RegisterInstrument.
@@ -72,6 +73,7 @@ impl SharedState {
             quotes: Box::new(std::array::from_fn(|_| SeqQuote::new())),
             fills: Mutex::new(Vec::with_capacity(64)),
             order_updates: Mutex::new(Vec::with_capacity(64)),
+            cancel_rejects: Mutex::new(Vec::with_capacity(16)),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
             account: Mutex::new(AccountState::default()),
             instrument_count: AtomicU64::new(0),
@@ -93,6 +95,12 @@ impl SharedState {
     /// Drain all pending order updates.
     pub fn drain_order_updates(&self) -> Vec<OrderUpdate> {
         let mut lock = self.order_updates.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending cancel/modify rejects.
+    pub fn drain_cancel_rejects(&self) -> Vec<CancelReject> {
+        let mut lock = self.cancel_rejects.lock().unwrap();
         std::mem::take(&mut *lock)
     }
 
@@ -123,6 +131,10 @@ impl SharedState {
 
     fn push_order_update(&self, update: OrderUpdate) {
         self.order_updates.lock().unwrap().push(update);
+    }
+
+    fn push_cancel_reject(&self, reject: CancelReject) {
+        self.cancel_rejects.lock().unwrap().push(reject);
     }
 
     fn set_position(&self, id: InstrumentId, pos: i64) {
@@ -169,6 +181,11 @@ impl Strategy for BridgeStrategy {
 
     fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
         self.shared.push_order_update(*update);
+        let _ = ctx;
+    }
+
+    fn on_cancel_reject(&mut self, reject: &CancelReject, ctx: &mut Context) {
+        self.shared.push_cancel_reject(*reject);
         let _ = ctx;
     }
 }

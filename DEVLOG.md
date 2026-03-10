@@ -1,3 +1,84 @@
+## 2026-03-10 - Issue #29: Subscription Cleanup on Disconnect
+
+### Goal
+Clean up stale state when farm/CCP connections drop to prevent trading on outdated data.
+
+### What Was Implemented
+
+**Farm disconnect (`handle_farm_disconnect`):**
+- Clear `md_req_to_instrument` and `instrument_md_reqs` tracking maps
+- Clear `server_tag_to_instrument` (old server tags invalid after reconnect)
+- Zero all active quote data (bid/ask/last/sizes = 0) to prevent stale price trading
+- Call `strategy.on_disconnect()`
+
+**CCP disconnect (`handle_ccp_disconnect`):**
+- Mark all live open orders (PendingSubmit/Submitted/PartiallyFilled) as `Uncertain`
+- Call `strategy.on_disconnect()`
+- On reconnect, 35=H mass status request (already implemented) reconciles order states
+
+**New types/methods:**
+- `OrderStatus::Uncertain` — order state unknown due to CCP disconnect
+- `MarketState::clear_server_tags()` / `MarketState::zero_all_quotes()`
+- `Context::mark_orders_uncertain()` — marks live orders as Uncertain
+- `open_orders_for()` now includes Uncertain orders
+
+### Files Changed
+- `src/types.rs` — Added `OrderStatus::Uncertain`
+- `src/engine/market_state.rs` — Added `clear_server_tags()`, `zero_all_quotes()`, 3 tests
+- `src/engine/context.rs` — Added `mark_orders_uncertain()`, updated `open_orders_for` filter
+- `src/engine/hot_loop.rs` — Added `handle_farm_disconnect()`, `handle_ccp_disconnect()`, replaced 4 inline disconnect sites, 3 tests
+
+### Test Results
+488 passed, 0 failed (+6 new tests).
+
+---
+
+## 2026-03-10 - Issue #28: Integration Tests for Order Lifecycle Safety
+
+### Goal
+Add integration tests for order lifecycle gaps: modify qty, outside RTH stop, bracket fill cascade, PnL after round trip.
+
+### What Was Implemented
+4 new test phases added to `tests/ib_paper_integration.rs` (total phases: 50 → 54):
+- **Phase 9b**: Modify order qty (separate from price modify in phase 9)
+- **Phase 10b**: Outside RTH GTC stop order (complements limit in phase 10)
+- **Phase 51**: Bracket fill cascade — marketable entry → fill → children activate → cancel → flatten
+- **Phase 52**: PnL after round trip — buy + sell → verify `realized_pnl` changes in `AccountState`
+
+### What Was NOT Built
+- Partial fill commission aggregation (paper trading fills in single execution)
+- Stop limit trigger test (requires unpredictable market movement)
+
+---
+
+## 2026-03-10 - P0 Safety Features (Must-Have Before Live Trading)
+
+### Goal
+Implement 5 P0 safety features from `.tmp/integration-test-gap-analysis.md`.
+
+### What Was Implemented
+
+1. **ExecID (tag 17) dedup** — `seen_exec_ids: HashSet<String>` in HotLoop. Duplicate fills with the same ExecID are now skipped. Prevents double-counting positions when IB sends duplicate exec reports (observed as 3x 39=A in benchmarks).
+
+2. **Cancel reject enhancement (35=9)** — Added `CancelReject` type and `Strategy::on_cancel_reject()` callback. Now parses FIX tag 434 (CxlRejResponseTo: cancel vs modify) and tag 102 (CxlRejReason). Restores PartiallyFilled status correctly (not always Submitted). BridgeStrategy forwards to SharedState.
+
+3. **Consistent disconnect behavior** — Heartbeat timeouts (CCP and farm) now set `ccp_disconnected`/`farm_disconnected` flags instead of `running = false`. The loop stays alive for reconnection instead of terminating.
+
+4. **CCP reconnect order reconciliation** — `reconnect_ccp()` now sends `35=H` (OrderMassStatusRequest) with wildcard params to discover orders that changed during disconnect. IB will respond with exec reports for all open orders.
+
+5. **Partial fill tracking** — Already worked but now has comprehensive test coverage: multi-partial fill sequences, position accumulation, status transitions PendingSubmit→PartiallyFilled→Filled.
+
+### Files Changed
+- `src/types.rs` — Added `CancelReject` struct
+- `src/engine/context.rs` — Added `Strategy::on_cancel_reject()` trait method
+- `src/engine/hot_loop.rs` — ExecID dedup, enhanced cancel reject handler, heartbeat timeout fix, CCP reconnect reconciliation, 7 new tests
+- `src/bridge.rs` — Added `cancel_rejects` queue to SharedState, BridgeStrategy forwards
+
+### Test Results
+482 passed, 0 failed, 0 new warnings.
+
+---
+
 ## 2026-03-10 - Order Types Gap: 3 Rounds of Implementation
 
 ### Goal

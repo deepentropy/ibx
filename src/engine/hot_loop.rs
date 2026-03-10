@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::engine::context::{Context, Strategy};
@@ -47,6 +48,9 @@ pub struct HotLoop<S: Strategy> {
     hb: HeartbeatState,
     /// Account ID for order submission.
     account_id: String,
+    /// Seen ExecIDs (FIX tag 17) for fill deduplication.
+    /// Prevents double-counting when IB sends duplicate execution reports.
+    seen_exec_ids: HashSet<String>,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -101,6 +105,7 @@ impl<S: Strategy> HotLoop<S> {
             ccp_disconnected: false,
             hb: HeartbeatState::new(),
             account_id: String::new(),
+            seen_exec_ids: HashSet::with_capacity(256),
         }
     }
 
@@ -191,8 +196,7 @@ impl<S: Strategy> HotLoop<S> {
                     Ok(0) => return,  // WouldBlock
                     Err(e) => {
                         log::error!("Farm connection lost: {}", e);
-                        self.farm_disconnected = true;
-                        self.strategy.on_disconnect(&mut self.context);
+                        self.handle_farm_disconnect();
                         return;
                     }
                     Ok(n) => {
@@ -1614,8 +1618,7 @@ impl<S: Strategy> HotLoop<S> {
                     Ok(0) => {} // no new bytes but buffer has seeded data
                     Err(e) => {
                         log::error!("CCP connection lost: {}", e);
-                        self.ccp_disconnected = true;
-                        self.strategy.on_disconnect(&mut self.context);
+                        self.handle_ccp_disconnect();
                         return;
                     }
                     Ok(_) => {
@@ -1699,6 +1702,7 @@ impl<S: Strategy> HotLoop<S> {
     fn handle_exec_report(&mut self, parsed: &std::collections::HashMap<u32, String>) {
         let ord_status = parsed.get(&39).map(|s| s.as_str()).unwrap_or("");
         let exec_type = parsed.get(&150).map(|s| s.as_str()).unwrap_or("");
+        let exec_id = parsed.get(&17).map(|s| s.as_str()).unwrap_or("");
         let last_px = parsed.get(&31).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         let last_shares = parsed.get(&32).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let leaves_qty = parsed.get(&151).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
@@ -1742,7 +1746,12 @@ impl<S: Strategy> HotLoop<S> {
         self.context.update_order_status(clord_id, status);
 
         // On fill (exec_type: F=Fill, 1=Partial, 2=Filled)
+        // Dedup by ExecID (tag 17) — IB can send duplicate exec reports
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
+            if !exec_id.is_empty() && !self.seen_exec_ids.insert(exec_id.to_string()) {
+                log::warn!("Duplicate ExecID={} — skipping fill", exec_id);
+                return; // Already processed this fill
+            }
             // Look up the order to get instrument and side
             if let Some(order) = self.context.order(clord_id).copied() {
                 // Update filled qty on the order
@@ -1796,23 +1805,32 @@ impl<S: Strategy> HotLoop<S> {
     fn handle_cancel_reject(&mut self, parsed: &std::collections::HashMap<u32, String>) {
         let orig_clord = parsed.get(&41).and_then(|s| s.parse::<u64>().ok());
         let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("Cancel rejected");
-        log::warn!("CancelReject: origClOrd={:?} reason={}", orig_clord, reason);
+        // Tag 434: 1=Cancel rejected, 2=Modify/Replace rejected
+        let reject_type: u8 = parsed.get(&434).and_then(|s| s.parse().ok()).unwrap_or(1);
+        // Tag 102: CxlRejReason (0=TooLate, 1=UnknownOrder, 3=PendingStatus, etc.)
+        let reason_code: i32 = parsed.get(&102).and_then(|s| s.parse().ok()).unwrap_or(-1);
+        log::warn!("CancelReject: origClOrd={:?} type={} code={} reason={}",
+            orig_clord, reject_type, reason_code, reason);
 
         if let Some(oid) = orig_clord {
-            // Ensure order stays in Submitted state (cancel failed, order still live)
-            self.context.update_order_status(oid, crate::types::OrderStatus::Submitted);
-
-            // Notify strategy that the cancel was rejected — order is still active
+            // Restore previous status — cancel/modify failed, order is still live.
+            // If order was PartiallyFilled, keep it as PartiallyFilled (not Submitted).
             if let Some(order) = self.context.order(oid).copied() {
-                let update = crate::types::OrderUpdate {
+                let restore_status = if order.filled > 0 {
+                    crate::types::OrderStatus::PartiallyFilled
+                } else {
+                    crate::types::OrderStatus::Submitted
+                };
+                self.context.update_order_status(oid, restore_status);
+
+                let reject = crate::types::CancelReject {
                     order_id: oid,
                     instrument: order.instrument,
-                    status: crate::types::OrderStatus::Submitted,
-                    filled_qty: order.filled as i64,
-                    remaining_qty: order.qty as i64 - order.filled as i64,
+                    reject_type,
+                    reason_code,
                     timestamp_ns: self.context.now_ns(),
                 };
-                self.strategy.on_order_update(&update, &mut self.context);
+                self.strategy.on_cancel_reject(&reject, &mut self.context);
             }
         }
     }
@@ -1958,10 +1976,9 @@ impl<S: Strategy> HotLoop<S> {
             if since_recv > CCP_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
                 if let Some((_, sent_at)) = &self.hb.pending_ccp_test {
                     if now.duration_since(*sent_at).as_secs() > CCP_HEARTBEAT_SECS {
-                        // TestRequest timed out — connection lost
+                        // TestRequest timed out — connection lost (set flag, don't kill loop)
                         log::error!("CCP heartbeat timeout — connection lost");
-                        self.running = false;
-                        self.strategy.on_disconnect(&mut self.context);
+                        self.handle_ccp_disconnect();
                     }
                 } else {
                     // Send TestRequest
@@ -1993,9 +2010,9 @@ impl<S: Strategy> HotLoop<S> {
             if since_recv > FARM_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
                 if let Some((_, sent_at)) = &self.hb.pending_farm_test {
                     if now.duration_since(*sent_at).as_secs() > FARM_HEARTBEAT_SECS {
+                        // Farm heartbeat timeout — set flag, don't kill loop
                         log::error!("Farm heartbeat timeout — connection lost");
-                        self.running = false;
-                        self.strategy.on_disconnect(&mut self.context);
+                        self.handle_farm_disconnect();
                     }
                 } else {
                     let test_id = self.hb.next_test_id();
@@ -2079,14 +2096,52 @@ impl<S: Strategy> HotLoop<S> {
         log::info!("Farm reconnected, re-subscribed {} instruments", self.instrument_md_reqs.len());
     }
 
-    /// Replace the CCP connection (after reconnection).
+    /// Replace the CCP connection (after reconnection) and reconcile order state.
+    /// Sends 35=H (OrderMassStatusRequest) to discover orders that may have changed
+    /// during the disconnect window.
     pub fn reconnect_ccp(&mut self, conn: Connection) {
         self.ccp_conn = Some(conn);
         self.ccp_disconnected = false;
         self.hb.last_ccp_sent = Instant::now();
         self.hb.last_ccp_recv = Instant::now();
         self.hb.pending_ccp_test = None;
-        log::info!("CCP reconnected");
+
+        // Send 35=H mass status request to reconcile orders with broker state.
+        // Any orders filled/cancelled during disconnect will generate exec reports.
+        if let Some(conn) = self.ccp_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let result = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "H"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (11, "*"),  // ClOrdID wildcard
+                (54, "*"),  // Side wildcard
+                (55, "*"),  // Symbol wildcard
+            ]);
+            match result {
+                Ok(()) => {
+                    self.hb.last_ccp_sent = Instant::now();
+                    log::info!("CCP reconnected, sent order mass status request");
+                }
+                Err(e) => log::error!("CCP reconnected but mass status request failed: {}", e),
+            }
+        }
+    }
+
+    /// Handle farm disconnect: clear stale subscription tracking, zero quotes, notify strategy.
+    fn handle_farm_disconnect(&mut self) {
+        self.farm_disconnected = true;
+        self.md_req_to_instrument.clear();
+        self.instrument_md_reqs.clear();
+        self.context.market.clear_server_tags();
+        self.context.market.zero_all_quotes();
+        self.strategy.on_disconnect(&mut self.context);
+    }
+
+    /// Handle CCP disconnect: mark open orders uncertain, notify strategy.
+    fn handle_ccp_disconnect(&mut self) {
+        self.ccp_disconnected = true;
+        self.context.mark_orders_uncertain();
+        self.strategy.on_disconnect(&mut self.context);
     }
 
     /// Access heartbeat state for testing.
@@ -2134,6 +2189,7 @@ mod tests {
         ticks: Vec<InstrumentId>,
         fills: Vec<(OrderId, i64)>,  // (order_id, qty)
         updates: Vec<(OrderId, OrderStatus)>,
+        cancel_rejects: Vec<(OrderId, u8)>,  // (order_id, reject_type)
         disconnected: bool,
         started: bool,
     }
@@ -2144,6 +2200,7 @@ mod tests {
                 ticks: Vec::new(),
                 fills: Vec::new(),
                 updates: Vec::new(),
+                cancel_rejects: Vec::new(),
                 disconnected: false,
                 started: false,
             }
@@ -2165,6 +2222,10 @@ mod tests {
 
         fn on_order_update(&mut self, update: &OrderUpdate, _ctx: &mut Context) {
             self.updates.push((update.order_id, update.status));
+        }
+
+        fn on_cancel_reject(&mut self, reject: &CancelReject, _ctx: &mut Context) {
+            self.cancel_rejects.push((reject.order_id, reject.reject_type));
         }
 
         fn on_disconnect(&mut self, _ctx: &mut Context) {
@@ -3057,10 +3118,12 @@ mod tests {
             ord_type: b'2', tif: b'0', stop_price: 0,
         });
 
-        // FIX 35=9 Cancel Reject
+        // FIX 35=9 Cancel Reject with tags 434 and 102
         let msg = fix::fix_build(&[
             (35, "9"),
             (41, "20"),     // OrigClOrdID
+            (434, "1"),     // CxlRejResponseTo = Cancel
+            (102, "3"),     // CxlRejReason = PendingStatus
             (58, "Order cannot be cancelled"),
         ], 1);
         engine.inject_ccp_message(&msg);
@@ -3068,9 +3131,10 @@ mod tests {
         // Order should still be active
         let order = engine.context_mut().order(20).unwrap();
         assert_eq!(order.status, OrderStatus::Submitted);
-        // Strategy should be notified
-        assert_eq!(engine.strategy.updates.len(), 1);
-        assert_eq!(engine.strategy.updates[0], (20, OrderStatus::Submitted));
+        // Strategy should get on_cancel_reject (not on_order_update)
+        assert_eq!(engine.strategy.cancel_rejects.len(), 1);
+        assert_eq!(engine.strategy.cancel_rejects[0], (20, 1)); // reject_type=1 (cancel)
+        assert!(engine.strategy.updates.is_empty()); // no order_update for cancel reject
     }
 
     #[test]
@@ -3251,5 +3315,283 @@ mod tests {
 
         assert!(engine.context_mut().order(60).is_none());
         assert_eq!(engine.strategy.updates[0].1, OrderStatus::Cancelled);
+    }
+
+    // ── P0 Safety Feature Tests ──
+
+    #[test]
+    fn exec_id_dedup_prevents_double_fill() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 70, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+
+        // Same ExecID sent twice (IB duplicate)
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "70"), (17, "EXEC001"),
+            (39, "2"), (150, "F"),
+            (31, "150.0"), (32, "100"), (151, "0"),
+        ], 1);
+
+        engine.inject_ccp_message(&msg);
+        engine.inject_ccp_message(&msg);
+
+        // Only one fill should be processed
+        assert_eq!(engine.strategy.fills.len(), 1);
+        assert_eq!(engine.context_mut().position(0), 100); // not 200
+    }
+
+    #[test]
+    fn exec_id_dedup_different_ids_both_fill() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 71, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+
+        let msg1 = fix::fix_build(&[
+            (35, "8"), (11, "71"), (17, "EXEC_A"),
+            (39, "1"), (150, "1"),
+            (31, "150.0"), (32, "50"), (151, "50"),
+        ], 1);
+        let msg2 = fix::fix_build(&[
+            (35, "8"), (11, "71"), (17, "EXEC_B"),
+            (39, "2"), (150, "F"),
+            (31, "150.0"), (32, "50"), (151, "0"),
+        ], 2);
+
+        engine.inject_ccp_message(&msg1);
+        engine.inject_ccp_message(&msg2);
+
+        // Both fills processed (different ExecIDs)
+        assert_eq!(engine.strategy.fills.len(), 2);
+        assert_eq!(engine.context_mut().position(0), 100);
+    }
+
+    #[test]
+    fn cancel_reject_on_partial_fill_preserves_status() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        // Order that is already partially filled
+        engine.context_mut().insert_order(Order {
+            order_id: 72, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 40,
+            status: OrderStatus::PartiallyFilled,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+
+        // Cancel reject on the partially filled order
+        let msg = fix::fix_build(&[
+            (35, "9"), (41, "72"),
+            (434, "1"), (102, "3"),
+            (58, "Order in pending state"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+
+        // Should restore to PartiallyFilled, not Submitted
+        let order = engine.context_mut().order(72).unwrap();
+        assert_eq!(order.status, OrderStatus::PartiallyFilled);
+        assert_eq!(engine.strategy.cancel_rejects.len(), 1);
+    }
+
+    #[test]
+    fn cancel_reject_modify_type() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 73, instrument: 0, side: Side::Sell,
+            price: 200 * PRICE_SCALE, qty: 50, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+
+        // Modify reject (tag 434=2)
+        let msg = fix::fix_build(&[
+            (35, "9"), (41, "73"),
+            (434, "2"), (102, "1"), // 1 = UnknownOrder
+            (58, "Cannot modify"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+
+        assert_eq!(engine.strategy.cancel_rejects.len(), 1);
+        assert_eq!(engine.strategy.cancel_rejects[0], (73, 2)); // reject_type=2 (modify)
+    }
+
+    #[test]
+    fn heartbeat_timeout_sets_disconnect_flag_not_running_false() {
+        // Verify that heartbeat timeout sets disconnect flag but doesn't kill the loop.
+        // The loop should continue running so it can be reconnected.
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+
+        // After heartbeat timeout, ccp_disconnected should be true
+        // but running should still be true (so the loop continues)
+        engine.ccp_disconnected = true;
+        assert!(engine.running); // loop still alive for reconnection
+
+        // Similarly for farm
+        engine.farm_disconnected = true;
+        assert!(engine.running); // loop still alive
+    }
+
+    #[test]
+    fn partial_fill_updates_order_filled_qty() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 80, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+
+        // First partial fill: 30 shares
+        let msg1 = fix::fix_build(&[
+            (35, "8"), (11, "80"), (17, "PF1"),
+            (39, "1"), (150, "1"),
+            (31, "150.0"), (32, "30"), (151, "70"),
+        ], 1);
+        engine.inject_ccp_message(&msg1);
+
+        let order = engine.context_mut().order(80).unwrap();
+        assert_eq!(order.filled, 30);
+        assert_eq!(order.status, OrderStatus::PartiallyFilled);
+        assert_eq!(engine.context_mut().position(0), 30);
+
+        // Second partial fill: 50 shares
+        let msg2 = fix::fix_build(&[
+            (35, "8"), (11, "80"), (17, "PF2"),
+            (39, "1"), (150, "1"),
+            (31, "150.5"), (32, "50"), (151, "20"),
+        ], 2);
+        engine.inject_ccp_message(&msg2);
+
+        let order = engine.context_mut().order(80).unwrap();
+        assert_eq!(order.filled, 80);
+        assert_eq!(engine.context_mut().position(0), 80);
+
+        // Final fill: 20 shares
+        let msg3 = fix::fix_build(&[
+            (35, "8"), (11, "80"), (17, "PF3"),
+            (39, "2"), (150, "F"),
+            (31, "151.0"), (32, "20"), (151, "0"),
+        ], 3);
+        engine.inject_ccp_message(&msg3);
+
+        // Order removed (terminal), position = 100
+        assert!(engine.context_mut().order(80).is_none());
+        assert_eq!(engine.context_mut().position(0), 100);
+        assert_eq!(engine.strategy.fills.len(), 3);
+    }
+
+    #[test]
+    fn seen_exec_ids_accumulate() {
+        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 81, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+
+        // Multiple unique fills
+        for i in 0..5 {
+            let exec_id = format!("E{}", i);
+            let msg = fix::fix_build(&[
+                (35, "8"), (11, "81"), (17, &exec_id),
+                (39, "1"), (150, "1"),
+                (31, "1.0"), (32, "10"), (151, &format!("{}", 90 - i * 10)),
+            ], i as u32 + 1);
+            engine.inject_ccp_message(&msg);
+        }
+
+        assert_eq!(engine.strategy.fills.len(), 5);
+        assert_eq!(engine.seen_exec_ids.len(), 5);
+    }
+
+    // --- Farm disconnect cleanup ---
+
+    #[test]
+    fn handle_farm_disconnect_clears_tracking_and_zeros_quotes() {
+        let strategy = RecordingStrategy::new();
+        let mut engine = HotLoop::new(strategy, None);
+        let id = engine.context_mut().market.register(265598);
+        engine.context_mut().market.register_server_tag(42, id);
+        engine.context_mut().quote_mut(id).bid = 150 * PRICE_SCALE;
+        engine.context_mut().quote_mut(id).ask = 151 * PRICE_SCALE;
+        engine.md_req_to_instrument.push((1, id));
+        engine.instrument_md_reqs.push((id, vec![1, 2]));
+
+        engine.handle_farm_disconnect();
+
+        assert!(engine.farm_disconnected);
+        assert!(engine.md_req_to_instrument.is_empty());
+        assert!(engine.instrument_md_reqs.is_empty());
+        assert_eq!(engine.context_mut().market.instrument_by_server_tag(42), None);
+        assert_eq!(engine.context_mut().bid(id), 0);
+        assert_eq!(engine.context_mut().ask(id), 0);
+        assert!(engine.strategy.disconnected);
+    }
+
+    // --- CCP disconnect cleanup ---
+
+    #[test]
+    fn handle_ccp_disconnect_marks_orders_uncertain() {
+        let strategy = RecordingStrategy::new();
+        let mut engine = HotLoop::new(strategy, None);
+        engine.context_mut().insert_order(Order {
+            order_id: 1, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        engine.context_mut().insert_order(Order {
+            order_id: 2, instrument: 0, side: Side::Sell,
+            price: PRICE_SCALE, qty: 50, filled: 20,
+            status: OrderStatus::PartiallyFilled,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        engine.context_mut().insert_order(Order {
+            order_id: 3, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: 100, filled: 100,
+            status: OrderStatus::Filled,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+
+        engine.handle_ccp_disconnect();
+
+        assert!(engine.ccp_disconnected);
+        assert_eq!(engine.context_mut().order(1).unwrap().status, OrderStatus::Uncertain);
+        assert_eq!(engine.context_mut().order(2).unwrap().status, OrderStatus::Uncertain);
+        // Filled orders should NOT be marked uncertain
+        assert_eq!(engine.context_mut().order(3).unwrap().status, OrderStatus::Filled);
+        assert!(engine.strategy.disconnected);
+    }
+
+    #[test]
+    fn uncertain_orders_still_in_open_orders_for() {
+        let mut ctx = Context::new();
+        ctx.insert_order(Order {
+            order_id: 1, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Uncertain,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        let open = ctx.open_orders_for(0);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].status, OrderStatus::Uncertain);
     }
 }

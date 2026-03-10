@@ -40,6 +40,9 @@ pub enum OrderStatus {
     PartiallyFilled,
     Cancelled,
     Rejected,
+    /// Order state is unknown due to a CCP disconnect.
+    /// Will be reconciled when reconnection completes (35=H mass status request).
+    Uncertain,
 }
 
 /// Current quote for an instrument. Cache-line aligned for hot-path access.
@@ -101,6 +104,18 @@ pub struct OrderUpdate {
     pub status: OrderStatus,
     pub filled_qty: i64,
     pub remaining_qty: i64,
+    pub timestamp_ns: u64,
+}
+
+/// Cancel/modify reject notification (FIX 35=9).
+#[derive(Debug, Clone, Copy)]
+pub struct CancelReject {
+    pub order_id: OrderId,
+    pub instrument: InstrumentId,
+    /// 1 = cancel rejected, 2 = modify rejected (FIX tag 434 CxlRejResponseTo).
+    pub reject_type: u8,
+    /// Numeric reason code (FIX tag 102 CxlRejReason). 0=TooLate, 1=UnknownOrder, etc.
+    pub reason_code: i32,
     pub timestamp_ns: u64,
 }
 

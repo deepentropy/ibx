@@ -24,6 +24,12 @@ pub trait Strategy {
         let _ = (update, ctx);
     }
 
+    /// Called when a cancel or modify request is rejected (FIX 35=9).
+    /// The original order is still live.
+    fn on_cancel_reject(&mut self, reject: &CancelReject, ctx: &mut Context) {
+        let _ = (reject, ctx);
+    }
+
     /// Called on disconnect or error. Chance to cancel all orders.
     fn on_disconnect(&mut self, ctx: &mut Context) {
         let _ = ctx;
@@ -148,7 +154,7 @@ impl Context {
         self.open_orders
             .values()
             .filter(|o| o.instrument == id && matches!(o.status,
-                OrderStatus::PendingSubmit | OrderStatus::Submitted | OrderStatus::PartiallyFilled))
+                OrderStatus::PendingSubmit | OrderStatus::Submitted | OrderStatus::PartiallyFilled | OrderStatus::Uncertain))
             .collect()
     }
 
@@ -809,6 +815,18 @@ impl Context {
 
     pub fn remove_order(&mut self, order_id: OrderId) {
         self.open_orders.remove(&order_id);
+    }
+
+    /// Mark all live open orders as Uncertain (CCP disconnect — status may have changed).
+    pub fn mark_orders_uncertain(&mut self) {
+        for order in self.open_orders.values_mut() {
+            match order.status {
+                OrderStatus::PendingSubmit | OrderStatus::Submitted | OrderStatus::PartiallyFilled => {
+                    order.status = OrderStatus::Uncertain;
+                }
+                _ => {}
+            }
+        }
     }
 }
 
