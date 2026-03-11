@@ -70,6 +70,11 @@ pub trait Strategy {
         let _ = (req_id, ctx);
     }
 
+    /// Called when a position update is received (conId, position, avgCost).
+    fn on_position_update(&mut self, instrument: InstrumentId, con_id: i64, position: i64, avg_cost: Price, ctx: &mut Context) {
+        let _ = (instrument, con_id, position, avg_cost, ctx);
+    }
+
     /// Called on disconnect or error. Chance to cancel all orders.
     fn on_disconnect(&mut self, ctx: &mut Context) {
         let _ = ctx;

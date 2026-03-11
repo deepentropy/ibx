@@ -246,3 +246,75 @@ def test_ibapi_pattern():
     client = EClient(app)
     assert client.is_connected() is False
     assert app.next_id is None
+
+
+# ── P&L subscriptions ──
+
+def test_pnl_subscribe_cancel():
+    wrapper = EWrapper()
+    client = EClient(wrapper)
+    client.req_pnl(1, "DU12345")
+    client.cancel_pnl(1)
+
+
+def test_pnl_single_subscribe_cancel():
+    wrapper = EWrapper()
+    client = EClient(wrapper)
+    client.req_pnl_single(2, "DU12345", "", 265598)
+    client.cancel_pnl_single(2)
+
+
+# ── Account summary ──
+
+def test_account_summary_subscribe_cancel():
+    wrapper = EWrapper()
+    client = EClient(wrapper)
+    client.req_account_summary(3, "All", "NetLiquidation,BuyingPower")
+    client.cancel_account_summary(3)
+
+
+# ── Positions ──
+
+def test_cancel_positions():
+    wrapper = EWrapper()
+    client = EClient(wrapper)
+    client.cancel_positions()  # should not raise
+
+
+# ── EWrapper account/P&L callbacks ──
+
+def test_ewrapper_pnl_callbacks():
+    class MyWrapper(EWrapper):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def pnl(self, req_id, daily_pnl, unrealized_pnl, realized_pnl):
+            self.events.append(("pnl", req_id, daily_pnl))
+
+        def pnl_single(self, req_id, pos, daily_pnl, unrealized_pnl, realized_pnl, value):
+            self.events.append(("pnl_single", req_id, pos))
+
+        def account_summary(self, req_id, account, tag, value, currency):
+            self.events.append(("account_summary", tag, value))
+
+        def account_summary_end(self, req_id):
+            self.events.append(("account_summary_end", req_id))
+
+        def position(self, account, contract, pos, avg_cost):
+            self.events.append(("position", pos, avg_cost))
+
+        def position_end(self):
+            self.events.append(("position_end",))
+
+    w = MyWrapper()
+    w.pnl(1, 100.0, 50.0, 50.0)
+    w.pnl_single(2, 10.0, 20.0, 15.0, 5.0, 1500.0)
+    w.account_summary(3, "DU12345", "NetLiquidation", "100000.00", "USD")
+    w.account_summary_end(3)
+    w.position_end()
+
+    assert len(w.events) == 5
+    assert w.events[0] == ("pnl", 1, 100.0)
+    assert w.events[2] == ("account_summary", "NetLiquidation", "100000.00")
+    assert w.events[4] == ("position_end",)

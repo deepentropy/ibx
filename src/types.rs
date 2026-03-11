@@ -836,6 +836,28 @@ pub struct AccountState {
     pub margin_used: Price,
     pub unrealized_pnl: Price,
     pub realized_pnl: Price,
+    pub total_cash_value: Price,
+    pub settled_cash: Price,
+    pub accrued_cash: Price,
+    pub equity_with_loan: Price,
+    pub gross_position_value: Price,
+    pub init_margin_req: Price,
+    pub maint_margin_req: Price,
+    pub available_funds: Price,
+    pub excess_liquidity: Price,
+    pub cushion: Price,        // percentage * PRICE_SCALE (e.g. 0.45 = 45%)
+    pub sma: Price,
+    pub day_trades_remaining: i64,
+    pub leverage: Price,       // ratio * PRICE_SCALE
+    pub daily_pnl: Price,
+}
+
+/// Position with average cost, for P&L computation and reqPositions.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PositionInfo {
+    pub con_id: i64,
+    pub position: i64,
+    pub avg_cost: Price,      // per-share avg cost * PRICE_SCALE
 }
 
 #[cfg(test)]

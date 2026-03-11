@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::cell::UnsafeCell;
 
+use std::collections::HashMap;
 use crate::engine::context::{Context, Strategy};
 use crate::control::historical::{HistoricalResponse, HeadTimestampResponse};
 use crate::control::contracts::ContractDefinition;
@@ -71,6 +72,8 @@ pub struct SharedState {
     head_timestamps: Mutex<Vec<(u32, HeadTimestampResponse)>>,
     contract_details: Mutex<Vec<(u32, ContractDefinition)>>,
     contract_details_end: Mutex<Vec<u32>>,
+    /// Position info (conId → PositionInfo) for reqPositions and P&L.
+    position_infos: Mutex<HashMap<i64, PositionInfo>>,
     positions: [AtomicU64; MAX_INSTRUMENTS],
     account: Mutex<AccountState>,
     /// InstrumentId counter — set by hot loop on RegisterInstrument.
@@ -92,6 +95,7 @@ impl SharedState {
             head_timestamps: Mutex::new(Vec::with_capacity(8)),
             contract_details: Mutex::new(Vec::with_capacity(16)),
             contract_details_end: Mutex::new(Vec::with_capacity(8)),
+            position_infos: Mutex::new(HashMap::new()),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
             account: Mutex::new(AccountState::default()),
             instrument_count: AtomicU64::new(0),
@@ -170,6 +174,16 @@ impl SharedState {
         std::mem::take(&mut *lock)
     }
 
+    /// Get all position infos (for reqPositions).
+    pub fn position_infos(&self) -> Vec<PositionInfo> {
+        self.position_infos.lock().unwrap().values().copied().collect()
+    }
+
+    /// Get position info for a single conId (for pnlSingle).
+    pub fn position_info(&self, con_id: i64) -> Option<PositionInfo> {
+        self.position_infos.lock().unwrap().get(&con_id).copied()
+    }
+
     /// Read current position for an instrument.
     pub fn position(&self, id: InstrumentId) -> i64 {
         self.positions[id as usize].load(Ordering::Relaxed) as i64
@@ -233,6 +247,10 @@ impl SharedState {
 
     fn push_contract_details_end(&self, req_id: u32) {
         self.contract_details_end.lock().unwrap().push(req_id);
+    }
+
+    fn set_position_info(&self, info: PositionInfo) {
+        self.position_infos.lock().unwrap().insert(info.con_id, info);
     }
 
     fn set_position(&self, id: InstrumentId, pos: i64) {
@@ -324,6 +342,12 @@ impl Strategy for BridgeStrategy {
 
     fn on_contract_details_end(&mut self, req_id: u32, ctx: &mut Context) {
         self.shared.push_contract_details_end(req_id);
+        let _ = ctx;
+    }
+
+    fn on_position_update(&mut self, instrument: InstrumentId, con_id: i64, position: i64, avg_cost: Price, ctx: &mut Context) {
+        self.shared.set_position_info(PositionInfo { con_id, position, avg_cost });
+        self.shared.set_position(instrument, position);
         let _ = ctx;
     }
 }

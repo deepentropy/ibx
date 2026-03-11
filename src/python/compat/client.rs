@@ -33,6 +33,14 @@ pub struct EClient {
     instrument_to_req: HashMap<u32, i64>,
     /// Last quote sent per instrument (for change detection).
     last_quotes: HashMap<u32, [i64; 12]>,
+    /// P&L subscription reqId (None = not subscribed).
+    pnl_req_id: Option<i64>,
+    /// Single-position P&L subscriptions: reqId → conId.
+    pnl_single_reqs: HashMap<i64, i64>,
+    /// Account summary subscription: (reqId, requested_tags).
+    account_summary_req: Option<(i64, Vec<String>)>,
+    /// Last P&L values sent (for change detection).
+    last_pnl: [i64; 3],
 }
 
 #[pymethods]
@@ -51,6 +59,10 @@ impl EClient {
             req_to_instrument: HashMap::new(),
             instrument_to_req: HashMap::new(),
             last_quotes: HashMap::new(),
+            pnl_req_id: None,
+            pnl_single_reqs: HashMap::new(),
+            account_summary_req: None,
+            last_pnl: [0; 3],
         }
     }
 
@@ -297,6 +309,82 @@ impl EClient {
             con_id: contract.con_id,
         }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
+    }
+
+    /// Request P&L updates for the account. Gateway-computed from positions × quotes.
+    #[pyo3(signature = (req_id, account, model_code=""))]
+    fn req_pnl(&mut self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
+        // P&L is gateway-computed, no FIX message needed.
+        // Store the subscription so the event loop can dispatch.
+        self.pnl_req_id = Some(req_id);
+        let _ = (account, model_code);
+        Ok(())
+    }
+
+    /// Cancel P&L subscription.
+    fn cancel_pnl(&mut self, req_id: i64) -> PyResult<()> {
+        if self.pnl_req_id == Some(req_id) {
+            self.pnl_req_id = None;
+        }
+        Ok(())
+    }
+
+    /// Request P&L for a single position. Gateway-computed.
+    #[pyo3(signature = (req_id, account, model_code, con_id))]
+    fn req_pnl_single(&mut self, req_id: i64, account: &str, model_code: &str, con_id: i64) -> PyResult<()> {
+        self.pnl_single_reqs.insert(req_id, con_id);
+        let _ = (account, model_code);
+        Ok(())
+    }
+
+    /// Cancel single-position P&L subscription.
+    fn cancel_pnl_single(&mut self, req_id: i64) -> PyResult<()> {
+        self.pnl_single_reqs.remove(&req_id);
+        Ok(())
+    }
+
+    /// Request account summary.
+    #[pyo3(signature = (req_id, group_name, tags))]
+    fn req_account_summary(&mut self, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
+        // Account summary comes from existing 35=UT/UM parsing.
+        // Store requested tags for filtering.
+        let tag_list: Vec<String> = tags.split(',').map(|s| s.trim().to_string()).collect();
+        self.account_summary_req = Some((req_id, tag_list));
+        let _ = group_name;
+        Ok(())
+    }
+
+    /// Cancel account summary.
+    fn cancel_account_summary(&mut self, req_id: i64) -> PyResult<()> {
+        if self.account_summary_req.as_ref().map(|(r, _)| *r) == Some(req_id) {
+            self.account_summary_req = None;
+        }
+        Ok(())
+    }
+
+    /// Request all positions.
+    fn req_positions(&mut self, py: Python<'_>) -> PyResult<()> {
+        let shared = self.shared.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        let positions = shared.position_infos();
+        for pi in &positions {
+            let mut c = super::contract::Contract::default();
+            c.con_id = pi.con_id;
+            let c_py = Py::new(py, c)?.into_any();
+            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
+            self.wrapper.call_method(
+                py, "position",
+                (self.account_id.as_str(), &c_py, pi.position as f64, avg_cost),
+                None,
+            )?;
+        }
+        self.wrapper.call_method0(py, "position_end")?;
+        Ok(())
+    }
+
+    /// Cancel positions.
+    fn cancel_positions(&self) -> PyResult<()> {
+        Ok(()) // positions delivered immediately, nothing to cancel
     }
 
     /// Place an order. Routes to the appropriate submit_* based on order_type.
@@ -712,6 +800,60 @@ impl EClient {
                     self.wrapper.call_method1(py, "update_account_value",
                         ("NetLiquidation", format!("{:.2}", nlv).as_str(), "USD", self.account_id.as_str()))?;
                 }
+            }
+
+            // P&L dispatch (gateway-computed)
+            if let Some(pnl_req) = self.pnl_req_id {
+                let acct = shared.account();
+                let pnl = [acct.daily_pnl, acct.unrealized_pnl, acct.realized_pnl];
+                if pnl != self.last_pnl {
+                    self.wrapper.call_method(
+                        py, "pnl",
+                        (pnl_req, acct.daily_pnl as f64 / PRICE_SCALE_F,
+                         acct.unrealized_pnl as f64 / PRICE_SCALE_F,
+                         acct.realized_pnl as f64 / PRICE_SCALE_F),
+                        None,
+                    )?;
+                    self.last_pnl = pnl;
+                }
+            }
+
+            // Account summary dispatch
+            if let Some((req_id, ref tags)) = self.account_summary_req {
+                let acct = shared.account();
+                let acct_name = self.account_id.as_str();
+                let tag_values: Vec<(&str, f64)> = vec![
+                    ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
+                    ("TotalCashValue", acct.total_cash_value as f64 / PRICE_SCALE_F),
+                    ("SettledCash", acct.settled_cash as f64 / PRICE_SCALE_F),
+                    ("BuyingPower", acct.buying_power as f64 / PRICE_SCALE_F),
+                    ("EquityWithLoanValue", acct.equity_with_loan as f64 / PRICE_SCALE_F),
+                    ("GrossPositionValue", acct.gross_position_value as f64 / PRICE_SCALE_F),
+                    ("InitMarginReq", acct.init_margin_req as f64 / PRICE_SCALE_F),
+                    ("MaintMarginReq", acct.maint_margin_req as f64 / PRICE_SCALE_F),
+                    ("AvailableFunds", acct.available_funds as f64 / PRICE_SCALE_F),
+                    ("ExcessLiquidity", acct.excess_liquidity as f64 / PRICE_SCALE_F),
+                    ("Cushion", acct.cushion as f64 / PRICE_SCALE_F),
+                    ("DayTradesRemaining", acct.day_trades_remaining as f64),
+                    ("Leverage", acct.leverage as f64 / PRICE_SCALE_F),
+                    ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
+                    ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
+                ];
+                for (tag, val) in &tag_values {
+                    if tags.is_empty() || tags.iter().any(|t| t == tag) {
+                        if *val != 0.0 {
+                            let val_str = format!("{:.2}", val);
+                            self.wrapper.call_method(
+                                py, "account_summary",
+                                (req_id, acct_name, *tag, val_str.as_str(), "USD"),
+                                None,
+                            )?;
+                        }
+                    }
+                }
+                self.wrapper.call_method1(py, "account_summary_end", (req_id,))?;
+                // One-shot: clear after delivery
+                self.account_summary_req = None;
             }
 
             // Sleep to avoid busy-wait (1ms)

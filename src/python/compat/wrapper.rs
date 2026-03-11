@@ -76,6 +76,10 @@ impl EWrapper {
 
     fn account_download_end(&self, _account: &str) {}
 
+    fn account_summary(&self, _req_id: i64, _account: &str, _tag: &str, _value: &str, _currency: &str) {}
+
+    fn account_summary_end(&self, _req_id: i64) {}
+
     fn position(&self, _account: &str, _contract: PyObject, _pos: f64, _avg_cost: f64) {}
 
     fn position_end(&self) {}

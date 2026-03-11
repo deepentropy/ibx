@@ -2242,6 +2242,76 @@ impl<S: Strategy> HotLoop<S> {
                                 self.context.account.realized_pnl = (v * PRICE_SCALE as f64) as Price;
                             }
                         }
+                        "TotalCashValue" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.total_cash_value = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "SettledCash" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.settled_cash = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "AccruedCash" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.accrued_cash = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "EquityWithLoanValue" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.equity_with_loan = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "GrossPositionValue" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.gross_position_value = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "InitMarginReq" | "FullInitMarginReq" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.init_margin_req = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "FullMaintMarginReq" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.maint_margin_req = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "AvailableFunds" | "FullAvailableFunds" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.available_funds = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "ExcessLiquidity" | "FullExcessLiquidity" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.excess_liquidity = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "Cushion" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.cushion = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "SMA" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.sma = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "DayTradesRemaining" => {
+                            if let Ok(v) = val.parse::<i64>() {
+                                self.context.account.day_trades_remaining = v;
+                            }
+                        }
+                        "Leverage-S" | "Leverage" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.leverage = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
+                        "DailyPnL" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.context.account.daily_pnl = (v * PRICE_SCALE as f64) as Price;
+                            }
+                        }
                         _ => {}
                     }
                     key = None;
@@ -2261,6 +2331,10 @@ impl<S: Strategy> HotLoop<S> {
             .and_then(|s| s.parse::<f64>().ok())
             .map(|v| v as i64)
             .unwrap_or(0);
+        let avg_cost: Price = parsed.get(&6065)
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|v| (v * PRICE_SCALE as f64) as Price)
+            .unwrap_or(0);
 
         if let Some(instrument) = self.context.market.instrument_by_con_id(con_id) {
             // Set absolute position (UP gives absolute, not delta)
@@ -2269,6 +2343,8 @@ impl<S: Strategy> HotLoop<S> {
             if delta != 0 {
                 self.context.update_position(instrument, delta);
             }
+            // Store position info for P&L and reqPositions
+            self.strategy.on_position_update(instrument, con_id, position, avg_cost, &mut self.context);
         }
     }
 
