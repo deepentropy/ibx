@@ -128,6 +128,8 @@ pub const ORD_SNAP_MID: u8 = 4;  // FIX "SMID" — Snap to Midpoint
 pub const ORD_SNAP_PRI: u8 = 5;  // FIX "SREL" — Snap to Primary
 pub const ORD_PEG_MKT: u8 = 6;   // FIX "E" + ExecInst "P" — Pegged to Market
 pub const ORD_PEG_MID: u8 = 7;   // FIX "E" + ExecInst "M" — Pegged to Midpoint
+pub const ORD_PEG_BENCH: u8 = 8; // FIX "PB" — Pegged to Benchmark
+pub const ORD_WHAT_IF: u8 = 9;   // Not a real OrdType — marker for what-if orders
 
 /// Convert an `ord_type` discriminant to the FIX tag 40 string.
 /// Single-char types (ASCII >= 32) are stored as-is; multi-char types use constants above.
@@ -139,10 +141,46 @@ pub fn ord_type_fix_str(t: u8) -> &'static str {
         ORD_SNAP_MID => "SMID",
         ORD_SNAP_PRI => "SREL",
         ORD_PEG_MKT | ORD_PEG_MID => "E",
+        ORD_PEG_BENCH => "PB",
         b'1' => "1", b'2' => "2", b'3' => "3", b'4' => "4", b'5' => "5",
         b'B' => "B", b'E' => "E", b'J' => "J", b'K' => "K",
         b'P' => "P", b'R' => "R", b'U' => "U",
         _ => "2",
+    }
+}
+
+/// What-If margin/commission preview response (FIX 35=8 with tag 6091=1).
+/// Returned when a what-if order is submitted — the order is NOT placed.
+#[derive(Debug, Clone, Copy)]
+pub struct WhatIfResponse {
+    pub order_id: OrderId,
+    pub instrument: InstrumentId,
+    pub init_margin_before: Price,
+    pub maint_margin_before: Price,
+    pub equity_with_loan_before: Price,
+    pub init_margin_after: Price,
+    pub maint_margin_after: Price,
+    pub equity_with_loan_after: Price,
+    pub commission: Price,
+}
+
+/// Adjusted order type for adjustable stops (FIX tag 6261).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdjustedOrderType {
+    Stop,       // 3
+    StopLimit,  // 4
+    Trail,      // 7
+    TrailLimit, // 8
+}
+
+impl AdjustedOrderType {
+    pub fn fix_code(&self) -> &'static str {
+        match self {
+            Self::Stop => "3",
+            Self::StopLimit => "4",
+            Self::Trail => "7",
+            Self::TrailLimit => "8",
+        }
     }
 }
 
@@ -221,6 +259,9 @@ pub struct OrderAttrs {
     /// 0=default, 1=double-bid-ask, 2=last, 3=double-last, 4=bid-ask,
     /// 7=last-or-bid-ask, 8=mid-point.
     pub trigger_method: u8,
+    /// Cash quantity — order by dollar amount instead of shares (IB tag 5920). 0 = not set.
+    /// Fixed-point Price value (e.g., $1000 = 1000 * PRICE_SCALE).
+    pub cash_qty: Price,
     /// Conditions that must be met before the order activates (IB tag 6136+).
     pub conditions: Vec<OrderCondition>,
     /// Cancel order if conditions are no longer met (IB tag 6128). Default false.
@@ -602,6 +643,66 @@ pub enum OrderRequest {
         qty: u32,
         price: Price,
         algo: AlgoParams,
+    },
+    /// Pegged to Benchmark: pegs to a benchmark instrument's price. OrdType PB.
+    /// Companion tags: 6941=refConId, 6938=isPegDecrease, 6939=pegChangeAmt, 6942=refChangeAmt.
+    SubmitPegBench {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        ref_con_id: u32,
+        is_peg_decrease: bool,
+        pegged_change_amount: Price,
+        ref_change_amount: Price,
+    },
+    /// Limit order for auction (TIF=AUC, tag 59=8). Participates in exchange opening/closing auction.
+    SubmitLimitAuc {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+    },
+    /// Market-to-Limit for auction (TIF=AUC, tag 59=8). MTL + auction participation.
+    SubmitMtlAuc {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    },
+    /// What-If order: sends a limit order with tag 6091=1 for margin/commission preview.
+    /// The order is NOT placed — response comes back as 35=8 with margin fields.
+    SubmitWhatIf {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+    },
+    /// Fractional shares limit order. Qty is fixed-point (QTY_SCALE = 10^4).
+    /// E.g., 0.5 shares = 5000. Tag 38 sent as decimal string.
+    SubmitLimitFractional {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: Qty, // QTY_SCALE fixed-point
+        price: Price,
+    },
+    /// Adjustable stop: a stop order that adjusts to a different order type when trigger_price is hit.
+    /// Tags: 6257=1, 6261=adjusted type, 6258=trigger, 6259=adjusted stop, 6262=adjusted limit.
+    SubmitAdjustableStop {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        stop_price: Price,
+        trigger_price: Price,
+        adjusted_order_type: AdjustedOrderType,
+        adjusted_stop_price: Price,
+        /// Only used when adjusted_order_type is StopLimit or TrailLimit. 0 = not set.
+        adjusted_stop_limit_price: Price,
     },
     Cancel {
         order_id: OrderId,
@@ -1145,5 +1246,43 @@ mod tests {
         assert_eq!(OrderStatus::Submitted, OrderStatus::Submitted);
         assert_ne!(OrderStatus::Filled, OrderStatus::Cancelled);
         assert_ne!(OrderStatus::PartiallyFilled, OrderStatus::Filled);
+    }
+
+    // --- WhatIfResponse ---
+
+    #[test]
+    fn what_if_response_is_copy() {
+        let r = WhatIfResponse {
+            order_id: 1,
+            instrument: 0,
+            init_margin_before: 1364_01 * (PRICE_SCALE / 100),
+            maint_margin_before: 1131_67 * (PRICE_SCALE / 100),
+            equity_with_loan_before: 754_255_14 * (PRICE_SCALE / 100),
+            init_margin_after: 8957_86 * (PRICE_SCALE / 100),
+            maint_margin_after: 8143_51 * (PRICE_SCALE / 100),
+            equity_with_loan_after: 754_255_14 * (PRICE_SCALE / 100),
+            commission: 1 * PRICE_SCALE,
+        };
+        let r2 = r; // Copy
+        assert_eq!(r.init_margin_after, r2.init_margin_after);
+        assert_eq!(r.commission, r2.commission);
+    }
+
+    // --- AdjustedOrderType ---
+
+    #[test]
+    fn adjusted_order_type_fix_codes() {
+        assert_eq!(AdjustedOrderType::Stop.fix_code(), "3");
+        assert_eq!(AdjustedOrderType::StopLimit.fix_code(), "4");
+        assert_eq!(AdjustedOrderType::Trail.fix_code(), "7");
+        assert_eq!(AdjustedOrderType::TrailLimit.fix_code(), "8");
+    }
+
+    // --- OrderAttrs cash_qty ---
+
+    #[test]
+    fn order_attrs_cash_qty_default_zero() {
+        let attrs = OrderAttrs::default();
+        assert_eq!(attrs.cash_qty, 0);
     }
 }

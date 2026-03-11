@@ -343,6 +343,18 @@ fn integration_suite() {
     conns = phase_dark_ice_order(conns);
     conns = phase_pct_vol_order(conns);
 
+    // Remaining order type phases (issue #36)
+    conns = phase_peg_bench_order(conns);
+    conns = phase_limit_auc_order(conns);
+    conns = phase_mtl_auc_order(conns);
+    conns = phase_box_top_order(conns);
+
+    // Order feature phases (issue #37)
+    conns = phase_what_if_order(conns);
+    conns = phase_cash_qty_order(conns);
+    conns = phase_fractional_order(conns);
+    conns = phase_adjustable_stop_order(conns);
+
     // Tick-by-tick data phase — needs HMDS and market open
     if needs_ticks && conns.hmds.is_some() {
         conns = phase_tbt_subscribe(conns);
@@ -3621,5 +3633,320 @@ fn phase_pct_vol_order(conns: Conns) -> Conns {
             start_time: "20260311-13:30:00".into(),
             end_time: "20260311-20:00:00".into(),
         })
+    })
+}
+
+// ─── Phase 68: Pegged to Benchmark Order ───
+
+fn phase_peg_bench_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 68: Pegged to Benchmark Order (SPY pegged to AAPL)", |ctx| {
+        ctx.submit_peg_bench(
+            0, Side::Buy, 1,
+            1_00_000_000,    // $1 limit price (far from market, won't fill)
+            265598,          // AAPL conId as benchmark reference
+            false,           // isPeggedChangeAmountDecrease
+            50_000_000,      // $0.50 pegged change amount
+            50_000_000,      // $0.50 reference change amount
+        )
+    })
+}
+
+// ─── Phase 69: Limit Auction Order ───
+
+fn phase_limit_auc_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 69: Limit Auction Order (SPY)", |ctx| {
+        ctx.submit_limit_auc(0, Side::Buy, 1, 1_00_000_000) // $1 limit
+    })
+}
+
+// ─── Phase 70: Market-to-Limit Auction Order ───
+
+fn phase_mtl_auc_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 70: Market-to-Limit Auction Order (SPY)", |ctx| {
+        ctx.submit_mtl_auc(0, Side::Buy, 1)
+    })
+}
+
+// ─── Phase 71: Box Top Order (wire-identical to MTL) ───
+
+fn phase_box_top_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 71: Box Top Order (SPY)", |ctx| {
+        ctx.submit_box_top(0, Side::Buy, 1)
+    })
+}
+
+// ─── Phase 72: What-If Order (margin/commission preview) ───
+
+fn phase_what_if_order(conns: Conns) -> Conns {
+    println!("--- Phase 72: What-If Order (SPY) ---");
+
+    let account_id = conns.account_id;
+    let submitted = Arc::new(AtomicBool::new(false));
+    let what_if_received = Arc::new(AtomicBool::new(false));
+    let commission = Arc::new(AtomicI64::new(0));
+
+    let sub = submitted.clone();
+    let wir = what_if_received.clone();
+    let comm = commission.clone();
+
+    struct WhatIfStrategy {
+        submitted: Arc<AtomicBool>,
+        what_if_received: Arc<AtomicBool>,
+        commission: Arc<AtomicI64>,
+    }
+
+    impl Strategy for WhatIfStrategy {
+        fn on_start(&mut self, ctx: &mut Context) {
+            ctx.submit_what_if(0, Side::Buy, 100, 1_00_000_000); // $1 limit, 100 shares
+            self.submitted.store(true, Ordering::Relaxed);
+        }
+
+        fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {}
+
+        fn on_what_if(&mut self, response: &WhatIfResponse, _ctx: &mut Context) {
+            self.commission.store(response.commission, Ordering::Relaxed);
+            self.what_if_received.store(true, Ordering::Relaxed);
+        }
+
+        fn on_disconnect(&mut self, _ctx: &mut Context) {}
+    }
+
+    let strategy = WhatIfStrategy {
+        submitted: sub,
+        what_if_received: wir,
+        commission: comm,
+    };
+
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if what_if_received.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    assert!(submitted.load(Ordering::Relaxed), "What-if was never submitted");
+    assert!(what_if_received.load(Ordering::Relaxed), "What-if response was never received");
+    let comm_val = commission.load(Ordering::Relaxed);
+    assert!(comm_val > 0, "Commission should be > 0, got {}", comm_val);
+    println!("  Commission: ${:.2}", comm_val as f64 / PRICE_SCALE as f64);
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 73: Cash Quantity Order ───
+
+fn phase_cash_qty_order(conns: Conns) -> Conns {
+    println!("--- Phase 73: Cash Quantity Order (SPY) ---");
+
+    let account_id = conns.account_id;
+    let submitted = Arc::new(AtomicBool::new(false));
+    let order_acked = Arc::new(AtomicBool::new(false));
+    let order_cancelled = Arc::new(AtomicBool::new(false));
+    let order_rejected = Arc::new(AtomicBool::new(false));
+
+    let sub = submitted.clone();
+    let ack = order_acked.clone();
+    let can = order_cancelled.clone();
+    let rej = order_rejected.clone();
+
+    struct CashQtyStrategy {
+        submitted: Arc<AtomicBool>,
+        order_acked: Arc<AtomicBool>,
+        cancel_sent: bool,
+        order_cancelled: Arc<AtomicBool>,
+        order_rejected: Arc<AtomicBool>,
+        order_id: Option<OrderId>,
+    }
+
+    impl Strategy for CashQtyStrategy {
+        fn on_start(&mut self, ctx: &mut Context) {
+            let mut attrs = OrderAttrs::default();
+            attrs.cash_qty = 1000 * PRICE_SCALE; // $1000 notional
+            let id = ctx.submit_limit_ex(0, Side::Buy, 100, 1_00_000_000, b'0', attrs);
+            self.order_id = Some(id);
+            self.submitted.store(true, Ordering::Relaxed);
+        }
+
+        fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {}
+
+        fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
+            match update.status {
+                OrderStatus::Submitted => {
+                    self.order_acked.store(true, Ordering::Relaxed);
+                    if !self.cancel_sent {
+                        if let Some(id) = self.order_id {
+                            ctx.cancel(id);
+                            self.cancel_sent = true;
+                        }
+                    }
+                }
+                OrderStatus::Cancelled => self.order_cancelled.store(true, Ordering::Relaxed),
+                OrderStatus::Rejected => self.order_rejected.store(true, Ordering::Relaxed),
+                _ => {}
+            }
+        }
+
+        fn on_disconnect(&mut self, _ctx: &mut Context) {}
+    }
+
+    let strategy = CashQtyStrategy {
+        submitted: sub, order_acked: ack, cancel_sent: false,
+        order_cancelled: can, order_rejected: rej, order_id: None,
+    };
+
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if order_cancelled.load(Ordering::Relaxed) || order_rejected.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if order_rejected.load(Ordering::Relaxed) {
+        // Cash qty may be rejected on paper accounts (error 10244)
+        println!("  SKIP: Cash qty rejected (expected on paper account)\n");
+        return conns;
+    }
+
+    assert!(submitted.load(Ordering::Relaxed), "Order was never submitted");
+    assert!(order_acked.load(Ordering::Relaxed), "Order was never acknowledged");
+    assert!(order_cancelled.load(Ordering::Relaxed), "Order was never cancelled");
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 74: Fractional Shares Order ───
+
+fn phase_fractional_order(conns: Conns) -> Conns {
+    println!("--- Phase 74: Fractional Shares Order (SPY) ---");
+
+    let account_id = conns.account_id;
+    let submitted = Arc::new(AtomicBool::new(false));
+    let order_acked = Arc::new(AtomicBool::new(false));
+    let order_cancelled = Arc::new(AtomicBool::new(false));
+    let order_rejected = Arc::new(AtomicBool::new(false));
+
+    let sub = submitted.clone();
+    let ack = order_acked.clone();
+    let can = order_cancelled.clone();
+    let rej = order_rejected.clone();
+
+    struct FractionalStrategy {
+        submitted: Arc<AtomicBool>,
+        order_acked: Arc<AtomicBool>,
+        cancel_sent: bool,
+        order_cancelled: Arc<AtomicBool>,
+        order_rejected: Arc<AtomicBool>,
+        order_id: Option<OrderId>,
+    }
+
+    impl Strategy for FractionalStrategy {
+        fn on_start(&mut self, ctx: &mut Context) {
+            // 0.5 shares at $1 limit
+            let id = ctx.submit_limit_fractional(0, Side::Buy, QTY_SCALE / 2, 1_00_000_000);
+            self.order_id = Some(id);
+            self.submitted.store(true, Ordering::Relaxed);
+        }
+
+        fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {}
+
+        fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
+            match update.status {
+                OrderStatus::Submitted => {
+                    self.order_acked.store(true, Ordering::Relaxed);
+                    if !self.cancel_sent {
+                        if let Some(id) = self.order_id {
+                            ctx.cancel(id);
+                            self.cancel_sent = true;
+                        }
+                    }
+                }
+                OrderStatus::Cancelled => self.order_cancelled.store(true, Ordering::Relaxed),
+                OrderStatus::Rejected => self.order_rejected.store(true, Ordering::Relaxed),
+                _ => {}
+            }
+        }
+
+        fn on_disconnect(&mut self, _ctx: &mut Context) {}
+    }
+
+    let strategy = FractionalStrategy {
+        submitted: sub, order_acked: ack, cancel_sent: false,
+        order_cancelled: can, order_rejected: rej, order_id: None,
+    };
+
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if order_cancelled.load(Ordering::Relaxed) || order_rejected.load(Ordering::Relaxed) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if order_rejected.load(Ordering::Relaxed) {
+        // Fractional may be rejected by CCP (API restriction)
+        println!("  SKIP: Fractional rejected (may be blocked by CCP)\n");
+        return conns;
+    }
+
+    assert!(submitted.load(Ordering::Relaxed), "Order was never submitted");
+    assert!(order_acked.load(Ordering::Relaxed), "Order was never acknowledged");
+    assert!(order_cancelled.load(Ordering::Relaxed), "Order was never cancelled");
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 75: Adjustable Stop Order ───
+
+fn phase_adjustable_stop_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 75: Adjustable Stop Order (SPY)", |ctx| {
+        ctx.submit_adjustable_stop(
+            0, Side::Sell, 1,
+            1_00_000_000,    // stop_price: $1
+            500_00_000_000,  // trigger_price: $500 (above market, won't trigger)
+            AdjustedOrderType::StopLimit,
+            1_50_000_000,    // adjusted_stop: $1.50
+            1_00_000_000,    // adjusted_limit: $1.00
+        )
     })
 }

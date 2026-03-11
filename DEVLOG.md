@@ -1,3 +1,80 @@
+## 2026-03-11 - Issue #37: Order Features (What-If, Cash Qty, Fractional, Adjustable Stops)
+
+### Goal
+Implement order features from issue #37 using FIX tag captures from ib-agent#49.
+
+### Approach Taken
+Used ib-agent#49 capture data for FIX tag mappings:
+- What-If: tag `6091=1` on 35=D request, response tags 6092-6094/6826-6828/6378 in 35=8
+- Cash Qty: tag `5920` (from bytecode disassembly, unverified on wire)
+- Fractional: same tag 38 with decimal value (gateway blocks API, CCP may accept)
+- Adjustable Stop: tags 6257/6261/6258/6259/6262
+
+### What Was Implemented
+- `SubmitWhatIf` variant + `on_what_if` Strategy callback + `WhatIfResponse` struct
+- `cash_qty: Price` field on `OrderAttrs` → tag 5920 in SubmitLimitEx serialization
+- `SubmitLimitFractional` variant with `Qty` (QTY_SCALE fixed-point) + `format_qty` helper
+- `SubmitAdjustableStop` variant + `AdjustedOrderType` enum (Stop/StopLimit/Trail/TrailLimit)
+- `parse_price_tag` helper for what-if response parsing
+- What-if response intercepted in `handle_exec_report` before normal order flow
+- 11 unit tests + 4 integration test phases (72-75)
+
+### Files Changed
+- `src/types.rs` — WhatIfResponse, AdjustedOrderType, cash_qty on OrderAttrs, 3 new OrderRequest variants
+- `src/engine/context.rs` — on_what_if callback, submit_what_if, submit_limit_fractional, submit_adjustable_stop
+- `src/engine/hot_loop.rs` — 3 new FIX serialization arms, cash_qty in SubmitLimitEx, what-if response parsing, format_qty, parse_price_tag
+- `tests/ib_paper_integration.rs` — Phases 72-75
+
+### Test Results
+523 unit tests pass (+11 new). Integration phases: 71 → 75.
+
+### What Was NOT Built
+- Scale Orders: complex multi-leg, blocked on parent order capture bypass
+- Hedge Orders: blocked on multi-asset support
+- Transmit Control: different paradigm, low priority
+
+### Current State
+4 of 7 order features implemented. Remaining: Scale, Hedge, Transmit (blocked/low priority).
+
+---
+
+## 2026-03-11 - Issue #36: Remaining Order Types (PEG BENCH, AUC, Box Top)
+
+### Goal
+Implement the unblocked remaining order types from issue #36 (3 of 5 — PEG STK and VOL still blocked by options support).
+
+### Approach Taken
+Used ib-agent#48 capture results (commit 2bac40d) for FIX tag mappings:
+- PEG BENCH: OrdType=`PB`, companion tags 6941/6938/6939/6942
+- AUC: NOT an order type — it's TIF (tag 59=`8`), used with LMT or MTL
+- BOX TOP: Wire-identical to MTL (OrdType=`K`), no special tags
+
+### What Was Implemented
+- `SubmitPegBench` variant: OrdType PB + 4 companion tags (ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount)
+- `SubmitLimitAuc` variant: LMT (OrdType 2) + TIF=AUC (tag 59=8)
+- `SubmitMtlAuc` variant: MTL (OrdType K) + TIF=AUC (tag 59=8)
+- `submit_box_top()`: thin alias for `submit_mtl()` — same wire format
+- `ORD_PEG_BENCH` constant (u8=8) + `ord_type_fix_str` mapping for "PB"
+- 4 unit tests + 4 integration test phases (68-71)
+
+### Files Changed
+- `src/types.rs` — ORD_PEG_BENCH, ord_type_fix_str, 3 new OrderRequest variants
+- `src/engine/context.rs` — submit_peg_bench, submit_limit_auc, submit_mtl_auc, submit_box_top + 4 tests
+- `src/engine/hot_loop.rs` — 3 new FIX serialization match arms
+- `tests/ib_paper_integration.rs` — Phases 68-71
+
+### Test Results
+512 unit tests pass (+4 new). Integration phases: 67 → 71.
+
+### What Was NOT Built
+- PEG STK, VOL: blocked by options (OPT) asset class (ib-agent#51 open)
+- Python bridge: created issue #41 for all 13 missing submit methods
+
+### Current State
+25 of 27 order types implemented (~93%). Remaining: PEG STK, VOL (blocked by options).
+
+---
+
 ## 2026-03-11 - Issue #35: Algorithmic Order Strategies (VWAP, TWAP, etc.)
 
 ### Goal

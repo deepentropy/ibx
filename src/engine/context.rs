@@ -40,6 +40,11 @@ pub trait Strategy {
         let _ = (quote, ctx);
     }
 
+    /// Called when a what-if order response is received (margin/commission preview).
+    fn on_what_if(&mut self, response: &WhatIfResponse, ctx: &mut Context) {
+        let _ = (response, ctx);
+    }
+
     /// Called on disconnect or error. Chance to cancel all orders.
     fn on_disconnect(&mut self, ctx: &mut Context) {
         let _ = ctx;
@@ -748,6 +753,124 @@ impl Context {
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitAlgo {
             order_id: id, instrument, side, qty, price, algo,
+        });
+        id
+    }
+
+    /// Submit a Pegged to Benchmark order (OrdType PB).
+    /// Pegs to a benchmark instrument's price with change amounts.
+    pub fn submit_peg_bench(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        ref_con_id: u32,
+        is_peg_decrease: bool,
+        pegged_change_amount: Price,
+        ref_change_amount: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitPegBench {
+            order_id: id, instrument, side, qty, price,
+            ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount,
+        });
+        id
+    }
+
+    /// Submit a limit order for exchange auction (TIF=AUC).
+    pub fn submit_limit_auc(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitLimitAuc {
+            order_id: id, instrument, side, qty, price,
+        });
+        id
+    }
+
+    /// Submit a Market-to-Limit order for exchange auction (TIF=AUC).
+    pub fn submit_mtl_auc(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitMtlAuc {
+            order_id: id, instrument, side, qty,
+        });
+        id
+    }
+
+    /// Submit a Box Top order (wire-identical to MTL, OrdType K). BOX exchange only.
+    pub fn submit_box_top(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+    ) -> OrderId {
+        self.submit_mtl(instrument, side, qty)
+    }
+
+    /// Submit a what-if order for margin/commission preview. The order is NOT placed.
+    /// Response delivered via `Strategy::on_what_if()`.
+    pub fn submit_what_if(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitWhatIf {
+            order_id: id, instrument, side, qty, price,
+        });
+        id
+    }
+
+    /// Submit a fractional shares limit order. Qty is fixed-point (QTY_SCALE = 10^4).
+    /// E.g., 0.5 shares = 5000, 1.25 shares = 12500.
+    pub fn submit_limit_fractional(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: Qty,
+        price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitLimitFractional {
+            order_id: id, instrument, side, qty, price,
+        });
+        id
+    }
+
+    /// Submit an adjustable stop order. Adjusts to a different order type when trigger is hit.
+    pub fn submit_adjustable_stop(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        stop_price: Price,
+        trigger_price: Price,
+        adjusted_order_type: AdjustedOrderType,
+        adjusted_stop_price: Price,
+        adjusted_stop_limit_price: Price,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitAdjustableStop {
+            order_id: id, instrument, side, qty, stop_price, trigger_price,
+            adjusted_order_type, adjusted_stop_price, adjusted_stop_limit_price,
         });
         id
     }
@@ -1486,5 +1609,146 @@ mod tests {
         let open = ctx.open_orders_for(0);
         // PendingSubmit and PartiallyFilled count as open; Filled does not
         assert_eq!(open.len(), 2);
+    }
+
+    #[test]
+    fn submit_peg_bench_drains_correctly() {
+        let mut ctx = Context::new();
+        let id = ctx.submit_peg_bench(0, Side::Buy, 100, 150 * PRICE_SCALE, 12345, false, 50_000_000, 50_000_000);
+        let orders: Vec<_> = ctx.drain_pending_orders().collect();
+        assert_eq!(orders.len(), 1);
+        match &orders[0] {
+            OrderRequest::SubmitPegBench { order_id, instrument, side, qty, price,
+                ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount } => {
+                assert_eq!(*order_id, id);
+                assert_eq!(*instrument, 0);
+                assert_eq!(*side, Side::Buy);
+                assert_eq!(*qty, 100);
+                assert_eq!(*price, 150 * PRICE_SCALE);
+                assert_eq!(*ref_con_id, 12345);
+                assert!(!*is_peg_decrease);
+                assert_eq!(*pegged_change_amount, 50_000_000);
+                assert_eq!(*ref_change_amount, 50_000_000);
+            }
+            _ => panic!("expected SubmitPegBench"),
+        }
+    }
+
+    #[test]
+    fn submit_limit_auc_drains_correctly() {
+        let mut ctx = Context::new();
+        let id = ctx.submit_limit_auc(0, Side::Buy, 100, 150 * PRICE_SCALE);
+        let orders: Vec<_> = ctx.drain_pending_orders().collect();
+        assert_eq!(orders.len(), 1);
+        match &orders[0] {
+            OrderRequest::SubmitLimitAuc { order_id, instrument, side, qty, price } => {
+                assert_eq!(*order_id, id);
+                assert_eq!(*instrument, 0);
+                assert_eq!(*side, Side::Buy);
+                assert_eq!(*qty, 100);
+                assert_eq!(*price, 150 * PRICE_SCALE);
+            }
+            _ => panic!("expected SubmitLimitAuc"),
+        }
+    }
+
+    #[test]
+    fn submit_mtl_auc_drains_correctly() {
+        let mut ctx = Context::new();
+        let id = ctx.submit_mtl_auc(0, Side::Buy, 100);
+        let orders: Vec<_> = ctx.drain_pending_orders().collect();
+        assert_eq!(orders.len(), 1);
+        match &orders[0] {
+            OrderRequest::SubmitMtlAuc { order_id, instrument, side, qty } => {
+                assert_eq!(*order_id, id);
+                assert_eq!(*instrument, 0);
+                assert_eq!(*side, Side::Buy);
+                assert_eq!(*qty, 100);
+            }
+            _ => panic!("expected SubmitMtlAuc"),
+        }
+    }
+
+    #[test]
+    fn submit_box_top_reuses_mtl() {
+        let mut ctx = Context::new();
+        let id = ctx.submit_box_top(0, Side::Buy, 100);
+        let orders: Vec<_> = ctx.drain_pending_orders().collect();
+        assert_eq!(orders.len(), 1);
+        match &orders[0] {
+            OrderRequest::SubmitMtl { order_id, instrument, side, qty } => {
+                assert_eq!(*order_id, id);
+                assert_eq!(*instrument, 0);
+                assert_eq!(*side, Side::Buy);
+                assert_eq!(*qty, 100);
+            }
+            _ => panic!("expected SubmitMtl from box_top"),
+        }
+    }
+
+    #[test]
+    fn submit_what_if_drains_correctly() {
+        let mut ctx = Context::new();
+        let id = ctx.submit_what_if(0, Side::Buy, 100, 256_20 * (PRICE_SCALE / 100));
+        let orders: Vec<_> = ctx.drain_pending_orders().collect();
+        assert_eq!(orders.len(), 1);
+        match &orders[0] {
+            OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price } => {
+                assert_eq!(*order_id, id);
+                assert_eq!(*instrument, 0);
+                assert_eq!(*side, Side::Buy);
+                assert_eq!(*qty, 100);
+                assert_eq!(*price, 256_20 * (PRICE_SCALE / 100));
+            }
+            _ => panic!("expected SubmitWhatIf"),
+        }
+    }
+
+    #[test]
+    fn submit_limit_fractional_drains_correctly() {
+        let mut ctx = Context::new();
+        // 0.5 shares = 5000 in QTY_SCALE
+        let id = ctx.submit_limit_fractional(0, Side::Buy, QTY_SCALE / 2, 150 * PRICE_SCALE);
+        let orders: Vec<_> = ctx.drain_pending_orders().collect();
+        assert_eq!(orders.len(), 1);
+        match &orders[0] {
+            OrderRequest::SubmitLimitFractional { order_id, instrument, side, qty, price } => {
+                assert_eq!(*order_id, id);
+                assert_eq!(*instrument, 0);
+                assert_eq!(*side, Side::Buy);
+                assert_eq!(*qty, 5000);
+                assert_eq!(*price, 150 * PRICE_SCALE);
+            }
+            _ => panic!("expected SubmitLimitFractional"),
+        }
+    }
+
+    #[test]
+    fn submit_adjustable_stop_drains_correctly() {
+        let mut ctx = Context::new();
+        let id = ctx.submit_adjustable_stop(
+            0, Side::Sell, 1,
+            251_20 * (PRICE_SCALE / 100), // stop_price
+            256_20 * (PRICE_SCALE / 100), // trigger_price
+            AdjustedOrderType::StopLimit,
+            253_20 * (PRICE_SCALE / 100), // adjusted_stop
+            252_20 * (PRICE_SCALE / 100), // adjusted_limit
+        );
+        let orders: Vec<_> = ctx.drain_pending_orders().collect();
+        assert_eq!(orders.len(), 1);
+        match &orders[0] {
+            OrderRequest::SubmitAdjustableStop { order_id, side, qty, stop_price,
+                trigger_price, adjusted_order_type, adjusted_stop_price, adjusted_stop_limit_price, .. } => {
+                assert_eq!(*order_id, id);
+                assert_eq!(*side, Side::Sell);
+                assert_eq!(*qty, 1);
+                assert_eq!(*stop_price, 251_20 * (PRICE_SCALE / 100));
+                assert_eq!(*trigger_price, 256_20 * (PRICE_SCALE / 100));
+                assert_eq!(*adjusted_order_type, AdjustedOrderType::StopLimit);
+                assert_eq!(*adjusted_stop_price, 253_20 * (PRICE_SCALE / 100));
+                assert_eq!(*adjusted_stop_limit_price, 252_20 * (PRICE_SCALE / 100));
+            }
+            _ => panic!("expected SubmitAdjustableStop"),
+        }
     }
 }

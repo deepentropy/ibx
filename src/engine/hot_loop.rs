@@ -7,7 +7,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{AlgoParams, ControlCommand, InstrumentId, OrderCondition, OrderRequest, Price, Side, PRICE_SCALE};
+use crate::types::{AlgoParams, ControlCommand, InstrumentId, OrderCondition, OrderRequest, Price, Qty, Side, PRICE_SCALE, QTY_SCALE};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 /// CCP heartbeat interval (10 seconds, configurable via FIX tag 108).
@@ -699,6 +699,11 @@ impl<S: Strategy> HotLoop<S> {
                         trigger_str = attrs.trigger_method.to_string();
                         fields.push((6115, &trigger_str));
                     }
+                    let cash_qty_str;
+                    if attrs.cash_qty > 0 {
+                        cash_qty_str = format_price(attrs.cash_qty);
+                        fields.push((5920, &cash_qty_str));
+                    }
                     // Condition tags (6136+ framework)
                     let cond_strs = build_condition_strings(&attrs.conditions);
                     if !attrs.conditions.is_empty() {
@@ -1352,6 +1357,202 @@ impl<S: Strategy> HotLoop<S> {
                     }
                     conn.send_fix(&fields)
                 }
+                OrderRequest::SubmitPegBench { order_id, instrument, side, qty, price,
+                    ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, crate::types::ORD_PEG_BENCH, b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    let ref_con_str = ref_con_id.to_string();
+                    let peg_decrease_str = if is_peg_decrease { "1" } else { "0" };
+                    let peg_change_str = format_price(pegged_change_amount);
+                    let ref_change_str = format_price(ref_change_amount);
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "PB"),          // OrdType = Pegged to Benchmark
+                        (44, &price_str),    // Limit price
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                        (6941, &ref_con_str),      // referenceContractId
+                        (6938, peg_decrease_str),   // isPeggedChangeAmountDecrease
+                        (6939, &peg_change_str),    // peggedChangeAmount
+                        (6942, &ref_change_str),    // referenceChangeAmount
+                    ])
+                }
+                OrderRequest::SubmitLimitAuc { order_id, instrument, side, qty, price } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'2', b'8', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "2"),           // OrdType = Limit
+                        (44, &price_str),    // Limit price
+                        (59, "8"),           // TIF = Auction
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitMtlAuc { order_id, instrument, side, qty } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, b'K', b'8', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "K"),           // OrdType = Market to Limit
+                        (59, "8"),           // TIF = Auction
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price } => {
+                    // What-if: insert with ORD_WHAT_IF marker so we can detect the response
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, crate::types::ORD_WHAT_IF, b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "2"),           // OrdType = Limit
+                        (44, &price_str),
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                        (6091, "1"),         // What-If flag
+                    ])
+                }
+                OrderRequest::SubmitLimitFractional { order_id, instrument, side, qty, price } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, 0, price, b'2', b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = format_qty(qty);
+                    let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),      // Decimal qty (e.g., "0.5")
+                        (40, "2"),           // OrdType = Limit
+                        (44, &price_str),
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ])
+                }
+                OrderRequest::SubmitAdjustableStop { order_id, instrument, side, qty,
+                    stop_price, trigger_price, adjusted_order_type,
+                    adjusted_stop_price, adjusted_stop_limit_price } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, 0, b'3', b'0', stop_price,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let stop_str = format_price(stop_price);
+                    let trigger_str = format_price(trigger_price);
+                    let adj_stop_str = format_price(adjusted_stop_price);
+                    let adj_limit_str = format_price(adjusted_stop_limit_price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    let mut fields: Vec<(u32, &str)> = vec![
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "3"),              // OrdType = Stop
+                        (99, &stop_str),        // StopPx
+                        (59, "0"),
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                        (6257, "1"),            // Has adjustable params flag
+                        (6261, adjusted_order_type.fix_code()), // Adjusted order type
+                        (6258, &trigger_str),   // Trigger price
+                        (6259, &adj_stop_str),  // Adjusted stop price
+                    ];
+                    if adjusted_stop_limit_price > 0 {
+                        fields.push((6262, &adj_limit_str)); // Adjusted stop limit price
+                    }
+                    conn.send_fix(&fields)
+                }
                 OrderRequest::SubmitMtl { order_id, instrument, side, qty } => {
                     self.context.insert_order(crate::types::Order::new(
                         order_id, instrument, side, qty, 0, b'K', b'0', 0,
@@ -1800,6 +2001,41 @@ impl<S: Strategy> HotLoop<S> {
 
     /// Handle FIX 35=8 ExecutionReport from CCP.
     fn handle_exec_report(&mut self, parsed: &std::collections::HashMap<u32, String>) {
+        let clord_id = parsed.get(&11).and_then(|s| {
+            // Cancel responses have "C" prefix (e.g. "C1772746902000")
+            let stripped = s.strip_prefix('C').unwrap_or(s);
+            stripped.parse::<u64>().ok()
+        }).unwrap_or(0);
+
+        // What-If response: tag 6091=1 with margin data (tag 6092+)
+        // Skip the first ack (has "n/a" values) — only process when 6092 has real data.
+        if parsed.get(&6091).map(|s| s.as_str()) == Some("1") {
+            let init_margin_after = parsed.get(&6092).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            if init_margin_after > 0.0 {
+                if let Some(order) = self.context.order(clord_id).copied() {
+                    let response = crate::types::WhatIfResponse {
+                        order_id: clord_id,
+                        instrument: order.instrument,
+                        init_margin_before: parse_price_tag(parsed.get(&6826)),
+                        maint_margin_before: parse_price_tag(parsed.get(&6827)),
+                        equity_with_loan_before: parse_price_tag(parsed.get(&6828)),
+                        init_margin_after: parse_price_tag(parsed.get(&6092)),
+                        maint_margin_after: parse_price_tag(parsed.get(&6093)),
+                        equity_with_loan_after: parse_price_tag(parsed.get(&6094)),
+                        commission: parse_price_tag(parsed.get(&6378)),
+                    };
+                    log::info!("WhatIf response: clord={} initMargin={:.2}->{:.2} commission={:.2}",
+                        clord_id,
+                        response.init_margin_before as f64 / PRICE_SCALE as f64,
+                        response.init_margin_after as f64 / PRICE_SCALE as f64,
+                        response.commission as f64 / PRICE_SCALE as f64);
+                    self.context.remove_order(clord_id);
+                    self.strategy.on_what_if(&response, &mut self.context);
+                }
+            }
+            return;
+        }
+
         let ord_status = parsed.get(&39).map(|s| s.as_str()).unwrap_or("");
         let exec_type = parsed.get(&150).map(|s| s.as_str()).unwrap_or("");
         let exec_id = parsed.get(&17).map(|s| s.as_str()).unwrap_or("");
@@ -1807,11 +2043,6 @@ impl<S: Strategy> HotLoop<S> {
         let last_shares = parsed.get(&32).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let leaves_qty = parsed.get(&151).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let commission = parsed.get(&12).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let clord_id = parsed.get(&11).and_then(|s| {
-            // Cancel responses have "C" prefix (e.g. "C1772746902000")
-            let stripped = s.strip_prefix('C').unwrap_or(s);
-            stripped.parse::<u64>().ok()
-        }).unwrap_or(0);
 
         if ord_status == "8" {
             log::warn!("ExecReport REJECTED: clord={} reason='{}' 103={}",
@@ -2200,6 +2431,27 @@ fn format_price(price: Price) -> String {
     } else {
         // Trim trailing zeros
         let frac_str = format!("{:08}", frac);
+        let trimmed = frac_str.trim_end_matches('0');
+        format!("{}.{}", whole, trimmed)
+    }
+}
+
+/// Parse a FIX tag value as a Price (fixed-point). Returns 0 if absent or unparseable.
+fn parse_price_tag(val: Option<&String>) -> Price {
+    val.and_then(|s| s.parse::<f64>().ok())
+        .map(|f| (f * PRICE_SCALE as f64) as Price)
+        .unwrap_or(0)
+}
+
+/// Format a fixed-point Qty (QTY_SCALE = 10^4) to a decimal string.
+/// E.g., 5000 → "0.5", 12500 → "1.25", 10000 → "1".
+fn format_qty(qty: Qty) -> String {
+    let whole = qty / QTY_SCALE;
+    let frac = (qty % QTY_SCALE).unsigned_abs();
+    if frac == 0 {
+        whole.to_string()
+    } else {
+        let frac_str = format!("{:04}", frac);
         let trimmed = frac_str.trim_end_matches('0');
         format!("{}.{}", whole, trimmed)
     }
@@ -4342,5 +4594,40 @@ mod tests {
         let open = ctx.open_orders_for(0);
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].status, OrderStatus::Uncertain);
+    }
+
+    // --- format_qty ---
+
+    #[test]
+    fn format_qty_whole() {
+        assert_eq!(format_qty(1 * QTY_SCALE), "1");
+        assert_eq!(format_qty(100 * QTY_SCALE), "100");
+    }
+
+    #[test]
+    fn format_qty_fractional() {
+        assert_eq!(format_qty(QTY_SCALE / 2), "0.5");
+        assert_eq!(format_qty(QTY_SCALE * 125 / 100), "1.25");
+        assert_eq!(format_qty(1), "0.0001");
+    }
+
+    // --- parse_price_tag ---
+
+    #[test]
+    fn parse_price_tag_some() {
+        let val = "8957.86".to_string();
+        let result = parse_price_tag(Some(&val));
+        assert_eq!(result, (8957.86 * PRICE_SCALE as f64) as Price);
+    }
+
+    #[test]
+    fn parse_price_tag_none() {
+        assert_eq!(parse_price_tag(None), 0);
+    }
+
+    #[test]
+    fn parse_price_tag_invalid() {
+        let val = "n/a".to_string();
+        assert_eq!(parse_price_tag(Some(&val)), 0);
     }
 }
