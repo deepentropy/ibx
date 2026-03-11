@@ -1,15 +1,4 @@
-//! PyO3 bindings for ibx. Feature-gated behind `python`.
-//!
-//! Exposes `IbEngine` as the main entry point for Python:
-//! ```python
-//! import ibx
-//! engine = ibx.connect(username="user", password="pass", paper=True)
-//! spy = engine.subscribe(conid=756733, symbol="SPY")
-//! quote = engine.quote(spy)
-//! order_id = engine.submit_limit(spy, "BUY", qty=1, price=680.50)
-//! fills = engine.fills()
-//! engine.shutdown()
-//! ```
+//! Direct API: IbEngine and connect() function.
 
 use std::sync::Arc;
 use std::thread;
@@ -21,241 +10,56 @@ use pyo3::prelude::*;
 use crate::bridge::{BridgeStrategy, SharedState};
 use crate::gateway::{Gateway, GatewayConfig};
 use crate::types::*;
-
-const PRICE_SCALE_F: f64 = PRICE_SCALE as f64;
-
-// ── Python-visible types ──
-
-#[pyclass]
-#[derive(Clone)]
-struct PyQuote {
-    #[pyo3(get)]
-    bid: f64,
-    #[pyo3(get)]
-    ask: f64,
-    #[pyo3(get)]
-    last: f64,
-    #[pyo3(get)]
-    bid_size: f64,
-    #[pyo3(get)]
-    ask_size: f64,
-    #[pyo3(get)]
-    last_size: f64,
-    #[pyo3(get)]
-    volume: f64,
-    #[pyo3(get)]
-    open: f64,
-    #[pyo3(get)]
-    high: f64,
-    #[pyo3(get)]
-    low: f64,
-    #[pyo3(get)]
-    close: f64,
-    #[pyo3(get)]
-    timestamp_ns: u64,
-}
-
-#[pymethods]
-impl PyQuote {
-    fn __repr__(&self) -> String {
-        format!("Quote(bid={}, ask={}, last={})", self.bid, self.ask, self.last)
-    }
-}
-
-impl From<Quote> for PyQuote {
-    fn from(q: Quote) -> Self {
-        Self {
-            bid: q.bid as f64 / PRICE_SCALE_F,
-            ask: q.ask as f64 / PRICE_SCALE_F,
-            last: q.last as f64 / PRICE_SCALE_F,
-            bid_size: q.bid_size as f64 / QTY_SCALE as f64,
-            ask_size: q.ask_size as f64 / QTY_SCALE as f64,
-            last_size: q.last_size as f64 / QTY_SCALE as f64,
-            volume: q.volume as f64 / QTY_SCALE as f64,
-            open: q.open as f64 / PRICE_SCALE_F,
-            high: q.high as f64 / PRICE_SCALE_F,
-            low: q.low as f64 / PRICE_SCALE_F,
-            close: q.close as f64 / PRICE_SCALE_F,
-            timestamp_ns: q.timestamp_ns,
-        }
-    }
-}
-
-#[pyclass]
-#[derive(Clone)]
-struct PyFill {
-    #[pyo3(get)]
-    instrument: u32,
-    #[pyo3(get)]
-    order_id: u64,
-    #[pyo3(get)]
-    side: String,
-    #[pyo3(get)]
-    price: f64,
-    #[pyo3(get)]
-    qty: i64,
-    #[pyo3(get)]
-    remaining: i64,
-    #[pyo3(get)]
-    commission: f64,
-    #[pyo3(get)]
-    timestamp_ns: u64,
-}
-
-#[pymethods]
-impl PyFill {
-    fn __repr__(&self) -> String {
-        format!("Fill(order_id={}, side={}, price={}, qty={})", self.order_id, self.side, self.price, self.qty)
-    }
-}
-
-impl From<Fill> for PyFill {
-    fn from(f: Fill) -> Self {
-        Self {
-            instrument: f.instrument,
-            order_id: f.order_id,
-            side: match f.side { Side::Buy => "BUY".into(), Side::Sell => "SELL".into(), Side::ShortSell => "SSHORT".into() },
-            price: f.price as f64 / PRICE_SCALE_F,
-            qty: f.qty,
-            remaining: f.remaining,
-            commission: f.commission as f64 / PRICE_SCALE_F,
-            timestamp_ns: f.timestamp_ns,
-        }
-    }
-}
-
-#[pyclass]
-#[derive(Clone)]
-struct PyOrderUpdate {
-    #[pyo3(get)]
-    order_id: u64,
-    #[pyo3(get)]
-    instrument: u32,
-    #[pyo3(get)]
-    status: String,
-    #[pyo3(get)]
-    filled_qty: i64,
-    #[pyo3(get)]
-    remaining_qty: i64,
-    #[pyo3(get)]
-    timestamp_ns: u64,
-}
-
-#[pymethods]
-impl PyOrderUpdate {
-    fn __repr__(&self) -> String {
-        format!("OrderUpdate(order_id={}, status={})", self.order_id, self.status)
-    }
-}
-
-impl From<OrderUpdate> for PyOrderUpdate {
-    fn from(u: OrderUpdate) -> Self {
-        Self {
-            order_id: u.order_id,
-            instrument: u.instrument,
-            status: format!("{:?}", u.status),
-            filled_qty: u.filled_qty,
-            remaining_qty: u.remaining_qty,
-            timestamp_ns: u.timestamp_ns,
-        }
-    }
-}
-
-#[pyclass]
-#[derive(Clone)]
-struct PyAccountState {
-    #[pyo3(get)]
-    net_liquidation: f64,
-    #[pyo3(get)]
-    buying_power: f64,
-    #[pyo3(get)]
-    margin_used: f64,
-    #[pyo3(get)]
-    unrealized_pnl: f64,
-    #[pyo3(get)]
-    realized_pnl: f64,
-}
-
-#[pymethods]
-impl PyAccountState {
-    fn __repr__(&self) -> String {
-        format!("AccountState(net_liq={}, buying_power={})", self.net_liquidation, self.buying_power)
-    }
-}
-
-impl From<AccountState> for PyAccountState {
-    fn from(a: AccountState) -> Self {
-        Self {
-            net_liquidation: a.net_liquidation as f64 / PRICE_SCALE_F,
-            buying_power: a.buying_power as f64 / PRICE_SCALE_F,
-            margin_used: a.margin_used as f64 / PRICE_SCALE_F,
-            unrealized_pnl: a.unrealized_pnl as f64 / PRICE_SCALE_F,
-            realized_pnl: a.realized_pnl as f64 / PRICE_SCALE_F,
-        }
-    }
-}
+use super::types::*;
 
 // ── Main engine class ──
 
 #[pyclass]
-struct IbEngine {
+pub struct IbEngine {
     shared: Arc<SharedState>,
     control_tx: Sender<ControlCommand>,
     next_order_id: std::sync::atomic::AtomicU64,
-    /// Handle to the hot loop thread (for join on shutdown).
     _thread: Option<thread::JoinHandle<()>>,
     account_id: String,
 }
 
 #[pymethods]
 impl IbEngine {
-    /// Subscribe to market data for an instrument.
-    /// Returns the InstrumentId used for subsequent calls.
     fn subscribe(&self, conid: i64, symbol: String) -> PyResult<u32> {
-        // Register instrument in the hot loop
         self.control_tx.send(ControlCommand::RegisterInstrument { con_id: conid })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         self.control_tx.send(ControlCommand::Subscribe { con_id: conid, symbol })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-        // Return instrument count - 1 as the ID (matches MarketState::register behavior)
-        // Wait briefly for the hot loop to process the register command
         std::thread::sleep(std::time::Duration::from_millis(10));
         Ok(self.shared.instrument_count().saturating_sub(1))
     }
 
-    /// Unsubscribe from market data.
     fn unsubscribe(&self, instrument: u32) -> PyResult<()> {
         self.control_tx.send(ControlCommand::Unsubscribe { instrument })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
     }
 
-    /// Read the latest quote for an instrument (lock-free SeqLock read).
     fn quote(&self, instrument: u32) -> PyQuote {
         self.shared.quote(instrument).into()
     }
 
-    /// Read the current position for an instrument.
     fn position(&self, instrument: u32) -> i64 {
         self.shared.position(instrument)
     }
 
-    /// Read the account state.
     fn account(&self) -> PyAccountState {
         self.shared.account().into()
     }
 
-    /// Drain all pending fills since last call.
     fn fills(&self) -> Vec<PyFill> {
         self.shared.drain_fills().into_iter().map(|f| f.into()).collect()
     }
 
-    /// Drain all pending order updates since last call.
     fn order_updates(&self) -> Vec<PyOrderUpdate> {
         self.shared.drain_order_updates().into_iter().map(|u| u.into()).collect()
     }
 
-    /// Submit a limit order. Returns OrderId.
     fn submit_limit(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -266,7 +70,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a market order. Returns OrderId.
     fn submit_market(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -276,7 +79,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a stop order. Returns OrderId.
     fn submit_stop(&self, instrument: u32, side: &str, qty: u32, stop_price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -287,7 +89,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a stop-limit order. Returns OrderId.
     fn submit_stop_limit(&self, instrument: u32, side: &str, qty: u32, price: f64, stop_price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -299,7 +100,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a GTC limit order. Returns OrderId.
     fn submit_limit_gtc(&self, instrument: u32, side: &str, qty: u32, price: f64, outside_rth: bool) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -310,7 +110,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a GTC stop order. Returns OrderId.
     fn submit_stop_gtc(&self, instrument: u32, side: &str, qty: u32, stop_price: f64, outside_rth: bool) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -321,7 +120,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a GTC stop-limit order. Returns OrderId.
     fn submit_stop_limit_gtc(&self, instrument: u32, side: &str, qty: u32, price: f64, stop_price: f64, outside_rth: bool) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -333,7 +131,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit an IOC limit order. Returns OrderId.
     fn submit_limit_ioc(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -344,7 +141,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a FOK limit order. Returns OrderId.
     fn submit_limit_fok(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -355,7 +151,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a trailing stop order. Returns OrderId.
     fn submit_trailing_stop(&self, instrument: u32, side: &str, qty: u32, trail_amt: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -366,7 +161,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a trailing stop-limit order. Returns OrderId.
     fn submit_trailing_stop_limit(&self, instrument: u32, side: &str, qty: u32, price: f64, trail_amt: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -378,7 +172,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Trailing Stop by percentage. trail_pct is in basis points (100 = 1%).
     fn submit_trailing_stop_pct(&self, instrument: u32, side: &str, qty: u32, trail_pct: u32) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -388,7 +181,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Market on Close order. Returns OrderId.
     fn submit_moc(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -398,7 +190,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Limit on Close order. Returns OrderId.
     fn submit_loc(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -409,7 +200,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Market if Touched order. Returns OrderId.
     fn submit_mit(&self, instrument: u32, side: &str, qty: u32, stop_price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -420,7 +210,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Limit if Touched order. Returns OrderId.
     fn submit_lit(&self, instrument: u32, side: &str, qty: u32, price: f64, stop_price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -432,7 +221,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a bracket order (entry + take-profit + stop-loss). Returns (parent_id, tp_id, sl_id).
     fn submit_bracket(&self, instrument: u32, side: &str, qty: u32, entry_price: f64, take_profit: f64, stop_loss: f64) -> PyResult<(u64, u64, u64)> {
         let parent_id = self.next_order_id.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
         let tp_id = parent_id + 1;
@@ -448,9 +236,6 @@ impl IbEngine {
         Ok((parent_id, tp_id, sl_id))
     }
 
-    /// Submit a limit order with extended attributes.
-    /// tif: "DAY", "GTC", or "GTD". Optional: display_size (iceberg), hidden, outside_rth,
-    /// good_after (unix secs), good_till (unix secs).
     #[pyo3(signature = (instrument, side, qty, price, tif="DAY", display_size=0, min_qty=0, hidden=false, outside_rth=false, good_after=0, good_till=0, oca_group=0))]
     fn submit_limit_ex(
         &self, instrument: u32, side: &str, qty: u32, price: f64,
@@ -463,8 +248,7 @@ impl IbEngine {
         let tif_byte = match tif {
             "DAY" => b'0',
             "GTC" => b'1',
-            "GTD" => b'6',
-            "DTC" => b'6',
+            "GTD" | "DTC" => b'6',
             _ => return Err(PyRuntimeError::new_err(format!("Invalid TIF: {}. Use DAY, GTC, GTD, or DTC", tif))),
         };
         self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitEx {
@@ -474,7 +258,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Relative / Pegged-to-Primary order. Offset is the peg offset from NBBO.
     fn submit_rel(&self, instrument: u32, side: &str, qty: u32, offset: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -485,7 +268,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Limit order for the opening auction (TIF=OPG).
     fn submit_limit_opg(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -496,7 +278,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit an adaptive algo limit order. Priority: "Patient", "Normal", or "Urgent".
     fn submit_adaptive(&self, instrument: u32, side: &str, qty: u32, price: f64, priority: &str) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -513,7 +294,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Market to Limit order. Fills at market, remainder becomes limit at fill price.
     fn submit_mtl(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -523,7 +303,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Market with Protection order (futures). Returns OrderId.
     fn submit_mkt_prt(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -533,7 +312,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Stop with Protection order. Returns OrderId.
     fn submit_stp_prt(&self, instrument: u32, side: &str, qty: u32, stop_price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -544,7 +322,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Mid-Price order. Pegs to midpoint with optional price cap (0.0 = no cap).
     #[pyo3(signature = (instrument, side, qty, price_cap=0.0))]
     fn submit_mid_price(&self, instrument: u32, side: &str, qty: u32, price_cap: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -556,7 +333,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Snap to Market order. Returns OrderId.
     fn submit_snap_mkt(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -566,7 +342,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Snap to Midpoint order. Returns OrderId.
     fn submit_snap_mid(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -576,7 +351,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Snap to Primary order. Returns OrderId.
     fn submit_snap_pri(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -586,7 +360,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Pegged to Market order. Offset is the peg offset (0.0 = no offset).
     #[pyo3(signature = (instrument, side, qty, offset=0.0))]
     fn submit_peg_mkt(&self, instrument: u32, side: &str, qty: u32, offset: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -598,7 +371,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Pegged to Midpoint order. Offset is the peg offset (0.0 = no offset).
     #[pyo3(signature = (instrument, side, qty, offset=0.0))]
     fn submit_peg_mid(&self, instrument: u32, side: &str, qty: u32, offset: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -610,7 +382,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Pegged to Benchmark order. Pegs to a reference instrument's price.
     fn submit_peg_bench(
         &self, instrument: u32, side: &str, qty: u32, price: f64,
         ref_con_id: u32, is_peg_decrease: bool, pegged_change_amount: f64, ref_change_amount: f64,
@@ -629,7 +400,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Limit Auction order (TIF=AUC). Returns OrderId.
     fn submit_limit_auc(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -640,7 +410,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Market-to-Limit Auction order (TIF=AUC). Returns OrderId.
     fn submit_mtl_auc(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -650,12 +419,10 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a Box Top order (alias for Market-to-Limit). Returns OrderId.
     fn submit_box_top(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
         self.submit_mtl(instrument, side, qty)
     }
 
-    /// Submit a What-If order for margin/commission preview. The order is NOT placed.
     fn submit_what_if(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -666,7 +433,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit a fractional shares limit order. qty is a float (e.g. 0.5 for half a share).
     fn submit_limit_fractional(&self, instrument: u32, side: &str, qty: f64, price: f64) -> PyResult<u64> {
         let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let side = parse_side(side)?;
@@ -678,7 +444,6 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Submit an adjustable stop order. adjusted_type: "Stop", "StopLimit", "Trail", "TrailLimit".
     #[pyo3(signature = (instrument, side, qty, stop_price, trigger_price, adjusted_type, adjusted_stop_price, adjusted_limit_price=0.0))]
     fn submit_adjustable_stop(
         &self, instrument: u32, side: &str, qty: u32, stop_price: f64,
@@ -705,21 +470,61 @@ impl IbEngine {
         Ok(order_id)
     }
 
-    /// Cancel an order by OrderId.
+    /// Submit an algo order (VWAP, TWAP, ArrivalPx, ClosePx, DarkIce, PctVol).
+    fn submit_algo(
+        &self, instrument: u32, side: &str, qty: u32, price: f64,
+        algo: &str, max_pct_vol: f64, start_time: String, end_time: String,
+    ) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+
+        let algo_params = match algo.to_lowercase().as_str() {
+            "vwap" => AlgoParams::Vwap {
+                max_pct_vol, no_take_liq: false, allow_past_end_time: false,
+                start_time, end_time,
+            },
+            "twap" => AlgoParams::Twap {
+                allow_past_end_time: false, start_time, end_time,
+            },
+            "arrivalpx" => AlgoParams::ArrivalPx {
+                max_pct_vol, risk_aversion: RiskAversion::Neutral,
+                allow_past_end_time: false, force_completion: false,
+                start_time, end_time,
+            },
+            "closepx" => AlgoParams::ClosePx {
+                max_pct_vol, risk_aversion: RiskAversion::Neutral,
+                force_completion: false, start_time,
+            },
+            "darkice" => AlgoParams::DarkIce {
+                allow_past_end_time: false, display_size: 100,
+                start_time, end_time,
+            },
+            "pctvol" => AlgoParams::PctVol {
+                pct_vol: max_pct_vol, no_take_liq: false,
+                start_time, end_time,
+            },
+            _ => return Err(PyRuntimeError::new_err(format!("Unknown algo: '{}'. Use vwap, twap, arrivalpx, closepx, darkice, pctvol", algo))),
+        };
+
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitAlgo {
+            order_id, instrument, side, qty, price: price_fixed, algo: algo_params,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
     fn cancel(&self, order_id: u64) -> PyResult<()> {
         self.control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }))
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
     }
 
-    /// Cancel all orders for an instrument.
     fn cancel_all(&self, instrument: u32) -> PyResult<()> {
         self.control_tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }))
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
     }
 
-    /// Modify an existing order. Returns new OrderId.
     fn modify(&self, order_id: u64, price: f64, qty: u32) -> PyResult<u64> {
         let new_order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let price_fixed = (price * PRICE_SCALE_F) as i64;
@@ -729,35 +534,60 @@ impl IbEngine {
         Ok(new_order_id)
     }
 
-    /// Gracefully shutdown the engine.
+    /// Drain all pending cancel/modify rejects.
+    fn cancel_rejects(&self) -> Vec<PyCancelReject> {
+        self.shared.drain_cancel_rejects().into_iter().map(|r| r.into()).collect()
+    }
+
     fn shutdown(&self) -> PyResult<()> {
         self.control_tx.send(ControlCommand::Shutdown)
             .map_err(|e| PyRuntimeError::new_err(format!("Engine already stopped: {}", e)))?;
         Ok(())
     }
 
-    /// Get the IB account ID.
     #[getter]
     fn account_id(&self) -> &str {
         &self.account_id
     }
 }
 
-fn parse_side(s: &str) -> PyResult<Side> {
-    match s.to_uppercase().as_str() {
-        "BUY" | "B" => Ok(Side::Buy),
-        "SELL" | "S" => Ok(Side::Sell),
-        "SSHORT" | "SS" => Ok(Side::ShortSell),
-        _ => Err(PyRuntimeError::new_err(format!("Invalid side '{}': use 'BUY' or 'SELL'", s))),
+/// Python-visible cancel reject type.
+#[pyclass]
+#[derive(Clone)]
+pub struct PyCancelReject {
+    #[pyo3(get)]
+    pub order_id: u64,
+    #[pyo3(get)]
+    pub reject_type: u8,
+    #[pyo3(get)]
+    pub reason_code: i32,
+    #[pyo3(get)]
+    pub timestamp_ns: u64,
+}
+
+#[pymethods]
+impl PyCancelReject {
+    fn __repr__(&self) -> String {
+        format!("CancelReject(order_id={}, reason={})", self.order_id, self.reason_code)
+    }
+}
+
+impl From<CancelReject> for PyCancelReject {
+    fn from(r: CancelReject) -> Self {
+        Self {
+            order_id: r.order_id,
+            reject_type: r.reject_type,
+            reason_code: r.reason_code,
+            timestamp_ns: r.timestamp_ns,
+        }
     }
 }
 
 // ── Module-level connect function ──
 
-/// Connect to IB and start the engine. Returns an IbEngine handle.
 #[pyfunction]
 #[pyo3(signature = (username, password, paper=true, host="cdc1.ibllc.com".to_string(), core_id=None))]
-fn connect(
+pub fn connect(
     py: Python<'_>,
     username: String,
     password: String,
@@ -767,7 +597,6 @@ fn connect(
 ) -> PyResult<IbEngine> {
     let config = GatewayConfig { username, password, host, paper };
 
-    // Release GIL during the blocking connect (~21s)
     let result = py.allow_threads(|| Gateway::connect(&config));
     let (gw, farm_conn, ccp_conn, hmds_conn) = result
         .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
@@ -779,13 +608,11 @@ fn connect(
 
     let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, core_id);
 
-    // Start order ID counter from epoch-based value (matches Context behavior)
     let start_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() * 1000;
 
-    // Spawn hot loop on a dedicated thread
     let handle = thread::Builder::new()
         .name("ib-engine-hotloop".into())
         .spawn(move || {
@@ -800,18 +627,4 @@ fn connect(
         _thread: Some(handle),
         account_id,
     })
-}
-
-/// Python module definition.
-#[pymodule]
-fn ibx(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(connect, m)?)?;
-    m.add_class::<IbEngine>()?;
-    m.add_class::<PyQuote>()?;
-    m.add_class::<PyFill>()?;
-    m.add_class::<PyOrderUpdate>()?;
-    m.add_class::<PyAccountState>()?;
-    m.add("PRICE_SCALE", PRICE_SCALE)?;
-    m.add("QTY_SCALE", QTY_SCALE)?;
-    Ok(())
 }
