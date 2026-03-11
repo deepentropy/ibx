@@ -735,6 +735,23 @@ impl Context {
         id
     }
 
+    /// Submit an algorithmic order (VWAP, TWAP, Arrival Price, etc.).
+    pub fn submit_algo(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        algo: AlgoParams,
+    ) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        self.pending_orders.push(OrderRequest::SubmitAlgo {
+            order_id: id, instrument, side, qty, price, algo,
+        });
+        id
+    }
+
     pub fn cancel(&mut self, order_id: OrderId) {
         self.pending_orders.push(OrderRequest::Cancel { order_id });
     }

@@ -335,6 +335,14 @@ fn integration_suite() {
     conns = phase_volume_condition_order(conns);
     conns = phase_multi_condition_order(conns);
 
+    // Algorithmic order phases
+    conns = phase_vwap_order(conns);
+    conns = phase_twap_order(conns);
+    conns = phase_arrival_px_order(conns);
+    conns = phase_close_px_order(conns);
+    conns = phase_dark_ice_order(conns);
+    conns = phase_pct_vol_order(conns);
+
     // Tick-by-tick data phase — needs HMDS and market open
     if needs_ticks && conns.hmds.is_some() {
         conns = phase_tbt_subscribe(conns);
@@ -374,7 +382,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 61;
+    let total_phases = 67;
     let skipped = if needs_ticks { 0 } else { 10 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -3534,4 +3542,84 @@ fn phase_tbt_subscribe(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
     println!("  PASS ({} trades, {} quotes)\n", trades, quotes);
     conns
+}
+
+// ─── Phase 62: VWAP Algo Order ───
+
+fn phase_vwap_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 62: VWAP Algo Order (SPY)", |ctx| {
+        ctx.submit_algo(0, Side::Buy, 1, 1_00_000_000, AlgoParams::Vwap {
+            max_pct_vol: 0.1,
+            no_take_liq: false,
+            allow_past_end_time: true,
+            start_time: "20260311-13:30:00".into(),
+            end_time: "20260311-20:00:00".into(),
+        })
+    })
+}
+
+// ─── Phase 63: TWAP Algo Order ───
+
+fn phase_twap_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 63: TWAP Algo Order (SPY)", |ctx| {
+        ctx.submit_algo(0, Side::Buy, 1, 1_00_000_000, AlgoParams::Twap {
+            allow_past_end_time: true,
+            start_time: "20260311-13:30:00".into(),
+            end_time: "20260311-20:00:00".into(),
+        })
+    })
+}
+
+// ─── Phase 64: Arrival Price Algo Order ───
+
+fn phase_arrival_px_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 64: Arrival Price Algo Order (SPY)", |ctx| {
+        ctx.submit_algo(0, Side::Buy, 1, 1_00_000_000, AlgoParams::ArrivalPx {
+            max_pct_vol: 0.1,
+            risk_aversion: RiskAversion::Neutral,
+            allow_past_end_time: true,
+            force_completion: false,
+            start_time: "20260311-13:30:00".into(),
+            end_time: "20260311-20:00:00".into(),
+        })
+    })
+}
+
+// ─── Phase 65: Close Price Algo Order ───
+
+fn phase_close_px_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 65: Close Price Algo Order (SPY)", |ctx| {
+        ctx.submit_algo(0, Side::Buy, 1, 1_00_000_000, AlgoParams::ClosePx {
+            max_pct_vol: 0.1,
+            risk_aversion: RiskAversion::Neutral,
+            force_completion: false,
+            start_time: "20260311-13:30:00".into(),
+        })
+    })
+}
+
+// ─── Phase 66: Dark Ice Algo Order ───
+
+fn phase_dark_ice_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 66: Dark Ice Algo Order (SPY)", |ctx| {
+        ctx.submit_algo(0, Side::Buy, 1, 1_00_000_000, AlgoParams::DarkIce {
+            allow_past_end_time: true,
+            display_size: 1,
+            start_time: "20260311-13:30:00".into(),
+            end_time: "20260311-20:00:00".into(),
+        })
+    })
+}
+
+// ─── Phase 67: % of Volume Algo Order ───
+
+fn phase_pct_vol_order(conns: Conns) -> Conns {
+    run_submit_cancel_phase(conns, "Phase 67: % of Volume Algo Order (SPY)", |ctx| {
+        ctx.submit_algo(0, Side::Buy, 1, 1_00_000_000, AlgoParams::PctVol {
+            pct_vol: 0.1,
+            no_take_liq: false,
+            start_time: "20260311-13:30:00".into(),
+            end_time: "20260311-20:00:00".into(),
+        })
+    })
 }

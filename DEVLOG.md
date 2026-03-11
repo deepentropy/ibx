@@ -1,3 +1,40 @@
+## 2026-03-11 - Issue #35: Algorithmic Order Strategies (VWAP, TWAP, etc.)
+
+### Goal
+Implement IB algo order strategies beyond existing Adaptive: VWAP, TWAP, Arrival Price, Close Price, Dark Ice, % of Volume.
+
+### What Was Implemented
+- `AlgoParams` enum: Vwap, Twap, ArrivalPx, ClosePx, DarkIce, PctVol — each with per-algo parameters
+- `RiskAversion` enum: GetDone, Aggressive, Neutral, Passive (for ArrivalPx/ClosePx)
+- `OrderRequest::SubmitAlgo` variant with algo params
+- `Context::submit_algo()` convenience method
+- `build_algo_tags()` helper: maps AlgoParams → (tag 847 name, 5958/5960 key-value pairs)
+- FIX serialization: tags 847 (algoStrategy), 849 (maxPctVol for Vwap/ArrivalPx/ClosePx), 5957 (param count), 5958/5960 (repeated key-value params)
+- 6 unit tests for `build_algo_tags` (one per algo variant)
+- 6 integration test phases (62-67): VWAP, TWAP, Arrival Price, Close Price, Dark Ice, % of Volume
+
+### Key Technical Details from ib-agent#47
+- All standard algos use same FIX structure: 847/5957/5958/5960
+- Gateway extracts maxPctVol from params into tag 849 for Vwap/ArrivalPx/ClosePx
+- PctVol keeps pctVol in params (not moved to 849)
+- Times in UTC format: YYYYMMDD-HH:MM:SS
+
+### Files Changed
+- `src/types.rs` — AlgoParams, RiskAversion, SubmitAlgo
+- `src/engine/context.rs` — submit_algo()
+- `src/engine/hot_loop.rs` — SubmitAlgo FIX handler, build_algo_tags(), 6 unit tests
+- `tests/ib_paper_integration.rs` — Phases 62-67
+
+### Test Results
+471 unit tests pass (+6 new). Integration phases: 61 → 67.
+
+### What Was NOT Built
+- AD (Accumulate/Distribute): completely different encoding (tag 6561/6408/6664 XML), Low priority
+- BalanceImpactRisk/MinImpact: unavailable on paper/individual accounts
+- Per-algo convenience methods (submit_vwap, submit_twap) — single submit_algo suffices
+
+---
+
 ## 2026-03-11 - Issue #32: Tick-by-Tick Data Support
 
 ### Goal

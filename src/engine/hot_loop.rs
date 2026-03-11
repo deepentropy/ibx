@@ -7,7 +7,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{ControlCommand, InstrumentId, OrderCondition, OrderRequest, Price, Side, PRICE_SCALE};
+use crate::types::{AlgoParams, ControlCommand, InstrumentId, OrderCondition, OrderRequest, Price, Side, PRICE_SCALE};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 /// CCP heartbeat interval (10 seconds, configurable via FIX tag 108).
@@ -1301,6 +1301,57 @@ impl<S: Strategy> HotLoop<S> {
                         (5960, priority_str),   // AlgoParamValue
                     ])
                 }
+                OrderRequest::SubmitAlgo { order_id, instrument, side, qty, price, algo } => {
+                    self.context.insert_order(crate::types::Order::new(
+                        order_id, instrument, side, qty, price, b'2', b'0', 0,
+                    ));
+                    let clord_str = order_id.to_string();
+                    let side_str = fix_side(side);
+                    let qty_str = qty.to_string();
+                    let price_str = format_price(price);
+                    let symbol = self.context.market.symbol(instrument).to_string();
+                    let now = chrono_free_timestamp();
+                    let mut fields: Vec<(u32, &str)> = vec![
+                        (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (11, &clord_str),
+                        (1, &self.account_id),
+                        (21, "2"),
+                        (55, &symbol),
+                        (54, side_str),
+                        (38, &qty_str),
+                        (40, "2"),              // OrdType = Limit
+                        (44, &price_str),
+                        (59, "0"),              // TIF = DAY
+                        (60, &now),
+                        (167, "STK"),
+                        (100, "SMART"),
+                        (15, "USD"),
+                        (204, "0"),
+                    ];
+                    let (algo_name, param_strs) = build_algo_tags(&algo);
+                    fields.push((847, algo_name));
+                    // Tag 849 (maxPctVol) for algos that use it
+                    let pct_str = match &algo {
+                        AlgoParams::Vwap { max_pct_vol, .. }
+                        | AlgoParams::ArrivalPx { max_pct_vol, .. }
+                        | AlgoParams::ClosePx { max_pct_vol, .. } => format!("{}", max_pct_vol),
+                        _ => String::new(),
+                    };
+                    if !pct_str.is_empty() {
+                        fields.push((849, &pct_str));
+                    }
+                    let count_str = (param_strs.len() / 2).to_string();
+                    fields.push((5957, &count_str));
+                    // Emit key/value pairs: 5958=key, 5960=value (repeated)
+                    let mut i = 0;
+                    while i < param_strs.len() {
+                        fields.push((5958, &param_strs[i]));
+                        fields.push((5960, &param_strs[i + 1]));
+                        i += 2;
+                    }
+                    conn.send_fix(&fields)
+                }
                 OrderRequest::SubmitMtl { order_id, instrument, side, qty } => {
                     self.context.insert_order(crate::types::Order::new(
                         order_id, instrument, side, qty, 0, b'K', b'0', 0,
@@ -2165,6 +2216,60 @@ fn find_body_after_tag<'a>(msg: &'a [u8], tag_marker: &[u8]) -> Option<&'a [u8]>
 /// Returns: [count, cond1_type, cond1_conj, cond1_op, cond1_conid, cond1_exch,
 ///           cond1_trigger, cond1_price, cond1_time, cond1_pct, cond1_vol, cond1_exec, ...]
 /// 1 + 11 * N strings total.
+/// Build algo FIX tag values: returns (algo_name, [key, value, key, value, ...]).
+/// Keys/values are for 5958/5960 repeated pairs.
+fn build_algo_tags(algo: &AlgoParams) -> (&'static str, Vec<String>) {
+    match algo {
+        AlgoParams::Vwap { no_take_liq, allow_past_end_time, start_time, end_time, .. } => {
+            ("Vwap", vec![
+                "noTakeLiq".into(), if *no_take_liq { "1" } else { "0" }.into(),
+                "allowPastEndTime".into(), if *allow_past_end_time { "1" } else { "0" }.into(),
+                "startTime".into(), start_time.clone(),
+                "endTime".into(), end_time.clone(),
+            ])
+        }
+        AlgoParams::Twap { allow_past_end_time, start_time, end_time } => {
+            ("Twap", vec![
+                "allowPastEndTime".into(), if *allow_past_end_time { "1" } else { "0" }.into(),
+                "startTime".into(), start_time.clone(),
+                "endTime".into(), end_time.clone(),
+            ])
+        }
+        AlgoParams::ArrivalPx { risk_aversion, allow_past_end_time, force_completion, start_time, end_time, .. } => {
+            ("ArrivalPx", vec![
+                "riskAversion".into(), risk_aversion.as_str().into(),
+                "allowPastEndTime".into(), if *allow_past_end_time { "1" } else { "0" }.into(),
+                "forceCompletion".into(), if *force_completion { "1" } else { "0" }.into(),
+                "startTime".into(), start_time.clone(),
+                "endTime".into(), end_time.clone(),
+            ])
+        }
+        AlgoParams::ClosePx { risk_aversion, force_completion, start_time, .. } => {
+            ("ClosePx", vec![
+                "riskAversion".into(), risk_aversion.as_str().into(),
+                "forceCompletion".into(), if *force_completion { "1" } else { "0" }.into(),
+                "startTime".into(), start_time.clone(),
+            ])
+        }
+        AlgoParams::DarkIce { allow_past_end_time, display_size, start_time, end_time } => {
+            ("DarkIce", vec![
+                "allowPastEndTime".into(), if *allow_past_end_time { "1" } else { "0" }.into(),
+                "displaySize".into(), display_size.to_string(),
+                "startTime".into(), start_time.clone(),
+                "endTime".into(), end_time.clone(),
+            ])
+        }
+        AlgoParams::PctVol { pct_vol, no_take_liq, start_time, end_time } => {
+            ("PctVol", vec![
+                "noTakeLiq".into(), if *no_take_liq { "1" } else { "0" }.into(),
+                "pctVol".into(), format!("{}", pct_vol),
+                "startTime".into(), start_time.clone(),
+                "endTime".into(), end_time.clone(),
+            ])
+        }
+    }
+}
+
 fn build_condition_strings(conditions: &[OrderCondition]) -> Vec<String> {
     let mut out = Vec::with_capacity(1 + conditions.len() * 11);
     out.push(conditions.len().to_string());
@@ -3129,6 +3234,107 @@ mod tests {
         let s = build_condition_strings(&[]);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0], "0");
+    }
+
+    // ── build_algo_tags tests ──
+
+    #[test]
+    fn build_algo_tags_vwap() {
+        let algo = AlgoParams::Vwap {
+            max_pct_vol: 0.1,
+            no_take_liq: false,
+            allow_past_end_time: true,
+            start_time: "20260311-13:30:00".into(),
+            end_time: "20260311-20:00:00".into(),
+        };
+        let (name, params) = build_algo_tags(&algo);
+        assert_eq!(name, "Vwap");
+        assert_eq!(params.len(), 8); // 4 key-value pairs
+        assert_eq!(params[0], "noTakeLiq");
+        assert_eq!(params[1], "0");
+        assert_eq!(params[2], "allowPastEndTime");
+        assert_eq!(params[3], "1");
+        assert_eq!(params[4], "startTime");
+        assert_eq!(params[5], "20260311-13:30:00");
+        assert_eq!(params[6], "endTime");
+        assert_eq!(params[7], "20260311-20:00:00");
+    }
+
+    #[test]
+    fn build_algo_tags_twap() {
+        let algo = AlgoParams::Twap {
+            allow_past_end_time: false,
+            start_time: "20260311-13:30:00".into(),
+            end_time: "20260311-20:00:00".into(),
+        };
+        let (name, params) = build_algo_tags(&algo);
+        assert_eq!(name, "Twap");
+        assert_eq!(params.len(), 6);
+        assert_eq!(params[0], "allowPastEndTime");
+        assert_eq!(params[1], "0");
+    }
+
+    #[test]
+    fn build_algo_tags_arrival_px() {
+        let algo = AlgoParams::ArrivalPx {
+            max_pct_vol: 0.25,
+            risk_aversion: crate::types::RiskAversion::Aggressive,
+            allow_past_end_time: true,
+            force_completion: true,
+            start_time: "20260311-13:30:00".into(),
+            end_time: "20260311-20:00:00".into(),
+        };
+        let (name, params) = build_algo_tags(&algo);
+        assert_eq!(name, "ArrivalPx");
+        assert_eq!(params.len(), 10); // 5 pairs
+        assert_eq!(params[0], "riskAversion");
+        assert_eq!(params[1], "Aggressive");
+        assert_eq!(params[4], "forceCompletion");
+        assert_eq!(params[5], "1");
+    }
+
+    #[test]
+    fn build_algo_tags_close_px() {
+        let algo = AlgoParams::ClosePx {
+            max_pct_vol: 0.1,
+            risk_aversion: crate::types::RiskAversion::Neutral,
+            force_completion: false,
+            start_time: "20260311-13:30:00".into(),
+        };
+        let (name, params) = build_algo_tags(&algo);
+        assert_eq!(name, "ClosePx");
+        assert_eq!(params.len(), 6); // 3 pairs
+        assert_eq!(params[1], "Neutral");
+    }
+
+    #[test]
+    fn build_algo_tags_dark_ice() {
+        let algo = AlgoParams::DarkIce {
+            allow_past_end_time: true,
+            display_size: 10,
+            start_time: "20260311-13:30:00".into(),
+            end_time: "20260311-20:00:00".into(),
+        };
+        let (name, params) = build_algo_tags(&algo);
+        assert_eq!(name, "DarkIce");
+        assert_eq!(params[2], "displaySize");
+        assert_eq!(params[3], "10");
+    }
+
+    #[test]
+    fn build_algo_tags_pct_vol() {
+        let algo = AlgoParams::PctVol {
+            pct_vol: 0.15,
+            no_take_liq: true,
+            start_time: "20260311-13:30:00".into(),
+            end_time: "20260311-20:00:00".into(),
+        };
+        let (name, params) = build_algo_tags(&algo);
+        assert_eq!(name, "PctVol");
+        assert_eq!(params[0], "noTakeLiq");
+        assert_eq!(params[1], "1");
+        assert_eq!(params[2], "pctVol");
+        assert_eq!(params[3], "0.15");
     }
 
     #[test]

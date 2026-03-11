@@ -276,6 +276,88 @@ pub enum OrderCondition {
     },
 }
 
+/// Risk aversion level for Arrival Price and Close Price algos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiskAversion {
+    GetDone,
+    Aggressive,
+    Neutral,
+    Passive,
+}
+
+impl RiskAversion {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::GetDone => "Get_Done",
+            Self::Aggressive => "Aggressive",
+            Self::Neutral => "Neutral",
+            Self::Passive => "Passive",
+        }
+    }
+}
+
+/// Parameters for IB algorithmic order strategies.
+/// Each variant maps to a specific tag 847 algoStrategy with its required params.
+#[derive(Debug, Clone)]
+pub enum AlgoParams {
+    /// VWAP: Volume-weighted average price.
+    /// Tag 847=Vwap, 849=max_pct_vol.
+    Vwap {
+        /// Maximum participation rate (0.0-1.0). Sent as tag 849.
+        max_pct_vol: f64,
+        /// Don't take liquidity (0 or 1).
+        no_take_liq: bool,
+        /// Allow algo to continue past end time.
+        allow_past_end_time: bool,
+        /// Start time in UTC: "YYYYMMDD-HH:MM:SS".
+        start_time: String,
+        /// End time in UTC: "YYYYMMDD-HH:MM:SS".
+        end_time: String,
+    },
+    /// TWAP: Time-weighted average price.
+    /// Tag 847=Twap.
+    Twap {
+        allow_past_end_time: bool,
+        start_time: String,
+        end_time: String,
+    },
+    /// Arrival Price: Minimize arrival price impact.
+    /// Tag 847=ArrivalPx, 849=max_pct_vol.
+    ArrivalPx {
+        max_pct_vol: f64,
+        risk_aversion: RiskAversion,
+        allow_past_end_time: bool,
+        force_completion: bool,
+        start_time: String,
+        end_time: String,
+    },
+    /// Close Price: Target closing price.
+    /// Tag 847=ClosePx, 849=max_pct_vol.
+    ClosePx {
+        max_pct_vol: f64,
+        risk_aversion: RiskAversion,
+        force_completion: bool,
+        start_time: String,
+    },
+    /// Dark Ice: Hidden iceberg algo.
+    /// Tag 847=DarkIce.
+    DarkIce {
+        allow_past_end_time: bool,
+        display_size: u32,
+        start_time: String,
+        end_time: String,
+    },
+    /// Percentage of Volume: Participate at % of volume.
+    /// Tag 847=PctVol.
+    PctVol {
+        /// Target participation rate (0.0-1.0). Sent as param pctVol.
+        pct_vol: f64,
+        no_take_liq: bool,
+        start_time: String,
+        end_time: String,
+    },
+}
+
 /// Order request written by strategy, drained by engine after on_tick.
 #[derive(Debug, Clone)]
 pub enum OrderRequest {
@@ -511,6 +593,15 @@ pub enum OrderRequest {
         side: Side,
         qty: u32,
         offset: Price, // peg offset, 0 = no offset
+    },
+    /// Algorithmic order: limit order with IB algo strategy overlay (VWAP, TWAP, etc.).
+    SubmitAlgo {
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        algo: AlgoParams,
     },
     Cancel {
         order_id: OrderId,
