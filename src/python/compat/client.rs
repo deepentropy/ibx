@@ -818,6 +818,36 @@ impl EClient {
                 }
             }
 
+            // Per-position P&L dispatch: (last_price - avg_cost) * position
+            if !self.pnl_single_reqs.is_empty() {
+                let reqs: Vec<(i64, i64)> = self.pnl_single_reqs.iter().map(|(&r, &c)| (r, c)).collect();
+                for (req_id, con_id) in reqs {
+                    if let Some(pi) = shared.position_info(con_id) {
+                        // Find instrument for this conId to get quote
+                        let last_price = self.instrument_to_req.iter()
+                            .find_map(|(&iid, _)| {
+                                let q = shared.quote(iid);
+                                if q.last != 0 { Some(q.last) } else { None }
+                            })
+                            .unwrap_or(0);
+
+                        if last_price != 0 && pi.avg_cost != 0 {
+                            let unrealized = (last_price - pi.avg_cost) * pi.position;
+                            let value = last_price * pi.position;
+                            self.wrapper.call_method(
+                                py, "pnl_single",
+                                (req_id, pi.position as f64,
+                                 0.0f64,  // daily P&L not available per-position
+                                 unrealized as f64 / PRICE_SCALE_F,
+                                 0.0f64,  // realized P&L not available per-position
+                                 value as f64 / PRICE_SCALE_F),
+                                None,
+                            )?;
+                        }
+                    }
+                }
+            }
+
             // Account summary dispatch
             if let Some((req_id, ref tags)) = self.account_summary_req {
                 let acct = shared.account();
