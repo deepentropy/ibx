@@ -299,6 +299,113 @@ impl ContractStore {
     }
 }
 
+// ─── Schedule subscription (35=U|6040=107) ───
+
+/// FIX tags for schedule subscription responses.
+pub const TAG_SUB_PROTOCOL: u32 = 6040;
+pub const TAG_SCHEDULE_TIMEZONE: u32 = 6734;
+pub const TAG_SESSION_COUNT: u32 = 6840;
+pub const TAG_SESSION_START: u32 = 6841;
+pub const TAG_SESSION_END: u32 = 6842;
+pub const TAG_TRADE_DATE: u32 = 75;
+pub const TAG_IS_TRADING_HOURS: u32 = 6843;
+pub const TAG_IS_LIQUID_HOURS: u32 = 6844;
+
+/// A single trading/liquid hours session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduleSession {
+    pub start: String,
+    pub end: String,
+    pub trade_date: String,
+}
+
+/// Parsed schedule from a 35=U|6040=107 response.
+#[derive(Debug, Clone)]
+pub struct ContractSchedule {
+    pub timezone: String,
+    pub trading_hours: Vec<ScheduleSession>,
+    pub liquid_hours: Vec<ScheduleSession>,
+}
+
+/// Parse a 35=U|6040=107 schedule response into trading/liquid hours.
+///
+/// Uses sequential tag parsing since sessions are a repeating group.
+pub fn parse_schedule_response(data: &[u8]) -> Option<ContractSchedule> {
+    use crate::protocol::fix::SOH;
+
+    // Sequential parse: collect all tag-value pairs in order
+    let mut tags: Vec<(u32, String)> = Vec::new();
+    for part in data.split(|&b| b == SOH) {
+        if part.is_empty() { continue; }
+        let text = String::from_utf8_lossy(part);
+        if let Some((tag_str, val)) = text.split_once('=') {
+            if let Ok(tag) = tag_str.parse::<u32>() {
+                tags.push((tag, val.to_string()));
+            }
+        }
+    }
+
+    // Verify this is 35=U with 6040=107
+    let msg_type = tags.iter().find(|(t, _)| *t == fix::TAG_MSG_TYPE)?.1.as_str();
+    if msg_type != "U" { return None; }
+    let sub_protocol = tags.iter().find(|(t, _)| *t == TAG_SUB_PROTOCOL)?.1.as_str();
+    if sub_protocol != "107" { return None; }
+
+    let timezone = tags.iter()
+        .find(|(t, _)| *t == TAG_SCHEDULE_TIMEZONE)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+
+    // Parse repeating session groups.
+    // Each session starts with tag 6841 (start) and includes 6842 (end), 75 (date),
+    // and either 6843 (trading) or 6844 (liquid).
+    let mut trading_hours = Vec::new();
+    let mut liquid_hours = Vec::new();
+
+    let mut start = String::new();
+    let mut end = String::new();
+    let mut trade_date = String::new();
+    let mut is_trading = false;
+    let mut is_liquid = false;
+    let mut in_session = false;
+
+    for (tag, val) in &tags {
+        match *tag {
+            TAG_SESSION_START => {
+                // Flush previous session if any
+                if in_session {
+                    let session = ScheduleSession {
+                        start: start.clone(), end: end.clone(), trade_date: trade_date.clone(),
+                    };
+                    if is_trading { trading_hours.push(session); }
+                    else if is_liquid { liquid_hours.push(session); }
+                }
+                start = val.clone();
+                end.clear();
+                trade_date.clear();
+                is_trading = false;
+                is_liquid = false;
+                in_session = true;
+            }
+            TAG_SESSION_END => end = val.clone(),
+            TAG_TRADE_DATE => trade_date = val.clone(),
+            TAG_IS_TRADING_HOURS => is_trading = val == "1",
+            TAG_IS_LIQUID_HOURS => is_liquid = val == "1",
+            _ => {}
+        }
+    }
+    // Flush last session
+    if in_session {
+        let session = ScheduleSession {
+            start: start, end: end, trade_date: trade_date,
+        };
+        if is_trading { trading_hours.push(session); }
+        else if is_liquid { liquid_hours.push(session); }
+    }
+
+    Some(ContractSchedule { timezone, trading_hours, liquid_hours })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +567,63 @@ mod tests {
         assert_eq!(def.strike, 200.0);
         assert_eq!(def.right, Some(OptionRight::Call));
         assert_eq!(def.multiplier, 100.0);
+    }
+
+    #[test]
+    fn parse_schedule_response_basic() {
+        // Build a fake 35=U|6040=107 with 2 trading + 2 liquid sessions
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "U"),
+                (TAG_SUB_PROTOCOL, "107"),
+                (TAG_SCHEDULE_TIMEZONE, "US/Eastern"),
+                (TAG_SESSION_COUNT, "4"),
+                // Trading session 1
+                (TAG_SESSION_START, "20260311-08:00:00"),
+                (TAG_SESSION_END, "20260312-00:00:00"),
+                (TAG_TRADE_DATE, "20260311"),
+                (TAG_IS_TRADING_HOURS, "1"),
+                // Liquid session 1
+                (TAG_SESSION_START, "20260311-13:30:00"),
+                (TAG_SESSION_END, "20260311-20:00:00"),
+                (TAG_TRADE_DATE, "20260311"),
+                (TAG_IS_LIQUID_HOURS, "1"),
+                // Trading session 2
+                (TAG_SESSION_START, "20260312-08:00:00"),
+                (TAG_SESSION_END, "20260313-00:00:00"),
+                (TAG_TRADE_DATE, "20260312"),
+                (TAG_IS_TRADING_HOURS, "1"),
+                // Liquid session 2
+                (TAG_SESSION_START, "20260312-13:30:00"),
+                (TAG_SESSION_END, "20260312-20:00:00"),
+                (TAG_TRADE_DATE, "20260312"),
+                (TAG_IS_LIQUID_HOURS, "1"),
+            ],
+            1,
+        );
+        let sched = parse_schedule_response(&msg).unwrap();
+        assert_eq!(sched.timezone, "US/Eastern");
+        assert_eq!(sched.trading_hours.len(), 2);
+        assert_eq!(sched.liquid_hours.len(), 2);
+
+        assert_eq!(sched.trading_hours[0].start, "20260311-08:00:00");
+        assert_eq!(sched.trading_hours[0].end, "20260312-00:00:00");
+        assert_eq!(sched.trading_hours[0].trade_date, "20260311");
+
+        assert_eq!(sched.liquid_hours[0].start, "20260311-13:30:00");
+        assert_eq!(sched.liquid_hours[0].end, "20260311-20:00:00");
+    }
+
+    #[test]
+    fn parse_schedule_rejects_non_schedule() {
+        let msg = fix::fix_build(&[(TAG_MSG_TYPE, "d")], 1);
+        assert!(parse_schedule_response(&msg).is_none());
+
+        // Wrong sub-protocol
+        let msg = fix::fix_build(
+            &[(TAG_MSG_TYPE, "U"), (TAG_SUB_PROTOCOL, "100")],
+            1,
+        );
+        assert!(parse_schedule_response(&msg).is_none());
     }
 }

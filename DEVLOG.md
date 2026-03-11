@@ -1,3 +1,24 @@
+## 2026-03-11 - Issue #33: Historical Data & Contract Details Integration Tests
+
+### Goal
+Add live integration tests for historical data and contract details against IB.
+
+### What Was Implemented
+- Phase 76: Historical daily bars (SPY, 5d of 1-day bars) — OHLCV validation
+- Phase 77: Cancel historical request — send 1s bars, wait for first chunk, send 35=Z cancel
+- Phase 78: Contract details by symbol search (AAPL) — symbol→conId resolution
+- Phase 12 enhanced: added min_tick assertion
+
+### Files Changed
+- `src/control/historical.rs` — HeadTimestampRequest/Response, build_head_timestamp_xml, parse_head_timestamp_response, 3 unit tests
+- `src/control/contracts.rs` — ScheduleSession, ContractSchedule, parse_schedule_response (35=U|6040=107), 2 unit tests
+- `tests/ib_paper_integration.rs` — 5 new phases (76-80), Phase 12 min_tick assertion, phase count 67→72
+
+### Test Results
+528 unit tests pass (+3 head timestamp, +2 schedule). Integration phases: 75 → 80. All issue #33 items complete.
+
+---
+
 ## 2026-03-11 - Issue #37: Order Features (What-If, Cash Qty, Fractional, Adjustable Stops)
 
 ### Goal

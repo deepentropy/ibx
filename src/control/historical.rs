@@ -274,6 +274,67 @@ pub fn parse_ticker_id(xml: &str) -> Option<String> {
     extract_xml_tag(xml, "tickerId").map(|s| s.to_string())
 }
 
+/// Parameters for a head timestamp request.
+#[derive(Debug, Clone)]
+pub struct HeadTimestampRequest {
+    pub con_id: u32,
+    pub sec_type: &'static str,
+    pub exchange: &'static str,
+    pub data_type: BarDataType,
+    pub use_rth: bool,
+}
+
+/// Parsed head timestamp response.
+#[derive(Debug, Clone)]
+pub struct HeadTimestampResponse {
+    pub head_timestamp: String,
+    pub timezone: String,
+}
+
+/// Build the XML query for a head timestamp request.
+pub fn build_head_timestamp_xml(req: &HeadTimestampRequest) -> String {
+    let exchange = match req.exchange {
+        "SMART" => "BEST",
+        e => e,
+    };
+    let rth = if req.use_rth { "true" } else { "false" };
+    let id = format!("TickHeadClient1;;{}@{} {};;0;;{};;0;;U",
+        req.con_id, exchange, req.data_type.as_str(), rth);
+
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ListOfQueries>\
+         <Query>\
+         <id>{id}</id>\
+         <useRTH>{rth}</useRTH>\
+         <contractID>{con_id}</contractID>\
+         <exchange>{exchange}</exchange>\
+         <secType>{sec_type}</secType>\
+         <type>TickHeadTimeStamp</type>\
+         <data>{data}</data>\
+         <step>-1</step>\
+         <source>API</source>\
+         <needTotalValue>false</needTotalValue>\
+         <wholeDays>false</wholeDays>\
+         <delay>auto</delay>\
+         </Query>\
+         </ListOfQueries>",
+        con_id = req.con_id,
+        sec_type = req.sec_type,
+        data = req.data_type.as_str(),
+    )
+}
+
+/// Parse a ResultSetHeadTimeStamp XML response.
+pub fn parse_head_timestamp_response(xml: &str) -> Option<HeadTimestampResponse> {
+    if !xml.contains("<ResultSetHeadTimeStamp>") {
+        return None;
+    }
+    let head_timestamp = extract_xml_tag(xml, "headTS")?.to_string();
+    let timezone = extract_xml_tag(xml, "tz").unwrap_or("").to_string();
+    Some(HeadTimestampResponse { head_timestamp, timezone })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +507,47 @@ mod tests {
         assert_eq!(extract_xml_tag("<a>hello</a>", "a"), Some("hello"));
         assert_eq!(extract_xml_tag("<x>123</x>", "x"), Some("123"));
         assert_eq!(extract_xml_tag("<x>123</x>", "y"), None);
+    }
+
+    #[test]
+    fn head_timestamp_xml_structure() {
+        let req = HeadTimestampRequest {
+            con_id: 756733,
+            sec_type: "STK",
+            exchange: "SMART",
+            data_type: BarDataType::Trades,
+            use_rth: true,
+        };
+        let xml = build_head_timestamp_xml(&req);
+        assert!(xml.contains("<type>TickHeadTimeStamp</type>"));
+        assert!(xml.contains("<contractID>756733</contractID>"));
+        assert!(xml.contains("<exchange>BEST</exchange>")); // SMART→BEST
+        assert!(xml.contains("<data>Last</data>"));
+        assert!(xml.contains("<step>-1</step>"));
+        assert!(xml.contains("<useRTH>true</useRTH>"));
+        assert!(xml.contains("TickHeadClient1;;756733@BEST Last;;0;;true;;0;;U"));
+    }
+
+    #[test]
+    fn parse_head_timestamp_response_basic() {
+        let xml = r#"<ResultSetHeadTimeStamp>
+            <id>TickHeadClient1;;756733@BEST Last;;0;;true;;0;;U</id>
+            <eoq>true</eoq>
+            <headTS>19930129-09:00:00</headTS>
+            <tz>US/Eastern</tz>
+            <Events>
+                <Open><time>19930129-14:30:00</time><refDate>19930129</refDate></Open>
+                <Close><time>19930129-21:15:00</time></Close>
+            </Events>
+        </ResultSetHeadTimeStamp>"#;
+        let resp = parse_head_timestamp_response(xml).unwrap();
+        assert_eq!(resp.head_timestamp, "19930129-09:00:00");
+        assert_eq!(resp.timezone, "US/Eastern");
+    }
+
+    #[test]
+    fn parse_head_timestamp_rejects_other() {
+        assert!(parse_head_timestamp_response("<ResultSetBar>...</ResultSetBar>").is_none());
+        assert!(parse_head_timestamp_response("not xml").is_none());
     }
 }

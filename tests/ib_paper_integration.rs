@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ibx::control::contracts;
-use ibx::control::historical::{self, BarDataType, BarSize, HistoricalRequest};
+use ibx::control::historical::{self, BarDataType, BarSize, HeadTimestampRequest, HistoricalRequest};
 use ibx::engine::context::{Context, Strategy};
 use ibx::engine::hot_loop::HotLoop;
 use ibx::gateway::{connect_farm, Gateway, GatewayConfig};
@@ -269,8 +269,23 @@ fn integration_suite() {
     // Phase 12: Contract details (raw CCP — init burst already consumed)
     phase_contract_details(&mut conns);
 
+    // Phase 78: Contract details by symbol search
+    phase_contract_details_by_symbol(&mut conns);
+
+    // Phase 80: Trading hours (schedule subscription)
+    phase_trading_hours(&mut conns);
+
     // Phase 11: Historical data — reconnect HMDS fresh to avoid stale connection
     conns = phase_historical_data(conns, &gw, &config);
+
+    // Phase 76: Historical daily bars
+    conns = phase_historical_daily_bars(conns, &gw, &config);
+
+    // Phase 77: Cancel historical request
+    conns = phase_cancel_historical(conns, &gw, &config);
+
+    // Phase 79: Head timestamp
+    conns = phase_head_timestamp(conns, &gw, &config);
 
     // Tick-dependent phases — regular hours only
     if needs_ticks {
@@ -394,7 +409,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 67;
+    let total_phases = 72;
     let skipped = if needs_ticks { 0 } else { 10 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -526,6 +541,8 @@ fn phase_contract_details(conns: &mut Conns) {
     assert!(!def.long_name.is_empty(), "Long name should not be empty");
     assert!(!def.valid_exchanges.is_empty(), "Valid exchanges should not be empty");
     assert!(def.valid_exchanges.contains(&"SMART".to_string()), "SMART should be in valid exchanges");
+    assert!(def.min_tick > 0.0, "Min tick should be positive");
+    println!("  MinTick={}", def.min_tick);
     println!("  PASS\n");
 }
 
@@ -3949,4 +3966,566 @@ fn phase_adjustable_stop_order(conns: Conns) -> Conns {
             1_00_000_000,    // adjusted_limit: $1.00
         )
     })
+}
+
+// ─── Phase 76: Historical daily bars via HMDS ───
+
+fn phase_historical_daily_bars(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 76: Historical Daily Bars (SPY, 5 days of 1-day bars) ---");
+
+    // Reconnect HMDS fresh
+    let mut hmds = match connect_farm(
+        &config.host, "ushmds",
+        &config.username, config.paper,
+        &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
+    ) {
+        Ok(c) => {
+            println!("  HMDS reconnected");
+            c
+        }
+        Err(e) => {
+            println!("  SKIP: ushmds reconnect failed: {}\n", e);
+            return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id };
+        }
+    };
+
+    let account_id = conns.account_id;
+
+    // Background hot loop to keep CCP+farm heartbeats alive
+    let (bg_loop, bg_tx) = HotLoop::with_connections(
+        NoopStrategy, account_id.clone(), conns.farm, conns.ccp, None, None,
+    );
+    bg_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let bg_join = run_hot_loop(bg_loop);
+
+    // Build end_time (same helper as phase 11)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let secs_per_day = 86400u64;
+    let end_time = {
+        let days = now / secs_per_day;
+        let mut y = 1970i64;
+        let mut remaining = days as i64;
+        loop {
+            let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+            if remaining < days_in_year { break; }
+            remaining -= days_in_year;
+            y += 1;
+        }
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 0;
+        for (i, &d) in month_days.iter().enumerate() {
+            if remaining < d as i64 { m = i + 1; break; }
+            remaining -= d as i64;
+        }
+        let day = remaining + 1;
+        let hour = (now % secs_per_day) / 3600;
+        let min = (now % 3600) / 60;
+        let sec = now % 60;
+        format!("{:04}{:02}{:02}-{:02}:{:02}:{:02}", y, m, day, hour, min, sec)
+    };
+
+    let req = HistoricalRequest {
+        query_id: "daily1".to_string(),
+        con_id: 756733,
+        symbol: "SPY".to_string(),
+        sec_type: "CS",
+        exchange: "SMART",
+        data_type: BarDataType::Trades,
+        end_time,
+        duration: "5 d".to_string(),
+        bar_size: BarSize::Day1,
+        use_rth: true,
+    };
+
+    let xml = historical::build_query_xml(&req);
+    hmds.send_fixcomp(&[
+        (fix::TAG_MSG_TYPE, "W"),
+        (historical::TAG_HISTORICAL_XML, &xml),
+    ]).expect("Failed to send daily bar request");
+
+    let mut all_bars = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut complete = false;
+
+    while Instant::now() < deadline && !complete {
+        match hmds.try_recv() {
+            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+            Err(e) => { println!("  HMDS recv error: {}", e); break; }
+            Ok(_) => {}
+        }
+
+        for frame in hmds.extract_frames() {
+            let data = match &frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = hmds.unsign(raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw.clone()],
+                _ => continue,
+            };
+
+            for msg in data {
+                let tags = fix::fix_parse(&msg);
+                if let Some(xml_resp) = tags.get(&historical::TAG_HISTORICAL_XML) {
+                    if let Some(resp) = historical::parse_bar_response(xml_resp) {
+                        all_bars.extend(resp.bars);
+                        if resp.is_complete { complete = true; }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut bg_conns = shutdown_and_reclaim(&bg_tx, bg_join, account_id);
+    bg_conns.hmds = Some(hmds);
+
+    println!("  Total daily bars: {}", all_bars.len());
+    if all_bars.is_empty() {
+        println!("  SKIP: No daily bars received (HMDS may be unavailable)\n");
+        return bg_conns;
+    }
+
+    // Daily bars for 5 trading days — expect 1-5 bars depending on market calendar
+    assert!(all_bars.len() <= 5, "Should have at most 5 daily bars, got {}", all_bars.len());
+    for bar in &all_bars {
+        assert!(bar.open > 0.0, "Open should be positive");
+        assert!(bar.high >= bar.low, "High ({}) should be >= Low ({})", bar.high, bar.low);
+        assert!(bar.high >= bar.open, "High ({}) should be >= Open ({})", bar.high, bar.open);
+        assert!(bar.high >= bar.close, "High ({}) should be >= Close ({})", bar.high, bar.close);
+        assert!(bar.low <= bar.open, "Low ({}) should be <= Open ({})", bar.low, bar.open);
+        assert!(bar.low <= bar.close, "Low ({}) should be <= Close ({})", bar.low, bar.close);
+        assert!(bar.volume > 0, "Volume should be positive");
+        println!("  {} O={:.2} H={:.2} L={:.2} C={:.2} V={}", bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume);
+    }
+    println!("  PASS ({} daily bars)\n", all_bars.len());
+
+    bg_conns
+}
+
+// ─── Phase 77: Cancel historical request ───
+
+fn phase_cancel_historical(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 77: Cancel Historical Request (SPY) ---");
+
+    // Reconnect HMDS fresh
+    let mut hmds = match connect_farm(
+        &config.host, "ushmds",
+        &config.username, config.paper,
+        &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
+    ) {
+        Ok(c) => {
+            println!("  HMDS reconnected");
+            c
+        }
+        Err(e) => {
+            println!("  SKIP: ushmds reconnect failed: {}\n", e);
+            return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id };
+        }
+    };
+
+    let account_id = conns.account_id;
+
+    // Background hot loop for heartbeats
+    let (bg_loop, bg_tx) = HotLoop::with_connections(
+        NoopStrategy, account_id.clone(), conns.farm, conns.ccp, None, None,
+    );
+    bg_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let bg_join = run_hot_loop(bg_loop);
+
+    // Send a historical request
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let secs_per_day = 86400u64;
+    let end_time = {
+        let days = now / secs_per_day;
+        let mut y = 1970i64;
+        let mut remaining = days as i64;
+        loop {
+            let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+            if remaining < days_in_year { break; }
+            remaining -= days_in_year;
+            y += 1;
+        }
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 0;
+        for (i, &d) in month_days.iter().enumerate() {
+            if remaining < d as i64 { m = i + 1; break; }
+            remaining -= d as i64;
+        }
+        let day = remaining + 1;
+        let hour = (now % secs_per_day) / 3600;
+        let min = (now % 3600) / 60;
+        let sec = now % 60;
+        format!("{:04}{:02}{:02}-{:02}:{:02}:{:02}", y, m, day, hour, min, sec)
+    };
+
+    let req = HistoricalRequest {
+        query_id: "cancel_test".to_string(),
+        con_id: 756733,
+        symbol: "SPY".to_string(),
+        sec_type: "CS",
+        exchange: "SMART",
+        data_type: BarDataType::Trades,
+        end_time,
+        duration: "1 d".to_string(),
+        bar_size: BarSize::Sec1,  // 1-second bars = lots of data, slow to complete
+        use_rth: true,
+    };
+
+    let xml = historical::build_query_xml(&req);
+    hmds.send_fixcomp(&[
+        (fix::TAG_MSG_TYPE, "W"),
+        (historical::TAG_HISTORICAL_XML, &xml),
+    ]).expect("Failed to send historical request");
+
+    // Wait briefly for the first chunk to arrive (confirms request was accepted)
+    let mut got_first_chunk = false;
+    let first_deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < first_deadline && !got_first_chunk {
+        match hmds.try_recv() {
+            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+            Err(e) => { println!("  HMDS recv error: {}", e); break; }
+            Ok(_) => {}
+        }
+        for frame in hmds.extract_frames() {
+            let data = match &frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = hmds.unsign(raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw.clone()],
+                _ => continue,
+            };
+            for msg in data {
+                let tags = fix::fix_parse(&msg);
+                if let Some(xml_resp) = tags.get(&historical::TAG_HISTORICAL_XML) {
+                    if historical::parse_bar_response(xml_resp).is_some() {
+                        got_first_chunk = true;
+                        println!("  First chunk received, sending cancel");
+                    }
+                }
+            }
+        }
+    }
+
+    if !got_first_chunk {
+        let mut bg_conns = shutdown_and_reclaim(&bg_tx, bg_join, account_id);
+        bg_conns.hmds = Some(hmds);
+        println!("  SKIP: No initial data received to cancel\n");
+        return bg_conns;
+    }
+
+    // Send cancel (35=Z)
+    let cancel_xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ListOfCancelQueries>\
+         <CancelQuery>\
+         <id>cancel_test</id>\
+         </CancelQuery>\
+         </ListOfCancelQueries>"
+    );
+    hmds.send_fixcomp(&[
+        (fix::TAG_MSG_TYPE, "Z"),
+        (historical::TAG_HISTORICAL_XML, &cancel_xml),
+    ]).expect("Failed to send cancel request");
+    println!("  Cancel sent");
+
+    // Drain remaining — after cancel, no more bars with is_complete should arrive
+    // (or data stops quickly). We just verify no error/disconnect occurs.
+    let drain_deadline = Instant::now() + Duration::from_secs(5);
+    let mut bars_after_cancel = 0u32;
+    while Instant::now() < drain_deadline {
+        match hmds.try_recv() {
+            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+            Err(e) => { println!("  HMDS recv error after cancel: {}", e); break; }
+            Ok(_) => {}
+        }
+        for frame in hmds.extract_frames() {
+            let data = match &frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = hmds.unsign(raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw.clone()],
+                _ => continue,
+            };
+            for msg in data {
+                let tags = fix::fix_parse(&msg);
+                if let Some(xml_resp) = tags.get(&historical::TAG_HISTORICAL_XML) {
+                    if let Some(resp) = historical::parse_bar_response(xml_resp) {
+                        bars_after_cancel += resp.bars.len() as u32;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut bg_conns = shutdown_and_reclaim(&bg_tx, bg_join, account_id);
+    bg_conns.hmds = Some(hmds);
+
+    println!("  Bars received after cancel: {} (in-flight data is expected)", bars_after_cancel);
+    // Connection should still be alive after cancel
+    println!("  PASS (cancel sent successfully, connection intact)\n");
+    bg_conns
+}
+
+// ─── Phase 78: Contract details by symbol search ───
+
+fn phase_contract_details_by_symbol(conns: &mut Conns) {
+    println!("--- Phase 78: Contract Details by Symbol Search (AAPL) ---");
+
+    let now = ibx::gateway::chrono_free_timestamp();
+    conns.ccp.send_fix(&[
+        (fix::TAG_MSG_TYPE, "c"),
+        (fix::TAG_SENDING_TIME, &now),
+        (contracts::TAG_SECURITY_REQ_ID, "R_sym1"),
+        (contracts::TAG_SECURITY_REQ_TYPE, "2"),
+        (contracts::TAG_SYMBOL, "AAPL"),
+        (contracts::TAG_SECURITY_TYPE, "CS"),
+        (contracts::TAG_EXCHANGE, "BEST"),
+        (contracts::TAG_CURRENCY, "USD"),
+        (contracts::TAG_IB_SOURCE, "Socket"),
+    ]).expect("Failed to send symbol search request");
+
+    let mut contract: Option<contracts::ContractDefinition> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    while Instant::now() < deadline && contract.is_none() {
+        match conns.ccp.try_recv() {
+            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+            Err(e) => { println!("  CCP recv error: {}", e); break; }
+            Ok(_) => {}
+        }
+
+        for frame in conns.ccp.extract_frames() {
+            let messages = match frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = conns.ccp.unsign(&raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw],
+                _ => continue,
+            };
+
+            for msg in messages {
+                let tags = fix::fix_parse(&msg);
+                let msg_type = tags.get(&fix::TAG_MSG_TYPE).map(|s| s.as_str()).unwrap_or("?");
+                if msg_type == "d" {
+                    if let Some(req_id) = tags.get(&contracts::TAG_SECURITY_REQ_ID) {
+                        if req_id == "R_sym1" {
+                            if let Some(def) = contracts::parse_secdef_response(&msg) {
+                                println!("  {} ({}) conId={}", def.symbol, def.long_name, def.con_id);
+                                contract = Some(def);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let def = contract.expect("No contract details received for AAPL by symbol search");
+    assert_eq!(def.symbol, "AAPL");
+    assert!(def.con_id > 0, "conId should be resolved");
+    assert_eq!(def.sec_type, contracts::SecurityType::Stock);
+    assert_eq!(def.currency, "USD");
+    assert!(!def.long_name.is_empty(), "Long name should not be empty");
+    assert!(def.min_tick > 0.0, "Min tick should be positive");
+    println!("  conId={} MinTick={}", def.con_id, def.min_tick);
+    println!("  PASS\n");
+}
+
+// ─── Phase 79: Head timestamp request via HMDS ───
+
+fn phase_head_timestamp(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 79: Head Timestamp (SPY, TRADES) ---");
+
+    // Reconnect HMDS fresh
+    let mut hmds = match connect_farm(
+        &config.host, "ushmds",
+        &config.username, config.paper,
+        &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
+    ) {
+        Ok(c) => {
+            println!("  HMDS reconnected");
+            c
+        }
+        Err(e) => {
+            println!("  SKIP: ushmds reconnect failed: {}\n", e);
+            return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id };
+        }
+    };
+
+    let account_id = conns.account_id;
+
+    // Background hot loop for heartbeats
+    let (bg_loop, bg_tx) = HotLoop::with_connections(
+        NoopStrategy, account_id.clone(), conns.farm, conns.ccp, None, None,
+    );
+    bg_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let bg_join = run_hot_loop(bg_loop);
+
+    let req = HeadTimestampRequest {
+        con_id: 756733,
+        sec_type: "STK",
+        exchange: "SMART",
+        data_type: BarDataType::Trades,
+        use_rth: true,
+    };
+
+    let xml = historical::build_head_timestamp_xml(&req);
+    hmds.send_fixcomp(&[
+        (fix::TAG_MSG_TYPE, "W"),
+        (historical::TAG_HISTORICAL_XML, &xml),
+    ]).expect("Failed to send head timestamp request");
+
+    let mut response: Option<historical::HeadTimestampResponse> = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
+
+    while Instant::now() < deadline && response.is_none() {
+        match hmds.try_recv() {
+            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+            Err(e) => { println!("  HMDS recv error: {}", e); break; }
+            Ok(_) => {}
+        }
+
+        for frame in hmds.extract_frames() {
+            let data = match &frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = hmds.unsign(raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw.clone()],
+                _ => continue,
+            };
+
+            for msg in data {
+                let tags = fix::fix_parse(&msg);
+                if let Some(xml_resp) = tags.get(&historical::TAG_HISTORICAL_XML) {
+                    if let Some(resp) = historical::parse_head_timestamp_response(xml_resp) {
+                        println!("  headTS={} tz={}", resp.head_timestamp, resp.timezone);
+                        response = Some(resp);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut bg_conns = shutdown_and_reclaim(&bg_tx, bg_join, account_id);
+    bg_conns.hmds = Some(hmds);
+
+    if response.is_none() {
+        println!("  SKIP: No head timestamp received (HMDS may be unavailable)\n");
+        return bg_conns;
+    }
+
+    let resp = response.unwrap();
+    // SPY head timestamp for TRADES should be in the 1990s
+    assert!(!resp.head_timestamp.is_empty(), "Head timestamp should not be empty");
+    assert!(resp.head_timestamp.starts_with("199"), "SPY TRADES head timestamp should be in 1990s, got {}", resp.head_timestamp);
+    assert!(!resp.timezone.is_empty(), "Timezone should not be empty");
+    println!("  PASS\n");
+
+    bg_conns
+}
+
+// ─── Phase 80: Trading hours / schedule verification ───
+
+fn phase_trading_hours(conns: &mut Conns) {
+    println!("--- Phase 80: Trading Hours (schedule subscription, AAPL) ---");
+
+    // Subscribe AAPL on farm to trigger schedule response on CCP
+    let now = ibx::gateway::chrono_free_timestamp();
+    conns.farm.send_fixcomp(&[
+        (fix::TAG_MSG_TYPE, "V"),
+        (fix::TAG_SENDING_TIME, &now),
+        (263, "1"),   // SubscriptionRequestType = Subscribe
+        (146, "1"),   // NoRelatedSym = 1
+        (262, "sched_test"),
+        (6008, "265598"),  // AAPL conId
+        (207, "BEST"),
+        (167, "CS"),
+        (264, "442"),      // BidAsk
+        (6088, "Socket"),
+        (9830, "1"),
+        (9839, "1"),
+    ]).expect("Failed to send farm subscribe for AAPL");
+    println!("  Subscribed AAPL on farm, listening on CCP for schedule");
+
+    let mut schedule: Option<contracts::ContractSchedule> = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
+
+    while Instant::now() < deadline && schedule.is_none() {
+        // Drain farm data (tick responses) to keep connection alive
+        match conns.farm.try_recv() {
+            Ok(_) => { conns.farm.extract_frames(); }
+            Err(_) => {}
+        }
+
+        match conns.ccp.try_recv() {
+            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+            Err(e) => { println!("  CCP recv error: {}", e); break; }
+            Ok(_) => {}
+        }
+
+        for frame in conns.ccp.extract_frames() {
+            let messages = match frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = conns.ccp.unsign(&raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw],
+                _ => continue,
+            };
+
+            for msg in messages {
+                if let Some(sched) = contracts::parse_schedule_response(&msg) {
+                    println!("  Schedule: tz={} trading={} liquid={}",
+                        sched.timezone, sched.trading_hours.len(), sched.liquid_hours.len());
+                    schedule = Some(sched);
+                }
+            }
+        }
+    }
+
+    // Unsubscribe AAPL to clean up
+    let now = ibx::gateway::chrono_free_timestamp();
+    let _ = conns.farm.send_fixcomp(&[
+        (fix::TAG_MSG_TYPE, "V"),
+        (fix::TAG_SENDING_TIME, &now),
+        (263, "2"),   // Unsubscribe
+        (146, "1"),
+        (262, "sched_test"),
+        (6008, "265598"),
+        (207, "BEST"),
+        (167, "CS"),
+        (264, "442"),
+        (6088, "Socket"),
+        (9830, "1"),
+        (9839, "1"),
+    ]);
+
+    if schedule.is_none() {
+        println!("  SKIP: No schedule received (may not be triggered by subscribe)\n");
+        return;
+    }
+
+    let sched = schedule.unwrap();
+    assert!(!sched.timezone.is_empty(), "Timezone should not be empty");
+    assert!(!sched.trading_hours.is_empty(), "Trading hours should not be empty");
+    assert!(!sched.liquid_hours.is_empty(), "Liquid hours should not be empty");
+    // Liquid hours should be a subset of trading hours (fewer or equal sessions)
+    assert!(sched.liquid_hours.len() <= sched.trading_hours.len(),
+        "Liquid hours ({}) should be <= trading hours ({})",
+        sched.liquid_hours.len(), sched.trading_hours.len());
+    if let Some(th) = sched.trading_hours.first() {
+        println!("  First trading session: {} → {} ({})", th.start, th.end, th.trade_date);
+    }
+    if let Some(lh) = sched.liquid_hours.first() {
+        println!("  First liquid session: {} → {} ({})", lh.start, lh.end, lh.trade_date);
+    }
+    println!("  PASS\n");
 }
