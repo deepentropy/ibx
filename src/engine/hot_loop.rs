@@ -51,6 +51,14 @@ pub struct HotLoop<S: Strategy> {
     /// Seen ExecIDs (FIX tag 17) for fill deduplication.
     /// Prevents double-counting when IB sends duplicate execution reports.
     seen_exec_ids: HashSet<String>,
+    /// Whether HMDS connection is lost.
+    hmds_disconnected: bool,
+    /// Next TBT request ID for HMDS subscriptions.
+    next_tbt_req_id: u32,
+    /// Active TBT subscriptions: InstrumentId → (ticker_id, tbt_type).
+    tbt_subscriptions: Vec<(InstrumentId, String, crate::types::TbtType)>,
+    /// Running price state for TBT decoding: InstrumentId → (last_price_cents, bid_cents, ask_cents).
+    tbt_price_state: Vec<(InstrumentId, i64, i64, i64)>,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -59,10 +67,14 @@ pub struct HeartbeatState {
     pub last_ccp_recv: Instant,
     pub last_farm_sent: Instant,
     pub last_farm_recv: Instant,
+    pub last_hmds_sent: Instant,
+    pub last_hmds_recv: Instant,
     /// Pending test request for CCP: (test_req_id, sent_at).
     pub pending_ccp_test: Option<(String, Instant)>,
     /// Pending test request for farm: (test_req_id, sent_at).
     pub pending_farm_test: Option<(String, Instant)>,
+    /// Pending test request for HMDS: (test_req_id, sent_at).
+    pub pending_hmds_test: Option<(String, Instant)>,
     /// Counter for generating unique test request IDs.
     test_req_counter: u32,
 }
@@ -75,8 +87,11 @@ impl HeartbeatState {
             last_ccp_recv: now,
             last_farm_sent: now,
             last_farm_recv: now,
+            last_hmds_sent: now,
+            last_hmds_recv: now,
             pending_ccp_test: None,
             pending_farm_test: None,
+            pending_hmds_test: None,
             test_req_counter: 0,
         }
     }
@@ -106,6 +121,10 @@ impl<S: Strategy> HotLoop<S> {
             hb: HeartbeatState::new(),
             account_id: String::new(),
             seen_exec_ids: HashSet::with_capacity(256),
+            hmds_disconnected: false,
+            next_tbt_req_id: 1,
+            tbt_subscriptions: Vec::new(),
+            tbt_price_state: Vec::new(),
         }
     }
 
@@ -165,6 +184,9 @@ impl<S: Strategy> HotLoop<S> {
             //    → update market state in-place
             //    → strategy.on_tick(&mut ctx)
             self.poll_market_data();
+
+            // 1b. Busy-poll HMDS socket for tick-by-tick data (35=E)
+            self.poll_hmds();
 
             // 2. Drain pending orders → FIX build → HMAC sign → send to CCP
             self.drain_and_send_orders();
@@ -1958,6 +1980,14 @@ impl<S: Strategy> HotLoop<S> {
                 ControlCommand::Unsubscribe { instrument } => {
                     self.send_mktdata_unsubscribe(instrument);
                 }
+                ControlCommand::SubscribeTbt { con_id, symbol, tbt_type } => {
+                    let id = self.context.market.register(con_id);
+                    self.context.market.set_symbol(id, symbol);
+                    self.send_tbt_subscribe(con_id, id, tbt_type);
+                }
+                ControlCommand::UnsubscribeTbt { instrument } => {
+                    self.send_tbt_unsubscribe(instrument);
+                }
                 ControlCommand::UpdateParam { key, value } => {
                     let _ = (key, value);
                 }
@@ -1973,6 +2003,12 @@ impl<S: Strategy> HotLoop<S> {
                         .iter().map(|(id, _)| *id).collect();
                     for instrument in instruments {
                         self.send_mktdata_unsubscribe(instrument);
+                    }
+                    // Unsubscribe all TBT subscriptions before stopping
+                    let tbt_instruments: Vec<InstrumentId> = self.tbt_subscriptions
+                        .iter().map(|(id, _, _)| *id).collect();
+                    for instrument in tbt_instruments {
+                        self.send_tbt_unsubscribe(instrument);
                     }
                     self.running = false;
                     self.strategy.on_disconnect(&mut self.context);
@@ -2053,6 +2089,40 @@ impl<S: Strategy> HotLoop<S> {
                     ]);
                     self.hb.pending_farm_test = Some((test_id, now));
                     self.hb.last_farm_sent = now;
+                }
+            }
+        }
+        }
+
+        // --- HMDS heartbeat (skip if disconnected or no TBT subscriptions) ---
+        if !self.hmds_disconnected && !self.tbt_subscriptions.is_empty() {
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let since_sent = now.duration_since(self.hb.last_hmds_sent).as_secs();
+            let since_recv = now.duration_since(self.hb.last_hmds_recv).as_secs();
+
+            if since_sent >= FARM_HEARTBEAT_SECS {
+                let _ = conn.send_fix(&[
+                    (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                    (fix::TAG_SENDING_TIME, &ts),
+                ]);
+                self.hb.last_hmds_sent = now;
+            }
+
+            if since_recv > FARM_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
+                if let Some((_, sent_at)) = &self.hb.pending_hmds_test {
+                    if now.duration_since(*sent_at).as_secs() > FARM_HEARTBEAT_SECS {
+                        log::error!("HMDS heartbeat timeout — connection lost");
+                        self.hmds_disconnected = true;
+                    }
+                } else {
+                    let test_id = self.hb.next_test_id();
+                    let _ = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                        (fix::TAG_SENDING_TIME, &ts),
+                        (fix::TAG_TEST_REQ_ID, &test_id),
+                    ]);
+                    self.hb.pending_hmds_test = Some((test_id, now));
+                    self.hb.last_hmds_sent = now;
                 }
             }
         }
@@ -2252,6 +2322,239 @@ impl<S: Strategy> HotLoop<S> {
                 Err(e) => log::error!("CCP reconnected but mass status request failed: {}", e),
             }
         }
+    }
+
+    /// Poll HMDS connection for tick-by-tick data (35=E messages).
+    fn poll_hmds(&mut self) {
+        if self.hmds_disconnected || self.tbt_subscriptions.is_empty() {
+            return;
+        }
+        let messages = match self.hmds_conn.as_mut() {
+            None => return,
+            Some(conn) => {
+                match conn.try_recv() {
+                    Ok(0) => return,
+                    Err(e) => {
+                        log::error!("HMDS connection lost: {}", e);
+                        self.hmds_disconnected = true;
+                        return;
+                    }
+                    Ok(n) => {
+                        log::info!("HMDS recv: {} bytes", n);
+                        self.hb.last_hmds_recv = Instant::now();
+                        self.hb.pending_hmds_test = None;
+                    }
+                }
+                let frames = conn.extract_frames();
+                let mut msgs = Vec::new();
+                for frame in &frames {
+                    match frame {
+                        Frame::FixComp(raw) => {
+                            let (unsigned, _valid) = conn.unsign(raw);
+                            let inner = fixcomp::fixcomp_decompress(&unsigned);
+                            msgs.extend(inner);
+                        }
+                        Frame::Binary(raw) => {
+                            let (unsigned, _valid) = conn.unsign(raw);
+                            msgs.push(unsigned);
+                        }
+                        Frame::Fix(raw) => {
+                            let (unsigned, _valid) = conn.unsign(raw);
+                            msgs.push(unsigned);
+                        }
+                    }
+                }
+                msgs
+            }
+        };
+
+        for msg in &messages {
+            self.process_hmds_message(msg);
+        }
+    }
+
+    fn process_hmds_message(&mut self, msg: &[u8]) {
+        let parsed = fix::fix_parse(msg);
+        let msg_type = match parsed.get(&fix::TAG_MSG_TYPE) {
+            Some(t) => t.as_str(),
+            None => return,
+        };
+
+        match msg_type {
+            "E" => self.handle_tbt_data(msg),
+            "0" => {} // heartbeat
+            "1" => {
+                // Test request — respond with heartbeat
+                let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
+                if let Some(conn) = self.hmds_conn.as_mut() {
+                    let ts = chrono_free_timestamp();
+                    let _ = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                        (fix::TAG_SENDING_TIME, &ts),
+                        (fix::TAG_TEST_REQ_ID, &test_id),
+                    ]);
+                    self.hb.last_hmds_sent = Instant::now();
+                }
+            }
+            "W" => {
+                // 35=W response — may contain ResultSetTickerId for TBT subscription ack
+                if let Some(xml_tag) = parsed.get(&6118) {
+                    if let Some(ticker_id) = crate::control::historical::parse_ticker_id(xml_tag) {
+                        log::info!("HMDS TBT ticker_id assigned: {}", ticker_id);
+                        // TODO: map ticker_id to instrument for future use
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Decode 35=E tick-by-tick binary data and dispatch to strategy callbacks.
+    fn handle_tbt_data(&mut self, msg: &[u8]) {
+        let body = match find_body_after_tag(msg, b"35=E\x01") {
+            Some(b) => b,
+            None => return,
+        };
+
+        let entries = tick_decoder::decode_ticks_35e(body);
+
+        for entry in &entries {
+            // For now, use the first TBT subscription's instrument (single-instrument TBT).
+            // Multi-instrument TBT would need server_tag → instrument mapping from HMDS.
+            let instrument = match self.tbt_subscriptions.first() {
+                Some((id, _, _)) => *id,
+                None => return,
+            };
+
+            match entry {
+                tick_decoder::TbtEntry::Trade { timestamp, price_cents_delta, size, exchange, conditions } => {
+                    // Update running price state
+                    let cents = self.update_tbt_price(instrument, *price_cents_delta, 0);
+                    let price = cents * (PRICE_SCALE / 100);
+                    let trade = crate::types::TbtTrade {
+                        instrument,
+                        price,
+                        size: *size as i64,
+                        timestamp: *timestamp,
+                        exchange: exchange.clone(),
+                        conditions: conditions.clone(),
+                    };
+                    self.strategy.on_tbt_trade(&trade, &mut self.context);
+                }
+                tick_decoder::TbtEntry::Quote { timestamp, bid_cents_delta, ask_cents_delta, bid_size, ask_size } => {
+                    let (bid_cents, ask_cents) = self.update_tbt_bid_ask(instrument, *bid_cents_delta, *ask_cents_delta);
+                    let quote = crate::types::TbtQuote {
+                        instrument,
+                        bid: bid_cents * (PRICE_SCALE / 100),
+                        ask: ask_cents * (PRICE_SCALE / 100),
+                        bid_size: *bid_size as i64,
+                        ask_size: *ask_size as i64,
+                        timestamp: *timestamp,
+                    };
+                    self.strategy.on_tbt_quote(&quote, &mut self.context);
+                }
+            }
+        }
+    }
+
+    /// Update running last-price state for TBT, return new absolute cents.
+    fn update_tbt_price(&mut self, instrument: InstrumentId, delta: i64, _: i64) -> i64 {
+        for entry in &mut self.tbt_price_state {
+            if entry.0 == instrument {
+                entry.1 += delta;
+                return entry.1;
+            }
+        }
+        // First tick for this instrument
+        self.tbt_price_state.push((instrument, delta, 0, 0));
+        delta
+    }
+
+    /// Update running bid/ask state for TBT, return (bid_cents, ask_cents).
+    fn update_tbt_bid_ask(&mut self, instrument: InstrumentId, bid_delta: i64, ask_delta: i64) -> (i64, i64) {
+        for entry in &mut self.tbt_price_state {
+            if entry.0 == instrument {
+                entry.2 += bid_delta;
+                entry.3 += ask_delta;
+                return (entry.2, entry.3);
+            }
+        }
+        self.tbt_price_state.push((instrument, 0, bid_delta, ask_delta));
+        (bid_delta, ask_delta)
+    }
+
+    /// Send TBT subscribe request to HMDS (35=W with XML).
+    fn send_tbt_subscribe(&mut self, con_id: i64, instrument: InstrumentId, tbt_type: crate::types::TbtType) {
+        let req_id = self.next_tbt_req_id;
+        self.next_tbt_req_id += 1;
+
+        let tbt_type_str = match tbt_type {
+            crate::types::TbtType::Last => "AllLast",
+            crate::types::TbtType::BidAsk => "BidAsk",
+        };
+
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <ListOfQueries>\
+             <Query>\
+             <id>tbt_{req_id}</id>\
+             <contractID>{con_id}</contractID>\
+             <exchange>BEST</exchange>\
+             <secType>CS</secType>\
+             <expired>no</expired>\
+             <type>TickData</type>\
+             <refresh>ticks</refresh>\
+             <data>{tbt_type_str}</data>\
+             <source>API</source>\
+             </Query>\
+             </ListOfQueries>"
+        );
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "W"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]);
+            log::info!("Sent TBT subscribe: con_id={} type={} req_id={}", con_id, tbt_type_str, req_id);
+            self.hb.last_hmds_sent = Instant::now();
+        }
+
+        let ticker_id = format!("tbt_{}", req_id);
+        self.tbt_subscriptions.push((instrument, ticker_id, tbt_type));
+    }
+
+    /// Send TBT unsubscribe request to HMDS (35=Z with XML).
+    fn send_tbt_unsubscribe(&mut self, instrument: InstrumentId) {
+        let idx = match self.tbt_subscriptions.iter().position(|(id, _, _)| *id == instrument) {
+            Some(i) => i,
+            None => return,
+        };
+        let (_, ticker_id, _) = self.tbt_subscriptions.remove(idx);
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <ListOfCancelQueries>\
+                 <CancelQuery>\
+                 <id>ticker:{tid}</id>\
+                 </CancelQuery>\
+                 </ListOfCancelQueries>",
+                tid = ticker_id,
+            );
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "Z"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]);
+            log::info!("Sent TBT unsubscribe: instrument={} ticker_id={}", instrument, ticker_id);
+            self.hb.last_hmds_sent = Instant::now();
+        }
+
+        // Clear price state
+        self.tbt_price_state.retain(|e| e.0 != instrument);
     }
 
     /// Handle farm disconnect: clear stale subscription tracking, zero quotes, notify strategy.

@@ -1,3 +1,40 @@
+## 2026-03-11 - Issue #32: Tick-by-Tick Data Support
+
+### Goal
+Implement tick-by-tick (TBT) data support via HMDS connection. 35=E binary messages decoded into trade and quote callbacks.
+
+### What Was Implemented
+- **types.rs**: `TbtType` (Last/BidAsk), `TbtTrade`, `TbtQuote` structs, `ControlCommand::SubscribeTbt`/`UnsubscribeTbt`
+- **tick_decoder.rs**: `TbtEntry` enum, `decode_ticks_35e()` — decodes 0x81 (AllLast) and 0x82 (BidAsk) markers with VLQ timestamps, signed price deltas, sizes, hibit-strings
+- **context.rs**: `on_tbt_trade()` and `on_tbt_quote()` callbacks on Strategy trait (default no-op)
+- **hot_loop.rs**: `poll_hmds()` in main loop, `process_hmds_message()` dispatching 35=E/0/1/W, `handle_tbt_data()` with running price state, `send_tbt_subscribe()`/`send_tbt_unsubscribe()` via 35=W/35=Z XML, HMDS heartbeat in `check_heartbeats()`, `HeartbeatState` extended with hmds fields
+- 6 unit tests for `decode_ticks_35e` (trade, quote, mixed, negative delta, empty, unknown marker)
+- Integration test Phase 61: TBT subscribe for SPY AllLast via HMDS
+
+### Key Technical Details
+- 35=E binary format: marker byte (0x81=AllLast, 0x82=BidAsk) + VLQ-encoded fields
+- Prices are signed VLQ deltas in cents from running state (state per instrument)
+- Subscribe: 35=W XML with `<type>TickData</type>` + `<refresh>ticks</refresh>` to ushmds
+- Cancel: 35=Z XML with `<CancelQuery><id>ticker:{tid}</id>`
+- HMDS connection uses same 30s heartbeat interval as farm
+
+### Files Changed
+- `src/types.rs` — TbtType, TbtTrade, TbtQuote, SubscribeTbt/UnsubscribeTbt commands
+- `src/protocol/tick_decoder.rs` — TbtEntry, decode_ticks_35e(), 6 unit tests
+- `src/engine/context.rs` — on_tbt_trade(), on_tbt_quote() callbacks
+- `src/engine/hot_loop.rs` — poll_hmds(), HMDS heartbeat, TBT subscribe/unsubscribe, handle_tbt_data()
+- `tests/ib_paper_integration.rs` — Phase 61 TBT integration test
+
+### Test Results
+465 unit tests pass, 0 failed (+6 new). Integration phases: 60 → 61.
+
+### What Was NOT Built
+- Multi-instrument TBT (needs server_tag mapping from HMDS — single instrument for now)
+- BidAsk TBT integration test (only AllLast tested — BidAsk uses same code path)
+- TBT price state persistence across reconnects (state resets on reconnect)
+
+---
+
 ## 2026-03-10 - Issue #34: Conditional Orders (Price, Time, Volume, Margin, Execution, % Change)
 
 ### Goal

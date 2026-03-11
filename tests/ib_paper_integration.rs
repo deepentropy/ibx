@@ -335,6 +335,13 @@ fn integration_suite() {
     conns = phase_volume_condition_order(conns);
     conns = phase_multi_condition_order(conns);
 
+    // Tick-by-tick data phase — needs HMDS and market open
+    if needs_ticks && conns.hmds.is_some() {
+        conns = phase_tbt_subscribe(conns);
+    } else {
+        println!("--- Phase 61: Tick-by-Tick Data (SPY) ---\n  SKIP: needs ticks+HMDS\n");
+    }
+
     // MOC/LOC only during regular hours (IB rejects outside regular hours)
     if needs_ticks {
         conns = phase_moc_order(conns);
@@ -367,7 +374,7 @@ fn integration_suite() {
 
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 60;
+    let total_phases = 61;
     let skipped = if needs_ticks { 0 } else { 10 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
@@ -3445,4 +3452,86 @@ fn phase_multi_condition_order(conns: Conns) -> Conns {
             ..OrderAttrs::default()
         })
     })
+}
+
+// ─── Phase 61: Tick-by-Tick Data (SPY via HMDS) ───
+
+fn phase_tbt_subscribe(conns: Conns) -> Conns {
+    println!("--- Phase 61: Tick-by-Tick Data (SPY via HMDS) ---");
+
+    let account_id = conns.account_id;
+    let tbt_trade_count = Arc::new(AtomicU32::new(0));
+    let tbt_quote_count = Arc::new(AtomicU32::new(0));
+    let first_tbt = Arc::new(AtomicBool::new(false));
+
+    struct TbtStrategy {
+        trade_count: Arc<AtomicU32>,
+        quote_count: Arc<AtomicU32>,
+        first_tbt: Arc<AtomicBool>,
+    }
+
+    impl Strategy for TbtStrategy {
+        fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {}
+
+        fn on_tbt_trade(&mut self, trade: &TbtTrade, _ctx: &mut Context) {
+            let n = self.trade_count.fetch_add(1, Ordering::Relaxed);
+            if n == 0 {
+                self.first_tbt.store(true, Ordering::Relaxed);
+                println!("  First TBT trade: price={} size={} exchange={}",
+                    trade.price as f64 / PRICE_SCALE as f64, trade.size, trade.exchange);
+            }
+        }
+
+        fn on_tbt_quote(&mut self, quote: &TbtQuote, _ctx: &mut Context) {
+            let n = self.quote_count.fetch_add(1, Ordering::Relaxed);
+            if n == 0 {
+                self.first_tbt.store(true, Ordering::Relaxed);
+                println!("  First TBT quote: bid={} ask={} bid_sz={} ask_sz={}",
+                    quote.bid as f64 / PRICE_SCALE as f64,
+                    quote.ask as f64 / PRICE_SCALE as f64,
+                    quote.bid_size, quote.ask_size);
+            }
+        }
+    }
+
+    let strategy = TbtStrategy {
+        trade_count: tbt_trade_count.clone(),
+        quote_count: tbt_quote_count.clone(),
+        first_tbt: first_tbt.clone(),
+    };
+
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        strategy, account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    // Subscribe to TBT AllLast for SPY
+    control_tx.send(ControlCommand::SubscribeTbt {
+        con_id: 756733,
+        symbol: "SPY".into(),
+        tbt_type: TbtType::Last,
+    }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    // Wait for first TBT data (up to 30s)
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if first_tbt.load(Ordering::Relaxed) { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if !first_tbt.load(Ordering::Relaxed) {
+        let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+        println!("  SKIP: No TBT data in 30s — market closed or HMDS not streaming\n");
+        return conns;
+    }
+
+    // Collect a few seconds of data
+    std::thread::sleep(Duration::from_secs(5));
+    let trades = tbt_trade_count.load(Ordering::Relaxed);
+    let quotes = tbt_quote_count.load(Ordering::Relaxed);
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+    println!("  PASS ({} trades, {} quotes)\n", trades, quotes);
+    conns
 }

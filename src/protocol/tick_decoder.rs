@@ -336,6 +336,112 @@ pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<RtBar> {
     })
 }
 
+/// Marker bytes for tick-by-tick 35=E binary entries.
+pub const TBT_MARKER_ALL_LAST: u8 = 0x81;
+pub const TBT_MARKER_BID_ASK: u8 = 0x82;
+
+/// A decoded tick-by-tick entry from 35=E.
+#[derive(Debug, Clone)]
+pub enum TbtEntry {
+    /// AllLast trade tick.
+    Trade {
+        timestamp: u64,
+        price_cents_delta: i64,
+        size: u64,
+        exchange: String,
+        conditions: String,
+    },
+    /// BidAsk quote tick.
+    Quote {
+        timestamp: u64,
+        bid_cents_delta: i64,
+        ask_cents_delta: i64,
+        bid_size: u64,
+        ask_size: u64,
+    },
+}
+
+/// Decode tick-by-tick entries from a 35=E binary payload.
+///
+/// `body` is the raw message body after stripping FIX framing and HMAC.
+/// Prices are signed VLQ deltas in cents from a running state (caller tracks).
+pub fn decode_ticks_35e(body: &[u8]) -> Vec<TbtEntry> {
+    let mut entries = Vec::new();
+    let mut pos = 0;
+
+    while pos < body.len() {
+        let marker = body[pos];
+        pos += 1;
+
+        match marker {
+            TBT_MARKER_ALL_LAST => {
+                if pos >= body.len() { break; }
+                let (ts, n) = read_vlq(body, pos);
+                pos += n;
+                if pos >= body.len() { break; }
+                let (price_raw, n) = read_vlq(body, pos);
+                let price_delta = vlq_signed(price_raw, n);
+                pos += n;
+                if pos >= body.len() { break; }
+                let (attribs, n) = read_vlq(body, pos);
+                let _ = attribs; // reserved
+                pos += n;
+                if pos >= body.len() { break; }
+                let (size, n) = read_vlq(body, pos);
+                pos += n;
+                if pos >= body.len() { break; }
+                let (exchange, n) = read_hibit_str(body, pos);
+                pos += n;
+                if pos >= body.len() { break; }
+                let (conditions, n) = read_hibit_str(body, pos);
+                pos += n;
+
+                entries.push(TbtEntry::Trade {
+                    timestamp: ts,
+                    price_cents_delta: price_delta,
+                    size,
+                    exchange,
+                    conditions,
+                });
+            }
+            TBT_MARKER_BID_ASK => {
+                if pos >= body.len() { break; }
+                let (ts, n) = read_vlq(body, pos);
+                pos += n;
+                if pos >= body.len() { break; }
+                let (bid_raw, n) = read_vlq(body, pos);
+                let bid_delta = vlq_signed(bid_raw, n);
+                pos += n;
+                if pos >= body.len() { break; }
+                let (ask_raw, n) = read_vlq(body, pos);
+                let ask_delta = vlq_signed(ask_raw, n);
+                pos += n;
+                if pos >= body.len() { break; }
+                let (attribs, n) = read_vlq(body, pos);
+                let _ = attribs;
+                pos += n;
+                if pos >= body.len() { break; }
+                let (bid_size, n) = read_vlq(body, pos);
+                pos += n;
+                if pos >= body.len() { break; }
+                let (ask_size, n) = read_vlq(body, pos);
+                pos += n;
+
+                entries.push(TbtEntry::Quote {
+                    timestamp: ts,
+                    bid_cents_delta: bid_delta,
+                    ask_cents_delta: ask_delta,
+                    bid_size,
+                    ask_size,
+                });
+            }
+            _ => break, // unknown marker, stop parsing
+        }
+    }
+
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,5 +1042,149 @@ mod tests {
         // wap = low + wap_sum * min_tick / volume = 20.0 + 100*0.01/1000
         let expected_wap = low + 100.0 * min_tick / 1000.0;
         assert!((bar.wap - expected_wap).abs() < 1e-9);
+    }
+
+    // ── decode_ticks_35e tests ────────────────────────────────────────
+
+    /// Helper: encode a VLQ value into bytes (hi-bit terminated).
+    fn encode_vlq(val: u64) -> Vec<u8> {
+        if val == 0 {
+            return vec![0x80];
+        }
+        // Find how many 7-bit groups we need
+        let mut v = val;
+        let mut groups = Vec::new();
+        while v > 0 {
+            groups.push((v & 0x7F) as u8);
+            v >>= 7;
+        }
+        groups.reverse();
+        let last = groups.len() - 1;
+        groups[last] |= 0x80; // hi-bit on last byte
+        groups
+    }
+
+    /// Helper: encode a hi-bit terminated string.
+    fn encode_hibit_str(s: &str) -> Vec<u8> {
+        if s.is_empty() {
+            return vec![0x80];
+        }
+        let bytes = s.as_bytes();
+        let mut out = bytes.to_vec();
+        let last = out.len() - 1;
+        out[last] |= 0x80;
+        out
+    }
+
+    #[test]
+    fn decode_35e_single_trade() {
+        let mut payload = Vec::new();
+        payload.push(TBT_MARKER_ALL_LAST);
+        payload.extend(encode_vlq(1000));    // timestamp
+        payload.extend(encode_vlq(5));       // price delta = +5 (1 byte VLQ, val < 64 = positive)
+        payload.extend(encode_vlq(0));       // attribs
+        payload.extend(encode_vlq(100));     // size
+        payload.extend(encode_hibit_str("ARCA"));   // exchange
+        payload.extend(encode_hibit_str(""));       // conditions
+
+        let entries = decode_ticks_35e(&payload);
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            TbtEntry::Trade { timestamp, price_cents_delta, size, exchange, conditions } => {
+                assert_eq!(*timestamp, 1000);
+                assert_eq!(*price_cents_delta, 5);
+                assert_eq!(*size, 100);
+                assert_eq!(exchange, "ARCA");
+                assert_eq!(conditions, "");
+            }
+            _ => panic!("expected Trade"),
+        }
+    }
+
+    #[test]
+    fn decode_35e_single_quote() {
+        let mut payload = Vec::new();
+        payload.push(TBT_MARKER_BID_ASK);
+        payload.extend(encode_vlq(2000));    // timestamp
+        payload.extend(encode_vlq(3));       // bid delta = +3
+        payload.extend(encode_vlq(7));       // ask delta = +7
+        payload.extend(encode_vlq(0));       // attribs
+        payload.extend(encode_vlq(500));     // bid_size
+        payload.extend(encode_vlq(300));     // ask_size
+
+        let entries = decode_ticks_35e(&payload);
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            TbtEntry::Quote { timestamp, bid_cents_delta, ask_cents_delta, bid_size, ask_size } => {
+                assert_eq!(*timestamp, 2000);
+                assert_eq!(*bid_cents_delta, 3);
+                assert_eq!(*ask_cents_delta, 7);
+                assert_eq!(*bid_size, 500);
+                assert_eq!(*ask_size, 300);
+            }
+            _ => panic!("expected Quote"),
+        }
+    }
+
+    #[test]
+    fn decode_35e_mixed_trade_and_quote() {
+        let mut payload = Vec::new();
+        // Trade
+        payload.push(TBT_MARKER_ALL_LAST);
+        payload.extend(encode_vlq(100));
+        payload.extend(encode_vlq(10));
+        payload.extend(encode_vlq(0));
+        payload.extend(encode_vlq(50));
+        payload.extend(encode_hibit_str("NYSE"));
+        payload.extend(encode_hibit_str("@"));
+        // Quote
+        payload.push(TBT_MARKER_BID_ASK);
+        payload.extend(encode_vlq(200));
+        payload.extend(encode_vlq(1));
+        payload.extend(encode_vlq(2));
+        payload.extend(encode_vlq(0));
+        payload.extend(encode_vlq(1000));
+        payload.extend(encode_vlq(800));
+
+        let entries = decode_ticks_35e(&payload);
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(&entries[0], TbtEntry::Trade { .. }));
+        assert!(matches!(&entries[1], TbtEntry::Quote { .. }));
+    }
+
+    #[test]
+    fn decode_35e_negative_price_delta() {
+        // VLQ 1 byte: value 64 = -64 (upper half)
+        let mut payload = Vec::new();
+        payload.push(TBT_MARKER_ALL_LAST);
+        payload.extend(encode_vlq(500));
+        // Encode -1: 1-byte VLQ val=127 → vlq_signed(127,1) = -1
+        payload.push(0xFF); // 0x7F | 0x80 = 0xFF → val=127, n=1
+        payload.extend(encode_vlq(0));
+        payload.extend(encode_vlq(25));
+        payload.extend(encode_hibit_str(""));
+        payload.extend(encode_hibit_str(""));
+
+        let entries = decode_ticks_35e(&payload);
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            TbtEntry::Trade { price_cents_delta, .. } => {
+                assert_eq!(*price_cents_delta, -1);
+            }
+            _ => panic!("expected Trade"),
+        }
+    }
+
+    #[test]
+    fn decode_35e_empty() {
+        assert!(decode_ticks_35e(&[]).is_empty());
+    }
+
+    #[test]
+    fn decode_35e_unknown_marker_stops() {
+        let mut payload = Vec::new();
+        payload.push(0x99); // unknown
+        payload.extend(encode_vlq(100));
+        assert!(decode_ticks_35e(&payload).is_empty());
     }
 }

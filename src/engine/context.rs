@@ -30,6 +30,16 @@ pub trait Strategy {
         let _ = (reject, ctx);
     }
 
+    /// Called on each tick-by-tick trade (AllLast) from HMDS.
+    fn on_tbt_trade(&mut self, trade: &TbtTrade, ctx: &mut Context) {
+        let _ = (trade, ctx);
+    }
+
+    /// Called on each tick-by-tick bid/ask quote from HMDS.
+    fn on_tbt_quote(&mut self, quote: &TbtQuote, ctx: &mut Context) {
+        let _ = (quote, ctx);
+    }
+
     /// Called on disconnect or error. Chance to cancel all orders.
     fn on_disconnect(&mut self, ctx: &mut Context) {
         let _ = ctx;

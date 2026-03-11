@@ -553,6 +553,37 @@ impl OrderBuffer {
     }
 }
 
+/// Tick-by-tick data type for subscription requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TbtType {
+    /// Last trade ticks (AllLast).
+    Last,
+    /// Bid/ask quote ticks (BidAsk).
+    BidAsk,
+}
+
+/// A single tick-by-tick trade (AllLast) from 35=E.
+#[derive(Debug, Clone)]
+pub struct TbtTrade {
+    pub instrument: InstrumentId,
+    pub price: Price,
+    pub size: i64,
+    pub timestamp: u64,
+    pub exchange: String,
+    pub conditions: String,
+}
+
+/// A single tick-by-tick bid/ask quote from 35=E.
+#[derive(Debug, Clone, Copy)]
+pub struct TbtQuote {
+    pub instrument: InstrumentId,
+    pub bid: Price,
+    pub ask: Price,
+    pub bid_size: i64,
+    pub ask_size: i64,
+    pub timestamp: u64,
+}
+
 /// Commands sent from the control plane to the hot loop via SPSC channel.
 #[derive(Debug, Clone)]
 pub enum ControlCommand {
@@ -560,6 +591,10 @@ pub enum ControlCommand {
     Subscribe { con_id: i64, symbol: String },
     /// Unsubscribe from market data for an instrument.
     Unsubscribe { instrument: InstrumentId },
+    /// Subscribe to tick-by-tick data via HMDS.
+    SubscribeTbt { con_id: i64, symbol: String, tbt_type: TbtType },
+    /// Unsubscribe from tick-by-tick data.
+    UnsubscribeTbt { instrument: InstrumentId },
     /// Update a strategy parameter.
     UpdateParam { key: String, value: String },
     /// Submit an order from external caller (bridge mode).
