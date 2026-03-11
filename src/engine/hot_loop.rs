@@ -298,7 +298,8 @@ impl<S: Strategy> HotLoop<S> {
             "L" => self.handle_ticker_setup(msg),
             "UT" | "UM" | "RL" => self.handle_account_update(msg),
             "UP" => self.handle_position_update(&parsed),
-            _ => {}   // other farm messages (35=G, etc.)
+            "G" => self.handle_tick_news(msg),
+            _ => {}
         }
     }
 
@@ -2840,6 +2841,82 @@ impl<S: Strategy> HotLoop<S> {
         (bid_delta, ask_delta)
     }
 
+    /// Parse 8=O|35=G binary tick news (tick type 0x1E90 = 7824).
+    ///
+    /// Binary layout per headline:
+    ///   [4] provider_len + [N] provider + [4] padding
+    ///   [2+N] article_id (length-prefixed) + [4] flags
+    ///   [4] timestamp (epoch seconds) + [4] headline_len + [N] headline
+    fn handle_tick_news(&mut self, msg: &[u8]) {
+        let body = match find_body_after_tag(msg, b"35=G\x01") {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Header: [2] tick_type [4] quote_id [2] field [4] batch_count
+        if body.len() < 12 { return; }
+
+        let tick_type = u16::from_be_bytes([body[0], body[1]]);
+        if tick_type != 0x1E90 { return; } // 7824 = NEWS
+
+        let batch_count = u32::from_be_bytes([body[8], body[9], body[10], body[11]]) as usize;
+        let mut pos = 12;
+
+        for _ in 0..batch_count {
+            // Provider code: [4] len + [N] string
+            if pos + 4 > body.len() { break; }
+            let prov_len = u32::from_be_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]]) as usize;
+            pos += 4;
+            if pos + prov_len > body.len() { break; }
+            let provider = String::from_utf8_lossy(&body[pos..pos+prov_len]).to_string();
+            pos += prov_len;
+
+            // Padding: [4]
+            if pos + 4 > body.len() { break; }
+            pos += 4;
+
+            // Article ID: [2] len + [N] string
+            if pos + 2 > body.len() { break; }
+            let aid_len = u16::from_be_bytes([body[pos], body[pos+1]]) as usize;
+            pos += 2;
+            if pos + aid_len > body.len() { break; }
+            let article_id = String::from_utf8_lossy(&body[pos..pos+aid_len]).to_string();
+            pos += aid_len;
+
+            // Flags: [4] + Timestamp: [4]
+            if pos + 8 > body.len() { break; }
+            pos += 4; // flags
+            let timestamp = u32::from_be_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]]) as u64;
+            pos += 4;
+
+            // Headline: [4] len + [N] string
+            if pos + 4 > body.len() { break; }
+            let hl_len = u32::from_be_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]]) as usize;
+            pos += 4;
+            if pos + hl_len > body.len() { break; }
+            let raw_headline = String::from_utf8_lossy(&body[pos..pos+hl_len]).to_string();
+            pos += hl_len;
+
+            // Strip metadata prefix: "{A:800015:L:en:K:n/a:C:0.999}actual headline"
+            let headline = if raw_headline.starts_with('{') {
+                match raw_headline.find('}') {
+                    Some(i) => raw_headline[i+1..].to_string(),
+                    None => raw_headline,
+                }
+            } else {
+                raw_headline
+            };
+
+            let news = crate::types::TickNews {
+                provider_code: provider,
+                article_id,
+                headline,
+                timestamp,
+            };
+            self.strategy.on_news(&news, &mut self.context);
+        }
+    }
+
     /// Send TBT subscribe request to HMDS (35=W with XML).
     fn send_tbt_subscribe(&mut self, con_id: i64, instrument: InstrumentId, tbt_type: crate::types::TbtType) {
         let req_id = self.next_tbt_req_id;
@@ -2978,6 +3055,7 @@ mod tests {
         fills: Vec<(OrderId, i64)>,  // (order_id, qty)
         updates: Vec<(OrderId, OrderStatus)>,
         cancel_rejects: Vec<(OrderId, u8)>,  // (order_id, reject_type)
+        news: Vec<(String, String)>,  // (provider, headline)
         disconnected: bool,
         started: bool,
     }
@@ -2989,6 +3067,7 @@ mod tests {
                 fills: Vec::new(),
                 updates: Vec::new(),
                 cancel_rejects: Vec::new(),
+                news: Vec::new(),
                 disconnected: false,
                 started: false,
             }
@@ -3014,6 +3093,10 @@ mod tests {
 
         fn on_cancel_reject(&mut self, reject: &CancelReject, _ctx: &mut Context) {
             self.cancel_rejects.push((reject.order_id, reject.reject_type));
+        }
+
+        fn on_news(&mut self, news: &crate::types::TickNews, _ctx: &mut Context) {
+            self.news.push((news.provider_code.clone(), news.headline.clone()));
         }
 
         fn on_disconnect(&mut self, _ctx: &mut Context) {
@@ -4629,5 +4712,50 @@ mod tests {
     fn parse_price_tag_invalid() {
         let val = "n/a".to_string();
         assert_eq!(parse_price_tag(Some(&val)), 0);
+    }
+
+    #[test]
+    fn handle_tick_news_parses_binary() {
+        let strategy = RecordingStrategy::new();
+        let mut engine = HotLoop::new(strategy, None);
+
+        // Build binary payload for tick type 0x1E90 (news)
+        let mut payload = Vec::new();
+        // Header: [2] tick_type [4] quote_id [2] field [4] batch_count
+        payload.extend_from_slice(&0x1E90u16.to_be_bytes()); // tick_type = NEWS
+        payload.extend_from_slice(&0u32.to_be_bytes());       // quote_id
+        payload.extend_from_slice(&0u16.to_be_bytes());       // field
+        payload.extend_from_slice(&1u32.to_be_bytes());       // batch_count = 1
+
+        // Headline entry:
+        let provider = b"BRFG";
+        payload.extend_from_slice(&(provider.len() as u32).to_be_bytes());
+        payload.extend_from_slice(provider);
+        payload.extend_from_slice(&0u32.to_be_bytes()); // padding
+
+        let article_id = b"BRFG$12345";
+        payload.extend_from_slice(&(article_id.len() as u16).to_be_bytes());
+        payload.extend_from_slice(article_id);
+        payload.extend_from_slice(&0u32.to_be_bytes()); // flags
+
+        let timestamp: u32 = 1700000000;
+        payload.extend_from_slice(&timestamp.to_be_bytes());
+
+        let headline = b"{A:800015:L:en:K:n/a:C:0.999}AAPL beats earnings";
+        payload.extend_from_slice(&(headline.len() as u32).to_be_bytes());
+        payload.extend_from_slice(headline);
+
+        // Wrap in 8=O FIX frame with 35=G
+        let tag = b"35=G\x01";
+        let body_len = tag.len() + payload.len();
+        let mut msg = format!("8=O\x019={}\x01", body_len).into_bytes();
+        msg.extend_from_slice(tag);
+        msg.extend_from_slice(&payload);
+
+        engine.inject_farm_message(&msg);
+
+        assert_eq!(engine.strategy.news.len(), 1);
+        assert_eq!(engine.strategy.news[0].0, "BRFG");
+        assert_eq!(engine.strategy.news[0].1, "AAPL beats earnings"); // metadata stripped
     }
 }

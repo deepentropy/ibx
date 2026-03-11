@@ -1,3 +1,25 @@
+## 2026-03-11 - Issue #39: Reference Data Features
+
+### Goal
+Implement scanner, news, fundamental data, matching symbols, and market rules.
+
+### What Was Implemented
+- `src/control/scanner.rs` — ScannerSubscription builder/parser, 5 unit tests
+- `src/control/news.rs` — HistoricalNewsRequest, NewsArticleRequest builders, 4 unit tests
+- `src/control/fundamental.rs` — FundamentalRequest builder, gzip decompressor, 5 unit tests
+- `src/control/contracts.rs` — matching symbols (6040=185/186), market_rule_id (tag 6031), 5 unit tests
+- Integration phases 81-84: matching symbols, scanner, fundamental data, market rule ID
+
+### What Was NOT Built
+- Tick news binary parser (8=O|35=G) — needs hot loop binary frame integration
+- Option parameters — blocked on #38
+- Display groups — low priority
+
+### Test Results
+547 unit tests pass (+19). Integration phases: 80 → 84.
+
+---
+
 ## 2026-03-11 - Issue #33: Historical Data & Contract Details Integration Tests
 
 ### Goal

@@ -45,6 +45,11 @@ pub trait Strategy {
         let _ = (response, ctx);
     }
 
+    /// Called on each real-time news headline (tick type 0x1E90 from 35=G).
+    fn on_news(&mut self, news: &TickNews, ctx: &mut Context) {
+        let _ = (news, ctx);
+    }
+
     /// Called on disconnect or error. Chance to cancel all orders.
     fn on_disconnect(&mut self, ctx: &mut Context) {
         let _ = ctx;

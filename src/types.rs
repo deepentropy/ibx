@@ -776,6 +776,15 @@ pub struct TbtQuote {
     pub timestamp: u64,
 }
 
+/// A real-time news headline from 8=O|35=G tick type 0x1E90.
+#[derive(Debug, Clone)]
+pub struct TickNews {
+    pub provider_code: String,
+    pub article_id: String,
+    pub headline: String,
+    pub timestamp: u64,
+}
+
 /// Commands sent from the control plane to the hot loop via SPSC channel.
 #[derive(Debug, Clone)]
 pub enum ControlCommand {

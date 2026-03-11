@@ -469,7 +469,7 @@ impl IbEngine {
         };
         self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitEx {
             order_id, instrument, side, qty, price: price_fixed, tif: tif_byte,
-            attrs: OrderAttrs { display_size, min_qty, hidden, outside_rth, good_after, good_till, oca_group },
+            attrs: OrderAttrs { display_size, min_qty, hidden, outside_rth, good_after, good_till, oca_group, ..OrderAttrs::default() },
         })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(order_id)
     }
@@ -509,6 +509,198 @@ impl IbEngine {
         };
         self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitAdaptive {
             order_id, instrument, side, qty, price: price_fixed, priority,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Market to Limit order. Fills at market, remainder becomes limit at fill price.
+    fn submit_mtl(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitMtl {
+            order_id, instrument, side, qty,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Market with Protection order (futures). Returns OrderId.
+    fn submit_mkt_prt(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitMktPrt {
+            order_id, instrument, side, qty,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Stop with Protection order. Returns OrderId.
+    fn submit_stp_prt(&self, instrument: u32, side: &str, qty: u32, stop_price: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let stop_fixed = (stop_price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitStpPrt {
+            order_id, instrument, side, qty, stop_price: stop_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Mid-Price order. Pegs to midpoint with optional price cap (0.0 = no cap).
+    #[pyo3(signature = (instrument, side, qty, price_cap=0.0))]
+    fn submit_mid_price(&self, instrument: u32, side: &str, qty: u32, price_cap: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let cap_fixed = (price_cap * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitMidPrice {
+            order_id, instrument, side, qty, price_cap: cap_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Snap to Market order. Returns OrderId.
+    fn submit_snap_mkt(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitSnapMkt {
+            order_id, instrument, side, qty,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Snap to Midpoint order. Returns OrderId.
+    fn submit_snap_mid(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitSnapMid {
+            order_id, instrument, side, qty,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Snap to Primary order. Returns OrderId.
+    fn submit_snap_pri(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitSnapPri {
+            order_id, instrument, side, qty,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Pegged to Market order. Offset is the peg offset (0.0 = no offset).
+    #[pyo3(signature = (instrument, side, qty, offset=0.0))]
+    fn submit_peg_mkt(&self, instrument: u32, side: &str, qty: u32, offset: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let offset_fixed = (offset * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitPegMkt {
+            order_id, instrument, side, qty, offset: offset_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Pegged to Midpoint order. Offset is the peg offset (0.0 = no offset).
+    #[pyo3(signature = (instrument, side, qty, offset=0.0))]
+    fn submit_peg_mid(&self, instrument: u32, side: &str, qty: u32, offset: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let offset_fixed = (offset * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitPegMid {
+            order_id, instrument, side, qty, offset: offset_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Pegged to Benchmark order. Pegs to a reference instrument's price.
+    fn submit_peg_bench(
+        &self, instrument: u32, side: &str, qty: u32, price: f64,
+        ref_con_id: u32, is_peg_decrease: bool, pegged_change_amount: f64, ref_change_amount: f64,
+    ) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        let peg_change_fixed = (pegged_change_amount * PRICE_SCALE_F) as i64;
+        let ref_change_fixed = (ref_change_amount * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitPegBench {
+            order_id, instrument, side, qty, price: price_fixed,
+            ref_con_id, is_peg_decrease,
+            pegged_change_amount: peg_change_fixed,
+            ref_change_amount: ref_change_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Limit Auction order (TIF=AUC). Returns OrderId.
+    fn submit_limit_auc(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitAuc {
+            order_id, instrument, side, qty, price: price_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Market-to-Limit Auction order (TIF=AUC). Returns OrderId.
+    fn submit_mtl_auc(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitMtlAuc {
+            order_id, instrument, side, qty,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a Box Top order (alias for Market-to-Limit). Returns OrderId.
+    fn submit_box_top(&self, instrument: u32, side: &str, qty: u32) -> PyResult<u64> {
+        self.submit_mtl(instrument, side, qty)
+    }
+
+    /// Submit a What-If order for margin/commission preview. The order is NOT placed.
+    fn submit_what_if(&self, instrument: u32, side: &str, qty: u32, price: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitWhatIf {
+            order_id, instrument, side, qty, price: price_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit a fractional shares limit order. qty is a float (e.g. 0.5 for half a share).
+    fn submit_limit_fractional(&self, instrument: u32, side: &str, qty: f64, price: f64) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let price_fixed = (price * PRICE_SCALE_F) as i64;
+        let qty_fixed = (qty * QTY_SCALE as f64) as i64;
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitFractional {
+            order_id, instrument, side, qty: qty_fixed, price: price_fixed,
+        })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(order_id)
+    }
+
+    /// Submit an adjustable stop order. adjusted_type: "Stop", "StopLimit", "Trail", "TrailLimit".
+    #[pyo3(signature = (instrument, side, qty, stop_price, trigger_price, adjusted_type, adjusted_stop_price, adjusted_limit_price=0.0))]
+    fn submit_adjustable_stop(
+        &self, instrument: u32, side: &str, qty: u32, stop_price: f64,
+        trigger_price: f64, adjusted_type: &str, adjusted_stop_price: f64,
+        adjusted_limit_price: f64,
+    ) -> PyResult<u64> {
+        let order_id = self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let side = parse_side(side)?;
+        let adjusted_order_type = match adjusted_type {
+            "Stop" => AdjustedOrderType::Stop,
+            "StopLimit" => AdjustedOrderType::StopLimit,
+            "Trail" => AdjustedOrderType::Trail,
+            "TrailLimit" => AdjustedOrderType::TrailLimit,
+            _ => return Err(PyRuntimeError::new_err(format!("Invalid adjusted_type '{}': use Stop, StopLimit, Trail, or TrailLimit", adjusted_type))),
+        };
+        self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitAdjustableStop {
+            order_id, instrument, side, qty,
+            stop_price: (stop_price * PRICE_SCALE_F) as i64,
+            trigger_price: (trigger_price * PRICE_SCALE_F) as i64,
+            adjusted_order_type,
+            adjusted_stop_price: (adjusted_stop_price * PRICE_SCALE_F) as i64,
+            adjusted_stop_limit_price: (adjusted_limit_price * PRICE_SCALE_F) as i64,
         })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(order_id)
     }

@@ -33,6 +33,7 @@ pub const TAG_IB_SOURCE: u32 = 6088;
 pub const TAG_IB_PRIMARY_EXCHANGE: u32 = 6470;
 pub const TAG_IB_MIN_TICK: u32 = 6019;
 pub const TAG_IB_ORDER_TYPES: u32 = 6431;
+pub const TAG_IB_MARKET_RULE_ID: u32 = 6031;
 pub const TAG_IB_STOCK_TYPE: u32 = 8077;
 
 /// Security types (IB internal encoding).
@@ -101,6 +102,7 @@ pub struct ContractDefinition {
     pub multiplier: f64,
     pub valid_exchanges: Vec<String>,
     pub order_types: Vec<String>,
+    pub market_rule_id: Option<u32>,
     // Options/futures specific
     pub last_trade_date: String,
     pub strike: f64,
@@ -123,6 +125,7 @@ impl Default for ContractDefinition {
             multiplier: 1.0,
             valid_exchanges: Vec::new(),
             order_types: Vec::new(),
+            market_rule_id: None,
             last_trade_date: String::new(),
             strike: 0.0,
             right: None,
@@ -234,6 +237,9 @@ pub fn parse_secdef_response(data: &[u8]) -> Option<ContractDefinition> {
     }
     if let Some(v) = tags.get(&TAG_IB_ORDER_TYPES) {
         def.order_types = v.split(',').map(|s| s.to_string()).collect();
+    }
+    if let Some(v) = tags.get(&TAG_IB_MARKET_RULE_ID) {
+        def.market_rule_id = v.parse().ok();
     }
     if let Some(v) = tags.get(&TAG_LAST_TRADE_DATE) {
         def.last_trade_date = v.clone();
@@ -404,6 +410,124 @@ pub fn parse_schedule_response(data: &[u8]) -> Option<ContractSchedule> {
     }
 
     Some(ContractSchedule { timezone, trading_hours, liquid_hours })
+}
+
+// ─── Matching symbols search (35=U|6040=185/186) ───
+
+/// FIX tags for matching symbols.
+pub const TAG_MATCH_PATTERN: u32 = 58;
+pub const TAG_MATCH_COUNT: u32 = 146;
+pub const TAG_MATCH_PRIMARY_EXCHANGE: u32 = 6453;
+pub const TAG_MATCH_DESCRIPTION: u32 = 306;
+pub const TAG_MATCH_DERIVATIVE_TYPES: u32 = 6070;
+
+/// A single matching symbol result.
+#[derive(Debug, Clone)]
+pub struct SymbolMatch {
+    pub con_id: u32,
+    pub symbol: String,
+    pub sec_type: SecurityType,
+    pub currency: String,
+    pub primary_exchange: String,
+    pub description: String,
+    pub derivative_types: Vec<String>,
+}
+
+/// Build a FIX 35=U matching symbols request (6040=185).
+pub fn build_matching_symbols_request(pattern: &str, req_id: &str, seq: u32) -> Vec<u8> {
+    fix::fix_build(
+        &[
+            (fix::TAG_MSG_TYPE, "U"),
+            (TAG_SUB_PROTOCOL, "185"),
+            (TAG_SECURITY_REQ_ID, req_id),
+            (TAG_MATCH_PATTERN, pattern),
+        ],
+        seq,
+    )
+}
+
+/// Parse a 35=U|6040=186 matching symbols response.
+///
+/// Uses sequential tag parsing since matches are a repeating group.
+pub fn parse_matching_symbols_response(data: &[u8]) -> Option<Vec<SymbolMatch>> {
+    use crate::protocol::fix::SOH;
+
+    let mut tags: Vec<(u32, String)> = Vec::new();
+    for part in data.split(|&b| b == SOH) {
+        if part.is_empty() { continue; }
+        let text = String::from_utf8_lossy(part);
+        if let Some((tag_str, val)) = text.split_once('=') {
+            if let Ok(tag) = tag_str.parse::<u32>() {
+                tags.push((tag, val.to_string()));
+            }
+        }
+    }
+
+    // Verify 35=U with 6040=186
+    let msg_type = tags.iter().find(|(t, _)| *t == fix::TAG_MSG_TYPE)?.1.as_str();
+    if msg_type != "U" { return None; }
+    let sub_protocol = tags.iter().find(|(t, _)| *t == TAG_SUB_PROTOCOL)?.1.as_str();
+    if sub_protocol != "186" { return None; }
+
+    // Parse repeating groups: each match starts with tag 55 (symbol)
+    let mut matches = Vec::new();
+    let mut current: Option<SymbolMatch> = None;
+
+    for (tag, val) in &tags {
+        match *tag {
+            TAG_SYMBOL => {
+                if let Some(m) = current.take() {
+                    if m.con_id > 0 { matches.push(m); }
+                }
+                current = Some(SymbolMatch {
+                    con_id: 0,
+                    symbol: val.clone(),
+                    sec_type: SecurityType::Stock,
+                    currency: String::new(),
+                    primary_exchange: String::new(),
+                    description: String::new(),
+                    derivative_types: Vec::new(),
+                });
+            }
+            TAG_SECURITY_TYPE => {
+                if let Some(ref mut m) = current {
+                    m.sec_type = SecurityType::from_fix(val);
+                }
+            }
+            TAG_CURRENCY => {
+                if let Some(ref mut m) = current {
+                    m.currency = val.clone();
+                }
+            }
+            TAG_IB_CON_ID => {
+                if let Some(ref mut m) = current {
+                    m.con_id = val.parse().unwrap_or(0);
+                }
+            }
+            TAG_MATCH_PRIMARY_EXCHANGE => {
+                if let Some(ref mut m) = current {
+                    m.primary_exchange = val.clone();
+                }
+            }
+            TAG_MATCH_DESCRIPTION => {
+                if let Some(ref mut m) = current {
+                    m.description = val.clone();
+                }
+            }
+            TAG_MATCH_DERIVATIVE_TYPES => {
+                if let Some(ref mut m) = current {
+                    m.derivative_types = val.split(',').map(|s| s.to_string()).collect();
+                }
+            }
+            _ => {}
+        }
+    }
+    // Flush last match
+    if let Some(m) = current {
+        if m.con_id > 0 { matches.push(m); }
+    }
+
+    Some(matches)
 }
 
 #[cfg(test)]
@@ -625,5 +749,96 @@ mod tests {
             1,
         );
         assert!(parse_schedule_response(&msg).is_none());
+    }
+
+    #[test]
+    fn market_rule_id_parsed() {
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "d"),
+                (TAG_IB_CON_ID, "756733"),
+                (TAG_SYMBOL, "SPY"),
+                (TAG_SECURITY_TYPE, "CS"),
+                (TAG_IB_MIN_TICK, "0.01"),
+                (TAG_IB_MARKET_RULE_ID, "4563"),
+            ],
+            1,
+        );
+        let def = super::parse_secdef_response(&msg).unwrap();
+        assert_eq!(def.market_rule_id, Some(4563));
+    }
+
+    #[test]
+    fn market_rule_id_absent() {
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "d"),
+                (TAG_IB_CON_ID, "756733"),
+                (TAG_SYMBOL, "SPY"),
+            ],
+            1,
+        );
+        let def = super::parse_secdef_response(&msg).unwrap();
+        assert_eq!(def.market_rule_id, None);
+    }
+
+    #[test]
+    fn build_matching_symbols_request_structure() {
+        let msg = build_matching_symbols_request("APP", "R1", 1);
+        let tags = fix::fix_parse(&msg);
+        assert_eq!(tags[&fix::TAG_MSG_TYPE], "U");
+        assert_eq!(tags[&TAG_SUB_PROTOCOL], "185");
+        assert_eq!(tags[&TAG_SECURITY_REQ_ID], "R1");
+        assert_eq!(tags[&TAG_MATCH_PATTERN], "APP");
+    }
+
+    #[test]
+    fn parse_matching_symbols_response_basic() {
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "U"),
+                (TAG_SUB_PROTOCOL, "186"),
+                (TAG_SECURITY_REQ_ID, "R1"),
+                (TAG_MATCH_COUNT, "2"),
+                // Match 1
+                (TAG_SYMBOL, "AAPL"),
+                (TAG_SECURITY_TYPE, "CS"),
+                (TAG_CURRENCY, "USD"),
+                (TAG_IB_CON_ID, "265598"),
+                (TAG_MATCH_PRIMARY_EXCHANGE, "NASDAQ"),
+                (TAG_MATCH_DESCRIPTION, "APPLE INC"),
+                (TAG_MATCH_DERIVATIVE_TYPES, "OPT,WAR"),
+                // Match 2
+                (TAG_SYMBOL, "APP"),
+                (TAG_SECURITY_TYPE, "CS"),
+                (TAG_CURRENCY, "USD"),
+                (TAG_IB_CON_ID, "481863646"),
+                (TAG_MATCH_PRIMARY_EXCHANGE, "NASDAQ"),
+                (TAG_MATCH_DESCRIPTION, "APPLOVIN CORP"),
+                (TAG_MATCH_DERIVATIVE_TYPES, "OPT"),
+            ],
+            1,
+        );
+        let matches = parse_matching_symbols_response(&msg).unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].symbol, "AAPL");
+        assert_eq!(matches[0].con_id, 265598);
+        assert_eq!(matches[0].primary_exchange, "NASDAQ");
+        assert_eq!(matches[0].description, "APPLE INC");
+        assert_eq!(matches[0].derivative_types, vec!["OPT", "WAR"]);
+        assert_eq!(matches[1].symbol, "APP");
+        assert_eq!(matches[1].con_id, 481863646);
+    }
+
+    #[test]
+    fn parse_matching_symbols_rejects_non_match() {
+        let msg = fix::fix_build(&[(TAG_MSG_TYPE, "d")], 1);
+        assert!(parse_matching_symbols_response(&msg).is_none());
+
+        let msg = fix::fix_build(
+            &[(TAG_MSG_TYPE, "U"), (TAG_SUB_PROTOCOL, "107")],
+            1,
+        );
+        assert!(parse_matching_symbols_response(&msg).is_none());
     }
 }
