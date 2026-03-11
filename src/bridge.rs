@@ -10,6 +10,8 @@ use std::sync::Mutex;
 use std::cell::UnsafeCell;
 
 use crate::engine::context::{Context, Strategy};
+use crate::control::historical::{HistoricalResponse, HeadTimestampResponse};
+use crate::control::contracts::ContractDefinition;
 use crate::types::*;
 
 /// SeqLock-protected quote slot. Writer (hot loop) never blocks.
@@ -61,6 +63,14 @@ pub struct SharedState {
     fills: Mutex<Vec<Fill>>,
     order_updates: Mutex<Vec<OrderUpdate>>,
     cancel_rejects: Mutex<Vec<CancelReject>>,
+    tbt_trades: Mutex<Vec<TbtTrade>>,
+    tbt_quotes: Mutex<Vec<TbtQuote>>,
+    tick_news: Mutex<Vec<TickNews>>,
+    what_if_responses: Mutex<Vec<WhatIfResponse>>,
+    historical_data: Mutex<Vec<(u32, HistoricalResponse)>>,
+    head_timestamps: Mutex<Vec<(u32, HeadTimestampResponse)>>,
+    contract_details: Mutex<Vec<(u32, ContractDefinition)>>,
+    contract_details_end: Mutex<Vec<u32>>,
     positions: [AtomicU64; MAX_INSTRUMENTS],
     account: Mutex<AccountState>,
     /// InstrumentId counter — set by hot loop on RegisterInstrument.
@@ -74,6 +84,14 @@ impl SharedState {
             fills: Mutex::new(Vec::with_capacity(64)),
             order_updates: Mutex::new(Vec::with_capacity(64)),
             cancel_rejects: Mutex::new(Vec::with_capacity(16)),
+            tbt_trades: Mutex::new(Vec::with_capacity(256)),
+            tbt_quotes: Mutex::new(Vec::with_capacity(256)),
+            tick_news: Mutex::new(Vec::with_capacity(32)),
+            what_if_responses: Mutex::new(Vec::with_capacity(8)),
+            historical_data: Mutex::new(Vec::with_capacity(16)),
+            head_timestamps: Mutex::new(Vec::with_capacity(8)),
+            contract_details: Mutex::new(Vec::with_capacity(16)),
+            contract_details_end: Mutex::new(Vec::with_capacity(8)),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
             account: Mutex::new(AccountState::default()),
             instrument_count: AtomicU64::new(0),
@@ -101,6 +119,54 @@ impl SharedState {
     /// Drain all pending cancel/modify rejects.
     pub fn drain_cancel_rejects(&self) -> Vec<CancelReject> {
         let mut lock = self.cancel_rejects.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending tick-by-tick trades.
+    pub fn drain_tbt_trades(&self) -> Vec<TbtTrade> {
+        let mut lock = self.tbt_trades.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending tick-by-tick quotes.
+    pub fn drain_tbt_quotes(&self) -> Vec<TbtQuote> {
+        let mut lock = self.tbt_quotes.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending news ticks.
+    pub fn drain_tick_news(&self) -> Vec<TickNews> {
+        let mut lock = self.tick_news.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending what-if responses.
+    pub fn drain_what_if_responses(&self) -> Vec<WhatIfResponse> {
+        let mut lock = self.what_if_responses.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending historical data responses.
+    pub fn drain_historical_data(&self) -> Vec<(u32, HistoricalResponse)> {
+        let mut lock = self.historical_data.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending head timestamp responses.
+    pub fn drain_head_timestamps(&self) -> Vec<(u32, HeadTimestampResponse)> {
+        let mut lock = self.head_timestamps.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending contract definitions.
+    pub fn drain_contract_details(&self) -> Vec<(u32, ContractDefinition)> {
+        let mut lock = self.contract_details.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending contract details end markers.
+    pub fn drain_contract_details_end(&self) -> Vec<u32> {
+        let mut lock = self.contract_details_end.lock().unwrap();
         std::mem::take(&mut *lock)
     }
 
@@ -135,6 +201,38 @@ impl SharedState {
 
     fn push_cancel_reject(&self, reject: CancelReject) {
         self.cancel_rejects.lock().unwrap().push(reject);
+    }
+
+    fn push_tbt_trade(&self, trade: TbtTrade) {
+        self.tbt_trades.lock().unwrap().push(trade);
+    }
+
+    fn push_tbt_quote(&self, quote: TbtQuote) {
+        self.tbt_quotes.lock().unwrap().push(quote);
+    }
+
+    fn push_tick_news(&self, news: TickNews) {
+        self.tick_news.lock().unwrap().push(news);
+    }
+
+    fn push_what_if(&self, response: WhatIfResponse) {
+        self.what_if_responses.lock().unwrap().push(response);
+    }
+
+    fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
+        self.historical_data.lock().unwrap().push((req_id, response));
+    }
+
+    fn push_head_timestamp(&self, req_id: u32, response: HeadTimestampResponse) {
+        self.head_timestamps.lock().unwrap().push((req_id, response));
+    }
+
+    fn push_contract_details(&self, req_id: u32, def: ContractDefinition) {
+        self.contract_details.lock().unwrap().push((req_id, def));
+    }
+
+    fn push_contract_details_end(&self, req_id: u32) {
+        self.contract_details_end.lock().unwrap().push(req_id);
     }
 
     fn set_position(&self, id: InstrumentId, pos: i64) {
@@ -186,6 +284,46 @@ impl Strategy for BridgeStrategy {
 
     fn on_cancel_reject(&mut self, reject: &CancelReject, ctx: &mut Context) {
         self.shared.push_cancel_reject(*reject);
+        let _ = ctx;
+    }
+
+    fn on_tbt_trade(&mut self, trade: &TbtTrade, ctx: &mut Context) {
+        self.shared.push_tbt_trade(trade.clone());
+        let _ = ctx;
+    }
+
+    fn on_tbt_quote(&mut self, quote: &TbtQuote, ctx: &mut Context) {
+        self.shared.push_tbt_quote(*quote);
+        let _ = ctx;
+    }
+
+    fn on_what_if(&mut self, response: &WhatIfResponse, ctx: &mut Context) {
+        self.shared.push_what_if(*response);
+        let _ = ctx;
+    }
+
+    fn on_news(&mut self, news: &TickNews, ctx: &mut Context) {
+        self.shared.push_tick_news(news.clone());
+        let _ = ctx;
+    }
+
+    fn on_historical_data(&mut self, req_id: u32, response: &HistoricalResponse, ctx: &mut Context) {
+        self.shared.push_historical_data(req_id, response.clone());
+        let _ = ctx;
+    }
+
+    fn on_head_timestamp(&mut self, req_id: u32, response: &HeadTimestampResponse, ctx: &mut Context) {
+        self.shared.push_head_timestamp(req_id, response.clone());
+        let _ = ctx;
+    }
+
+    fn on_contract_details(&mut self, req_id: u32, def: &ContractDefinition, ctx: &mut Context) {
+        self.shared.push_contract_details(req_id, def.clone());
+        let _ = ctx;
+    }
+
+    fn on_contract_details_end(&mut self, req_id: u32, ctx: &mut Context) {
+        self.shared.push_contract_details_end(req_id);
         let _ = ctx;
     }
 }

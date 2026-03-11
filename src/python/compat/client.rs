@@ -176,6 +176,129 @@ impl EClient {
         Ok(())
     }
 
+    /// Request tick-by-tick data.
+    #[pyo3(signature = (req_id, contract, tick_type, number_of_ticks=0, ignore_size=false))]
+    fn req_tick_by_tick_data(
+        &mut self,
+        req_id: i64,
+        contract: &Contract,
+        tick_type: &str,
+        number_of_ticks: i32,
+        ignore_size: bool,
+    ) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+
+        let tbt_type = match tick_type {
+            "Last" | "AllLast" => TbtType::Last,
+            "BidAsk" => TbtType::BidAsk,
+            _ => return Err(PyRuntimeError::new_err(format!("Unknown tick type: '{}'", tick_type))),
+        };
+
+        tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id })
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        tx.send(ControlCommand::SubscribeTbt {
+            con_id: contract.con_id,
+            symbol: contract.symbol.clone(),
+            tbt_type,
+        })
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let shared = self.shared.as_ref().unwrap();
+        let instrument_id = shared.instrument_count().saturating_sub(1);
+        self.req_to_instrument.insert(req_id, instrument_id);
+        self.instrument_to_req.insert(instrument_id, req_id);
+
+        let _ = (number_of_ticks, ignore_size);
+        Ok(())
+    }
+
+    /// Cancel tick-by-tick data.
+    fn cancel_tick_by_tick_data(&mut self, req_id: i64) -> PyResult<()> {
+        if let Some(instrument) = self.req_to_instrument.remove(&req_id) {
+            self.instrument_to_req.remove(&instrument);
+            let tx = self.control_tx.as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+            tx.send(ControlCommand::UnsubscribeTbt { instrument })
+                .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        }
+        Ok(())
+    }
+
+    /// Request historical bar data.
+    #[pyo3(signature = (req_id, contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth, format_date=1, keep_up_to_date=false, chart_options=Vec::new()))]
+    fn req_historical_data(
+        &self,
+        req_id: i64,
+        contract: &Contract,
+        end_date_time: &str,
+        duration_str: &str,
+        bar_size_setting: &str,
+        what_to_show: &str,
+        use_rth: i32,
+        format_date: i32,
+        keep_up_to_date: bool,
+        chart_options: Vec<PyObject>,
+    ) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::FetchHistorical {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            symbol: contract.symbol.clone(),
+            end_date_time: end_date_time.to_string(),
+            duration: duration_str.to_string(),
+            bar_size: bar_size_setting.to_string(),
+            what_to_show: what_to_show.to_string(),
+            use_rth: use_rth != 0,
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        let _ = (format_date, keep_up_to_date, chart_options);
+        Ok(())
+    }
+
+    /// Cancel historical data.
+    fn cancel_historical_data(&self, req_id: i64) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::CancelHistorical { req_id: req_id as u32 })
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    /// Request head timestamp.
+    #[pyo3(signature = (req_id, contract, what_to_show, use_rth, format_date=1))]
+    fn req_head_time_stamp(
+        &self,
+        req_id: i64,
+        contract: &Contract,
+        what_to_show: &str,
+        use_rth: i32,
+        format_date: i32,
+    ) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::FetchHeadTimestamp {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            what_to_show: what_to_show.to_string(),
+            use_rth: use_rth != 0,
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        let _ = format_date;
+        Ok(())
+    }
+
+    /// Request contract details.
+    fn req_contract_details(&self, req_id: i64, contract: &Contract) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::FetchContractDetails {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
     /// Place an order. Routes to the appropriate submit_* based on order_type.
     fn place_order(&mut self, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
         if self.control_tx.is_none() {
@@ -470,6 +593,115 @@ impl EClient {
                 }
 
                 *last = fields;
+            }
+
+            // Drain TBT trades -> tickByTickAllLast
+            let tbt_trades = shared.drain_tbt_trades();
+            for trade in tbt_trades {
+                let req_id = self.instrument_to_req.get(&trade.instrument).copied().unwrap_or(-1);
+                let price = trade.price as f64 / PRICE_SCALE_F;
+                let size = trade.size as f64;
+                let attrib = super::tick_types::TickAttribLast::default();
+                let attrib_obj = Py::new(py, attrib)?.into_any();
+                self.wrapper.call_method(
+                    py, "tick_by_tick_all_last",
+                    (req_id, 1i32, trade.timestamp as i64, price, size,
+                     &attrib_obj, trade.exchange.as_str(), trade.conditions.as_str()),
+                    None,
+                )?;
+            }
+
+            // Drain TBT quotes -> tickByTickBidAsk
+            let tbt_quotes = shared.drain_tbt_quotes();
+            for quote in tbt_quotes {
+                let req_id = self.instrument_to_req.get(&quote.instrument).copied().unwrap_or(-1);
+                let attrib = super::tick_types::TickAttribBidAsk::default();
+                let attrib_obj = Py::new(py, attrib)?.into_any();
+                self.wrapper.call_method(
+                    py, "tick_by_tick_bid_ask",
+                    (req_id, quote.timestamp as i64,
+                     quote.bid as f64 / PRICE_SCALE_F, quote.ask as f64 / PRICE_SCALE_F,
+                     quote.bid_size as f64, quote.ask_size as f64, &attrib_obj),
+                    None,
+                )?;
+            }
+
+            // Drain news -> tickNews
+            let news_items = shared.drain_tick_news();
+            for news in news_items {
+                // tickNews(tickerId, timeStamp, providerCode, articleId, headline, extraData)
+                for (&_iid, &req_id) in &self.instrument_to_req {
+                    self.wrapper.call_method(
+                        py, "tick_news",
+                        (req_id, news.timestamp as i64, news.provider_code.as_str(),
+                         news.article_id.as_str(), news.headline.as_str(), ""),
+                        None,
+                    )?;
+                    break; // broadcast to first req_id only
+                }
+            }
+
+            // Drain what-if responses -> orderStatus with margin info
+            let what_ifs = shared.drain_what_if_responses();
+            for wi in what_ifs {
+                // Dispatch as order_status with margin/commission data via error callback
+                // ibapi sends what-if results through orderStatus + openOrder with OrderState
+                let msg = format!(
+                    "WhatIf: initMargin={:.2}, maintMargin={:.2}, commission={:.2}",
+                    wi.init_margin_after as f64 / PRICE_SCALE_F,
+                    wi.maint_margin_after as f64 / PRICE_SCALE_F,
+                    wi.commission as f64 / PRICE_SCALE_F,
+                );
+                self.wrapper.call_method(
+                    py, "order_status",
+                    (wi.order_id as i64, "PreSubmitted", 0.0f64, 0.0f64,
+                     0.0f64, 0i64, 0i64, 0.0f64, 0i64, msg.as_str(), 0.0f64),
+                    None,
+                )?;
+            }
+
+            // Drain historical data -> historicalData + historicalDataEnd
+            let hist_data = shared.drain_historical_data();
+            for (req_id, response) in hist_data {
+                for bar in &response.bars {
+                    let bar_obj = super::contract::BarData::new(
+                        bar.time.clone(), bar.open, bar.high, bar.low, bar.close,
+                        bar.volume, bar.wap, bar.count as i32,
+                    );
+                    let bar_py = Py::new(py, bar_obj)?.into_any();
+                    self.wrapper.call_method1(py, "historical_data", (req_id as i64, &bar_py))?;
+                }
+                if response.is_complete {
+                    self.wrapper.call_method(
+                        py, "historical_data_end",
+                        (req_id as i64, "", ""),
+                        None,
+                    )?;
+                }
+            }
+
+            // Drain head timestamps -> headTimestamp
+            let head_ts = shared.drain_head_timestamps();
+            for (req_id, response) in head_ts {
+                self.wrapper.call_method1(
+                    py, "head_timestamp",
+                    (req_id as i64, response.head_timestamp.as_str()),
+                )?;
+            }
+
+            // Drain contract details -> contractDetails + contractDetailsEnd
+            let contract_defs = shared.drain_contract_details();
+            for (req_id, def) in contract_defs {
+                let details = super::contract::ContractDetails::from_definition(&def);
+                let details_py = Py::new(py, details)?.into_any();
+                self.wrapper.call_method1(
+                    py, "contract_details",
+                    (req_id as i64, &details_py),
+                )?;
+            }
+            let contract_ends = shared.drain_contract_details_end();
+            for req_id in contract_ends {
+                self.wrapper.call_method1(py, "contract_details_end", (req_id as i64,))?;
             }
 
             // Account state -> updateAccountValue

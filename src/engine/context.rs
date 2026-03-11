@@ -50,6 +50,26 @@ pub trait Strategy {
         let _ = (news, ctx);
     }
 
+    /// Called when historical bar data is received from HMDS.
+    fn on_historical_data(&mut self, req_id: u32, response: &crate::control::historical::HistoricalResponse, ctx: &mut Context) {
+        let _ = (req_id, response, ctx);
+    }
+
+    /// Called when a head timestamp response is received from HMDS.
+    fn on_head_timestamp(&mut self, req_id: u32, response: &crate::control::historical::HeadTimestampResponse, ctx: &mut Context) {
+        let _ = (req_id, response, ctx);
+    }
+
+    /// Called when a contract definition is received from CCP.
+    fn on_contract_details(&mut self, req_id: u32, def: &crate::control::contracts::ContractDefinition, ctx: &mut Context) {
+        let _ = (req_id, def, ctx);
+    }
+
+    /// Called when contract details are complete for a request.
+    fn on_contract_details_end(&mut self, req_id: u32, ctx: &mut Context) {
+        let _ = (req_id, ctx);
+    }
+
     /// Called on disconnect or error. Chance to cancel all orders.
     fn on_disconnect(&mut self, ctx: &mut Context) {
         let _ = ctx;

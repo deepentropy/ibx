@@ -598,6 +598,110 @@ impl PercentChangeCondition {
     }
 }
 
+// ── BarData ──
+
+/// ibapi-compatible BarData class for historical data callbacks.
+#[pyclass]
+#[derive(Clone)]
+pub struct BarData {
+    #[pyo3(get, set)]
+    pub date: String,
+    #[pyo3(get, set)]
+    pub open: f64,
+    #[pyo3(get, set)]
+    pub high: f64,
+    #[pyo3(get, set)]
+    pub low: f64,
+    #[pyo3(get, set)]
+    pub close: f64,
+    #[pyo3(get, set)]
+    pub volume: i64,
+    #[pyo3(get, set)]
+    pub wap: f64,
+    #[pyo3(get, set)]
+    pub bar_count: i32,
+}
+
+#[pymethods]
+impl BarData {
+    #[new]
+    #[pyo3(signature = (date="".to_string(), open=0.0, high=0.0, low=0.0, close=0.0, volume=0, wap=0.0, bar_count=0))]
+    pub fn new(date: String, open: f64, high: f64, low: f64, close: f64, volume: i64, wap: f64, bar_count: i32) -> Self {
+        Self { date, open, high, low, close, volume, wap, bar_count }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("BarData(date='{}', O={}, H={}, L={}, C={}, V={})",
+            self.date, self.open, self.high, self.low, self.close, self.volume)
+    }
+}
+
+// ── ContractDetails ──
+
+/// ibapi-compatible ContractDetails class.
+#[pyclass]
+#[derive(Clone, Default)]
+pub struct ContractDetails {
+    #[pyo3(get, set)]
+    pub contract: Contract,
+    #[pyo3(get, set)]
+    pub market_name: String,
+    #[pyo3(get, set)]
+    pub min_tick: f64,
+    #[pyo3(get, set)]
+    pub order_types: String,
+    #[pyo3(get, set)]
+    pub valid_exchanges: String,
+    #[pyo3(get, set)]
+    pub long_name: String,
+    #[pyo3(get, set)]
+    pub last_trade_date: String,
+    #[pyo3(get, set)]
+    pub multiplier: String,
+}
+
+#[pymethods]
+impl ContractDetails {
+    #[new]
+    #[pyo3(signature = ())]
+    fn py_new() -> Self {
+        Self::default()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ContractDetails(symbol='{}', longName='{}')",
+            self.contract.symbol, self.long_name)
+    }
+}
+
+impl ContractDetails {
+    pub fn from_definition(def: &crate::control::contracts::ContractDefinition) -> Self {
+        let mut c = Contract::default();
+        c.con_id = def.con_id as i64;
+        c.symbol = def.symbol.clone();
+        c.sec_type = format!("{:?}", def.sec_type);
+        c.exchange = def.exchange.clone();
+        c.primary_exchange = def.primary_exchange.clone();
+        c.currency = def.currency.clone();
+        c.local_symbol = def.local_symbol.clone();
+        c.trading_class = def.trading_class.clone();
+        c.last_trade_date_or_contract_month = def.last_trade_date.clone();
+        c.strike = def.strike;
+        c.multiplier = if def.multiplier != 1.0 { format!("{}", def.multiplier) } else { String::new() };
+
+        Self {
+            contract: c,
+            market_name: String::new(),
+            min_tick: def.min_tick,
+            order_types: def.order_types.join(","),
+            valid_exchanges: def.valid_exchanges.join(","),
+            long_name: def.long_name.clone(),
+            last_trade_date: def.last_trade_date.clone(),
+            multiplier: if def.multiplier != 1.0 { format!("{}", def.multiplier) } else { String::new() },
+        }
+    }
+}
+
 /// Register all compat contract/order classes on the module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Contract>()?;
@@ -610,6 +714,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ExecutionCondition>()?;
     m.add_class::<VolumeCondition>()?;
     m.add_class::<PercentChangeCondition>()?;
+    m.add_class::<BarData>()?;
+    m.add_class::<ContractDetails>()?;
     Ok(())
 }
 

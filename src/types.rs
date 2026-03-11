@@ -802,6 +802,28 @@ pub enum ControlCommand {
     Order(OrderRequest),
     /// Register an instrument from external caller (bridge mode).
     RegisterInstrument { con_id: i64 },
+    /// Request historical bar data via HMDS.
+    FetchHistorical {
+        req_id: u32,
+        con_id: i64,
+        symbol: String,
+        end_date_time: String,
+        duration: String,
+        bar_size: String,
+        what_to_show: String,
+        use_rth: bool,
+    },
+    /// Cancel a historical data request.
+    CancelHistorical { req_id: u32 },
+    /// Request head timestamp via HMDS.
+    FetchHeadTimestamp {
+        req_id: u32,
+        con_id: i64,
+        what_to_show: String,
+        use_rth: bool,
+    },
+    /// Request contract details via CCP.
+    FetchContractDetails { req_id: u32, con_id: i64 },
     /// Graceful shutdown.
     Shutdown,
 }

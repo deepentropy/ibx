@@ -59,6 +59,14 @@ pub struct HotLoop<S: Strategy> {
     tbt_subscriptions: Vec<(InstrumentId, String, crate::types::TbtType)>,
     /// Running price state for TBT decoding: InstrumentId → (last_price_cents, bid_cents, ask_cents).
     tbt_price_state: Vec<(InstrumentId, i64, i64, i64)>,
+    /// Next HMDS query ID for historical/head-timestamp requests.
+    next_hmds_query_id: u32,
+    /// Pending historical data requests: query_id_string → external req_id.
+    pending_historical: Vec<(String, u32)>,
+    /// Pending head timestamp requests: query_id_string → external req_id.
+    pending_head_ts: Vec<(String, u32)>,
+    /// Pending contract details requests: req_id.
+    pending_secdef: Vec<u32>,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -125,6 +133,10 @@ impl<S: Strategy> HotLoop<S> {
             next_tbt_req_id: 1,
             tbt_subscriptions: Vec::new(),
             tbt_price_state: Vec::new(),
+            next_hmds_query_id: 1000,
+            pending_historical: Vec::new(),
+            pending_head_ts: Vec::new(),
+            pending_secdef: Vec::new(),
         }
     }
 
@@ -1996,6 +2008,20 @@ impl<S: Strategy> HotLoop<S> {
             }
             "UT" | "UM" | "RL" => self.handle_account_update(msg),
             "UP" => self.handle_position_update(&parsed),
+            "d" => {
+                // SecurityDefinition response
+                if let Some(def) = crate::control::contracts::parse_secdef_response(msg) {
+                    let is_last = crate::control::contracts::secdef_response_is_last(msg);
+                    // Match to pending request (use first pending)
+                    if let Some(&req_id) = self.pending_secdef.first() {
+                        self.strategy.on_contract_details(req_id, &def, &mut self.context);
+                        if is_last {
+                            self.pending_secdef.remove(0);
+                            self.strategy.on_contract_details_end(req_id, &mut self.context);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2279,6 +2305,23 @@ impl<S: Strategy> HotLoop<S> {
                 }
                 ControlCommand::RegisterInstrument { con_id } => {
                     self.context.market.register(con_id);
+                }
+                ControlCommand::FetchHistorical { req_id, con_id, symbol, end_date_time, duration, bar_size, what_to_show, use_rth } => {
+                    self.send_historical_request(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth);
+                    let _ = symbol;
+                }
+                ControlCommand::CancelHistorical { req_id } => {
+                    // Find and remove the pending request, cancel via HMDS
+                    if let Some(pos) = self.pending_historical.iter().position(|(_, rid)| *rid == req_id) {
+                        let (query_id, _) = self.pending_historical.remove(pos);
+                        self.send_historical_cancel(&query_id);
+                    }
+                }
+                ControlCommand::FetchHeadTimestamp { req_id, con_id, what_to_show, use_rth } => {
+                    self.send_head_timestamp_request(req_id, con_id, &what_to_show, use_rth);
+                }
+                ControlCommand::FetchContractDetails { req_id, con_id } => {
+                    self.send_secdef_request(req_id, con_id);
                 }
                 ControlCommand::Shutdown => {
                     // Unsubscribe all active market data before stopping
@@ -2755,11 +2798,30 @@ impl<S: Strategy> HotLoop<S> {
                 }
             }
             "W" => {
-                // 35=W response — may contain ResultSetTickerId for TBT subscription ack
                 if let Some(xml_tag) = parsed.get(&6118) {
-                    if let Some(ticker_id) = crate::control::historical::parse_ticker_id(xml_tag) {
+                    // Try parsing as historical bar data
+                    if let Some(resp) = crate::control::historical::parse_bar_response(xml_tag) {
+                        // Find the external req_id for this query
+                        if let Some(pos) = self.pending_historical.iter().position(|(qid, _)| *qid == resp.query_id) {
+                            let (_, req_id) = self.pending_historical[pos];
+                            let is_complete = resp.is_complete;
+                            self.strategy.on_historical_data(req_id, &resp, &mut self.context);
+                            if is_complete {
+                                self.pending_historical.remove(pos);
+                            }
+                        }
+                    }
+                    // Try parsing as head timestamp
+                    else if let Some(resp) = crate::control::historical::parse_head_timestamp_response(xml_tag) {
+                        // Match by looking at pending head timestamp requests
+                        if let Some(pos) = self.pending_head_ts.iter().position(|_| true) {
+                            let (_, req_id) = self.pending_head_ts.remove(pos);
+                            self.strategy.on_head_timestamp(req_id, &resp, &mut self.context);
+                        }
+                    }
+                    // Try parsing as TBT ticker ID assignment
+                    else if let Some(ticker_id) = crate::control::historical::parse_ticker_id(xml_tag) {
                         log::info!("HMDS TBT ticker_id assigned: {}", ticker_id);
-                        // TODO: map ticker_id to instrument for future use
                     }
                 }
             }
@@ -2989,6 +3051,152 @@ impl<S: Strategy> HotLoop<S> {
 
         // Clear price state
         self.tbt_price_state.retain(|e| e.0 != instrument);
+    }
+
+    /// Send a historical data request to HMDS.
+    fn send_historical_request(&mut self, req_id: u32, con_id: i64, end_date_time: &str, duration: &str, bar_size: &str, what_to_show: &str, use_rth: bool) {
+        let qid = self.next_hmds_query_id;
+        self.next_hmds_query_id += 1;
+
+        let data_type = match what_to_show.to_uppercase().as_str() {
+            "MIDPOINT" => crate::control::historical::BarDataType::Midpoint,
+            "BID" => crate::control::historical::BarDataType::Bid,
+            "ASK" => crate::control::historical::BarDataType::Ask,
+            "BID_ASK" => crate::control::historical::BarDataType::BidAsk,
+            "ADJUSTED_LAST" => crate::control::historical::BarDataType::AdjustedLast,
+            "HISTORICAL_VOLATILITY" => crate::control::historical::BarDataType::HistoricalVolatility,
+            "OPTION_IMPLIED_VOLATILITY" => crate::control::historical::BarDataType::ImpliedVolatility,
+            _ => crate::control::historical::BarDataType::Trades,
+        };
+
+        let bs = match bar_size {
+            "1 secs" | "1 sec" => crate::control::historical::BarSize::Sec1,
+            "5 secs" => crate::control::historical::BarSize::Sec5,
+            "10 secs" => crate::control::historical::BarSize::Sec10,
+            "15 secs" => crate::control::historical::BarSize::Sec15,
+            "30 secs" => crate::control::historical::BarSize::Sec30,
+            "1 min" => crate::control::historical::BarSize::Min1,
+            "2 mins" => crate::control::historical::BarSize::Min2,
+            "3 mins" => crate::control::historical::BarSize::Min3,
+            "5 mins" => crate::control::historical::BarSize::Min5,
+            "10 mins" => crate::control::historical::BarSize::Min10,
+            "15 mins" => crate::control::historical::BarSize::Min15,
+            "20 mins" => crate::control::historical::BarSize::Min20,
+            "30 mins" => crate::control::historical::BarSize::Min30,
+            "1 hour" => crate::control::historical::BarSize::Hour1,
+            "2 hours" => crate::control::historical::BarSize::Hour2,
+            "3 hours" => crate::control::historical::BarSize::Hour3,
+            "4 hours" => crate::control::historical::BarSize::Hour4,
+            "8 hours" => crate::control::historical::BarSize::Hour8,
+            "1 day" => crate::control::historical::BarSize::Day1,
+            "1 week" | "1W" => crate::control::historical::BarSize::Week1,
+            "1 month" | "1M" => crate::control::historical::BarSize::Month1,
+            _ => crate::control::historical::BarSize::Min5,
+        };
+
+        let query_id = format!("hist_{}", qid);
+        let req = crate::control::historical::HistoricalRequest {
+            query_id: query_id.clone(),
+            con_id: con_id as u32,
+            symbol: String::new(),
+            sec_type: "CS",
+            exchange: "SMART",
+            data_type,
+            end_time: end_date_time.to_string(),
+            duration: duration.to_string(),
+            bar_size: bs,
+            use_rth,
+        };
+
+        let xml = crate::control::historical::build_query_xml(&req);
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "W"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]);
+            log::info!("Sent historical request: req_id={} con_id={} bar_size={}", req_id, con_id, bar_size);
+            self.hb.last_hmds_sent = Instant::now();
+        }
+
+        self.pending_historical.push((query_id, req_id));
+    }
+
+    /// Cancel a historical data request via HMDS.
+    fn send_historical_cancel(&mut self, query_id: &str) {
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <ListOfCancelQueries>\
+                 <CancelQuery>\
+                 <id>ticker:{tid}</id>\
+                 </CancelQuery>\
+                 </ListOfCancelQueries>",
+                tid = query_id,
+            );
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "Z"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]);
+            self.hb.last_hmds_sent = Instant::now();
+        }
+    }
+
+    /// Send a head timestamp request to HMDS.
+    fn send_head_timestamp_request(&mut self, req_id: u32, con_id: i64, what_to_show: &str, use_rth: bool) {
+        let data_type = match what_to_show.to_uppercase().as_str() {
+            "MIDPOINT" => crate::control::historical::BarDataType::Midpoint,
+            "BID" => crate::control::historical::BarDataType::Bid,
+            "ASK" => crate::control::historical::BarDataType::Ask,
+            _ => crate::control::historical::BarDataType::Trades,
+        };
+
+        let req = crate::control::historical::HeadTimestampRequest {
+            con_id: con_id as u32,
+            sec_type: "CS",
+            exchange: "SMART",
+            data_type,
+            use_rth,
+        };
+
+        let xml = crate::control::historical::build_head_timestamp_xml(&req);
+        let query_id = format!("hts_{}", self.next_hmds_query_id);
+        self.next_hmds_query_id += 1;
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "W"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]);
+            log::info!("Sent head timestamp request: req_id={} con_id={}", req_id, con_id);
+            self.hb.last_hmds_sent = Instant::now();
+        }
+
+        self.pending_head_ts.push((query_id, req_id));
+    }
+
+    /// Send a contract details (secdef) request to CCP.
+    fn send_secdef_request(&mut self, req_id: u32, con_id: i64) {
+        if let Some(conn) = self.ccp_conn.as_mut() {
+            let con_id_str = con_id.to_string();
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "c"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (320, &req_id.to_string()),  // SecurityReqID
+                (321, "4"),                    // SecurityRequestType = SecurityListBySymbol
+                (48, &con_id_str),             // SecurityID
+                (22, "1"),                     // IDSource = CUSIP (IB uses conId)
+            ]);
+            log::info!("Sent secdef request: req_id={} con_id={}", req_id, con_id);
+            self.hb.last_ccp_sent = Instant::now();
+        }
+        self.pending_secdef.push(req_id);
     }
 
     /// Handle farm disconnect: clear stale subscription tracking, zero quotes, notify strategy.
