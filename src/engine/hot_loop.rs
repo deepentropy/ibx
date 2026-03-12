@@ -2229,6 +2229,7 @@ impl HotLoop {
             self.context.account.net_liquidation = (val * PRICE_SCALE as f64) as Price;
             log::info!("Account summary: net_liq=${:.2}", val);
         }
+        self.shared.set_account(self.context.account());
     }
 
     /// Handle 8=O UT/UM/RL account value messages.
@@ -2347,6 +2348,8 @@ impl HotLoop {
                 }
             }
         }
+        // Sync account state to SharedState so external readers see updates immediately
+        self.shared.set_account(self.context.account());
     }
 
     /// Handle 8=O UP position messages.
