@@ -785,6 +785,54 @@ pub struct TickNews {
     pub timestamp: u64,
 }
 
+/// A historical tick (midpoint).
+#[derive(Debug, Clone)]
+pub struct HistoricalTickMidpoint {
+    pub time: String,
+    pub price: f64,
+}
+
+/// A historical tick (last trade).
+#[derive(Debug, Clone)]
+pub struct HistoricalTickLast {
+    pub time: String,
+    pub price: f64,
+    pub size: i64,
+    pub exchange: String,
+    pub special_conditions: String,
+}
+
+/// A historical tick (bid/ask).
+#[derive(Debug, Clone)]
+pub struct HistoricalTickBidAsk {
+    pub time: String,
+    pub bid_price: f64,
+    pub ask_price: f64,
+    pub bid_size: i64,
+    pub ask_size: i64,
+}
+
+/// Historical tick data (one of three types based on whatToShow).
+#[derive(Debug, Clone)]
+pub enum HistoricalTickData {
+    Midpoint(Vec<HistoricalTickMidpoint>),
+    Last(Vec<HistoricalTickLast>),
+    BidAsk(Vec<HistoricalTickBidAsk>),
+}
+
+/// A real-time 5-second bar.
+#[derive(Debug, Clone, Copy)]
+pub struct RealTimeBar {
+    pub timestamp: u32,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub wap: f64,
+    pub count: i32,
+}
+
 /// A single trading session from a historical schedule response.
 #[derive(Debug, Clone)]
 pub struct ScheduleSession {
@@ -900,6 +948,26 @@ pub enum ControlCommand {
     },
     /// Cancel histogram data request.
     CancelHistogramData { req_id: u32 },
+    /// Request historical ticks via HMDS.
+    FetchHistoricalTicks {
+        req_id: u32,
+        con_id: i64,
+        start_date_time: String,
+        end_date_time: String,
+        number_of_ticks: u32,
+        what_to_show: String,
+        use_rth: bool,
+    },
+    /// Subscribe to real-time 5-second bars via HMDS.
+    SubscribeRealTimeBar {
+        req_id: u32,
+        con_id: i64,
+        symbol: String,
+        what_to_show: String,
+        use_rth: bool,
+    },
+    /// Cancel real-time bar subscription.
+    CancelRealTimeBar { req_id: u32 },
     /// Request historical schedule via HMDS.
     FetchHistoricalSchedule {
         req_id: u32,

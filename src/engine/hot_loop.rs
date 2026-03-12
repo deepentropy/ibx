@@ -89,6 +89,10 @@ pub struct HotLoop {
     pending_histogram: Vec<(String, u32)>,
     /// Pending historical schedule requests: query_id → req_id.
     pending_schedule: Vec<(String, u32)>,
+    /// Pending historical tick requests: (query_id, req_id, what_to_show).
+    pending_ticks: Vec<(String, u32, String)>,
+    /// Real-time bar subscriptions: (query_id, req_id, ticker_id, min_tick).
+    rtbar_subs: Vec<(String, u32, Option<u32>, f64)>,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -170,6 +174,8 @@ impl HotLoop {
             pending_fundamental: Vec::new(),
             pending_histogram: Vec::new(),
             pending_schedule: Vec::new(),
+            pending_ticks: Vec::new(),
+            rtbar_subs: Vec::new(),
         }
     }
 
@@ -2529,6 +2535,19 @@ impl HotLoop {
                         self.pending_histogram.remove(pos);
                     }
                 }
+                ControlCommand::FetchHistoricalTicks { req_id, con_id, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth } => {
+                    self.send_historical_ticks_request(req_id, con_id, &start_date_time, &end_date_time, number_of_ticks, &what_to_show, use_rth);
+                }
+                ControlCommand::SubscribeRealTimeBar { req_id, con_id, symbol, what_to_show, use_rth } => {
+                    self.send_realtime_bar_subscribe(req_id, con_id, &symbol, &what_to_show, use_rth);
+                }
+                ControlCommand::CancelRealTimeBar { req_id } => {
+                    if let Some(pos) = self.rtbar_subs.iter().position(|(_, rid, _, _)| *rid == req_id) {
+                        let (query_id, _, ticker_id, _) = self.rtbar_subs.remove(pos);
+                        let cancel_id = ticker_id.map(|t| t.to_string()).unwrap_or(query_id);
+                        self.send_historical_cancel(&cancel_id);
+                    }
+                }
                 ControlCommand::FetchHistoricalSchedule { req_id, con_id, end_date_time, duration, use_rth } => {
                     self.send_schedule_request(req_id, con_id, &end_date_time, &duration, use_rth);
                 }
@@ -3046,6 +3065,15 @@ impl HotLoop {
                             self.shared.push_histogram_data(req_id, entries);
                         }
                     }
+                    // Try parsing as historical ticks
+                    else if xml_tag.contains("<ResultSetTick>") {
+                        if let Some(pos) = self.pending_ticks.iter().position(|(qid, _, _)| xml_tag.contains(qid.as_str())) {
+                            let (_, req_id, what_to_show) = self.pending_ticks.remove(pos);
+                            if let Some((_, data, done)) = crate::control::historical::parse_tick_response(xml_tag, &what_to_show) {
+                                self.shared.push_historical_ticks(req_id, data, what_to_show, done);
+                            }
+                        }
+                    }
                     // Try parsing as historical schedule
                     else if let Some(resp) = crate::control::historical::parse_schedule_response(xml_tag) {
                         if let Some(pos) = self.pending_schedule.iter().position(|(qid, _)| *qid == resp.query_id) {
@@ -3053,9 +3081,26 @@ impl HotLoop {
                             self.shared.push_historical_schedule(req_id, resp);
                         }
                     }
-                    // Try parsing as TBT ticker ID assignment
-                    else if let Some(ticker_id) = crate::control::historical::parse_ticker_id(xml_tag) {
-                        log::info!("HMDS TBT ticker_id assigned: {}", ticker_id);
+                    // Try parsing as TBT/RTBar ticker ID assignment
+                    else if let Some(ticker_id_str) = crate::control::historical::parse_ticker_id(xml_tag) {
+                        // Check if it's for a real-time bar subscription
+                        let min_tick = crate::control::historical::extract_xml_tag(xml_tag, "minTick")
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or(0.01);
+                        let ticker_id: u32 = ticker_id_str.parse().unwrap_or(0);
+                        let mut matched = false;
+                        for sub in &mut self.rtbar_subs {
+                            if xml_tag.contains(&sub.0) {
+                                sub.2 = Some(ticker_id);
+                                sub.3 = min_tick;
+                                log::info!("HMDS rtbar ticker_id={} min_tick={} for req_id={}", ticker_id, min_tick, sub.1);
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if !matched {
+                            log::info!("HMDS TBT ticker_id assigned: {}", ticker_id_str);
+                        }
                     }
                 }
             }
@@ -3142,7 +3187,45 @@ impl HotLoop {
                     }
                 }
             }
+            "G" => self.handle_rtbar_data(msg),
             _ => {}
+        }
+    }
+
+    /// Decode 35=G real-time bar binary data and dispatch.
+    fn handle_rtbar_data(&mut self, msg: &[u8]) {
+        let body = match find_body_after_tag(msg, b"35=G\x01") {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Strip HMAC signature tag (8349=...)
+        let sig_pos = body.windows(6).position(|w| w == b"\x018349=");
+        let body = if let Some(pos) = sig_pos { &body[..pos] } else { body };
+
+        if body.len() < 11 {
+            return; // 2 (bit_count) + 4 (tickerId) + 4 (timestamp) + 1 (payloadLen)
+        }
+
+        let ticker_id = u32::from_be_bytes([body[2], body[3], body[4], body[5]]);
+        let timestamp = u32::from_be_bytes([body[6], body[7], body[8], body[9]]);
+        let payload_len = body[10] as usize;
+
+        if body.len() < 11 + payload_len {
+            return;
+        }
+
+        // Find matching subscription
+        let sub = self.rtbar_subs.iter().find(|(_, _, tid, _)| *tid == Some(ticker_id));
+        let (req_id, min_tick) = match sub {
+            Some((_, rid, _, mt)) => (*rid, *mt),
+            None => return,
+        };
+
+        let payload = &body[11..11 + payload_len];
+        if let Some(mut bar) = crate::control::historical::decode_bar_payload(payload, min_tick) {
+            bar.timestamp = timestamp;
+            self.shared.push_real_time_bar(req_id, bar);
         }
     }
 
@@ -3692,6 +3775,50 @@ impl HotLoop {
             log::info!("Sent histogram request: req_id={} con_id={}", req_id, con_id);
         }
         self.pending_histogram.push((query_id, req_id));
+    }
+
+    /// Send a historical ticks request to HMDS.
+    fn send_historical_ticks_request(&mut self, req_id: u32, con_id: i64, start_date_time: &str, end_date_time: &str, number_of_ticks: u32, what_to_show: &str, use_rth: bool) {
+        let qid = self.next_hmds_query_id;
+        self.next_hmds_query_id += 1;
+
+        let query_id = format!("tk_{}", qid);
+        let xml = crate::control::historical::build_tick_query_xml(
+            &query_id, con_id, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth,
+        );
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "W"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]);
+            self.hb.last_hmds_sent = Instant::now();
+            log::info!("Sent historical ticks request: req_id={} con_id={} what={}", req_id, con_id, what_to_show);
+        }
+        self.pending_ticks.push((query_id, req_id, what_to_show.to_string()));
+    }
+
+    /// Subscribe to real-time 5-second bars via HMDS.
+    fn send_realtime_bar_subscribe(&mut self, req_id: u32, con_id: i64, _symbol: &str, what_to_show: &str, use_rth: bool) {
+        let qid = self.next_hmds_query_id;
+        self.next_hmds_query_id += 1;
+
+        let query_id = format!("rt_{}", qid);
+        let xml = crate::control::historical::build_realtime_bar_xml(&query_id, con_id, what_to_show, use_rth);
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "W"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]);
+            self.hb.last_hmds_sent = Instant::now();
+            log::info!("Sent rtbar subscribe: req_id={} con_id={} what={}", req_id, con_id, what_to_show);
+        }
+        self.rtbar_subs.push((query_id, req_id, None, 0.01));
     }
 
     /// Send a historical schedule request to HMDS.

@@ -263,50 +263,56 @@ def test_req_executions_with_filter():
 # req_historical_ticks
 # ═══════════════════════════════════════
 
-def test_req_historical_ticks_signature():
-    """req_historical_ticks accepts ibapi signature without raising."""
+def test_req_historical_ticks_not_connected():
+    """req_historical_ticks raises when not connected."""
     client = EClient(EWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    client.req_historical_ticks(1, contract, "20260311 09:30:00", "",
-                                 1000, "TRADES", 1, False)
+    with pytest.raises(Exception, match="Not connected"):
+        client.req_historical_ticks(1, contract, "20260311 09:30:00", "",
+                                     1000, "TRADES", 1, False)
 
 
-def test_req_historical_ticks_defaults():
-    """req_historical_ticks works with minimal args."""
+def test_req_historical_ticks_defaults_not_connected():
+    """req_historical_ticks with defaults raises when not connected."""
     client = EClient(EWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    client.req_historical_ticks(1, contract)
+    with pytest.raises(Exception, match="Not connected"):
+        client.req_historical_ticks(1, contract)
 
 
-def test_req_historical_ticks_bid_ask():
-    """req_historical_ticks with BID_ASK."""
+def test_req_historical_ticks_bid_ask_not_connected():
+    """req_historical_ticks with BID_ASK raises when not connected."""
     client = EClient(EWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    client.req_historical_ticks(1, contract, what_to_show="BID_ASK")
+    with pytest.raises(Exception, match="Not connected"):
+        client.req_historical_ticks(1, contract, what_to_show="BID_ASK")
 
 
 # ═══════════════════════════════════════
 # req_real_time_bars / cancel_real_time_bars
 # ═══════════════════════════════════════
 
-def test_req_real_time_bars_signature():
-    """req_real_time_bars accepts ibapi signature without raising."""
+def test_req_real_time_bars_not_connected():
+    """req_real_time_bars raises when not connected."""
     client = EClient(EWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    client.req_real_time_bars(1, contract, 5, "TRADES", 0)
+    with pytest.raises(Exception, match="Not connected"):
+        client.req_real_time_bars(1, contract, 5, "TRADES", 0)
 
 
-def test_req_real_time_bars_defaults():
-    """req_real_time_bars works with minimal args."""
+def test_req_real_time_bars_defaults_not_connected():
+    """req_real_time_bars with defaults raises when not connected."""
     client = EClient(EWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    client.req_real_time_bars(1, contract)
+    with pytest.raises(Exception, match="Not connected"):
+        client.req_real_time_bars(1, contract)
 
 
-def test_cancel_real_time_bars():
-    """cancel_real_time_bars accepts reqId."""
+def test_cancel_real_time_bars_not_connected():
+    """cancel_real_time_bars raises when not connected."""
     client = EClient(EWrapper())
-    client.cancel_real_time_bars(1)
+    with pytest.raises(Exception, match="Not connected"):
+        client.cancel_real_time_bars(1)
 
 
 # ═══════════════════════════════════════
@@ -580,15 +586,17 @@ def test_mkt_depth_options_list():
 
 
 def test_real_time_bars_options_list():
-    """req_real_time_bars accepts real_time_bars_options list like ibapi."""
+    """req_real_time_bars with options list raises when not connected."""
     client = EClient(EWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    client.req_real_time_bars(1, contract, 5, "TRADES", 1, [])
+    with pytest.raises(Exception, match="Not connected"):
+        client.req_real_time_bars(1, contract, 5, "TRADES", 1, [])
 
 
 def test_historical_ticks_misc_options():
-    """req_historical_ticks accepts misc_options list like ibapi."""
+    """req_historical_ticks with misc_options raises when not connected."""
     client = EClient(EWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    client.req_historical_ticks(1, contract, "20260311 09:30:00", "",
-                                 1000, "TRADES", 1, False, [])
+    with pytest.raises(Exception, match="Not connected"):
+        client.req_historical_ticks(1, contract, "20260311 09:30:00", "",
+                                     1000, "TRADES", 1, False, [])

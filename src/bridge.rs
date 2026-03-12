@@ -116,6 +116,8 @@ pub struct SharedState {
     news_articles: Mutex<Vec<(u32, i32, String)>>,
     fundamental_data: Mutex<Vec<(u32, String)>>,
     histogram_data: Mutex<Vec<(u32, Vec<HistogramEntry>)>>,
+    historical_ticks: Mutex<Vec<(u32, HistoricalTickData, String, bool)>>,
+    real_time_bars: Mutex<Vec<(u32, RealTimeBar)>>,
     historical_schedules: Mutex<Vec<(u32, HistoricalScheduleResponse)>>,
     completed_orders: Mutex<Vec<CompletedOrder>>,
     market_rules: Mutex<Vec<MarketRule>>,
@@ -149,6 +151,8 @@ impl SharedState {
             news_articles: Mutex::new(Vec::with_capacity(8)),
             fundamental_data: Mutex::new(Vec::with_capacity(4)),
             histogram_data: Mutex::new(Vec::with_capacity(4)),
+            historical_ticks: Mutex::new(Vec::with_capacity(4)),
+            real_time_bars: Mutex::new(Vec::with_capacity(64)),
             historical_schedules: Mutex::new(Vec::with_capacity(4)),
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             market_rules: Mutex::new(Vec::new()),
@@ -270,6 +274,18 @@ impl SharedState {
     /// Drain all pending histogram data responses.
     pub fn drain_histogram_data(&self) -> Vec<(u32, Vec<HistogramEntry>)> {
         let mut lock = self.histogram_data.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending historical tick responses: (req_id, data, what_to_show, done).
+    pub fn drain_historical_ticks(&self) -> Vec<(u32, HistoricalTickData, String, bool)> {
+        let mut lock = self.historical_ticks.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending real-time bars.
+    pub fn drain_real_time_bars(&self) -> Vec<(u32, RealTimeBar)> {
+        let mut lock = self.real_time_bars.lock().unwrap();
         std::mem::take(&mut *lock)
     }
 
@@ -396,6 +412,14 @@ impl SharedState {
 
     pub(crate) fn push_histogram_data(&self, req_id: u32, entries: Vec<HistogramEntry>) {
         self.histogram_data.lock().unwrap().push((req_id, entries));
+    }
+
+    pub(crate) fn push_historical_ticks(&self, req_id: u32, data: HistoricalTickData, what_to_show: String, done: bool) {
+        self.historical_ticks.lock().unwrap().push((req_id, data, what_to_show, done));
+    }
+
+    pub(crate) fn push_real_time_bar(&self, req_id: u32, bar: RealTimeBar) {
+        self.real_time_bars.lock().unwrap().push((req_id, bar));
     }
 
     pub(crate) fn push_historical_schedule(&self, req_id: u32, response: HistoricalScheduleResponse) {

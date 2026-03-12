@@ -674,10 +674,18 @@ impl EClient {
         ignore_size: bool,
         misc_options: Vec<PyObject>,
     ) -> PyResult<()> {
-        // Historical ticks use a different HMDS query format not yet implemented.
-        let _ = (req_id, contract, start_date_time, end_date_time, number_of_ticks,
-                 what_to_show, use_rth, ignore_size, misc_options);
-        log::warn!("req_historical_ticks: not yet implemented in engine");
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        let _ = (ignore_size, misc_options);
+        tx.send(ControlCommand::FetchHistoricalTicks {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            start_date_time: start_date_time.to_string(),
+            end_date_time: end_date_time.to_string(),
+            number_of_ticks: number_of_ticks as u32,
+            what_to_show: what_to_show.to_string(),
+            use_rth: use_rth != 0,
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
     }
 
@@ -692,15 +700,25 @@ impl EClient {
         use_rth: i32,
         real_time_bars_options: Vec<PyObject>,
     ) -> PyResult<()> {
-        // Real-time bars use a streaming HMDS subscription not yet implemented.
-        let _ = (req_id, contract, bar_size, what_to_show, use_rth, real_time_bars_options);
-        log::warn!("req_real_time_bars: not yet implemented in engine");
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        let _ = (bar_size, real_time_bars_options);
+        tx.send(ControlCommand::SubscribeRealTimeBar {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            symbol: contract.symbol.clone(),
+            what_to_show: what_to_show.to_string(),
+            use_rth: use_rth != 0,
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
     }
 
     /// Cancel real-time bars.
     fn cancel_real_time_bars(&self, req_id: i64) -> PyResult<()> {
-        let _ = req_id;
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::CancelRealTimeBar { req_id: req_id as u32 })
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
     }
 
@@ -1551,6 +1569,60 @@ impl EClient {
                 }).collect();
                 let py_list = pyo3::types::PyList::new(py, tuples)?;
                 self.wrapper.call_method1(py, "histogram_data", (req_id as i64, py_list))?;
+            }
+
+            // Drain historical ticks -> historical_ticks / historical_ticks_bid_ask / historical_ticks_last
+            let hist_ticks = shared.drain_historical_ticks();
+            for (req_id, data, _what, done) in hist_ticks {
+                match data {
+                    crate::types::HistoricalTickData::Midpoint(ticks) => {
+                        let py_ticks: Vec<Bound<'_, pyo3::types::PyTuple>> = ticks.iter().map(|t| {
+                            pyo3::types::PyTuple::new(py, &[
+                                t.time.as_str().into_pyobject(py).unwrap().into_any(),
+                                t.price.into_pyobject(py).unwrap().into_any(),
+                            ]).unwrap()
+                        }).collect();
+                        let list = pyo3::types::PyList::new(py, py_ticks)?;
+                        self.wrapper.call_method1(py, "historical_ticks", (req_id as i64, list, done))?;
+                    }
+                    crate::types::HistoricalTickData::Last(ticks) => {
+                        let py_ticks: Vec<Bound<'_, pyo3::types::PyTuple>> = ticks.iter().map(|t| {
+                            pyo3::types::PyTuple::new(py, &[
+                                t.time.as_str().into_pyobject(py).unwrap().into_any(),
+                                t.price.into_pyobject(py).unwrap().into_any(),
+                                t.size.into_pyobject(py).unwrap().into_any(),
+                                t.exchange.as_str().into_pyobject(py).unwrap().into_any(),
+                                t.special_conditions.as_str().into_pyobject(py).unwrap().into_any(),
+                            ]).unwrap()
+                        }).collect();
+                        let list = pyo3::types::PyList::new(py, py_ticks)?;
+                        self.wrapper.call_method1(py, "historical_ticks_last", (req_id as i64, list, done))?;
+                    }
+                    crate::types::HistoricalTickData::BidAsk(ticks) => {
+                        let py_ticks: Vec<Bound<'_, pyo3::types::PyTuple>> = ticks.iter().map(|t| {
+                            pyo3::types::PyTuple::new(py, &[
+                                t.time.as_str().into_pyobject(py).unwrap().into_any(),
+                                t.bid_price.into_pyobject(py).unwrap().into_any(),
+                                t.ask_price.into_pyobject(py).unwrap().into_any(),
+                                t.bid_size.into_pyobject(py).unwrap().into_any(),
+                                t.ask_size.into_pyobject(py).unwrap().into_any(),
+                            ]).unwrap()
+                        }).collect();
+                        let list = pyo3::types::PyList::new(py, py_ticks)?;
+                        self.wrapper.call_method1(py, "historical_ticks_bid_ask", (req_id as i64, list, done))?;
+                    }
+                }
+            }
+
+            // Drain real-time bars -> real_time_bar
+            let rtbars = shared.drain_real_time_bars();
+            for (req_id, bar) in rtbars {
+                self.wrapper.call_method1(py, "real_time_bar", (
+                    req_id as i64,
+                    bar.timestamp as i64,
+                    bar.open, bar.high, bar.low, bar.close,
+                    bar.volume, bar.wap, bar.count,
+                ))?;
             }
 
             // Drain historical schedules -> historical_schedule
