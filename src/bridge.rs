@@ -13,6 +13,8 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use crate::control::historical::{HistoricalResponse, HeadTimestampResponse};
 use crate::control::contracts::{ContractDefinition, SymbolMatch};
+use crate::control::scanner::ScannerResult;
+use crate::control::news::NewsHeadline;
 use crate::types::*;
 
 /// Events emitted by the IB engine.
@@ -106,6 +108,11 @@ pub struct SharedState {
     contract_details: Mutex<Vec<(u32, ContractDefinition)>>,
     contract_details_end: Mutex<Vec<u32>>,
     matching_symbols: Mutex<Vec<(u32, Vec<SymbolMatch>)>>,
+    scanner_params: Mutex<Vec<String>>,
+    scanner_data: Mutex<Vec<(u32, ScannerResult)>>,
+    historical_news: Mutex<Vec<(u32, Vec<NewsHeadline>, bool)>>,
+    news_articles: Mutex<Vec<(u32, i32, String)>>,
+    fundamental_data: Mutex<Vec<(u32, String)>>,
     /// Position info (conId → PositionInfo) for reqPositions and P&L.
     position_infos: Mutex<HashMap<i64, PositionInfo>>,
     positions: [AtomicU64; MAX_INSTRUMENTS],
@@ -130,6 +137,11 @@ impl SharedState {
             contract_details: Mutex::new(Vec::with_capacity(16)),
             contract_details_end: Mutex::new(Vec::with_capacity(8)),
             matching_symbols: Mutex::new(Vec::with_capacity(8)),
+            scanner_params: Mutex::new(Vec::new()),
+            scanner_data: Mutex::new(Vec::with_capacity(8)),
+            historical_news: Mutex::new(Vec::with_capacity(8)),
+            news_articles: Mutex::new(Vec::with_capacity(8)),
+            fundamental_data: Mutex::new(Vec::with_capacity(4)),
             position_infos: Mutex::new(HashMap::new()),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
             account: Mutex::new(AccountState::default()),
@@ -215,6 +227,36 @@ impl SharedState {
         std::mem::take(&mut *lock)
     }
 
+    /// Drain all pending scanner parameter XMLs.
+    pub fn drain_scanner_params(&self) -> Vec<String> {
+        let mut lock = self.scanner_params.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending scanner data results.
+    pub fn drain_scanner_data(&self) -> Vec<(u32, ScannerResult)> {
+        let mut lock = self.scanner_data.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending historical news responses.
+    pub fn drain_historical_news(&self) -> Vec<(u32, Vec<NewsHeadline>, bool)> {
+        let mut lock = self.historical_news.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending news articles.
+    pub fn drain_news_articles(&self) -> Vec<(u32, i32, String)> {
+        let mut lock = self.news_articles.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending fundamental data responses.
+    pub fn drain_fundamental_data(&self) -> Vec<(u32, String)> {
+        let mut lock = self.fundamental_data.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
     /// Get all position infos (for reqPositions).
     pub fn position_infos(&self) -> Vec<PositionInfo> {
         self.position_infos.lock().unwrap().values().copied().collect()
@@ -292,6 +334,26 @@ impl SharedState {
 
     pub(crate) fn push_matching_symbols(&self, req_id: u32, matches: Vec<SymbolMatch>) {
         self.matching_symbols.lock().unwrap().push((req_id, matches));
+    }
+
+    pub(crate) fn push_scanner_params(&self, xml: String) {
+        self.scanner_params.lock().unwrap().push(xml);
+    }
+
+    pub(crate) fn push_scanner_data(&self, req_id: u32, result: ScannerResult) {
+        self.scanner_data.lock().unwrap().push((req_id, result));
+    }
+
+    pub(crate) fn push_historical_news(&self, req_id: u32, headlines: Vec<NewsHeadline>, has_more: bool) {
+        self.historical_news.lock().unwrap().push((req_id, headlines, has_more));
+    }
+
+    pub(crate) fn push_news_article(&self, req_id: u32, article_type: i32, article_text: String) {
+        self.news_articles.lock().unwrap().push((req_id, article_type, article_text));
+    }
+
+    pub(crate) fn push_fundamental_data(&self, req_id: u32, data: String) {
+        self.fundamental_data.lock().unwrap().push((req_id, data));
     }
 
     pub(crate) fn set_position_info(&self, info: PositionInfo) {

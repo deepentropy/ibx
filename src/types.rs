@@ -828,6 +828,41 @@ pub enum ControlCommand {
     CancelHeadTimestamp { req_id: u32 },
     /// Search for matching symbols via CCP.
     FetchMatchingSymbols { req_id: u32, pattern: String },
+    /// Request scanner parameter XML via HMDS.
+    FetchScannerParams,
+    /// Subscribe to a scanner scan via HMDS.
+    SubscribeScanner {
+        req_id: u32,
+        instrument: String,
+        location_code: String,
+        scan_code: String,
+        max_items: u32,
+    },
+    /// Cancel a scanner subscription.
+    CancelScanner { req_id: u32 },
+    /// Request historical news via HMDS.
+    FetchHistoricalNews {
+        req_id: u32,
+        con_id: u32,
+        provider_codes: String,
+        start_time: String,
+        end_time: String,
+        max_results: u32,
+    },
+    /// Request a news article via HMDS.
+    FetchNewsArticle {
+        req_id: u32,
+        provider_code: String,
+        article_id: String,
+    },
+    /// Request fundamental data via HMDS.
+    FetchFundamentalData {
+        req_id: u32,
+        con_id: u32,
+        report_type: String,
+    },
+    /// Cancel fundamental data request.
+    CancelFundamentalData { req_id: u32 },
     /// Graceful shutdown.
     Shutdown,
 }

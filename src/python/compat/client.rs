@@ -739,6 +739,243 @@ impl EClient {
         Ok(())
     }
 
+    // ── Tier 2: Scanner ──
+
+    /// Request scanner subscription.
+    #[pyo3(signature = (req_id, subscription, scanner_subscription_options=Vec::new()))]
+    fn req_scanner_subscription(
+        &self,
+        req_id: i64,
+        subscription: PyObject,
+        scanner_subscription_options: Vec<PyObject>,
+    ) -> PyResult<()> {
+        let _ = scanner_subscription_options;
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        // Extract fields from the subscription object
+        Python::with_gil(|py| {
+            let instrument = subscription.getattr(py, "instrument")
+                .and_then(|v| v.extract::<String>(py)).unwrap_or_else(|_| "STK".to_string());
+            let location_code = subscription.getattr(py, "locationCode")
+                .and_then(|v| v.extract::<String>(py)).unwrap_or_else(|_| "STK.US.MAJOR".to_string());
+            let scan_code = subscription.getattr(py, "scanCode")
+                .and_then(|v| v.extract::<String>(py)).unwrap_or_else(|_| "TOP_PERC_GAIN".to_string());
+            let max_items = subscription.getattr(py, "numberOfRows")
+                .and_then(|v| v.extract::<u32>(py)).unwrap_or(50);
+            tx.send(ControlCommand::SubscribeScanner {
+                req_id: req_id as u32, instrument, location_code, scan_code, max_items,
+            }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))
+        })
+    }
+
+    /// Cancel scanner subscription.
+    fn cancel_scanner_subscription(&self, req_id: i64) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::CancelScanner { req_id: req_id as u32 })
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    /// Request scanner parameters XML.
+    fn req_scanner_parameters(&self) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::FetchScannerParams)
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    // ── Tier 2: News ──
+
+    /// Request news providers.
+    fn req_news_providers(&self, py: Python<'_>) -> PyResult<()> {
+        // News providers are typically cached by the gateway.
+        // Return an empty list for now — the callback signature is satisfied.
+        let empty_list = pyo3::types::PyList::empty(py);
+        self.wrapper.call_method1(py, "news_providers", (empty_list.as_any(),))?;
+        Ok(())
+    }
+
+    /// Request a news article.
+    #[pyo3(signature = (req_id, provider_code, article_id, news_article_options=Vec::new()))]
+    fn req_news_article(
+        &self,
+        req_id: i64,
+        provider_code: &str,
+        article_id: &str,
+        news_article_options: Vec<PyObject>,
+    ) -> PyResult<()> {
+        let _ = news_article_options;
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::FetchNewsArticle {
+            req_id: req_id as u32,
+            provider_code: provider_code.to_string(),
+            article_id: article_id.to_string(),
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    /// Request historical news.
+    #[pyo3(signature = (req_id, con_id, provider_codes, start_date_time, end_date_time, total_results, historical_news_options=Vec::new()))]
+    fn req_historical_news(
+        &self,
+        req_id: i64,
+        con_id: i64,
+        provider_codes: &str,
+        start_date_time: &str,
+        end_date_time: &str,
+        total_results: i32,
+        historical_news_options: Vec<PyObject>,
+    ) -> PyResult<()> {
+        let _ = historical_news_options;
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::FetchHistoricalNews {
+            req_id: req_id as u32,
+            con_id: con_id as u32,
+            provider_codes: provider_codes.to_string(),
+            start_time: start_date_time.to_string(),
+            end_time: end_date_time.to_string(),
+            max_results: total_results as u32,
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    // ── Tier 2: Fundamental Data ──
+
+    /// Request fundamental data.
+    #[pyo3(signature = (req_id, contract, report_type, fundamental_data_options=Vec::new()))]
+    fn req_fundamental_data(
+        &self,
+        req_id: i64,
+        contract: &Contract,
+        report_type: &str,
+        fundamental_data_options: Vec<PyObject>,
+    ) -> PyResult<()> {
+        let _ = fundamental_data_options;
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::FetchFundamentalData {
+            req_id: req_id as u32,
+            con_id: contract.con_id as u32,
+            report_type: report_type.to_string(),
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    /// Cancel fundamental data.
+    fn cancel_fundamental_data(&self, req_id: i64) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::CancelFundamentalData { req_id: req_id as u32 })
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    // ── Tier 2: Options Calculations (stubs) ──
+
+    /// Calculate implied volatility.
+    #[pyo3(signature = (req_id, contract, option_price, under_price, implied_vol_options=Vec::new()))]
+    fn calculate_implied_volatility(
+        &self, req_id: i64, contract: &Contract, option_price: f64,
+        under_price: f64, implied_vol_options: Vec<PyObject>,
+    ) -> PyResult<()> {
+        let _ = (req_id, contract, option_price, under_price, implied_vol_options);
+        log::warn!("calculate_implied_volatility: not yet implemented in engine");
+        Ok(())
+    }
+
+    /// Calculate option price.
+    #[pyo3(signature = (req_id, contract, volatility, under_price, opt_prc_options=Vec::new()))]
+    fn calculate_option_price(
+        &self, req_id: i64, contract: &Contract, volatility: f64,
+        under_price: f64, opt_prc_options: Vec<PyObject>,
+    ) -> PyResult<()> {
+        let _ = (req_id, contract, volatility, under_price, opt_prc_options);
+        log::warn!("calculate_option_price: not yet implemented in engine");
+        Ok(())
+    }
+
+    /// Cancel implied volatility calculation.
+    fn cancel_calculate_implied_volatility(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        Ok(())
+    }
+
+    /// Cancel option price calculation.
+    fn cancel_calculate_option_price(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        Ok(())
+    }
+
+    /// Exercise options.
+    #[pyo3(signature = (req_id, contract, exercise_action, exercise_quantity, account, _override))]
+    fn exercise_options(
+        &self, req_id: i64, contract: &Contract, exercise_action: i32,
+        exercise_quantity: i32, account: &str, _override: i32,
+    ) -> PyResult<()> {
+        let _ = (req_id, contract, exercise_action, exercise_quantity, account, _override);
+        log::warn!("exercise_options: not yet implemented in engine");
+        Ok(())
+    }
+
+    // ── Tier 2: News Bulletins (stubs) ──
+
+    /// Subscribe to news bulletins.
+    #[pyo3(signature = (all_msgs=true))]
+    fn req_news_bulletins(&self, all_msgs: bool) -> PyResult<()> {
+        let _ = all_msgs;
+        log::warn!("req_news_bulletins: not yet implemented in engine");
+        Ok(())
+    }
+
+    /// Cancel news bulletins.
+    fn cancel_news_bulletins(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    // ── Tier 2: Managed Accounts ──
+
+    /// Request managed accounts list.
+    fn req_managed_accts(&self, py: Python<'_>) -> PyResult<()> {
+        self.wrapper.call_method1(py, "managed_accounts", (self.account_id.as_str(),))?;
+        Ok(())
+    }
+
+    // ── Tier 2: Multi-Account (stubs) ──
+
+    /// Request account updates for multiple accounts/models.
+    #[pyo3(signature = (req_id, account, model_code, ledger_and_nlv=false))]
+    fn req_account_updates_multi(
+        &self, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
+    ) -> PyResult<()> {
+        let _ = (req_id, account, model_code, ledger_and_nlv);
+        log::warn!("req_account_updates_multi: not yet implemented in engine");
+        Ok(())
+    }
+
+    /// Cancel multi-account updates.
+    fn cancel_account_updates_multi(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        Ok(())
+    }
+
+    /// Request positions across multiple accounts/models.
+    #[pyo3(signature = (req_id, account, model_code))]
+    fn req_positions_multi(&self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
+        let _ = (req_id, account, model_code);
+        log::warn!("req_positions_multi: not yet implemented in engine");
+        Ok(())
+    }
+
+    /// Cancel multi-account positions.
+    fn cancel_positions_multi(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        Ok(())
+    }
+
     /// Run the event loop. Polls bridge queues and dispatches to EWrapper callbacks.
     /// Takes `&self` so the main thread can call req/cancel methods concurrently.
     fn run(&self, py: Python<'_>) -> PyResult<()> {
@@ -1037,6 +1274,58 @@ impl EClient {
                 }).collect();
                 let list = pyo3::types::PyList::new(py, &descriptions)?;
                 self.wrapper.call_method1(py, "symbol_samples", (req_id as i64, list.as_any()))?;
+            }
+
+            // Drain scanner params -> scannerParameters
+            let scanner_params = shared.drain_scanner_params();
+            for xml in scanner_params {
+                self.wrapper.call_method1(py, "scanner_parameters", (xml.as_str(),))?;
+            }
+
+            // Drain scanner data -> scannerData + scannerDataEnd
+            let scanner_results = shared.drain_scanner_data();
+            for (req_id, result) in scanner_results {
+                for (rank, &con_id) in result.con_ids.iter().enumerate() {
+                    let cd = super::contract::ContractDetails::default();
+                    let cd_py = Py::new(py, cd)?.into_any();
+                    self.wrapper.call_method(
+                        py, "scanner_data",
+                        (req_id as i64, rank as i32, &cd_py, "", "", "", ""),
+                        None,
+                    )?;
+                    let _ = con_id;
+                }
+                self.wrapper.call_method1(py, "scanner_data_end", (req_id as i64,))?;
+            }
+
+            // Drain historical news -> historicalNews + historicalNewsEnd
+            let news_results = shared.drain_historical_news();
+            for (req_id, headlines, has_more) in news_results {
+                for h in &headlines {
+                    self.wrapper.call_method(
+                        py, "historical_news",
+                        (req_id as i64, h.time.as_str(), h.provider_code.as_str(),
+                         h.article_id.as_str(), h.headline.as_str()),
+                        None,
+                    )?;
+                }
+                self.wrapper.call_method1(py, "historical_news_end", (req_id as i64, has_more))?;
+            }
+
+            // Drain news articles -> newsArticle
+            let articles = shared.drain_news_articles();
+            for (req_id, article_type, text) in articles {
+                self.wrapper.call_method(
+                    py, "news_article",
+                    (req_id as i64, article_type, text.as_str()),
+                    None,
+                )?;
+            }
+
+            // Drain fundamental data -> fundamentalData
+            let fundamentals = shared.drain_fundamental_data();
+            for (req_id, data) in fundamentals {
+                self.wrapper.call_method1(py, "fundamental_data", (req_id as i64, data.as_str()))?;
             }
 
             // Account state -> updateAccountValue

@@ -73,6 +73,18 @@ pub struct HotLoop {
     pending_matching_symbols: Vec<u32>,
     /// Next CCP sequence number for matching symbols.
     next_ccp_seq: u32,
+    /// Whether a scanner params request is pending.
+    pending_scanner_params: bool,
+    /// Pending scanner subscriptions: scan_id → req_id.
+    pending_scanner: Vec<(String, u32)>,
+    /// Next scanner subscription ID counter.
+    next_scanner_id: u32,
+    /// Pending historical news requests: query_id → req_id.
+    pending_news: Vec<(String, u32)>,
+    /// Pending news article requests: query_id → req_id.
+    pending_articles: Vec<(String, u32)>,
+    /// Pending fundamental data requests: query_id → req_id.
+    pending_fundamental: Vec<(String, u32)>,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -146,6 +158,12 @@ impl HotLoop {
             pending_secdef: Vec::new(),
             pending_matching_symbols: Vec::new(),
             next_ccp_seq: 1,
+            pending_scanner_params: false,
+            pending_scanner: Vec::new(),
+            next_scanner_id: 1,
+            pending_news: Vec::new(),
+            pending_articles: Vec::new(),
+            pending_fundamental: Vec::new(),
         }
     }
 
@@ -2457,6 +2475,32 @@ impl HotLoop {
                 ControlCommand::FetchMatchingSymbols { req_id, pattern } => {
                     self.send_matching_symbols_request(req_id, &pattern);
                 }
+                ControlCommand::FetchScannerParams => {
+                    self.send_scanner_params_request();
+                }
+                ControlCommand::SubscribeScanner { req_id, instrument, location_code, scan_code, max_items } => {
+                    self.send_scanner_subscribe(req_id, &instrument, &location_code, &scan_code, max_items);
+                }
+                ControlCommand::CancelScanner { req_id } => {
+                    if let Some(pos) = self.pending_scanner.iter().position(|(_, rid)| *rid == req_id) {
+                        let (scan_id, _) = self.pending_scanner.remove(pos);
+                        self.send_scanner_cancel(&scan_id);
+                    }
+                }
+                ControlCommand::FetchHistoricalNews { req_id, con_id, provider_codes, start_time, end_time, max_results } => {
+                    self.send_historical_news_request(req_id, con_id, &provider_codes, &start_time, &end_time, max_results);
+                }
+                ControlCommand::FetchNewsArticle { req_id, provider_code, article_id } => {
+                    self.send_news_article_request(req_id, &provider_code, &article_id);
+                }
+                ControlCommand::FetchFundamentalData { req_id, con_id, report_type } => {
+                    self.send_fundamental_data_request(req_id, con_id, &report_type);
+                }
+                ControlCommand::CancelFundamentalData { req_id } => {
+                    if let Some(pos) = self.pending_fundamental.iter().position(|(_, rid)| *rid == req_id) {
+                        self.pending_fundamental.remove(pos);
+                    }
+                }
                 ControlCommand::Shutdown => {
                     // Unsubscribe all active market data before stopping
                     let instruments: Vec<InstrumentId> = self.instrument_md_reqs
@@ -2636,6 +2680,15 @@ fn format_qty(qty: Qty) -> String {
 }
 
 /// Find the body content after a specific tag marker in a FIX/binary message.
+/// Extract a simple XML tag value: `<tag>value</tag>` -> `value`.
+fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml[start..end].to_string())
+}
+
 fn find_body_after_tag<'a>(msg: &'a [u8], tag_marker: &[u8]) -> Option<&'a [u8]> {
     msg.windows(tag_marker.len())
         .position(|w| w == tag_marker)
@@ -2958,6 +3011,89 @@ impl HotLoop {
                     // Try parsing as TBT ticker ID assignment
                     else if let Some(ticker_id) = crate::control::historical::parse_ticker_id(xml_tag) {
                         log::info!("HMDS TBT ticker_id assigned: {}", ticker_id);
+                    }
+                }
+            }
+            "U" => {
+                // IB custom message — route by 6040 comm type
+                if let Some(comm) = parsed.get(&6040) {
+                    match comm.as_str() {
+                        "10002" => {
+                            // Scanner parameters response
+                            if let Some(xml) = parsed.get(&6118) {
+                                self.pending_scanner_params = false;
+                                self.shared.push_scanner_params(xml.clone());
+                            }
+                        }
+                        "10005" => {
+                            // Scanner data response
+                            if let Some(xml) = parsed.get(&6118) {
+                                if let Some(result) = crate::control::scanner::parse_scanner_response(xml) {
+                                    // Match to first pending scanner subscription
+                                    if let Some((_, req_id)) = self.pending_scanner.first() {
+                                        let req_id = *req_id;
+                                        self.shared.push_scanner_data(req_id, result);
+                                    }
+                                }
+                            }
+                        }
+                        "10032" => {
+                            // News response (historical news or article)
+                            if let Some(xml) = parsed.get(&6118) {
+                                // Check if it's article data (contains raw data in tag 96)
+                                if let Some(raw) = parsed.get(&96) {
+                                    // News article response
+                                    if let Some(pos) = self.pending_articles.iter().position(|_| true) {
+                                        let (_, req_id) = self.pending_articles.remove(pos);
+                                        self.shared.push_news_article(req_id, 0, raw.clone());
+                                    }
+                                } else {
+                                    // Historical news headlines
+                                    // Parse headlines from XML
+                                    let mut headlines = Vec::new();
+                                    let has_more = xml.contains("<hasMore>true</hasMore>");
+                                    // Simple XML parsing for news headlines
+                                    let mut search = 0usize;
+                                    while let Some(start) = xml[search..].find("<item>") {
+                                        let abs_start = search + start;
+                                        if let Some(end) = xml[abs_start..].find("</item>") {
+                                            let item = &xml[abs_start..abs_start + end + 7];
+                                            let time = extract_xml_value(item, "time").unwrap_or_default();
+                                            let provider = extract_xml_value(item, "providerCode").unwrap_or_default();
+                                            let article_id = extract_xml_value(item, "articleId").unwrap_or_default();
+                                            let headline = extract_xml_value(item, "headline").unwrap_or_default();
+                                            headlines.push(crate::control::news::NewsHeadline {
+                                                time, provider_code: provider, article_id, headline,
+                                            });
+                                            search = abs_start + end + 7;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    if let Some(pos) = self.pending_news.iter().position(|_| true) {
+                                        let (_, req_id) = self.pending_news.remove(pos);
+                                        self.shared.push_historical_news(req_id, headlines, has_more);
+                                    }
+                                }
+                            }
+                        }
+                        "10012" => {
+                            // Fundamental data response
+                            if let Some(xml) = parsed.get(&6118) {
+                                // Check for gzip-compressed data in tag 96
+                                let data = if let Some(raw) = parsed.get(&96) {
+                                    crate::control::fundamental::decompress_fundamental_data(raw.as_bytes())
+                                        .unwrap_or_else(|| raw.clone())
+                                } else {
+                                    xml.clone()
+                                };
+                                if let Some(pos) = self.pending_fundamental.iter().position(|_| true) {
+                                    let (_, req_id) = self.pending_fundamental.remove(pos);
+                                    self.shared.push_fundamental_data(req_id, data);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -3350,6 +3486,143 @@ impl HotLoop {
             log::info!("Sent matching symbols request: req_id={} pattern='{}'", req_id, pattern);
         }
         self.pending_matching_symbols.push(req_id);
+    }
+
+    /// Send a scanner parameters request to HMDS.
+    fn send_scanner_params_request(&mut self) {
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let msg = crate::control::scanner::build_scanner_params_request(self.next_hmds_query_id);
+            self.next_hmds_query_id += 1;
+            let _ = conn.send_raw(&msg);
+            self.pending_scanner_params = true;
+            self.hb.last_hmds_sent = Instant::now();
+            log::info!("Sent scanner params request");
+        }
+    }
+
+    /// Send a scanner subscription request to HMDS.
+    fn send_scanner_subscribe(&mut self, req_id: u32, instrument: &str, location_code: &str, scan_code: &str, max_items: u32) {
+        let sub = crate::control::scanner::ScannerSubscription {
+            instrument: instrument.to_string(),
+            location_code: location_code.to_string(),
+            scan_code: scan_code.to_string(),
+            max_items,
+        };
+        let xml = crate::control::scanner::build_scanner_subscribe_xml(&sub);
+        let scan_id = format!("APISCAN{}:{}", self.next_scanner_id, req_id);
+        self.next_scanner_id += 1;
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "10003"),
+                (6118, &xml),
+            ]);
+            self.hb.last_hmds_sent = Instant::now();
+            log::info!("Sent scanner subscribe: req_id={} scan_code={}", req_id, scan_code);
+        }
+        self.pending_scanner.push((scan_id, req_id));
+    }
+
+    /// Send a scanner cancel to HMDS.
+    fn send_scanner_cancel(&mut self, scan_id: &str) {
+        let xml = crate::control::scanner::build_scanner_cancel_xml(scan_id);
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "10004"),
+                (6118, &xml),
+            ]);
+            self.hb.last_hmds_sent = Instant::now();
+            log::info!("Sent scanner cancel: scan_id={}", scan_id);
+        }
+    }
+
+    /// Send a historical news request to HMDS.
+    fn send_historical_news_request(&mut self, req_id: u32, con_id: u32, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32) {
+        let req = crate::control::news::HistoricalNewsRequest {
+            con_id,
+            provider_codes: provider_codes.to_string(),
+            start_time: start_time.to_string(),
+            end_time: end_time.to_string(),
+            max_results,
+        };
+        let xml = crate::control::news::build_historical_news_xml(&req);
+        let query_id = format!("news_{}", self.next_hmds_query_id);
+        self.next_hmds_query_id += 1;
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "10030"),
+                (6118, &xml),
+            ]);
+            self.hb.last_hmds_sent = Instant::now();
+            log::info!("Sent historical news request: req_id={} con_id={}", req_id, con_id);
+        }
+        self.pending_news.push((query_id, req_id));
+    }
+
+    /// Send a news article request to HMDS.
+    fn send_news_article_request(&mut self, req_id: u32, provider_code: &str, article_id: &str) {
+        let req = crate::control::news::NewsArticleRequest {
+            provider_code: provider_code.to_string(),
+            article_id: article_id.to_string(),
+        };
+        let xml = crate::control::news::build_article_request_xml(&req);
+        let query_id = format!("art_{}", self.next_hmds_query_id);
+        self.next_hmds_query_id += 1;
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "10030"),
+                (6118, &xml),
+            ]);
+            self.hb.last_hmds_sent = Instant::now();
+            log::info!("Sent news article request: req_id={} article={}", req_id, article_id);
+        }
+        self.pending_articles.push((query_id, req_id));
+    }
+
+    /// Send a fundamental data request to HMDS.
+    fn send_fundamental_data_request(&mut self, req_id: u32, con_id: u32, report_type: &str) {
+        let rt = match report_type {
+            "ReportSnapshot" | "snapshot" => crate::control::fundamental::ReportType::Snapshot,
+            "ReportFinSummary" | "finsum" => crate::control::fundamental::ReportType::FinancialSummary,
+            "ReportsFinStatements" | "finstat" => crate::control::fundamental::ReportType::FinancialStatements,
+            _ => crate::control::fundamental::ReportType::Snapshot,
+        };
+        let req = crate::control::fundamental::FundamentalRequest {
+            con_id,
+            sec_type: "STK",
+            currency: "USD",
+            report_type: rt,
+        };
+        let xml = crate::control::fundamental::build_fundamental_request_xml(&req);
+        let query_id = format!("fund_{}", self.next_hmds_query_id);
+        self.next_hmds_query_id += 1;
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "10010"),
+                (6118, &xml),
+            ]);
+            self.hb.last_hmds_sent = Instant::now();
+            log::info!("Sent fundamental data request: req_id={} con_id={}", req_id, con_id);
+        }
+        self.pending_fundamental.push((query_id, req_id));
     }
 
     /// Handle farm disconnect: clear stale subscription tracking, zero quotes, emit event.

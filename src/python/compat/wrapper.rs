@@ -197,6 +197,30 @@ impl EWrapper {
     ) {}
 
     fn security_definition_option_parameter_end(&self, _req_id: i64) {}
+
+    // ── Fundamental Data ──
+
+    fn fundamental_data(&self, _req_id: i64, _data: &str) {}
+
+    // ── News Bulletins ──
+
+    fn update_news_bulletin(&self, _msg_id: i64, _msg_type: i32, _message: &str, _orig_exchange: &str) {}
+
+    // ── Financial Advisor ──
+
+    fn receive_fa(&self, _fa_data_type: i32, _xml: &str) {}
+
+    fn replace_fa_end(&self, _req_id: i64, _text: &str) {}
+
+    // ── Multi-Account / Multi-Model ──
+
+    fn position_multi(&self, _req_id: i64, _account: &str, _model_code: &str, _contract: PyObject, _pos: f64, _avg_cost: f64) {}
+
+    fn position_multi_end(&self, _req_id: i64) {}
+
+    fn account_update_multi(&self, _req_id: i64, _account: &str, _model_code: &str, _key: &str, _value: &str, _currency: &str) {}
+
+    fn account_update_multi_end(&self, _req_id: i64) {}
 }
 
 /// Register EWrapper on the module.
