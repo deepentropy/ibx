@@ -39,9 +39,9 @@ use std::thread;
 use crossbeam_channel::Sender;
 
 use crate::api::types::{
-    self, Contract as ApiContract, Order as ApiOrder, TagValue as ApiTagValue,
-    BarData, ContractDetails, ContractDescription, Execution, OrderState,
-    TickAttrib, TickAttribLast, TickAttribBidAsk, PriceIncrement, CommissionReport,
+    Contract as ApiContract, Order as ApiOrder, TagValue as ApiTagValue,
+    BarData, ContractDetails, ContractDescription, Execution,
+    TickAttribLast, TickAttribBidAsk,
     PRICE_SCALE_F,
 };
 use crate::api::wrapper::Wrapper;

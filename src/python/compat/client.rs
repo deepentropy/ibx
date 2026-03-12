@@ -411,7 +411,7 @@ impl EClient {
         Ok(()) // positions delivered immediately, nothing to cancel
     }
 
-    /// Place an order. Routes to the appropriate submit_* based on order_type.
+    /// Place an order. Delegates to Rust API's order routing logic.
     fn place_order(&self, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
         if self.control_tx.is_none() {
             return Err(PyRuntimeError::new_err("Not connected"));
@@ -423,28 +423,29 @@ impl EClient {
             self.next_order_id.fetch_add(1, Ordering::Relaxed)
         };
 
-        // Find the instrument ID for this contract
         let instrument = self.find_or_register_instrument(contract)?;
         let tx = self.control_tx.as_ref().unwrap();
-        let side = order.side()?;
-        let qty = order.total_quantity as u32;
 
-        // Route based on order type
-        let order_type = order.order_type.to_uppercase();
+        // Convert Python Order to Rust API Order and use shared routing logic
+        let api_order = order.to_api();
+        let side = api_order.side().map_err(|e| PyRuntimeError::new_err(e))?;
+        let qty = api_order.total_quantity as u32;
+        let order_type = api_order.order_type.to_uppercase();
 
-        // Check for algo strategy
-        if !order.algo_strategy.is_empty() {
-            let algo = self.parse_algo_params(&order.algo_strategy, &order.algo_params)?;
-            let price = (order.lmt_price * PRICE_SCALE_F) as i64;
+        // Algo orders
+        if !api_order.algo_strategy.is_empty() {
+            let algo = crate::api::client::parse_algo_params(&api_order.algo_strategy, &api_order.algo_params)
+                .map_err(|e| PyRuntimeError::new_err(e))?;
+            let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
             tx.send(ControlCommand::Order(OrderRequest::SubmitAlgo {
                 order_id: oid, instrument, side, qty, price, algo,
             })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
             return Ok(());
         }
 
-        // Check for what-if
-        if order.what_if {
-            let price = (order.lmt_price * PRICE_SCALE_F) as i64;
+        // What-if orders
+        if api_order.what_if {
+            let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
             tx.send(ControlCommand::Order(OrderRequest::SubmitWhatIf {
                 order_id: oid, instrument, side, qty, price,
             })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -454,74 +455,74 @@ impl EClient {
         let req = match order_type.as_str() {
             "MKT" => OrderRequest::SubmitMarket { order_id: oid, instrument, side, qty },
             "LMT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                if order.has_extended_attrs() || order.tif != "DAY" {
+                let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
+                if api_order.has_extended_attrs() || api_order.tif != "DAY" {
                     OrderRequest::SubmitLimitEx {
                         order_id: oid, instrument, side, qty, price,
-                        tif: order.tif_byte(),
-                        attrs: order.attrs(),
+                        tif: api_order.tif_byte(),
+                        attrs: api_order.attrs(),
                     }
                 } else {
                     OrderRequest::SubmitLimit { order_id: oid, instrument, side, qty, price }
                 }
             }
             "STP" => {
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
+                let stop = (api_order.aux_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitStop { order_id: oid, instrument, side, qty, stop_price: stop }
             }
             "STP LMT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
+                let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
+                let stop = (api_order.aux_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitStopLimit { order_id: oid, instrument, side, qty, price, stop_price: stop }
             }
             "TRAIL" => {
-                if order.trailing_percent > 0.0 {
-                    let pct = (order.trailing_percent * 100.0) as u32; // convert to basis points
+                if api_order.trailing_percent > 0.0 {
+                    let pct = (api_order.trailing_percent * 100.0) as u32;
                     OrderRequest::SubmitTrailingStopPct { order_id: oid, instrument, side, qty, trail_pct: pct }
                 } else {
-                    let trail = (order.aux_price * PRICE_SCALE_F) as i64;
+                    let trail = (api_order.aux_price * PRICE_SCALE_F) as i64;
                     OrderRequest::SubmitTrailingStop { order_id: oid, instrument, side, qty, trail_amt: trail }
                 }
             }
             "TRAIL LIMIT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                let trail = (order.aux_price * PRICE_SCALE_F) as i64;
+                let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
+                let trail = (api_order.aux_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitTrailingStopLimit { order_id: oid, instrument, side, qty, price, trail_amt: trail }
             }
             "MOC" => OrderRequest::SubmitMoc { order_id: oid, instrument, side, qty },
             "LOC" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
+                let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitLoc { order_id: oid, instrument, side, qty, price }
             }
             "MIT" => {
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
+                let stop = (api_order.aux_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitMit { order_id: oid, instrument, side, qty, stop_price: stop }
             }
             "LIT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
+                let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
+                let stop = (api_order.aux_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitLit { order_id: oid, instrument, side, qty, price, stop_price: stop }
             }
             "MTL" => OrderRequest::SubmitMtl { order_id: oid, instrument, side, qty },
             "MKT PRT" => OrderRequest::SubmitMktPrt { order_id: oid, instrument, side, qty },
             "STP PRT" => {
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
+                let stop = (api_order.aux_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitStpPrt { order_id: oid, instrument, side, qty, stop_price: stop }
             }
             "REL" => {
-                let offset = (order.aux_price * PRICE_SCALE_F) as i64;
+                let offset = (api_order.aux_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitRel { order_id: oid, instrument, side, qty, offset }
             }
             "PEG MKT" => {
-                let offset = (order.aux_price * PRICE_SCALE_F) as i64;
+                let offset = (api_order.aux_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitPegMkt { order_id: oid, instrument, side, qty, offset }
             }
             "PEG MID" | "PEG MIDPT" => {
-                let offset = (order.aux_price * PRICE_SCALE_F) as i64;
+                let offset = (api_order.aux_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitPegMid { order_id: oid, instrument, side, qty, offset }
             }
             "MIDPX" | "MIDPRICE" => {
-                let cap = (order.lmt_price * PRICE_SCALE_F) as i64;
+                let cap = (api_order.lmt_price * PRICE_SCALE_F) as i64;
                 OrderRequest::SubmitMidPrice { order_id: oid, instrument, side, qty, price_cap: cap }
             }
             "SNAP MKT" => OrderRequest::SubmitSnapMkt { order_id: oid, instrument, side, qty },
@@ -529,7 +530,7 @@ impl EClient {
             "SNAP PRI" | "SNAP PRIM" => OrderRequest::SubmitSnapPri { order_id: oid, instrument, side, qty },
             "BOX TOP" => OrderRequest::SubmitMtl { order_id: oid, instrument, side, qty },
             _ => {
-                return Err(PyRuntimeError::new_err(format!("Unsupported order type: '{}'", order.order_type)));
+                return Err(PyRuntimeError::new_err(format!("Unsupported order type: '{}'", api_order.order_type)));
             }
         };
 
@@ -1830,86 +1831,6 @@ impl EClient {
         Ok(shared.instrument_count().saturating_sub(1))
     }
 
-    /// Parse algo strategy and params into AlgoParams.
-    fn parse_algo_params(&self, strategy: &str, params: &[TagValue]) -> PyResult<AlgoParams> {
-        let get = |key: &str| -> String {
-            params.iter()
-                .find(|tv| tv.tag == key)
-                .map(|tv| tv.value.clone())
-                .unwrap_or_default()
-        };
-        let get_f64 = |key: &str| -> f64 {
-            get(key).parse().unwrap_or(0.0)
-        };
-        let get_bool = |key: &str| -> bool {
-            let v = get(key);
-            v == "1" || v.eq_ignore_ascii_case("true")
-        };
-
-        match strategy.to_lowercase().as_str() {
-            "vwap" => Ok(AlgoParams::Vwap {
-                max_pct_vol: get_f64("maxPctVol"),
-                no_take_liq: get_bool("noTakeLiq"),
-                allow_past_end_time: get_bool("allowPastEndTime"),
-                start_time: get("startTime"),
-                end_time: get("endTime"),
-            }),
-            "twap" => Ok(AlgoParams::Twap {
-                allow_past_end_time: get_bool("allowPastEndTime"),
-                start_time: get("startTime"),
-                end_time: get("endTime"),
-            }),
-            "arrivalpx" | "arrival_price" => {
-                let risk = match get("riskAversion").to_lowercase().as_str() {
-                    "get_done" | "getdone" => RiskAversion::GetDone,
-                    "aggressive" => RiskAversion::Aggressive,
-                    "passive" => RiskAversion::Passive,
-                    _ => RiskAversion::Neutral,
-                };
-                Ok(AlgoParams::ArrivalPx {
-                    max_pct_vol: get_f64("maxPctVol"),
-                    risk_aversion: risk,
-                    allow_past_end_time: get_bool("allowPastEndTime"),
-                    force_completion: get_bool("forceCompletion"),
-                    start_time: get("startTime"),
-                    end_time: get("endTime"),
-                })
-            }
-            "closepx" | "close_price" => {
-                let risk = match get("riskAversion").to_lowercase().as_str() {
-                    "get_done" | "getdone" => RiskAversion::GetDone,
-                    "aggressive" => RiskAversion::Aggressive,
-                    "passive" => RiskAversion::Passive,
-                    _ => RiskAversion::Neutral,
-                };
-                Ok(AlgoParams::ClosePx {
-                    max_pct_vol: get_f64("maxPctVol"),
-                    risk_aversion: risk,
-                    force_completion: get_bool("forceCompletion"),
-                    start_time: get("startTime"),
-                })
-            }
-            "darkice" | "dark_ice" => Ok(AlgoParams::DarkIce {
-                allow_past_end_time: get_bool("allowPastEndTime"),
-                display_size: get("displaySize").parse().unwrap_or(100),
-                start_time: get("startTime"),
-                end_time: get("endTime"),
-            }),
-            "pctvol" | "pct_vol" => Ok(AlgoParams::PctVol {
-                pct_vol: get_f64("pctVol"),
-                no_take_liq: get_bool("noTakeLiq"),
-                start_time: get("startTime"),
-                end_time: get("endTime"),
-            }),
-            "adaptive" => {
-                // Adaptive is handled differently — it's a priority, not full algo
-                Err(PyRuntimeError::new_err(
-                    "Use order_type='LMT' with Adaptive strategy via the direct API's submit_adaptive()"
-                ))
-            }
-            _ => Err(PyRuntimeError::new_err(format!("Unsupported algo strategy: '{}'", strategy))),
-        }
-    }
 }
 
 /// Register EClient on the module.

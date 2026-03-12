@@ -253,67 +253,92 @@ impl Order {
     }
 }
 
-/// Convert an ibapi Order to the internal OrderRequest.
-/// Returns (OrderRequest, Option<order_id_override>).
+/// Delegate conversion helpers to the Rust API types.
 impl Order {
-    /// Parse the action string to Side.
+    /// Parse the action string to Side. Delegates to `api::Order::side()`.
     pub fn side(&self) -> PyResult<Side> {
-        match self.action.to_uppercase().as_str() {
-            "BUY" | "B" => Ok(Side::Buy),
-            "SELL" | "S" => Ok(Side::Sell),
-            "SSHORT" | "SS" => Ok(Side::ShortSell),
-            _ => Err(PyRuntimeError::new_err(format!("Invalid action '{}': use BUY or SELL", self.action))),
-        }
+        self.to_api().side()
+            .map_err(|e| PyRuntimeError::new_err(e))
     }
 
-    /// Parse the TIF string to FIX byte.
+    /// Parse the TIF string to FIX byte. Delegates to `api::Order::tif_byte()`.
     pub fn tif_byte(&self) -> u8 {
-        match self.tif.as_str() {
-            "GTC" => b'1',
-            "IOC" => b'3',
-            "FOK" => b'4',
-            "OPG" => b'2',
-            "GTD" | "DTC" => b'6',
-            "AUC" => b'8',
-            _ => b'0', // DAY
-        }
+        self.to_api().tif_byte()
     }
 
-    /// Build OrderAttrs from Order fields.
+    /// Build OrderAttrs from Order fields. Delegates to `api::Order::attrs()`.
     pub fn attrs(&self) -> OrderAttrs {
-        OrderAttrs {
-            display_size: self.display_size.max(0) as u32,
-            min_qty: self.min_qty.max(0) as u32,
-            hidden: self.hidden,
+        self.to_api().attrs()
+    }
+
+    /// Check if the order has any extended attributes set. Delegates to `api::Order::has_extended_attrs()`.
+    pub fn has_extended_attrs(&self) -> bool {
+        self.to_api().has_extended_attrs()
+    }
+}
+
+// ── Conversions between Python compat types and Rust API types ──
+
+impl Contract {
+    /// Convert to Rust API Contract.
+    pub fn to_api(&self) -> crate::api::types::Contract {
+        crate::api::types::Contract {
+            con_id: self.con_id,
+            symbol: self.symbol.clone(),
+            sec_type: self.sec_type.clone(),
+            exchange: self.exchange.clone(),
+            currency: self.currency.clone(),
+            last_trade_date_or_contract_month: self.last_trade_date_or_contract_month.clone(),
+            strike: self.strike,
+            right: self.right.clone(),
+            multiplier: self.multiplier.clone(),
+            local_symbol: self.local_symbol.clone(),
+            primary_exchange: self.primary_exchange.clone(),
+            trading_class: self.trading_class.clone(),
+        }
+    }
+}
+
+impl Order {
+    /// Convert to Rust API Order.
+    pub fn to_api(&self) -> crate::api::types::Order {
+        crate::api::types::Order {
+            order_id: self.order_id,
+            action: self.action.clone(),
+            total_quantity: self.total_quantity,
+            order_type: self.order_type.clone(),
+            lmt_price: self.lmt_price,
+            aux_price: self.aux_price,
+            tif: self.tif.clone(),
             outside_rth: self.outside_rth,
-            good_after: 0, // TODO: parse good_after_time string
-            good_till: 0,  // TODO: parse good_till_date string
-            oca_group: self.oca_group.parse().unwrap_or(0),
-            discretionary_amt: (self.discretionary_amt * PRICE_SCALE_F) as Price,
+            display_size: self.display_size,
+            min_qty: self.min_qty,
+            hidden: self.hidden,
+            good_after_time: self.good_after_time.clone(),
+            good_till_date: self.good_till_date.clone(),
+            oca_group: self.oca_group.clone(),
+            trailing_percent: self.trailing_percent,
+            algo_strategy: self.algo_strategy.clone(),
+            algo_params: self.algo_params.iter().map(|tv| crate::api::types::TagValue {
+                tag: tv.tag.clone(),
+                value: tv.value.clone(),
+            }).collect(),
+            what_if: self.what_if,
+            cash_qty: self.cash_qty,
+            parent_id: self.parent_id,
+            transmit: self.transmit,
+            discretionary_amt: self.discretionary_amt,
             sweep_to_fill: self.sweep_to_fill,
             all_or_none: self.all_or_none,
-            trigger_method: self.trigger_method as u8,
-            cash_qty: (self.cash_qty * PRICE_SCALE_F) as Price,
-            conditions: Vec::new(), // TODO: parse conditions from PyObject
-            conditions_cancel_order: self.conditions_cancel_order,
+            trigger_method: self.trigger_method,
+            adjusted_order_type: self.adjusted_order_type.clone(),
+            trigger_price: self.trigger_price,
+            adjusted_stop_price: self.adjusted_stop_price,
+            adjusted_stop_limit_price: self.adjusted_stop_limit_price,
+            conditions: Vec::new(), // TODO: convert PyObject conditions
             conditions_ignore_rth: self.conditions_ignore_rth,
+            conditions_cancel_order: self.conditions_cancel_order,
         }
-    }
-
-    /// Check if the order has any extended attributes set.
-    pub fn has_extended_attrs(&self) -> bool {
-        self.display_size > 0
-            || self.min_qty > 0
-            || self.hidden
-            || self.outside_rth
-            || !self.good_after_time.is_empty()
-            || !self.good_till_date.is_empty()
-            || !self.oca_group.is_empty()
-            || self.discretionary_amt > 0.0
-            || self.sweep_to_fill
-            || self.all_or_none
-            || self.trigger_method > 0
-            || self.cash_qty > 0.0
     }
 }
 
