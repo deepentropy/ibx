@@ -4,5 +4,7 @@
 //! C++ TWS API (EClientSocket / EWrapper) pattern.
 
 pub mod types;
+pub mod wrapper;
 
 pub use types::*;
+pub use wrapper::Wrapper;
