@@ -2,8 +2,8 @@
 //!
 //! Architecture:
 //! - `SharedState` holds SeqLock-protected quotes, concurrent event queues, and position/account state.
-//! - `Event` enum carries all events through a crossbeam channel for the `Client` API.
-//! - The HotLoop pushes to SharedState directly (no intermediate Strategy layer).
+//! - `Event` enum carries all events through a crossbeam channel for the `EClient` API.
+//! - The HotLoop pushes to SharedState directly.
 //! - External callers read snapshots and poll events without blocking the hot loop.
 
 use std::sync::atomic::{AtomicU64, Ordering};
