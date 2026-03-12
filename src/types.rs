@@ -824,6 +824,10 @@ pub enum ControlCommand {
     },
     /// Request contract details via CCP.
     FetchContractDetails { req_id: u32, con_id: i64 },
+    /// Cancel a head timestamp request.
+    CancelHeadTimestamp { req_id: u32 },
+    /// Search for matching symbols via CCP.
+    FetchMatchingSymbols { req_id: u32, pattern: String },
     /// Graceful shutdown.
     Shutdown,
 }

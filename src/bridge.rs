@@ -12,7 +12,7 @@ use std::cell::UnsafeCell;
 
 use std::collections::HashMap;
 use crate::control::historical::{HistoricalResponse, HeadTimestampResponse};
-use crate::control::contracts::ContractDefinition;
+use crate::control::contracts::{ContractDefinition, SymbolMatch};
 use crate::types::*;
 
 /// Events emitted by the IB engine.
@@ -105,6 +105,7 @@ pub struct SharedState {
     head_timestamps: Mutex<Vec<(u32, HeadTimestampResponse)>>,
     contract_details: Mutex<Vec<(u32, ContractDefinition)>>,
     contract_details_end: Mutex<Vec<u32>>,
+    matching_symbols: Mutex<Vec<(u32, Vec<SymbolMatch>)>>,
     /// Position info (conId → PositionInfo) for reqPositions and P&L.
     position_infos: Mutex<HashMap<i64, PositionInfo>>,
     positions: [AtomicU64; MAX_INSTRUMENTS],
@@ -128,6 +129,7 @@ impl SharedState {
             head_timestamps: Mutex::new(Vec::with_capacity(8)),
             contract_details: Mutex::new(Vec::with_capacity(16)),
             contract_details_end: Mutex::new(Vec::with_capacity(8)),
+            matching_symbols: Mutex::new(Vec::with_capacity(8)),
             position_infos: Mutex::new(HashMap::new()),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
             account: Mutex::new(AccountState::default()),
@@ -207,6 +209,12 @@ impl SharedState {
         std::mem::take(&mut *lock)
     }
 
+    /// Drain all pending matching symbol results.
+    pub fn drain_matching_symbols(&self) -> Vec<(u32, Vec<SymbolMatch>)> {
+        let mut lock = self.matching_symbols.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
     /// Get all position infos (for reqPositions).
     pub fn position_infos(&self) -> Vec<PositionInfo> {
         self.position_infos.lock().unwrap().values().copied().collect()
@@ -280,6 +288,10 @@ impl SharedState {
 
     pub(crate) fn push_contract_details_end(&self, req_id: u32) {
         self.contract_details_end.lock().unwrap().push(req_id);
+    }
+
+    pub(crate) fn push_matching_symbols(&self, req_id: u32, matches: Vec<SymbolMatch>) {
+        self.matching_symbols.lock().unwrap().push((req_id, matches));
     }
 
     pub(crate) fn set_position_info(&self, info: PositionInfo) {

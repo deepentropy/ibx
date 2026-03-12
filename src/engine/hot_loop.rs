@@ -69,6 +69,10 @@ pub struct HotLoop {
     pending_head_ts: Vec<(String, u32)>,
     /// Pending contract details requests: req_id.
     pending_secdef: Vec<u32>,
+    /// Pending matching symbols requests: req_id.
+    pending_matching_symbols: Vec<u32>,
+    /// Next CCP sequence number for matching symbols.
+    next_ccp_seq: u32,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -140,6 +144,8 @@ impl HotLoop {
             pending_historical: Vec::new(),
             pending_head_ts: Vec::new(),
             pending_secdef: Vec::new(),
+            pending_matching_symbols: Vec::new(),
+            next_ccp_seq: 1,
         }
     }
 
@@ -2025,8 +2031,18 @@ impl HotLoop {
             "U" => {
                 // IB custom message — route by 6040 comm type
                 if let Some(comm) = parsed.get(&6040) {
-                    if comm == "77" {
-                        self.handle_account_summary(&parsed);
+                    match comm.as_str() {
+                        "77" => self.handle_account_summary(&parsed),
+                        "186" => {
+                            // Matching symbols response
+                            if let Some(matches) = crate::control::contracts::parse_matching_symbols_response(msg) {
+                                if let Some(req_id) = self.pending_matching_symbols.first().copied() {
+                                    self.pending_matching_symbols.remove(0);
+                                    self.shared.push_matching_symbols(req_id, matches);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -2432,6 +2448,14 @@ impl HotLoop {
                 }
                 ControlCommand::FetchContractDetails { req_id, con_id } => {
                     self.send_secdef_request(req_id, con_id);
+                }
+                ControlCommand::CancelHeadTimestamp { req_id } => {
+                    if let Some(pos) = self.pending_head_ts.iter().position(|(_, rid)| *rid == req_id) {
+                        self.pending_head_ts.remove(pos);
+                    }
+                }
+                ControlCommand::FetchMatchingSymbols { req_id, pattern } => {
+                    self.send_matching_symbols_request(req_id, &pattern);
                 }
                 ControlCommand::Shutdown => {
                     // Unsubscribe all active market data before stopping
@@ -3312,6 +3336,20 @@ impl HotLoop {
             self.hb.last_ccp_sent = Instant::now();
         }
         self.pending_secdef.push(req_id);
+    }
+
+    /// Send a matching symbols request to CCP.
+    fn send_matching_symbols_request(&mut self, req_id: u32, pattern: &str) {
+        if let Some(conn) = self.ccp_conn.as_mut() {
+            let seq = self.next_ccp_seq;
+            self.next_ccp_seq += 1;
+            let req_id_str = req_id.to_string();
+            let msg = crate::control::contracts::build_matching_symbols_request(pattern, &req_id_str, seq);
+            let _ = conn.send_raw(&msg);
+            self.hb.last_ccp_sent = Instant::now();
+            log::info!("Sent matching symbols request: req_id={} pattern='{}'", req_id, pattern);
+        }
+        self.pending_matching_symbols.push(req_id);
     }
 
     /// Handle farm disconnect: clear stale subscription tracking, zero quotes, emit event.

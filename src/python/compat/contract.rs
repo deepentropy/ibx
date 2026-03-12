@@ -702,6 +702,40 @@ impl ContractDetails {
     }
 }
 
+// ── ContractDescription ──
+
+/// ibapi-compatible ContractDescription class for symbol search results.
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct ContractDescription {
+    #[pyo3(get, set)]
+    pub con_id: i64,
+    #[pyo3(get, set)]
+    pub symbol: String,
+    #[pyo3(get, set)]
+    pub sec_type: String,
+    #[pyo3(get, set)]
+    pub currency: String,
+    #[pyo3(get, set)]
+    pub primary_exchange: String,
+    #[pyo3(get, set)]
+    pub derivative_sec_types: Vec<String>,
+}
+
+#[pymethods]
+impl ContractDescription {
+    #[new]
+    #[pyo3(signature = (con_id=0, symbol="".to_string(), sec_type="".to_string(), currency="".to_string(), primary_exchange="".to_string(), derivative_sec_types=Vec::new()))]
+    fn new(con_id: i64, symbol: String, sec_type: String, currency: String, primary_exchange: String, derivative_sec_types: Vec<String>) -> Self {
+        Self { con_id, symbol, sec_type, currency, primary_exchange, derivative_sec_types }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ContractDescription(conId={}, symbol='{}', secType='{}', currency='{}')",
+            self.con_id, self.symbol, self.sec_type, self.currency)
+    }
+}
+
 /// Register all compat contract/order classes on the module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Contract>()?;
@@ -716,6 +750,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PercentChangeCondition>()?;
     m.add_class::<BarData>()?;
     m.add_class::<ContractDetails>()?;
+    m.add_class::<ContractDescription>()?;
     Ok(())
 }
 

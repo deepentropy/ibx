@@ -164,6 +164,25 @@ impl EWrapper {
         _operation: i32, _side: i32, _price: f64, _size: f64, _is_smart_depth: bool,
     ) {}
 
+    // ── Market Depth (additional) ──
+
+    fn mkt_depth_exchanges(&self, _depth_mkt_data_descriptions: PyObject) {}
+
+    // ── Real-Time Bars ──
+
+    fn real_time_bar(
+        &self, _req_id: i64, _date: i64, _open: f64, _high: f64,
+        _low: f64, _close: f64, _volume: f64, _wap: f64, _count: i32,
+    ) {}
+
+    // ── Historical Ticks ──
+
+    fn historical_ticks(&self, _req_id: i64, _ticks: PyObject, _done: bool) {}
+
+    fn historical_ticks_bid_ask(&self, _req_id: i64, _ticks: PyObject, _done: bool) {}
+
+    fn historical_ticks_last(&self, _req_id: i64, _ticks: PyObject, _done: bool) {}
+
     // ── Options ──
 
     fn tick_option_computation(
@@ -171,6 +190,13 @@ impl EWrapper {
         _implied_vol: f64, _delta: f64, _opt_price: f64, _pv_dividend: f64,
         _gamma: f64, _vega: f64, _theta: f64, _und_price: f64,
     ) {}
+
+    fn security_definition_option_parameter(
+        &self, _req_id: i64, _exchange: &str, _underlying_con_id: i64,
+        _trading_class: &str, _multiplier: &str, _expirations: PyObject, _strikes: PyObject,
+    ) {}
+
+    fn security_definition_option_parameter_end(&self, _req_id: i64) {}
 }
 
 /// Register EWrapper on the module.

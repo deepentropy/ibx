@@ -1,7 +1,7 @@
 //! ibapi-compatible EClient class that wraps IbEngine.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -12,7 +12,7 @@ use pyo3::prelude::*;
 use crate::bridge::SharedState;
 use crate::gateway::{Gateway, GatewayConfig};
 use crate::types::*;
-use super::contract::{Contract, Order, TagValue};
+use super::contract::{Contract, ContractDescription, Order, TagValue};
 use super::tick_types::*;
 use super::super::types::PRICE_SCALE_F;
 
@@ -49,6 +49,12 @@ pub struct EClient {
     account_summary_req: Mutex<Option<(i64, Vec<String>)>>,
     /// Last P&L values sent (for change detection).
     last_pnl: Mutex<[i64; 3]>,
+    /// Market data type preference (1=live, 2=frozen, 3=delayed, 4=delayed-frozen).
+    market_data_type: AtomicI32,
+    /// Track open orders: order_id → (status, instrument, filled, remaining).
+    open_orders: Mutex<HashMap<u64, (String, u32, f64, f64)>>,
+    /// Track executions: (req_id, contract_con_id, exec_id, side, price, qty, time).
+    executions: Mutex<Vec<(i64, i64, String, String, f64, f64, String)>>,
 }
 
 #[pymethods]
@@ -71,6 +77,9 @@ impl EClient {
             pnl_single_reqs: Mutex::new(HashMap::new()),
             account_summary_req: Mutex::new(None),
             last_pnl: Mutex::new([0; 3]),
+            market_data_type: AtomicI32::new(1),
+            open_orders: Mutex::new(HashMap::new()),
+            executions: Mutex::new(Vec::new()),
         }
     }
 
@@ -556,6 +565,180 @@ impl EClient {
         Ok(())
     }
 
+    /// Set market data type (1=live, 2=frozen, 3=delayed, 4=delayed-frozen).
+    fn req_market_data_type(&self, market_data_type: i32) -> PyResult<()> {
+        self.market_data_type.store(market_data_type, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Request market depth (L2 order book).
+    #[pyo3(signature = (req_id, contract, num_rows=5, is_smart_depth=false, mkt_depth_options=Vec::new()))]
+    fn req_mkt_depth(
+        &self,
+        req_id: i64,
+        contract: &Contract,
+        num_rows: i32,
+        is_smart_depth: bool,
+        mkt_depth_options: Vec<PyObject>,
+    ) -> PyResult<()> {
+        // L2 depth data requires a different subscription protocol not yet supported.
+        // Accept the call for API compatibility; the wrapper callbacks won't fire.
+        let _ = (req_id, contract, num_rows, is_smart_depth, mkt_depth_options);
+        log::warn!("req_mkt_depth: L2 depth subscription not yet implemented in engine");
+        Ok(())
+    }
+
+    /// Cancel market depth.
+    #[pyo3(signature = (req_id, is_smart_depth=false))]
+    fn cancel_mkt_depth(&self, req_id: i64, is_smart_depth: bool) -> PyResult<()> {
+        let _ = (req_id, is_smart_depth);
+        Ok(())
+    }
+
+    /// Request all open orders for this client.
+    fn req_open_orders(&self, py: Python<'_>) -> PyResult<()> {
+        let orders: Vec<(u64, String, u32, f64, f64)> = {
+            let map = self.open_orders.lock().unwrap();
+            map.iter().map(|(&oid, &(ref status, inst, filled, remaining))| {
+                (oid, status.clone(), inst, filled, remaining)
+            }).collect()
+        };
+        for (order_id, status, _inst, filled, remaining) in &orders {
+            self.wrapper.call_method(
+                py, "order_status",
+                (*order_id as i64, status.as_str(), *filled, *remaining,
+                 0.0f64, 0i64, 0i64, 0.0f64, 0i64, "", 0.0f64),
+                None,
+            )?;
+        }
+        self.wrapper.call_method0(py, "open_order_end")?;
+        Ok(())
+    }
+
+    /// Request all open orders across all clients.
+    fn req_all_open_orders(&self, py: Python<'_>) -> PyResult<()> {
+        // Same as req_open_orders — we only have one client connection.
+        self.req_open_orders(py)
+    }
+
+    /// Request execution reports.
+    #[pyo3(signature = (req_id, _exec_filter=None))]
+    fn req_executions(&self, py: Python<'_>, req_id: i64, _exec_filter: Option<PyObject>) -> PyResult<()> {
+        let execs: Vec<(i64, i64, String, String, f64, f64, String)> = {
+            self.executions.lock().unwrap().clone()
+        };
+        for (_, con_id, exec_id, side, price, qty, time) in &execs {
+            let mut c = super::contract::Contract::default();
+            c.con_id = *con_id;
+            let c_py = Py::new(py, c)?.into_any();
+
+            let exec_obj = pyo3::types::PyDict::new(py);
+            exec_obj.set_item("execId", exec_id.as_str())?;
+            exec_obj.set_item("side", side.as_str())?;
+            exec_obj.set_item("price", *price)?;
+            exec_obj.set_item("shares", *qty)?;
+            exec_obj.set_item("time", time.as_str())?;
+
+            self.wrapper.call_method(
+                py, "exec_details",
+                (req_id, &c_py, exec_obj.as_any()),
+                None,
+            )?;
+        }
+        self.wrapper.call_method1(py, "exec_details_end", (req_id,))?;
+        Ok(())
+    }
+
+    /// Request historical tick data (Time & Sales).
+    #[pyo3(signature = (req_id, contract, start_date_time="", end_date_time="", number_of_ticks=1000, what_to_show="TRADES", use_rth=1, ignore_size=false, misc_options=Vec::new()))]
+    fn req_historical_ticks(
+        &self,
+        req_id: i64,
+        contract: &Contract,
+        start_date_time: &str,
+        end_date_time: &str,
+        number_of_ticks: i32,
+        what_to_show: &str,
+        use_rth: i32,
+        ignore_size: bool,
+        misc_options: Vec<PyObject>,
+    ) -> PyResult<()> {
+        // Historical ticks use a different HMDS query format not yet implemented.
+        let _ = (req_id, contract, start_date_time, end_date_time, number_of_ticks,
+                 what_to_show, use_rth, ignore_size, misc_options);
+        log::warn!("req_historical_ticks: not yet implemented in engine");
+        Ok(())
+    }
+
+    /// Request real-time 5-second bars.
+    #[pyo3(signature = (req_id, contract, bar_size=5, what_to_show="TRADES", use_rth=0, real_time_bars_options=Vec::new()))]
+    fn req_real_time_bars(
+        &self,
+        req_id: i64,
+        contract: &Contract,
+        bar_size: i32,
+        what_to_show: &str,
+        use_rth: i32,
+        real_time_bars_options: Vec<PyObject>,
+    ) -> PyResult<()> {
+        // Real-time bars use a streaming HMDS subscription not yet implemented.
+        let _ = (req_id, contract, bar_size, what_to_show, use_rth, real_time_bars_options);
+        log::warn!("req_real_time_bars: not yet implemented in engine");
+        Ok(())
+    }
+
+    /// Cancel real-time bars.
+    fn cancel_real_time_bars(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        Ok(())
+    }
+
+    /// Cancel head timestamp request.
+    fn cancel_head_time_stamp(&self, req_id: i64) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::CancelHeadTimestamp { req_id: req_id as u32 })
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    /// Request option chain parameters (expirations and strikes).
+    #[pyo3(signature = (req_id, underlying_symbol, fut_fop_exchange="", underlying_sec_type="STK", underlying_con_id=0))]
+    fn req_sec_def_opt_params(
+        &self,
+        req_id: i64,
+        underlying_symbol: &str,
+        fut_fop_exchange: &str,
+        underlying_sec_type: &str,
+        underlying_con_id: i64,
+    ) -> PyResult<()> {
+        // Option chain parameters require a dedicated CCP query not yet implemented.
+        let _ = (req_id, underlying_symbol, fut_fop_exchange, underlying_sec_type, underlying_con_id);
+        log::warn!("req_sec_def_opt_params: not yet implemented in engine");
+        Ok(())
+    }
+
+    /// Search for matching symbols.
+    fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::FetchMatchingSymbols {
+            req_id: req_id as u32,
+            pattern: pattern.to_string(),
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    /// Request server time.
+    fn req_current_time(&self, py: Python<'_>) -> PyResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.wrapper.call_method1(py, "current_time", (now,))?;
+        Ok(())
+    }
+
     /// Run the event loop. Polls bridge queues and dispatches to EWrapper callbacks.
     /// Takes `&self` so the main thread can call req/cancel methods concurrently.
     fn run(&self, py: Python<'_>) -> PyResult<()> {
@@ -599,7 +782,26 @@ impl EClient {
                     None,
                 )?;
 
-                let _ = (req_id, side_str, commission);
+                // Track execution for req_executions
+                let exec_id = format!("{}.{}", fill.order_id, fill.timestamp_ns);
+                let now_str = format!("{}", fill.timestamp_ns);
+                self.executions.lock().unwrap().push((
+                    req_id, 0i64, exec_id, side_str.to_string(), price, fill.qty as f64, now_str,
+                ));
+
+                // Update open order tracking
+                {
+                    let mut orders = self.open_orders.lock().unwrap();
+                    if fill.remaining == 0 {
+                        orders.remove(&fill.order_id);
+                    } else {
+                        orders.insert(fill.order_id, (
+                            status.to_string(), fill.instrument, fill.qty as f64, fill.remaining as f64,
+                        ));
+                    }
+                }
+
+                let _ = commission;
             }
 
             // Drain order updates -> orderStatus
@@ -620,6 +822,22 @@ impl EClient {
                      update.remaining_qty as f64, 0.0f64, 0i64, 0i64, 0.0f64, 0i64, "", 0.0f64),
                     None,
                 )?;
+
+                // Track open orders
+                {
+                    let mut orders = self.open_orders.lock().unwrap();
+                    match update.status {
+                        OrderStatus::Filled | OrderStatus::Cancelled | OrderStatus::Rejected => {
+                            orders.remove(&update.order_id);
+                        }
+                        _ => {
+                            orders.insert(update.order_id, (
+                                status.to_string(), update.instrument,
+                                update.filled_qty as f64, update.remaining_qty as f64,
+                            ));
+                        }
+                    }
+                }
             }
 
             // Drain cancel rejects -> error
@@ -802,6 +1020,23 @@ impl EClient {
             let contract_ends = shared.drain_contract_details_end();
             for req_id in contract_ends {
                 self.wrapper.call_method1(py, "contract_details_end", (req_id as i64,))?;
+            }
+
+            // Drain matching symbols -> symbolSamples
+            let symbol_results = shared.drain_matching_symbols();
+            for (req_id, matches) in symbol_results {
+                let descriptions: Vec<Py<ContractDescription>> = matches.iter().map(|m| {
+                    Py::new(py, ContractDescription {
+                        con_id: m.con_id as i64,
+                        symbol: m.symbol.clone(),
+                        sec_type: m.sec_type.to_fix().to_string(),
+                        currency: m.currency.clone(),
+                        primary_exchange: m.primary_exchange.clone(),
+                        derivative_sec_types: m.derivative_types.clone(),
+                    }).unwrap()
+                }).collect();
+                let list = pyo3::types::PyList::new(py, &descriptions)?;
+                self.wrapper.call_method1(py, "symbol_samples", (req_id as i64, list.as_any()))?;
             }
 
             // Account state -> updateAccountValue
