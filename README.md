@@ -10,7 +10,6 @@
   <a href="#benchmarks">Benchmarks</a> &bull;
   <a href="#rust-usage">Rust</a> &bull;
   <a href="#python-usage">Python</a> &bull;
-  <a href="#ibapi-compatible-python">ibapi Compatible</a> &bull;
   <a href="#notebooks">Notebooks</a> &bull;
   <a href="#architecture">Architecture</a>
 </p>
@@ -106,6 +105,8 @@ fn main() {
 
 ## Python Usage
 
+IBX exposes an [ibapi](https://github.com/InteractiveBrokers/tws-api)-compatible `EClient`/`EWrapper` API. Same callback pattern, same method names — but connecting directly through the Rust engine instead of through TWS or IB Gateway. Drop-in compatible with existing ibapi and [ib_async](https://github.com/ib-api-reloaded/ib_async) code.
+
 ### Install
 
 ```bash
@@ -116,57 +117,7 @@ pip install maturin
 maturin develop --features python
 ```
 
-### Connect and stream market data
-
-```python
-import ibx
-
-engine = ibx.connect(username="your_user", password="your_pass", paper=True)
-spy = engine.subscribe(conid=756733, symbol="SPY")
-
-# Read quotes (lock-free SeqLock read)
-quote = engine.quote(spy)
-print(f"SPY bid={quote.bid:.2f} ask={quote.ask:.2f}")
-
-# Account data
-acct = engine.account()
-print(f"Net liquidation: ${acct.net_liquidation:,.2f}")
-```
-
-### Submit and manage orders
-
-```python
-# Limit order
-order_id = engine.submit_limit(spy, "BUY", qty=1, price=680.50)
-
-# Modify
-new_id = engine.modify(order_id, price=681.00, qty=1)
-
-# Cancel
-engine.cancel(new_id)
-
-# Poll fills and order updates
-for fill in engine.fills():
-    print(f"Filled {fill.qty} @ ${fill.price:.2f}")
-
-for update in engine.order_updates():
-    print(f"Order {update.order_id}: {update.status}")
-
-engine.shutdown()
-```
-
-### Order types
-
-```python
-engine.submit_market(spy, "BUY", qty=1)
-engine.submit_stop(spy, "SELL", qty=1, stop_price=670.00)
-engine.submit_stop_limit(spy, "SELL", qty=1, price=669.50, stop_price=670.00)
-engine.submit_limit_gtc(spy, "BUY", qty=1, price=650.00, outside_rth=True)
-```
-
-## ibapi-Compatible Python
-
-If you have existing code using [ibapi](https://github.com/InteractiveBrokers/tws-api) or [ib_async](https://github.com/ib-api-reloaded/ib_async), IBX provides a drop-in `EClient`/`EWrapper` layer. Same callback pattern, same method names — but connecting directly through the Rust engine instead of through TWS or IB Gateway.
+### Connect and trade
 
 ```python
 import threading
