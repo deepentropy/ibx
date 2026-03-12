@@ -399,7 +399,7 @@ pub enum AlgoParams {
     },
 }
 
-/// Order request written by strategy, drained by engine after on_tick.
+/// Order request sent via control channel, processed by engine.
 #[derive(Debug, Clone)]
 pub enum OrderRequest {
     SubmitLimit {

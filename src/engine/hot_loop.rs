@@ -218,7 +218,7 @@ impl HotLoop {
             // 1. Busy-poll usfarm socket (non-blocking recv)
             //    → HMAC verify → zlib decompress → bit-unpack ticks
             //    → update market state in-place
-            //    → strategy.on_tick(&mut ctx)
+            //    → push Event::Tick to shared state
             self.poll_market_data();
 
             // 1b. Busy-poll HMDS socket for tick-by-tick data (35=E)
@@ -230,7 +230,7 @@ impl HotLoop {
             // 3. Busy-poll CCP socket (non-blocking recv)
             //    → decode execution reports
             //    → update positions/orders
-            //    → strategy.on_fill() / on_order_update()
+            //    → push Event::Fill / Event::OrderUpdate to shared state
             self.poll_executions();
 
             // 4. Check control_plane_rx (SPSC) for commands
