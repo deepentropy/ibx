@@ -1,7 +1,35 @@
 use std::env;
 
-use ibx::{Client, ClientConfig, Event};
-use ibx::types::*;
+use ibx::api::{EClient, EClientConfig, Wrapper, Contract, TickAttrib};
+
+struct QuotePrinter;
+
+impl Wrapper for QuotePrinter {
+    fn error(&mut self, req_id: i64, error_code: i64, error_string: &str, _: &str) {
+        eprintln!("Error req_id={req_id} code={error_code}: {error_string}");
+    }
+
+    fn tick_price(&mut self, req_id: i64, tick_type: i32, price: f64, _attrib: &TickAttrib) {
+        let label = match tick_type {
+            1 => "bid",
+            2 => "ask",
+            4 => "last",
+            _ => return,
+        };
+        println!("req_id={req_id} {label}={price:.2}");
+    }
+
+    fn tick_size(&mut self, req_id: i64, tick_type: i32, size: f64) {
+        let label = match tick_type {
+            0 => "bid_size",
+            3 => "ask_size",
+            5 => "last_size",
+            8 => "volume",
+            _ => return,
+        };
+        println!("req_id={req_id} {label}={size}");
+    }
+}
 
 fn main() {
     env_logger::init();
@@ -18,7 +46,7 @@ fn main() {
     let paper = env::var("IB_PAPER").unwrap_or_else(|_| "true".to_string()) == "true";
     let host = env::var("IB_HOST").unwrap_or_else(|_| "cdc1.ibllc.com".to_string());
 
-    let client = Client::connect(&ClientConfig {
+    let mut client = EClient::connect(&EClientConfig {
         username,
         password,
         host,
@@ -29,35 +57,24 @@ fn main() {
         std::process::exit(1);
     });
 
-    println!("Connected! Account: {}", client.account_id);
+    println!("Connected!");
 
-    let spy = client.subscribe(756733, "SPY");
-    println!("Subscribed to SPY (instrument={})", spy);
+    let mut contract = Contract::default();
+    contract.con_id = 756733;
+    contract.symbol = "SPY".into();
+    contract.sec_type = "STK".into();
+    contract.exchange = "SMART".into();
+    contract.currency = "USD".into();
 
-    while let Ok(event) = client.recv() {
-        match event {
-            Event::Tick(instrument) if instrument == spy => {
-                let q = client.quote(spy);
-                println!(
-                    "SPY bid={:.2} ask={:.2} last={:.2}",
-                    q.bid as f64 / PRICE_SCALE as f64,
-                    q.ask as f64 / PRICE_SCALE as f64,
-                    q.last as f64 / PRICE_SCALE as f64,
-                );
-            }
-            Event::Fill(fill) => {
-                println!("Fill: order={} qty={} price={:.2}",
-                    fill.order_id, fill.qty,
-                    fill.price as f64 / PRICE_SCALE as f64);
-            }
-            Event::OrderUpdate(update) => {
-                println!("Order {}: {:?}", update.order_id, update.status);
-            }
-            Event::Disconnected => {
-                println!("Disconnected.");
-                break;
-            }
-            _ => {}
-        }
+    client.req_mkt_data(1, &contract, "", false, false);
+    println!("Requested market data for SPY (req_id=1)");
+
+    // Zero-copy SeqLock escape hatch still available:
+    // let q = client.quote(1);
+
+    let mut wrapper = QuotePrinter;
+    loop {
+        client.process_msgs(&mut wrapper);
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }

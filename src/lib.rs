@@ -1,14 +1,13 @@
 pub mod api;
 pub mod auth;
 pub mod bridge;
-pub mod client;
 pub mod config;
 pub mod control;
 pub mod gateway;
 pub mod protocol;
 pub mod types;
 
-/// Internal engine module. Use [`Client`] for the public API.
+/// Internal engine module. Use [`api::EClient`] for the public API.
 #[doc(hidden)]
 pub mod engine;
 
@@ -16,5 +15,4 @@ pub mod engine;
 mod python;
 
 // Re-exports for convenience.
-pub use client::{Client, ClientConfig};
-pub use bridge::Event;
+pub use api::{EClient, EClientConfig, Wrapper};

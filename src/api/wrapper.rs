@@ -4,7 +4,7 @@
 //! callbacks they care about.
 
 use crate::api::types::*;
-use crate::types::{InstrumentId, Quote, HistoricalTickData, RealTimeBar};
+use crate::types::HistoricalTickData;
 
 /// ibapi-compatible callback interface. Mirrors C++ `EWrapper`.
 ///
