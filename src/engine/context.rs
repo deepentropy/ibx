@@ -3,83 +3,6 @@ use crate::types::*;
 use std::collections::HashMap;
 use std::time::Instant;
 
-/// The strategy trait. Generic type parameter S: Strategy is monomorphized into
-/// the engine loop — no Box<dyn>, no vtable, no indirection.
-pub trait Strategy {
-    /// Called once after authentication and initial state sync.
-    fn on_start(&mut self, ctx: &mut Context) {
-        let _ = ctx;
-    }
-
-    /// Called on every market data tick. THE hot path.
-    fn on_tick(&mut self, instrument: InstrumentId, ctx: &mut Context);
-
-    /// Called when an order is filled (partial or full).
-    fn on_fill(&mut self, fill: &Fill, ctx: &mut Context) {
-        let _ = (fill, ctx);
-    }
-
-    /// Called on order status change (submitted, cancelled, rejected).
-    fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
-        let _ = (update, ctx);
-    }
-
-    /// Called when a cancel or modify request is rejected (FIX 35=9).
-    /// The original order is still live.
-    fn on_cancel_reject(&mut self, reject: &CancelReject, ctx: &mut Context) {
-        let _ = (reject, ctx);
-    }
-
-    /// Called on each tick-by-tick trade (AllLast) from HMDS.
-    fn on_tbt_trade(&mut self, trade: &TbtTrade, ctx: &mut Context) {
-        let _ = (trade, ctx);
-    }
-
-    /// Called on each tick-by-tick bid/ask quote from HMDS.
-    fn on_tbt_quote(&mut self, quote: &TbtQuote, ctx: &mut Context) {
-        let _ = (quote, ctx);
-    }
-
-    /// Called when a what-if order response is received (margin/commission preview).
-    fn on_what_if(&mut self, response: &WhatIfResponse, ctx: &mut Context) {
-        let _ = (response, ctx);
-    }
-
-    /// Called on each real-time news headline (tick type 0x1E90 from 35=G).
-    fn on_news(&mut self, news: &TickNews, ctx: &mut Context) {
-        let _ = (news, ctx);
-    }
-
-    /// Called when historical bar data is received from HMDS.
-    fn on_historical_data(&mut self, req_id: u32, response: &crate::control::historical::HistoricalResponse, ctx: &mut Context) {
-        let _ = (req_id, response, ctx);
-    }
-
-    /// Called when a head timestamp response is received from HMDS.
-    fn on_head_timestamp(&mut self, req_id: u32, response: &crate::control::historical::HeadTimestampResponse, ctx: &mut Context) {
-        let _ = (req_id, response, ctx);
-    }
-
-    /// Called when a contract definition is received from CCP.
-    fn on_contract_details(&mut self, req_id: u32, def: &crate::control::contracts::ContractDefinition, ctx: &mut Context) {
-        let _ = (req_id, def, ctx);
-    }
-
-    /// Called when contract details are complete for a request.
-    fn on_contract_details_end(&mut self, req_id: u32, ctx: &mut Context) {
-        let _ = (req_id, ctx);
-    }
-
-    /// Called when a position update is received (conId, position, avgCost).
-    fn on_position_update(&mut self, instrument: InstrumentId, con_id: i64, position: i64, avg_cost: Price, ctx: &mut Context) {
-        let _ = (instrument, con_id, position, avg_cost, ctx);
-    }
-
-    /// Called on disconnect or error. Chance to cancel all orders.
-    fn on_disconnect(&mut self, ctx: &mut Context) {
-        let _ = ctx;
-    }
-}
 
 /// TSC-calibrated clock for hot-path timestamps.
 pub struct Clock {
@@ -851,7 +774,7 @@ impl Context {
     }
 
     /// Submit a what-if order for margin/commission preview. The order is NOT placed.
-    /// Response delivered via `Strategy::on_what_if()`.
+    /// Response delivered via `Event::WhatIf`.
     pub fn submit_what_if(
         &mut self,
         instrument: InstrumentId,
@@ -1295,94 +1218,15 @@ mod tests {
         assert!(ts > 1_735_689_600);
     }
 
-    // --- Strategy trait ---
-
-    struct CountingStrategy {
-        tick_count: u32,
-        fill_count: u32,
-        started: bool,
-        disconnected: bool,
-    }
-
-    impl CountingStrategy {
-        fn new() -> Self {
-            Self {
-                tick_count: 0,
-                fill_count: 0,
-                started: false,
-                disconnected: false,
-            }
-        }
-    }
-
-    impl Strategy for CountingStrategy {
-        fn on_start(&mut self, _ctx: &mut Context) {
-            self.started = true;
-        }
-
-        fn on_tick(&mut self, _instrument: InstrumentId, _ctx: &mut Context) {
-            self.tick_count += 1;
-        }
-
-        fn on_fill(&mut self, _fill: &Fill, _ctx: &mut Context) {
-            self.fill_count += 1;
-        }
-
-        fn on_disconnect(&mut self, _ctx: &mut Context) {
-            self.disconnected = true;
-        }
-    }
+    // --- submit_limit uses current bid ---
 
     #[test]
-    fn strategy_on_start() {
-        let mut s = CountingStrategy::new();
-        let mut ctx = Context::new();
-        s.on_start(&mut ctx);
-        assert!(s.started);
-    }
-
-    #[test]
-    fn strategy_on_tick() {
-        let mut s = CountingStrategy::new();
-        let mut ctx = Context::new();
-        s.on_tick(0, &mut ctx);
-        s.on_tick(0, &mut ctx);
-        assert_eq!(s.tick_count, 2);
-    }
-
-    #[test]
-    fn strategy_on_fill() {
-        let mut s = CountingStrategy::new();
-        let mut ctx = Context::new();
-        let fill = Fill {
-            instrument: 0,
-            order_id: 1,
-            side: Side::Buy,
-            price: 150 * PRICE_SCALE,
-            qty: 100,
-            remaining: 0,
-            commission: 0,
-            timestamp_ns: 0,
-        };
-        s.on_fill(&fill, &mut ctx);
-        assert_eq!(s.fill_count, 1);
-    }
-
-    #[test]
-    fn strategy_submits_orders_in_on_tick() {
-        struct OrderPlacer;
-        impl Strategy for OrderPlacer {
-            fn on_tick(&mut self, instrument: InstrumentId, ctx: &mut Context) {
-                ctx.submit_limit(instrument, Side::Buy, 100, ctx.bid(instrument));
-            }
-        }
-
-        let mut s = OrderPlacer;
+    fn submit_limit_uses_current_bid() {
         let mut ctx = Context::new();
         ctx.market.register(265598);
         ctx.market.quote_mut(0).bid = 150 * PRICE_SCALE;
 
-        s.on_tick(0, &mut ctx);
+        ctx.submit_limit(0, Side::Buy, 100, ctx.bid(0));
 
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
@@ -1471,50 +1315,6 @@ mod tests {
         let mut ctx = Context::new();
         ctx.account.net_liquidation = 100_000 * PRICE_SCALE;
         assert_eq!(ctx.account().net_liquidation, 100_000 * PRICE_SCALE);
-    }
-
-    // --- on_order_update callback ---
-
-    #[test]
-    fn strategy_on_order_update() {
-        struct UpdateTracker { updates: Vec<OrderId> }
-        impl Strategy for UpdateTracker {
-            fn on_tick(&mut self, _: InstrumentId, _: &mut Context) {}
-            fn on_order_update(&mut self, update: &OrderUpdate, _: &mut Context) {
-                self.updates.push(update.order_id);
-            }
-        }
-
-        let mut s = UpdateTracker { updates: Vec::new() };
-        let mut ctx = Context::new();
-        let update = OrderUpdate {
-            order_id: 42,
-            instrument: 0,
-            status: OrderStatus::Filled,
-            filled_qty: 100,
-            remaining_qty: 0,
-            timestamp_ns: 0,
-        };
-        s.on_order_update(&update, &mut ctx);
-        assert_eq!(s.updates, vec![42]);
-    }
-
-    // --- on_disconnect callback ---
-
-    #[test]
-    fn strategy_on_disconnect() {
-        struct DisconnectTracker { called: bool }
-        impl Strategy for DisconnectTracker {
-            fn on_tick(&mut self, _: InstrumentId, _: &mut Context) {}
-            fn on_disconnect(&mut self, _: &mut Context) {
-                self.called = true;
-            }
-        }
-
-        let mut s = DisconnectTracker { called: false };
-        let mut ctx = Context::new();
-        s.on_disconnect(&mut ctx);
-        assert!(s.called);
     }
 
     // --- Timing ---

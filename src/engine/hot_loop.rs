@@ -1,13 +1,15 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Instant;
 
-use crate::engine::context::{Context, Strategy};
+use crate::bridge::{Event, SharedState};
+use crate::engine::context::Context;
 use crate::config::{chrono_free_timestamp, unix_to_ib_datetime};
 use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{AlgoParams, ControlCommand, InstrumentId, OrderCondition, OrderRequest, Price, Qty, Side, PRICE_SCALE, QTY_SCALE};
+use crate::types::{AlgoParams, ControlCommand, Fill, InstrumentId, OrderCondition, OrderRequest, PositionInfo, Price, Qty, Side, PRICE_SCALE, QTY_SCALE};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 /// CCP heartbeat interval (10 seconds, configurable via FIX tag 108).
@@ -17,10 +19,10 @@ const FARM_HEARTBEAT_SECS: u64 = 30;
 /// Grace period before declaring timeout (1 second).
 const HEARTBEAT_GRACE_SECS: u64 = 1;
 
-/// The pinned-core hot loop. Runs strategy inline with decode and order send.
-/// Generic over S to monomorphize the strategy — zero vtable overhead.
-pub struct HotLoop<S: Strategy> {
-    strategy: S,
+/// The pinned-core hot loop. Pushes events to SharedState + optional event channel.
+pub struct HotLoop {
+    shared: Arc<SharedState>,
+    event_tx: Option<Sender<Event>>,
     context: Context,
     /// Core ID to pin the hot loop thread to. None = no pinning.
     core_id: Option<usize>,
@@ -110,10 +112,11 @@ impl HeartbeatState {
     }
 }
 
-impl<S: Strategy> HotLoop<S> {
-    pub fn new(strategy: S, core_id: Option<usize>) -> Self {
+impl HotLoop {
+    pub fn new(shared: Arc<SharedState>, event_tx: Option<Sender<Event>>, core_id: Option<usize>) -> Self {
         Self {
-            strategy,
+            shared,
+            event_tx,
             context: Context::new(),
             core_id,
             farm_conn: None,
@@ -150,6 +153,32 @@ impl<S: Strategy> HotLoop<S> {
         self.account_id = account_id;
     }
 
+    /// Emit an event to the channel (if connected).
+    #[inline]
+    fn emit(&self, event: Event) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(event);
+        }
+    }
+
+    /// Sync tick state to SharedState and emit event.
+    #[inline]
+    fn notify_tick(&mut self, instrument: InstrumentId) {
+        self.shared.push_quote(instrument, self.context.quote(instrument));
+        self.shared.set_position(instrument, self.context.position(instrument));
+        self.shared.set_account(self.context.account());
+        self.shared.set_instrument_count(self.context.market.count());
+        self.emit(Event::Tick(instrument));
+    }
+
+    /// Sync fill to SharedState and emit event.
+    #[inline]
+    fn notify_fill(&mut self, fill: &Fill) {
+        self.shared.push_fill(*fill);
+        self.shared.set_position(fill.instrument, self.context.position(fill.instrument));
+        self.emit(Event::Fill(*fill));
+    }
+
     /// Access the context (for pre-start configuration like registering instruments).
     pub fn context_mut(&mut self) -> &mut Context {
         &mut self.context
@@ -157,7 +186,8 @@ impl<S: Strategy> HotLoop<S> {
 
     /// Build a HotLoop with connections and control channel, without requiring a Gateway.
     pub fn with_connections(
-        strategy: S,
+        shared: Arc<SharedState>,
+        event_tx: Option<Sender<Event>>,
         account_id: String,
         farm_conn: Connection,
         ccp_conn: Connection,
@@ -165,7 +195,7 @@ impl<S: Strategy> HotLoop<S> {
         core_id: Option<usize>,
     ) -> (Self, Sender<ControlCommand>) {
         let (tx, rx) = bounded(64);
-        let mut hl = Self::new(strategy, core_id);
+        let mut hl = Self::new(shared, event_tx, core_id);
         hl.set_control_rx(rx);
         hl.set_account_id(account_id);
         hl.farm_conn = Some(farm_conn);
@@ -174,18 +204,12 @@ impl<S: Strategy> HotLoop<S> {
         (hl, tx)
     }
 
-    /// Access the strategy (for reading results after run completes).
-    pub fn strategy(&self) -> &S {
-        &self.strategy
-    }
-
     /// Run the hot loop. Blocks until Shutdown command received.
     pub fn run(&mut self) {
         if let Some(core) = self.core_id {
             Self::pin_to_core(core);
         }
 
-        self.strategy.on_start(&mut self.context);
         self.running = true;
 
         while self.running {
@@ -377,11 +401,11 @@ impl<S: Strategy> HotLoop<S> {
                 _ => {} // exchanges, halted, etc. — skip for now
             }
 
-            // Notify strategy once per instrument per batch
+            // Notify once per instrument per batch
             let bit = 1u32 << instrument;
             if notified & bit == 0 {
                 notified |= bit;
-                self.strategy.on_tick(instrument, &mut self.context);
+                self.notify_tick(instrument);
             }
         }
     }
@@ -2014,10 +2038,12 @@ impl<S: Strategy> HotLoop<S> {
                     let is_last = crate::control::contracts::secdef_response_is_last(msg);
                     // Match to pending request (use first pending)
                     if let Some(&req_id) = self.pending_secdef.first() {
-                        self.strategy.on_contract_details(req_id, &def, &mut self.context);
+                        self.shared.push_contract_details(req_id, def.clone());
+                        self.emit(Event::ContractDetails { req_id, details: def });
                         if is_last {
                             self.pending_secdef.remove(0);
-                            self.strategy.on_contract_details_end(req_id, &mut self.context);
+                            self.shared.push_contract_details_end(req_id);
+                            self.emit(Event::ContractDetailsEnd(req_id));
                         }
                     }
                 }
@@ -2057,7 +2083,8 @@ impl<S: Strategy> HotLoop<S> {
                         response.init_margin_after as f64 / PRICE_SCALE as f64,
                         response.commission as f64 / PRICE_SCALE as f64);
                     self.context.remove_order(clord_id);
-                    self.strategy.on_what_if(&response, &mut self.context);
+                    self.shared.push_what_if(response);
+                    self.emit(Event::WhatIf(response));
                 }
             }
             return;
@@ -2115,7 +2142,7 @@ impl<S: Strategy> HotLoop<S> {
                 // Update filled qty on the order
                 self.context.update_order_filled(clord_id, last_shares as u32);
 
-                let fill = crate::types::Fill {
+                let fill = Fill {
                     instrument: order.instrument,
                     order_id: clord_id,
                     side: order.side,
@@ -2131,7 +2158,7 @@ impl<S: Strategy> HotLoop<S> {
                     Side::Sell | Side::ShortSell => -last_shares,
                 };
                 self.context.update_position(order.instrument, delta);
-                self.strategy.on_fill(&fill, &mut self.context);
+                self.notify_fill(&fill);
             }
         }
 
@@ -2146,7 +2173,8 @@ impl<S: Strategy> HotLoop<S> {
                     remaining_qty: leaves_qty,
                     timestamp_ns: self.context.now_ns(),
                 };
-                self.strategy.on_order_update(&update, &mut self.context);
+                self.shared.push_order_update(update);
+                self.emit(Event::OrderUpdate(update));
             }
         }
 
@@ -2188,7 +2216,8 @@ impl<S: Strategy> HotLoop<S> {
                     reason_code,
                     timestamp_ns: self.context.now_ns(),
                 };
-                self.strategy.on_cancel_reject(&reject, &mut self.context);
+                self.shared.push_cancel_reject(reject);
+                self.emit(Event::CancelReject(reject));
             }
         }
     }
@@ -2344,7 +2373,9 @@ impl<S: Strategy> HotLoop<S> {
                 self.context.update_position(instrument, delta);
             }
             // Store position info for P&L and reqPositions
-            self.strategy.on_position_update(instrument, con_id, position, avg_cost, &mut self.context);
+            self.shared.set_position_info(PositionInfo { con_id, position, avg_cost });
+            self.shared.set_position(instrument, position);
+            self.emit(Event::PositionUpdate { instrument, con_id, position, avg_cost });
         }
     }
 
@@ -2413,7 +2444,7 @@ impl<S: Strategy> HotLoop<S> {
                         self.send_tbt_unsubscribe(instrument);
                     }
                     self.running = false;
-                    self.strategy.on_disconnect(&mut self.context);
+                    self.emit(Event::Disconnected);
                 }
             }
         }
@@ -2734,7 +2765,7 @@ fn build_condition_strings(conditions: &[OrderCondition]) -> Vec<String> {
     out
 }
 
-impl<S: Strategy> HotLoop<S> {
+impl HotLoop {
     fn pin_to_core(core: usize) {
         let core_ids = core_affinity::get_core_ids().unwrap_or_default();
         if let Some(id) = core_ids.get(core) {
@@ -2881,7 +2912,8 @@ impl<S: Strategy> HotLoop<S> {
                         if let Some(pos) = self.pending_historical.iter().position(|(qid, _)| *qid == resp.query_id) {
                             let (_, req_id) = self.pending_historical[pos];
                             let is_complete = resp.is_complete;
-                            self.strategy.on_historical_data(req_id, &resp, &mut self.context);
+                            self.shared.push_historical_data(req_id, resp.clone());
+                            self.emit(Event::HistoricalData { req_id, data: resp });
                             if is_complete {
                                 self.pending_historical.remove(pos);
                             }
@@ -2892,7 +2924,8 @@ impl<S: Strategy> HotLoop<S> {
                         // Match by looking at pending head timestamp requests
                         if let Some(pos) = self.pending_head_ts.iter().position(|_| true) {
                             let (_, req_id) = self.pending_head_ts.remove(pos);
-                            self.strategy.on_head_timestamp(req_id, &resp, &mut self.context);
+                            self.shared.push_head_timestamp(req_id, resp.clone());
+                            self.emit(Event::HeadTimestamp { req_id, data: resp });
                         }
                     }
                     // Try parsing as TBT ticker ID assignment
@@ -2935,7 +2968,8 @@ impl<S: Strategy> HotLoop<S> {
                         exchange: exchange.clone(),
                         conditions: conditions.clone(),
                     };
-                    self.strategy.on_tbt_trade(&trade, &mut self.context);
+                    self.shared.push_tbt_trade(trade.clone());
+                    self.emit(Event::TbtTrade(trade));
                 }
                 tick_decoder::TbtEntry::Quote { timestamp, bid_cents_delta, ask_cents_delta, bid_size, ask_size } => {
                     let (bid_cents, ask_cents) = self.update_tbt_bid_ask(instrument, *bid_cents_delta, *ask_cents_delta);
@@ -2947,7 +2981,8 @@ impl<S: Strategy> HotLoop<S> {
                         ask_size: *ask_size as i64,
                         timestamp: *timestamp,
                     };
-                    self.strategy.on_tbt_quote(&quote, &mut self.context);
+                    self.shared.push_tbt_quote(quote);
+                    self.emit(Event::TbtQuote(quote));
                 }
             }
         }
@@ -3051,7 +3086,8 @@ impl<S: Strategy> HotLoop<S> {
                 headline,
                 timestamp,
             };
-            self.strategy.on_news(&news, &mut self.context);
+            self.shared.push_tick_news(news.clone());
+            self.emit(Event::News(news));
         }
     }
 
@@ -3275,21 +3311,21 @@ impl<S: Strategy> HotLoop<S> {
         self.pending_secdef.push(req_id);
     }
 
-    /// Handle farm disconnect: clear stale subscription tracking, zero quotes, notify strategy.
+    /// Handle farm disconnect: clear stale subscription tracking, zero quotes, emit event.
     fn handle_farm_disconnect(&mut self) {
         self.farm_disconnected = true;
         self.md_req_to_instrument.clear();
         self.instrument_md_reqs.clear();
         self.context.market.clear_server_tags();
         self.context.market.zero_all_quotes();
-        self.strategy.on_disconnect(&mut self.context);
+        self.emit(Event::Disconnected);
     }
 
-    /// Handle CCP disconnect: mark open orders uncertain, notify strategy.
+    /// Handle CCP disconnect: mark open orders uncertain, emit event.
     fn handle_ccp_disconnect(&mut self) {
         self.ccp_disconnected = true;
         self.context.mark_orders_uncertain();
-        self.strategy.on_disconnect(&mut self.context);
+        self.emit(Event::Disconnected);
     }
 
     /// Access heartbeat state for testing.
@@ -3312,98 +3348,50 @@ impl<S: Strategy> HotLoop<S> {
         self.process_ccp_message(msg);
     }
 
-    /// Inject a simulated tick for testing. Calls on_tick with the given instrument.
+    /// Inject a simulated tick for testing.
     pub fn inject_tick(&mut self, instrument: InstrumentId) {
-        self.strategy.on_tick(instrument, &mut self.context);
+        self.notify_tick(instrument);
     }
 
-    /// Simulate a fill for testing. Updates position and calls strategy.on_fill().
-    pub fn inject_fill(&mut self, fill: &crate::types::Fill) {
+    /// Simulate a fill for testing. Updates position and notifies.
+    pub fn inject_fill(&mut self, fill: &Fill) {
         let delta = match fill.side {
             crate::types::Side::Buy => fill.qty,
             crate::types::Side::Sell | crate::types::Side::ShortSell => -fill.qty,
         };
         self.context.update_position(fill.instrument, delta);
-        self.strategy.on_fill(fill, &mut self.context);
+        self.notify_fill(fill);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use crate::bridge::{Event, SharedState};
     use crate::types::*;
     use std::time::Duration;
 
-    struct RecordingStrategy {
-        ticks: Vec<InstrumentId>,
-        fills: Vec<(OrderId, i64)>,  // (order_id, qty)
-        updates: Vec<(OrderId, OrderStatus)>,
-        cancel_rejects: Vec<(OrderId, u8)>,  // (order_id, reject_type)
-        news: Vec<(String, String)>,  // (provider, headline)
-        disconnected: bool,
-        started: bool,
-    }
-
-    impl RecordingStrategy {
-        fn new() -> Self {
-            Self {
-                ticks: Vec::new(),
-                fills: Vec::new(),
-                updates: Vec::new(),
-                cancel_rejects: Vec::new(),
-                news: Vec::new(),
-                disconnected: false,
-                started: false,
-            }
-        }
-    }
-
-    impl Strategy for RecordingStrategy {
-        fn on_start(&mut self, _ctx: &mut Context) {
-            self.started = true;
-        }
-
-        fn on_tick(&mut self, instrument: InstrumentId, _ctx: &mut Context) {
-            self.ticks.push(instrument);
-        }
-
-        fn on_fill(&mut self, fill: &Fill, _ctx: &mut Context) {
-            self.fills.push((fill.order_id, fill.qty));
-        }
-
-        fn on_order_update(&mut self, update: &OrderUpdate, _ctx: &mut Context) {
-            self.updates.push((update.order_id, update.status));
-        }
-
-        fn on_cancel_reject(&mut self, reject: &CancelReject, _ctx: &mut Context) {
-            self.cancel_rejects.push((reject.order_id, reject.reject_type));
-        }
-
-        fn on_news(&mut self, news: &crate::types::TickNews, _ctx: &mut Context) {
-            self.news.push((news.provider_code.clone(), news.headline.clone()));
-        }
-
-        fn on_disconnect(&mut self, _ctx: &mut Context) {
-            self.disconnected = true;
-        }
-    }
-
     #[test]
-    fn inject_tick_calls_strategy() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+    fn inject_tick_emits_events() {
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
         engine.context_mut().market.register(265598);
 
         engine.inject_tick(0);
         engine.inject_tick(0);
 
-        assert_eq!(engine.strategy.ticks, vec![0, 0]);
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        let tick_count = events.iter().filter(|e| matches!(e, Event::Tick(_))).count();
+        assert_eq!(tick_count, 2);
     }
 
     #[test]
     fn inject_tick_multiple_instruments() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
         engine.context_mut().market.register(265598); // 0: AAPL
         engine.context_mut().market.register(272093); // 1: MSFT
 
@@ -3411,13 +3399,18 @@ mod tests {
         engine.inject_tick(1);
         engine.inject_tick(0);
 
-        assert_eq!(engine.strategy.ticks, vec![0, 1, 0]);
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        let tick_ids: Vec<InstrumentId> = events.iter().filter_map(|e| match e {
+            Event::Tick(id) => Some(*id),
+            _ => None,
+        }).collect();
+        assert_eq!(tick_ids, vec![0, 1, 0]);
     }
 
     #[test]
     fn inject_fill_updates_position() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         let fill = Fill {
@@ -3433,13 +3426,16 @@ mod tests {
         engine.inject_fill(&fill);
 
         assert_eq!(engine.context_mut().position(0), 100);
-        assert_eq!(engine.strategy.fills, vec![(1, 100)]);
+        let fills = shared.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].order_id, 1);
+        assert_eq!(fills[0].qty, 100);
     }
 
     #[test]
     fn inject_fill_sell_decreases_position() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
         engine.context_mut().update_position(0, 100);
 
@@ -3459,19 +3455,9 @@ mod tests {
     }
 
     #[test]
-    fn strategy_reads_market_data_in_on_tick() {
-        struct SpreadReader {
-            last_spread: Price,
-        }
-
-        impl Strategy for SpreadReader {
-            fn on_tick(&mut self, instrument: InstrumentId, ctx: &mut Context) {
-                self.last_spread = ctx.spread(instrument);
-            }
-        }
-
-        let strategy = SpreadReader { last_spread: 0 };
-        let mut engine = HotLoop::new(strategy, None);
+    fn tick_syncs_quote_to_shared_state() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         let id = engine.context_mut().market.register(265598);
         let q = engine.context_mut().market.quote_mut(id);
         q.bid = 15000 * (PRICE_SCALE / 100);
@@ -3479,7 +3465,9 @@ mod tests {
 
         engine.inject_tick(id);
 
-        assert_eq!(engine.strategy.last_spread, 10 * (PRICE_SCALE / 100));
+        let sq = shared.quote(id);
+        assert_eq!(sq.bid, 15000 * (PRICE_SCALE / 100));
+        assert_eq!(sq.ask, 15010 * (PRICE_SCALE / 100));
     }
 
     #[test]
@@ -3525,8 +3513,9 @@ mod tests {
         msg.extend_from_slice(&payload);
 
         // Set up engine
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
         let aapl = engine.context_mut().market.register(265598);
         engine.context_mut().market.set_min_tick(aapl, 0.01);
         engine.context_mut().market.register_server_tag(100, aapl);
@@ -3536,14 +3525,17 @@ mod tests {
 
         // bid_size should be updated to 50
         assert_eq!(engine.context_mut().market.bid_size(aapl), 50);
-        // Strategy should have been notified
-        assert_eq!(engine.strategy.ticks, vec![aapl]);
+        // Event should have been emitted
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        let tick_count = events.iter().filter(|e| matches!(e, Event::Tick(_))).count();
+        assert_eq!(tick_count, 1);
     }
 
     #[test]
     fn handle_tick_data_unknown_server_tag_ignored() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
         engine.context_mut().market.register(265598);
 
         // Build a minimal 35=P with unknown server_tag
@@ -3558,14 +3550,15 @@ mod tests {
 
         engine.inject_farm_message(&msg);
 
-        // No strategy notification (unknown server_tag)
-        assert!(engine.strategy.ticks.is_empty());
+        // No event emitted (unknown server_tag)
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        assert!(events.is_empty());
     }
 
     #[test]
     fn exec_report_fill_updates_position_and_notifies() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         // Insert an open order so the exec report can find it
@@ -3595,16 +3588,19 @@ mod tests {
 
         // Position should be updated (+100 for buy)
         assert_eq!(engine.context_mut().position(0), 100);
-        // Strategy should have received the fill
-        assert_eq!(engine.strategy.fills, vec![(1, 100)]);
+        // SharedState should have received the fill
+        let fills = shared.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].order_id, 1);
+        assert_eq!(fills[0].qty, 100);
         // Order should be removed (terminal state)
         assert!(engine.context_mut().order(1).is_none());
     }
 
     #[test]
     fn exec_report_partial_fill() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(crate::types::Order {
@@ -3638,8 +3634,8 @@ mod tests {
 
     #[test]
     fn exec_report_rejected() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(crate::types::Order {
@@ -3671,8 +3667,8 @@ mod tests {
 
     #[test]
     fn control_subscribe_registers_instrument() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
@@ -3686,8 +3682,8 @@ mod tests {
 
     #[test]
     fn control_shutdown_stops_loop() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
@@ -3699,8 +3695,8 @@ mod tests {
 
     #[test]
     fn control_multiple_commands_drained() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
@@ -3716,7 +3712,8 @@ mod tests {
 
     #[test]
     fn heartbeat_state_initialized() {
-        let engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let engine = HotLoop::new(shared.clone(), None, None);
         let hb = engine.heartbeat_state();
         // All timestamps should be recent (within 1 second of now)
         let now = Instant::now();
@@ -3728,7 +3725,8 @@ mod tests {
 
     #[test]
     fn heartbeat_test_id_increments() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         let id1 = engine.heartbeat_state_mut().next_test_id();
         let id2 = engine.heartbeat_state_mut().next_test_id();
         assert_eq!(id1, "T1");
@@ -3738,14 +3736,17 @@ mod tests {
     #[test]
     fn check_heartbeats_no_connections_no_panic() {
         // No connections set — check_heartbeats should be a no-op
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.check_heartbeats(); // should not panic
         assert!(engine.running);
     }
 
     #[test]
     fn check_heartbeats_skips_already_disconnected() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
         // Simulate: CCP and farm already disconnected
         engine.ccp_disconnected = true;
         engine.farm_disconnected = true;
@@ -3754,8 +3755,10 @@ mod tests {
         engine.hb.last_farm_recv = Instant::now() - Duration::from_secs(120);
         // Should be a no-op — no duplicate disconnect handling
         engine.check_heartbeats();
-        // Strategy should NOT have received on_disconnect (already disconnected)
-        assert!(!engine.strategy().disconnected);
+        // No Disconnected event should have been emitted (already disconnected)
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        let disc_count = events.iter().filter(|e| matches!(e, Event::Disconnected)).count();
+        assert_eq!(disc_count, 0);
     }
 
     #[test]
@@ -3976,39 +3979,9 @@ mod tests {
     }
 
     #[test]
-    fn strategy_submits_and_engine_drains() {
-        struct AutoBuyer;
-
-        impl Strategy for AutoBuyer {
-            fn on_tick(&mut self, instrument: InstrumentId, ctx: &mut Context) {
-                if ctx.position(instrument) == 0 {
-                    ctx.submit_limit(instrument, Side::Buy, 100, ctx.bid(instrument));
-                }
-            }
-        }
-
-        let mut engine = HotLoop::new(AutoBuyer, None);
-        let id = engine.context_mut().market.register(265598);
-        engine.context_mut().market.quote_mut(id).bid = 150 * PRICE_SCALE;
-
-        // Tick triggers order submission
-        engine.inject_tick(id);
-
-        // Engine drains pending orders (simulating what drain_and_send_orders does)
-        let orders: Vec<_> = engine.context_mut().drain_pending_orders().collect();
-        assert_eq!(orders.len(), 1);
-
-        // Simulate fill → position changes → next tick doesn't order again
-        engine.context_mut().update_position(id, 100);
-        engine.inject_tick(id);
-
-        let orders: Vec<_> = engine.context_mut().drain_pending_orders().collect();
-        assert!(orders.is_empty());
-    }
-
-    #[test]
     fn subscribe_tracks_md_req_id() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
@@ -4029,7 +4002,8 @@ mod tests {
 
     #[test]
     fn subscription_ack_registers_server_tag() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         // Simulate pending subscription for req_id=1 → instrument 0
@@ -4049,7 +4023,8 @@ mod tests {
 
     #[test]
     fn ticker_setup_registers_server_tag() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         // Build raw 35=L message: CSV body = conId,minTick,serverTag,,1
@@ -4063,7 +4038,8 @@ mod tests {
 
     #[test]
     fn account_update_ut_parses_values() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
 
         // Simulate 8=O UT message
         let msg = b"8=O\x019=999\x0135=UT\x018001=NetLiquidation\x018004=100000.50\x018001=BuyingPower\x018004=200000.00\x01";
@@ -4077,7 +4053,7 @@ mod tests {
 
     #[test]
     fn account_update_um_parses_pnl() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
 
         let msg = b"8=O\x019=999\x0135=UM\x018001=UnrealizedPnL\x018004=1500.25\x018001=RealizedPnL\x018004=-200.00\x01";
         engine.inject_ccp_message(msg);
@@ -4090,7 +4066,7 @@ mod tests {
 
     #[test]
     fn position_update_sets_absolute() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598); // instrument 0
 
         // UP message with position = 100
@@ -4108,7 +4084,7 @@ mod tests {
 
     #[test]
     fn position_update_unknown_con_id_ignored() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598);
 
         let msg = format!("8=O\x019=999\x0135=UP\x016008=999999\x016064=50\x01");
@@ -4120,7 +4096,7 @@ mod tests {
 
     #[test]
     fn unsubscribe_clears_tracking() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598);
 
         // Manually populate tracking (simulating prior subscribe)
@@ -4134,14 +4110,14 @@ mod tests {
 
     #[test]
     fn disconnect_flags_default_false() {
-        let engine = HotLoop::new(RecordingStrategy::new(), None);
+        let engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         assert!(!engine.is_farm_disconnected());
         assert!(!engine.is_ccp_disconnected());
     }
 
     #[test]
     fn reconnect_farm_clears_flag_and_resubscribes() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598); // instrument 0
         engine.context_mut().market.register(272093); // instrument 1
 
@@ -4161,7 +4137,7 @@ mod tests {
 
     #[test]
     fn subscription_ack_no_body() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598);
 
         // 35=Q with no CSV body — should be a no-op
@@ -4172,7 +4148,7 @@ mod tests {
 
     #[test]
     fn subscription_ack_malformed_csv() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598);
 
         // 35=Q with malformed CSV (not 3+ fields)
@@ -4183,7 +4159,7 @@ mod tests {
 
     #[test]
     fn subscription_ack_unknown_req_id() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598);
         // Don't add to md_req_to_instrument
 
@@ -4196,7 +4172,7 @@ mod tests {
 
     #[test]
     fn ticker_setup_no_body() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         // 35=L with no CSV body
         let msg = b"8=O\x019=999\x0135=L\x01\x01";
         engine.handle_ticker_setup(msg);
@@ -4205,7 +4181,7 @@ mod tests {
 
     #[test]
     fn ticker_setup_unknown_con_id() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598);
 
         // con_id 999999 not registered
@@ -4217,7 +4193,7 @@ mod tests {
 
     #[test]
     fn handle_cancel_reject_keeps_order() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598);
         engine.context_mut().insert_order(crate::types::Order {
             order_id: 10,
@@ -4243,7 +4219,7 @@ mod tests {
 
     #[test]
     fn handle_account_update_invalid_values_ignored() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
 
         // 8001=NetLiquidation but 8004= is not a valid float
         let msg = b"8=O\x019=999\x0135=UT\x018001=NetLiquidation\x018004=not_a_number\x01";
@@ -4254,7 +4230,7 @@ mod tests {
 
     #[test]
     fn handle_account_update_unknown_key_ignored() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
 
         let msg = b"8=O\x019=999\x0135=UT\x018001=SomeUnknownKey\x018004=12345.67\x01";
         engine.inject_ccp_message(msg);
@@ -4263,7 +4239,7 @@ mod tests {
 
     #[test]
     fn exec_report_cancelled_removes_order() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(crate::types::Order {
@@ -4322,7 +4298,7 @@ mod tests {
 
     #[test]
     fn multiple_subscriptions_same_instrument() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
@@ -4340,22 +4316,14 @@ mod tests {
 
     #[test]
     fn unsubscribe_nonexistent_instrument_noop() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.send_mktdata_unsubscribe(99); // no tracked subscription
         // Should not panic
     }
 
     #[test]
-    fn on_start_called() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
-        assert!(!engine.strategy.started);
-        engine.strategy.on_start(&mut engine.context);
-        assert!(engine.strategy.started);
-    }
-
-    #[test]
     fn control_unsubscribe_command() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
@@ -4372,26 +4340,32 @@ mod tests {
 
     #[test]
     fn process_farm_message_no_msg_type() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
         // Message without 35= tag
         let bad_msg = b"8=O\x019=5\x01junk\x01";
         engine.inject_farm_message(bad_msg);
-        // Should not panic
-        assert!(engine.strategy.ticks.is_empty());
+        // Should not panic, no events
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        assert!(events.is_empty());
     }
 
     #[test]
     fn process_farm_message_heartbeat_noop() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
         let heartbeat = fix::fix_build(&[(35, "0")], 1);
         engine.inject_farm_message(&heartbeat);
         // Should not trigger on_tick
-        assert!(engine.strategy.ticks.is_empty());
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        assert!(events.is_empty());
     }
 
     #[test]
     fn position_update_zero_delta_no_change() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.context_mut().market.register(265598);
         engine.context_mut().update_position(0, 50);
 
@@ -4404,7 +4378,8 @@ mod tests {
 
     #[test]
     fn exec_report_unknown_ord_status_ignored() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         let exec_msg = fix::fix_build(&[
@@ -4415,7 +4390,7 @@ mod tests {
         ], 1);
         engine.inject_ccp_message(&exec_msg);
         // Should not crash, no fills/updates
-        assert!(engine.strategy.fills.is_empty());
+        assert!(shared.drain_fills().is_empty());
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -4424,7 +4399,8 @@ mod tests {
 
     #[test]
     fn partial_fill_updates_filled_qty_and_keeps_order() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4442,8 +4418,10 @@ mod tests {
         engine.inject_ccp_message(&msg1);
 
         assert_eq!(engine.context_mut().position(0), 30);
-        assert_eq!(engine.strategy.fills.len(), 1);
-        assert_eq!(engine.strategy.fills[0], (10, 30));
+        let fills = shared.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].order_id, 10);
+        assert_eq!(fills[0].qty, 30);
         let order = engine.context_mut().order(10).unwrap();
         assert_eq!(order.filled, 30);
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
@@ -4456,8 +4434,9 @@ mod tests {
         engine.inject_ccp_message(&msg2);
 
         assert_eq!(engine.context_mut().position(0), 80);
-        assert_eq!(engine.strategy.fills.len(), 2);
-        assert_eq!(engine.strategy.fills[1], (10, 50));
+        let fills = shared.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].qty, 50);
         let order = engine.context_mut().order(10).unwrap();
         assert_eq!(order.filled, 80);
 
@@ -4469,14 +4448,16 @@ mod tests {
         engine.inject_ccp_message(&msg3);
 
         assert_eq!(engine.context_mut().position(0), 100);
-        assert_eq!(engine.strategy.fills.len(), 3);
+        let fills = shared.drain_fills();
+        assert_eq!(fills.len(), 1);
         // Order should be removed (Filled is terminal)
         assert!(engine.context_mut().order(10).is_none());
     }
 
     #[test]
-    fn cancel_reject_notifies_strategy_order_stays_active() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+    fn cancel_reject_notifies_shared_state_order_stays_active() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4499,15 +4480,18 @@ mod tests {
         // Order should still be active
         let order = engine.context_mut().order(20).unwrap();
         assert_eq!(order.status, OrderStatus::Submitted);
-        // Strategy should get on_cancel_reject (not on_order_update)
-        assert_eq!(engine.strategy.cancel_rejects.len(), 1);
-        assert_eq!(engine.strategy.cancel_rejects[0], (20, 1)); // reject_type=1 (cancel)
-        assert!(engine.strategy.updates.is_empty()); // no order_update for cancel reject
+        // SharedState should have cancel_reject (not order_update)
+        let rejects = shared.drain_cancel_rejects();
+        assert_eq!(rejects.len(), 1);
+        assert_eq!(rejects[0].order_id, 20);
+        assert_eq!(rejects[0].reject_type, 1);
+        assert!(shared.drain_order_updates().is_empty());
     }
 
     #[test]
     fn duplicate_exec_reports_deduped() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4526,39 +4510,46 @@ mod tests {
         engine.inject_ccp_message(&msg);
         engine.inject_ccp_message(&msg);
 
-        // Strategy should only get ONE notification, not three
-        assert_eq!(engine.strategy.updates.len(), 1);
-        assert_eq!(engine.strategy.updates[0], (30, OrderStatus::Submitted));
+        // Should only get ONE notification, not three
+        let updates = shared.drain_order_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].order_id, 30);
+        assert_eq!(updates[0].status, OrderStatus::Submitted);
     }
 
     #[test]
-    fn farm_disconnect_notifies_strategy() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
-        assert!(!engine.strategy.disconnected);
+    fn farm_disconnect_emits_event() {
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
         assert!(!engine.farm_disconnected);
 
-        // Simulate farm disconnection by setting the flag directly
-        // (In real code, poll_market_data sets this on recv error)
-        engine.farm_disconnected = true;
-        engine.strategy.on_disconnect(&mut engine.context);
+        engine.handle_farm_disconnect();
 
-        assert!(engine.strategy.disconnected);
+        assert!(engine.farm_disconnected);
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        let disc_count = events.iter().filter(|e| matches!(e, Event::Disconnected)).count();
+        assert_eq!(disc_count, 1);
     }
 
     #[test]
-    fn ccp_disconnect_notifies_strategy() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
-        assert!(!engine.strategy.disconnected);
+    fn ccp_disconnect_emits_event() {
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
 
-        engine.ccp_disconnected = true;
-        engine.strategy.on_disconnect(&mut engine.context);
+        engine.handle_ccp_disconnect();
 
-        assert!(engine.strategy.disconnected);
+        assert!(engine.ccp_disconnected);
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        let disc_count = events.iter().filter(|e| matches!(e, Event::Disconnected)).count();
+        assert_eq!(disc_count, 1);
     }
 
     #[test]
     fn open_orders_survive_disconnect() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         // Insert an open order
@@ -4570,13 +4561,11 @@ mod tests {
         });
 
         // Simulate disconnect
-        engine.ccp_disconnected = true;
-        engine.strategy.on_disconnect(&mut engine.context);
+        engine.handle_ccp_disconnect();
 
         // Open orders should survive (HashMap not cleared)
         let order = engine.context_mut().order(40).unwrap();
         assert_eq!(order.filled, 30);
-        assert_eq!(order.status, OrderStatus::PartiallyFilled);
         // Positions should survive
         engine.context_mut().update_position(0, 30);
         assert_eq!(engine.context_mut().position(0), 30);
@@ -4584,7 +4573,8 @@ mod tests {
 
     #[test]
     fn submit_stop_order_creates_request() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         let id = engine.context_mut().submit_stop(0, Side::Sell, 100, 140 * PRICE_SCALE);
@@ -4605,7 +4595,8 @@ mod tests {
 
     #[test]
     fn partial_fill_then_cancel_correct_position() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4634,14 +4625,16 @@ mod tests {
         assert_eq!(engine.context_mut().position(0), 40);
         assert!(engine.context_mut().order(50).is_none());
         // Updates: PartiallyFilled, then Cancelled
-        assert_eq!(engine.strategy.updates.len(), 2);
-        assert_eq!(engine.strategy.updates[0].1, OrderStatus::PartiallyFilled);
-        assert_eq!(engine.strategy.updates[1].1, OrderStatus::Cancelled);
+        let updates = shared.drain_order_updates();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].status, OrderStatus::PartiallyFilled);
+        assert_eq!(updates[1].status, OrderStatus::Cancelled);
     }
 
     #[test]
     fn cancel_clord_id_c_prefix_stripped() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4659,13 +4652,15 @@ mod tests {
 
         // Order should be cancelled (C prefix stripped, found the order)
         assert!(engine.context_mut().order(1772746902000).is_none());
-        assert_eq!(engine.strategy.updates.len(), 1);
-        assert_eq!(engine.strategy.updates[0].1, OrderStatus::Cancelled);
+        let updates = shared.drain_order_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].status, OrderStatus::Cancelled);
     }
 
     #[test]
     fn expired_order_treated_as_cancelled() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4682,14 +4677,16 @@ mod tests {
         engine.inject_ccp_message(&msg);
 
         assert!(engine.context_mut().order(60).is_none());
-        assert_eq!(engine.strategy.updates[0].1, OrderStatus::Cancelled);
+        let updates = shared.drain_order_updates();
+        assert_eq!(updates[0].status, OrderStatus::Cancelled);
     }
 
-    // ── P0 Safety Feature Tests ──
+    // -- P0 Safety Feature Tests --
 
     #[test]
     fn exec_id_dedup_prevents_double_fill() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4710,13 +4707,14 @@ mod tests {
         engine.inject_ccp_message(&msg);
 
         // Only one fill should be processed
-        assert_eq!(engine.strategy.fills.len(), 1);
+        assert_eq!(shared.drain_fills().len(), 1);
         assert_eq!(engine.context_mut().position(0), 100); // not 200
     }
 
     #[test]
     fn exec_id_dedup_different_ids_both_fill() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4741,13 +4739,14 @@ mod tests {
         engine.inject_ccp_message(&msg2);
 
         // Both fills processed (different ExecIDs)
-        assert_eq!(engine.strategy.fills.len(), 2);
+        assert_eq!(shared.drain_fills().len(), 2);
         assert_eq!(engine.context_mut().position(0), 100);
     }
 
     #[test]
     fn cancel_reject_on_partial_fill_preserves_status() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         // Order that is already partially filled
@@ -4769,12 +4768,13 @@ mod tests {
         // Should restore to PartiallyFilled, not Submitted
         let order = engine.context_mut().order(72).unwrap();
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
-        assert_eq!(engine.strategy.cancel_rejects.len(), 1);
+        assert_eq!(shared.drain_cancel_rejects().len(), 1);
     }
 
     #[test]
     fn cancel_reject_modify_type() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4792,15 +4792,18 @@ mod tests {
         ], 1);
         engine.inject_ccp_message(&msg);
 
-        assert_eq!(engine.strategy.cancel_rejects.len(), 1);
-        assert_eq!(engine.strategy.cancel_rejects[0], (73, 2)); // reject_type=2 (modify)
+        let rejects = shared.drain_cancel_rejects();
+        assert_eq!(rejects.len(), 1);
+        assert_eq!(rejects[0].order_id, 73);
+        assert_eq!(rejects[0].reject_type, 2); // modify
     }
 
     #[test]
     fn heartbeat_timeout_sets_disconnect_flag_not_running_false() {
         // Verify that heartbeat timeout sets disconnect flag but doesn't kill the loop.
         // The loop should continue running so it can be reconnected.
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
 
         // After heartbeat timeout, ccp_disconnected should be true
         // but running should still be true (so the loop continues)
@@ -4814,7 +4817,8 @@ mod tests {
 
     #[test]
     fn partial_fill_updates_order_filled_qty() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4860,12 +4864,13 @@ mod tests {
         // Order removed (terminal), position = 100
         assert!(engine.context_mut().order(80).is_none());
         assert_eq!(engine.context_mut().position(0), 100);
-        assert_eq!(engine.strategy.fills.len(), 3);
+        assert_eq!(shared.drain_fills().len(), 3);
     }
 
     #[test]
     fn seen_exec_ids_accumulate() {
-        let mut engine = HotLoop::new(RecordingStrategy::new(), None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.context_mut().market.register(265598);
 
         engine.context_mut().insert_order(Order {
@@ -4886,7 +4891,7 @@ mod tests {
             engine.inject_ccp_message(&msg);
         }
 
-        assert_eq!(engine.strategy.fills.len(), 5);
+        assert_eq!(shared.drain_fills().len(), 5);
         assert_eq!(engine.seen_exec_ids.len(), 5);
     }
 
@@ -4894,8 +4899,9 @@ mod tests {
 
     #[test]
     fn handle_farm_disconnect_clears_tracking_and_zeros_quotes() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
         let id = engine.context_mut().market.register(265598);
         engine.context_mut().market.register_server_tag(42, id);
         engine.context_mut().quote_mut(id).bid = 150 * PRICE_SCALE;
@@ -4911,15 +4917,17 @@ mod tests {
         assert_eq!(engine.context_mut().market.instrument_by_server_tag(42), None);
         assert_eq!(engine.context_mut().bid(id), 0);
         assert_eq!(engine.context_mut().ask(id), 0);
-        assert!(engine.strategy.disconnected);
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(e, Event::Disconnected)));
     }
 
     // --- CCP disconnect cleanup ---
 
     #[test]
     fn handle_ccp_disconnect_marks_orders_uncertain() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), Some(event_tx), None);
         engine.context_mut().insert_order(Order {
             order_id: 1, instrument: 0, side: Side::Buy,
             price: PRICE_SCALE, qty: 100, filled: 0,
@@ -4946,7 +4954,8 @@ mod tests {
         assert_eq!(engine.context_mut().order(2).unwrap().status, OrderStatus::Uncertain);
         // Filled orders should NOT be marked uncertain
         assert_eq!(engine.context_mut().order(3).unwrap().status, OrderStatus::Filled);
-        assert!(engine.strategy.disconnected);
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(e, Event::Disconnected)));
     }
 
     #[test]
@@ -5000,8 +5009,8 @@ mod tests {
 
     #[test]
     fn handle_tick_news_parses_binary() {
-        let strategy = RecordingStrategy::new();
-        let mut engine = HotLoop::new(strategy, None);
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
 
         // Build binary payload for tick type 0x1E90 (news)
         let mut payload = Vec::new();
@@ -5038,8 +5047,9 @@ mod tests {
 
         engine.inject_farm_message(&msg);
 
-        assert_eq!(engine.strategy.news.len(), 1);
-        assert_eq!(engine.strategy.news[0].0, "BRFG");
-        assert_eq!(engine.strategy.news[0].1, "AAPL beats earnings"); // metadata stripped
+        let news = shared.drain_tick_news();
+        assert_eq!(news.len(), 1);
+        assert_eq!(news[0].provider_code, "BRFG");
+        assert_eq!(news[0].headline, "AAPL beats earnings"); // metadata stripped
     }
 }

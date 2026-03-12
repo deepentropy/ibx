@@ -22,7 +22,8 @@ use crate::auth::crypto::strip_leading_zeros;
 use crate::auth::dh::SecureChannel;
 use crate::auth::session::{self, do_srp, do_soft_token};
 use crate::config::*;
-use crate::engine::context::Strategy;
+use std::sync::Arc;
+use crate::bridge::{Event, SharedState};
 use crate::engine::hot_loop::HotLoop;
 use crate::protocol::connection::Connection;
 use crate::protocol::fix::{self, fix_build, fix_parse, fix_read, SOH};
@@ -744,16 +745,17 @@ impl Gateway {
     }
 
     /// Create the control channel and build a HotLoop with connected sockets.
-    pub fn into_hot_loop<S: Strategy>(
+    pub fn into_hot_loop(
         self,
-        strategy: S,
+        shared: Arc<SharedState>,
+        event_tx: Option<Sender<Event>>,
         farm_conn: Connection,
         ccp_conn: Connection,
         hmds_conn: Option<Connection>,
         core_id: Option<usize>,
-    ) -> (HotLoop<S>, Sender<ControlCommand>) {
+    ) -> (HotLoop, Sender<ControlCommand>) {
         let (tx, rx) = bounded(64);
-        let mut hot_loop = HotLoop::new(strategy, core_id);
+        let mut hot_loop = HotLoop::new(shared, event_tx, core_id);
         hot_loop.set_control_rx(rx);
         hot_loop.set_account_id(self.account_id.clone());
         hot_loop.farm_conn = Some(farm_conn);

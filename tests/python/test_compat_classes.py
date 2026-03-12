@@ -180,6 +180,20 @@ def test_percent_change_condition():
     assert pcc.change_percent == 5.0
 
 
+def test_execution_condition():
+    ec = ExecutionCondition(symbol="AAPL", exchange="SMART", sec_type="STK")
+    assert ec.symbol == "AAPL"
+    assert ec.exchange == "SMART"
+    assert ec.sec_type == "STK"
+
+
+def test_execution_condition_defaults():
+    ec = ExecutionCondition()
+    assert ec.symbol == ""
+    assert ec.exchange == ""
+    assert ec.sec_type == ""
+
+
 # ── EWrapper subclassing ──
 
 def test_ewrapper_subclass():

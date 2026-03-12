@@ -1,3 +1,30 @@
+## 2026-03-12 - Add channel-based Rust Client API, remove native Python API
+
+### Goal
+Replace the Strategy/HotLoop framework pattern with a library-style Client API. Remove the native Python API (IbEngine/connect), keep ibapi-compatible as sole Python interface.
+
+### Approach Taken
+1. Added `Event` enum to `bridge.rs` — all event types the engine can emit
+2. Modified `BridgeStrategy` to accept optional `Sender<Event>` — sends events to channel alongside SharedState pushes
+3. Created `src/client.rs` with `Client` struct — wraps SharedState + control_tx + event_rx
+4. Hid `engine` module from public docs (`#[doc(hidden)]`) — Strategy/HotLoop still accessible for internal tests
+5. Re-exported `Client`, `ClientConfig`, `Event` at crate root
+6. Removed native Python API: deleted `engine.rs` (PyO3), stripped `types.rs`, removed `examples/` notebooks
+7. Updated main.rs to use Client pattern, updated README with new architecture
+
+### What Worked
+- BridgeStrategy + SharedState already implemented the channel pattern — just needed to add the actual crossbeam channel
+- `#[doc(hidden)]` keeps engine module pub (tests work) but hides from rustdoc
+- 549 tests pass unchanged — zero test breakage
+
+### Key Decisions
+- Strategy trait stays internally for test infrastructure (RecordingStrategy, etc.) but hidden from public API
+- Event channel is unbounded (hot loop never blocks)
+- Quotes still read via SeqLock (not through channel) for zero-copy performance
+- Python compat layer unchanged — uses BridgeStrategy::new() without event channel
+
+---
+
 ## 2026-03-12 - Fix EClient thread safety for concurrent Python access
 
 ### Goal

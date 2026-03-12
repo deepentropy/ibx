@@ -107,10 +107,8 @@ impl EClient {
 
         self.account_id = gw.account_id.clone();
         let shared = Arc::new(SharedState::new());
-        let shared_clone = shared.clone();
-        let strategy = crate::bridge::BridgeStrategy::new(shared_clone);
 
-        let (mut hot_loop, control_tx) = gw.into_hot_loop(strategy, farm_conn, ccp_conn, hmds_conn, core_id);
+        let (mut hot_loop, control_tx) = gw.into_hot_loop(shared.clone(), None, farm_conn, ccp_conn, hmds_conn, core_id);
 
         let start_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

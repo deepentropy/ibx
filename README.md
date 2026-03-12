@@ -16,7 +16,7 @@
 
 ---
 
-IBX connects directly to Interactive Brokers servers using IB's native protocol — bypassing the official Java Gateway entirely. Built in Rust for ultra-low-latency, available as both a Rust library and a Python library via PyO3.
+IBX connects directly to Interactive Brokers servers using IB's native protocol — bypassing the official Java Gateway entirely. Built in Rust for ultra-low-latency, available as both a Rust library (`Client` + channel-based events) and a Python library via PyO3 (ibapi-compatible `EClient`/`EWrapper`).
 
 ## Benchmarks
 
@@ -59,48 +59,56 @@ Add to `Cargo.toml`:
 ibx = { git = "https://github.com/deepentropy/ibx" }
 ```
 
-Implement the `Strategy` trait:
+Connect and receive events:
 
 ```rust
-use ibx::engine::context::{Context, Strategy};
-use ibx::gateway::{Gateway, GatewayConfig};
+use ibx::{Client, ClientConfig, Event};
 use ibx::types::*;
 
-struct MyStrategy;
-
-impl Strategy for MyStrategy {
-    fn on_tick(&mut self, instrument: InstrumentId, ctx: &mut Context) {
-        let quote = ctx.quote(instrument);
-        if ctx.position(instrument) == 0 {
-            ctx.submit_limit(instrument, Side::Buy, 1, quote.bid);
-        }
-    }
-
-    fn on_fill(&mut self, fill: &Fill, ctx: &mut Context) {
-        let tp = fill.price + 50 * PRICE_SCALE / 100; // $0.50 take-profit
-        ctx.submit_limit(fill.instrument, Side::Sell, fill.qty as u32, tp);
-    }
-}
-
 fn main() {
-    let config = GatewayConfig {
+    let client = Client::connect(&ClientConfig {
         username: "your_username".into(),
         password: "your_password".into(),
         host: "cdc1.ibllc.com".into(),
         paper: true,
-    };
-
-    let (gw, farm, ccp, hmds) = Gateway::connect(&config).unwrap();
-    let (mut hot_loop, control_tx) = gw.into_hot_loop(MyStrategy, farm, ccp, hmds, None);
-
-    hot_loop.context_mut().register_instrument(756733); // SPY
-    control_tx.send(ControlCommand::Subscribe {
-        con_id: 756733,
-        symbol: "SPY".into(),
+        core_id: None,
     }).unwrap();
 
-    hot_loop.run(); // blocks, runs strategy inline
+    let spy = client.subscribe(756733, "SPY");
+
+    while let Ok(event) = client.recv() {
+        match event {
+            Event::Tick(instrument) if instrument == spy => {
+                let q = client.quote(spy);
+                // q.bid, q.ask, q.last are i64 fixed-point (PRICE_SCALE = 10^8)
+            }
+            Event::Fill(fill) => {
+                println!("Filled {} @ {}", fill.qty, fill.price);
+            }
+            Event::OrderUpdate(update) => {
+                println!("Order {}: {:?}", update.order_id, update.status);
+            }
+            _ => {}
+        }
+    }
 }
+```
+
+### Place and manage orders
+
+```rust
+// Limit order
+let id = client.next_order_id();
+client.place_order(OrderRequest::SubmitLimit {
+    order_id: id, instrument: spy, side: Side::Buy, qty: 1,
+    price: client.quote(spy).bid,
+});
+
+// Modify price
+let new_id = client.modify_order(id, new_price, 1);
+
+// Cancel
+client.cancel_order(new_id);
 ```
 
 ## Python Usage
@@ -204,40 +212,40 @@ Jupyter notebooks adapted from [ib_async's examples](https://ib-api-reloaded.git
 ## Architecture
 
 ```
-                    IBX
-    ┌───────────────────────────────┐
-    │         HotLoop<S>            │
-    │  ┌─────────┐  ┌───────────┐  │
-    │  │ Strategy │  │  Context  │  │    Rust: monomorphized, zero-vtable
-    │  │ on_tick  │──│ bid/ask   │  │    Python: BridgeStrategy + SharedState
-    │  │ on_fill  │  │ orders    │  │
-    │  └─────────┘  └───────────┘  │
-    │       │              │        │
-    │  ┌────▼──────────────▼────┐   │
-    │  │   Protocol Stack       │   │
-    │  │ TLS → HMAC → FIXCOMP   │   │
-    │  │ → FIX → Binary Ticks   │   │
-    │  └────────────────────────┘   │
-    └──────────┬──────────┬─────────┘
-               │          │
-          ┌────▼───┐ ┌────▼───┐
-          │ usfarm │ │  CCP   │
-          │ market │ │ orders │
-          │  data  │ │  auth  │
-          └────┬───┘ └────┬───┘
-               │          │
-         ──────▼──────────▼──────
-              IB Servers
+    ┌─────────────────────────────────────────────┐
+    │           Your Code (Rust / Python)          │
+    │  client.recv() → Event::Tick / Fill / ...    │
+    │  client.quote(spy) → SeqLock read            │
+    │  client.place_order(req) → control channel   │
+    └─────────┬──────────────────────┬─────────────┘
+              │ events (crossbeam)   │ commands
+    ┌─────────▼──────────────────────▼─────────────┐
+    │              IBX Engine (pinned thread)       │
+    │  ┌────────────────────────────────────────┐  │
+    │  │   Protocol Stack                       │  │
+    │  │   TLS → HMAC → FIXCOMP → Binary Ticks  │  │
+    │  └────────────┬───────────────┬───────────┘  │
+    └───────────────┼───────────────┼──────────────┘
+               ┌────▼───┐     ┌────▼───┐
+               │ usfarm │     │  CCP   │
+               │ market │     │ orders │
+               │  data  │     │  auth  │
+               └────┬───┘     └────┬───┘
+                    │              │
+              ──────▼──────────────▼──────
+                     IB Servers
 ```
 
-**Hot path**: Poll farm socket (non-blocking) -> HMAC verify -> zlib decompress -> binary tick decode -> update pre-allocated Quote array -> `strategy.on_tick()` -> drain orders -> FIX encode -> send to CCP. All on a single pinned core, zero allocations.
+**Hot path**: Poll farm socket (non-blocking) → HMAC verify → zlib decompress → binary tick decode → update SeqLock quotes → push `Event::Tick` to channel → drain orders → FIX encode → send to CCP. All on a single pinned core, zero allocations.
 
-**Python bridge**: The Rust hot loop runs on a dedicated background thread. Python reads market data through SeqLock-protected shared memory (lock-free, writer never blocks). Orders flow through a crossbeam SPSC channel. No GIL contention on the hot path.
+**Rust client**: Events arrive via crossbeam channel (`client.recv()`). Quotes readable anytime via lock-free SeqLock (`client.quote()`). Orders sent via SPSC channel. No shared mutable state.
+
+**Python bridge**: Same engine, ibapi-compatible `EClient`/`EWrapper` API. SeqLock quote reads, crossbeam order channel. No GIL contention on the hot path.
 
 ## Testing
 
 ```bash
-# Unit tests (475+)
+# Unit tests (542+)
 cargo test
 
 # Integration tests (requires IB credentials in .env)

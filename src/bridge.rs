@@ -1,8 +1,9 @@
-//! Bridge module: connects the Rust HotLoop to external callers (Python via PyO3).
+//! Bridge module: shared state and events between the HotLoop and external callers.
 //!
 //! Architecture:
-//! - `SharedState` holds SeqLock-protected quotes, concurrent event queues, and an order channel.
-//! - `BridgeStrategy` implements `Strategy` — copies quotes to shared state, pushes fills/updates.
+//! - `SharedState` holds SeqLock-protected quotes, concurrent event queues, and position/account state.
+//! - `Event` enum carries all events through a crossbeam channel for the `Client` API.
+//! - The HotLoop pushes to SharedState directly (no intermediate Strategy layer).
 //! - External callers read snapshots and poll events without blocking the hot loop.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,10 +11,42 @@ use std::sync::Mutex;
 use std::cell::UnsafeCell;
 
 use std::collections::HashMap;
-use crate::engine::context::{Context, Strategy};
 use crate::control::historical::{HistoricalResponse, HeadTimestampResponse};
 use crate::control::contracts::ContractDefinition;
 use crate::types::*;
+
+/// Events emitted by the IB engine.
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// Market data tick received. Read the latest quote via `Client::quote()`.
+    Tick(InstrumentId),
+    /// Order filled (partial or full).
+    Fill(Fill),
+    /// Order status changed.
+    OrderUpdate(OrderUpdate),
+    /// Cancel or modify request rejected.
+    CancelReject(CancelReject),
+    /// Tick-by-tick trade data.
+    TbtTrade(TbtTrade),
+    /// Tick-by-tick bid/ask quote.
+    TbtQuote(TbtQuote),
+    /// What-if order response (margin/commission preview).
+    WhatIf(WhatIfResponse),
+    /// Real-time news headline.
+    News(TickNews),
+    /// Historical bar data.
+    HistoricalData { req_id: u32, data: HistoricalResponse },
+    /// Head timestamp response.
+    HeadTimestamp { req_id: u32, data: HeadTimestampResponse },
+    /// Contract details response.
+    ContractDetails { req_id: u32, details: ContractDefinition },
+    /// End of contract details for a request.
+    ContractDetailsEnd(u32),
+    /// Position update.
+    PositionUpdate { instrument: InstrumentId, con_id: i64, position: i64, avg_cost: Price },
+    /// Connection lost.
+    Disconnected,
+}
 
 /// SeqLock-protected quote slot. Writer (hot loop) never blocks.
 /// Reader retries if it catches a write in progress.
@@ -201,154 +234,68 @@ impl SharedState {
 
     // ── Hot-loop-side writers ──
 
-    fn push_quote(&self, id: InstrumentId, quote: &Quote) {
+    pub(crate) fn push_quote(&self, id: InstrumentId, quote: &Quote) {
         self.quotes[id as usize].write(quote);
     }
 
-    fn push_fill(&self, fill: Fill) {
+    pub(crate) fn push_fill(&self, fill: Fill) {
         self.fills.lock().unwrap().push(fill);
     }
 
-    fn push_order_update(&self, update: OrderUpdate) {
+    pub(crate) fn push_order_update(&self, update: OrderUpdate) {
         self.order_updates.lock().unwrap().push(update);
     }
 
-    fn push_cancel_reject(&self, reject: CancelReject) {
+    pub(crate) fn push_cancel_reject(&self, reject: CancelReject) {
         self.cancel_rejects.lock().unwrap().push(reject);
     }
 
-    fn push_tbt_trade(&self, trade: TbtTrade) {
+    pub(crate) fn push_tbt_trade(&self, trade: TbtTrade) {
         self.tbt_trades.lock().unwrap().push(trade);
     }
 
-    fn push_tbt_quote(&self, quote: TbtQuote) {
+    pub(crate) fn push_tbt_quote(&self, quote: TbtQuote) {
         self.tbt_quotes.lock().unwrap().push(quote);
     }
 
-    fn push_tick_news(&self, news: TickNews) {
+    pub(crate) fn push_tick_news(&self, news: TickNews) {
         self.tick_news.lock().unwrap().push(news);
     }
 
-    fn push_what_if(&self, response: WhatIfResponse) {
+    pub(crate) fn push_what_if(&self, response: WhatIfResponse) {
         self.what_if_responses.lock().unwrap().push(response);
     }
 
-    fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
+    pub(crate) fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
         self.historical_data.lock().unwrap().push((req_id, response));
     }
 
-    fn push_head_timestamp(&self, req_id: u32, response: HeadTimestampResponse) {
+    pub(crate) fn push_head_timestamp(&self, req_id: u32, response: HeadTimestampResponse) {
         self.head_timestamps.lock().unwrap().push((req_id, response));
     }
 
-    fn push_contract_details(&self, req_id: u32, def: ContractDefinition) {
+    pub(crate) fn push_contract_details(&self, req_id: u32, def: ContractDefinition) {
         self.contract_details.lock().unwrap().push((req_id, def));
     }
 
-    fn push_contract_details_end(&self, req_id: u32) {
+    pub(crate) fn push_contract_details_end(&self, req_id: u32) {
         self.contract_details_end.lock().unwrap().push(req_id);
     }
 
-    fn set_position_info(&self, info: PositionInfo) {
+    pub(crate) fn set_position_info(&self, info: PositionInfo) {
         self.position_infos.lock().unwrap().insert(info.con_id, info);
     }
 
-    fn set_position(&self, id: InstrumentId, pos: i64) {
+    pub(crate) fn set_position(&self, id: InstrumentId, pos: i64) {
         self.positions[id as usize].store(pos as u64, Ordering::Relaxed);
     }
 
-    fn set_account(&self, account: &AccountState) {
+    pub(crate) fn set_account(&self, account: &AccountState) {
         *self.account.lock().unwrap() = *account;
     }
 
-    fn set_instrument_count(&self, count: u32) {
+    pub(crate) fn set_instrument_count(&self, count: u32) {
         self.instrument_count.store(count as u64, Ordering::Relaxed);
-    }
-}
-
-/// Strategy implementation that bridges the hot loop to SharedState.
-/// No-op on_tick — just syncs quotes/positions/account to shared state.
-pub struct BridgeStrategy {
-    shared: std::sync::Arc<SharedState>,
-}
-
-impl BridgeStrategy {
-    pub fn new(shared: std::sync::Arc<SharedState>) -> Self {
-        Self { shared }
-    }
-}
-
-impl Strategy for BridgeStrategy {
-    fn on_tick(&mut self, instrument: InstrumentId, ctx: &mut Context) {
-        // Sync quote to shared state (SeqLock write, never blocks)
-        self.shared.push_quote(instrument, ctx.quote(instrument));
-        // Sync position
-        self.shared.set_position(instrument, ctx.position(instrument));
-        // Sync account
-        self.shared.set_account(ctx.account());
-        // Sync instrument count
-        self.shared.set_instrument_count(ctx.market.count());
-    }
-
-    fn on_fill(&mut self, fill: &Fill, ctx: &mut Context) {
-        self.shared.push_fill(*fill);
-        self.shared.set_position(fill.instrument, ctx.position(fill.instrument));
-    }
-
-    fn on_order_update(&mut self, update: &OrderUpdate, ctx: &mut Context) {
-        self.shared.push_order_update(*update);
-        let _ = ctx;
-    }
-
-    fn on_cancel_reject(&mut self, reject: &CancelReject, ctx: &mut Context) {
-        self.shared.push_cancel_reject(*reject);
-        let _ = ctx;
-    }
-
-    fn on_tbt_trade(&mut self, trade: &TbtTrade, ctx: &mut Context) {
-        self.shared.push_tbt_trade(trade.clone());
-        let _ = ctx;
-    }
-
-    fn on_tbt_quote(&mut self, quote: &TbtQuote, ctx: &mut Context) {
-        self.shared.push_tbt_quote(*quote);
-        let _ = ctx;
-    }
-
-    fn on_what_if(&mut self, response: &WhatIfResponse, ctx: &mut Context) {
-        self.shared.push_what_if(*response);
-        let _ = ctx;
-    }
-
-    fn on_news(&mut self, news: &TickNews, ctx: &mut Context) {
-        self.shared.push_tick_news(news.clone());
-        let _ = ctx;
-    }
-
-    fn on_historical_data(&mut self, req_id: u32, response: &HistoricalResponse, ctx: &mut Context) {
-        self.shared.push_historical_data(req_id, response.clone());
-        let _ = ctx;
-    }
-
-    fn on_head_timestamp(&mut self, req_id: u32, response: &HeadTimestampResponse, ctx: &mut Context) {
-        self.shared.push_head_timestamp(req_id, response.clone());
-        let _ = ctx;
-    }
-
-    fn on_contract_details(&mut self, req_id: u32, def: &ContractDefinition, ctx: &mut Context) {
-        self.shared.push_contract_details(req_id, def.clone());
-        let _ = ctx;
-    }
-
-    fn on_contract_details_end(&mut self, req_id: u32, ctx: &mut Context) {
-        self.shared.push_contract_details_end(req_id);
-        let _ = ctx;
-    }
-
-    fn on_position_update(&mut self, instrument: InstrumentId, con_id: i64, position: i64, avg_cost: Price, ctx: &mut Context) {
-        self.shared.set_position_info(PositionInfo { con_id, position, avg_cost });
-        self.shared.set_position(instrument, position);
-        let _ = ctx;
     }
 }
 
