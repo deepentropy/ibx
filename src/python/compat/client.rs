@@ -1,7 +1,8 @@
 //! ibapi-compatible EClient class that wraps IbEngine.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crossbeam_channel::Sender;
@@ -17,30 +18,37 @@ use super::super::types::PRICE_SCALE_F;
 
 /// ibapi-compatible EClient class.
 /// Wraps the internal engine and dispatches events to an EWrapper subclass.
+///
+/// All methods except `connect()` take `&self` (shared borrow) so that `run()`
+/// can execute in a daemon thread while the main thread calls req/cancel methods.
+/// Interior mutability is provided by `AtomicBool` and `Mutex`.
 #[pyclass(subclass)]
 pub struct EClient {
     /// Reference to the EWrapper (which is typically `self` in the `App(EWrapper, EClient)` pattern).
     wrapper: PyObject,
+    /// Set once by connect(), read-only after.
     shared: Option<Arc<SharedState>>,
+    /// Set once by connect(), read-only after.
     control_tx: Option<Sender<ControlCommand>>,
-    next_order_id: std::sync::atomic::AtomicU64,
-    _thread: Option<thread::JoinHandle<()>>,
+    next_order_id: AtomicU64,
+    _thread: Mutex<Option<thread::JoinHandle<()>>>,
+    /// Set once by connect(), read-only after.
     account_id: String,
-    connected: bool,
+    connected: AtomicBool,
     /// Maps reqId -> InstrumentId for market data subscriptions.
-    req_to_instrument: HashMap<i64, u32>,
+    req_to_instrument: Mutex<HashMap<i64, u32>>,
     /// Maps InstrumentId -> reqId (reverse).
-    instrument_to_req: HashMap<u32, i64>,
+    instrument_to_req: Mutex<HashMap<u32, i64>>,
     /// Last quote sent per instrument (for change detection).
-    last_quotes: HashMap<u32, [i64; 12]>,
+    last_quotes: Mutex<HashMap<u32, [i64; 12]>>,
     /// P&L subscription reqId (None = not subscribed).
-    pnl_req_id: Option<i64>,
+    pnl_req_id: Mutex<Option<i64>>,
     /// Single-position P&L subscriptions: reqId → conId.
-    pnl_single_reqs: HashMap<i64, i64>,
+    pnl_single_reqs: Mutex<HashMap<i64, i64>>,
     /// Account summary subscription: (reqId, requested_tags).
-    account_summary_req: Option<(i64, Vec<String>)>,
+    account_summary_req: Mutex<Option<(i64, Vec<String>)>>,
     /// Last P&L values sent (for change detection).
-    last_pnl: [i64; 3],
+    last_pnl: Mutex<[i64; 3]>,
 }
 
 #[pymethods]
@@ -52,17 +60,17 @@ impl EClient {
             wrapper,
             shared: None,
             control_tx: None,
-            next_order_id: std::sync::atomic::AtomicU64::new(0),
-            _thread: None,
+            next_order_id: AtomicU64::new(0),
+            _thread: Mutex::new(None),
             account_id: String::new(),
-            connected: false,
-            req_to_instrument: HashMap::new(),
-            instrument_to_req: HashMap::new(),
-            last_quotes: HashMap::new(),
-            pnl_req_id: None,
-            pnl_single_reqs: HashMap::new(),
-            account_summary_req: None,
-            last_pnl: [0; 3],
+            connected: AtomicBool::new(false),
+            req_to_instrument: Mutex::new(HashMap::new()),
+            instrument_to_req: Mutex::new(HashMap::new()),
+            last_quotes: Mutex::new(HashMap::new()),
+            pnl_req_id: Mutex::new(None),
+            pnl_single_reqs: Mutex::new(HashMap::new()),
+            account_summary_req: Mutex::new(None),
+            last_pnl: Mutex::new([0; 3]),
         }
     }
 
@@ -82,7 +90,7 @@ impl EClient {
         paper: bool,
         core_id: Option<usize>,
     ) -> PyResult<()> {
-        if self.connected {
+        if self.connected.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("Already connected"));
         }
 
@@ -118,9 +126,9 @@ impl EClient {
 
         self.shared = Some(shared);
         self.control_tx = Some(control_tx);
-        self.next_order_id = std::sync::atomic::AtomicU64::new(start_id);
-        self._thread = Some(handle);
-        self.connected = true;
+        self.next_order_id = AtomicU64::new(start_id);
+        *self._thread.lock().unwrap() = Some(handle);
+        self.connected.store(true, Ordering::Release);
 
         let _ = (port, client_id); // unused but kept for ibapi signature compat
 
@@ -128,23 +136,23 @@ impl EClient {
     }
 
     /// Disconnect from IB.
-    fn disconnect(&mut self) -> PyResult<()> {
+    fn disconnect(&self) -> PyResult<()> {
         if let Some(ref tx) = self.control_tx {
             let _ = tx.send(ControlCommand::Shutdown);
         }
-        self.connected = false;
+        self.connected.store(false, Ordering::Release);
         Ok(())
     }
 
     /// Check if connected.
     fn is_connected(&self) -> bool {
-        self.connected
+        self.connected.load(Ordering::Relaxed)
     }
 
     /// Request market data for a contract.
     #[pyo3(signature = (req_id, contract, generic_tick_list="", snapshot=false, regulatory_snapshot=false, mkt_data_options=Vec::new()))]
     fn req_mkt_data(
-        &mut self,
+        &self,
         req_id: i64,
         contract: &Contract,
         generic_tick_list: &str,
@@ -167,8 +175,8 @@ impl EClient {
         let shared = self.shared.as_ref().unwrap();
         let instrument_id = shared.instrument_count().saturating_sub(1);
 
-        self.req_to_instrument.insert(req_id, instrument_id);
-        self.instrument_to_req.insert(instrument_id, req_id);
+        self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
+        self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
 
         let _ = (generic_tick_list, snapshot, regulatory_snapshot, mkt_data_options);
 
@@ -176,10 +184,10 @@ impl EClient {
     }
 
     /// Cancel market data.
-    fn cancel_mkt_data(&mut self, req_id: i64) -> PyResult<()> {
-        if let Some(instrument) = self.req_to_instrument.remove(&req_id) {
-            self.instrument_to_req.remove(&instrument);
-            self.last_quotes.remove(&instrument);
+    fn cancel_mkt_data(&self, req_id: i64) -> PyResult<()> {
+        if let Some(instrument) = self.req_to_instrument.lock().unwrap().remove(&req_id) {
+            self.instrument_to_req.lock().unwrap().remove(&instrument);
+            self.last_quotes.lock().unwrap().remove(&instrument);
             let tx = self.control_tx.as_ref()
                 .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
             tx.send(ControlCommand::Unsubscribe { instrument })
@@ -191,7 +199,7 @@ impl EClient {
     /// Request tick-by-tick data.
     #[pyo3(signature = (req_id, contract, tick_type, number_of_ticks=0, ignore_size=false))]
     fn req_tick_by_tick_data(
-        &mut self,
+        &self,
         req_id: i64,
         contract: &Contract,
         tick_type: &str,
@@ -219,17 +227,17 @@ impl EClient {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let shared = self.shared.as_ref().unwrap();
         let instrument_id = shared.instrument_count().saturating_sub(1);
-        self.req_to_instrument.insert(req_id, instrument_id);
-        self.instrument_to_req.insert(instrument_id, req_id);
+        self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
+        self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
 
         let _ = (number_of_ticks, ignore_size);
         Ok(())
     }
 
     /// Cancel tick-by-tick data.
-    fn cancel_tick_by_tick_data(&mut self, req_id: i64) -> PyResult<()> {
-        if let Some(instrument) = self.req_to_instrument.remove(&req_id) {
-            self.instrument_to_req.remove(&instrument);
+    fn cancel_tick_by_tick_data(&self, req_id: i64) -> PyResult<()> {
+        if let Some(instrument) = self.req_to_instrument.lock().unwrap().remove(&req_id) {
+            self.instrument_to_req.lock().unwrap().remove(&instrument);
             let tx = self.control_tx.as_ref()
                 .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
             tx.send(ControlCommand::UnsubscribeTbt { instrument })
@@ -313,57 +321,55 @@ impl EClient {
 
     /// Request P&L updates for the account. Gateway-computed from positions × quotes.
     #[pyo3(signature = (req_id, account, model_code=""))]
-    fn req_pnl(&mut self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
-        // P&L is gateway-computed, no FIX message needed.
-        // Store the subscription so the event loop can dispatch.
-        self.pnl_req_id = Some(req_id);
+    fn req_pnl(&self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
+        *self.pnl_req_id.lock().unwrap() = Some(req_id);
         let _ = (account, model_code);
         Ok(())
     }
 
     /// Cancel P&L subscription.
-    fn cancel_pnl(&mut self, req_id: i64) -> PyResult<()> {
-        if self.pnl_req_id == Some(req_id) {
-            self.pnl_req_id = None;
+    fn cancel_pnl(&self, req_id: i64) -> PyResult<()> {
+        let mut pnl = self.pnl_req_id.lock().unwrap();
+        if *pnl == Some(req_id) {
+            *pnl = None;
         }
         Ok(())
     }
 
     /// Request P&L for a single position. Gateway-computed.
     #[pyo3(signature = (req_id, account, model_code, con_id))]
-    fn req_pnl_single(&mut self, req_id: i64, account: &str, model_code: &str, con_id: i64) -> PyResult<()> {
-        self.pnl_single_reqs.insert(req_id, con_id);
+    fn req_pnl_single(&self, req_id: i64, account: &str, model_code: &str, con_id: i64) -> PyResult<()> {
+        self.pnl_single_reqs.lock().unwrap().insert(req_id, con_id);
         let _ = (account, model_code);
         Ok(())
     }
 
     /// Cancel single-position P&L subscription.
-    fn cancel_pnl_single(&mut self, req_id: i64) -> PyResult<()> {
-        self.pnl_single_reqs.remove(&req_id);
+    fn cancel_pnl_single(&self, req_id: i64) -> PyResult<()> {
+        self.pnl_single_reqs.lock().unwrap().remove(&req_id);
         Ok(())
     }
 
     /// Request account summary.
     #[pyo3(signature = (req_id, group_name, tags))]
-    fn req_account_summary(&mut self, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
-        // Account summary comes from existing 35=UT/UM parsing.
-        // Store requested tags for filtering.
+    fn req_account_summary(&self, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
         let tag_list: Vec<String> = tags.split(',').map(|s| s.trim().to_string()).collect();
-        self.account_summary_req = Some((req_id, tag_list));
+        *self.account_summary_req.lock().unwrap() = Some((req_id, tag_list));
         let _ = group_name;
         Ok(())
     }
 
     /// Cancel account summary.
-    fn cancel_account_summary(&mut self, req_id: i64) -> PyResult<()> {
-        if self.account_summary_req.as_ref().map(|(r, _)| *r) == Some(req_id) {
-            self.account_summary_req = None;
+    fn cancel_account_summary(&self, req_id: i64) -> PyResult<()> {
+        let mut req = self.account_summary_req.lock().unwrap();
+        if req.as_ref().map(|(r, _)| *r) == Some(req_id) {
+            *req = None;
         }
         Ok(())
     }
 
     /// Request all positions.
-    fn req_positions(&mut self, py: Python<'_>) -> PyResult<()> {
+    fn req_positions(&self, py: Python<'_>) -> PyResult<()> {
         let shared = self.shared.as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
         let positions = shared.position_infos();
@@ -388,7 +394,7 @@ impl EClient {
     }
 
     /// Place an order. Routes to the appropriate submit_* based on order_type.
-    fn place_order(&mut self, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
+    fn place_order(&self, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
         if self.control_tx.is_none() {
             return Err(PyRuntimeError::new_err("Not connected"));
         }
@@ -396,7 +402,7 @@ impl EClient {
         let oid = if order_id > 0 {
             order_id as u64
         } else {
-            self.next_order_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            self.next_order_id.fetch_add(1, Ordering::Relaxed)
         };
 
         // Find the instrument ID for this contract
@@ -529,8 +535,8 @@ impl EClient {
     fn req_global_cancel(&self) -> PyResult<()> {
         let tx = self.control_tx.as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-        // Cancel all for each subscribed instrument
-        for &instrument in self.req_to_instrument.values() {
+        let map = self.req_to_instrument.lock().unwrap();
+        for &instrument in map.values() {
             let _ = tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }));
         }
         Ok(())
@@ -539,7 +545,7 @@ impl EClient {
     /// Request next valid order ID.
     #[pyo3(signature = (num_ids=1))]
     fn req_ids(&self, py: Python<'_>, num_ids: i32) -> PyResult<()> {
-        let next_id = self.next_order_id.load(std::sync::atomic::Ordering::Relaxed) as i64;
+        let next_id = self.next_order_id.load(Ordering::Relaxed) as i64;
         self.wrapper.call_method1(py, "next_valid_id", (next_id,))?;
         let _ = num_ids;
         Ok(())
@@ -553,20 +559,20 @@ impl EClient {
     }
 
     /// Run the event loop. Polls bridge queues and dispatches to EWrapper callbacks.
-    fn run(&mut self, py: Python<'_>) -> PyResult<()> {
-        if !self.connected {
+    /// Takes `&self` so the main thread can call req/cancel methods concurrently.
+    fn run(&self, py: Python<'_>) -> PyResult<()> {
+        if !self.connected.load(Ordering::Acquire) {
             return Err(PyRuntimeError::new_err("Not connected. Call connect() first."));
         }
 
         // Fire initial callbacks
-        let next_id = self.next_order_id.load(std::sync::atomic::Ordering::Relaxed) as i64;
+        let next_id = self.next_order_id.load(Ordering::Relaxed) as i64;
         self.wrapper.call_method1(py, "next_valid_id", (next_id,))?;
         self.wrapper.call_method1(py, "managed_accounts", (self.account_id.as_str(),))?;
         self.wrapper.call_method0(py, "connect_ack")?;
 
         // Event loop
-        while self.connected {
-            // Allow Python threads to run and check for KeyboardInterrupt
+        while self.connected.load(Ordering::Relaxed) {
             py.check_signals()?;
 
             let shared = match self.shared.as_ref() {
@@ -577,7 +583,8 @@ impl EClient {
             // Drain fills -> execDetails + orderStatus
             let fills = shared.drain_fills();
             for fill in fills {
-                let req_id = self.instrument_to_req.get(&fill.instrument).copied().unwrap_or(-1);
+                let req_id = self.instrument_to_req.lock().unwrap()
+                    .get(&fill.instrument).copied().unwrap_or(-1);
                 let side_str = match fill.side {
                     Side::Buy => "BUY",
                     Side::Sell => "SELL",
@@ -586,7 +593,6 @@ impl EClient {
                 let price = fill.price as f64 / PRICE_SCALE_F;
                 let commission = fill.commission as f64 / PRICE_SCALE_F;
 
-                // orderStatus with Filled/PartiallyFilled
                 let status = if fill.remaining == 0 { "Filled" } else { "PartiallyFilled" };
                 self.wrapper.call_method(
                     py, "order_status",
@@ -631,9 +637,11 @@ impl EClient {
             }
 
             // Poll quotes for changes -> tickPrice/tickSize
-            let instruments: Vec<(u32, i64)> = self.instrument_to_req.iter()
-                .map(|(&iid, &req_id)| (iid, req_id))
-                .collect();
+            // Snapshot instrument map then release lock before calling Python
+            let instruments: Vec<(u32, i64)> = {
+                let map = self.instrument_to_req.lock().unwrap();
+                map.iter().map(|(&iid, &req_id)| (iid, req_id)).collect()
+            };
 
             for (iid, req_id) in instruments {
                 let q = shared.quote(iid);
@@ -642,7 +650,12 @@ impl EClient {
                     q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
                 ];
 
-                let last = self.last_quotes.entry(iid).or_insert([0i64; 12]);
+                // Read previous values
+                let last = {
+                    let map = self.last_quotes.lock().unwrap();
+                    map.get(&iid).copied().unwrap_or([0i64; 12])
+                };
+
                 let attrib = TickAttrib::default();
                 let attrib_obj = Py::new(py, attrib)?.into_any();
 
@@ -680,13 +693,15 @@ impl EClient {
                     self.wrapper.call_method1(py, "tick_price", (req_id, TICK_OPEN, fields[10] as f64 / PRICE_SCALE_F, &attrib_obj))?;
                 }
 
-                *last = fields;
+                // Update last quotes
+                self.last_quotes.lock().unwrap().insert(iid, fields);
             }
 
             // Drain TBT trades -> tickByTickAllLast
             let tbt_trades = shared.drain_tbt_trades();
             for trade in tbt_trades {
-                let req_id = self.instrument_to_req.get(&trade.instrument).copied().unwrap_or(-1);
+                let req_id = self.instrument_to_req.lock().unwrap()
+                    .get(&trade.instrument).copied().unwrap_or(-1);
                 let price = trade.price as f64 / PRICE_SCALE_F;
                 let size = trade.size as f64;
                 let attrib = super::tick_types::TickAttribLast::default();
@@ -702,7 +717,8 @@ impl EClient {
             // Drain TBT quotes -> tickByTickBidAsk
             let tbt_quotes = shared.drain_tbt_quotes();
             for quote in tbt_quotes {
-                let req_id = self.instrument_to_req.get(&quote.instrument).copied().unwrap_or(-1);
+                let req_id = self.instrument_to_req.lock().unwrap()
+                    .get(&quote.instrument).copied().unwrap_or(-1);
                 let attrib = super::tick_types::TickAttribBidAsk::default();
                 let attrib_obj = Py::new(py, attrib)?.into_any();
                 self.wrapper.call_method(
@@ -717,23 +733,21 @@ impl EClient {
             // Drain news -> tickNews
             let news_items = shared.drain_tick_news();
             for news in news_items {
-                // tickNews(tickerId, timeStamp, providerCode, articleId, headline, extraData)
-                for (&_iid, &req_id) in &self.instrument_to_req {
+                let first_req_id = self.instrument_to_req.lock().unwrap()
+                    .values().next().copied();
+                if let Some(req_id) = first_req_id {
                     self.wrapper.call_method(
                         py, "tick_news",
                         (req_id, news.timestamp as i64, news.provider_code.as_str(),
                          news.article_id.as_str(), news.headline.as_str(), ""),
                         None,
                     )?;
-                    break; // broadcast to first req_id only
                 }
             }
 
             // Drain what-if responses -> orderStatus with margin info
             let what_ifs = shared.drain_what_if_responses();
             for wi in what_ifs {
-                // Dispatch as order_status with margin/commission data via error callback
-                // ibapi sends what-if results through orderStatus + openOrder with OrderState
                 let msg = format!(
                     "WhatIf: initMargin={:.2}, maintMargin={:.2}, commission={:.2}",
                     wi.init_margin_after as f64 / PRICE_SCALE_F,
@@ -803,10 +817,12 @@ impl EClient {
             }
 
             // P&L dispatch (gateway-computed)
-            if let Some(pnl_req) = self.pnl_req_id {
+            let pnl_req = *self.pnl_req_id.lock().unwrap();
+            if let Some(pnl_req) = pnl_req {
                 let acct = shared.account();
                 let pnl = [acct.daily_pnl, acct.unrealized_pnl, acct.realized_pnl];
-                if pnl != self.last_pnl {
+                let prev = *self.last_pnl.lock().unwrap();
+                if pnl != prev {
                     self.wrapper.call_method(
                         py, "pnl",
                         (pnl_req, acct.daily_pnl as f64 / PRICE_SCALE_F,
@@ -814,22 +830,27 @@ impl EClient {
                          acct.realized_pnl as f64 / PRICE_SCALE_F),
                         None,
                     )?;
-                    self.last_pnl = pnl;
+                    *self.last_pnl.lock().unwrap() = pnl;
                 }
             }
 
-            // Per-position P&L dispatch: (last_price - avg_cost) * position
-            if !self.pnl_single_reqs.is_empty() {
-                let reqs: Vec<(i64, i64)> = self.pnl_single_reqs.iter().map(|(&r, &c)| (r, c)).collect();
+            // Per-position P&L dispatch
+            {
+                let reqs: Vec<(i64, i64)> = {
+                    let map = self.pnl_single_reqs.lock().unwrap();
+                    map.iter().map(|(&r, &c)| (r, c)).collect()
+                };
                 for (req_id, con_id) in reqs {
                     if let Some(pi) = shared.position_info(con_id) {
-                        // Find instrument for this conId to get quote
-                        let last_price = self.instrument_to_req.iter()
-                            .find_map(|(&iid, _)| {
-                                let q = shared.quote(iid);
-                                if q.last != 0 { Some(q.last) } else { None }
-                            })
-                            .unwrap_or(0);
+                        let last_price = {
+                            let imap = self.instrument_to_req.lock().unwrap();
+                            imap.keys()
+                                .find_map(|&iid| {
+                                    let q = shared.quote(iid);
+                                    if q.last != 0 { Some(q.last) } else { None }
+                                })
+                                .unwrap_or(0)
+                        };
 
                         if last_price != 0 && pi.avg_cost != 0 {
                             let unrealized = (last_price - pi.avg_cost) * pi.position;
@@ -837,9 +858,9 @@ impl EClient {
                             self.wrapper.call_method(
                                 py, "pnl_single",
                                 (req_id, pi.position as f64,
-                                 0.0f64,  // daily P&L not available per-position
+                                 0.0f64,
                                  unrealized as f64 / PRICE_SCALE_F,
-                                 0.0f64,  // realized P&L not available per-position
+                                 0.0f64,
                                  value as f64 / PRICE_SCALE_F),
                                 None,
                             )?;
@@ -849,41 +870,44 @@ impl EClient {
             }
 
             // Account summary dispatch
-            if let Some((req_id, ref tags)) = self.account_summary_req {
-                let acct = shared.account();
-                let acct_name = self.account_id.as_str();
-                let tag_values: Vec<(&str, f64)> = vec![
-                    ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
-                    ("TotalCashValue", acct.total_cash_value as f64 / PRICE_SCALE_F),
-                    ("SettledCash", acct.settled_cash as f64 / PRICE_SCALE_F),
-                    ("BuyingPower", acct.buying_power as f64 / PRICE_SCALE_F),
-                    ("EquityWithLoanValue", acct.equity_with_loan as f64 / PRICE_SCALE_F),
-                    ("GrossPositionValue", acct.gross_position_value as f64 / PRICE_SCALE_F),
-                    ("InitMarginReq", acct.init_margin_req as f64 / PRICE_SCALE_F),
-                    ("MaintMarginReq", acct.maint_margin_req as f64 / PRICE_SCALE_F),
-                    ("AvailableFunds", acct.available_funds as f64 / PRICE_SCALE_F),
-                    ("ExcessLiquidity", acct.excess_liquidity as f64 / PRICE_SCALE_F),
-                    ("Cushion", acct.cushion as f64 / PRICE_SCALE_F),
-                    ("DayTradesRemaining", acct.day_trades_remaining as f64),
-                    ("Leverage", acct.leverage as f64 / PRICE_SCALE_F),
-                    ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
-                    ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
-                ];
-                for (tag, val) in &tag_values {
-                    if tags.is_empty() || tags.iter().any(|t| t == tag) {
-                        if *val != 0.0 {
-                            let val_str = format!("{:.2}", val);
-                            self.wrapper.call_method(
-                                py, "account_summary",
-                                (req_id, acct_name, *tag, val_str.as_str(), "USD"),
-                                None,
-                            )?;
+            {
+                let summary_req = self.account_summary_req.lock().unwrap().clone();
+                if let Some((req_id, ref tags)) = summary_req {
+                    let acct = shared.account();
+                    let acct_name = self.account_id.as_str();
+                    let tag_values: Vec<(&str, f64)> = vec![
+                        ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
+                        ("TotalCashValue", acct.total_cash_value as f64 / PRICE_SCALE_F),
+                        ("SettledCash", acct.settled_cash as f64 / PRICE_SCALE_F),
+                        ("BuyingPower", acct.buying_power as f64 / PRICE_SCALE_F),
+                        ("EquityWithLoanValue", acct.equity_with_loan as f64 / PRICE_SCALE_F),
+                        ("GrossPositionValue", acct.gross_position_value as f64 / PRICE_SCALE_F),
+                        ("InitMarginReq", acct.init_margin_req as f64 / PRICE_SCALE_F),
+                        ("MaintMarginReq", acct.maint_margin_req as f64 / PRICE_SCALE_F),
+                        ("AvailableFunds", acct.available_funds as f64 / PRICE_SCALE_F),
+                        ("ExcessLiquidity", acct.excess_liquidity as f64 / PRICE_SCALE_F),
+                        ("Cushion", acct.cushion as f64 / PRICE_SCALE_F),
+                        ("DayTradesRemaining", acct.day_trades_remaining as f64),
+                        ("Leverage", acct.leverage as f64 / PRICE_SCALE_F),
+                        ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
+                        ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
+                    ];
+                    for (tag, val) in &tag_values {
+                        if tags.is_empty() || tags.iter().any(|t| t == tag) {
+                            if *val != 0.0 {
+                                let val_str = format!("{:.2}", val);
+                                self.wrapper.call_method(
+                                    py, "account_summary",
+                                    (req_id, acct_name, *tag, val_str.as_str(), "USD"),
+                                    None,
+                                )?;
+                            }
                         }
                     }
+                    self.wrapper.call_method1(py, "account_summary_end", (req_id,))?;
+                    // One-shot: clear after delivery
+                    *self.account_summary_req.lock().unwrap() = None;
                 }
-                self.wrapper.call_method1(py, "account_summary_end", (req_id,))?;
-                // One-shot: clear after delivery
-                self.account_summary_req = None;
             }
 
             // Sleep to avoid busy-wait (1ms)
@@ -901,11 +925,13 @@ impl EClient {
 
 impl EClient {
     /// Find instrument ID for a contract, registering if needed.
-    fn find_or_register_instrument(&mut self, contract: &Contract) -> PyResult<u32> {
+    fn find_or_register_instrument(&self, contract: &Contract) -> PyResult<u32> {
         // Check if already registered via any reqId
-        for (&iid, _) in &self.instrument_to_req {
-            // Already have this instrument registered
-            return Ok(iid);
+        {
+            let map = self.instrument_to_req.lock().unwrap();
+            if let Some((&iid, _)) = map.iter().next() {
+                return Ok(iid);
+            }
         }
 
         // Register new instrument

@@ -1,3 +1,60 @@
+## 2026-03-12 - Fix EClient thread safety for concurrent Python access
+
+### Goal
+Make `client.run()` work in a daemon thread while the main thread calls `req_mkt_data()`, `is_connected()`, `disconnect()`, etc.
+
+### Problem
+PyO3's `#[pyclass(subclass)]` borrow checker uses RefCell semantics. When `run()` held `&mut self`, the daemon thread held an exclusive borrow, blocking ALL other method calls from the main thread ("Already mutably borrowed" error).
+
+### Approach Taken
+1. Changed all EClient methods except `connect()` from `&mut self` to `&self`
+2. Wrapped mutable state in `AtomicBool` (connected flag) and `Mutex<T>` (HashMaps, Options)
+3. `connect()` stays `&mut self` (called before `run()` starts, no concurrency)
+4. In `run()`, locks are acquired/released per-section — never held while calling Python wrapper methods (prevents deadlock if user callbacks call back into EClient)
+5. Required `cargo clean` after changing method signatures — PyO3 proc-macro caches stale borrow checker code
+
+### What Worked
+- `AtomicBool` for `connected` flag — lightweight, no Mutex overhead
+- Individual `Mutex` per field (not one big lock) — allows `run()` to process quotes while main thread adds subscriptions
+- Snapshot-then-release pattern in `run()`: lock HashMap, copy to Vec, release lock, then iterate and call Python
+
+### What Failed
+- First attempt: changed `&mut self` → `&self` but build cache was stale. `maturin develop` showed "Finished in 0.12s" (cached). Required full `cargo clean` + rebuild (9.82s) to regenerate PyO3 proc-macro output.
+
+### Current State
+- All 177 Python tests pass
+- Live integration verified: connect + threaded run + concurrent method calls work
+- Market data streaming, contract details, ordering all confirmed with IB paper account
+
+### Key Decisions
+- `connect()` remains `&mut self` — it's the only method called before threading starts, keeping it simple
+- No `#[pyclass(frozen)]` — incompatible with `subclass` and `&mut self` connect
+
+---
+
+## 2026-03-11 - Issues #45, #47, #54: Bridge TBT/News/Historical/ContractDetails + Tests
+
+### Goal
+Bridge control plane data (TBT, news, historical, contract details) through SharedState to Python EClient event loop, and add Python integration tests.
+
+### What Was Implemented
+- **bridge.rs**: SharedState queues + BridgeStrategy callbacks for TBT trades/quotes, tick news, what-if responses, historical data, head timestamps, contract definitions
+- **context.rs**: Strategy callbacks on_historical_data, on_head_timestamp, on_contract_details, on_contract_details_end
+- **hot_loop.rs**: ControlCommand handling for FetchHistorical, CancelHistorical, FetchHeadTimestamp, FetchContractDetails. HMDS response parsing for ResultSetBar → strategy.on_historical_data(), ResultSetHeadTimeStamp → strategy.on_head_timestamp(). CCP 35=d → strategy.on_contract_details()
+- **client.rs**: EClient methods reqTickByTickData, cancelTickByTickData, reqHistoricalData, cancelHistoricalData, reqHeadTimestamp, reqContractDetails. Event loop drains TBT, news, historical, head_timestamp, contract_details queues
+- **contract.rs**: BarData, ContractDetails PyO3 classes with from_definition() converter
+- **tests/python/test_compat_classes.py**: 25 Python tests for all ibapi-compatible classes
+
+### Key Decisions
+- Historical/ContractDetails use Strategy callbacks (Path C hybrid) — consistent with existing pattern, no extra channels needed
+- Scanner deferred (goes through HMDS 35=U sub-protocol, more complex)
+- EWrapper + EClient multi-inheritance unsupported by PyO3; use composition pattern instead
+
+### Test Results
+564 Rust tests + 25 Python tests pass. Issues #45, #47, #54 closed.
+
+---
+
 ## 2026-03-11 - Issue #39: Reference Data Features
 
 ### Goal
