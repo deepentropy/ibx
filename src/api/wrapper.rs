@@ -159,7 +159,7 @@ pub trait Wrapper {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A Wrapper impl that records all callback invocations for testing.
