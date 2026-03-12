@@ -325,6 +325,94 @@ pub fn build_head_timestamp_xml(req: &HeadTimestampRequest) -> String {
     )
 }
 
+/// Build the XML query for a historical schedule request.
+///
+/// Schedule requests use `<data>Schedule</data>` and `<scheduleOnly>true</scheduleOnly>`
+/// with `<type>BarData</type>`. Response is `<ResultSetSchedule>`.
+pub fn build_schedule_xml(query_id: &str, con_id: i64, end_time: &str, duration: &str, use_rth: bool) -> String {
+    let exchange = "BEST";
+    let rth = if use_rth { "true" } else { "false" };
+
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ListOfQueries>\
+         <Query>\
+         <id>{id}</id>\
+         <useRTH>{rth}</useRTH>\
+         <contractID>{con_id}</contractID>\
+         <exchange>{exchange}</exchange>\
+         <secType>STK</secType>\
+         <type>BarData</type>\
+         <data>Schedule</data>\
+         <endTime>{end}</endTime>\
+         <timeLength>{dur}</timeLength>\
+         <step>1 day</step>\
+         <scheduleOnly>true</scheduleOnly>\
+         </Query>\
+         </ListOfQueries>",
+        id = query_id,
+        con_id = con_id,
+        end = end_time,
+        dur = duration,
+    )
+}
+
+/// Parse a ResultSetSchedule XML response into sessions.
+pub fn parse_schedule_response(xml: &str) -> Option<crate::types::HistoricalScheduleResponse> {
+    if !xml.contains("<ResultSetSchedule>") {
+        return None;
+    }
+
+    let query_id = extract_xml_tag(xml, "id").unwrap_or("").to_string();
+    let timezone = extract_xml_tag(xml, "tz").unwrap_or("").to_string();
+    let start_date_time = extract_xml_tag(xml, "derivedStart").unwrap_or("").to_string();
+
+    let mut sessions = Vec::new();
+    let mut search_start = 0;
+
+    // Parse Open/Close pairs into sessions
+    while let Some(open_pos) = xml[search_start..].find("<Open>") {
+        let abs_open = search_start + open_pos;
+        let open_end = match xml[abs_open..].find("</Open>") {
+            Some(e) => abs_open + e + 7,
+            None => break,
+        };
+        let open_xml = &xml[abs_open..open_end];
+
+        let open_time = extract_xml_tag(open_xml, "time").unwrap_or("").to_string();
+        let ref_date = extract_xml_tag(open_xml, "refDate").unwrap_or("").to_string();
+
+        // Find the matching Close
+        let close_time = if let Some(close_pos) = xml[open_end..].find("<Close>") {
+            let abs_close = open_end + close_pos;
+            let close_end = match xml[abs_close..].find("</Close>") {
+                Some(e) => abs_close + e + 8,
+                None => break,
+            };
+            let close_xml = &xml[abs_close..close_end];
+            search_start = close_end;
+            extract_xml_tag(close_xml, "time").unwrap_or("").to_string()
+        } else {
+            search_start = open_end;
+            String::new()
+        };
+
+        sessions.push(crate::types::ScheduleSession {
+            ref_date,
+            open_time,
+            close_time,
+        });
+    }
+
+    Some(crate::types::HistoricalScheduleResponse {
+        query_id,
+        timezone,
+        start_date_time,
+        end_date_time: String::new(), // filled by caller from request context
+        sessions,
+    })
+}
+
 /// Parse a ResultSetHeadTimeStamp XML response.
 pub fn parse_head_timestamp_response(xml: &str) -> Option<HeadTimestampResponse> {
     if !xml.contains("<ResultSetHeadTimeStamp>") {
@@ -549,5 +637,49 @@ mod tests {
     fn parse_head_timestamp_rejects_other() {
         assert!(parse_head_timestamp_response("<ResultSetBar>...</ResultSetBar>").is_none());
         assert!(parse_head_timestamp_response("not xml").is_none());
+    }
+
+    #[test]
+    fn build_schedule_xml_structure() {
+        let xml = build_schedule_xml("sched_1", 756733, "20260312-19:34:06", "5 d", true);
+        assert!(xml.contains("<id>sched_1</id>"));
+        assert!(xml.contains("<contractID>756733</contractID>"));
+        assert!(xml.contains("<data>Schedule</data>"));
+        assert!(xml.contains("<scheduleOnly>true</scheduleOnly>"));
+        assert!(xml.contains("<step>1 day</step>"));
+        assert!(xml.contains("<useRTH>true</useRTH>"));
+        assert!(xml.contains("<timeLength>5 d</timeLength>"));
+    }
+
+    #[test]
+    fn parse_schedule_response_basic() {
+        let xml = r#"<ResultSetSchedule>
+            <id>sched_1</id>
+            <eoq>true</eoq>
+            <tz>US/Eastern</tz>
+            <derivedStart>20260306-14:30:00</derivedStart>
+            <Events>
+                <Open><time>20260306-14:30:00</time><refDate>20260306</refDate></Open>
+                <Close><time>20260306-21:00:00</time></Close>
+                <Open><time>20260309-14:30:00</time><refDate>20260309</refDate></Open>
+                <Close><time>20260309-21:00:00</time></Close>
+            </Events>
+        </ResultSetSchedule>"#;
+
+        let resp = parse_schedule_response(xml).unwrap();
+        assert_eq!(resp.query_id, "sched_1");
+        assert_eq!(resp.timezone, "US/Eastern");
+        assert_eq!(resp.start_date_time, "20260306-14:30:00");
+        assert_eq!(resp.sessions.len(), 2);
+        assert_eq!(resp.sessions[0].ref_date, "20260306");
+        assert_eq!(resp.sessions[0].open_time, "20260306-14:30:00");
+        assert_eq!(resp.sessions[0].close_time, "20260306-21:00:00");
+        assert_eq!(resp.sessions[1].ref_date, "20260309");
+    }
+
+    #[test]
+    fn parse_schedule_response_rejects_other() {
+        assert!(parse_schedule_response("<ResultSetBar>...</ResultSetBar>").is_none());
+        assert!(parse_schedule_response("not xml").is_none());
     }
 }

@@ -116,6 +116,8 @@ pub struct SharedState {
     news_articles: Mutex<Vec<(u32, i32, String)>>,
     fundamental_data: Mutex<Vec<(u32, String)>>,
     histogram_data: Mutex<Vec<(u32, Vec<HistogramEntry>)>>,
+    historical_schedules: Mutex<Vec<(u32, HistoricalScheduleResponse)>>,
+    completed_orders: Mutex<Vec<CompletedOrder>>,
     market_rules: Mutex<Vec<MarketRule>>,
     /// Position info (conId → PositionInfo) for reqPositions and P&L.
     position_infos: Mutex<HashMap<i64, PositionInfo>>,
@@ -147,6 +149,8 @@ impl SharedState {
             news_articles: Mutex::new(Vec::with_capacity(8)),
             fundamental_data: Mutex::new(Vec::with_capacity(4)),
             histogram_data: Mutex::new(Vec::with_capacity(4)),
+            historical_schedules: Mutex::new(Vec::with_capacity(4)),
+            completed_orders: Mutex::new(Vec::with_capacity(64)),
             market_rules: Mutex::new(Vec::new()),
             position_infos: Mutex::new(HashMap::new()),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -269,6 +273,18 @@ impl SharedState {
         std::mem::take(&mut *lock)
     }
 
+    /// Drain all pending historical schedule responses.
+    pub fn drain_historical_schedules(&self) -> Vec<(u32, HistoricalScheduleResponse)> {
+        let mut lock = self.historical_schedules.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all completed orders.
+    pub fn drain_completed_orders(&self) -> Vec<CompletedOrder> {
+        let mut lock = self.completed_orders.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
     /// Get cached market rules.
     pub fn market_rules(&self) -> Vec<MarketRule> {
         self.market_rules.lock().unwrap().clone()
@@ -380,6 +396,14 @@ impl SharedState {
 
     pub(crate) fn push_histogram_data(&self, req_id: u32, entries: Vec<HistogramEntry>) {
         self.histogram_data.lock().unwrap().push((req_id, entries));
+    }
+
+    pub(crate) fn push_historical_schedule(&self, req_id: u32, response: HistoricalScheduleResponse) {
+        self.historical_schedules.lock().unwrap().push((req_id, response));
+    }
+
+    pub(crate) fn push_completed_order(&self, order: CompletedOrder) {
+        self.completed_orders.lock().unwrap().push(order);
     }
 
     pub(crate) fn push_market_rules(&self, rules: Vec<MarketRule>) {

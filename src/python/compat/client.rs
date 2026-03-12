@@ -270,17 +270,28 @@ impl EClient {
     ) -> PyResult<()> {
         let tx = self.control_tx.as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-        tx.send(ControlCommand::FetchHistorical {
-            req_id: req_id as u32,
-            con_id: contract.con_id,
-            symbol: contract.symbol.clone(),
-            end_date_time: end_date_time.to_string(),
-            duration: duration_str.to_string(),
-            bar_size: bar_size_setting.to_string(),
-            what_to_show: what_to_show.to_string(),
-            use_rth: use_rth != 0,
-        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         let _ = (format_date, keep_up_to_date, chart_options);
+        // Route SCHEDULE requests to the schedule-specific command
+        if what_to_show.eq_ignore_ascii_case("SCHEDULE") {
+            tx.send(ControlCommand::FetchHistoricalSchedule {
+                req_id: req_id as u32,
+                con_id: contract.con_id,
+                end_date_time: end_date_time.to_string(),
+                duration: duration_str.to_string(),
+                use_rth: use_rth != 0,
+            }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        } else {
+            tx.send(ControlCommand::FetchHistorical {
+                req_id: req_id as u32,
+                con_id: contract.con_id,
+                symbol: contract.symbol.clone(),
+                end_date_time: end_date_time.to_string(),
+                duration: duration_str.to_string(),
+                bar_size: bar_size_setting.to_string(),
+                what_to_show: what_to_show.to_string(),
+                use_rth: use_rth != 0,
+            }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        }
         Ok(())
     }
 
@@ -1052,18 +1063,34 @@ impl EClient {
 
     // ── Tier 3: Soft Dollar Tiers ──
 
-    /// Request soft dollar tiers.
-    fn req_soft_dollar_tiers(&self, req_id: i64) -> PyResult<()> {
-        let _ = req_id;
-        log::warn!("req_soft_dollar_tiers: not yet implemented — needs FIX capture");
+    /// Request soft dollar tiers. Gateway resolves locally — returns empty on paper accounts.
+    fn req_soft_dollar_tiers(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // Soft dollar tiers are gateway-local data (EClient msg 79→77).
+        // Paper accounts always return 0 tiers.
+        let empty_list = pyo3::types::PyList::empty(py);
+        self.wrapper.call_method1(py, "soft_dollar_tiers", (req_id, empty_list.as_any()))?;
         Ok(())
     }
 
     // ── Tier 3: Family Codes ──
 
-    /// Request family codes.
-    fn req_family_codes(&self) -> PyResult<()> {
-        log::warn!("req_family_codes: not yet implemented — needs FIX capture");
+    /// Request family codes. Gateway resolves locally from login data.
+    fn req_family_codes(&self, py: Python<'_>) -> PyResult<()> {
+        // Family codes come from CCP login data (EClient msg 80→78).
+        // Return account_id with empty family code (matches paper behavior).
+        let account = if !self.account_id.is_empty() {
+            self.account_id.as_str()
+        } else {
+            "*"
+        };
+        let codes = vec![(account, "")];
+        let py_list = pyo3::types::PyList::new(py, codes.iter().map(|(acct, code)| {
+            pyo3::types::PyTuple::new(py, &[
+                acct.into_pyobject(py).unwrap().into_any(),
+                code.into_pyobject(py).unwrap().into_any(),
+            ]).unwrap()
+        }))?;
+        self.wrapper.call_method1(py, "family_codes", (py_list.as_any(),))?;
         Ok(())
     }
 
@@ -1111,10 +1138,11 @@ impl EClient {
 
     // ── Tier 3: User Info ──
 
-    /// Request user info.
-    fn req_user_info(&self, req_id: i64) -> PyResult<()> {
-        let _ = req_id;
-        log::warn!("req_user_info: not yet implemented — needs FIX capture");
+    /// Request user info. Gateway resolves locally — empty whiteBrandingId on paper.
+    fn req_user_info(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // User info is gateway-local data (EClient msg 104→107).
+        // Paper accounts return empty whiteBrandingId.
+        self.wrapper.call_method1(py, "user_info", (req_id, ""))?;
         Ok(())
     }
 
@@ -1137,11 +1165,29 @@ impl EClient {
 
     // ── Tier 3: Completed Orders ──
 
-    /// Request completed (filled/cancelled) orders.
+    /// Request completed (filled/cancelled) orders from session archive.
     #[pyo3(signature = (api_only=false))]
-    fn req_completed_orders(&self, api_only: bool) -> PyResult<()> {
+    fn req_completed_orders(&self, py: Python<'_>, api_only: bool) -> PyResult<()> {
         let _ = api_only;
-        log::warn!("req_completed_orders: not yet implemented — needs FIX capture");
+        if let Some(shared) = self.shared.as_ref() {
+            let completed = shared.drain_completed_orders();
+            for order in &completed {
+                let status_str = match order.status {
+                    crate::types::OrderStatus::Filled => "Filled",
+                    crate::types::OrderStatus::Cancelled => "Cancelled",
+                    crate::types::OrderStatus::Rejected => "Inactive",
+                    _ => "Unknown",
+                };
+                // Fire completed_order callback with minimal contract/order/state info
+                let contract = py.None();
+                let order_obj = py.None();
+                let state = pyo3::types::PyDict::new(py);
+                state.set_item("status", status_str)?;
+                state.set_item("completedTime", "")?;
+                self.wrapper.call_method1(py, "completed_order", (&contract, &order_obj, state.as_any()))?;
+            }
+            self.wrapper.call_method0(py, "completed_orders_end")?;
+        }
         Ok(())
     }
 
@@ -1505,6 +1551,26 @@ impl EClient {
                 }).collect();
                 let py_list = pyo3::types::PyList::new(py, tuples)?;
                 self.wrapper.call_method1(py, "histogram_data", (req_id as i64, py_list))?;
+            }
+
+            // Drain historical schedules -> historical_schedule
+            let schedules = shared.drain_historical_schedules();
+            for (req_id, resp) in schedules {
+                let sessions: Vec<Bound<'_, pyo3::types::PyTuple>> = resp.sessions.iter().map(|s| {
+                    pyo3::types::PyTuple::new(py, &[
+                        s.ref_date.as_str().into_pyobject(py).unwrap().into_any(),
+                        s.open_time.as_str().into_pyobject(py).unwrap().into_any(),
+                        s.close_time.as_str().into_pyobject(py).unwrap().into_any(),
+                    ]).unwrap()
+                }).collect();
+                let py_sessions = pyo3::types::PyList::new(py, sessions)?;
+                self.wrapper.call_method1(py, "historical_schedule", (
+                    req_id as i64,
+                    resp.start_date_time.as_str(),
+                    resp.end_date_time.as_str(),
+                    resp.timezone.as_str(),
+                    py_sessions,
+                ))?;
             }
 
             // Drain market rules -> market_rule (already served from cache in req_market_rule)

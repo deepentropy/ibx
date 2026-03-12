@@ -785,6 +785,34 @@ pub struct TickNews {
     pub timestamp: u64,
 }
 
+/// A single trading session from a historical schedule response.
+#[derive(Debug, Clone)]
+pub struct ScheduleSession {
+    pub ref_date: String,
+    pub open_time: String,
+    pub close_time: String,
+}
+
+/// Parsed historical schedule response from HMDS.
+#[derive(Debug, Clone)]
+pub struct HistoricalScheduleResponse {
+    pub query_id: String,
+    pub timezone: String,
+    pub start_date_time: String,
+    pub end_date_time: String,
+    pub sessions: Vec<ScheduleSession>,
+}
+
+/// A completed order record for req_completed_orders.
+#[derive(Debug, Clone)]
+pub struct CompletedOrder {
+    pub order_id: OrderId,
+    pub instrument: InstrumentId,
+    pub status: OrderStatus,
+    pub filled_qty: i64,
+    pub timestamp_ns: u64,
+}
+
 /// Commands sent from the control plane to the hot loop via SPSC channel.
 #[derive(Debug, Clone)]
 pub enum ControlCommand {
@@ -872,6 +900,14 @@ pub enum ControlCommand {
     },
     /// Cancel histogram data request.
     CancelHistogramData { req_id: u32 },
+    /// Request historical schedule via HMDS.
+    FetchHistoricalSchedule {
+        req_id: u32,
+        con_id: i64,
+        end_date_time: String,
+        duration: String,
+        use_rth: bool,
+    },
     /// Graceful shutdown.
     Shutdown,
 }

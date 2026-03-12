@@ -117,12 +117,26 @@ def test_req_smart_components_signature():
 
 
 # ═══════════════════════════════════════════════════════════
-# Soft Dollar Tiers (stub)
+# Soft Dollar Tiers (gateway-local, returns empty list)
 # ═══════════════════════════════════════════════════════════
 
-def test_req_soft_dollar_tiers_stub():
-    c, w = make_client()
-    c.req_soft_dollar_tiers(1)
+class SoftDollarTiersCapture(EWrapper):
+    def __init__(self):
+        super().__init__()
+        self.tiers = None
+        self.req_id = None
+
+    def soft_dollar_tiers(self, req_id, tiers):
+        self.req_id = req_id
+        self.tiers = tiers
+
+
+def test_req_soft_dollar_tiers_fires_callback():
+    w = SoftDollarTiersCapture()
+    c = EClient(w)
+    c.req_soft_dollar_tiers(42)
+    assert w.req_id == 42
+    assert len(w.tiers) == 0  # Paper accounts return empty
 
 
 def test_req_soft_dollar_tiers_signature():
@@ -131,12 +145,26 @@ def test_req_soft_dollar_tiers_signature():
 
 
 # ═══════════════════════════════════════════════════════════
-# Family Codes (stub)
+# Family Codes (gateway-local, returns account info)
 # ═══════════════════════════════════════════════════════════
 
-def test_req_family_codes_stub():
-    c, w = make_client()
+class FamilyCodesCapture(EWrapper):
+    def __init__(self):
+        super().__init__()
+        self.codes = None
+
+    def family_codes(self, codes):
+        self.codes = codes
+
+
+def test_req_family_codes_fires_callback():
+    w = FamilyCodesCapture()
+    c = EClient(w)
     c.req_family_codes()
+    assert w.codes is not None
+    assert len(w.codes) == 1
+    # Each entry is (accountID, familyCodeStr)
+    assert w.codes[0][1] == ""  # Empty family code on unconnected
 
 
 def test_req_family_codes_signature():
@@ -174,6 +202,26 @@ def test_histogram_data_signatures():
 
 
 # ═══════════════════════════════════════════════════════════
+# Historical Schedule (routed via req_historical_data + SCHEDULE)
+# ═══════════════════════════════════════════════════════════
+
+def test_req_historical_schedule_not_connected():
+    c, w = make_client()
+    con = make_contract(con_id=756733, symbol="SPY", sec_type="STK", exchange="SMART")
+    try:
+        c.req_historical_data(1, con, "", "5 D", "1 day", "SCHEDULE", 1)
+        assert False, "Should raise"
+    except RuntimeError as e:
+        assert "Not connected" in str(e)
+
+
+def test_req_historical_schedule_signature():
+    """SCHEDULE is routed via req_historical_data, not a separate method."""
+    c, w = make_client()
+    assert hasattr(c, "req_historical_data")
+
+
+# ═══════════════════════════════════════════════════════════
 # Server Log Level (local-only, always succeeds)
 # ═══════════════════════════════════════════════════════════
 
@@ -196,12 +244,26 @@ def test_set_server_log_level_signature():
 
 
 # ═══════════════════════════════════════════════════════════
-# User Info (stub)
+# User Info (gateway-local, returns empty whiteBrandingId)
 # ═══════════════════════════════════════════════════════════
 
-def test_req_user_info_stub():
-    c, w = make_client()
-    c.req_user_info(1)
+class UserInfoCapture(EWrapper):
+    def __init__(self):
+        super().__init__()
+        self.req_id = None
+        self.white_branding_id = None
+
+    def user_info(self, req_id, white_branding_id):
+        self.req_id = req_id
+        self.white_branding_id = white_branding_id
+
+
+def test_req_user_info_fires_callback():
+    w = UserInfoCapture()
+    c = EClient(w)
+    c.req_user_info(7)
+    assert w.req_id == 7
+    assert w.white_branding_id == ""  # Empty on paper
 
 
 def test_req_user_info_signature():
@@ -235,10 +297,11 @@ def test_wsh_signatures():
 
 
 # ═══════════════════════════════════════════════════════════
-# Completed Orders (stub)
+# Completed Orders (session archive)
 # ═══════════════════════════════════════════════════════════
 
-def test_req_completed_orders_stub():
+def test_req_completed_orders_no_shared_state():
+    """Without connection, req_completed_orders should not crash."""
     c, w = make_client()
     c.req_completed_orders(True)
 

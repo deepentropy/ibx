@@ -9,7 +9,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{AlgoParams, ControlCommand, Fill, InstrumentId, OrderCondition, OrderRequest, PositionInfo, Price, Qty, Side, PRICE_SCALE, QTY_SCALE};
+use crate::types::{AlgoParams, CompletedOrder, ControlCommand, Fill, InstrumentId, OrderCondition, OrderRequest, PositionInfo, Price, Qty, Side, PRICE_SCALE, QTY_SCALE};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 /// CCP heartbeat interval (10 seconds, configurable via FIX tag 108).
@@ -87,6 +87,8 @@ pub struct HotLoop {
     pending_fundamental: Vec<(String, u32)>,
     /// Pending histogram data requests: query_id → req_id.
     pending_histogram: Vec<(String, u32)>,
+    /// Pending historical schedule requests: query_id → req_id.
+    pending_schedule: Vec<(String, u32)>,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -167,6 +169,7 @@ impl HotLoop {
             pending_articles: Vec::new(),
             pending_fundamental: Vec::new(),
             pending_histogram: Vec::new(),
+            pending_schedule: Vec::new(),
         }
     }
 
@@ -2220,12 +2223,21 @@ impl HotLoop {
             }
         }
 
-        // Remove fully terminal orders
+        // Archive and remove fully terminal orders
         if matches!(status,
             crate::types::OrderStatus::Filled |
             crate::types::OrderStatus::Cancelled |
             crate::types::OrderStatus::Rejected
         ) {
+            if let Some(order) = self.context.order(clord_id).copied() {
+                self.shared.push_completed_order(CompletedOrder {
+                    order_id: clord_id,
+                    instrument: order.instrument,
+                    status,
+                    filled_qty: order.filled as i64,
+                    timestamp_ns: self.context.now_ns(),
+                });
+            }
             self.context.remove_order(clord_id);
         }
     }
@@ -2516,6 +2528,9 @@ impl HotLoop {
                     if let Some(pos) = self.pending_histogram.iter().position(|(_, rid)| *rid == req_id) {
                         self.pending_histogram.remove(pos);
                     }
+                }
+                ControlCommand::FetchHistoricalSchedule { req_id, con_id, end_date_time, duration, use_rth } => {
+                    self.send_schedule_request(req_id, con_id, &end_date_time, &duration, use_rth);
                 }
                 ControlCommand::Shutdown => {
                     // Unsubscribe all active market data before stopping
@@ -3029,6 +3044,13 @@ impl HotLoop {
                         if let Some(pos) = self.pending_histogram.iter().position(|_| true) {
                             let (_, req_id) = self.pending_histogram.remove(pos);
                             self.shared.push_histogram_data(req_id, entries);
+                        }
+                    }
+                    // Try parsing as historical schedule
+                    else if let Some(resp) = crate::control::historical::parse_schedule_response(xml_tag) {
+                        if let Some(pos) = self.pending_schedule.iter().position(|(qid, _)| *qid == resp.query_id) {
+                            let (_, req_id) = self.pending_schedule.remove(pos);
+                            self.shared.push_historical_schedule(req_id, resp);
                         }
                     }
                     // Try parsing as TBT ticker ID assignment
@@ -3670,6 +3692,27 @@ impl HotLoop {
             log::info!("Sent histogram request: req_id={} con_id={}", req_id, con_id);
         }
         self.pending_histogram.push((query_id, req_id));
+    }
+
+    /// Send a historical schedule request to HMDS.
+    fn send_schedule_request(&mut self, req_id: u32, con_id: i64, end_date_time: &str, duration: &str, use_rth: bool) {
+        let qid = self.next_hmds_query_id;
+        self.next_hmds_query_id += 1;
+
+        let query_id = format!("sched_{}", qid);
+        let xml = crate::control::historical::build_schedule_xml(&query_id, con_id, end_date_time, duration, use_rth);
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "W"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]);
+            self.hb.last_hmds_sent = Instant::now();
+            log::info!("Sent schedule request: req_id={} con_id={}", req_id, con_id);
+        }
+        self.pending_schedule.push((query_id, req_id));
     }
 
     /// Handle farm disconnect: clear stale subscription tracking, zero quotes, emit event.
