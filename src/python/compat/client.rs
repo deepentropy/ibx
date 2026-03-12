@@ -976,30 +976,67 @@ impl EClient {
     // ── Tier 2: Multi-Account (stubs) ──
 
     /// Request account updates for multiple accounts/models.
+    /// One-shot delivery from SharedState (single-account gateway).
     #[pyo3(signature = (req_id, account, model_code, ledger_and_nlv=false))]
     fn req_account_updates_multi(
-        &self, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
+        &self, py: Python<'_>, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
     ) -> PyResult<()> {
-        let _ = (req_id, account, model_code, ledger_and_nlv);
-        log::warn!("req_account_updates_multi: not yet implemented in engine");
+        let shared = self.shared.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        let _ = ledger_and_nlv;
+        let acct = shared.account();
+        let acct_name = if !account.is_empty() { account } else { self.account_id.as_str() };
+        let tag_values: [(&str, f64); 8] = [
+            ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
+            ("TotalCashValue", acct.total_cash_value as f64 / PRICE_SCALE_F),
+            ("BuyingPower", acct.buying_power as f64 / PRICE_SCALE_F),
+            ("GrossPositionValue", acct.gross_position_value as f64 / PRICE_SCALE_F),
+            ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
+            ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
+            ("InitMarginReq", acct.init_margin_req as f64 / PRICE_SCALE_F),
+            ("MaintMarginReq", acct.maint_margin_req as f64 / PRICE_SCALE_F),
+        ];
+        for (key, val) in &tag_values {
+            let val_str = format!("{:.2}", val);
+            self.wrapper.call_method(
+                py, "account_update_multi",
+                (req_id, acct_name, model_code, *key, val_str.as_str(), "USD"),
+                None,
+            )?;
+        }
+        self.wrapper.call_method1(py, "account_update_multi_end", (req_id,))?;
         Ok(())
     }
 
-    /// Cancel multi-account updates.
+    /// Cancel multi-account updates. One-shot delivery, so this is a no-op.
     fn cancel_account_updates_multi(&self, req_id: i64) -> PyResult<()> {
         let _ = req_id;
         Ok(())
     }
 
     /// Request positions across multiple accounts/models.
+    /// One-shot delivery from SharedState (single-account gateway).
     #[pyo3(signature = (req_id, account, model_code))]
-    fn req_positions_multi(&self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
-        let _ = (req_id, account, model_code);
-        log::warn!("req_positions_multi: not yet implemented in engine");
+    fn req_positions_multi(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
+        let shared = self.shared.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        let positions = shared.position_infos();
+        for pi in &positions {
+            let mut c = super::contract::Contract::default();
+            c.con_id = pi.con_id;
+            let c_py = Py::new(py, c)?.into_any();
+            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
+            self.wrapper.call_method(
+                py, "position_multi",
+                (req_id, account, model_code, &c_py, pi.position as f64, avg_cost),
+                None,
+            )?;
+        }
+        self.wrapper.call_method1(py, "position_multi_end", (req_id,))?;
         Ok(())
     }
 
-    /// Cancel multi-account positions.
+    /// Cancel multi-account positions. One-shot delivery, so this is a no-op.
     fn cancel_positions_multi(&self, req_id: i64) -> PyResult<()> {
         let _ = req_id;
         Ok(())
@@ -1072,10 +1109,11 @@ impl EClient {
 
     // ── Tier 3: Smart Components ──
 
-    /// Request SMART routing components.
-    fn req_smart_components(&self, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
-        let _ = (req_id, bbo_exchange);
-        log::warn!("req_smart_components: not yet implemented — needs FIX capture");
+    /// Request SMART routing components. Returns empty map (gateway-local data not available).
+    fn req_smart_components(&self, py: Python<'_>, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
+        let _ = bbo_exchange;
+        let empty_map = pyo3::types::PyList::empty(py);
+        self.wrapper.call_method1(py, "smart_components", (req_id, empty_map.as_any()))?;
         Ok(())
     }
 

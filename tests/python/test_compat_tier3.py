@@ -103,12 +103,26 @@ def test_req_market_rule_signature():
 
 
 # ═══════════════════════════════════════════════════════════
-# Smart Components (stub)
+# Smart Components (fires empty callback)
 # ═══════════════════════════════════════════════════════════
 
-def test_req_smart_components_stub():
-    c, w = make_client()
+class SmartComponentsCapture(EWrapper):
+    def __init__(self):
+        super().__init__()
+        self.req_id = None
+        self.components = None
+
+    def smart_components(self, req_id, smart_component_map):
+        self.req_id = req_id
+        self.components = smart_component_map
+
+
+def test_req_smart_components_fires_callback():
+    w = SmartComponentsCapture()
+    c = EClient(w)
     c.req_smart_components(1, "a]AMEX")
+    assert w.req_id == 1
+    assert len(w.components) == 0  # Empty map (gateway-local data not available)
 
 
 def test_req_smart_components_signature():
@@ -403,3 +417,31 @@ def test_wrapper_delta_neutral_validation():
 def test_wrapper_historical_schedule():
     w = EWrapper()
     w.historical_schedule(1, "20230101", "20230201", "US/Eastern", None)
+
+
+# ═══════════════════════════════════════════════════════════
+# Positions Multi (one-shot from SharedState)
+# ═══════════════════════════════════════════════════════════
+
+def test_wrapper_position_multi():
+    w = EWrapper()
+    w.position_multi(1, "DU12345", "", None, 100.0, 50.5)
+
+
+def test_wrapper_position_multi_end():
+    w = EWrapper()
+    w.position_multi_end(1)
+
+
+# ═══════════════════════════════════════════════════════════
+# Account Updates Multi (one-shot from SharedState)
+# ═══════════════════════════════════════════════════════════
+
+def test_wrapper_account_update_multi():
+    w = EWrapper()
+    w.account_update_multi(1, "DU12345", "", "NetLiquidation", "100000.00", "USD")
+
+
+def test_wrapper_account_update_multi_end():
+    w = EWrapper()
+    w.account_update_multi_end(1)

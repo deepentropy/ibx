@@ -15,6 +15,7 @@ Tests cover:
 """
 
 import time
+import pytest
 from ibx import EClient, EWrapper, Contract
 
 
@@ -285,19 +286,19 @@ def test_req_managed_accts_fires_callback():
 
 
 # ═══════════════════════════════════════════════════════════
-# Multi-Account (stubs)
+# Multi-Account (requires connection — reads SharedState)
 # ═══════════════════════════════════════════════════════════
 
-def test_req_account_updates_multi_accepts_call():
+def test_req_account_updates_multi_not_connected():
     c, w = make_client()
-    result = c.req_account_updates_multi(1, "DU12345", "")
-    assert result is None
+    with pytest.raises(Exception, match="Not connected"):
+        c.req_account_updates_multi(1, "DU12345", "")
 
 
-def test_req_account_updates_multi_with_ledger():
+def test_req_account_updates_multi_with_ledger_not_connected():
     c, w = make_client()
-    result = c.req_account_updates_multi(1, "DU12345", "", True)
-    assert result is None
+    with pytest.raises(Exception, match="Not connected"):
+        c.req_account_updates_multi(1, "DU12345", "", True)
 
 
 def test_cancel_account_updates_multi():
@@ -306,10 +307,10 @@ def test_cancel_account_updates_multi():
     assert result is None
 
 
-def test_req_positions_multi_accepts_call():
+def test_req_positions_multi_not_connected():
     c, w = make_client()
-    result = c.req_positions_multi(1, "DU12345", "")
-    assert result is None
+    with pytest.raises(Exception, match="Not connected"):
+        c.req_positions_multi(1, "DU12345", "")
 
 
 def test_cancel_positions_multi():
@@ -445,9 +446,8 @@ def test_full_ibapi_app_pattern_with_tier2():
     app.client.cancel_calculate_implied_volatility(1)
     app.client.cancel_calculate_option_price(2)
     app.client.exercise_options(3, contract, 1, 100, "DU12345", 0)
-    app.client.req_account_updates_multi(10, "DU12345", "")
+    # cancel_* are no-ops that work without connection
     app.client.cancel_account_updates_multi(10)
-    app.client.req_positions_multi(11, "DU12345", "")
     app.client.cancel_positions_multi(11)
 
     # Verify callbacks fired
