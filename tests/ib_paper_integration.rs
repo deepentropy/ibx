@@ -163,7 +163,6 @@ fn market_session() -> (MarketSession, u16) {
 // ─── Master test suite ───
 
 #[test]
-#[ignore]
 fn integration_suite() {
     let _ = env_logger::try_init();
     let config = match get_config() {
