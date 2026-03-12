@@ -85,6 +85,8 @@ pub struct HotLoop {
     pending_articles: Vec<(String, u32)>,
     /// Pending fundamental data requests: query_id → req_id.
     pending_fundamental: Vec<(String, u32)>,
+    /// Pending histogram data requests: query_id → req_id.
+    pending_histogram: Vec<(String, u32)>,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -164,6 +166,7 @@ impl HotLoop {
             pending_news: Vec::new(),
             pending_articles: Vec::new(),
             pending_fundamental: Vec::new(),
+            pending_histogram: Vec::new(),
         }
     }
 
@@ -2081,6 +2084,11 @@ impl HotLoop {
                         }
                     }
                 }
+                // Extract and cache market rules from secdef responses
+                let rules = crate::control::contracts::parse_market_rules(msg);
+                if !rules.is_empty() {
+                    self.shared.push_market_rules(rules);
+                }
             }
             _ => {}
         }
@@ -2499,6 +2507,14 @@ impl HotLoop {
                 ControlCommand::CancelFundamentalData { req_id } => {
                     if let Some(pos) = self.pending_fundamental.iter().position(|(_, rid)| *rid == req_id) {
                         self.pending_fundamental.remove(pos);
+                    }
+                }
+                ControlCommand::FetchHistogramData { req_id, con_id, use_rth, period } => {
+                    self.send_histogram_request(req_id, con_id, use_rth, &period);
+                }
+                ControlCommand::CancelHistogramData { req_id } => {
+                    if let Some(pos) = self.pending_histogram.iter().position(|(_, rid)| *rid == req_id) {
+                        self.pending_histogram.remove(pos);
                     }
                 }
                 ControlCommand::Shutdown => {
@@ -3006,6 +3022,13 @@ impl HotLoop {
                             let (_, req_id) = self.pending_head_ts.remove(pos);
                             self.shared.push_head_timestamp(req_id, resp.clone());
                             self.emit(Event::HeadTimestamp { req_id, data: resp });
+                        }
+                    }
+                    // Try parsing as histogram data
+                    else if let Some(entries) = crate::control::histogram::parse_histogram_response(xml_tag) {
+                        if let Some(pos) = self.pending_histogram.iter().position(|_| true) {
+                            let (_, req_id) = self.pending_histogram.remove(pos);
+                            self.shared.push_histogram_data(req_id, entries);
                         }
                     }
                     // Try parsing as TBT ticker ID assignment
@@ -3623,6 +3646,30 @@ impl HotLoop {
             log::info!("Sent fundamental data request: req_id={} con_id={}", req_id, con_id);
         }
         self.pending_fundamental.push((query_id, req_id));
+    }
+
+    /// Send a histogram data request to HMDS.
+    fn send_histogram_request(&mut self, req_id: u32, con_id: u32, use_rth: bool, period: &str) {
+        let req = crate::control::histogram::HistogramRequest {
+            con_id,
+            use_rth,
+            period: period.to_string(),
+        };
+        let xml = crate::control::histogram::build_histogram_request_xml(&req);
+        let query_id = format!("hg_{}", self.next_hmds_query_id);
+        self.next_hmds_query_id += 1;
+
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "W"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]);
+            self.hb.last_hmds_sent = Instant::now();
+            log::info!("Sent histogram request: req_id={} con_id={}", req_id, con_id);
+        }
+        self.pending_histogram.push((query_id, req_id));
     }
 
     /// Handle farm disconnect: clear stale subscription tracking, zero quotes, emit event.

@@ -221,6 +221,68 @@ impl EWrapper {
     fn account_update_multi(&self, _req_id: i64, _account: &str, _model_code: &str, _key: &str, _value: &str, _currency: &str) {}
 
     fn account_update_multi_end(&self, _req_id: i64) {}
+
+    // ── Tier 3: Display Groups ──
+
+    fn display_group_list(&self, _req_id: i64, _groups: &str) {}
+
+    fn display_group_updated(&self, _req_id: i64, _contract_info: &str) {}
+
+    // ── Tier 3: Market Rules ──
+
+    fn market_rule(&self, _market_rule_id: i64, _price_increments: PyObject) {}
+
+    // ── Tier 3: Smart Components ──
+
+    fn smart_components(&self, _req_id: i64, _smart_component_map: PyObject) {}
+
+    // ── Tier 3: Soft Dollar Tiers ──
+
+    fn soft_dollar_tiers(&self, _req_id: i64, _tiers: PyObject) {}
+
+    // ── Tier 3: Family Codes ──
+
+    fn family_codes(&self, _family_codes: PyObject) {}
+
+    // ── Tier 3: Histogram Data ──
+
+    fn histogram_data(&self, _req_id: i64, _items: PyObject) {}
+
+    // ── Tier 3: User Info ──
+
+    fn user_info(&self, _req_id: i64, _white_branding_id: &str) {}
+
+    // ── Tier 3: WSH ──
+
+    fn wsh_meta_data(&self, _req_id: i64, _data_json: &str) {}
+
+    fn wsh_event_data(&self, _req_id: i64, _data_json: &str) {}
+
+    // ── Tier 3: Completed Orders ──
+
+    fn completed_order(&self, _contract: PyObject, _order: PyObject, _order_state: PyObject) {}
+
+    fn completed_orders_end(&self) {}
+
+    // ── Tier 3: Order Bound ──
+
+    fn order_bound(&self, _order_id: i64, _api_client_id: i64, _api_order_id: i64) {}
+
+    // ── Tier 3: Tick Req Params ──
+
+    fn tick_req_params(&self, _ticker_id: i64, _min_tick: f64, _bbo_exchange: &str, _snapshot_permissions: i64) {}
+
+    // ── Tier 3: Bond Contract Details ──
+
+    fn bond_contract_details(&self, _req_id: i64, _contract_details: PyObject) {}
+
+    // ── Tier 3: Delta Neutral Validation ──
+
+    fn delta_neutral_validation(&self, _req_id: i64, _delta_neutral_contract: PyObject) {}
+
+    // ── Tier 3: Historical Schedule ──
+
+    fn historical_schedule(&self, _req_id: i64, _start_date_time: &str, _end_date_time: &str, _time_zone: &str, _sessions: PyObject) {}
 }
 
 /// Register EWrapper on the module.

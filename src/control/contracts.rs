@@ -36,6 +36,13 @@ pub const TAG_IB_ORDER_TYPES: u32 = 6431;
 pub const TAG_IB_MARKET_RULE_ID: u32 = 6031;
 pub const TAG_IB_STOCK_TYPE: u32 = 8077;
 
+// Market rule tags (repeating group within 35=d responses)
+pub const TAG_MARKET_RULE_START: u32 = 6019; // value "1" starts a new rule block
+pub const TAG_MARKET_RULE_ID: u32 = 6031;    // rule ID integer
+pub const TAG_LOW_EDGE: u32 = 6023;          // price increment threshold
+pub const TAG_INCREMENT: u32 = 6027;         // tick size at that price level
+pub const TAG_MARKET_RULE_END: u32 = 6030;   // end marker
+
 /// Security types (IB internal encoding).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityType {
@@ -271,6 +278,98 @@ pub fn secdef_response_is_last(data: &[u8]) -> bool {
         tags.get(&TAG_SECURITY_RESPONSE_TYPE).map(|s| s.as_str()),
         Some("5") | Some("6")
     )
+}
+
+// ─── Market rules (repeating group within 35=d responses) ───
+
+/// A price increment rule defining tick sizes at different price levels.
+#[derive(Debug, Clone)]
+pub struct PriceIncrement {
+    pub low_edge: f64,
+    pub increment: f64,
+}
+
+/// A market rule containing a rule ID and its price increment table.
+#[derive(Debug, Clone)]
+pub struct MarketRule {
+    pub rule_id: i32,
+    pub price_increments: Vec<PriceIncrement>,
+}
+
+/// Parse market rules from a raw FIX message (typically 35=d).
+///
+/// Market rules are embedded as repeating groups:
+/// - 6019=1 starts a new rule block
+/// - 6031=N is the rule ID
+/// - 6023/6027 pairs define price increments
+/// - 6030 ends the rule block
+///
+/// Uses sequential tag parsing since rules are a repeating group.
+pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
+    use crate::protocol::fix::SOH;
+
+    let mut tags: Vec<(u32, String)> = Vec::new();
+    for part in data.split(|&b| b == SOH) {
+        if part.is_empty() { continue; }
+        let text = String::from_utf8_lossy(part);
+        if let Some((tag_str, val)) = text.split_once('=') {
+            if let Ok(tag) = tag_str.parse::<u32>() {
+                tags.push((tag, val.to_string()));
+            }
+        }
+    }
+
+    let mut rules: Vec<MarketRule> = Vec::new();
+    let mut current: Option<MarketRule> = None;
+    let mut pending_low_edge: Option<f64> = None;
+
+    for (tag, val) in &tags {
+        match *tag {
+            TAG_MARKET_RULE_START if val == "1" => {
+                // Flush previous rule if any
+                if let Some(rule) = current.take() {
+                    rules.push(rule);
+                }
+                current = Some(MarketRule {
+                    rule_id: 0,
+                    price_increments: Vec::new(),
+                });
+                pending_low_edge = None;
+            }
+            TAG_MARKET_RULE_ID => {
+                if let Some(ref mut rule) = current {
+                    rule.rule_id = val.parse().unwrap_or(0);
+                }
+            }
+            TAG_LOW_EDGE => {
+                if current.is_some() {
+                    pending_low_edge = val.parse().ok();
+                }
+            }
+            TAG_INCREMENT => {
+                if let Some(ref mut rule) = current {
+                    if let Some(low_edge) = pending_low_edge.take() {
+                        if let Ok(increment) = val.parse::<f64>() {
+                            rule.price_increments.push(PriceIncrement { low_edge, increment });
+                        }
+                    }
+                }
+            }
+            TAG_MARKET_RULE_END => {
+                if let Some(rule) = current.take() {
+                    rules.push(rule);
+                }
+                pending_low_edge = None;
+            }
+            _ => {}
+        }
+    }
+    // Flush last rule if no 6030 end marker was present
+    if let Some(rule) = current.take() {
+        rules.push(rule);
+    }
+
+    rules
 }
 
 /// Cache of contract definitions by conId.
@@ -840,5 +939,99 @@ mod tests {
             1,
         );
         assert!(parse_matching_symbols_response(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_market_rules_single_rule() {
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "d"),
+                (TAG_IB_CON_ID, "265598"),
+                (TAG_SYMBOL, "AAPL"),
+                // Market rule block
+                (TAG_MARKET_RULE_START, "1"),
+                (TAG_MARKET_RULE_ID, "26"),
+                (TAG_LOW_EDGE, "0"),
+                (TAG_INCREMENT, "0.01"),
+                (TAG_LOW_EDGE, "1"),
+                (TAG_INCREMENT, "0.01"),
+                (TAG_MARKET_RULE_END, "1"),
+            ],
+            1,
+        );
+        let rules = parse_market_rules(&msg);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_id, 26);
+        assert_eq!(rules[0].price_increments.len(), 2);
+        assert_eq!(rules[0].price_increments[0].low_edge, 0.0);
+        assert_eq!(rules[0].price_increments[0].increment, 0.01);
+        assert_eq!(rules[0].price_increments[1].low_edge, 1.0);
+        assert_eq!(rules[0].price_increments[1].increment, 0.01);
+    }
+
+    #[test]
+    fn parse_market_rules_multiple_rules() {
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "d"),
+                // Rule 1: penny increments
+                (TAG_MARKET_RULE_START, "1"),
+                (TAG_MARKET_RULE_ID, "26"),
+                (TAG_LOW_EDGE, "0"),
+                (TAG_INCREMENT, "0.01"),
+                (TAG_MARKET_RULE_END, "1"),
+                // Rule 2: nickel increments above $1
+                (TAG_MARKET_RULE_START, "1"),
+                (TAG_MARKET_RULE_ID, "42"),
+                (TAG_LOW_EDGE, "0"),
+                (TAG_INCREMENT, "0.01"),
+                (TAG_LOW_EDGE, "1"),
+                (TAG_INCREMENT, "0.05"),
+                (TAG_MARKET_RULE_END, "1"),
+            ],
+            1,
+        );
+        let rules = parse_market_rules(&msg);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].rule_id, 26);
+        assert_eq!(rules[0].price_increments.len(), 1);
+        assert_eq!(rules[1].rule_id, 42);
+        assert_eq!(rules[1].price_increments.len(), 2);
+        assert_eq!(rules[1].price_increments[1].low_edge, 1.0);
+        assert_eq!(rules[1].price_increments[1].increment, 0.05);
+    }
+
+    #[test]
+    fn parse_market_rules_empty_when_none() {
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "d"),
+                (TAG_IB_CON_ID, "265598"),
+                (TAG_SYMBOL, "AAPL"),
+            ],
+            1,
+        );
+        let rules = parse_market_rules(&msg);
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn parse_market_rules_no_end_marker() {
+        // Rule without explicit 6030 end marker -- should still be collected
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "d"),
+                (TAG_MARKET_RULE_START, "1"),
+                (TAG_MARKET_RULE_ID, "10"),
+                (TAG_LOW_EDGE, "0"),
+                (TAG_INCREMENT, "0.005"),
+            ],
+            1,
+        );
+        let rules = parse_market_rules(&msg);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_id, 10);
+        assert_eq!(rules[0].price_increments.len(), 1);
+        assert_eq!(rules[0].price_increments[0].increment, 0.005);
     }
 }

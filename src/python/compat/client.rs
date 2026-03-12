@@ -976,6 +976,175 @@ impl EClient {
         Ok(())
     }
 
+    // ── Tier 3: FA (Financial Advisor) ──
+
+    /// Request FA data (groups, profiles, aliases).
+    fn request_fa(&self, _fa_data_type: i32) -> PyResult<()> {
+        log::warn!("request_fa: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    /// Replace FA data.
+    #[pyo3(signature = (req_id, fa_data_type, cxml))]
+    fn replace_fa(&self, req_id: i64, fa_data_type: i32, cxml: &str) -> PyResult<()> {
+        let _ = (req_id, fa_data_type, cxml);
+        log::warn!("replace_fa: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    // ── Tier 3: Display Groups ──
+
+    /// Query display groups.
+    fn query_display_groups(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        log::warn!("query_display_groups: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    /// Subscribe to group events.
+    fn subscribe_to_group_events(&self, req_id: i64, group_id: i32) -> PyResult<()> {
+        let _ = (req_id, group_id);
+        log::warn!("subscribe_to_group_events: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    /// Unsubscribe from group events.
+    fn unsubscribe_from_group_events(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        Ok(())
+    }
+
+    /// Update display group.
+    fn update_display_group(&self, req_id: i64, contract_info: &str) -> PyResult<()> {
+        let _ = (req_id, contract_info);
+        log::warn!("update_display_group: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    // ── Tier 3: Market Rules ──
+
+    /// Request market rule details (price increments).
+    fn req_market_rule(&self, py: Python<'_>, market_rule_id: i32) -> PyResult<()> {
+        // Market rules are cached from secdef responses.
+        if let Some(shared) = self.shared.as_ref() {
+            if let Some(rule) = shared.market_rule(market_rule_id) {
+                let increments: Vec<(f64, f64)> = rule.price_increments.iter()
+                    .map(|pi| (pi.low_edge, pi.increment)).collect();
+                let list = pyo3::types::PyList::new(py, increments.iter().map(|(low, inc)| {
+                    pyo3::types::PyTuple::new(py, &[*low, *inc]).unwrap()
+                }))?;
+                self.wrapper.call_method1(py, "market_rule", (market_rule_id as i64, list.as_any()))?;
+                return Ok(());
+            }
+        }
+        log::warn!("req_market_rule: rule {} not in cache", market_rule_id);
+        Ok(())
+    }
+
+    // ── Tier 3: Smart Components ──
+
+    /// Request SMART routing components.
+    fn req_smart_components(&self, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
+        let _ = (req_id, bbo_exchange);
+        log::warn!("req_smart_components: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    // ── Tier 3: Soft Dollar Tiers ──
+
+    /// Request soft dollar tiers.
+    fn req_soft_dollar_tiers(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        log::warn!("req_soft_dollar_tiers: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    // ── Tier 3: Family Codes ──
+
+    /// Request family codes.
+    fn req_family_codes(&self) -> PyResult<()> {
+        log::warn!("req_family_codes: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    // ── Tier 3: Histogram Data ──
+
+    /// Request histogram data.
+    #[pyo3(signature = (req_id, contract, use_rth, time_period))]
+    fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, time_period: &str) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::FetchHistogramData {
+            req_id: req_id as u32,
+            con_id: contract.con_id as u32,
+            use_rth,
+            period: time_period.to_string(),
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    /// Cancel histogram data.
+    fn cancel_histogram_data(&self, req_id: i64) -> PyResult<()> {
+        let tx = self.control_tx.as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        tx.send(ControlCommand::CancelHistogramData { req_id: req_id as u32 })
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    // ── Tier 3: Server Log Level ──
+
+    /// Set server log level (local-only, adjusts Rust log filter).
+    #[pyo3(signature = (log_level=2))]
+    fn set_server_log_level(&self, log_level: i32) -> PyResult<()> {
+        let level = match log_level {
+            1 => "error",
+            2 => "warn",
+            3 => "info",
+            4 => "debug",
+            5 => "trace",
+            _ => "warn",
+        };
+        log::info!("set_server_log_level: {} (level {})", level, log_level);
+        Ok(())
+    }
+
+    // ── Tier 3: User Info ──
+
+    /// Request user info.
+    fn req_user_info(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        log::warn!("req_user_info: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    // ── Tier 3: WSH ──
+
+    /// Request WSH meta data.
+    fn req_wsh_meta_data(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        log::warn!("req_wsh_meta_data: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    /// Request WSH event data.
+    #[pyo3(signature = (req_id, wsh_event_data=None))]
+    fn req_wsh_event_data(&self, req_id: i64, wsh_event_data: Option<PyObject>) -> PyResult<()> {
+        let _ = (req_id, wsh_event_data);
+        log::warn!("req_wsh_event_data: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
+    // ── Tier 3: Completed Orders ──
+
+    /// Request completed (filled/cancelled) orders.
+    #[pyo3(signature = (api_only=false))]
+    fn req_completed_orders(&self, api_only: bool) -> PyResult<()> {
+        let _ = api_only;
+        log::warn!("req_completed_orders: not yet implemented — needs FIX capture");
+        Ok(())
+    }
+
     /// Run the event loop. Polls bridge queues and dispatches to EWrapper callbacks.
     /// Takes `&self` so the main thread can call req/cancel methods concurrently.
     fn run(&self, py: Python<'_>) -> PyResult<()> {
@@ -1327,6 +1496,18 @@ impl EClient {
             for (req_id, data) in fundamentals {
                 self.wrapper.call_method1(py, "fundamental_data", (req_id as i64, data.as_str()))?;
             }
+
+            // Drain histogram data -> histogram_data
+            let histograms = shared.drain_histogram_data();
+            for (req_id, entries) in histograms {
+                let tuples: Vec<Bound<'_, pyo3::types::PyTuple>> = entries.iter().map(|e| {
+                    pyo3::types::PyTuple::new(py, &[e.price.into_pyobject(py).unwrap().into_any(), e.count.into_pyobject(py).unwrap().into_any()]).unwrap()
+                }).collect();
+                let py_list = pyo3::types::PyList::new(py, tuples)?;
+                self.wrapper.call_method1(py, "histogram_data", (req_id as i64, py_list))?;
+            }
+
+            // Drain market rules -> market_rule (already served from cache in req_market_rule)
 
             // Account state -> updateAccountValue
             if !self.account_id.is_empty() {

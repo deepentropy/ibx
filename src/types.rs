@@ -863,6 +863,15 @@ pub enum ControlCommand {
     },
     /// Cancel fundamental data request.
     CancelFundamentalData { req_id: u32 },
+    /// Request histogram data via HMDS.
+    FetchHistogramData {
+        req_id: u32,
+        con_id: u32,
+        use_rth: bool,
+        period: String,
+    },
+    /// Cancel histogram data request.
+    CancelHistogramData { req_id: u32 },
     /// Graceful shutdown.
     Shutdown,
 }

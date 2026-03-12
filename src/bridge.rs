@@ -15,6 +15,8 @@ use crate::control::historical::{HistoricalResponse, HeadTimestampResponse};
 use crate::control::contracts::{ContractDefinition, SymbolMatch};
 use crate::control::scanner::ScannerResult;
 use crate::control::news::NewsHeadline;
+use crate::control::histogram::HistogramEntry;
+use crate::control::contracts::MarketRule;
 use crate::types::*;
 
 /// Events emitted by the IB engine.
@@ -113,6 +115,8 @@ pub struct SharedState {
     historical_news: Mutex<Vec<(u32, Vec<NewsHeadline>, bool)>>,
     news_articles: Mutex<Vec<(u32, i32, String)>>,
     fundamental_data: Mutex<Vec<(u32, String)>>,
+    histogram_data: Mutex<Vec<(u32, Vec<HistogramEntry>)>>,
+    market_rules: Mutex<Vec<MarketRule>>,
     /// Position info (conId → PositionInfo) for reqPositions and P&L.
     position_infos: Mutex<HashMap<i64, PositionInfo>>,
     positions: [AtomicU64; MAX_INSTRUMENTS],
@@ -142,6 +146,8 @@ impl SharedState {
             historical_news: Mutex::new(Vec::with_capacity(8)),
             news_articles: Mutex::new(Vec::with_capacity(8)),
             fundamental_data: Mutex::new(Vec::with_capacity(4)),
+            histogram_data: Mutex::new(Vec::with_capacity(4)),
+            market_rules: Mutex::new(Vec::new()),
             position_infos: Mutex::new(HashMap::new()),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
             account: Mutex::new(AccountState::default()),
@@ -257,6 +263,22 @@ impl SharedState {
         std::mem::take(&mut *lock)
     }
 
+    /// Drain all pending histogram data responses.
+    pub fn drain_histogram_data(&self) -> Vec<(u32, Vec<HistogramEntry>)> {
+        let mut lock = self.histogram_data.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Get cached market rules.
+    pub fn market_rules(&self) -> Vec<MarketRule> {
+        self.market_rules.lock().unwrap().clone()
+    }
+
+    /// Get a market rule by ID.
+    pub fn market_rule(&self, rule_id: i32) -> Option<MarketRule> {
+        self.market_rules.lock().unwrap().iter().find(|r| r.rule_id == rule_id).cloned()
+    }
+
     /// Get all position infos (for reqPositions).
     pub fn position_infos(&self) -> Vec<PositionInfo> {
         self.position_infos.lock().unwrap().values().copied().collect()
@@ -354,6 +376,19 @@ impl SharedState {
 
     pub(crate) fn push_fundamental_data(&self, req_id: u32, data: String) {
         self.fundamental_data.lock().unwrap().push((req_id, data));
+    }
+
+    pub(crate) fn push_histogram_data(&self, req_id: u32, entries: Vec<HistogramEntry>) {
+        self.histogram_data.lock().unwrap().push((req_id, entries));
+    }
+
+    pub(crate) fn push_market_rules(&self, rules: Vec<MarketRule>) {
+        let mut lock = self.market_rules.lock().unwrap();
+        for rule in rules {
+            if !lock.iter().any(|r| r.rule_id == rule.rule_id) {
+                lock.push(rule);
+            }
+        }
     }
 
     pub(crate) fn set_position_info(&self, info: PositionInfo) {
