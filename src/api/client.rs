@@ -2801,4 +2801,295 @@ mod tests {
         // exec_details should use req_id=42 (not -1)
         assert!(w.events.iter().any(|e| e.starts_with("exec_details:42:")));
     }
+
+    // ── Order modification edge cases ─────────────────────────────────
+
+    #[test]
+    fn modify_limit_order_price_via_resubmit() {
+        let (client, rx, shared) = test_client();
+        shared.set_instrument_count(1);
+        let order = Order {
+            action: "BUY".into(), total_quantity: 100.0,
+            order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
+        };
+        client.place_order(80, &spy(), &order).unwrap();
+        while rx.try_recv().is_ok() {}
+
+        let modified = Order {
+            action: "BUY".into(), total_quantity: 100.0,
+            order_type: "LMT".into(), lmt_price: 152.0, ..Default::default()
+        };
+        client.place_order(80, &spy(), &modified).unwrap();
+
+        let mut found = false;
+        while let Ok(cmd) = rx.try_recv() {
+            if let ControlCommand::Order(req) = cmd {
+                if let OrderRequest::SubmitLimit { order_id: 80, price, .. } = req {
+                    assert_eq!(price, (152.0 * PRICE_SCALE_F) as i64);
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "Modified limit order should be sent with new price");
+    }
+
+    #[test]
+    fn modify_order_before_ack_no_panic() {
+        let (client, rx, shared) = test_client();
+        shared.set_instrument_count(1);
+        for price in 0..10 {
+            let order = Order {
+                action: "BUY".into(), total_quantity: 100.0,
+                order_type: "LMT".into(), lmt_price: 150.0 + price as f64,
+                ..Default::default()
+            };
+            let _ = client.place_order(42, &spy(), &order);
+        }
+        let mut count = 0;
+        while rx.try_recv().is_ok() { count += 1; }
+        assert!(count >= 10, "All modify attempts should send commands, got {}", count);
+    }
+
+    #[test]
+    fn cancel_during_modify_no_panic() {
+        let (client, rx, shared) = test_client();
+        shared.set_instrument_count(1);
+        let order = Order {
+            action: "BUY".into(), total_quantity: 100.0,
+            order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
+        };
+        client.place_order(99, &spy(), &order).unwrap();
+        let modified = Order {
+            action: "BUY".into(), total_quantity: 100.0,
+            order_type: "LMT".into(), lmt_price: 151.0, ..Default::default()
+        };
+        client.place_order(99, &spy(), &modified).unwrap();
+        client.cancel_order(99, "");
+
+        let mut has_cancel = false;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 99 })) {
+                has_cancel = true;
+            }
+        }
+        assert!(has_cancel, "Cancel command should be sent");
+    }
+
+    #[test]
+    fn modify_filled_order_receives_cancel_reject() {
+        let (client, _rx, shared) = test_client();
+        client.map_req_instrument(1, 0);
+        shared.push_fill(Fill {
+            instrument: 0, order_id: 120, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
+            commission: 0, timestamp_ns: 1000,
+        });
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+        assert!(w.events.iter().any(|e| e.starts_with("order_status:120:Filled")));
+
+        shared.push_cancel_reject(CancelReject {
+            order_id: 120, instrument: 0, reject_type: 2, reason_code: 0, timestamp_ns: 2000,
+        });
+        w.events.clear();
+        client.process_msgs(&mut w);
+        assert!(w.events.iter().any(|e| e.starts_with("error:120:")),
+            "Modify reject should generate error callback, got: {:?}", w.events);
+    }
+
+    #[test]
+    fn rapid_modify_multiple_prices_no_crash() {
+        let (client, rx, shared) = test_client();
+        shared.set_instrument_count(1);
+        for i in 0..50 {
+            let order = Order {
+                action: "BUY".into(), total_quantity: 100.0,
+                order_type: "LMT".into(), lmt_price: 100.0 + i as f64 * 0.01,
+                ..Default::default()
+            };
+            let _ = client.place_order(77, &spy(), &order);
+        }
+        let mut order_count = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, ControlCommand::Order(_)) { order_count += 1; }
+        }
+        assert_eq!(order_count, 50, "All 50 modify commands should be sent");
+    }
+
+    #[test]
+    fn modify_tif_day_to_gtc_via_resubmit() {
+        let (client, rx, shared) = test_client();
+        shared.set_instrument_count(1);
+        let order = Order {
+            action: "BUY".into(), total_quantity: 100.0,
+            order_type: "LMT".into(), lmt_price: 150.0,
+            tif: "DAY".into(), ..Default::default()
+        };
+        client.place_order(88, &spy(), &order).unwrap();
+        while rx.try_recv().is_ok() {}
+
+        let modified = Order {
+            action: "BUY".into(), total_quantity: 100.0,
+            order_type: "LMT".into(), lmt_price: 150.0,
+            tif: "GTC".into(), ..Default::default()
+        };
+        client.place_order(88, &spy(), &modified).unwrap();
+
+        let mut found_limit_ex = false;
+        while let Ok(cmd) = rx.try_recv() {
+            if let ControlCommand::Order(OrderRequest::SubmitLimitEx { order_id: 88, tif, .. }) = cmd {
+                assert_eq!(tif, b'1', "GTC should map to TIF byte 0x31 ('1')");
+                found_limit_ex = true;
+            }
+        }
+        assert!(found_limit_ex, "GTC limit should use SubmitLimitEx");
+    }
+
+    #[test]
+    fn modify_price_and_qty_simultaneously() {
+        let (client, rx, shared) = test_client();
+        shared.set_instrument_count(1);
+        let order = Order {
+            action: "BUY".into(), total_quantity: 100.0,
+            order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
+        };
+        client.place_order(55, &spy(), &order).unwrap();
+        while rx.try_recv().is_ok() {}
+
+        let modified = Order {
+            action: "BUY".into(), total_quantity: 200.0,
+            order_type: "LMT".into(), lmt_price: 148.0, ..Default::default()
+        };
+        client.place_order(55, &spy(), &modified).unwrap();
+
+        let mut found = false;
+        while let Ok(cmd) = rx.try_recv() {
+            if let ControlCommand::Order(OrderRequest::SubmitLimit { order_id: 55, qty, price, .. }) = cmd {
+                assert_eq!(qty, 200);
+                assert_eq!(price, (148.0 * PRICE_SCALE_F) as i64);
+                found = true;
+            }
+        }
+        assert!(found, "Modified order should have new price and qty");
+    }
+
+    #[test]
+    fn modify_order_type_lmt_to_stp() {
+        let (client, rx, shared) = test_client();
+        shared.set_instrument_count(1);
+        let order = Order {
+            action: "BUY".into(), total_quantity: 100.0,
+            order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
+        };
+        client.place_order(66, &spy(), &order).unwrap();
+        while rx.try_recv().is_ok() {}
+
+        let modified = Order {
+            action: "BUY".into(), total_quantity: 100.0,
+            order_type: "STP".into(), aux_price: 149.0, ..Default::default()
+        };
+        client.place_order(66, &spy(), &modified).unwrap();
+
+        let mut found_stop = false;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, ControlCommand::Order(OrderRequest::SubmitStop { order_id: 66, .. })) {
+                found_stop = true;
+            }
+        }
+        assert!(found_stop, "Modified order should now be a stop order");
+    }
+
+    // ── Market data type switching ────────────────────────────────────
+
+    #[test]
+    fn market_data_type_callback_compiles_and_dispatches() {
+        struct MarketDataTypeRecorder { events: Vec<(i64, i32)> }
+        impl crate::api::wrapper::Wrapper for MarketDataTypeRecorder {
+            fn market_data_type(&mut self, req_id: i64, market_data_type: i32) {
+                self.events.push((req_id, market_data_type));
+            }
+        }
+        let mut w = MarketDataTypeRecorder { events: vec![] };
+        w.market_data_type(1, 1); // Live
+        w.market_data_type(1, 2); // Frozen
+        w.market_data_type(1, 3); // Delayed
+        w.market_data_type(1, 4); // Delayed-Frozen
+        assert_eq!(w.events.len(), 4);
+        assert_eq!(w.events[0], (1, 1));
+        assert_eq!(w.events[3], (1, 4));
+    }
+
+    #[test]
+    fn quote_dispatch_agnostic_to_data_type() {
+        let (client, _rx, shared) = test_client();
+        client.map_req_instrument(1, 0);
+        let mut q = Quote::default();
+        q.bid = 450 * PRICE_SCALE;
+        q.ask = 451 * PRICE_SCALE;
+        shared.push_quote(0, &q);
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+        assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:450")));
+    }
+
+    #[test]
+    fn frozen_stale_quote_no_redispatch() {
+        let (client, _rx, shared) = test_client();
+        client.map_req_instrument(1, 0);
+        let mut q = Quote::default();
+        q.bid = 300 * PRICE_SCALE;
+        q.ask = 301 * PRICE_SCALE;
+        shared.push_quote(0, &q);
+
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+        assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:")));
+
+        shared.push_quote(0, &q); // same quote
+        w.events.clear();
+        client.process_msgs(&mut w);
+        let second_count = w.events.iter().filter(|e| e.starts_with("tick_price:1:")).count();
+        assert_eq!(second_count, 0, "Identical frozen quote should not re-dispatch");
+    }
+
+    #[test]
+    fn transition_no_data_to_live_fires_callbacks() {
+        let (client, _rx, shared) = test_client();
+        client.map_req_instrument(1, 0);
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+        assert_eq!(w.events.iter().filter(|e| e.starts_with("tick_price:1:")).count(), 0);
+
+        let mut q = Quote::default();
+        q.bid = 500 * PRICE_SCALE;
+        q.ask = 501 * PRICE_SCALE;
+        shared.push_quote(0, &q);
+        w.events.clear();
+        client.process_msgs(&mut w);
+        assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:500")));
+        assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:2:501")));
+    }
+
+    #[test]
+    fn partial_quote_update_only_changed_fields_dispatch() {
+        let (client, _rx, shared) = test_client();
+        client.map_req_instrument(1, 0);
+        let mut q = Quote::default();
+        q.bid = 100 * PRICE_SCALE;
+        q.ask = 101 * PRICE_SCALE;
+        shared.push_quote(0, &q);
+
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+
+        q.bid = 99 * PRICE_SCALE;
+        shared.push_quote(0, &q);
+        w.events.clear();
+        client.process_msgs(&mut w);
+
+        let bid_ticks: Vec<_> = w.events.iter().filter(|e| e.starts_with("tick_price:1:1:")).collect();
+        let ask_ticks: Vec<_> = w.events.iter().filter(|e| e.starts_with("tick_price:1:2:")).collect();
+        assert!(!bid_ticks.is_empty(), "Changed bid should dispatch");
+        assert!(ask_ticks.is_empty(), "Unchanged ask should NOT dispatch");
+    }
 }

@@ -5680,4 +5680,270 @@ mod tests {
         assert_eq!(news[0].provider_code, "BRFG");
         assert_eq!(news[0].headline, "AAPL beats earnings"); // metadata stripped
     }
+
+    // ── Malformed / unexpected message handling ───────────────────────
+
+    #[test]
+    fn engine_ignores_fix_without_msg_type() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        let msg = fix::fix_build(&[(11, "999"), (39, "0"), (151, "100")], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_fills().is_empty());
+        assert!(shared.drain_order_updates().is_empty());
+    }
+
+    #[test]
+    fn engine_ignores_unknown_msg_type() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        let msg = fix::fix_build(&[(35, "ZZ"), (11, "999")], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_fills().is_empty());
+        assert!(shared.drain_order_updates().is_empty());
+    }
+
+    #[test]
+    fn engine_handles_exec_report_missing_clord_id() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        let msg = fix::fix_build(&[
+            (35, "8"), (39, "0"), (150, "0"),
+            (31, "150.0"), (32, "100"), (151, "0"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_fills().is_empty());
+    }
+
+    #[test]
+    fn engine_handles_exec_report_missing_ord_status() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 300, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "300"), (150, "0"),
+            (31, "150.0"), (32, "100"), (151, "0"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_fills().is_empty());
+        assert!(shared.drain_order_updates().is_empty());
+    }
+
+    #[test]
+    fn engine_handles_exec_report_bad_price() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 301, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "301"), (17, "EXEC_BAD_PX"),
+            (39, "2"), (150, "F"),
+            (31, "NOT_A_NUMBER"), (32, "100"), (151, "0"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+        let fills = shared.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].price, 0, "Bad price should default to 0");
+    }
+
+    #[test]
+    fn engine_handles_exec_report_zero_shares_fill() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 302, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "302"), (17, "EXEC_ZERO_SH"),
+            (39, "1"), (150, "F"),
+            (31, "150.0"), (32, "0"), (151, "100"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_fills().is_empty(), "Zero shares should not produce a fill");
+        let updates = shared.drain_order_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].status, OrderStatus::PartiallyFilled);
+    }
+
+    #[test]
+    fn engine_handles_empty_fix_body() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        let msg = b"8=FIX.4.1\x019=0000\x01";
+        engine.inject_ccp_message(msg);
+        assert!(shared.drain_fills().is_empty());
+    }
+
+    #[test]
+    fn engine_handles_session_reject() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let msg = fix::fix_build(&[(35, "3"), (58, "Invalid tag value"), (371, "40")], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_fills().is_empty());
+        assert!(shared.drain_order_updates().is_empty());
+    }
+
+    #[test]
+    fn engine_handles_cancel_reject_minimal() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        let msg = fix::fix_build(&[(35, "9")], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_cancel_rejects().is_empty());
+    }
+
+    #[test]
+    fn engine_ignores_pending_cancel_status() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 303, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "303"), (17, ""),
+            (39, "6"), (150, "0"),
+            (31, "0"), (32, "0"), (151, "100"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_order_updates().is_empty(),
+            "PendingCancel (39=6) should not produce an order update");
+        let order = engine.context_mut().order(303).unwrap();
+        assert_eq!(order.status, OrderStatus::Submitted);
+    }
+
+    #[test]
+    fn engine_handles_heartbeat() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let msg = fix::fix_build(&[(35, "0"), (52, "20260313-10:30:00")], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_fills().is_empty());
+    }
+
+    #[test]
+    fn engine_handles_test_request_no_conn() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let msg = fix::fix_build(&[(35, "1"), (112, "TEST123")], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_fills().is_empty());
+    }
+
+    #[test]
+    fn engine_dedup_rapid_duplicate_exec_ids() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 400, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 300, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        for _ in 0..5 {
+            let msg = fix::fix_build(&[
+                (35, "8"), (11, "400"), (17, "EXEC_DEDUP_RAPID"),
+                (39, "1"), (150, "F"),
+                (31, "150.0"), (32, "100"), (151, "200"),
+            ], 1);
+            engine.inject_ccp_message(&msg);
+        }
+        let fills = shared.drain_fills();
+        assert_eq!(fills.len(), 1, "Duplicate ExecIDs should produce exactly 1 fill");
+        assert_eq!(engine.context_mut().position(0), 100);
+    }
+
+    #[test]
+    fn engine_handles_unknown_custom_message_type() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let msg = fix::fix_build(&[(35, "U"), (6040, "99999")], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_fills().is_empty());
+    }
+
+    #[test]
+    fn engine_handles_reject_for_unknown_order() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "999"), (17, ""),
+            (39, "8"), (150, "0"),
+            (58, "No such order"), (103, "1"),
+            (31, "0"), (32, "0"), (151, "0"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+        assert!(shared.drain_fills().is_empty());
+    }
+
+    #[test]
+    fn engine_handles_mixed_message_types() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(265598);
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 500, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        engine.inject_ccp_message(&fix::fix_build(&[(35, "0")], 1));
+        engine.inject_ccp_message(&fix::fix_build(&[(35, "QQ")], 2));
+        engine.inject_ccp_message(&fix::fix_build(&[(35, "3"), (58, "bad tag")], 3));
+        engine.inject_ccp_message(&fix::fix_build(&[
+            (35, "8"), (11, "500"), (17, "EXEC_MIXED1"),
+            (39, "2"), (150, "F"),
+            (31, "150.0"), (32, "100"), (151, "0"),
+        ], 4));
+        let fills = shared.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].order_id, 500);
+    }
+
+    #[test]
+    fn engine_fix_replaced_status_transitions_to_submitted() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().register_instrument(756733);
+        engine.context_mut().insert_order(crate::types::Order {
+            order_id: 200, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "200"), (17, "EXEC_REPLACE1"),
+            (39, "5"), (150, "0"),
+            (31, "0"), (32, "0"), (151, "100"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+        let order = engine.context_mut().order(200).unwrap();
+        assert_eq!(order.status, OrderStatus::Submitted);
+    }
 }

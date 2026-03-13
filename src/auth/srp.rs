@@ -286,4 +286,125 @@ mod tests {
             "Different tokens should produce different hash slots (paper mode)"
         );
     }
+
+    // ── Authentication failure paths ──────────────────────────────────
+
+    #[test]
+    fn srp_wrong_password_different_x() {
+        let salt = vec![0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89];
+        let x_correct = srp_compute_x(&salt, "testuser", "correct_password");
+        let x_wrong = srp_compute_x(&salt, "testuser", "wrong_password");
+        assert_ne!(x_correct, x_wrong, "Different passwords must produce different x");
+    }
+
+    #[test]
+    fn srp_wrong_password_different_m1() {
+        let n = srp_n();
+        let g = BigUint::from(SRP_G);
+        let salt = BigUint::from(0xABCDEFu64);
+        let a_pub = BigUint::from(12345u64);
+        let b_pub = BigUint::from(67890u64);
+
+        let x_correct = srp_compute_x(&salt.to_bytes_be(), "user", "correct");
+        let u = srp_compute_u(&a_pub, &b_pub);
+        let k_mult = BigUint::from(SRP_K);
+        let s_correct = srp_compute_s(&b_pub, &BigUint::from(42u32), &u, &x_correct, &n, &g, &k_mult);
+        let k_correct = srp_compute_k(&s_correct);
+        let m1_correct = srp_compute_m1(&n, &g, "user", &salt, &a_pub, &b_pub, &k_correct);
+
+        let x_wrong = srp_compute_x(&salt.to_bytes_be(), "user", "wrong");
+        let s_wrong = srp_compute_s(&b_pub, &BigUint::from(42u32), &u, &x_wrong, &n, &g, &k_mult);
+        let k_wrong = srp_compute_k(&s_wrong);
+        let m1_wrong = srp_compute_m1(&n, &g, "user", &salt, &a_pub, &b_pub, &k_wrong);
+
+        assert_ne!(m1_correct, m1_wrong,
+            "Wrong password should produce different M1 proof");
+    }
+
+    #[test]
+    fn srp_empty_salt_no_panic() {
+        let salt = vec![];
+        let x = srp_compute_x(&salt, "user", "pass");
+        assert!(x > BigUint::ZERO, "x should still produce a non-zero value");
+    }
+
+    #[test]
+    fn srp_empty_username_no_panic() {
+        let salt = vec![0x01, 0x02, 0x03, 0x04];
+        let x = srp_compute_x(&salt, "", "pass");
+        let x2 = srp_compute_x(&salt, "user", "pass");
+        assert_ne!(x, x2, "Empty username should produce different x");
+    }
+
+    #[test]
+    fn srp_empty_password_no_panic() {
+        let salt = vec![0x01, 0x02, 0x03, 0x04];
+        let x_empty = srp_compute_x(&salt, "user", "");
+        let x_real = srp_compute_x(&salt, "user", "realpass");
+        assert_ne!(x_empty, x_real, "Empty password should produce different x");
+    }
+
+    #[test]
+    fn srp_b_pub_zero_no_panic() {
+        let n = srp_n();
+        let g = BigUint::from(SRP_G);
+        let k = BigUint::from(SRP_K);
+        let a_priv = BigUint::from(42u32);
+        let u = BigUint::from(7u32);
+        let x = BigUint::from(3u32);
+        let b_pub = BigUint::ZERO;
+        let _s = srp_compute_s(&b_pub, &a_priv, &u, &x, &n, &g, &k);
+    }
+
+    #[test]
+    fn srp_b_pub_less_than_kgx_wraps_correctly() {
+        let n = BigUint::from(23u32);
+        let g = BigUint::from(5u32);
+        let k = BigUint::from(3u32);
+        let a_priv = BigUint::from(4u32);
+        let x = BigUint::from(2u32);
+        let u = BigUint::from(3u32);
+        let b_pub = BigUint::from(1u32);
+        let s = srp_compute_s(&b_pub, &a_priv, &u, &x, &n, &g, &k);
+        assert!(s < n, "S should be in range [0, N)");
+    }
+
+    #[test]
+    fn paper_token_different_hw_produces_different_result() {
+        let k = BigUint::from(123456789u64);
+        let token_a = paper_token_convert(&k, "hw1|AA:BB:CC:DD:EE:FF");
+        let token_b = paper_token_convert(&k, "hw2|11:22:33:44:55:66");
+        assert_ne!(token_a, token_b,
+            "Different hardware info must produce different paper tokens");
+    }
+
+    #[test]
+    fn token_hash_wrong_token_different_slots() {
+        let real_token = BigUint::from(999_999_999u64);
+        let wrong_token = BigUint::from(111_111_111u64);
+        let real_slots = token_hash_slots(&real_token, true);
+        let wrong_slots = token_hash_slots(&wrong_token, true);
+        assert_ne!(real_slots, wrong_slots,
+            "Wrong token should produce different hash slots");
+    }
+
+    #[test]
+    fn srp_large_salt_no_panic() {
+        let salt: Vec<u8> = (0..256).map(|i| i as u8).collect();
+        let x = srp_compute_x(&salt, "user", "pass");
+        assert!(x > BigUint::ZERO);
+    }
+
+    #[test]
+    fn srp_large_public_keys_no_panic() {
+        let n = srp_n();
+        let g = BigUint::from(SRP_G);
+        let k = BigUint::from(SRP_K);
+        let a_pub = &n - BigUint::from(1u32);
+        let b_pub = &n - BigUint::from(2u32);
+        let u = srp_compute_u(&a_pub, &b_pub);
+        assert!(u > BigUint::ZERO);
+        let x = srp_compute_x(&[0x01], "user", "pass");
+        let _s = srp_compute_s(&b_pub, &BigUint::from(42u32), &u, &x, &n, &g, &k);
+    }
 }
