@@ -233,3 +233,27 @@ pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _co
     println!("  PASS\n");
     conns2
 }
+
+pub(super) fn phase_auth_wrong_password(config: &GatewayConfig) {
+    println!("--- Phase 118: Authentication Failure (wrong password) ---");
+
+    let bad_config = GatewayConfig {
+        username: config.username.clone(),
+        password: "definitely_wrong_password_12345".to_string(),
+        host: config.host.clone(),
+        paper: config.paper,
+    };
+
+    let start = Instant::now();
+    let result = Gateway::connect(&bad_config);
+    let elapsed = start.elapsed();
+
+    let err_msg = match result {
+        Ok(_) => panic!("Gateway::connect with wrong password should fail"),
+        Err(e) => format!("{}", e),
+    };
+    println!("  Error: {}", err_msg);
+    println!("  Failed in {:.3}s (expected)", elapsed.as_secs_f64());
+    assert!(elapsed < Duration::from_secs(30), "Auth failure should not take >30s");
+    println!("  PASS\n");
+}

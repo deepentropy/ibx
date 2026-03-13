@@ -1623,3 +1623,223 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
     println!("  PASS\n");
     conns
 }
+
+// ─── Phase 115: Modify both price and qty simultaneously ───
+
+pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
+    println!("--- Phase 115: Modify Price + Qty Simultaneously (SPY) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    let order_id = next_order_id();
+    let new_order_id = order_id + 1;
+    // Submit limit buy at $1, qty=1
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
+        order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
+    })).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut order_acked = false;
+    let mut modify_sent = false;
+    let mut modify_acked = false;
+    let mut order_cancelled = false;
+    let mut order_rejected = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                match update.status {
+                    OrderStatus::Submitted => {
+                        if modify_sent && !modify_acked {
+                            modify_acked = true;
+                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: new_order_id })).unwrap();
+                        } else if !order_acked {
+                            order_acked = true;
+                            // Modify BOTH price ($1→$2) and qty (1→3) in a single Modify
+                            control_tx.send(ControlCommand::Order(OrderRequest::Modify {
+                                order_id, new_order_id, price: 2_00_000_000, qty: 3,
+                            })).unwrap();
+                            modify_sent = true;
+                        }
+                    }
+                    OrderStatus::Cancelled => { order_cancelled = true; break; }
+                    OrderStatus::Rejected => { order_rejected = true; break; }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if order_rejected {
+        println!("  SKIP: Order rejected\n");
+        return conns;
+    }
+    assert!(order_acked, "Order was never acknowledged");
+    assert!(modify_sent, "Modify was never sent");
+    assert!(modify_acked, "Modify (price+qty) was never acknowledged");
+    assert!(order_cancelled, "Modified order was never cancelled");
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 116: Double modify chain ───
+
+pub(super) fn phase_double_modify(conns: Conns) -> Conns {
+    println!("--- Phase 116: Double Modify Chain (SPY: $1→$2→$3) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    let order_id = next_order_id();
+    let modify_id_1 = order_id + 1;
+    let modify_id_2 = order_id + 2;
+
+    // Submit limit buy at $1
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
+        order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
+    })).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut phase = 0u8; // 0=waiting for ack, 1=waiting for modify1 ack, 2=waiting for modify2 ack
+    let mut order_cancelled = false;
+    let mut order_rejected = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                match update.status {
+                    OrderStatus::Submitted => {
+                        match phase {
+                            0 => {
+                                // Original order acked → modify to $2
+                                control_tx.send(ControlCommand::Order(OrderRequest::Modify {
+                                    order_id, new_order_id: modify_id_1, price: 2_00_000_000, qty: 1,
+                                })).unwrap();
+                                phase = 1;
+                            }
+                            1 => {
+                                // First modify acked → modify again to $3
+                                control_tx.send(ControlCommand::Order(OrderRequest::Modify {
+                                    order_id: modify_id_1, new_order_id: modify_id_2, price: 3_00_000_000, qty: 1,
+                                })).unwrap();
+                                phase = 2;
+                            }
+                            2 => {
+                                // Second modify acked → cancel
+                                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: modify_id_2 })).unwrap();
+                                phase = 3;
+                            }
+                            _ => {}
+                        }
+                    }
+                    OrderStatus::Cancelled => { order_cancelled = true; break; }
+                    OrderStatus::Rejected => { order_rejected = true; break; }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if order_rejected {
+        println!("  SKIP: Order rejected\n");
+        return conns;
+    }
+    assert!(phase >= 3, "Did not complete double modify chain (reached phase {})", phase);
+    assert!(order_cancelled, "Final modified order was never cancelled");
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 117: Cancel during modify (race condition) ───
+
+pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
+    println!("--- Phase 117: Cancel During Modify (race condition, SPY) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    let order_id = next_order_id();
+    let new_order_id = order_id + 1;
+
+    // Submit limit buy at $1
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
+        order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
+    })).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut order_acked = false;
+    let mut race_sent = false;
+    let mut order_cancelled = false;
+    let mut order_rejected = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                match update.status {
+                    OrderStatus::Submitted => {
+                        if !order_acked {
+                            order_acked = true;
+                            // Send modify AND cancel back-to-back — no waiting
+                            control_tx.send(ControlCommand::Order(OrderRequest::Modify {
+                                order_id, new_order_id, price: 2_00_000_000, qty: 1,
+                            })).unwrap();
+                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: new_order_id })).unwrap();
+                            race_sent = true;
+                        }
+                    }
+                    OrderStatus::Cancelled => { order_cancelled = true; break; }
+                    OrderStatus::Rejected => { order_rejected = true; break; }
+                    _ => {}
+                }
+            }
+            Ok(Event::CancelReject(_)) => {
+                // Expected: one of the cancels may be rejected
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if order_rejected {
+        println!("  SKIP: Order rejected\n");
+        return conns;
+    }
+    assert!(order_acked, "Order was never acknowledged");
+    assert!(race_sent, "Race condition commands were never sent");
+    assert!(order_cancelled, "Order was never cancelled (neither original nor modified)");
+    println!("  PASS\n");
+    conns
+}
