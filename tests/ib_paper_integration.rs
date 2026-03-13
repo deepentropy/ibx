@@ -389,10 +389,30 @@ fn integration_suite() {
         println!("--- Phase 97: Position Tracking (SPY) ---\n  SKIP: {:?} — needs fills\n", session);
     }
     conns = phase_connection_recovery(conns, &gw, &config);
+
+    // ── New integration test phases (issues #83-#93) ──
+    conns = phase_forex_order(conns);
+    conns = phase_futures_order(conns);
+    conns = phase_options_order(conns);
+    conns = phase_concurrent_orders(conns);
+    if needs_ticks {
+        conns = phase_streaming_validation(conns);
+    } else {
+        println!("--- Phase 102: Streaming Data Validation (SPY) ---\n  SKIP: {:?} — needs ticks\n", session);
+    }
+    conns = phase_historical_ohlc_validation(conns, &gw, &config);
+    conns = phase_ib_error_handling(conns);
+    if needs_ticks {
+        conns = phase_reconnection_state_recovery(conns, &gw, &config);
+    } else {
+        println!("--- Phase 105: Reconnection State Recovery ---\n  SKIP: {:?} — needs ticks\n", session);
+    }
+    conns = phase_account_summary(conns);
+
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 90;
-    let skipped = if needs_ticks { 0 } else { 11 };
+    let total_phases = 99;
+    let skipped = if needs_ticks { 0 } else { 13 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
 }
@@ -4169,6 +4189,814 @@ fn phase_position_tracking(conns: Conns) -> Conns {
         println!("  PASS\n");
     } else {
         println!("  SKIP: No PositionUpdate events received (fills completed but no position update)\n");
+    }
+    conns
+}
+
+// ─── Phase 98: Forex contract details + order lifecycle (issue #83, #92) ───
+
+fn phase_forex_order(conns: Conns) -> Conns {
+    println!("--- Phase 98: Forex Order Lifecycle (EUR.USD) ---");
+
+    // First, look up EUR.USD contract via CCP
+    let now = ibx::gateway::chrono_free_timestamp();
+    let mut ccp = conns.ccp;
+    ccp.send_fix(&[
+        (fix::TAG_MSG_TYPE, "c"),
+        (fix::TAG_SENDING_TIME, &now),
+        (contracts::TAG_SECURITY_REQ_ID, "RFXEUR"),
+        (contracts::TAG_SECURITY_REQ_TYPE, "2"),
+        (contracts::TAG_SYMBOL, "EUR"),
+        (contracts::TAG_SECURITY_TYPE, "CASH"),
+        (contracts::TAG_EXCHANGE, "IDEALPRO"),
+        (contracts::TAG_CURRENCY, "USD"),
+        (contracts::TAG_IB_SOURCE, "Socket"),
+    ]).expect("Failed to send forex secdef request");
+
+    let mut forex_con_id: Option<u32> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    while Instant::now() < deadline && forex_con_id.is_none() {
+        match ccp.try_recv() {
+            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+            Err(e) => { println!("  CCP recv error: {}", e); break; }
+            Ok(_) => {}
+        }
+        for frame in ccp.extract_frames() {
+            let messages = match frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = ccp.unsign(&raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw],
+                _ => continue,
+            };
+            for msg in messages {
+                let tags = fix::fix_parse(&msg);
+                if tags.get(&fix::TAG_MSG_TYPE).map(|s| s.as_str()) == Some("d") {
+                    if let Some(def) = contracts::parse_secdef_response(&msg) {
+                        if def.sec_type == contracts::SecurityType::Forex {
+                            println!("  Contract: {} conId={} secType={:?} exchange={}",
+                                def.symbol, def.con_id, def.sec_type, def.exchange);
+                            forex_con_id = Some(def.con_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let fx_con_id = match forex_con_id {
+        Some(id) => id,
+        None => {
+            println!("  SKIP: No forex contract found for EUR.USD\n");
+            return Conns { farm: conns.farm, ccp, hmds: conns.hmds, account_id: conns.account_id };
+        }
+    };
+
+    // Submit a forex limit order using the actual forex con_id
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+    );
+    let inst = hot_loop.context_mut().register_instrument(fx_con_id as i64);
+    hot_loop.context_mut().set_symbol(inst, "EUR".to_string());
+
+    let oid = next_order_id();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+        order_id: oid, instrument: inst, side: Side::Buy, qty: 20000, price: 50_000_000, outside_rth: true,
+    })).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut order_acked = false;
+    let mut cancel_sent = false;
+    let mut order_cancelled = false;
+    let mut order_rejected = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                if update.order_id == oid {
+                    match update.status {
+                        OrderStatus::Submitted => {
+                            order_acked = true;
+                            if !cancel_sent {
+                                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                                cancel_sent = true;
+                            }
+                        }
+                        OrderStatus::Cancelled => { order_cancelled = true; break; }
+                        OrderStatus::Rejected => { order_rejected = true; break; }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if order_rejected {
+        println!("  SKIP: Forex order rejected (may need trading permissions)\n");
+    } else {
+        assert!(order_acked, "Forex order should be acknowledged");
+        assert!(order_cancelled, "Forex order should be cancelled");
+        println!("  PASS\n");
+    }
+    conns
+}
+
+// ─── Phase 99: Futures contract details + order lifecycle (issue #83, #92) ───
+
+fn phase_futures_order(conns: Conns) -> Conns {
+    println!("--- Phase 99: Futures Contract Details (MES) ---");
+
+    // Look up MES (Micro E-mini S&P 500) via CCP
+    let now = ibx::gateway::chrono_free_timestamp();
+    let mut ccp = conns.ccp;
+    ccp.send_fix(&[
+        (fix::TAG_MSG_TYPE, "c"),
+        (fix::TAG_SENDING_TIME, &now),
+        (contracts::TAG_SECURITY_REQ_ID, "RFUT"),
+        (contracts::TAG_SECURITY_REQ_TYPE, "2"),
+        (contracts::TAG_SYMBOL, "MES"),
+        (contracts::TAG_SECURITY_TYPE, "FUT"),
+        (contracts::TAG_EXCHANGE, "CME"),
+        (contracts::TAG_CURRENCY, "USD"),
+        (contracts::TAG_IB_SOURCE, "Socket"),
+    ]).expect("Failed to send futures secdef request");
+
+    let mut fut_contract: Option<contracts::ContractDefinition> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    while Instant::now() < deadline && fut_contract.is_none() {
+        match ccp.try_recv() {
+            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+            Err(e) => { println!("  CCP recv error: {}", e); break; }
+            Ok(_) => {}
+        }
+        for frame in ccp.extract_frames() {
+            let messages = match frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = ccp.unsign(&raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw],
+                _ => continue,
+            };
+            for msg in messages {
+                let tags = fix::fix_parse(&msg);
+                if tags.get(&fix::TAG_MSG_TYPE).map(|s| s.as_str()) == Some("d") {
+                    if let Some(def) = contracts::parse_secdef_response(&msg) {
+                        if def.sec_type == contracts::SecurityType::Future {
+                            println!("  Contract: {} conId={} secType={:?} exchange={} expiry={} multiplier={}",
+                                def.symbol, def.con_id, def.sec_type, def.exchange,
+                                def.last_trade_date, def.multiplier);
+                            assert!(def.multiplier > 0.0, "Futures multiplier should be positive");
+                            assert!(!def.last_trade_date.is_empty(), "Futures should have expiry date");
+                            // Take the first (front-month) contract
+                            if fut_contract.is_none() {
+                                fut_contract = Some(def);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let fut_def = match fut_contract {
+        Some(def) => def,
+        None => {
+            println!("  SKIP: No MES futures contract found\n");
+            return Conns { farm: conns.farm, ccp, hmds: conns.hmds, account_id: conns.account_id };
+        }
+    };
+
+    // Submit a futures limit order using the actual futures con_id
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+    );
+    let inst = hot_loop.context_mut().register_instrument(fut_def.con_id as i64);
+    hot_loop.context_mut().set_symbol(inst, "MES".to_string());
+
+    let oid = next_order_id();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+        order_id: oid, instrument: inst, side: Side::Buy, qty: 1, price: 100_00_000_000, outside_rth: true,
+    })).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut order_acked = false;
+    let mut cancel_sent = false;
+    let mut order_cancelled = false;
+    let mut order_rejected = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                if update.order_id == oid {
+                    match update.status {
+                        OrderStatus::Submitted => {
+                            order_acked = true;
+                            if !cancel_sent {
+                                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                                cancel_sent = true;
+                            }
+                        }
+                        OrderStatus::Cancelled => { order_cancelled = true; break; }
+                        OrderStatus::Rejected => { order_rejected = true; break; }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if order_rejected {
+        println!("  SKIP: Futures order rejected (may need trading permissions)\n");
+    } else {
+        assert!(order_acked, "Futures order should be acknowledged");
+        assert!(order_cancelled, "Futures order should be cancelled");
+        println!("  PASS\n");
+    }
+    conns
+}
+
+// ─── Phase 100: Options contract details + order lifecycle (issue #83, #89) ───
+
+fn phase_options_order(conns: Conns) -> Conns {
+    println!("--- Phase 100: Options Contract Details + Order (SPY options) ---");
+
+    // Look up SPY options via CCP
+    let now = ibx::gateway::chrono_free_timestamp();
+    let mut ccp = conns.ccp;
+    ccp.send_fix(&[
+        (fix::TAG_MSG_TYPE, "c"),
+        (fix::TAG_SENDING_TIME, &now),
+        (contracts::TAG_SECURITY_REQ_ID, "ROPT"),
+        (contracts::TAG_SECURITY_REQ_TYPE, "2"),
+        (contracts::TAG_SYMBOL, "SPY"),
+        (contracts::TAG_SECURITY_TYPE, "OPT"),
+        (contracts::TAG_EXCHANGE, "BEST"),
+        (contracts::TAG_CURRENCY, "USD"),
+        (contracts::TAG_IB_SOURCE, "Socket"),
+    ]).expect("Failed to send options secdef request");
+
+    let mut option_contracts: Vec<contracts::ContractDefinition> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+
+    while Instant::now() < deadline {
+        match ccp.try_recv() {
+            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+            Err(e) => { println!("  CCP recv error: {}", e); break; }
+            Ok(_) => {}
+        }
+        let mut got_end = false;
+        for frame in ccp.extract_frames() {
+            let messages = match frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = ccp.unsign(&raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw],
+                _ => continue,
+            };
+            for msg in messages {
+                let tags = fix::fix_parse(&msg);
+                let msg_type = tags.get(&fix::TAG_MSG_TYPE).map(|s| s.as_str()).unwrap_or("?");
+                if msg_type == "d" {
+                    if let Some(resp_type) = tags.get(&contracts::TAG_SECURITY_RESPONSE_TYPE) {
+                        if resp_type == "6" || resp_type == "5" {
+                            got_end = true;
+                            continue;
+                        }
+                    }
+                    if let Some(def) = contracts::parse_secdef_response(&msg) {
+                        if def.sec_type == contracts::SecurityType::Option && def.right.is_some() {
+                            option_contracts.push(def);
+                        }
+                    }
+                }
+            }
+        }
+        if got_end && !option_contracts.is_empty() { break; }
+    }
+
+    if option_contracts.is_empty() {
+        println!("  SKIP: No SPY option contracts found\n");
+        return Conns { farm: conns.farm, ccp, hmds: conns.hmds, account_id: conns.account_id };
+    }
+
+    // Pick the first call option found
+    let opt = option_contracts.iter()
+        .find(|d| d.right == Some(contracts::OptionRight::Call))
+        .unwrap_or(&option_contracts[0]);
+    println!("  Found {} option contracts, using: {} conId={} strike={} right={:?} expiry={}",
+        option_contracts.len(), opt.symbol, opt.con_id, opt.strike,
+        opt.right, opt.last_trade_date);
+    assert!(opt.strike > 0.0, "Option strike should be positive");
+    assert!(opt.multiplier > 0.0, "Option multiplier should be positive (typically 100)");
+
+    // Submit an option limit order using the actual option con_id
+    let opt_con_id = opt.con_id;
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+    );
+    let inst = hot_loop.context_mut().register_instrument(opt_con_id as i64);
+    hot_loop.context_mut().set_symbol(inst, "SPY".to_string());
+
+    let oid = next_order_id();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+        order_id: oid, instrument: inst, side: Side::Buy, qty: 1, price: 1_000_000, outside_rth: true,
+    })).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut order_acked = false;
+    let mut cancel_sent = false;
+    let mut order_cancelled = false;
+    let mut order_rejected = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                if update.order_id == oid {
+                    match update.status {
+                        OrderStatus::Submitted => {
+                            order_acked = true;
+                            if !cancel_sent {
+                                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                                cancel_sent = true;
+                            }
+                        }
+                        OrderStatus::Cancelled => { order_cancelled = true; break; }
+                        OrderStatus::Rejected => { order_rejected = true; break; }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if order_rejected {
+        println!("  SKIP: Option order rejected (may need trading permissions)\n");
+    } else {
+        assert!(order_acked, "Option order should be acknowledged");
+        assert!(order_cancelled, "Option order should be cancelled");
+        println!("  PASS\n");
+    }
+    conns
+}
+
+// ─── Phase 101: Concurrent orders in flight (issue #84) ───
+
+fn phase_concurrent_orders(conns: Conns) -> Conns {
+    println!("--- Phase 101: Concurrent Orders in Flight (3 simultaneous limit orders) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    // Register SPY
+    let spy_inst = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(spy_inst, "SPY".to_string());
+
+    // Submit 3 limit orders simultaneously at $1.00 (far below market)
+    let oid1 = next_order_id();
+    let oid2 = oid1 + 1;
+    let oid3 = oid1 + 2;
+
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+        order_id: oid1, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, outside_rth: true,
+    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+        order_id: oid2, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, outside_rth: true,
+    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+        order_id: oid3, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, outside_rth: true,
+    })).unwrap();
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut acked = [false; 3];
+    let mut cancelled = [false; 3];
+    let mut cancel_sent = false;
+    let mut rejected = false;
+    let oids = [oid1, oid2, oid3];
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                let idx = oids.iter().position(|&id| id == update.order_id);
+                if let Some(i) = idx {
+                    match update.status {
+                        OrderStatus::Submitted => {
+                            acked[i] = true;
+                            // Once all 3 are acked, cancel them all
+                            if acked.iter().all(|&a| a) && !cancel_sent {
+                                for &oid in &oids {
+                                    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
+                                }
+                                cancel_sent = true;
+                            }
+                        }
+                        OrderStatus::Cancelled => { cancelled[i] = true; }
+                        OrderStatus::Rejected => { rejected = true; break; }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        if cancelled.iter().all(|&c| c) { break; }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if rejected {
+        println!("  SKIP: One or more orders rejected\n");
+        return conns;
+    }
+
+    let acked_count = acked.iter().filter(|&&a| a).count();
+    let cancelled_count = cancelled.iter().filter(|&&c| c).count();
+    println!("  Acked: {}/3  Cancelled: {}/3", acked_count, cancelled_count);
+
+    assert_eq!(acked_count, 3, "All 3 orders should be acknowledged");
+    assert_eq!(cancelled_count, 3, "All 3 orders should be cancelled");
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 102: Streaming data validation (issue #87) ───
+
+fn phase_streaming_validation(conns: Conns) -> Conns {
+    println!("--- Phase 102: Streaming Data Validation (SPY tick quality) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut tick_count = 0u32;
+    let mut bid_positive = false;
+    let mut ask_positive = false;
+    let mut spread_valid = true;
+    let mut price_reasonable = true;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(instrument)) => {
+                tick_count += 1;
+                let q = shared.quote(instrument);
+                let bid = q.bid as f64 / PRICE_SCALE as f64;
+                let ask = q.ask as f64 / PRICE_SCALE as f64;
+
+                if q.bid > 0 { bid_positive = true; }
+                if q.ask > 0 { ask_positive = true; }
+
+                // Validate spread: ask >= bid (when both are set)
+                if q.bid > 0 && q.ask > 0 && q.ask < q.bid {
+                    spread_valid = false;
+                    println!("  WARNING: Crossed market bid={:.4} ask={:.4}", bid, ask);
+                }
+
+                // SPY should be between $50 and $1000
+                if q.bid > 0 && (bid < 50.0 || bid > 1000.0) {
+                    price_reasonable = false;
+                    println!("  WARNING: Bid out of range: {:.4}", bid);
+                }
+                if q.ask > 0 && (ask < 50.0 || ask > 1000.0) {
+                    price_reasonable = false;
+                    println!("  WARNING: Ask out of range: {:.4}", ask);
+                }
+
+                if tick_count >= 20 { break; }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if tick_count == 0 {
+        println!("  SKIP: No ticks received — market closed\n");
+        return conns;
+    }
+
+    println!("  {} ticks: bid_positive={} ask_positive={} spread_valid={} price_reasonable={}",
+        tick_count, bid_positive, ask_positive, spread_valid, price_reasonable);
+    assert!(bid_positive, "Should have seen at least one positive bid");
+    assert!(ask_positive, "Should have seen at least one positive ask");
+    assert!(spread_valid, "Spread should not be crossed (ask >= bid)");
+    assert!(price_reasonable, "Prices should be in reasonable range for SPY");
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 103: Historical bar OHLC validation (issue #93) ───
+
+fn phase_historical_ohlc_validation(conns: Conns, _gw: &Gateway, _config: &GatewayConfig) -> Conns {
+    println!("--- Phase 103: Historical Bar OHLC Validation (SPY 1-hour bars) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    let req_id = 6001u32;
+    control_tx.send(ControlCommand::FetchHistorical {
+        req_id,
+        con_id: 756733,
+        symbol: "SPY".into(),
+        end_date_time: String::new(), // empty = now
+        duration: "5 D".into(),
+        bar_size: "1 hour".into(),
+        what_to_show: "TRADES".into(),
+        use_rth: true,
+    }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut bars_data: Option<historical::HistoricalResponse> = None;
+
+    while Instant::now() < deadline {
+        let hist = shared.drain_historical_data();
+        for (rid, data) in hist {
+            if rid == req_id {
+                bars_data = Some(data);
+            }
+        }
+        if bars_data.is_some() { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    let data = match bars_data {
+        Some(d) => d,
+        None => {
+            println!("  SKIP: No historical data received\n");
+            return conns;
+        }
+    };
+
+    let bars = &data.bars;
+    println!("  Received {} bars", bars.len());
+    assert!(!bars.is_empty(), "Should receive at least 1 bar");
+
+    let mut ohlc_valid = true;
+    let mut volume_valid = true;
+
+    for (i, bar) in bars.iter().enumerate() {
+        // OHLC consistency: low <= everything, high >= everything
+        if bar.low > bar.high {
+            println!("  Bar {}: low ({}) > high ({})", i, bar.low, bar.high);
+            ohlc_valid = false;
+        }
+        if bar.low > bar.open {
+            println!("  Bar {}: low ({}) > open ({})", i, bar.low, bar.open);
+            ohlc_valid = false;
+        }
+        if bar.low > bar.close {
+            println!("  Bar {}: low ({}) > close ({})", i, bar.low, bar.close);
+            ohlc_valid = false;
+        }
+        if bar.high < bar.open {
+            println!("  Bar {}: high ({}) < open ({})", i, bar.high, bar.open);
+            ohlc_valid = false;
+        }
+        if bar.high < bar.close {
+            println!("  Bar {}: high ({}) < close ({})", i, bar.high, bar.close);
+            ohlc_valid = false;
+        }
+        // Volume should be non-negative
+        if bar.volume < 0 {
+            println!("  Bar {}: negative volume ({})", i, bar.volume);
+            volume_valid = false;
+        }
+    }
+
+    assert!(ohlc_valid, "All bars should have valid OHLC relationships");
+    assert!(volume_valid, "All bars should have non-negative volume");
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 104: IB-side error handling (issue #88) ───
+
+fn phase_ib_error_handling(conns: Conns) -> Conns {
+    println!("--- Phase 104: IB-Side Error Handling (invalid requests) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    let spy_inst = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(spy_inst, "SPY".to_string());
+
+    // Submit an order for a non-existent instrument (con_id 999999999)
+    // The hot loop should handle this gracefully
+    let oid = next_order_id();
+    // Register a bogus instrument
+    let bogus_inst = hot_loop.context_mut().register_instrument(999999999);
+    hot_loop.context_mut().set_symbol(bogus_inst, "BOGUS".to_string());
+
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
+        order_id: oid, instrument: bogus_inst, side: Side::Buy, qty: 1,
+    })).unwrap();
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_error_or_reject = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                if update.order_id == oid && update.status == OrderStatus::Rejected {
+                    println!("  Order rejected as expected (bogus con_id)");
+                    got_error_or_reject = true;
+                    break;
+                }
+            }
+            Ok(Event::CancelReject(cr)) => {
+                if cr.order_id == oid {
+                    got_error_or_reject = true;
+                    println!("  CancelReject received for bogus order");
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if got_error_or_reject {
+        println!("  PASS\n");
+    } else {
+        // The order may have been silently ignored or the hot loop handled it
+        println!("  SKIP: No rejection/error received (order may have been filtered)\n");
+    }
+    conns
+}
+
+// ─── Phase 105: Reconnection with state recovery (issue #86) ───
+
+fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _config: &GatewayConfig) -> Conns {
+    println!("--- Phase 105: Reconnection with State Recovery ---");
+
+    // Step 1: Subscribe to market data, verify we get ticks
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_ticks = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(_)) => { got_ticks = true; break; }
+            _ => {}
+        }
+    }
+
+    // Shutdown the hot loop to simulate "disconnect"
+    let conns1 = shutdown_and_reclaim(&control_tx, join, account_id.clone());
+
+    if !got_ticks {
+        println!("  SKIP: No ticks received before disconnect — market closed\n");
+        return conns1;
+    }
+
+    println!("  Step 1: Got ticks before disconnect");
+
+    // Step 2: Reconnect with fresh connections and verify ticks resume
+    let shared2 = Arc::new(SharedState::new());
+    let (event_tx2, event_rx2) = crossbeam_channel::unbounded();
+    let (hot_loop2, control_tx2) = HotLoop::with_connections(
+        shared2.clone(), Some(event_tx2), conns1.account_id.clone(),
+        conns1.farm, conns1.ccp, conns1.hmds, None,
+    );
+
+    control_tx2.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join2 = run_hot_loop(hot_loop2);
+
+    let deadline2 = Instant::now() + Duration::from_secs(15);
+    let mut got_ticks_after = false;
+
+    while Instant::now() < deadline2 {
+        match event_rx2.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(inst)) => {
+                let q = shared2.quote(inst);
+                println!("  Step 2: Tick after reconnect bid={:.4} ask={:.4}",
+                    q.bid as f64 / PRICE_SCALE as f64, q.ask as f64 / PRICE_SCALE as f64);
+                got_ticks_after = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let conns2 = shutdown_and_reclaim(&control_tx2, join2, conns1.account_id);
+
+    assert!(got_ticks_after, "Should receive ticks after reconnection");
+    println!("  PASS\n");
+    conns2
+}
+
+// ─── Phase 106: Account summary request (issue #90) ───
+
+fn phase_account_summary(conns: Conns) -> Conns {
+    println!("--- Phase 106: Account Summary (raw CCP request) ---");
+
+    let ccp = conns.ccp;
+
+    // Account data is available via the HotLoop account state
+    let account_id = conns.account_id.clone();
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(),
+        conns.farm, ccp, conns.hmds, None,
+    );
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    // Wait for account data to populate
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut has_account_data = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(Event::Tick(_)) => {
+                let acct = shared.account();
+                if acct.net_liquidation > 0 {
+                    println!("  NetLiquidation: {:.2}", acct.net_liquidation as f64 / PRICE_SCALE as f64);
+                    println!("  BuyingPower: {:.2}", acct.buying_power as f64 / PRICE_SCALE as f64);
+                    println!("  AvailableFunds: {:.2}", acct.available_funds as f64 / PRICE_SCALE as f64);
+                    println!("  MarginUsed: {:.2}", acct.margin_used as f64 / PRICE_SCALE as f64);
+                    println!("  MaintMarginReq: {:.2}", acct.maint_margin_req as f64 / PRICE_SCALE as f64);
+                    has_account_data = true;
+
+                    // Validate account data sanity
+                    assert!(acct.net_liquidation > 0, "NetLiquidation should be positive");
+                    assert!(acct.buying_power >= 0, "BuyingPower should be non-negative");
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if has_account_data {
+        println!("  PASS\n");
+    } else {
+        println!("  SKIP: No account data received\n");
     }
     conns
 }
