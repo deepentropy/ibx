@@ -96,6 +96,7 @@ pub trait Wrapper {
 
     // ── News ──
 
+    fn update_news_bulletin(&mut self, msg_id: i64, msg_type: i32, message: &str, orig_exchange: &str) {}
     fn tick_news(
         &mut self, ticker_id: i64, timestamp: i64, provider_code: &str,
         article_id: &str, headline: &str, extra_data: &str,
@@ -235,6 +236,9 @@ pub mod tests {
         }
         fn scanner_parameters(&mut self, _xml: &str) {
             self.events.push("scanner_parameters".into());
+        }
+        fn update_news_bulletin(&mut self, msg_id: i64, msg_type: i32, message: &str, orig_exchange: &str) {
+            self.events.push(format!("news_bulletin:{msg_id}:{msg_type}:{message}:{orig_exchange}"));
         }
         fn tick_news(
             &mut self, _: i64, _: i64, provider_code: &str, article_id: &str, headline: &str, _: &str,

@@ -776,6 +776,16 @@ pub struct TbtQuote {
     pub timestamp: u64,
 }
 
+/// An IB news bulletin from CCP FIX 35=B.
+#[derive(Debug, Clone)]
+pub struct NewsBulletin {
+    pub msg_id: i32,
+    /// 1=Regular, 2=Exchange unavailable, 3=Exchange available.
+    pub msg_type: i32,
+    pub message: String,
+    pub exchange: String,
+}
+
 /// A real-time news headline from 8=O|35=G tick type 0x1E90.
 #[derive(Debug, Clone)]
 pub struct TickNews {

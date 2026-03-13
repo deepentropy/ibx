@@ -24,11 +24,13 @@ pub const TAG_SENDER_COMP_ID: u32 = 49;
 pub const TAG_SENDING_TIME: u32 = 52;
 pub const TAG_TARGET_COMP_ID: u32 = 56;
 pub const TAG_TEXT: u32 = 58;
+pub const TAG_URGENCY: u32 = 61;
 pub const TAG_ENCRYPT_METHOD: u32 = 98;
 pub const TAG_HEARTBEAT_INT: u32 = 108;
 pub const TAG_TEST_REQ_ID: u32 = 112;
 pub const TAG_RESET_SEQ_NUM: u32 = 141;
 pub const TAG_HEADLINE: u32 = 148;
+pub const TAG_SECURITY_EXCHANGE: u32 = 207;
 
 // IB custom tags
 pub const TAG_IB_BUILD: u32 = 6034;

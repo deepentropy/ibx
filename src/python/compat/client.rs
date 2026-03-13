@@ -56,6 +56,8 @@ pub struct EClient {
     open_orders: Mutex<HashMap<u64, (String, u32, f64, f64)>>,
     /// Track executions: (req_id, contract_con_id, exec_id, side, price, qty, time).
     executions: Mutex<Vec<(i64, i64, String, String, f64, f64, String)>>,
+    /// Whether news bulletins subscription is active.
+    bulletin_subscribed: AtomicBool,
 }
 
 #[pymethods]
@@ -81,6 +83,7 @@ impl EClient {
             market_data_type: AtomicI32::new(1),
             open_orders: Mutex::new(HashMap::new()),
             executions: Mutex::new(Vec::new()),
+            bulletin_subscribed: AtomicBool::new(false),
         }
     }
 
@@ -954,18 +957,19 @@ impl EClient {
         Ok(())
     }
 
-    // ── Tier 2: News Bulletins (stubs) ──
+    // ── Tier 2: News Bulletins ──
 
-    /// Subscribe to news bulletins.
+    /// Subscribe to news bulletins. Bulletins arrive as CCP FIX 35=B messages.
     #[pyo3(signature = (all_msgs=true))]
     fn req_news_bulletins(&self, all_msgs: bool) -> PyResult<()> {
         let _ = all_msgs;
-        log::warn!("req_news_bulletins: not yet implemented in engine");
+        self.bulletin_subscribed.store(true, Ordering::Release);
         Ok(())
     }
 
     /// Cancel news bulletins.
     fn cancel_news_bulletins(&self) -> PyResult<()> {
+        self.bulletin_subscribed.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -1064,30 +1068,27 @@ impl EClient {
 
     // ── Tier 3: Display Groups ──
 
-    /// Query display groups.
-    fn query_display_groups(&self, req_id: i64) -> PyResult<()> {
-        let _ = req_id;
-        log::warn!("query_display_groups: not yet implemented — needs FIX capture");
+    /// Query display groups. Gateway returns empty list (no physical TWS windows).
+    fn query_display_groups(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        self.wrapper.call_method1(py, "display_group_list", (req_id, ""))?;
         Ok(())
     }
 
-    /// Subscribe to group events.
+    /// Subscribe to group events. No-op (gateway has no display groups).
     fn subscribe_to_group_events(&self, req_id: i64, group_id: i32) -> PyResult<()> {
         let _ = (req_id, group_id);
-        log::warn!("subscribe_to_group_events: not yet implemented — needs FIX capture");
         Ok(())
     }
 
-    /// Unsubscribe from group events.
+    /// Unsubscribe from group events. No-op.
     fn unsubscribe_from_group_events(&self, req_id: i64) -> PyResult<()> {
         let _ = req_id;
         Ok(())
     }
 
-    /// Update display group.
+    /// Update display group. No-op (gateway has no display groups).
     fn update_display_group(&self, req_id: i64, contract_info: &str) -> PyResult<()> {
         let _ = (req_id, contract_info);
-        log::warn!("update_display_group: not yet implemented — needs FIX capture");
         Ok(())
     }
 
@@ -1468,6 +1469,18 @@ impl EClient {
                         py, "tick_news",
                         (req_id, news.timestamp as i64, news.provider_code.as_str(),
                          news.article_id.as_str(), news.headline.as_str(), ""),
+                        None,
+                    )?;
+                }
+            }
+
+            // Drain news bulletins -> updateNewsBulletin
+            if self.bulletin_subscribed.load(Ordering::Acquire) {
+                let bulletins = shared.drain_news_bulletins();
+                for b in bulletins {
+                    self.wrapper.call_method(
+                        py, "update_news_bulletin",
+                        (b.msg_id as i64, b.msg_type, b.message.as_str(), b.exchange.as_str()),
                         None,
                     )?;
                 }

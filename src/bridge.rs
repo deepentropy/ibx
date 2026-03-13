@@ -104,6 +104,7 @@ pub struct SharedState {
     tbt_trades: Mutex<Vec<TbtTrade>>,
     tbt_quotes: Mutex<Vec<TbtQuote>>,
     tick_news: Mutex<Vec<TickNews>>,
+    news_bulletins: Mutex<Vec<NewsBulletin>>,
     what_if_responses: Mutex<Vec<WhatIfResponse>>,
     historical_data: Mutex<Vec<(u32, HistoricalResponse)>>,
     head_timestamps: Mutex<Vec<(u32, HeadTimestampResponse)>>,
@@ -142,6 +143,7 @@ impl SharedState {
             tbt_trades: Mutex::new(Vec::with_capacity(256)),
             tbt_quotes: Mutex::new(Vec::with_capacity(256)),
             tick_news: Mutex::new(Vec::with_capacity(32)),
+            news_bulletins: Mutex::new(Vec::with_capacity(16)),
             what_if_responses: Mutex::new(Vec::with_capacity(8)),
             historical_data: Mutex::new(Vec::with_capacity(16)),
             head_timestamps: Mutex::new(Vec::with_capacity(8)),
@@ -206,6 +208,12 @@ impl SharedState {
     /// Drain all pending news ticks.
     pub fn drain_tick_news(&self) -> Vec<TickNews> {
         let mut lock = self.tick_news.lock().unwrap();
+        std::mem::take(&mut *lock)
+    }
+
+    /// Drain all pending news bulletins.
+    pub fn drain_news_bulletins(&self) -> Vec<NewsBulletin> {
+        let mut lock = self.news_bulletins.lock().unwrap();
         std::mem::take(&mut *lock)
     }
 
@@ -369,6 +377,10 @@ impl SharedState {
 
     #[doc(hidden)] pub fn push_tick_news(&self, news: TickNews) {
         self.tick_news.lock().unwrap().push(news);
+    }
+
+    #[doc(hidden)] pub fn push_news_bulletin(&self, bulletin: NewsBulletin) {
+        self.news_bulletins.lock().unwrap().push(bulletin);
     }
 
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {

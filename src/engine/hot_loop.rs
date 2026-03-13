@@ -9,7 +9,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{AlgoParams, CompletedOrder, ControlCommand, Fill, InstrumentId, OrderCondition, OrderRequest, PositionInfo, Price, Qty, Side, PRICE_SCALE, QTY_SCALE};
+use crate::types::{AlgoParams, CompletedOrder, ControlCommand, Fill, InstrumentId, NewsBulletin, OrderCondition, OrderRequest, PositionInfo, Price, Qty, Side, PRICE_SCALE, QTY_SCALE};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 /// CCP heartbeat interval (10 seconds, configurable via FIX tag 108).
@@ -93,6 +93,8 @@ pub struct HotLoop {
     pending_ticks: Vec<(String, u32, String)>,
     /// Real-time bar subscriptions: (query_id, req_id, ticker_id, min_tick).
     rtbar_subs: Vec<(String, u32, Option<u32>, f64)>,
+    /// Auto-incrementing bulletin ID for news bulletins.
+    bulletin_next_id: i32,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -176,6 +178,7 @@ impl HotLoop {
             pending_schedule: Vec::new(),
             pending_ticks: Vec::new(),
             rtbar_subs: Vec::new(),
+            bulletin_next_id: 0,
         }
     }
 
@@ -2039,6 +2042,7 @@ impl HotLoop {
         match msg_type {
             fix::MSG_EXEC_REPORT => self.handle_exec_report(&parsed),
             fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed),
+            fix::MSG_NEWS => self.handle_news_bulletin(&parsed),
             fix::MSG_HEARTBEAT => {} // timestamp already updated in try_recv
             fix::MSG_TEST_REQUEST => {
                 let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
@@ -2280,6 +2284,35 @@ impl HotLoop {
                 self.emit(Event::CancelReject(reject));
             }
         }
+    }
+
+    /// Handle CCP 35=B news bulletin.
+    fn handle_news_bulletin(&mut self, parsed: &std::collections::HashMap<u32, String>) {
+        // FIX tag 61 (Urgency) → bulletin type: 1=Regular, 2=Exchange unavailable, 3=Exchange available
+        static BULLETIN_TYPE_MAP: &[(i32, i32)] = &[
+            (1, 1), (2, 2), (3, 3), (8, 1), (9, 1), (10, 1),
+        ];
+
+        let fix_type: i32 = parsed.get(&fix::TAG_URGENCY)
+            .and_then(|s| s.parse().ok()).unwrap_or(0);
+        let api_type = BULLETIN_TYPE_MAP.iter()
+            .find(|(k, _)| *k == fix_type)
+            .map(|(_, v)| *v);
+        let api_type = match api_type {
+            Some(t) => t,
+            None => return, // Unknown bulletin type, skip
+        };
+        let message = parsed.get(&fix::TAG_HEADLINE).cloned().unwrap_or_default();
+        let exchange = parsed.get(&fix::TAG_SECURITY_EXCHANGE).cloned().unwrap_or_default();
+
+        self.bulletin_next_id += 1;
+        let bulletin = NewsBulletin {
+            msg_id: self.bulletin_next_id,
+            msg_type: api_type,
+            message,
+            exchange,
+        };
+        self.shared.push_news_bulletin(bulletin);
     }
 
     /// Handle CCP 35=U 6040=77 account summary (init burst response).
@@ -4753,6 +4786,63 @@ mod tests {
 
         // Order should still exist
         assert!(engine.context_mut().order(10).is_some());
+    }
+
+    #[test]
+    fn handle_news_bulletin_pushes_to_shared() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+
+        // FIX 35=B with tag 61=1 (Regular), 148=headline, 207=NYSE
+        let msg = fix::fix_build(&[
+            (35, "B"),
+            (61, "1"),
+            (148, "Market closed early"),
+            (207, "NYSE"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+
+        let bulletins = shared.drain_news_bulletins();
+        assert_eq!(bulletins.len(), 1);
+        assert_eq!(bulletins[0].msg_id, 1);
+        assert_eq!(bulletins[0].msg_type, 1);
+        assert_eq!(bulletins[0].message, "Market closed early");
+        assert_eq!(bulletins[0].exchange, "NYSE");
+    }
+
+    #[test]
+    fn handle_news_bulletin_unknown_type_skipped() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+
+        // FIX 35=B with tag 61=99 (unknown type)
+        let msg = fix::fix_build(&[
+            (35, "B"),
+            (61, "99"),
+            (148, "Should be skipped"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+
+        let bulletins = shared.drain_news_bulletins();
+        assert_eq!(bulletins.len(), 0);
+    }
+
+    #[test]
+    fn handle_news_bulletin_type_mapping() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+
+        // Type 8 should map to API type 1
+        let msg = fix::fix_build(&[
+            (35, "B"),
+            (61, "8"),
+            (148, "Info bulletin"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+
+        let bulletins = shared.drain_news_bulletins();
+        assert_eq!(bulletins.len(), 1);
+        assert_eq!(bulletins[0].msg_type, 1); // mapped from 8 → 1
     }
 
     #[test]

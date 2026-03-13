@@ -731,6 +731,11 @@ impl EClient {
             );
         }
 
+        // News bulletins → update_news_bulletin
+        for b in self.shared.drain_news_bulletins() {
+            wrapper.update_news_bulletin(b.msg_id as i64, b.msg_type, &b.message, &b.exchange);
+        }
+
         // What-if → order_status (with margin info in why_held)
         for wi in self.shared.drain_what_if_responses() {
             let msg = format!(
@@ -2295,6 +2300,22 @@ mod tests {
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e == "tick_news:BRFG:BRFG$123:AAPL beats"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  process_msgs — news bulletins
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn process_msgs_dispatches_news_bulletin() {
+        let (client, _rx, shared) = test_client();
+        shared.push_news_bulletin(NewsBulletin {
+            msg_id: 1, msg_type: 1,
+            message: "Exchange notice".into(), exchange: "NYSE".into(),
+        });
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+        assert!(w.events.iter().any(|e| e == "news_bulletin:1:1:Exchange notice:NYSE"));
     }
 
     // ═══════════════════════════════════════════════════════════════════
