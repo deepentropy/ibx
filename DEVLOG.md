@@ -1,3 +1,31 @@
+## 2026-03-13 - Split integration test monolith + add 5 new test phases
+
+### Goal
+Split 5,273-line `tests/ib_paper_integration.rs` monolith into modules, create GitHub issues for test gaps, implement new phases.
+
+### Approach Taken
+1. Created `tests/ib_paper_integration/` directory with `main.rs` orchestrator + 9 module files
+2. Filed GitHub issues #92-#97 for identified gaps (tick stress, large historical, DST boundary, order dedup, pacing recovery, multi-account FA)
+3. Implemented 5 new phases (110-114) in their respective modules
+
+### What Worked
+- Rust `tests/foo/main.rs` directory pattern keeps same test binary name while splitting into modules
+- `pub(super)` visibility scopes phase functions correctly
+- All 664 unit tests pass, integration test compiles clean
+
+### Key Decisions
+- Cannot split into independent `#[test]` functions due to IB ONELOGON constraint (single connection shared sequentially)
+- Phase 110 (tick stress) is session-dependent (needs_ticks guard)
+- Phases 111-114 are session-independent
+- Issues #96 (multi-account FA) and #97 (Python error resilience) deferred — no implementation yet
+
+### Files
+- `tests/ib_paper_integration/main.rs` — orchestrator, 107 phases
+- `tests/ib_paper_integration/common.rs` — Conns, helpers, market session detection
+- `tests/ib_paper_integration/{connection,contracts,market_data,historical,account,orders,multi_asset,heartbeat,error_handling}.rs`
+
+---
+
 ## 2026-03-12 - Add channel-based Rust Client API, remove native Python API
 
 ### Goal
