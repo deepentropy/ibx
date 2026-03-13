@@ -409,12 +409,24 @@ fn integration_suite() {
     }
     conns = phase_account_summary(conns);
 
+    // ── Session-independent forex fallback phases (issue #91) ──
+    // EUR.USD trades ~24h Sun-Fri, so these cover tick reception when US stocks are closed.
+    if !needs_ticks {
+        conns = phase_forex_market_data(conns);
+        conns = phase_forex_streaming_validation(conns);
+        conns = phase_forex_reconnection(conns);
+    }
+
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 99;
+    // Session-dependent phases: 2,3,4,6,17,27,28,51,52,61,97,102,105 = 13
+    // Forex fallback phases cover 3 of those when !needs_ticks (107,108,109)
+    let total_phases = 102;
     let skipped = if needs_ticks { 0 } else { 13 };
-    println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
-        total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
+    let forex_fallback = if needs_ticks { 0 } else { 3 };
+    let ran = total_phases - skipped + forex_fallback;
+    println!("\n=== {}/{} phases ran ({} skipped, {} forex-fallback, {:?}) in {:.1}s ===",
+        ran, total_phases, skipped, forex_fallback, session, suite_start.elapsed().as_secs_f64());
 }
 
 // ─── Phase 1: CCP auth + farm logon (no hot loop) ───
@@ -4999,6 +5011,254 @@ fn phase_account_summary(conns: Conns) -> Conns {
         println!("  SKIP: No account data received\n");
     }
     conns
+}
+
+// ─── Phase 107: Forex market data ticks — session-independent (issue #91) ───
+// EUR.USD trades ~24h Sun-Fri, providing tick coverage when US stocks are closed.
+
+fn phase_forex_market_data(conns: Conns) -> Conns {
+    println!("--- Phase 107: Forex Market Data Ticks (EUR.USD — session-independent) ---");
+
+    // Look up EUR.USD con_id via CCP first
+    let now = ibx::gateway::chrono_free_timestamp();
+    let mut ccp = conns.ccp;
+    ccp.send_fix(&[
+        (fix::TAG_MSG_TYPE, "c"),
+        (fix::TAG_SENDING_TIME, &now),
+        (contracts::TAG_SECURITY_REQ_ID, "RFX107"),
+        (contracts::TAG_SECURITY_REQ_TYPE, "2"),
+        (contracts::TAG_SYMBOL, "EUR"),
+        (contracts::TAG_SECURITY_TYPE, "CASH"),
+        (contracts::TAG_EXCHANGE, "IDEALPRO"),
+        (contracts::TAG_CURRENCY, "USD"),
+        (contracts::TAG_IB_SOURCE, "Socket"),
+    ]).expect("Failed to send forex secdef request");
+
+    let mut forex_con_id: Option<i64> = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && forex_con_id.is_none() {
+        match ccp.try_recv() {
+            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
+            Err(_) => break,
+            Ok(_) => {}
+        }
+        for frame in ccp.extract_frames() {
+            let messages = match frame {
+                Frame::FixComp(raw) => {
+                    let (unsigned, _) = ccp.unsign(&raw);
+                    fixcomp::fixcomp_decompress(&unsigned)
+                }
+                Frame::Fix(raw) => vec![raw],
+                _ => continue,
+            };
+            for msg in messages {
+                let tags = fix::fix_parse(&msg);
+                if tags.get(&fix::TAG_MSG_TYPE).map(|s| s.as_str()) == Some("d") {
+                    if let Some(def) = contracts::parse_secdef_response(&msg) {
+                        if def.sec_type == contracts::SecurityType::Forex {
+                            forex_con_id = Some(def.con_id as i64);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let con_id = match forex_con_id {
+        Some(id) => id,
+        None => {
+            println!("  SKIP: No EUR.USD contract found\n");
+            return Conns { farm: conns.farm, ccp, hmds: conns.hmds, account_id: conns.account_id };
+        }
+    };
+
+    // Subscribe and verify ticks
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+    );
+
+    control_tx.send(ControlCommand::Subscribe { con_id, symbol: "EUR".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut tick_count = 0u32;
+    let mut bid_seen = false;
+    let mut ask_seen = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(instrument)) => {
+                tick_count += 1;
+                let q = shared.quote(instrument);
+                if q.bid > 0 { bid_seen = true; }
+                if q.ask > 0 { ask_seen = true; }
+
+                if tick_count == 1 {
+                    println!("  FIRST TICK: bid={:.5} ask={:.5}",
+                        q.bid as f64 / PRICE_SCALE as f64,
+                        q.ask as f64 / PRICE_SCALE as f64);
+                }
+
+                // Validate forex prices: EUR.USD typically 0.8-1.5
+                if q.bid > 0 {
+                    let bid = q.bid as f64 / PRICE_SCALE as f64;
+                    assert!(bid > 0.5 && bid < 2.0,
+                        "EUR.USD bid {:.5} out of expected range", bid);
+                }
+                if q.ask > 0 && q.bid > 0 {
+                    assert!(q.ask >= q.bid, "Crossed market: ask < bid");
+                }
+
+                if tick_count >= 10 { break; }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if tick_count == 0 {
+        println!("  SKIP: No forex ticks (weekend or forex market closed)\n");
+    } else {
+        assert!(bid_seen, "Should see at least one bid");
+        assert!(ask_seen, "Should see at least one ask");
+        println!("  {} ticks received, bid_seen={} ask_seen={}", tick_count, bid_seen, ask_seen);
+        println!("  PASS\n");
+    }
+    conns
+}
+
+// ─── Phase 108: Forex streaming validation — session-independent (issue #91) ───
+
+fn phase_forex_streaming_validation(conns: Conns) -> Conns {
+    println!("--- Phase 108: Forex Streaming Validation (EUR.USD — session-independent) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    // EUR.USD con_id = 12087792 (well-known IB con_id)
+    control_tx.send(ControlCommand::Subscribe { con_id: 12087792, symbol: "EUR".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut tick_count = 0u32;
+    let mut spread_valid = true;
+    let mut price_in_range = true;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(instrument)) => {
+                tick_count += 1;
+                let q = shared.quote(instrument);
+                let bid = q.bid as f64 / PRICE_SCALE as f64;
+                let ask = q.ask as f64 / PRICE_SCALE as f64;
+
+                if q.bid > 0 && q.ask > 0 {
+                    if q.ask < q.bid {
+                        spread_valid = false;
+                        println!("  WARNING: Crossed spread bid={:.5} ask={:.5}", bid, ask);
+                    }
+                    // Spread should be reasonable for major forex pair (< 0.01)
+                    let spread = ask - bid;
+                    if spread > 0.01 {
+                        println!("  NOTE: Wide spread {:.5} (unusual for EUR.USD)", spread);
+                    }
+                }
+
+                if q.bid > 0 && (bid < 0.5 || bid > 2.0) {
+                    price_in_range = false;
+                }
+
+                if tick_count >= 15 { break; }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if tick_count == 0 {
+        println!("  SKIP: No forex ticks (weekend or forex market closed)\n");
+    } else {
+        assert!(spread_valid, "Spread should not be crossed");
+        assert!(price_in_range, "EUR.USD price should be in 0.5-2.0 range");
+        println!("  {} ticks, spread_valid={} price_in_range={}", tick_count, spread_valid, price_in_range);
+        println!("  PASS\n");
+    }
+    conns
+}
+
+// ─── Phase 109: Forex reconnection — session-independent (issue #91) ───
+
+fn phase_forex_reconnection(conns: Conns) -> Conns {
+    println!("--- Phase 109: Forex Reconnection Recovery (EUR.USD — session-independent) ---");
+
+    // Step 1: Subscribe, get forex ticks
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 12087792, symbol: "EUR".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_ticks = false;
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(_)) => { got_ticks = true; break; }
+            _ => {}
+        }
+    }
+
+    let conns1 = shutdown_and_reclaim(&control_tx, join, account_id.clone());
+
+    if !got_ticks {
+        println!("  SKIP: No forex ticks before disconnect (weekend)\n");
+        return conns1;
+    }
+    println!("  Step 1: Got forex ticks before disconnect");
+
+    // Step 2: Reconnect and verify ticks resume
+    let shared2 = Arc::new(SharedState::new());
+    let (event_tx2, event_rx2) = crossbeam_channel::unbounded();
+    let (hot_loop2, control_tx2) = HotLoop::with_connections(
+        shared2.clone(), Some(event_tx2), conns1.account_id.clone(),
+        conns1.farm, conns1.ccp, conns1.hmds, None,
+    );
+
+    control_tx2.send(ControlCommand::Subscribe { con_id: 12087792, symbol: "EUR".into() }).unwrap();
+    let join2 = run_hot_loop(hot_loop2);
+
+    let deadline2 = Instant::now() + Duration::from_secs(15);
+    let mut got_ticks_after = false;
+    while Instant::now() < deadline2 {
+        match event_rx2.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(inst)) => {
+                let q = shared2.quote(inst);
+                println!("  Step 2: Tick after reconnect bid={:.5} ask={:.5}",
+                    q.bid as f64 / PRICE_SCALE as f64, q.ask as f64 / PRICE_SCALE as f64);
+                got_ticks_after = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let conns2 = shutdown_and_reclaim(&control_tx2, join2, conns1.account_id);
+
+    assert!(got_ticks_after, "Should receive forex ticks after reconnection");
+    println!("  PASS\n");
+    conns2
 }
 
 /// Format seconds since epoch as YYYYMMDD-HH:MM:SS UTC.

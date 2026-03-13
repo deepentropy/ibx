@@ -70,6 +70,12 @@ class LiveWrapper(EWrapper):
     def error(self, req_id, error_code, error_string, advanced_order_reject_json=""):
         self.events.append(("error", req_id, error_code, error_string))
 
+    def display_group_list(self, req_id, groups):
+        self.events.append(("display_group_list", req_id, groups))
+
+    def display_group_updated(self, req_id, contract_info):
+        self.events.append(("display_group_updated", req_id, contract_info))
+
 
 class TestLiveE2E:
     """End-to-end tests against live IB paper account."""
@@ -190,6 +196,29 @@ class TestLiveE2E:
                         if e[0] == "order_status" and e[1] == oid and e[2] == "Rejected"]
         assert len(cancel_events) > 0 or len(reject_events) > 0, \
             "Order should be cancelled or rejected"
+
+    def test_display_groups(self):
+        """Verify display group API calls work (issue #90).
+
+        Gateway has no physical TWS windows, so query_display_groups
+        returns empty and subscribe/unsubscribe are no-ops. We verify
+        the callbacks fire without errors.
+        """
+        assert self.wrapper.got_next_id.wait(timeout=10)
+
+        # query_display_groups should immediately fire display_group_list callback
+        self.client.query_display_groups(5001)
+        time.sleep(0.5)
+
+        dg_events = [e for e in self.wrapper.events if e[0] == "display_group_list"]
+        assert len(dg_events) > 0, "display_group_list callback should fire"
+        assert dg_events[0][1] == 5001  # req_id
+        assert dg_events[0][2] == ""    # empty groups (no TWS windows)
+
+        # subscribe/unsubscribe should not raise
+        self.client.subscribe_to_group_events(5002, 1)
+        self.client.unsubscribe_from_group_events(5002)
+        self.client.update_display_group(5002, "")
 
     def test_disconnect_reconnect(self):
         """Verify clean disconnect."""
