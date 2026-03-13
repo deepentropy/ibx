@@ -290,6 +290,14 @@ fn integration_suite() {
     conns = orders::phase_rapid_order_dedup(conns);
     conns = error_handling::phase_pacing_violation_recovery(conns);
 
+    // ── Order modification edge cases (gap #4) ──
+    conns = orders::phase_modify_price_and_qty(conns);
+    conns = orders::phase_double_modify(conns);
+    conns = orders::phase_cancel_during_modify(conns);
+
+    // ── Authentication failure (gap #5) ──
+    connection::phase_auth_wrong_password(&config);
+
     // ── Session-independent forex fallback phases (issue #91) ──
     // EUR.USD trades ~24h Sun-Fri, so these cover tick reception when US stocks are closed.
     if !needs_ticks {
@@ -302,7 +310,7 @@ fn integration_suite() {
 
     // Session-dependent phases: 2,3,4,6,17,27,28,51,52,61,97,102,105,110 = 14
     // Forex fallback phases cover 3 of those when !needs_ticks (107,108,109)
-    let total_phases = 110;
+    let total_phases = 114;
     let skipped = if needs_ticks { 0 } else { 14 };
     let forex_fallback = if needs_ticks { 0 } else { 3 };
     let ran = total_phases - skipped + forex_fallback;
