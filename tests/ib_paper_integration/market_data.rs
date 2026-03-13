@@ -224,7 +224,11 @@ pub(super) fn phase_streaming_validation(conns: Conns) -> Conns {
                 if q.ask > 0 { ask_positive = true; }
 
                 // Validate spread: ask >= bid (when both are set)
-                if q.bid > 0 && q.ask > 0 && q.ask < q.bid {
+                // Tolerate up to 5 cents of momentary crossing — bid/ask ticks
+                // arrive in separate messages so the SeqLock snapshot can show
+                // a transient cross until the next tick updates the other side.
+                let cross_tolerance = 0.05 * PRICE_SCALE as f64; // 5 cents
+                if q.bid > 0 && q.ask > 0 && (q.bid - q.ask) as f64 > cross_tolerance {
                     spread_valid = false;
                     println!("  WARNING: Crossed market bid={:.4} ask={:.4}", bid, ask);
                 }

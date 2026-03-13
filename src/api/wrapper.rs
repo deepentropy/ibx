@@ -296,6 +296,18 @@ pub mod tests {
         fn completed_orders_end(&mut self) {
             self.events.push("completed_orders_end".into());
         }
+        fn pnl(&mut self, req_id: i64, daily_pnl: f64, unrealized_pnl: f64, realized_pnl: f64) {
+            self.events.push(format!("pnl:{req_id}:{daily_pnl}:{unrealized_pnl}:{realized_pnl}"));
+        }
+        fn pnl_single(&mut self, req_id: i64, pos: f64, daily_pnl: f64, unrealized_pnl: f64, realized_pnl: f64, value: f64) {
+            self.events.push(format!("pnl_single:{req_id}:{pos}:{daily_pnl}:{unrealized_pnl}:{realized_pnl}:{value}"));
+        }
+        fn account_summary(&mut self, req_id: i64, account: &str, tag: &str, value: &str, currency: &str) {
+            self.events.push(format!("account_summary:{req_id}:{account}:{tag}:{value}:{currency}"));
+        }
+        fn account_summary_end(&mut self, req_id: i64) {
+            self.events.push(format!("account_summary_end:{req_id}"));
+        }
     }
 
     #[test]

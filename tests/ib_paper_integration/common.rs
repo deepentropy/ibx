@@ -7,8 +7,9 @@ pub(super) use std::time::{Duration, Instant};
 
 pub(super) use ibx::bridge::{Event, SharedState};
 pub(super) use ibx::engine::hot_loop::HotLoop;
-pub(super) use ibx::gateway::GatewayConfig;
-pub(super) use ibx::protocol::connection::Connection;
+pub(super) use ibx::gateway::{self, GatewayConfig};
+pub(super) use ibx::protocol::connection::{Connection, Frame};
+pub(super) use ibx::protocol::{fix, fixcomp};
 pub(super) use ibx::types::*;
 
 pub(super) fn get_config() -> Option<GatewayConfig> {
@@ -49,9 +50,56 @@ pub(super) fn shutdown_and_reclaim(
     let _ = control_tx.send(ControlCommand::Shutdown);
     let mut hl = join.join().expect("hot loop thread panicked");
     let farm = hl.farm_conn.take().expect("farm_conn missing after shutdown");
-    let ccp = hl.ccp_conn.take().expect("ccp_conn missing after shutdown");
+    let mut ccp = hl.ccp_conn.take().expect("ccp_conn missing after shutdown");
     let hmds = hl.hmds_conn.take();
+
+    // Keep CCP alive between phases — drain pending data and send heartbeat.
+    // Without this, IB kills the CCP connection if we're idle for >10s during
+    // phase transitions (e.g., HMDS reconnection in historical phases).
+    ccp_keepalive(&mut ccp);
+
     Conns { farm, ccp, hmds, account_id }
+}
+
+/// Send a heartbeat on CCP and respond to any pending TestRequests.
+/// Prevents IB from killing the connection during phase transitions.
+pub(super) fn ccp_keepalive(ccp: &mut Connection) {
+    // Drain any pending data (heartbeats, TestRequests from IB)
+    let _ = ccp.try_recv();
+    if ccp.has_buffered_data() || true {
+        let frames = ccp.extract_frames();
+        for frame in frames {
+            let raw = match &frame {
+                Frame::Fix(r) | Frame::FixComp(r) | Frame::Binary(r) => r,
+            };
+            let (unsigned, _) = ccp.unsign(raw);
+            let msg = if matches!(frame, Frame::FixComp(_)) {
+                fixcomp::fixcomp_decompress(&unsigned).into_iter().next()
+            } else {
+                Some(unsigned)
+            };
+            if let Some(m) = msg {
+                let parsed = fix::fix_parse(&m);
+                if parsed.get(&fix::TAG_MSG_TYPE).map(|s| s.as_str()) == Some(fix::MSG_TEST_REQUEST) {
+                    // Respond to TestRequest with Heartbeat containing the test ID
+                    let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
+                    let ts = gateway::chrono_free_timestamp();
+                    let _ = ccp.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                        (fix::TAG_SENDING_TIME, &ts),
+                        (fix::TAG_TEST_REQ_ID, &test_id),
+                    ]);
+                }
+            }
+        }
+    }
+
+    // Send our own heartbeat
+    let ts = gateway::chrono_free_timestamp();
+    let _ = ccp.send_fix(&[
+        (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+        (fix::TAG_SENDING_TIME, &ts),
+    ]);
 }
 
 /// Generate a unique order ID based on current time.

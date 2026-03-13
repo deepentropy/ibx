@@ -127,6 +127,12 @@ fn integration_suite() {
     }
 
     conns = account::phase_account_pnl(conns);
+
+    // ── Completed orders, PnL, news bulletins (early — before flaky network phases) ──
+    conns = account::phase_completed_orders(conns);
+    conns = account::phase_pnl_subscription(conns);
+    conns = account::phase_news_bulletins(conns);
+
     contracts::phase_contract_details(&mut conns);
     contracts::phase_contract_details_by_symbol(&mut conns);
     contracts::phase_trading_hours(&mut conns);
@@ -296,7 +302,7 @@ fn integration_suite() {
 
     // Session-dependent phases: 2,3,4,6,17,27,28,51,52,61,97,102,105,110 = 14
     // Forex fallback phases cover 3 of those when !needs_ticks (107,108,109)
-    let total_phases = 107;
+    let total_phases = 110;
     let skipped = if needs_ticks { 0 } else { 14 };
     let forex_fallback = if needs_ticks { 0 } else { 3 };
     let ran = total_phases - skipped + forex_fallback;

@@ -888,3 +888,235 @@ fn mixed_all_data_types_single_process() {
     assert!(w.events.iter().any(|e| e.starts_with("tick_news:")));
     assert!(w.events.iter().any(|e| e == "scanner_parameters"));
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  COMPLETED ORDERS
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn req_completed_orders_drains_and_dispatches() {
+    let (client, _rx, shared) = test_client();
+
+    shared.push_completed_order(CompletedOrder {
+        order_id: 100, instrument: 0, status: OrderStatus::Filled,
+        filled_qty: 50, timestamp_ns: 1000,
+    });
+    shared.push_completed_order(CompletedOrder {
+        order_id: 200, instrument: 0, status: OrderStatus::Cancelled,
+        filled_qty: 0, timestamp_ns: 2000,
+    });
+
+    let mut w = RecordingWrapper::default();
+    client.req_completed_orders(&mut w);
+
+    assert_eq!(w.events.iter().filter(|e| *e == "completed_order").count(), 2);
+    assert!(w.events.iter().any(|e| e == "completed_orders_end"));
+
+    // Second call should return empty (already drained)
+    w.events.clear();
+    client.req_completed_orders(&mut w);
+    assert_eq!(w.events.iter().filter(|e| *e == "completed_order").count(), 0);
+    assert!(w.events.iter().any(|e| e == "completed_orders_end"));
+}
+
+#[test]
+fn req_completed_orders_empty_still_fires_end() {
+    let (client, _rx, _shared) = test_client();
+    let mut w = RecordingWrapper::default();
+    client.req_completed_orders(&mut w);
+    assert_eq!(w.events, vec!["completed_orders_end"]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  PNL SUBSCRIPTION
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn pnl_subscription_fires_on_change() {
+    let (client, _rx, shared) = test_client();
+
+    client.req_pnl(10, "DU123", "");
+
+    // Set initial account state with PnL
+    let mut acct = AccountState::default();
+    acct.daily_pnl = 500 * PRICE_SCALE;
+    acct.unrealized_pnl = 1000 * PRICE_SCALE;
+    acct.realized_pnl = 200 * PRICE_SCALE;
+    shared.set_account(&acct);
+
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("pnl:10:")), "PnL callback expected");
+
+    // Same values → no duplicate
+    w.events.clear();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("pnl:")), "No duplicate PnL expected");
+
+    // Changed values → fires again
+    acct.daily_pnl = 600 * PRICE_SCALE;
+    shared.set_account(&acct);
+    w.events.clear();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("pnl:10:")), "Changed PnL should fire callback");
+}
+
+#[test]
+fn cancel_pnl_stops_dispatch() {
+    let (client, _rx, shared) = test_client();
+
+    client.req_pnl(10, "DU123", "");
+    let mut acct = AccountState::default();
+    acct.daily_pnl = 500 * PRICE_SCALE;
+    shared.set_account(&acct);
+
+    // First call should fire
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("pnl:10:")));
+
+    // Cancel and change value
+    client.cancel_pnl(10);
+    acct.daily_pnl = 999 * PRICE_SCALE;
+    shared.set_account(&acct);
+
+    w.events.clear();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("pnl:")), "Cancelled PnL should not fire");
+}
+
+#[test]
+fn pnl_single_dispatches_position_info() {
+    let (client, _rx, shared) = test_client();
+
+    client.req_pnl_single(20, "DU123", "", 265598);
+
+    shared.set_position_info(PositionInfo {
+        con_id: 265598,
+        position: 100,
+        avg_cost: 150 * PRICE_SCALE,
+    });
+
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("pnl_single:20:")), "PnL single callback expected");
+
+    // Cancel should stop dispatch
+    client.cancel_pnl_single(20);
+    w.events.clear();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("pnl_single:")), "Cancelled PnL single should not fire");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  ACCOUNT SUMMARY
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn account_summary_one_shot_delivery() {
+    let (client, _rx, shared) = test_client();
+
+    let mut acct = AccountState::default();
+    acct.net_liquidation = 100_000 * PRICE_SCALE;
+    acct.buying_power = 400_000 * PRICE_SCALE;
+    acct.available_funds = 50_000 * PRICE_SCALE;
+    shared.set_account(&acct);
+
+    client.req_account_summary(5, "All", "NetLiquidation,BuyingPower,AvailableFunds");
+
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+
+    // Should have exactly 3 account_summary events + 1 end
+    let summaries: Vec<_> = w.events.iter().filter(|e| e.starts_with("account_summary:5:")).collect();
+    assert_eq!(summaries.len(), 3, "Expected 3 summary tags, got {:?}", summaries);
+    assert!(w.events.iter().any(|e| e == "account_summary_end:5"));
+
+    // Verify specific tags
+    assert!(summaries.iter().any(|e| e.contains(":NetLiquidation:")));
+    assert!(summaries.iter().any(|e| e.contains(":BuyingPower:")));
+    assert!(summaries.iter().any(|e| e.contains(":AvailableFunds:")));
+
+    // Second call should NOT fire (one-shot, already consumed)
+    w.events.clear();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("account_summary:")));
+    assert!(!w.events.iter().any(|e| e.starts_with("account_summary_end:")));
+}
+
+#[test]
+fn cancel_account_summary_prevents_delivery() {
+    let (client, _rx, shared) = test_client();
+
+    let mut acct = AccountState::default();
+    acct.net_liquidation = 100_000 * PRICE_SCALE;
+    shared.set_account(&acct);
+
+    client.req_account_summary(5, "All", "NetLiquidation");
+    client.cancel_account_summary(5);
+
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("account_summary:")));
+}
+
+#[test]
+fn account_summary_empty_tags_returns_all() {
+    let (client, _rx, shared) = test_client();
+
+    let mut acct = AccountState::default();
+    acct.net_liquidation = 100_000 * PRICE_SCALE;
+    acct.buying_power = 400_000 * PRICE_SCALE;
+    acct.total_cash_value = 50_000 * PRICE_SCALE;
+    shared.set_account(&acct);
+
+    // Empty tags string → all non-zero fields
+    client.req_account_summary(7, "All", "");
+
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+
+    let summaries: Vec<_> = w.events.iter().filter(|e| e.starts_with("account_summary:7:")).collect();
+    assert!(summaries.len() >= 3, "Expected at least 3 non-zero fields, got {}", summaries.len());
+    assert!(w.events.iter().any(|e| e == "account_summary_end:7"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  NEWS BULLETINS
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn news_bulletins_gated_by_subscription() {
+    let (client, _rx, shared) = test_client();
+
+    shared.push_news_bulletin(NewsBulletin {
+        msg_id: 1, msg_type: 1, message: "Test bulletin".into(), exchange: "NYSE".into(),
+    });
+
+    // Without subscription → not dispatched (but drained silently)
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("news_bulletin:")));
+
+    // Subscribe
+    client.req_news_bulletins(true);
+
+    shared.push_news_bulletin(NewsBulletin {
+        msg_id: 2, msg_type: 2, message: "Exchange down".into(), exchange: "ARCA".into(),
+    });
+
+    w.events.clear();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("news_bulletin:")), "Expected bulletin after subscription");
+
+    // Cancel subscription
+    client.cancel_news_bulletins();
+
+    shared.push_news_bulletin(NewsBulletin {
+        msg_id: 3, msg_type: 1, message: "After cancel".into(), exchange: "NYSE".into(),
+    });
+
+    w.events.clear();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("news_bulletin:")), "No bulletin after cancel");
+}

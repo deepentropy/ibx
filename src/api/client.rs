@@ -90,6 +90,17 @@ pub struct EClient {
     instrument_to_req: Mutex<HashMap<InstrumentId, i64>>,
     // Change detection for quote polling
     last_quotes: Mutex<HashMap<InstrumentId, [i64; 12]>>,
+
+    // PnL subscription state
+    pnl_req_id: Mutex<Option<i64>>,
+    pnl_single_reqs: Mutex<HashMap<i64, i64>>, // req_id → con_id
+    last_pnl: Mutex<[i64; 3]>, // [daily, unrealized, realized]
+
+    // Account summary subscription state (req_id, tags)
+    account_summary_req: Mutex<Option<(i64, Vec<String>)>>,
+
+    // News bulletin subscription
+    bulletin_subscribed: AtomicBool,
 }
 
 impl EClient {
@@ -129,6 +140,11 @@ impl EClient {
             req_to_instrument: Mutex::new(HashMap::new()),
             instrument_to_req: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
+            pnl_req_id: Mutex::new(None),
+            pnl_single_reqs: Mutex::new(HashMap::new()),
+            last_pnl: Mutex::new([0i64; 3]),
+            account_summary_req: Mutex::new(None),
+            bulletin_subscribed: AtomicBool::new(false),
         })
     }
 
@@ -154,6 +170,11 @@ impl EClient {
             req_to_instrument: Mutex::new(HashMap::new()),
             instrument_to_req: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
+            pnl_req_id: Mutex::new(None),
+            pnl_single_reqs: Mutex::new(HashMap::new()),
+            last_pnl: Mutex::new([0i64; 3]),
+            account_summary_req: Mutex::new(None),
+            bulletin_subscribed: AtomicBool::new(false),
         }
     }
 
@@ -457,6 +478,87 @@ impl EClient {
         wrapper.position_end();
     }
 
+    // ── Completed Orders ──
+
+    /// Request completed orders. Matches `reqCompletedOrders` in C++.
+    /// Immediately delivers all archived completed orders, then calls `completed_orders_end`.
+    pub fn req_completed_orders(&self, wrapper: &mut impl Wrapper) {
+        for order in self.shared.drain_completed_orders() {
+            let status_str = match order.status {
+                OrderStatus::Filled => "Filled",
+                OrderStatus::Cancelled => "Cancelled",
+                OrderStatus::Rejected => "Inactive",
+                _ => "Unknown",
+            };
+            let contract = Contract::default();
+            let api_order = Order { order_id: order.order_id as i64, ..Default::default() };
+            let state = crate::api::types::OrderState {
+                status: status_str.into(),
+                ..Default::default()
+            };
+            wrapper.completed_order(&contract, &api_order, &state);
+        }
+        wrapper.completed_orders_end();
+    }
+
+    // ── PnL ──
+
+    /// Subscribe to account PnL updates. Matches `reqPnL` in C++.
+    /// PnL updates are delivered via `process_msgs` when values change.
+    pub fn req_pnl(&self, req_id: i64, _account: &str, _model_code: &str) {
+        *self.pnl_req_id.lock().unwrap() = Some(req_id);
+    }
+
+    /// Cancel PnL subscription. Matches `cancelPnL` in C++.
+    pub fn cancel_pnl(&self, req_id: i64) {
+        let mut pnl = self.pnl_req_id.lock().unwrap();
+        if *pnl == Some(req_id) {
+            *pnl = None;
+        }
+    }
+
+    /// Subscribe to single-position PnL updates. Matches `reqPnLSingle` in C++.
+    pub fn req_pnl_single(&self, req_id: i64, _account: &str, _model_code: &str, con_id: i64) {
+        self.pnl_single_reqs.lock().unwrap().insert(req_id, con_id);
+    }
+
+    /// Cancel single-position PnL subscription. Matches `cancelPnLSingle` in C++.
+    pub fn cancel_pnl_single(&self, req_id: i64) {
+        self.pnl_single_reqs.lock().unwrap().remove(&req_id);
+    }
+
+    // ── Account Summary ──
+
+    /// Request account summary. Matches `reqAccountSummary` in C++.
+    /// Delivered via `process_msgs` as a one-shot response.
+    pub fn req_account_summary(&self, req_id: i64, _group: &str, tags: &str) {
+        let tag_list: Vec<String> = tags.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        *self.account_summary_req.lock().unwrap() = Some((req_id, tag_list));
+    }
+
+    /// Cancel account summary. Matches `cancelAccountSummary` in C++.
+    pub fn cancel_account_summary(&self, req_id: i64) {
+        let mut req = self.account_summary_req.lock().unwrap();
+        if req.as_ref().map(|(r, _)| *r) == Some(req_id) {
+            *req = None;
+        }
+    }
+
+    // ── News Bulletins ──
+
+    /// Subscribe to news bulletins. Matches `reqNewsBulletins` in C++.
+    pub fn req_news_bulletins(&self, _all_msgs: bool) {
+        self.bulletin_subscribed.store(true, Ordering::Release);
+    }
+
+    /// Cancel news bulletin subscription. Matches `cancelNewsBulletins` in C++.
+    pub fn cancel_news_bulletins(&self) {
+        self.bulletin_subscribed.store(false, Ordering::Release);
+    }
+
     // ── Scanner ──
 
     pub fn req_scanner_parameters(&self) {
@@ -731,9 +833,11 @@ impl EClient {
             );
         }
 
-        // News bulletins → update_news_bulletin
-        for b in self.shared.drain_news_bulletins() {
-            wrapper.update_news_bulletin(b.msg_id as i64, b.msg_type, &b.message, &b.exchange);
+        // News bulletins → update_news_bulletin (only when subscribed)
+        if self.bulletin_subscribed.load(Ordering::Acquire) {
+            for b in self.shared.drain_news_bulletins() {
+                wrapper.update_news_bulletin(b.msg_id as i64, b.msg_type, &b.message, &b.exchange);
+            }
         }
 
         // What-if → order_status (with margin info in why_held)
@@ -871,6 +975,71 @@ impl EClient {
         // Delivered on request via req_market_rule(), not here.
 
         // Position updates are delivered immediately via req_positions(), not polled.
+
+        // PnL → pnl callback (change-detected)
+        if let Some(req_id) = *self.pnl_req_id.lock().unwrap() {
+            let acct = self.shared.account();
+            let pnl = [acct.daily_pnl, acct.unrealized_pnl, acct.realized_pnl];
+            let prev = *self.last_pnl.lock().unwrap();
+            if pnl != prev {
+                wrapper.pnl(
+                    req_id,
+                    acct.daily_pnl as f64 / PRICE_SCALE_F,
+                    acct.unrealized_pnl as f64 / PRICE_SCALE_F,
+                    acct.realized_pnl as f64 / PRICE_SCALE_F,
+                );
+                *self.last_pnl.lock().unwrap() = pnl;
+            }
+        }
+
+        // PnL single → pnl_single callback
+        {
+            let reqs: Vec<(i64, i64)> = self.pnl_single_reqs.lock().unwrap()
+                .iter().map(|(&r, &c)| (r, c)).collect();
+            for (req_id, con_id) in reqs {
+                if let Some(pi) = self.shared.position_info(con_id) {
+                    let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
+                    let pos = pi.position as f64;
+                    wrapper.pnl_single(req_id, pos, 0.0, 0.0, 0.0, avg_cost * pos);
+                }
+            }
+        }
+
+        // Account summary → account_summary + account_summary_end (one-shot)
+        {
+            let req = self.account_summary_req.lock().unwrap().take();
+            if let Some((req_id, tags)) = req {
+                let acct = self.shared.account();
+                let fields: &[(&str, f64)] = &[
+                    ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
+                    ("TotalCashValue", acct.total_cash_value as f64 / PRICE_SCALE_F),
+                    ("SettledCash", acct.settled_cash as f64 / PRICE_SCALE_F),
+                    ("BuyingPower", acct.buying_power as f64 / PRICE_SCALE_F),
+                    ("EquityWithLoanValue", acct.equity_with_loan as f64 / PRICE_SCALE_F),
+                    ("GrossPositionValue", acct.gross_position_value as f64 / PRICE_SCALE_F),
+                    ("InitMarginReq", acct.init_margin_req as f64 / PRICE_SCALE_F),
+                    ("MaintMarginReq", acct.maint_margin_req as f64 / PRICE_SCALE_F),
+                    ("AvailableFunds", acct.available_funds as f64 / PRICE_SCALE_F),
+                    ("ExcessLiquidity", acct.excess_liquidity as f64 / PRICE_SCALE_F),
+                    ("Cushion", acct.cushion as f64 / PRICE_SCALE_F),
+                    ("DayTradesRemaining", acct.day_trades_remaining as f64),
+                    ("Leverage", acct.leverage as f64 / PRICE_SCALE_F),
+                    ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
+                    ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
+                    ("DailyPnL", acct.daily_pnl as f64 / PRICE_SCALE_F),
+                ];
+                for &(tag, val) in fields {
+                    if !tags.is_empty() && !tags.iter().any(|t| t == tag) {
+                        continue;
+                    }
+                    if val != 0.0 {
+                        let val_str = format!("{:.2}", val);
+                        wrapper.account_summary(req_id, &self.account_id, tag, &val_str, "USD");
+                    }
+                }
+                wrapper.account_summary_end(req_id);
+            }
+        }
     }
 
     // ── Internal helpers ──
@@ -2309,6 +2478,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_news_bulletin() {
         let (client, _rx, shared) = test_client();
+        client.req_news_bulletins(true);
         shared.push_news_bulletin(NewsBulletin {
             msg_id: 1, msg_type: 1,
             message: "Exchange notice".into(), exchange: "NYSE".into(),

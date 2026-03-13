@@ -401,25 +401,25 @@ impl HotLoop {
             // Apply tick to quote based on tick type
             match tick.tick_type {
                 tick_decoder::O_BID_PRICE => {
-                    q.bid += (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.bid = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
                 }
                 tick_decoder::O_ASK_PRICE => {
-                    q.ask += (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.ask = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
                 }
                 tick_decoder::O_LAST_PRICE => {
-                    q.last += (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.last = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
                 }
                 tick_decoder::O_HIGH_PRICE => {
-                    q.high += (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.high = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
                 }
                 tick_decoder::O_LOW_PRICE => {
-                    q.low += (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.low = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
                 }
                 tick_decoder::O_OPEN_PRICE => {
-                    q.open += (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.open = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
                 }
                 tick_decoder::O_CLOSE_PRICE => {
-                    q.close += (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.close = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
                 }
                 tick_decoder::O_BID_SIZE => {
                     q.bid_size = tick.magnitude;
