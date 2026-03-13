@@ -338,99 +338,100 @@ impl SharedState {
 
     // ── Hot-loop-side writers ──
 
-    pub(crate) fn push_quote(&self, id: InstrumentId, quote: &Quote) {
+    #[doc(hidden)]
+    pub fn push_quote(&self, id: InstrumentId, quote: &Quote) {
         self.quotes[id as usize].write(quote);
     }
 
-    pub(crate) fn push_fill(&self, fill: Fill) {
+    #[doc(hidden)] pub fn push_fill(&self, fill: Fill) {
         self.fills.lock().unwrap().push(fill);
     }
 
-    pub(crate) fn push_order_update(&self, update: OrderUpdate) {
+    #[doc(hidden)] pub fn push_order_update(&self, update: OrderUpdate) {
         self.order_updates.lock().unwrap().push(update);
     }
 
-    pub(crate) fn push_cancel_reject(&self, reject: CancelReject) {
+    #[doc(hidden)] pub fn push_cancel_reject(&self, reject: CancelReject) {
         self.cancel_rejects.lock().unwrap().push(reject);
     }
 
-    pub(crate) fn push_tbt_trade(&self, trade: TbtTrade) {
+    #[doc(hidden)] pub fn push_tbt_trade(&self, trade: TbtTrade) {
         self.tbt_trades.lock().unwrap().push(trade);
     }
 
-    pub(crate) fn push_tbt_quote(&self, quote: TbtQuote) {
+    #[doc(hidden)] pub fn push_tbt_quote(&self, quote: TbtQuote) {
         self.tbt_quotes.lock().unwrap().push(quote);
     }
 
-    pub(crate) fn push_tick_news(&self, news: TickNews) {
+    #[doc(hidden)] pub fn push_tick_news(&self, news: TickNews) {
         self.tick_news.lock().unwrap().push(news);
     }
 
-    pub(crate) fn push_what_if(&self, response: WhatIfResponse) {
+    #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {
         self.what_if_responses.lock().unwrap().push(response);
     }
 
-    pub(crate) fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
+    #[doc(hidden)] pub fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
         self.historical_data.lock().unwrap().push((req_id, response));
     }
 
-    pub(crate) fn push_head_timestamp(&self, req_id: u32, response: HeadTimestampResponse) {
+    #[doc(hidden)] pub fn push_head_timestamp(&self, req_id: u32, response: HeadTimestampResponse) {
         self.head_timestamps.lock().unwrap().push((req_id, response));
     }
 
-    pub(crate) fn push_contract_details(&self, req_id: u32, def: ContractDefinition) {
+    #[doc(hidden)] pub fn push_contract_details(&self, req_id: u32, def: ContractDefinition) {
         self.contract_details.lock().unwrap().push((req_id, def));
     }
 
-    pub(crate) fn push_contract_details_end(&self, req_id: u32) {
+    #[doc(hidden)] pub fn push_contract_details_end(&self, req_id: u32) {
         self.contract_details_end.lock().unwrap().push(req_id);
     }
 
-    pub(crate) fn push_matching_symbols(&self, req_id: u32, matches: Vec<SymbolMatch>) {
+    #[doc(hidden)] pub fn push_matching_symbols(&self, req_id: u32, matches: Vec<SymbolMatch>) {
         self.matching_symbols.lock().unwrap().push((req_id, matches));
     }
 
-    pub(crate) fn push_scanner_params(&self, xml: String) {
+    #[doc(hidden)] pub fn push_scanner_params(&self, xml: String) {
         self.scanner_params.lock().unwrap().push(xml);
     }
 
-    pub(crate) fn push_scanner_data(&self, req_id: u32, result: ScannerResult) {
+    #[doc(hidden)] pub fn push_scanner_data(&self, req_id: u32, result: ScannerResult) {
         self.scanner_data.lock().unwrap().push((req_id, result));
     }
 
-    pub(crate) fn push_historical_news(&self, req_id: u32, headlines: Vec<NewsHeadline>, has_more: bool) {
+    #[doc(hidden)] pub fn push_historical_news(&self, req_id: u32, headlines: Vec<NewsHeadline>, has_more: bool) {
         self.historical_news.lock().unwrap().push((req_id, headlines, has_more));
     }
 
-    pub(crate) fn push_news_article(&self, req_id: u32, article_type: i32, article_text: String) {
+    #[doc(hidden)] pub fn push_news_article(&self, req_id: u32, article_type: i32, article_text: String) {
         self.news_articles.lock().unwrap().push((req_id, article_type, article_text));
     }
 
-    pub(crate) fn push_fundamental_data(&self, req_id: u32, data: String) {
+    #[doc(hidden)] pub fn push_fundamental_data(&self, req_id: u32, data: String) {
         self.fundamental_data.lock().unwrap().push((req_id, data));
     }
 
-    pub(crate) fn push_histogram_data(&self, req_id: u32, entries: Vec<HistogramEntry>) {
+    #[doc(hidden)] pub fn push_histogram_data(&self, req_id: u32, entries: Vec<HistogramEntry>) {
         self.histogram_data.lock().unwrap().push((req_id, entries));
     }
 
-    pub(crate) fn push_historical_ticks(&self, req_id: u32, data: HistoricalTickData, what_to_show: String, done: bool) {
+    #[doc(hidden)] pub fn push_historical_ticks(&self, req_id: u32, data: HistoricalTickData, what_to_show: String, done: bool) {
         self.historical_ticks.lock().unwrap().push((req_id, data, what_to_show, done));
     }
 
-    pub(crate) fn push_real_time_bar(&self, req_id: u32, bar: RealTimeBar) {
+    #[doc(hidden)] pub fn push_real_time_bar(&self, req_id: u32, bar: RealTimeBar) {
         self.real_time_bars.lock().unwrap().push((req_id, bar));
     }
 
-    pub(crate) fn push_historical_schedule(&self, req_id: u32, response: HistoricalScheduleResponse) {
+    #[doc(hidden)] pub fn push_historical_schedule(&self, req_id: u32, response: HistoricalScheduleResponse) {
         self.historical_schedules.lock().unwrap().push((req_id, response));
     }
 
-    pub(crate) fn push_completed_order(&self, order: CompletedOrder) {
+    #[doc(hidden)] pub fn push_completed_order(&self, order: CompletedOrder) {
         self.completed_orders.lock().unwrap().push(order);
     }
 
-    pub(crate) fn push_market_rules(&self, rules: Vec<MarketRule>) {
+    #[doc(hidden)] pub fn push_market_rules(&self, rules: Vec<MarketRule>) {
         let mut lock = self.market_rules.lock().unwrap();
         for rule in rules {
             if !lock.iter().any(|r| r.rule_id == rule.rule_id) {
@@ -439,19 +440,19 @@ impl SharedState {
         }
     }
 
-    pub(crate) fn set_position_info(&self, info: PositionInfo) {
+    #[doc(hidden)] pub fn set_position_info(&self, info: PositionInfo) {
         self.position_infos.lock().unwrap().insert(info.con_id, info);
     }
 
-    pub(crate) fn set_position(&self, id: InstrumentId, pos: i64) {
+    #[doc(hidden)] pub fn set_position(&self, id: InstrumentId, pos: i64) {
         self.positions[id as usize].store(pos as u64, Ordering::Relaxed);
     }
 
-    pub(crate) fn set_account(&self, account: &AccountState) {
+    #[doc(hidden)] pub fn set_account(&self, account: &AccountState) {
         *self.account.lock().unwrap() = *account;
     }
 
-    pub(crate) fn set_instrument_count(&self, count: u32) {
+    #[doc(hidden)] pub fn set_instrument_count(&self, count: u32) {
         self.instrument_count.store(count as u64, Ordering::Relaxed);
     }
 }

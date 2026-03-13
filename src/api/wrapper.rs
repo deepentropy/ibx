@@ -158,8 +158,9 @@ pub trait Wrapper {
     fn tick_req_params(&mut self, ticker_id: i64, min_tick: f64, bbo_exchange: &str, snapshot_permissions: i64) {}
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+/// Test helpers for Wrapper-based testing. Hidden from docs.
+#[doc(hidden)]
+pub mod tests {
     use super::*;
 
     /// A Wrapper impl that records all callback invocations for testing.
@@ -360,6 +361,7 @@ pub(crate) mod tests {
     }
 
     /// Verify a bare no-op impl compiles — ensures all defaults work.
+    #[allow(dead_code)]
     struct NoOpWrapper;
     impl Wrapper for NoOpWrapper {}
 

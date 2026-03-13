@@ -157,6 +157,13 @@ impl EClient {
         }
     }
 
+    /// Map a reqId to an InstrumentId (for testing without a live engine).
+    #[doc(hidden)]
+    pub fn map_req_instrument(&self, req_id: i64, instrument: InstrumentId) {
+        self.req_to_instrument.lock().unwrap().insert(req_id, instrument);
+        self.instrument_to_req.lock().unwrap().insert(instrument, req_id);
+    }
+
     // ── Connection ──
 
     pub fn is_connected(&self) -> bool {
