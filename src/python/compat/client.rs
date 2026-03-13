@@ -171,6 +171,9 @@ impl EClient {
         let tx = self.control_tx.as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
 
+        let shared = self.shared.as_ref().unwrap();
+        let reg_gen = shared.register_gen();
+
         tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         tx.send(ControlCommand::Subscribe {
@@ -179,10 +182,7 @@ impl EClient {
         })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let shared = self.shared.as_ref().unwrap();
-        let instrument_id = shared.instrument_count().saturating_sub(1);
-
+        let instrument_id = Self::wait_for_registration(shared, reg_gen);
         self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
         self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
 
@@ -223,6 +223,9 @@ impl EClient {
             _ => return Err(PyRuntimeError::new_err(format!("Unknown tick type: '{}'", tick_type))),
         };
 
+        let shared = self.shared.as_ref().unwrap();
+        let reg_gen = shared.register_gen();
+
         tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         tx.send(ControlCommand::SubscribeTbt {
@@ -232,9 +235,7 @@ impl EClient {
         })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let shared = self.shared.as_ref().unwrap();
-        let instrument_id = shared.instrument_count().saturating_sub(1);
+        let instrument_id = Self::wait_for_registration(shared, reg_gen);
         self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
         self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
 
@@ -413,7 +414,7 @@ impl EClient {
     }
 
     /// Place an order. Delegates to Rust API's order routing logic.
-    fn place_order(&self, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
+    fn place_order(&self, py: Python<'_>, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
         if self.control_tx.is_none() {
             return Err(PyRuntimeError::new_err("Not connected"));
         }
@@ -428,7 +429,8 @@ impl EClient {
         let tx = self.control_tx.as_ref().unwrap();
 
         // Convert Python Order to Rust API Order and use shared routing logic
-        let api_order = order.to_api();
+        let mut api_order = order.to_api();
+        api_order.conditions = order.convert_conditions(py);
         let side = api_order.side().map_err(|e| PyRuntimeError::new_err(e))?;
         let qty = api_order.total_quantity as u32;
         let order_type = api_order.order_type.to_uppercase();
@@ -2318,6 +2320,17 @@ impl EClient {
 }
 
 impl EClient {
+    /// Spin-wait for the hot loop to process a registration command.
+    fn wait_for_registration(shared: &SharedState, old_gen: u64) -> InstrumentId {
+        for _ in 0..100_000 {
+            if shared.register_gen() != old_gen {
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        shared.instrument_count().saturating_sub(1)
+    }
+
     /// Find instrument ID for a contract, registering if needed.
     fn find_or_register_instrument(&self, contract: &Contract) -> PyResult<u32> {
         // Check if already registered via any reqId
@@ -2331,6 +2344,8 @@ impl EClient {
         // Register new instrument
         let tx = self.control_tx.as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+        let shared = self.shared.as_ref().unwrap();
+        let reg_gen = shared.register_gen();
 
         tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -2340,9 +2355,7 @@ impl EClient {
         })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let shared = self.shared.as_ref().unwrap();
-        Ok(shared.instrument_count().saturating_sub(1))
+        Ok(Self::wait_for_registration(shared, reg_gen))
     }
 
 }

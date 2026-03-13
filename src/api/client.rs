@@ -177,22 +177,31 @@ impl EClient {
 
     // ── Market Data ──
 
+    /// Spin-wait for the hot loop to process a registration command.
+    /// Returns the InstrumentId assigned (instrument_count - 1).
+    fn wait_for_registration(&self, old_gen: u64) -> InstrumentId {
+        for _ in 0..100_000 {
+            if self.shared.register_gen() != old_gen {
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        self.shared.instrument_count().saturating_sub(1)
+    }
+
     /// Subscribe to market data. Matches `reqMktData` in C++.
     pub fn req_mkt_data(
         &self, req_id: i64, contract: &Contract,
         _generic_tick_list: &str, _snapshot: bool, _regulatory_snapshot: bool,
     ) {
+        let reg_gen = self.shared.register_gen();
         let _ = self.control_tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id });
         let _ = self.control_tx.send(ControlCommand::Subscribe {
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
         });
 
-        // Wait briefly for the engine to process the registration, then map the reqId.
-        // TODO: Replace with acknowledgment-based approach to eliminate this delay.
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let instrument_id = self.shared.instrument_count().saturating_sub(1);
-
+        let instrument_id = self.wait_for_registration(reg_gen);
         self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
         self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
     }
@@ -215,15 +224,14 @@ impl EClient {
             "BidAsk" => TbtType::BidAsk,
             _ => TbtType::Last,
         };
+        let reg_gen = self.shared.register_gen();
         let _ = self.control_tx.send(ControlCommand::SubscribeTbt {
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
             tbt_type,
         });
 
-        // Map reqId to instrument
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let instrument_id = self.shared.instrument_count().saturating_sub(1);
+        let instrument_id = self.wait_for_registration(reg_gen);
         self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
         self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
     }
@@ -872,6 +880,7 @@ impl EClient {
         }
 
         // Register new
+        let reg_gen = self.shared.register_gen();
         self.control_tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id })
             .map_err(|e| format!("Engine stopped: {}", e))?;
         self.control_tx.send(ControlCommand::Subscribe {
@@ -879,8 +888,7 @@ impl EClient {
             symbol: contract.symbol.clone(),
         }).map_err(|e| format!("Engine stopped: {}", e))?;
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        Ok(self.shared.instrument_count().saturating_sub(1))
+        Ok(self.wait_for_registration(reg_gen))
     }
 }
 

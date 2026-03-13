@@ -300,6 +300,21 @@ impl Contract {
 }
 
 impl Order {
+    /// Convert PyObject conditions to internal OrderCondition list.
+    pub fn convert_conditions(&self, py: Python<'_>) -> Vec<OrderCondition> {
+        self.conditions.iter().filter_map(|obj| {
+            let any = obj.bind(py);
+            if let Ok(c) = any.downcast::<PriceCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.downcast::<TimeCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.downcast::<MarginCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.downcast::<ExecutionCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.downcast::<VolumeCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.downcast::<PercentChangeCondition>() { return Some(c.borrow().to_internal()); }
+            log::warn!("Unknown order condition type, skipping");
+            None
+        }).collect()
+    }
+
     /// Convert to Rust API Order.
     pub fn to_api(&self) -> crate::api::types::Order {
         crate::api::types::Order {
@@ -335,7 +350,7 @@ impl Order {
             trigger_price: self.trigger_price,
             adjusted_stop_price: self.adjusted_stop_price,
             adjusted_stop_limit_price: self.adjusted_stop_limit_price,
-            conditions: Vec::new(), // TODO: convert PyObject conditions
+            conditions: Vec::new(), // Use convert_conditions(py) + to_api() at call sites that need conditions
             conditions_ignore_rth: self.conditions_ignore_rth,
             conditions_cancel_order: self.conditions_cancel_order,
         }

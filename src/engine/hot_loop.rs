@@ -2454,6 +2454,8 @@ impl HotLoop {
                 ControlCommand::Subscribe { con_id, symbol } => {
                     let id = self.context.market.register(con_id);
                     self.context.market.set_symbol(id, symbol);
+                    self.shared.set_instrument_count(self.context.market.count());
+                    self.shared.bump_register_gen();
                     self.send_mktdata_subscribe(con_id, id);
                 }
                 ControlCommand::Unsubscribe { instrument } => {
@@ -2462,6 +2464,8 @@ impl HotLoop {
                 ControlCommand::SubscribeTbt { con_id, symbol, tbt_type } => {
                     let id = self.context.market.register(con_id);
                     self.context.market.set_symbol(id, symbol);
+                    self.shared.set_instrument_count(self.context.market.count());
+                    self.shared.bump_register_gen();
                     self.send_tbt_subscribe(con_id, id, tbt_type);
                 }
                 ControlCommand::UnsubscribeTbt { instrument } => {
@@ -2475,6 +2479,8 @@ impl HotLoop {
                 }
                 ControlCommand::RegisterInstrument { con_id } => {
                     self.context.market.register(con_id);
+                    self.shared.set_instrument_count(self.context.market.count());
+                    self.shared.bump_register_gen();
                 }
                 ControlCommand::FetchHistorical { req_id, con_id, symbol, end_date_time, duration, bar_size, what_to_show, use_rth } => {
                     self.send_historical_request(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth);
