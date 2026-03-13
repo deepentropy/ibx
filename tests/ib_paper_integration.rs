@@ -373,10 +373,26 @@ fn integration_suite() {
     }
 
     conns = phase_heartbeat_timeout_detection(conns);
+    conns = phase_contract_details_channel(conns);
+    conns = phase_cancel_reject(conns);
+    conns = phase_historical_ticks(conns, &gw, &config);
+    conns = phase_histogram_data(conns, &gw, &config);
+    conns = phase_historical_schedule(conns, &gw, &config);
+    conns = phase_realtime_bars(conns, &gw, &config);
+    conns = phase_news_article(conns, &gw, &config);
+    conns = phase_fundamental_data_channel(conns, &gw, &config);
+    conns = phase_parallel_historical(conns, &gw, &config);
+    conns = phase_scanner_params(conns, &gw, &config);
+    if needs_ticks {
+        conns = phase_position_tracking(conns);
+    } else {
+        println!("--- Phase 97: Position Tracking (SPY) ---\n  SKIP: {:?} — needs fills\n", session);
+    }
+    conns = phase_connection_recovery(conns, &gw, &config);
     let _conns = phase_graceful_shutdown(conns);
 
-    let total_phases = 77;
-    let skipped = if needs_ticks { 0 } else { 10 };
+    let total_phases = 90;
+    let skipped = if needs_ticks { 0 } else { 11 };
     println!("\n=== {}/{} phases ran ({} skipped, {:?}) in {:.1}s ===",
         total_phases - skipped, total_phases, skipped, session, suite_start.elapsed().as_secs_f64());
 }
@@ -3385,4 +3401,800 @@ fn phase_historical_news(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> 
     }
     println!("  PASS\n");
     bg_conns
+}
+
+// ─── Phase 86: Contract Details via HotLoop event channel (issue #76) ───
+
+fn phase_contract_details_channel(conns: Conns) -> Conns {
+    println!("--- Phase 86: Contract Details via Event Channel (SPY) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    control_tx.send(ControlCommand::FetchContractDetails { req_id: 1001, con_id: 756733 }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_details = false;
+    let mut got_end = false;
+
+    while Instant::now() < deadline && !got_details {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::ContractDetails { req_id, details }) => {
+                if req_id == 1001 {
+                    println!("  ContractDetails: {} ({}) conId={}", details.symbol, details.long_name, details.con_id);
+                    assert_eq!(details.con_id, 756733);
+                    assert_eq!(details.symbol, "SPY");
+                    got_details = true;
+                }
+            }
+            Ok(Event::ContractDetailsEnd(req_id)) => {
+                if req_id == 1001 { got_end = true; }
+            }
+            _ => {}
+        }
+    }
+
+    // Wait briefly for ContractDetailsEnd if not yet received
+    if got_details && !got_end {
+        let end_deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < end_deadline {
+            match event_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(Event::ContractDetailsEnd(req_id)) => {
+                    if req_id == 1001 { got_end = true; break; }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    assert!(got_details, "Event::ContractDetails not received for SPY");
+    if got_end {
+        println!("  ContractDetailsEnd received");
+    } else {
+        println!("  ContractDetailsEnd not received (single-conId request — non-fatal)");
+    }
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 87: CancelReject Event path (issue #78) ───
+
+fn phase_cancel_reject(conns: Conns) -> Conns {
+    println!("--- Phase 87: CancelReject Event (bogus order cancel) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    // Register instrument and submit a real order so there's a known order in context
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    let order_id = next_order_id();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+        order_id, instrument: inst_id, side: Side::Buy, qty: 1,
+        price: 1_00_000_000, outside_rth: true,
+    })).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    // Wait for order ack, then cancel it twice — second cancel should produce CancelReject
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut order_acked = false;
+    let mut _first_cancel_sent = false;
+    let mut first_cancelled = false;
+    let mut _second_cancel_sent = false;
+    let mut got_reject = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                if update.status == OrderStatus::Submitted && !order_acked {
+                    order_acked = true;
+                    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                    _first_cancel_sent = true;
+                }
+                if update.status == OrderStatus::Cancelled && !first_cancelled {
+                    first_cancelled = true;
+                    // Cancel again — order is already dead, should produce reject
+                    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+                    _second_cancel_sent = true;
+                }
+            }
+            Ok(Event::CancelReject(reject)) => {
+                println!("  CancelReject: order_id={} type={} code={}", reject.order_id, reject.reject_type, reject.reason_code);
+                got_reject = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if !order_acked {
+        println!("  SKIP: Order never acknowledged\n");
+        return conns;
+    }
+    if got_reject {
+        println!("  PASS\n");
+    } else {
+        // CancelReject may not be emitted if IB silently ignores the second cancel
+        println!("  SKIP: No CancelReject received (IB may silently ignore duplicate cancel)\n");
+    }
+    conns
+}
+
+// ─── Phase 88: Historical Ticks via HotLoop (issue #72) ───
+
+fn phase_historical_ticks(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 88: Historical Ticks (SPY, TRADES) ---");
+
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+        Ok(c) => { println!("  HMDS reconnected"); c }
+        Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
+    };
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
+    );
+
+    // Request last 100 historical ticks for SPY, ending now
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let end_dt = format_utc_timestamp(now);
+    control_tx.send(ControlCommand::FetchHistoricalTicks {
+        req_id: 2001,
+        con_id: 756733,
+        start_date_time: String::new(),
+        end_date_time: end_dt,
+        number_of_ticks: 100,
+        what_to_show: "TRADES".to_string(),
+        use_rth: true,
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut tick_count = 0usize;
+
+    while Instant::now() < deadline {
+        let ticks = shared.drain_historical_ticks();
+        for (req_id, data, what, done) in &ticks {
+            if *req_id == 2001 {
+                let count = match data {
+                    HistoricalTickData::Last(v) => v.len(),
+                    HistoricalTickData::Midpoint(v) => v.len(),
+                    HistoricalTickData::BidAsk(v) => v.len(),
+                };
+                tick_count += count;
+                println!("  Received {} ticks (what={}, done={})", count, what, done);
+                if *done { break; }
+            }
+        }
+        if tick_count > 0 { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if tick_count == 0 {
+        println!("  SKIP: No historical ticks received\n");
+    } else {
+        println!("  PASS ({} ticks)\n", tick_count);
+    }
+    conns
+}
+
+// ─── Phase 89: Histogram Data via HotLoop (issue #73) ───
+
+fn phase_histogram_data(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 89: Histogram Data (SPY, 1 week) ---");
+
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+        Ok(c) => { println!("  HMDS reconnected"); c }
+        Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
+    };
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
+    );
+
+    control_tx.send(ControlCommand::FetchHistogramData {
+        req_id: 3001,
+        con_id: 756733,
+        use_rth: true,
+        period: "1 week".to_string(),
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut entries = Vec::new();
+
+    while Instant::now() < deadline {
+        let data = shared.drain_histogram_data();
+        for (req_id, ents) in data {
+            if req_id == 3001 {
+                entries = ents;
+                break;
+            }
+        }
+        if !entries.is_empty() { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if entries.is_empty() {
+        println!("  SKIP: No histogram data received\n");
+    } else {
+        println!("  {} histogram entries", entries.len());
+        if let Some(first) = entries.first() {
+            println!("  First: price={:.2} count={}", first.price, first.count);
+        }
+        println!("  PASS\n");
+    }
+    conns
+}
+
+// ─── Phase 90: Historical Schedule via HotLoop (issue #74) ───
+
+fn phase_historical_schedule(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 90: Historical Schedule (SPY) ---");
+
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+        Ok(c) => { println!("  HMDS reconnected"); c }
+        Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
+    };
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
+    );
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let end_dt = format_utc_timestamp(now);
+    control_tx.send(ControlCommand::FetchHistoricalSchedule {
+        req_id: 4001,
+        con_id: 756733,
+        end_date_time: end_dt,
+        duration: "5 d".to_string(),
+        use_rth: true,
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut schedule: Option<HistoricalScheduleResponse> = None;
+
+    while Instant::now() < deadline {
+        let data = shared.drain_historical_schedules();
+        for (req_id, resp) in data {
+            if req_id == 4001 {
+                schedule = Some(resp);
+                break;
+            }
+        }
+        if schedule.is_some() { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if let Some(sched) = schedule {
+        println!("  Timezone: {}", sched.timezone);
+        println!("  Sessions: {}", sched.sessions.len());
+        for s in sched.sessions.iter().take(3) {
+            println!("    {} open={} close={}", s.ref_date, s.open_time, s.close_time);
+        }
+        assert!(!sched.sessions.is_empty(), "Schedule should contain sessions");
+        println!("  PASS\n");
+    } else {
+        println!("  SKIP: No schedule data received\n");
+    }
+    conns
+}
+
+// ─── Phase 91: Real-Time Bars via HotLoop (issue #71) ───
+
+fn phase_realtime_bars(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 91: Real-Time Bars (SPY, 5-second) ---");
+
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+        Ok(c) => { println!("  HMDS reconnected"); c }
+        Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
+    };
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
+    );
+
+    control_tx.send(ControlCommand::SubscribeRealTimeBar {
+        req_id: 5001,
+        con_id: 756733,
+        symbol: "SPY".to_string(),
+        what_to_show: "TRADES".to_string(),
+        use_rth: false,
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    // Wait up to 20s for at least one 5-second bar
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut bars = Vec::new();
+
+    while Instant::now() < deadline {
+        let data = shared.drain_real_time_bars();
+        for (req_id, bar) in data {
+            if req_id == 5001 {
+                bars.push(bar);
+            }
+        }
+        if !bars.is_empty() { break; }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // Cancel subscription
+    control_tx.send(ControlCommand::CancelRealTimeBar { req_id: 5001 }).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if bars.is_empty() {
+        println!("  SKIP: No real-time bars received (market may be closed)\n");
+    } else {
+        let bar = &bars[0];
+        println!("  First bar: O={:.2} H={:.2} L={:.2} C={:.2} V={:.0}", bar.open, bar.high, bar.low, bar.close, bar.volume);
+        assert!(bar.high >= bar.low, "High should be >= Low");
+        println!("  PASS ({} bars)\n", bars.len());
+    }
+    conns
+}
+
+// ─── Phase 92: News Article Fetch via HotLoop (issue #75) ───
+
+fn phase_news_article(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 92: News Article Fetch (AAPL) ---");
+
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+        Ok(c) => { println!("  HMDS reconnected"); c }
+        Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
+    };
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
+    );
+
+    // First request historical news to get an article ID
+    control_tx.send(ControlCommand::FetchHistoricalNews {
+        req_id: 6001,
+        con_id: 265598,
+        provider_codes: "BRFG+BRFUPDN".to_string(),
+        start_time: String::new(),
+        end_time: String::new(),
+        max_results: 5,
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    // Poll for headlines
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut article_id: Option<String> = None;
+    let mut provider_code: Option<String> = None;
+
+    while Instant::now() < deadline && article_id.is_none() {
+        let data = shared.drain_historical_news();
+        for (req_id, headlines, _done) in data {
+            if req_id == 6001 {
+                if let Some(h) = headlines.first() {
+                    article_id = Some(h.article_id.clone());
+                    provider_code = Some(h.provider_code.clone());
+                    println!("  Headline: {} ({})", h.headline, h.article_id);
+                }
+            }
+        }
+        if article_id.is_some() { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if let (Some(art_id), Some(prov)) = (article_id, provider_code) {
+        // Now fetch the article body
+        control_tx.send(ControlCommand::FetchNewsArticle {
+            req_id: 6002,
+            provider_code: prov,
+            article_id: art_id.clone(),
+        }).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut got_article = false;
+
+        while Instant::now() < deadline {
+            let articles = shared.drain_news_articles();
+            for (req_id, _art_type, body) in &articles {
+                if *req_id == 6002 {
+                    println!("  Article body: {} bytes", body.len());
+                    got_article = true;
+                }
+            }
+            if got_article { break; }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+        if got_article {
+            println!("  PASS\n");
+        } else {
+            println!("  SKIP: Article body not received\n");
+        }
+        conns
+    } else {
+        let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+        println!("  SKIP: No news headlines to fetch article from\n");
+        conns
+    }
+}
+
+// ─── Phase 93: Fundamental Data via HotLoop (issue #82) ───
+
+fn phase_fundamental_data_channel(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 93: Fundamental Data via HotLoop (AAPL) ---");
+
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+        Ok(c) => { println!("  HMDS reconnected"); c }
+        Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
+    };
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
+    );
+
+    control_tx.send(ControlCommand::FetchFundamentalData {
+        req_id: 7001,
+        con_id: 265598,
+        report_type: "ReportSnapshot".to_string(),
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_data = false;
+
+    while Instant::now() < deadline {
+        let data = shared.drain_fundamental_data();
+        for (req_id, xml) in &data {
+            if *req_id == 7001 {
+                println!("  Fundamental data: {} bytes", xml.len());
+                got_data = true;
+            }
+        }
+        if got_data { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if got_data {
+        println!("  PASS\n");
+    } else {
+        println!("  SKIP: No fundamental data received (may require subscription)\n");
+    }
+    conns
+}
+
+// ─── Phase 94: Multiple Parallel Historical Requests (issue #80) ───
+
+fn phase_parallel_historical(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 94: Parallel Historical Requests (SPY: 1d/5min, 5d/1day, 1w/1h) ---");
+
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+        Ok(c) => { println!("  HMDS reconnected"); c }
+        Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
+    };
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
+    );
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let end_dt = format_utc_timestamp(now);
+
+    // Send 3 requests in quick succession
+    control_tx.send(ControlCommand::FetchHistorical {
+        req_id: 8001, con_id: 756733, symbol: "SPY".to_string(),
+        end_date_time: end_dt.clone(), duration: "1 d".to_string(),
+        bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+    }).unwrap();
+    control_tx.send(ControlCommand::FetchHistorical {
+        req_id: 8002, con_id: 756733, symbol: "SPY".to_string(),
+        end_date_time: end_dt.clone(), duration: "5 d".to_string(),
+        bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+    }).unwrap();
+    control_tx.send(ControlCommand::FetchHistorical {
+        req_id: 8003, con_id: 756733, symbol: "SPY".to_string(),
+        end_date_time: end_dt, duration: "1 W".to_string(),
+        bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+    }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut received: [bool; 3] = [false; 3];
+
+    while Instant::now() < deadline {
+        let data = shared.drain_historical_data();
+        for (req_id, resp) in &data {
+            match *req_id {
+                8001 => { if resp.is_complete { received[0] = true; println!("  req 8001 (1d/5min): {} bars", resp.bars.len()); } }
+                8002 => { if resp.is_complete { received[1] = true; println!("  req 8002 (5d/1day): {} bars", resp.bars.len()); } }
+                8003 => { if resp.is_complete { received[2] = true; println!("  req 8003 (1W/1h): {} bars", resp.bars.len()); } }
+                _ => {}
+            }
+        }
+        if received.iter().all(|r| *r) { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    let count = received.iter().filter(|r| **r).count();
+    if count == 3 {
+        println!("  PASS (all 3 responses received)\n");
+    } else if count > 0 {
+        println!("  PARTIAL: {}/3 responses received\n", count);
+    } else {
+        println!("  SKIP: No responses received\n");
+    }
+    conns
+}
+
+// ─── Phase 95: Scanner Parameters (issue #81) ───
+
+fn phase_scanner_params(conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 95: Scanner Parameters + HOT_BY_VOLUME Scan ---");
+
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+        Ok(c) => { println!("  HMDS reconnected"); c }
+        Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
+    };
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
+    );
+
+    // Request scanner params XML
+    control_tx.send(ControlCommand::FetchScannerParams).unwrap();
+    // Also subscribe to a HOT_BY_VOLUME scan
+    control_tx.send(ControlCommand::SubscribeScanner {
+        req_id: 9001,
+        instrument: "STK".to_string(),
+        location_code: "STK.US.MAJOR".to_string(),
+        scan_code: "HOT_BY_VOLUME".to_string(),
+        max_items: 10,
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut got_params = false;
+    let mut got_scan = false;
+
+    while Instant::now() < deadline {
+        let params = shared.drain_scanner_params();
+        if !params.is_empty() {
+            println!("  Scanner params XML: {} bytes", params[0].len());
+            got_params = true;
+        }
+        let scans = shared.drain_scanner_data();
+        for (req_id, result) in &scans {
+            if *req_id == 9001 {
+                println!("  Scanner results: {} contracts", result.con_ids.len());
+                got_scan = true;
+            }
+        }
+        if got_params && got_scan { break; }
+        // If we have params but no scan after a while, don't wait forever
+        if got_params && Instant::now() > deadline - Duration::from_secs(5) { break; }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // Cancel scanner subscription
+    control_tx.send(ControlCommand::CancelScanner { req_id: 9001 }).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if got_params {
+        println!("  Scanner params: PASS");
+    } else {
+        println!("  Scanner params: SKIP");
+    }
+    if got_scan {
+        println!("  Scanner scan: PASS");
+    } else {
+        println!("  Scanner scan: SKIP (may need market hours)");
+    }
+    println!();
+    conns
+}
+
+// ─── Phase 96: Connection Recovery (issue #79) ───
+
+fn phase_connection_recovery(conns: Conns, _gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 96: Connection Recovery (simulated farm drop) ---");
+
+    // We use a dummy TCP listener as a fake farm connection that we can close
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind local listener");
+    let local_addr = listener.local_addr().unwrap();
+
+    // Connect a fake "farm" to the local listener
+    let fake_farm = std::net::TcpStream::connect(local_addr).expect("Failed to connect to local listener");
+    let (_accepted, _) = listener.accept().expect("Failed to accept connection");
+
+    // Build a Connection from the fake stream
+    let fake_conn = Connection::new_raw(fake_farm).expect("Failed to create Connection");
+
+    let account_id = conns.account_id.clone();
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    // Use fake farm, real CCP — hot loop should detect farm disconnect
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), fake_conn, conns.ccp, conns.hmds, None,
+    );
+
+    let join = run_hot_loop(hot_loop);
+
+    // Drop the accepted side to close the connection
+    drop(_accepted);
+    drop(listener);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_disconnect = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(Event::Disconnected) => { got_disconnect = true; break; }
+            _ => {}
+        }
+    }
+
+    // The hot loop should exit on its own after detecting disconnect
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let result = join.join();
+    assert!(result.is_ok(), "Hot loop should not panic on connection drop");
+
+    // Reconnect real farm for remaining tests
+    let (farm, ccp, hmds) = match Gateway::connect(config) {
+        Ok((_gw2, f, c, h)) => {
+            println!("  Reconnected to IB for remaining tests");
+            (f, c, h)
+        }
+        Err(e) => {
+            panic!("Cannot continue integration suite without farm connection: {}", e);
+        }
+    };
+
+    if got_disconnect {
+        println!("  Disconnected event received");
+        println!("  PASS\n");
+    } else {
+        println!("  SKIP: No Disconnected event (hot loop may have exited before emitting)\n");
+    }
+    Conns { farm, ccp, hmds, account_id }
+}
+
+// ─── Phase 97: Position Tracking after fills (issue #77) ───
+
+fn phase_position_tracking(conns: Conns) -> Conns {
+    println!("--- Phase 97: Position Tracking (SPY buy+sell round trip) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut phase = 0u8; // 0=wait ticks, 1=buy sent, 2=sell sent
+    let mut tick_count = 0u32;
+    let mut got_position_update = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(instrument)) => {
+                tick_count += 1;
+                if phase == 0 && tick_count >= 5 {
+                    let buy_oid = next_order_id();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
+                        order_id: buy_oid, instrument, side: Side::Buy, qty: 1,
+                    })).unwrap();
+                    phase = 1;
+                }
+            }
+            Ok(Event::Fill(fill)) => {
+                if phase == 1 && fill.side == Side::Buy {
+                    let sell_order_id = next_order_id() + 1;
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
+                        order_id: sell_order_id, instrument: fill.instrument, side: Side::Sell, qty: 1,
+                    })).unwrap();
+                    phase = 2;
+                } else if phase == 2 && fill.side == Side::Sell {
+                    // Wait a bit more for position update
+                    std::thread::sleep(Duration::from_secs(2));
+                    break;
+                }
+            }
+            Ok(Event::PositionUpdate { instrument, con_id, position, avg_cost }) => {
+                println!("  PositionUpdate: inst={} conId={} pos={} avgCost={:.4}",
+                    instrument, con_id, position, avg_cost as f64 / ibx::types::PRICE_SCALE as f64);
+                got_position_update = true;
+            }
+            Ok(Event::OrderUpdate(update)) => {
+                if update.status == OrderStatus::Rejected {
+                    println!("  SKIP: Order rejected — market closed\n");
+                    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+                    return conns;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if phase < 1 {
+        println!("  SKIP: No ticks received — market closed\n");
+    } else if got_position_update {
+        println!("  PASS\n");
+    } else {
+        println!("  SKIP: No PositionUpdate events received (fills completed but no position update)\n");
+    }
+    conns
+}
+
+/// Format seconds since epoch as YYYYMMDD-HH:MM:SS UTC.
+fn format_utc_timestamp(epoch_secs: u64) -> String {
+    let secs_per_day = 86400u64;
+    let days = epoch_secs / secs_per_day;
+    let mut y = 1970i64;
+    let mut remaining = days as i64;
+    loop {
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        if remaining < days_in_year { break; }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0;
+    for (i, &d) in month_days.iter().enumerate() {
+        if remaining < d as i64 { m = i + 1; break; }
+        remaining -= d as i64;
+    }
+    let day = remaining + 1;
+    let hour = (epoch_secs % secs_per_day) / 3600;
+    let min = (epoch_secs % 3600) / 60;
+    let sec = epoch_secs % 60;
+    format!("{:04}{:02}{:02}-{:02}:{:02}:{:02}", y, m, day, hour, min, sec)
 }

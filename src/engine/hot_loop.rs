@@ -3587,14 +3587,15 @@ impl HotLoop {
     fn send_secdef_request(&mut self, req_id: u32, con_id: i64) {
         if let Some(conn) = self.ccp_conn.as_mut() {
             let con_id_str = con_id.to_string();
+            let req_id_str = req_id.to_string();
             let ts = chrono_free_timestamp();
             let _ = conn.send_fix(&[
                 (fix::TAG_MSG_TYPE, "c"),
                 (fix::TAG_SENDING_TIME, &ts),
-                (320, &req_id.to_string()),  // SecurityReqID
-                (321, "4"),                    // SecurityRequestType = SecurityListBySymbol
-                (48, &con_id_str),             // SecurityID
-                (22, "1"),                     // IDSource = CUSIP (IB uses conId)
+                (crate::control::contracts::TAG_SECURITY_REQ_ID, &req_id_str),
+                (crate::control::contracts::TAG_SECURITY_REQ_TYPE, "2"),
+                (crate::control::contracts::TAG_IB_CON_ID, &con_id_str),
+                (crate::control::contracts::TAG_IB_SOURCE, "Socket"),
             ]);
             log::info!("Sent secdef request: req_id={} con_id={}", req_id, con_id);
             self.hb.last_ccp_sent = Instant::now();
