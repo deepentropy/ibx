@@ -228,7 +228,7 @@ pub(crate) mod tests {
         }
         fn real_time_bar(
             &mut self, req_id: i64, date: i64, open: f64, high: f64,
-            low: f64, close: f64, volume: f64, wap: f64, count: i32,
+            low: f64, close: f64, _volume: f64, _wap: f64, _count: i32,
         ) {
             self.events.push(format!("real_time_bar:{req_id}:{date}:{open}:{high}:{low}:{close}"));
         }
@@ -248,6 +248,48 @@ pub(crate) mod tests {
         }
         fn fundamental_data(&mut self, req_id: i64, _data: &str) {
             self.events.push(format!("fundamental_data:{req_id}"));
+        }
+        fn symbol_samples(&mut self, req_id: i64, descriptions: &[ContractDescription]) {
+            self.events.push(format!("symbol_samples:{req_id}:{}", descriptions.len()));
+        }
+        fn scanner_data(
+            &mut self, req_id: i64, rank: i32, _details: &ContractDetails,
+            _: &str, _: &str, _: &str, _: &str,
+        ) {
+            self.events.push(format!("scanner_data:{req_id}:{rank}"));
+        }
+        fn scanner_data_end(&mut self, req_id: i64) {
+            self.events.push(format!("scanner_data_end:{req_id}"));
+        }
+        fn historical_news(
+            &mut self, req_id: i64, _time: &str, provider_code: &str,
+            article_id: &str, headline: &str,
+        ) {
+            self.events.push(format!("historical_news:{req_id}:{provider_code}:{article_id}:{headline}"));
+        }
+        fn historical_news_end(&mut self, req_id: i64, has_more: bool) {
+            self.events.push(format!("historical_news_end:{req_id}:{has_more}"));
+        }
+        fn news_article(&mut self, req_id: i64, article_type: i32, article_text: &str) {
+            self.events.push(format!("news_article:{req_id}:{article_type}:{article_text}"));
+        }
+        fn historical_ticks(&mut self, req_id: i64, _ticks: &HistoricalTickData, done: bool) {
+            self.events.push(format!("historical_ticks:{req_id}:{done}"));
+        }
+        fn historical_schedule(
+            &mut self, req_id: i64, _start: &str, _end: &str,
+            tz: &str, sessions: &[(String, String, String)],
+        ) {
+            self.events.push(format!("historical_schedule:{req_id}:{tz}:{}", sessions.len()));
+        }
+        fn position_end(&mut self) {
+            self.events.push("position_end".into());
+        }
+        fn completed_order(&mut self, _contract: &Contract, _order: &Order, _state: &OrderState) {
+            self.events.push("completed_order".into());
+        }
+        fn completed_orders_end(&mut self) {
+            self.events.push("completed_orders_end".into());
         }
     }
 
