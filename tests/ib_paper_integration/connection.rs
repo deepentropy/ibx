@@ -257,3 +257,118 @@ pub(super) fn phase_auth_wrong_password(config: &GatewayConfig) {
     assert!(elapsed < Duration::from_secs(30), "Auth failure should not take >30s");
     println!("  PASS\n");
 }
+
+// ─── Phase 131: RegisterInstrument via ControlCommand channel ───
+
+pub(super) fn phase_register_instrument_channel(conns: Conns) -> Conns {
+    println!("--- Phase 131: RegisterInstrument via ControlCommand Channel ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+    let join = run_hot_loop(hot_loop);
+
+    // Register 3 instruments via ControlCommand channel (not context_mut)
+    control_tx.send(ControlCommand::RegisterInstrument { con_id: 756733 }).unwrap();
+    control_tx.send(ControlCommand::RegisterInstrument { con_id: 265598 }).unwrap();
+    control_tx.send(ControlCommand::RegisterInstrument { con_id: 272093 }).unwrap();
+
+    // Give hot loop time to process
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Verify instrument count increased
+    let count = shared.instrument_count();
+    println!("  Instrument count after 3 registrations: {}", count);
+
+    // Now subscribe to one of the registered instruments
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+
+    // Wait briefly for any events (subscription confirmation or ticks)
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut got_event = false;
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(Event::Tick(_)) => { got_event = true; break; }
+            Ok(_) => { got_event = true; }
+            Err(_) => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    assert!(count >= 3, "Should have at least 3 registered instruments, got {}", count);
+    println!("  Events received: {}", got_event);
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 132: UpdateParam Smoke Test ───
+
+pub(super) fn phase_update_param(conns: Conns) -> Conns {
+    println!("--- Phase 132: UpdateParam Smoke Test (no-op parameter) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    // Send UpdateParam — hot loop should accept it without crashing
+    control_tx.send(ControlCommand::UpdateParam {
+        key: "test_key".to_string(), value: "test_value".to_string(),
+    }).unwrap();
+    control_tx.send(ControlCommand::UpdateParam {
+        key: "max_position".to_string(), value: "100".to_string(),
+    }).unwrap();
+
+    // Submit + cancel an order to verify hot loop is still functional after UpdateParam
+    let oid = next_order_id();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+        order_id: oid, instrument: inst_id, side: Side::Buy, qty: 1,
+        price: 1_00_000_000, outside_rth: true,
+    })).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut order_acked = false;
+    let mut cancel_sent = false;
+    let mut terminal = false;
+
+    while Instant::now() < deadline && !terminal {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                match update.status {
+                    OrderStatus::Submitted => {
+                        order_acked = true;
+                        if !cancel_sent {
+                            control_tx.send(ControlCommand::Order(
+                                OrderRequest::Cancel { order_id: oid }
+                            )).unwrap();
+                            cancel_sent = true;
+                        }
+                    }
+                    OrderStatus::Cancelled | OrderStatus::Rejected => {
+                        terminal = true;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    assert!(order_acked, "Order should be acknowledged after UpdateParam");
+    assert!(terminal, "Order should reach terminal state");
+    println!("  UpdateParam processed, hot loop still functional");
+    println!("  PASS\n");
+    conns
+}

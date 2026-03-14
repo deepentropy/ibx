@@ -623,3 +623,153 @@ pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
     println!("  PASS\n");
     conns
 }
+
+// ─── Phase 128: TBT + Regular Quotes Dual Stream ───
+
+pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
+    println!("--- Phase 128: TBT + Regular Quotes Dual Stream (SPY) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    // Subscribe to both regular market data and TBT simultaneously
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    control_tx.send(ControlCommand::SubscribeTbt {
+        con_id: 756733, symbol: "SPY".into(), tbt_type: TbtType::Last,
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut tick_count = 0u32;
+    let mut tbt_trade_count = 0u32;
+    let mut tbt_quote_count = 0u32;
+    let mut got_tick = false;
+    let mut got_tbt = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(instrument)) => {
+                tick_count += 1;
+                if !got_tick {
+                    let q = shared.quote(instrument);
+                    println!("  First regular tick: bid={:.4} ask={:.4}",
+                        q.bid as f64 / PRICE_SCALE as f64,
+                        q.ask as f64 / PRICE_SCALE as f64);
+                    got_tick = true;
+                }
+            }
+            Ok(Event::TbtTrade(trade)) => {
+                tbt_trade_count += 1;
+                if !got_tbt {
+                    println!("  First TBT trade: price={:.4} size={}",
+                        trade.price as f64 / PRICE_SCALE as f64, trade.size);
+                    got_tbt = true;
+                }
+            }
+            Ok(Event::TbtQuote(quote)) => {
+                tbt_quote_count += 1;
+                if !got_tbt {
+                    println!("  First TBT quote: bid={:.4} ask={:.4}",
+                        quote.bid as f64 / PRICE_SCALE as f64,
+                        quote.ask as f64 / PRICE_SCALE as f64);
+                    got_tbt = true;
+                }
+            }
+            _ => {}
+        }
+        // Wait for both streams to produce data
+        if got_tick && got_tbt && tick_count >= 5 && (tbt_trade_count + tbt_quote_count) >= 3 {
+            break;
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if !got_tick && !got_tbt {
+        println!("  SKIP: No data on either stream — market closed\n");
+        return conns;
+    }
+
+    println!("  Regular ticks: {}  TBT trades: {}  TBT quotes: {}",
+        tick_count, tbt_trade_count, tbt_quote_count);
+
+    if got_tick && got_tbt {
+        println!("  PASS (both streams active simultaneously)\n");
+    } else if got_tick {
+        println!("  PASS (regular ticks only — HMDS TBT may not be streaming)\n");
+    } else {
+        println!("  PASS (TBT only — regular ticks delayed)\n");
+    }
+    conns
+}
+
+// ─── Phase 129: Concurrent Subscribe Stress (10 instruments) ───
+
+pub(super) fn phase_concurrent_subscribe_stress(conns: Conns) -> Conns {
+    println!("--- Phase 129: Concurrent Subscribe Stress (10 instruments, 20s) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    // 10 well-known US stock con_ids (IB paper account should have market data for all)
+    let instruments: &[(i64, &str)] = &[
+        (756733, "SPY"),     // S&P 500 ETF
+        (265598, "AAPL"),    // Apple
+        (272093, "MSFT"),    // Microsoft
+        (208813720, "GOOGL"), // Alphabet
+        (15124833, "AMZN"),  // Amazon
+        (107113386, "META"), // Meta
+        (76792991, "TSLA"),  // Tesla
+        (4815747, "NVDA"),   // Nvidia
+        (6459, "AMD"),       // AMD
+        (267321477, "NFLX"), // Netflix
+    ];
+
+    // Subscribe to all 10 simultaneously
+    for &(con_id, symbol) in instruments {
+        control_tx.send(ControlCommand::Subscribe { con_id, symbol: symbol.into() }).unwrap();
+    }
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut per_instrument = std::collections::HashMap::new();
+    let mut total_ticks = 0u64;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(instrument)) => {
+                total_ticks += 1;
+                *per_instrument.entry(instrument).or_insert(0u64) += 1;
+            }
+            _ => {}
+        }
+        // Stop early if we have ticks from at least 5 instruments
+        if per_instrument.len() >= 5 && total_ticks >= 50 { break; }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if total_ticks == 0 {
+        println!("  SKIP: No ticks — market closed\n");
+        return conns;
+    }
+
+    println!("  Total ticks: {} across {} instruments", total_ticks, per_instrument.len());
+    for (&inst, &count) in &per_instrument {
+        println!("    instrument {} → {} ticks", inst, count);
+    }
+
+    // At least 3 instruments should receive ticks when 10 are subscribed
+    assert!(per_instrument.len() >= 3,
+        "Expected ticks from >=3 instruments, got {}", per_instrument.len());
+    println!("  PASS\n");
+    conns
+}

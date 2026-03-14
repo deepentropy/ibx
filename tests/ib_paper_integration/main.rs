@@ -321,6 +321,29 @@ fn integration_suite() {
     // ── P1: Cancel data requests (historical, fundamental, histogram, head timestamp) ──
     conns = historical::phase_cancel_data_requests(conns, &gw, &config);
 
+    // ── P2: TBT + regular quotes dual stream ──
+    if needs_ticks && conns.hmds.is_some() {
+        conns = market_data::phase_tbt_and_quotes_dual_stream(conns);
+    } else {
+        println!("--- Phase 128: TBT + Regular Quotes Dual Stream ---\n  SKIP: needs ticks+HMDS\n");
+    }
+
+    // ── P2: Concurrent subscribe stress (10 instruments) ──
+    if needs_ticks {
+        conns = market_data::phase_concurrent_subscribe_stress(conns);
+    } else {
+        println!("--- Phase 129: Concurrent Subscribe Stress ---\n  SKIP: {:?} — needs ticks\n", session);
+    }
+
+    // ── P2: Historical data + live orders coexistence ──
+    conns = historical::phase_historical_and_orders(conns, &gw, &config);
+
+    // ── P2: RegisterInstrument via ControlCommand channel ──
+    conns = connection::phase_register_instrument_channel(conns);
+
+    // ── P2: UpdateParam smoke test ──
+    conns = connection::phase_update_param(conns);
+
     // ── Session-independent forex fallback phases (issue #91) ──
     // EUR.USD trades ~24h Sun-Fri, so these cover tick reception when US stocks are closed.
     if !needs_ticks {
@@ -331,10 +354,10 @@ fn integration_suite() {
 
     let _conns = connection::phase_graceful_shutdown(conns);
 
-    // Session-dependent phases: 2,3,4,6,17,27,28,51,52,61,97,102,105,110,124,126 = 16
+    // Session-dependent phases: 2,3,4,6,17,27,28,51,52,61,97,102,105,110,124,126,128,129 = 18
     // Forex fallback phases cover 3 of those when !needs_ticks (107,108,109)
-    let total_phases = 120;
-    let skipped = if needs_ticks { 0 } else { 16 };
+    let total_phases = 125;
+    let skipped = if needs_ticks { 0 } else { 18 };
     let forex_fallback = if needs_ticks { 0 } else { 3 };
     let ran = total_phases - skipped + forex_fallback;
     println!("\n=== {}/{} phases ran ({} skipped, {} forex-fallback, {:?}) in {:.1}s ===",

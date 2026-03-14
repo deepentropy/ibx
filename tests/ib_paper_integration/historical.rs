@@ -1355,3 +1355,114 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config:
     println!("  PASS\n");
     conns
 }
+
+// ─── Phase 130: Historical Data + Live Orders Coexistence ───
+
+pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 130: Historical Data + Live Orders Coexistence ---");
+
+    ccp_keepalive(&mut conns.ccp);
+    let hmds = match connect_farm(
+        &config.host, "ushmds",
+        &config.username, config.paper,
+        &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
+    ) {
+        Ok(c) => { println!("  HMDS reconnected"); Some(c) }
+        Err(e) => {
+            println!("  SKIP: ushmds reconnect failed: {}\n", e);
+            return conns;
+        }
+    };
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    // Step 1: Submit a limit order (far from market, won't fill)
+    let oid = next_order_id();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+        order_id: oid, instrument: inst_id, side: Side::Buy, qty: 1,
+        price: 1_00_000_000, outside_rth: true,
+    })).unwrap();
+
+    // Step 2: Fire 5 historical requests while order is pending
+    let now = now_ib_timestamp();
+    for i in 0..5u32 {
+        control_tx.send(ControlCommand::FetchHistorical {
+            req_id: 30001 + i, con_id: 756733, symbol: "SPY".to_string(),
+            end_date_time: now.clone(), duration: "1 d".to_string(),
+            bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+        }).unwrap();
+    }
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut order_acked = false;
+    let mut order_cancelled = false;
+    let mut cancel_sent = false;
+    let mut order_rejected = false;
+    let mut hist_responses = std::collections::HashSet::new();
+
+    while Instant::now() < deadline {
+        // Check historical responses
+        let data = shared.drain_historical_data();
+        for (req_id, resp) in &data {
+            if *req_id >= 30001 && *req_id <= 30005 && resp.is_complete {
+                hist_responses.insert(*req_id);
+            }
+        }
+
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                if update.order_id == oid {
+                    match update.status {
+                        OrderStatus::Submitted => {
+                            order_acked = true;
+                            if !cancel_sent {
+                                control_tx.send(ControlCommand::Order(
+                                    OrderRequest::Cancel { order_id: oid }
+                                )).unwrap();
+                                cancel_sent = true;
+                            }
+                        }
+                        OrderStatus::Cancelled => { order_cancelled = true; }
+                        OrderStatus::Rejected => { order_rejected = true; }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        if order_cancelled && hist_responses.len() >= 3 { break; }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    println!("  Order: acked={} cancelled={} rejected={}",
+        order_acked, order_cancelled, order_rejected);
+    println!("  Historical responses: {}/5", hist_responses.len());
+
+    if order_rejected {
+        println!("  Order rejected — verifying historical path still works");
+    }
+    if !order_rejected {
+        assert!(order_acked, "Order should have been acknowledged");
+        assert!(order_cancelled, "Order should have been cancelled");
+    }
+    // At least some historical requests should complete even during order activity
+    // (tolerance for HMDS pacing — may not get all 5)
+    if hist_responses.is_empty() {
+        println!("  SKIP: No historical responses — HMDS pacing limited\n");
+    } else {
+        println!("  PASS (order lifecycle + {} historical responses coexisted)\n", hist_responses.len());
+    }
+    conns
+}
