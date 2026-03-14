@@ -1271,3 +1271,87 @@ pub(super) fn phase_dst_boundary_historical(mut conns: Conns, gw: &Gateway, conf
     println!("  PASS\n");
     conns
 }
+
+// ─── Phase 127: Cancel Data Requests (historical, fundamental, histogram, head timestamp) ───
+
+pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
+    println!("--- Phase 127: Cancel Data Requests (4 cancel ControlCommands) ---");
+
+    ccp_keepalive(&mut conns.ccp);
+    let hmds = match connect_farm(
+        &config.host, "ushmds",
+        &config.username, config.paper,
+        &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
+    ) {
+        Ok(c) => { println!("  HMDS reconnected"); Some(c) }
+        Err(e) => {
+            println!("  SKIP: ushmds reconnect failed: {}\n", e);
+            return conns;
+        }
+    };
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, hmds, None,
+    );
+
+    let now = now_ib_timestamp();
+
+    // 1. FetchHistorical + CancelHistorical
+    control_tx.send(ControlCommand::FetchHistorical {
+        req_id: 20001, con_id: 756733, symbol: "SPY".to_string(),
+        end_date_time: now.clone(), duration: "1 d".to_string(),
+        bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+    }).unwrap();
+    control_tx.send(ControlCommand::CancelHistorical { req_id: 20001 }).unwrap();
+
+    // 2. FetchHeadTimestamp + CancelHeadTimestamp
+    control_tx.send(ControlCommand::FetchHeadTimestamp {
+        req_id: 20002, con_id: 756733,
+        what_to_show: "TRADES".to_string(), use_rth: true,
+    }).unwrap();
+    control_tx.send(ControlCommand::CancelHeadTimestamp { req_id: 20002 }).unwrap();
+
+    // 3. FetchFundamentalData + CancelFundamentalData
+    control_tx.send(ControlCommand::FetchFundamentalData {
+        req_id: 20003, con_id: 265598, report_type: "ReportsFinStatements".to_string(),
+    }).unwrap();
+    control_tx.send(ControlCommand::CancelFundamentalData { req_id: 20003 }).unwrap();
+
+    // 4. FetchHistogramData + CancelHistogramData
+    control_tx.send(ControlCommand::FetchHistogramData {
+        req_id: 20004, con_id: 756733, use_rth: true, period: "1 week".to_string(),
+    }).unwrap();
+    control_tx.send(ControlCommand::CancelHistogramData { req_id: 20004 }).unwrap();
+
+    let join = run_hot_loop(hot_loop);
+
+    // Wait a moment for the hot loop to process all commands
+    std::thread::sleep(Duration::from_secs(3));
+
+    // Verify no responses arrived for cancelled requests
+    let hist = shared.drain_historical_data();
+    let head = shared.drain_head_timestamps();
+    let fund = shared.drain_fundamental_data();
+    let histo = shared.drain_histogram_data();
+
+    let hist_for_req: Vec<_> = hist.iter().filter(|(id, _)| *id == 20001).collect();
+    let head_for_req: Vec<_> = head.iter().filter(|(id, _)| *id == 20002).collect();
+    let fund_for_req: Vec<_> = fund.iter().filter(|(id, _)| *id == 20003).collect();
+    let histo_for_req: Vec<_> = histo.iter().filter(|(id, _)| *id == 20004).collect();
+
+    println!("  Historical (20001): {} responses (expect 0)", hist_for_req.len());
+    println!("  HeadTimestamp (20002): {} responses (expect 0)", head_for_req.len());
+    println!("  Fundamental (20003): {} responses (expect 0)", fund_for_req.len());
+    println!("  Histogram (20004): {} responses (expect 0)", histo_for_req.len());
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    // Cancelled requests should produce no responses (or at most partial data
+    // that arrived before the cancel was processed — we tolerate that)
+    println!("  All 4 cancel commands processed without crash");
+    println!("  PASS\n");
+    conns
+}

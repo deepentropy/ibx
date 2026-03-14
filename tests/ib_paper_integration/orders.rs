@@ -1843,3 +1843,187 @@ pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
     println!("  PASS\n");
     conns
 }
+
+// ─── Phase 123: Global Cancel (CancelAll — emergency kill switch) ───
+
+pub(super) fn phase_global_cancel(conns: Conns) -> Conns {
+    println!("--- Phase 123: Global Cancel (3 orders → CancelAll) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    // Submit 3 limit orders at $1 (won't fill)
+    let oid1 = next_order_id();
+    let oid2 = oid1 + 1;
+    let oid3 = oid1 + 2;
+    for oid in [oid1, oid2, oid3] {
+        control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+            order_id: oid, instrument: inst_id, side: Side::Buy, qty: 1,
+            price: 1_00_000_000, outside_rth: true,
+        })).unwrap();
+    }
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut acked = std::collections::HashSet::new();
+    let mut cancelled = std::collections::HashSet::new();
+    let mut cancel_all_sent = false;
+    let mut order_rejected = false;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::OrderUpdate(update)) => {
+                match update.status {
+                    OrderStatus::Submitted => {
+                        acked.insert(update.order_id);
+                        if acked.len() >= 3 && !cancel_all_sent {
+                            control_tx.send(ControlCommand::Order(
+                                OrderRequest::CancelAll { instrument: inst_id }
+                            )).unwrap();
+                            cancel_all_sent = true;
+                            println!("  CancelAll sent after {} orders acked", acked.len());
+                        }
+                    }
+                    OrderStatus::Cancelled => {
+                        cancelled.insert(update.order_id);
+                        if cancelled.len() >= 3 { break; }
+                    }
+                    OrderStatus::Rejected => { order_rejected = true; break; }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if order_rejected {
+        println!("  SKIP: Order rejected\n");
+        return conns;
+    }
+    assert!(cancel_all_sent, "CancelAll was never sent (not all orders acked)");
+    assert_eq!(cancelled.len(), 3, "Expected 3 cancellations, got {}", cancelled.len());
+    println!("  All 3 orders cancelled via CancelAll");
+    println!("  PASS\n");
+    conns
+}
+
+// ─── Phase 124: Cancel Filled Order (expect CancelReject) ───
+
+pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
+    println!("--- Phase 124: Cancel Filled Order (expect CancelReject) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut tick_count = 0u32;
+    let mut phase = 0u8; // 0=wait ticks, 1=buy sent, 2=filled→cancel sent, 3=sell sent
+    let mut buy_order_id = 0u64;
+    let mut got_cancel_reject = false;
+    let mut got_order_reject = false;
+    let mut instrument_id = 0u32;
+
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Tick(instrument)) => {
+                tick_count += 1;
+                if phase == 0 && tick_count >= 5 {
+                    buy_order_id = next_order_id();
+                    instrument_id = instrument;
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
+                        order_id: buy_order_id, instrument, side: Side::Buy, qty: 1,
+                    })).unwrap();
+                    phase = 1;
+                }
+            }
+            Ok(Event::Fill(fill)) => {
+                if phase == 1 && fill.side == Side::Buy {
+                    // Order filled — now try to cancel it (should fail)
+                    control_tx.send(ControlCommand::Order(
+                        OrderRequest::Cancel { order_id: buy_order_id }
+                    )).unwrap();
+                    phase = 2;
+                    println!("  Buy filled at ${:.4}, sending cancel on filled order",
+                        fill.price as f64 / PRICE_SCALE as f64);
+                }
+            }
+            Ok(Event::CancelReject(cr)) => {
+                if cr.order_id == buy_order_id {
+                    got_cancel_reject = true;
+                    println!("  CancelReject received for filled order (expected)");
+                }
+            }
+            Ok(Event::OrderUpdate(update)) => {
+                if update.status == OrderStatus::Rejected && phase <= 1 {
+                    got_order_reject = true;
+                    break;
+                }
+            }
+            _ => {}
+        }
+        // Give IB a moment to respond, then move on
+        if phase == 2 {
+            let wait_deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < wait_deadline {
+                match event_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Event::CancelReject(cr)) if cr.order_id == buy_order_id => {
+                        got_cancel_reject = true;
+                        println!("  CancelReject received for filled order (expected)");
+                    }
+                    _ => {}
+                }
+                if got_cancel_reject { break; }
+            }
+            // Sell to flatten position
+            let sell_oid = next_order_id() + 1;
+            control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
+                order_id: sell_oid, instrument: instrument_id, side: Side::Sell, qty: 1,
+            })).unwrap();
+            phase = 3;
+            // Wait for sell fill
+            let sell_deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < sell_deadline {
+                match event_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Event::Fill(f)) if f.side == Side::Sell => break,
+                    _ => {}
+                }
+            }
+            break;
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if got_order_reject {
+        println!("  SKIP: Order rejected — market closed\n");
+        return conns;
+    }
+    if phase < 2 {
+        println!("  SKIP: No fill received — market may be closed\n");
+        return conns;
+    }
+    // IB may silently ignore cancel on filled order (no CancelReject),
+    // or it may send one. Either way, the system didn't crash.
+    if got_cancel_reject {
+        println!("  PASS (CancelReject received as expected)\n");
+    } else {
+        println!("  PASS (cancel silently ignored — no crash, no CancelReject)\n");
+    }
+    conns
+}

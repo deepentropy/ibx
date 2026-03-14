@@ -298,6 +298,29 @@ fn integration_suite() {
     // ── Authentication failure (gap #5) ──
     connection::phase_auth_wrong_password(&config);
 
+    // ── P0: Global cancel (emergency kill switch) ──
+    conns = orders::phase_global_cancel(conns);
+
+    // ── P0: Cancel filled order (expect graceful handling) ──
+    if needs_ticks {
+        conns = orders::phase_cancel_filled_order(conns);
+    } else {
+        println!("--- Phase 124: Cancel Filled Order ---\n  SKIP: {:?} — needs fills\n", session);
+    }
+
+    // ── P1: Matching symbols via ControlCommand channel ──
+    conns = contracts::phase_matching_symbols_channel(conns);
+
+    // ── P1: TBT unsubscribe lifecycle ──
+    if needs_ticks && conns.hmds.is_some() {
+        conns = market_data::phase_tbt_unsubscribe(conns);
+    } else {
+        println!("--- Phase 126: TBT Unsubscribe ---\n  SKIP: needs ticks+HMDS\n");
+    }
+
+    // ── P1: Cancel data requests (historical, fundamental, histogram, head timestamp) ──
+    conns = historical::phase_cancel_data_requests(conns, &gw, &config);
+
     // ── Session-independent forex fallback phases (issue #91) ──
     // EUR.USD trades ~24h Sun-Fri, so these cover tick reception when US stocks are closed.
     if !needs_ticks {
@@ -308,10 +331,10 @@ fn integration_suite() {
 
     let _conns = connection::phase_graceful_shutdown(conns);
 
-    // Session-dependent phases: 2,3,4,6,17,27,28,51,52,61,97,102,105,110 = 14
+    // Session-dependent phases: 2,3,4,6,17,27,28,51,52,61,97,102,105,110,124,126 = 16
     // Forex fallback phases cover 3 of those when !needs_ticks (107,108,109)
-    let total_phases = 114;
-    let skipped = if needs_ticks { 0 } else { 14 };
+    let total_phases = 120;
+    let skipped = if needs_ticks { 0 } else { 16 };
     let forex_fallback = if needs_ticks { 0 } else { 3 };
     let ran = total_phases - skipped + forex_fallback;
     println!("\n=== {}/{} phases ran ({} skipped, {} forex-fallback, {:?}) in {:.1}s ===",

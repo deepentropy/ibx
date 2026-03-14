@@ -564,3 +564,62 @@ pub(super) fn phase_tick_stress_test(conns: Conns) -> Conns {
     println!("  PASS\n");
     conns
 }
+
+// ─── Phase 126: TBT Subscribe + Unsubscribe lifecycle ───
+
+pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
+    println!("--- Phase 126: TBT Subscribe + Unsubscribe (SPY via HMDS) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    control_tx.send(ControlCommand::SubscribeTbt {
+        con_id: 756733, symbol: "SPY".into(), tbt_type: TbtType::Last,
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    // Step 1: Wait for at least one TBT event
+    let mut tbt_before = 0u32;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::TbtTrade(_)) | Ok(Event::TbtQuote(_)) => {
+                tbt_before += 1;
+                if tbt_before >= 3 { break; }
+            }
+            _ => {}
+        }
+    }
+
+    if tbt_before == 0 {
+        let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+        println!("  SKIP: No TBT data — market closed or HMDS not streaming\n");
+        return conns;
+    }
+    println!("  Step 1: {} TBT events received before unsubscribe", tbt_before);
+
+    // Step 2: Unsubscribe — instrument 0 is the first registered (SPY)
+    control_tx.send(ControlCommand::UnsubscribeTbt { instrument: 0 }).unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+
+    // Step 3: Count TBT events after unsubscribe (should be 0 or very few)
+    let mut tbt_after = 0u32;
+    while let Ok(ev) = event_rx.try_recv() {
+        match ev {
+            Event::TbtTrade(_) | Event::TbtQuote(_) => tbt_after += 1,
+            _ => {}
+        }
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    println!("  Step 2: {} TBT events after unsubscribe (expect 0 or near-0)", tbt_after);
+    // Allow a small number of in-flight events that were already queued
+    assert!(tbt_after <= 3, "Too many TBT events after unsubscribe: {} (expected <=3)", tbt_after);
+    println!("  PASS\n");
+    conns
+}

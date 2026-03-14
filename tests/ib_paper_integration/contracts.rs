@@ -301,6 +301,54 @@ pub(super) fn phase_market_rule_id(conns: &mut Conns) {
     println!("  PASS\n");
 }
 
+// ─── Phase 125: Matching Symbols via ControlCommand channel ───
+
+pub(super) fn phase_matching_symbols_channel(conns: Conns) -> Conns {
+    println!("--- Phase 125: Matching Symbols via Channel (pattern=\"AAPL\") ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+    );
+
+    control_tx.send(ControlCommand::FetchMatchingSymbols {
+        req_id: 2001, pattern: "AAPL".to_string(),
+    }).unwrap();
+    let join = run_hot_loop(hot_loop);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_matches = false;
+    let mut match_count = 0usize;
+
+    while Instant::now() < deadline {
+        let results = shared.drain_matching_symbols();
+        for (req_id, matches) in &results {
+            if *req_id == 2001 {
+                match_count = matches.len();
+                println!("  {} matches for 'AAPL'", match_count);
+                for m in matches.iter().take(3) {
+                    println!("    {} ({:?}) conId={} exchange={}", m.symbol, m.sec_type, m.con_id, m.primary_exchange);
+                }
+                got_matches = true;
+            }
+        }
+        if got_matches { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+
+    if !got_matches {
+        println!("  SKIP: No matching symbols response received\n");
+        return conns;
+    }
+    assert!(match_count > 0, "Should have at least one match for 'AAPL'");
+    println!("  PASS\n");
+    conns
+}
+
 pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
     println!("--- Phase 86: Contract Details via Event Channel (SPY) ---");
 
