@@ -1,0 +1,56 @@
+[package]
+name = "ibx"
+version = "0.3.1"
+edition = "2024"
+
+[lib]
+name = "ibx"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "ibx"
+path = "src/main.rs"
+
+[features]
+default = []
+python = ["pyo3"]
+compat = []
+
+[dependencies]
+# Hot loop
+quanta = "0.12"
+core_affinity = "0.8"
+
+# Crypto (RustCrypto ecosystem)
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+digest = "0.10"
+aes = "0.8"
+cbc = "0.1"
+
+# Protocol
+flate2 = "1"
+base64 = "0.22"
+hex = "0.4"
+
+# Auth (big integer math for DH/SRP)
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+rand = "0.9"
+
+# TLS
+native-tls = "0.2"
+
+# Control plane
+tokio = { version = "1", features = ["full"] }
+crossbeam-channel = "0.5"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Python bindings (optional)
+pyo3 = { version = "0.24", features = ["extension-module", "multiple-pymethods"], optional = true }
