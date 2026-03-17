@@ -3686,9 +3686,12 @@ impl HotLoop {
     /// Send a scanner parameters request to historical server.
     fn send_scanner_params_request(&mut self) {
         if let Some(conn) = self.hmds_conn.as_mut() {
-            let msg = crate::control::scanner::build_scanner_params_request(self.next_hmds_query_id);
-            self.next_hmds_query_id += 1;
-            let _ = conn.send_raw(&msg);
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (crate::control::scanner::TAG_SUB_PROTOCOL, "10001"),
+            ]);
             self.pending_scanner_params = true;
             self.hb.last_hmds_sent = Instant::now();
             log::info!("Sent scanner params request");
@@ -3703,9 +3706,9 @@ impl HotLoop {
             scan_code: scan_code.to_string(),
             max_items,
         };
-        let xml = crate::control::scanner::build_scanner_subscribe_xml(&sub);
         let scan_id = format!("APISCAN{}:{}", self.next_scanner_id, req_id);
         self.next_scanner_id += 1;
+        let xml = crate::control::scanner::build_scanner_subscribe_xml(&sub, &scan_id);
 
         if let Some(conn) = self.hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();

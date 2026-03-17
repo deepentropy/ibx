@@ -1577,14 +1577,14 @@ impl EClient {
             let scanner_results = shared.drain_scanner_data();
             for (req_id, result) in scanner_results {
                 for (rank, &con_id) in result.con_ids.iter().enumerate() {
-                    let cd = super::contract::ContractDetails::default();
+                    let mut cd = super::contract::ContractDetails::default();
+                    cd.contract.con_id = con_id as i64;
                     let cd_py = Py::new(py, cd)?.into_any();
                     self.wrapper.call_method(
                         py, "scanner_data",
                         (req_id as i64, rank as i32, &cd_py, "", "", "", ""),
                         None,
                     )?;
-                    let _ = con_id;
                 }
                 self.wrapper.call_method1(py, "scanner_data_end", (req_id as i64,))?;
             }
