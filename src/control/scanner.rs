@@ -34,9 +34,10 @@ pub fn build_scanner_params_request(seq: u32) -> Vec<u8> {
 }
 
 /// Build the XML payload for a scanner subscription request.
-pub fn build_scanner_subscribe_xml(sub: &ScannerSubscription) -> String {
+pub fn build_scanner_subscribe_xml(sub: &ScannerSubscription, scan_id: &str) -> String {
     format!(
         "<ScanSubscription>\
+         <id>{id}</id>\
          <instrument>{instrument}</instrument>\
          <locations>{locations}</locations>\
          <scanCode>{scan_code}</scanCode>\
@@ -47,6 +48,7 @@ pub fn build_scanner_subscribe_xml(sub: &ScannerSubscription) -> String {
          <apiManual>no</apiManual>\
          <aggGroup>-1</aggGroup>\
          </ScanSubscription>",
+        id = scan_id,
         instrument = sub.instrument,
         locations = sub.location_code,
         scan_code = sub.scan_code,
@@ -123,7 +125,8 @@ mod tests {
             scan_code: "TOP_PERC_GAIN".to_string(),
             max_items: 50,
         };
-        let xml = build_scanner_subscribe_xml(&sub);
+        let xml = build_scanner_subscribe_xml(&sub, "APISCAN1:1");
+        assert!(xml.contains("<id>APISCAN1:1</id>"));
         assert!(xml.contains("<instrument>STK</instrument>"));
         assert!(xml.contains("<locations>STK.US.MAJOR</locations>"));
         assert!(xml.contains("<scanCode>TOP_PERC_GAIN</scanCode>"));

@@ -374,7 +374,7 @@ pub(super) fn phase_scanner_subscription(mut conns: Conns, gw: &Gateway, config:
         instrument: "STK".to_string(), location_code: "STK.US.MAJOR".to_string(),
         scan_code: "TOP_PERC_GAIN".to_string(), max_items: 10,
     };
-    let xml = scanner::build_scanner_subscribe_xml(&sub);
+    let xml = scanner::build_scanner_subscribe_xml(&sub, "APISCAN1:1");
     hmds.send_fixcomp(&[(fix::TAG_MSG_TYPE, "U"), (scanner::TAG_SUB_PROTOCOL, "10003"), (scanner::TAG_SCANNER_XML, &xml)]).expect("Failed to send scanner subscription");
 
     let mut result: Option<scanner::ScannerResult> = None;
