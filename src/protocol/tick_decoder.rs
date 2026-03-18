@@ -121,14 +121,21 @@ pub struct RawTick {
 /// `body` is the raw message body after stripping FIX framing and HMAC signature.
 /// Returns a list of raw ticks with server_tag, tick_type, and signed magnitude.
 pub fn decode_ticks_35p(body: &[u8]) -> Vec<RawTick> {
+    let mut ticks = Vec::with_capacity(8);
+    decode_ticks_35p_into(body, &mut ticks);
+    ticks
+}
+
+/// Decode ticks into a caller-supplied buffer (avoids heap allocation on hot path).
+pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
+    ticks.clear();
     if body.len() < 4 {
-        return Vec::new();
+        return;
     }
 
     let bit_count = ((body[0] as usize) << 8) | (body[1] as usize);
     let payload = &body[2..];
     let mut reader = BitReader::new(payload, bit_count);
-    let mut ticks = Vec::with_capacity(8);
 
     while reader.remaining() > 32 {
         let cont = match reader.read_unsigned(1) {
@@ -162,15 +169,15 @@ pub fn decode_ticks_35p(body: &[u8]) -> Vec<RawTick> {
             if raw_tick_type == 31 {
                 // Extended format
                 if reader.remaining() < 16 {
-                    return ticks;
+                    return;
                 }
                 tick_type = match reader.read_unsigned(8) {
                     Some(v) => v,
-                    None => return ticks,
+                    None => return,
                 };
                 byte_width = match reader.read_unsigned(8) {
                     Some(v) => v,
-                    None => return ticks,
+                    None => return,
                 };
             } else {
                 tick_type = raw_tick_type;
@@ -179,17 +186,17 @@ pub fn decode_ticks_35p(body: &[u8]) -> Vec<RawTick> {
 
             let total_value_bits = (8 * byte_width) as usize;
             if reader.remaining() < total_value_bits {
-                return ticks;
+                return;
             }
 
             let sign = match reader.read_unsigned(1) {
                 Some(v) => v,
-                None => return ticks,
+                None => return,
             };
             let magnitude_unsigned = if total_value_bits > 1 {
                 match reader.read_unsigned(total_value_bits - 1) {
                     Some(v) => v as i64,
-                    None => return ticks,
+                    None => return,
                 }
             } else {
                 0i64
@@ -208,8 +215,6 @@ pub fn decode_ticks_35p(body: &[u8]) -> Vec<RawTick> {
             });
         }
     }
-
-    ticks
 }
 
 /// Read a VLQ-encoded unsigned integer (hi-bit terminated).

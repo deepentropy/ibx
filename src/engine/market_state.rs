@@ -1,5 +1,11 @@
 use crate::types::{InstrumentId, Price, Qty, Quote, PRICE_SCALE, MAX_INSTRUMENTS};
 
+/// Max server_tag value for flat lookup array. Server tags are small integers from IB.
+const MAX_SERVER_TAG: usize = 1024;
+
+/// Sentinel value for empty server_tag slots.
+const NO_INSTRUMENT: u32 = u32::MAX;
+
 /// Pre-allocated quote storage indexed by InstrumentId.
 /// All quotes live in a contiguous array for cache efficiency.
 pub struct MarketState {
@@ -8,8 +14,8 @@ pub struct MarketState {
     active_count: u32,
     /// Maps IB conId → internal InstrumentId.
     con_id_to_instrument: Vec<(i64, InstrumentId)>,
-    /// Maps IB server_tag (from 35=Q/35=L) → InstrumentId.
-    server_tag_to_instrument: Vec<(u32, InstrumentId)>,
+    /// O(1) server_tag → InstrumentId lookup. Server tags are small integers.
+    server_tag_table: Box<[u32; MAX_SERVER_TAG]>,
     /// Per-instrument minTick (from 35=Q). Used to scale tick magnitudes to prices.
     min_ticks: [f64; MAX_INSTRUMENTS],
     /// Pre-computed min_tick * PRICE_SCALE as integer for hot-path price conversion.
@@ -24,7 +30,7 @@ impl MarketState {
             quotes: [Quote::default(); MAX_INSTRUMENTS],
             active_count: 0,
             con_id_to_instrument: Vec::new(),
-            server_tag_to_instrument: Vec::new(),
+            server_tag_table: Box::new([NO_INSTRUMENT; MAX_SERVER_TAG]),
             min_ticks: [0.0; MAX_INSTRUMENTS],
             min_tick_scaled: [0; MAX_INSTRUMENTS],
             symbols: Vec::new(),
@@ -48,12 +54,9 @@ impl MarketState {
 
     /// Map an IB server_tag (from 35=Q subscription ack) to an InstrumentId.
     pub fn register_server_tag(&mut self, server_tag: u32, instrument: InstrumentId) {
-        for &(st, _) in &self.server_tag_to_instrument {
-            if st == server_tag {
-                return; // already registered
-            }
+        if (server_tag as usize) < MAX_SERVER_TAG {
+            self.server_tag_table[server_tag as usize] = instrument;
         }
-        self.server_tag_to_instrument.push((server_tag, instrument));
     }
 
     /// Number of registered instruments.
@@ -86,14 +89,15 @@ impl MarketState {
         None
     }
 
-    /// Look up InstrumentId by server_tag. Returns None if not registered.
+    /// Look up InstrumentId by server_tag. O(1) flat array lookup.
+    #[inline(always)]
     pub fn instrument_by_server_tag(&self, server_tag: u32) -> Option<InstrumentId> {
-        for &(st, iid) in &self.server_tag_to_instrument {
-            if st == server_tag {
-                return Some(iid);
-            }
+        if (server_tag as usize) < MAX_SERVER_TAG {
+            let id = self.server_tag_table[server_tag as usize];
+            if id != NO_INSTRUMENT { Some(id) } else { None }
+        } else {
+            None
         }
-        None
     }
 
     /// Set symbol name for an instrument (e.g. "AAPL"). Used for orders.
@@ -184,7 +188,7 @@ impl MarketState {
 
     /// Clear server tag mappings (called on farm disconnect — old tags are invalid).
     pub fn clear_server_tags(&mut self) {
-        self.server_tag_to_instrument.clear();
+        self.server_tag_table.fill(NO_INSTRUMENT);
     }
 
     /// Zero all quote data to prevent stale price trading after farm disconnect.
@@ -307,12 +311,12 @@ mod tests {
     }
 
     #[test]
-    fn server_tag_dedup() {
+    fn server_tag_overwrite() {
         let mut ms = MarketState::new();
         let aapl = ms.register(265598);
         ms.register_server_tag(42, aapl);
-        ms.register_server_tag(42, aapl); // duplicate
-        assert_eq!(ms.server_tag_to_instrument.len(), 1);
+        ms.register_server_tag(42, aapl); // same value, overwrites
+        assert_eq!(ms.instrument_by_server_tag(42), Some(aapl));
     }
 
     #[test]

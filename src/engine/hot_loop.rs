@@ -95,6 +95,10 @@ pub struct HotLoop {
     rtbar_subs: Vec<(String, u32, Option<u32>, f64)>,
     /// Auto-incrementing bulletin ID for news bulletins.
     bulletin_next_id: i32,
+    /// Reusable tick buffer for decode_ticks_35p (avoids heap alloc per message).
+    tick_buf: Vec<tick_decoder::RawTick>,
+    /// Reusable message buffer for poll_market_data (avoids heap alloc per poll cycle).
+    farm_msg_buf: Vec<Vec<u8>>,
 }
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
@@ -179,6 +183,8 @@ impl HotLoop {
             pending_ticks: Vec::new(),
             rtbar_subs: Vec::new(),
             bulletin_next_id: 0,
+            tick_buf: Vec::with_capacity(16),
+            farm_msg_buf: Vec::with_capacity(32),
         }
     }
 
@@ -285,59 +291,55 @@ impl HotLoop {
         }
         // Collect all messages from farm connection first, then process.
         // This avoids borrow conflicts between conn and self.
-        let messages = match self.farm_conn.as_mut() {
-            None => return,
-            Some(conn) => {
-                match conn.try_recv() {
-                    Ok(0) => return,  // WouldBlock
-                    Err(e) => {
-                        log::error!("Farm connection lost: {}", e);
-                        self.handle_farm_disconnect();
-                        return;
-                    }
-                    Ok(n) => {
-                        log::info!("Farm recv: {} bytes, buffered: {}", n, conn.buffered());
-                        let now = Instant::now();
-                        self.hb.last_farm_recv = now;
-                        self.context.recv_at = now;
-                        self.hb.pending_farm_test = None; // data received, clear pending test
-                    }
+        self.farm_msg_buf.clear();
+        {
+            let conn = match self.farm_conn.as_mut() {
+                None => return,
+                Some(c) => c,
+            };
+            match conn.try_recv() {
+                Ok(0) => return,  // WouldBlock
+                Err(e) => {
+                    log::error!("Farm connection lost: {}", e);
+                    // fall through — handle_farm_disconnect needs &mut self
+                    self.handle_farm_disconnect();
+                    return;
                 }
-                let frames = conn.extract_frames();
-                log::info!("Farm frames: {}", frames.len());
-                let mut msgs = Vec::new();
-                for frame in &frames {
-                    match frame {
-                        Frame::FixComp(raw) => {
-                            let (unsigned, _valid) = conn.unsign(raw);
-                            let inner = fixcomp::fixcomp_decompress(&unsigned);
-                            for m in &inner {
-                                log::info!("Farm FIXCOMP inner: {:?}",
-                                    String::from_utf8_lossy(&m[..std::cmp::min(120, m.len())]));
-                            }
-                            msgs.extend(inner);
-                        }
-                        Frame::Binary(raw) => {
-                            let (unsigned, _valid) = conn.unsign(raw);
-                            log::info!("Farm Binary: {:?}",
-                                String::from_utf8_lossy(&unsigned[..std::cmp::min(120, unsigned.len())]));
-                            msgs.push(unsigned);
-                        }
-                        Frame::Fix(raw) => {
-                            let (unsigned, _valid) = conn.unsign(raw);
-                            log::info!("Farm FIX: {:?}",
-                                String::from_utf8_lossy(&unsigned[..std::cmp::min(120, unsigned.len())]));
-                            msgs.push(unsigned);
-                        }
-                    }
+                Ok(n) => {
+                    log::trace!("Farm recv: {} bytes, buffered: {}", n, conn.buffered());
+                    let now = Instant::now();
+                    self.hb.last_farm_recv = now;
+                    self.context.recv_at = now;
+                    self.hb.pending_farm_test = None;
                 }
-                msgs
             }
-        };
+            let frames = conn.extract_frames();
+            log::trace!("Farm frames: {}", frames.len());
+            for frame in &frames {
+                match frame {
+                    Frame::FixComp(raw) => {
+                        let (unsigned, _valid) = conn.unsign(raw);
+                        let inner = fixcomp::fixcomp_decompress(&unsigned);
+                        self.farm_msg_buf.extend(inner);
+                    }
+                    Frame::Binary(raw) => {
+                        let (unsigned, _valid) = conn.unsign(raw);
+                        self.farm_msg_buf.push(unsigned);
+                    }
+                    Frame::Fix(raw) => {
+                        let (unsigned, _valid) = conn.unsign(raw);
+                        self.farm_msg_buf.push(unsigned);
+                    }
+                }
+            }
+        }
 
-        for msg in &messages {
+        let mut msgs = std::mem::take(&mut self.farm_msg_buf);
+        for msg in &msgs {
             self.process_farm_message(msg);
         }
+        msgs.clear();
+        self.farm_msg_buf = msgs;
     }
 
     fn process_farm_message(&mut self, msg: &[u8]) {
@@ -391,7 +393,8 @@ impl HotLoop {
             None => return,
         };
 
-        let ticks = tick_decoder::decode_ticks_35p(body);
+        let mut ticks = std::mem::take(&mut self.tick_buf);
+        tick_decoder::decode_ticks_35p_into(body, &mut ticks);
         let mut notified: u32 = 0; // bitmask of instruments already notified this batch
 
         for tick in &ticks {
@@ -453,6 +456,7 @@ impl HotLoop {
                 self.notify_tick(instrument);
             }
         }
+        self.tick_buf = ticks;
     }
 
     /// Handle 35=Q subscription acknowledgement: map server_tag → instrument.
