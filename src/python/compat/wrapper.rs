@@ -11,7 +11,8 @@ pub struct EWrapper;
 #[pymethods]
 impl EWrapper {
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(_args: &Bound<'_, pyo3::types::PyTuple>, _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>) -> Self {
         Self
     }
 

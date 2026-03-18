@@ -218,6 +218,21 @@ def test_execution_condition_defaults():
 
 # ── EWrapper subclassing ──
 
+def test_ewrapper_subclass_with_args():
+    """Issue #105: subclassing EWrapper with constructor arguments."""
+    class MyWrapper(EWrapper):
+        def __init__(self, some_arg):
+            super().__init__()
+            self.thing = some_arg
+
+    w = MyWrapper("hello")
+    assert w.thing == "hello"
+
+    # Also works with kwargs
+    w2 = MyWrapper(some_arg="world")
+    assert w2.thing == "world"
+
+
 def test_ewrapper_subclass():
     class MyWrapper(EWrapper):
         def __init__(self):
