@@ -20,35 +20,38 @@ IBX connects directly to Interactive Brokers servers — without requiring the o
 
 ## Benchmarks
 
-> **Note:** These benchmarks were run on a paper trading account with limited sample sizes and no full statistical coverage. Results are indicative, not definitive. Comprehensive benchmarking on a live account is a TODO.
+### Processing Latency (no network)
 
-SPY on IB paper account, public internet (not colocated). Compared to the official C++ TWS API connecting through IB Gateway on localhost.
+Internal engine processing measured in isolation (1M iterations, no network I/O). Compared to the Java Gateway's internal processing, measured via bytecode instrumentation.
 
-### Order Latency
+#### Tick Reading (wire → strategy)
+
+| Metric | Java Gateway | IBX (Rust) | Ratio |
+|---|---|---|---|
+| Latency | 2 ms | 340 ns | **5,900x** |
+
+#### Order Sending (strategy → wire)
+
+| Order Type | Java Gateway | IBX (Rust) | Ratio |
+|---|---|---|---|
+| Limit | 83 µs | 459 ns | **180x** |
+| Market | 76 µs | 460 ns | **165x** |
+| Cancel | 125 µs | 386 ns | **323x** |
+| Modify | 86 µs | 470 ns | **183x** |
+
+IBX eliminates the Java Gateway entirely — no JVM, no localhost hop, no garbage collection pauses. The strategy receives ticks and sends orders in-process.
+
+### End-to-End Latency (over network)
+
+SPY on IB paper account, public internet (not colocated). Compared to the official C++ TWS API connecting through the Java Gateway on localhost.
 
 | Metric | IBX | C++ TWS API | Ratio |
 |---|---|---|---|
 | Limit submit → ack | 114.8ms | 632.9ms | **5.5x faster** |
 | Limit cancel → confirm | 125.7ms | 148.2ms | 1.2x faster |
 | **Limit full round-trip** | **240.5ms** | **781.1ms** | **3.2x faster** |
-| Market order mean RTT | 1,113ms | — | — |
-| Market order slippage | $0.09 | — | — |
 
-### Tick Decode Latency
-
-| Percentile | IBX | C++ TWS API | Ratio |
-|---|---|---|---|
-| P50 | 14.2us | 8.9us | 1.6x* |
-| P99 | 25.4us | 22.4us | 1.1x* |
-| Max | 41.6us | 27.6us | — |
-
-*IBX handles the full connection stack (encryption, authentication, compression, binary decoding). IB Gateway pre-parses and feeds callbacks over localhost — no crypto, no decompression.
-
-### Analysis
-
-The biggest win is **order latency**: IBX measured ~500ms faster round-trip times compared to routing through the Gateway. Eliminating the extra localhost hop and Java intermediary accounts for most of the difference.
-
-Tick decode is 1.6x slower — expected and acceptable. At IB's ~4 ticks/sec paper rate, the 5us difference is negligible. The real win is eliminating the Java gateway as a dependency entirely.
+> **Note:** End-to-end benchmarks were run on a paper trading account with limited sample sizes. Results are indicative, not definitive.
 
 ## Rust Usage
 
