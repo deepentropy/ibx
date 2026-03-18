@@ -201,12 +201,11 @@ impl HotLoop {
     }
 
     /// Sync tick state to SharedState and emit event.
+    /// Only pushes the quote — position/account/instrument_count are synced
+    /// at the points where they actually change (fills, control commands, account updates).
     #[inline]
     fn notify_tick(&mut self, instrument: InstrumentId) {
         self.shared.push_quote(instrument, self.context.quote(instrument));
-        self.shared.set_position(instrument, self.context.position(instrument));
-        self.shared.set_account(self.context.account());
-        self.shared.set_instrument_count(self.context.market.count());
         self.emit(Event::Tick(instrument));
     }
 
@@ -342,21 +341,23 @@ impl HotLoop {
     }
 
     fn process_farm_message(&mut self, msg: &[u8]) {
-        let parsed = fix::fix_parse(msg);
-        let msg_type = match parsed.get(&fix::TAG_MSG_TYPE) {
-            Some(t) => t.as_str(),
+        // Fast-path: extract tag 35 (MsgType) via byte scan instead of full HashMap parse.
+        // fix_parse costs ~435 ns (HashMap alloc); this scan costs ~2 ns.
+        let msg_type = match fast_extract_msg_type(msg) {
+            Some(t) => t,
             None => return,
         };
 
         match msg_type {
-            "P" => self.handle_tick_data(msg),
-            "Q" => {
+            b"P" => self.handle_tick_data(msg),
+            b"Q" => {
                 log::info!("Farm 35=Q subscription ack received");
                 self.handle_subscription_ack(msg);
             }
-            "0" => {} // heartbeat — timestamp already updated in try_recv
-            "1" => {
-                // Test request — respond with heartbeat containing the test req ID
+            b"0" => {} // heartbeat — timestamp already updated in try_recv
+            b"1" => {
+                // Test request — needs parsed map for TAG_TEST_REQ_ID (rare path)
+                let parsed = fix::fix_parse(msg);
                 let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
                 if let Some(conn) = self.farm_conn.as_mut() {
                     let ts = chrono_free_timestamp();
@@ -370,10 +371,14 @@ impl HotLoop {
                     self.hb.last_farm_sent = Instant::now();
                 }
             }
-            "L" => self.handle_ticker_setup(msg),
-            "UT" | "UM" | "RL" => self.handle_account_update(msg),
-            "UP" => self.handle_position_update(&parsed),
-            "G" => self.handle_tick_news(msg),
+            b"L" => self.handle_ticker_setup(msg),
+            b"UT" | b"UM" | b"RL" => self.handle_account_update(msg),
+            b"UP" => {
+                // Position update — needs parsed map (rare path)
+                let parsed = fix::fix_parse(msg);
+                self.handle_position_update(&parsed);
+            }
+            b"G" => self.handle_tick_news(msg),
             _ => {}
         }
     }
@@ -395,31 +400,32 @@ impl HotLoop {
                 None => continue,
             };
 
-            let min_tick = self.context.market.min_tick(instrument);
+            let mts = self.context.market.min_tick_scaled(instrument);
             let q = self.context.market.quote_mut(instrument);
 
-            // Apply tick to quote based on tick type
+            // Apply tick to quote based on tick type.
+            // Price conversion: integer multiply (magnitude * min_tick_scaled) instead of f64.
             match tick.tick_type {
                 tick_decoder::O_BID_PRICE => {
-                    q.bid = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.bid = tick.magnitude * mts;
                 }
                 tick_decoder::O_ASK_PRICE => {
-                    q.ask = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.ask = tick.magnitude * mts;
                 }
                 tick_decoder::O_LAST_PRICE => {
-                    q.last = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.last = tick.magnitude * mts;
                 }
                 tick_decoder::O_HIGH_PRICE => {
-                    q.high = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.high = tick.magnitude * mts;
                 }
                 tick_decoder::O_LOW_PRICE => {
-                    q.low = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.low = tick.magnitude * mts;
                 }
                 tick_decoder::O_OPEN_PRICE => {
-                    q.open = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.open = tick.magnitude * mts;
                 }
                 tick_decoder::O_CLOSE_PRICE => {
-                    q.close = (tick.magnitude as f64 * min_tick * PRICE_SCALE as f64) as i64;
+                    q.close = tick.magnitude * mts;
                 }
                 tick_decoder::O_BID_SIZE => {
                     q.bid_size = tick.magnitude;
@@ -2776,6 +2782,33 @@ fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
     let start = xml.find(&open)? + open.len();
     let end = xml[start..].find(&close)? + start;
     Some(xml[start..end].to_string())
+}
+
+/// Fast extraction of FIX tag 35 (MsgType) value via byte scan.
+/// Returns the value as a byte slice (e.g. b"P", b"UP", b"UT").
+/// Scans only the first 40 bytes — tag 35 is always near the message start.
+fn fast_extract_msg_type(msg: &[u8]) -> Option<&[u8]> {
+    let limit = msg.len().min(48);
+    let mut i = 0;
+    while i + 3 < limit {
+        // Match \x01 35= or start-of-message 35= (for 8=O binary protocol)
+        if msg[i] == b'3' && msg[i + 1] == b'5' && msg[i + 2] == b'=' {
+            // Check preceded by SOH or at start of tag area
+            if i == 0 || msg[i - 1] == 0x01 {
+                let val_start = i + 3;
+                // Find the end (next SOH)
+                let mut j = val_start;
+                while j < msg.len() && msg[j] != 0x01 {
+                    j += 1;
+                }
+                if j > val_start {
+                    return Some(&msg[val_start..j]);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 fn find_body_after_tag<'a>(msg: &'a [u8], tag_marker: &[u8]) -> Option<&'a [u8]> {

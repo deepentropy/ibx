@@ -31,21 +31,58 @@ impl<'a> BitReader<'a> {
     }
 
     /// Read n bits as unsigned integer (MSB first).
+    /// Uses word-aligned reads for performance (1-3 ops instead of n iterations).
+    #[inline]
     pub fn read_unsigned(&mut self, n: usize) -> Option<u64> {
         if n == 0 {
             return Some(0);
         }
-        if self.bit_pos + n > self.total_bits {
+        if n > 64 || self.bit_pos + n > self.total_bits {
             return None;
         }
-        let mut result: u64 = 0;
-        for _ in 0..n {
-            let byte_idx = self.bit_pos >> 3;
-            let bit_idx = 7 - (self.bit_pos & 7); // MSB first
-            result = (result << 1) | ((self.data[byte_idx] >> bit_idx) as u64 & 1);
-            self.bit_pos += 1;
+        let byte_idx = self.bit_pos >> 3;
+        let bit_offset = self.bit_pos & 7;
+        self.bit_pos += n;
+
+        // Total bits we need from the byte stream: bit_offset + n.
+        // If <= 64, one u64 load suffices. If > 64 (cross-word), load two words.
+        let needed = bit_offset + n;
+
+        let remaining_bytes = self.data.len() - byte_idx;
+
+        if needed <= 64 {
+            // Fast path: single word load
+            let word = if remaining_bytes >= 8 {
+                u64::from_be_bytes(self.data[byte_idx..byte_idx + 8].try_into().unwrap())
+            } else {
+                let mut buf = [0u8; 8];
+                buf[..remaining_bytes].copy_from_slice(&self.data[byte_idx..]);
+                u64::from_be_bytes(buf)
+            };
+            let result = (word << bit_offset) >> (64 - n);
+            Some(result)
+        } else {
+            // Cross-word: need bits from two consecutive u64s
+            let load_be = |off: usize| -> u64 {
+                let rem = self.data.len().saturating_sub(off);
+                if rem >= 8 {
+                    u64::from_be_bytes(self.data[off..off + 8].try_into().unwrap())
+                } else if rem > 0 {
+                    let mut buf = [0u8; 8];
+                    buf[..rem].copy_from_slice(&self.data[off..off + rem]);
+                    u64::from_be_bytes(buf)
+                } else {
+                    0
+                }
+            };
+            let hi = load_be(byte_idx);
+            let lo = load_be(byte_idx + 8);
+            // Combine: take (64 - bit_offset) bits from hi, then (n - (64 - bit_offset)) from lo
+            let hi_bits = 64 - bit_offset; // bits available in hi after discarding offset
+            let lo_bits = n - hi_bits;
+            let result = ((hi << bit_offset) >> (64 - n)) | (lo >> (64 - lo_bits));
+            Some(result)
         }
-        Some(result)
     }
 }
 

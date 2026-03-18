@@ -1,4 +1,4 @@
-use crate::types::{InstrumentId, Price, Qty, Quote, MAX_INSTRUMENTS};
+use crate::types::{InstrumentId, Price, Qty, Quote, PRICE_SCALE, MAX_INSTRUMENTS};
 
 /// Pre-allocated quote storage indexed by InstrumentId.
 /// All quotes live in a contiguous array for cache efficiency.
@@ -12,6 +12,8 @@ pub struct MarketState {
     server_tag_to_instrument: Vec<(u32, InstrumentId)>,
     /// Per-instrument minTick (from 35=Q). Used to scale tick magnitudes to prices.
     min_ticks: [f64; MAX_INSTRUMENTS],
+    /// Pre-computed min_tick * PRICE_SCALE as integer for hot-path price conversion.
+    min_tick_scaled: [i64; MAX_INSTRUMENTS],
     /// Per-instrument symbol name (e.g. "AAPL"). Used for orders.
     symbols: Vec<(InstrumentId, String)>,
 }
@@ -24,6 +26,7 @@ impl MarketState {
             con_id_to_instrument: Vec::new(),
             server_tag_to_instrument: Vec::new(),
             min_ticks: [0.0; MAX_INSTRUMENTS],
+            min_tick_scaled: [0; MAX_INSTRUMENTS],
             symbols: Vec::new(),
         }
     }
@@ -117,12 +120,19 @@ impl MarketState {
     /// Set minTick for an instrument (from 35=Q). Price ticks = magnitude * min_tick.
     pub fn set_min_tick(&mut self, id: InstrumentId, min_tick: f64) {
         self.min_ticks[id as usize] = min_tick;
+        self.min_tick_scaled[id as usize] = (min_tick * PRICE_SCALE as f64).round() as i64;
     }
 
     /// Get minTick for an instrument.
     #[inline(always)]
     pub fn min_tick(&self, id: InstrumentId) -> f64 {
         self.min_ticks[id as usize]
+    }
+
+    /// Get pre-computed min_tick * PRICE_SCALE for integer price conversion.
+    #[inline(always)]
+    pub fn min_tick_scaled(&self, id: InstrumentId) -> i64 {
+        self.min_tick_scaled[id as usize]
     }
 
     #[inline(always)]
