@@ -82,17 +82,23 @@ pub fn build_historical_news_xml(req: &HistoricalNewsRequest) -> String {
     // Convert "BRFG+BRFUPDN" to "BRFG*BRFUPDN" for url_key
     let providers_star = req.provider_codes.replace('+', "*");
 
+    let tags = if req.con_id > 0 {
+        format!("@@{}:ALL_SUB@", req.con_id)
+    } else {
+        format!("@@0:{}@", providers_star)
+    };
+
     let query_raw = format!(
         "conid_count=\"{count}\";\
          total_count=\"{count}\";\
          ip=\"dummy\";\
          fingerprint=\"dummy\";\
          cmd=\"history\";\
-         tags=\"@@{con_id}:ALL_SUB@\";\
+         tags=\"{tags}\";\
          url_key=\"dummy\\;{providers}\";\
          ",
         count = req.max_results,
-        con_id = req.con_id,
+        tags = tags,
         providers = providers_star,
     );
 
