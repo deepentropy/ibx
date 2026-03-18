@@ -2778,14 +2778,69 @@ fn format_qty(qty: Qty) -> String {
     }
 }
 
-/// Find the body content after a specific tag marker in a FIX/binary message.
-/// Extract a simple XML tag value: `<tag>value</tag>` -> `value`.
-fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find(&close)? + start;
-    Some(xml[start..end].to_string())
+/// Extract the raw bytes of a binary FIX tag value using a length tag.
+/// For FIX binary fields, tag N-1 gives the length (e.g. 95=len, 96=data).
+/// Falls back to SOH-delimited extraction if no length tag is found.
+fn extract_raw_tag(msg: &[u8], tag: u32) -> Option<Vec<u8>> {
+    // First try length-prefixed extraction (tag-1 = length)
+    let len_tag = tag - 1; // e.g. tag 96 uses tag 95 for length
+    if let Some(len_val) = extract_text_tag(msg, len_tag) {
+        if let Ok(data_len) = len_val.parse::<usize>() {
+            // Find the data tag itself
+            let needle = format!("{}=", tag);
+            let needle_bytes = needle.as_bytes();
+            if let Some(idx) = msg.windows(needle_bytes.len()).position(|w| w == needle_bytes) {
+                let val_start = idx + needle_bytes.len();
+                let val_end = (val_start + data_len).min(msg.len());
+                return Some(msg[val_start..val_end].to_vec());
+            }
+        }
+    }
+    // Fallback: SOH-delimited
+    let needle = format!("{}=", tag);
+    let needle_bytes = needle.as_bytes();
+    let mut pos = 0;
+    while pos < msg.len() {
+        let remaining = &msg[pos..];
+        if let Some(idx) = remaining.windows(needle_bytes.len()).position(|w| w == needle_bytes) {
+            let abs_idx = pos + idx;
+            if abs_idx == 0 || msg[abs_idx - 1] == 0x01 {
+                let val_start = abs_idx + needle_bytes.len();
+                let val_end = msg[val_start..].iter().position(|&b| b == 0x01)
+                    .map(|p| val_start + p)
+                    .unwrap_or(msg.len());
+                return Some(msg[val_start..val_end].to_vec());
+            }
+            pos = abs_idx + 1;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// Extract a text FIX tag value (SOH-delimited) from raw message bytes.
+fn extract_text_tag(msg: &[u8], tag: u32) -> Option<String> {
+    let needle = format!("{}=", tag);
+    let needle_bytes = needle.as_bytes();
+    let mut pos = 0;
+    while pos < msg.len() {
+        let remaining = &msg[pos..];
+        if let Some(idx) = remaining.windows(needle_bytes.len()).position(|w| w == needle_bytes) {
+            let abs_idx = pos + idx;
+            if abs_idx == 0 || msg[abs_idx - 1] == 0x01 {
+                let val_start = abs_idx + needle_bytes.len();
+                let val_end = msg[val_start..].iter().position(|&b| b == 0x01)
+                    .map(|p| val_start + p)
+                    .unwrap_or(msg.len());
+                return Some(String::from_utf8_lossy(&msg[val_start..val_end]).into_owned());
+            }
+            pos = abs_idx + 1;
+        } else {
+            break;
+        }
+    }
+    None
 }
 
 /// Fast extraction of FIX tag 35 (MsgType) value via byte scan.
@@ -3108,7 +3163,6 @@ impl HotLoop {
             Some(t) => t.as_str(),
             None => return,
         };
-
         match msg_type {
             "E" => self.handle_tbt_data(msg),
             "0" => {} // heartbeat
@@ -3220,41 +3274,28 @@ impl HotLoop {
                             }
                         }
                         "10032" => {
-                            // News response (historical news or article)
+                            // News response — payload is in tag 96 (binary ZIP).
+                            // The XML in tag 6118 echoes the request id.
+                            let raw_bytes = extract_raw_tag(msg, 96);
                             if let Some(xml) = parsed.get(&6118) {
-                                // Check if it's article data (contains raw data in tag 96)
-                                if let Some(raw) = parsed.get(&96) {
-                                    // News article response
+                                let is_article = xml.contains("article_file");
+                                if is_article {
                                     if let Some(pos) = self.pending_articles.iter().position(|_| true) {
                                         let (_, req_id) = self.pending_articles.remove(pos);
-                                        self.shared.push_news_article(req_id, 0, raw.clone());
-                                    }
-                                } else {
-                                    // Historical news headlines
-                                    // Parse headlines from XML
-                                    let mut headlines = Vec::new();
-                                    let has_more = xml.contains("<hasMore>true</hasMore>");
-                                    // Simple XML parsing for news headlines
-                                    let mut search = 0usize;
-                                    while let Some(start) = xml[search..].find("<item>") {
-                                        let abs_start = search + start;
-                                        if let Some(end) = xml[abs_start..].find("</item>") {
-                                            let item = &xml[abs_start..abs_start + end + 7];
-                                            let time = extract_xml_value(item, "time").unwrap_or_default();
-                                            let provider = extract_xml_value(item, "providerCode").unwrap_or_default();
-                                            let article_id = extract_xml_value(item, "articleId").unwrap_or_default();
-                                            let headline = extract_xml_value(item, "headline").unwrap_or_default();
-                                            headlines.push(crate::control::news::NewsHeadline {
-                                                time, provider_code: provider, article_id, headline,
-                                            });
-                                            search = abs_start + end + 7;
-                                        } else {
-                                            break;
+                                        if let Some(raw) = &raw_bytes {
+                                            if let Some((atype, text)) = crate::control::news::parse_article_payload(raw) {
+                                                self.shared.push_news_article(req_id, atype, text);
+                                            }
                                         }
                                     }
-                                    if let Some(pos) = self.pending_news.iter().position(|_| true) {
-                                        let (_, req_id) = self.pending_news.remove(pos);
+                                } else if let Some(pos) = self.pending_news.iter().position(|_| true) {
+                                    let (_, req_id) = self.pending_news.remove(pos);
+                                    if let Some(raw) = &raw_bytes {
+                                        let (headlines, has_more) = crate::control::news::parse_news_payload(raw);
                                         self.shared.push_historical_news(req_id, headlines, has_more);
+                                    } else {
+                                        // No payload — empty response
+                                        self.shared.push_historical_news(req_id, Vec::new(), false);
                                     }
                                 }
                             }
@@ -3779,7 +3820,9 @@ impl HotLoop {
 
     /// Send a historical news request to historical server.
     fn send_historical_news_request(&mut self, req_id: u32, con_id: u32, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32) {
+        let query_id = format!("news_{}", self.next_hmds_query_id);
         let req = crate::control::news::HistoricalNewsRequest {
+            query_id: query_id.clone(),
             con_id,
             provider_codes: provider_codes.to_string(),
             start_time: start_time.to_string(),
@@ -3787,7 +3830,6 @@ impl HotLoop {
             max_results,
         };
         let xml = crate::control::news::build_historical_news_xml(&req);
-        let query_id = format!("news_{}", self.next_hmds_query_id);
         self.next_hmds_query_id += 1;
 
         if let Some(conn) = self.hmds_conn.as_mut() {
@@ -3806,12 +3848,13 @@ impl HotLoop {
 
     /// Send a news article request to historical server.
     fn send_news_article_request(&mut self, req_id: u32, provider_code: &str, article_id: &str) {
+        let query_id = format!("art_{}", self.next_hmds_query_id);
         let req = crate::control::news::NewsArticleRequest {
+            query_id: query_id.clone(),
             provider_code: provider_code.to_string(),
             article_id: article_id.to_string(),
         };
         let xml = crate::control::news::build_article_request_xml(&req);
-        let query_id = format!("art_{}", self.next_hmds_query_id);
         self.next_hmds_query_id += 1;
 
         if let Some(conn) = self.hmds_conn.as_mut() {

@@ -501,6 +501,7 @@ pub(super) fn phase_historical_news(mut conns: Conns, gw: &Gateway, config: &Gat
     let bg_join = run_hot_loop(bg_loop);
 
     let req = news::HistoricalNewsRequest {
+        query_id: "news_test".to_string(),
         con_id: 265598, provider_codes: "BRFG+BRFUPDN".to_string(),
         start_time: String::new(), end_time: String::new(), max_results: 5,
     };
