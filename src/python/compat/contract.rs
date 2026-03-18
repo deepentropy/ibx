@@ -248,9 +248,31 @@ impl Order {
     }
 
     fn __repr__(&self) -> String {
-        format!("Order(orderId={}, action='{}', totalQuantity={}, orderType='{}', lmtPrice={})",
-            self.order_id, self.action, self.total_quantity, self.order_type, self.lmt_price)
+        format!("Order(orderId={}, action='{}', totalQuantity={}, orderType='{}', lmtPrice={}, auxPrice={})",
+            self.order_id, self.action, self.total_quantity, self.order_type, self.lmt_price, self.aux_price)
     }
+
+    // ibapi camelCase aliases
+    #[getter(auxPrice)]
+    fn get_aux_price_alias(&self) -> f64 { self.aux_price }
+    #[setter(auxPrice)]
+    fn set_aux_price_alias(&mut self, v: f64) { self.aux_price = v; }
+    #[getter(lmtPrice)]
+    fn get_lmt_price_alias(&self) -> f64 { self.lmt_price }
+    #[setter(lmtPrice)]
+    fn set_lmt_price_alias(&mut self, v: f64) { self.lmt_price = v; }
+    #[getter(orderId)]
+    fn get_order_id_alias(&self) -> i64 { self.order_id }
+    #[setter(orderId)]
+    fn set_order_id_alias(&mut self, v: i64) { self.order_id = v; }
+    #[getter(totalQuantity)]
+    fn get_total_quantity_alias(&self) -> f64 { self.total_quantity }
+    #[setter(totalQuantity)]
+    fn set_total_quantity_alias(&mut self, v: f64) { self.total_quantity = v; }
+    #[getter(orderType)]
+    fn get_order_type_alias(&self) -> String { self.order_type.clone() }
+    #[setter(orderType)]
+    fn set_order_type_alias(&mut self, v: String) { self.order_type = v; }
 }
 
 /// Delegate conversion helpers to the Rust API types.

@@ -64,6 +64,28 @@ def test_order_kwargs():
     assert o.lmt_price == 150.50
 
 
+def test_order_aux_price_kwarg():
+    o = Order(order_id=1, action="SELL", total_quantity=10, order_type="STP", aux_price=150.0)
+    assert o.aux_price == 150.0
+    assert "auxPrice=150" in repr(o)
+
+
+def test_order_camel_case_aliases():
+    o = Order()
+    o.auxPrice = 150.0
+    assert o.aux_price == 150.0
+    assert o.auxPrice == 150.0
+    o.lmtPrice = 200.0
+    assert o.lmt_price == 200.0
+    assert o.lmtPrice == 200.0
+    o.orderId = 42
+    assert o.order_id == 42
+    o.totalQuantity = 100.0
+    assert o.total_quantity == 100.0
+    o.orderType = "STP"
+    assert o.order_type == "STP"
+
+
 def test_order_algo_params():
     o = Order()
     o.algo_strategy = "Vwap"
