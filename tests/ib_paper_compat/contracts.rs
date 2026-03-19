@@ -196,11 +196,8 @@ pub(super) fn phase_matching_symbols(conns: Conns) -> Conns {
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    if matches.is_none() || matches.as_ref().map(|m| m.is_empty()).unwrap_or(true) {
-        println!("  SKIP: No matching symbols response received\n");
-        return conns;
-    }
-    let m = matches.unwrap();
+    let m = matches.expect("No matching symbols response received for 'SPY'");
+    assert!(!m.is_empty(), "Should have at least one match for 'SPY'");
     println!("  {} matches found", m.len());
     let spy = m.iter().find(|s| s.symbol == "SPY" && s.sec_type == contracts::SecurityType::Stock && s.currency == "USD");
     if let Some(spy) = spy {

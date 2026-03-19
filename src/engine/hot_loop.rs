@@ -2129,14 +2129,19 @@ impl HotLoop {
             "U" => {
                 // IB custom message — route by 6040 comm type
                 if let Some(comm) = parsed.get(&6040) {
+                    log::trace!("CCP U msg: 6040={}", comm);
                     match comm.as_str() {
                         "77" => self.handle_account_summary(&parsed),
                         "186" => {
-                            // Matching symbols response
+                            // Matching symbols response — server sends an initial ack
+                            // (0 matches, no TAG_MATCH_COUNT) then the real data.
+                            // Only consume the pending entry when matches are present.
                             if let Some(matches) = crate::control::contracts::parse_matching_symbols_response(msg) {
-                                if let Some(req_id) = self.pending_matching_symbols.first().copied() {
-                                    self.pending_matching_symbols.remove(0);
-                                    self.shared.push_matching_symbols(req_id, matches);
+                                if !matches.is_empty() {
+                                    if let Some(req_id) = self.pending_matching_symbols.first().copied() {
+                                        self.pending_matching_symbols.remove(0);
+                                        self.shared.push_matching_symbols(req_id, matches);
+                                    }
                                 }
                             }
                         }
