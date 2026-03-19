@@ -73,8 +73,6 @@ pub struct HotLoop {
     pending_secdef: Vec<u32>,
     /// Pending matching symbols requests: req_id.
     pending_matching_symbols: Vec<u32>,
-    /// Next auth sequence number for matching symbols.
-    next_ccp_seq: u32,
     /// Whether a scanner params request is pending.
     pending_scanner_params: bool,
     /// Pending scanner subscriptions: scan_id → req_id.
@@ -174,7 +172,6 @@ impl HotLoop {
             pending_head_ts: Vec::new(),
             pending_secdef: Vec::new(),
             pending_matching_symbols: Vec::new(),
-            next_ccp_seq: 1,
             pending_scanner_params: false,
             pending_scanner: Vec::new(),
             next_scanner_id: 1,
@@ -2601,8 +2598,12 @@ impl HotLoop {
                 ControlCommand::FetchHeadTimestamp { req_id, con_id, what_to_show, use_rth } => {
                     self.send_head_timestamp_request(req_id, con_id, &what_to_show, use_rth);
                 }
-                ControlCommand::FetchContractDetails { req_id, con_id } => {
-                    self.send_secdef_request(req_id, con_id);
+                ControlCommand::FetchContractDetails { req_id, con_id, symbol, sec_type, exchange, currency } => {
+                    if con_id > 0 {
+                        self.send_secdef_request(req_id, con_id);
+                    } else {
+                        self.send_secdef_request_by_symbol(req_id, &symbol, &sec_type, &exchange, &currency);
+                    }
                 }
                 ControlCommand::CancelHeadTimestamp { req_id } => {
                     if let Some(pos) = self.pending_head_ts.iter().position(|(_, rid)| *rid == req_id) {
@@ -3815,14 +3816,48 @@ impl HotLoop {
         self.pending_secdef.push(req_id);
     }
 
+    /// Send a contract details request by symbol to auth server.
+    fn send_secdef_request_by_symbol(&mut self, req_id: u32, symbol: &str, sec_type: &str, exchange: &str, currency: &str) {
+        if let Some(conn) = self.ccp_conn.as_mut() {
+            let req_id_str = req_id.to_string();
+            let ts = chrono_free_timestamp();
+            let fix_exchange = if exchange == "SMART" { "BEST" } else { exchange };
+            let fix_sec_type = match sec_type {
+                "STK" => "CS",
+                "FUT" => "FUT",
+                "OPT" => "OPT",
+                "IND" => "IND",
+                other => other,
+            };
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "c"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (320, &req_id_str),
+                (321, "2"),
+                (55, symbol),
+                (167, fix_sec_type),
+                (207, fix_exchange),
+                (15, currency),
+                (6088, "Socket"),
+            ]);
+            log::info!("Sent secdef-by-symbol: req_id={} symbol={} sec_type={}", req_id, symbol, sec_type);
+            self.hb.last_ccp_sent = Instant::now();
+        }
+        self.pending_secdef.push(req_id);
+    }
+
     /// Send a matching symbols request to auth server.
     fn send_matching_symbols_request(&mut self, req_id: u32, pattern: &str) {
         if let Some(conn) = self.ccp_conn.as_mut() {
-            let seq = self.next_ccp_seq;
-            self.next_ccp_seq += 1;
             let req_id_str = req_id.to_string();
-            let msg = crate::control::contracts::build_matching_symbols_request(pattern, &req_id_str, seq);
-            let _ = conn.send_raw(&msg);
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "185"),
+                (320, &req_id_str),
+                (58, pattern),
+            ]);
             self.hb.last_ccp_sent = Instant::now();
             log::info!("Sent matching symbols request: req_id={} pattern='{}'", req_id, pattern);
         }

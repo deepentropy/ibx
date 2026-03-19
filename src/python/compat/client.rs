@@ -365,6 +365,10 @@ impl EClient {
         tx.send(ControlCommand::FetchContractDetails {
             req_id: req_id as u32,
             con_id: contract.con_id,
+            symbol: contract.symbol.clone(),
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
+            currency: contract.currency.clone(),
         }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
     }

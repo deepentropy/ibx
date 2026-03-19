@@ -453,6 +453,10 @@ impl EClient {
         let _ = self.control_tx.send(ControlCommand::FetchContractDetails {
             req_id: req_id as u32,
             con_id: contract.con_id,
+            symbol: contract.symbol.clone(),
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
+            currency: contract.currency.clone(),
         });
     }
 
@@ -1948,7 +1952,7 @@ mod tests {
         client.req_contract_details(7, &spy());
         let cmd = rx.try_recv().unwrap();
         match cmd {
-            ControlCommand::FetchContractDetails { req_id, con_id } => {
+            ControlCommand::FetchContractDetails { req_id, con_id, .. } => {
                 assert_eq!(req_id, 7);
                 assert_eq!(con_id, 756733);
             }

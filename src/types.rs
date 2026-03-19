@@ -913,7 +913,14 @@ pub enum ControlCommand {
         use_rth: bool,
     },
     /// Request contract details via auth connection.
-    FetchContractDetails { req_id: u32, con_id: i64 },
+    FetchContractDetails {
+        req_id: u32,
+        con_id: i64,
+        symbol: String,
+        sec_type: String,
+        exchange: String,
+        currency: String,
+    },
     /// Cancel a head timestamp request.
     CancelHeadTimestamp { req_id: u32 },
     /// Search for matching symbols via auth connection.
