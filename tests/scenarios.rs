@@ -618,6 +618,7 @@ fn contract_lookup_then_subscribe() {
         min_tick: 0.01, multiplier: 1.0, valid_exchanges: vec!["SMART".into()],
         order_types: vec!["LMT".into()], market_rule_id: Some(26),
         last_trade_date: String::new(), right: None, strike: 0.0,
+        ..Default::default()
     });
     shared.push_contract_details_end(20);
 

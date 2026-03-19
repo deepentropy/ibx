@@ -113,6 +113,13 @@ pub struct ContractDefinition {
     pub last_trade_date: String,
     pub strike: f64,
     pub right: Option<OptionRight>,
+    // Extended fields
+    pub stock_type: String,
+    pub category: String,
+    pub country: String,
+    pub market_name: String,
+    pub isin: String,
+    pub min_size: f64,
 }
 
 impl Default for ContractDefinition {
@@ -135,6 +142,12 @@ impl Default for ContractDefinition {
             last_trade_date: String::new(),
             strike: 0.0,
             right: None,
+            stock_type: String::new(),
+            category: String::new(),
+            country: String::new(),
+            market_name: String::new(),
+            isin: String::new(),
+            min_size: 0.0,
         }
     }
 }
@@ -259,6 +272,40 @@ pub fn parse_secdef_response(data: &[u8]) -> Option<ContractDefinition> {
             "P" => Some(OptionRight::Put),
             _ => None,
         };
+    }
+    // Extended fields
+    if let Some(v) = tags.get(&8077) { // StockType
+        def.stock_type = v.clone();
+    }
+    if let Some(v) = tags.get(&6624) { // Category (pipe-delimited: "Technology|Computers|Computers")
+        def.category = v.clone();
+    }
+    if let Some(v) = tags.get(&6911) { // Country
+        def.country = v.clone();
+    }
+    if let Some(v) = tags.get(&58) { // MarketName
+        def.market_name = v.clone();
+    }
+    // ISIN from SecurityAltID repeating group (tag 455 with source 456=4)
+    // fix_parse only keeps last value per tag, so we parse sequentially
+    {
+        use crate::protocol::fix::SOH;
+        let mut last_alt_id = String::new();
+        let mut last_source = String::new();
+        for part in data.split(|&b| b == SOH) {
+            let text = String::from_utf8_lossy(part);
+            if let Some(val) = text.strip_prefix("455=") {
+                last_alt_id = val.to_string();
+            } else if let Some(val) = text.strip_prefix("456=") {
+                last_source = val.to_string();
+                if last_source == "4" { // ISIN
+                    def.isin = last_alt_id.clone();
+                }
+            }
+        }
+    }
+    if let Some(v) = tags.get(&8598) { // MinSizeIncrement
+        def.min_size = v.parse().unwrap_or(0.0);
     }
 
     Some(def)

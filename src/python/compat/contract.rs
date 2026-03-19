@@ -732,6 +732,16 @@ pub struct ContractDetails {
     pub local_symbol: String,
     #[pyo3(get, set)]
     pub trading_class: String,
+    #[pyo3(get, set)]
+    pub stock_type: String,
+    #[pyo3(get, set)]
+    pub category: String,
+    #[pyo3(get, set)]
+    pub country: String,
+    #[pyo3(get, set)]
+    pub isin: String,
+    #[pyo3(get, set)]
+    pub min_size: f64,
 }
 
 #[pymethods]
@@ -778,6 +788,11 @@ impl ContractDetails {
             primary_exchange: def.primary_exchange.clone(),
             local_symbol: def.local_symbol.clone(),
             trading_class: def.trading_class.clone(),
+            stock_type: def.stock_type.clone(),
+            category: def.category.clone(),
+            country: def.country.clone(),
+            isin: def.isin.clone(),
+            min_size: def.min_size,
         }
     }
 }
