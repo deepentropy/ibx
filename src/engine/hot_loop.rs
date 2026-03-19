@@ -6179,6 +6179,22 @@ mod tests {
         (conn, client)
     }
 
+    /// Parse FIX from raw wire data. Handles both plain FIX and FixComp-wrapped messages.
+    /// Returns the parsed tags from the first message found.
+    fn parse_wire(data: &[u8]) -> std::collections::HashMap<u32, String> {
+        // Try plain FIX first
+        let parsed = fix::fix_parse(data);
+        if parsed.contains_key(&35) {
+            return parsed;
+        }
+        // Try FixComp decompress (farm messages use compression)
+        let messages = crate::protocol::fixcomp::fixcomp_decompress(data);
+        if let Some(first) = messages.first() {
+            return fix::fix_parse(first);
+        }
+        parsed
+    }
+
     /// Read all available bytes from a TcpStream.
     fn read_all(stream: &mut std::net::TcpStream) -> Vec<u8> {
         use std::io::Read;
@@ -6196,19 +6212,37 @@ mod tests {
         out
     }
 
-    /// Engine with a CCP connection attached via TCP loopback.
-    fn engine_with_ccp() -> (HotLoop, crossbeam_channel::Sender<ControlCommand>, std::net::TcpStream) {
+    /// Engine with all three connections attached via TCP loopback.
+    struct WiredEngine {
+        engine: HotLoop,
+        tx: crossbeam_channel::Sender<ControlCommand>,
+        ccp_reader: std::net::TcpStream,
+        farm_reader: std::net::TcpStream,
+        hmds_reader: std::net::TcpStream,
+    }
+
+    fn engine_wired() -> WiredEngine {
         let shared = Arc::new(SharedState::new());
         let (ccp_conn, ccp_reader) = loopback_pair();
-        let (farm_conn, _farm_reader) = loopback_pair();
+        let (farm_conn, farm_reader) = loopback_pair();
+        let (hmds_conn, hmds_reader) = loopback_pair();
         let mut engine = HotLoop::new(shared, None, None);
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
         engine.ccp_conn = Some(ccp_conn);
         engine.farm_conn = Some(farm_conn);
-        // Set seq to a realistic value (as if logon already happened)
+        engine.hmds_conn = Some(hmds_conn);
+        // Set seq to realistic values (as if logon already happened)
         engine.ccp_conn.as_mut().unwrap().seq = 100;
-        (engine, tx, ccp_reader)
+        engine.farm_conn.as_mut().unwrap().seq = 200;
+        engine.hmds_conn.as_mut().unwrap().seq = 300;
+        WiredEngine { engine, tx, ccp_reader, farm_reader, hmds_reader }
+    }
+
+    /// Engine with a CCP connection attached via TCP loopback (legacy helper).
+    fn engine_with_ccp() -> (HotLoop, crossbeam_channel::Sender<ControlCommand>, std::net::TcpStream) {
+        let w = engine_wired();
+        (w.engine, w.tx, w.ccp_reader)
     }
 
     #[test]
@@ -6303,5 +6337,177 @@ mod tests {
         assert_eq!(parsed.get(&207).map(|s| s.as_str()), Some("NEWS"));
         assert_eq!(parsed.get(&264).map(|s| s.as_str()), Some("292"));
         assert_eq!(parsed.get(&6472).map(|s| s.as_str()), Some("BRFG*BRFUPDN"));
+    }
+
+    #[test]
+    fn wire_subscribe_sends_to_farm() {
+        let mut w = engine_wired();
+
+        w.tx.send(ControlCommand::Subscribe {
+            con_id: 265598,
+            symbol: "AAPL".into(),
+        }).unwrap();
+        w.engine.poll_control_commands();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Farm should receive the 35=V subscribe, CCP should not
+        let farm_data = read_all(&mut w.farm_reader);
+        let ccp_data = read_all(&mut w.ccp_reader);
+        assert!(!farm_data.is_empty(), "subscribe should send to farm");
+        assert!(ccp_data.is_empty(), "subscribe should NOT send to CCP");
+
+        let parsed = parse_wire(&farm_data);
+        assert_eq!(parsed.get(&35).map(|s| s.as_str()), Some("V"));
+        assert_eq!(parsed.get(&263).map(|s| s.as_str()), Some("1")); // Subscribe
+        assert_eq!(parsed.get(&146).map(|s| s.as_str()), Some("2")); // 2 entries (BidAsk + Last)
+        assert!(parsed.get(&6008).is_some(), "should contain conId tag");
+    }
+
+    #[test]
+    fn wire_unsubscribe_sends_to_farm() {
+        let mut w = engine_wired();
+
+        // First subscribe to get an instrument registered
+        w.tx.send(ControlCommand::Subscribe {
+            con_id: 265598,
+            symbol: "AAPL".into(),
+        }).unwrap();
+        w.engine.poll_control_commands();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = read_all(&mut w.farm_reader); // drain subscribe
+
+        // Now unsubscribe
+        w.tx.send(ControlCommand::Unsubscribe { instrument: 0 }).unwrap();
+        w.engine.poll_control_commands();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let farm_data = read_all(&mut w.farm_reader);
+        assert!(!farm_data.is_empty(), "unsubscribe should send to farm");
+
+        let parsed = parse_wire(&farm_data);
+        assert_eq!(parsed.get(&35).map(|s| s.as_str()), Some("V"));
+        assert_eq!(parsed.get(&263).map(|s| s.as_str()), Some("2")); // Unsubscribe
+    }
+
+    #[test]
+    fn wire_historical_sends_to_hmds() {
+        let mut w = engine_wired();
+
+        w.tx.send(ControlCommand::FetchHistorical {
+            req_id: 10,
+            con_id: 265598,
+            symbol: "AAPL".into(),
+            end_date_time: "20260318 16:00:00".into(),
+            duration: "1 D".into(),
+            bar_size: "5 mins".into(),
+            what_to_show: "TRADES".into(),
+            use_rth: true,
+        }).unwrap();
+        w.engine.poll_control_commands();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let hmds_data = read_all(&mut w.hmds_reader);
+        let farm_data = read_all(&mut w.farm_reader);
+        let ccp_data = read_all(&mut w.ccp_reader);
+        assert!(!hmds_data.is_empty(), "historical request should send to HMDS");
+        assert!(farm_data.is_empty(), "historical should NOT send to farm");
+        assert!(ccp_data.is_empty(), "historical should NOT send to CCP");
+
+        let parsed = fix::fix_parse(&hmds_data);
+        assert_eq!(parsed.get(&35).map(|s| s.as_str()), Some("W"));
+        // XML payload should be in tag 6118
+        assert!(parsed.get(&6118).is_some(), "should contain XML payload");
+        let xml = parsed.get(&6118).unwrap();
+        assert!(xml.contains("<contractID>265598</contractID>"), "XML should contain conId");
+        assert!(xml.contains("useRTH>true<"), "XML should contain RTH flag");
+    }
+
+    #[test]
+    fn wire_historical_news_sends_to_hmds() {
+        let mut w = engine_wired();
+
+        w.tx.send(ControlCommand::FetchHistoricalNews {
+            req_id: 20,
+            con_id: 265598,
+            provider_codes: "BRFG+BRFUPDN".into(),
+            start_time: String::new(),
+            end_time: String::new(),
+            max_results: 10,
+        }).unwrap();
+        w.engine.poll_control_commands();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let hmds_data = read_all(&mut w.hmds_reader);
+        assert!(!hmds_data.is_empty(), "news request should send to HMDS");
+
+        let parsed = fix::fix_parse(&hmds_data);
+        assert_eq!(parsed.get(&35).map(|s| s.as_str()), Some("U"));
+        assert_eq!(parsed.get(&6040).map(|s| s.as_str()), Some("10030"));
+        let xml = parsed.get(&6118).unwrap();
+        assert!(xml.contains("<ListOfQueries>"), "should use ListOfQueries envelope");
+        assert!(xml.contains("<NewsHMDSQuery>"), "should contain NewsHMDSQuery");
+        assert!(xml.contains("265598"), "should contain conId in query");
+        assert!(xml.contains("BRFG*BRFUPDN"), "providers should use * separator");
+    }
+
+    #[test]
+    fn wire_order_sends_to_ccp() {
+        let mut w = engine_wired();
+
+        // Register an instrument first (orders need instrument context)
+        w.tx.send(ControlCommand::Subscribe {
+            con_id: 265598,
+            symbol: "AAPL".into(),
+        }).unwrap();
+        w.engine.poll_control_commands();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = read_all(&mut w.farm_reader); // drain subscribe
+        let _ = read_all(&mut w.ccp_reader);
+
+        w.tx.send(ControlCommand::Order(crate::types::OrderRequest::SubmitLimit {
+            order_id: 1,
+            instrument: 0,
+            side: crate::types::Side::Buy,
+            qty: 100,
+            price: 15000, // $150.00 in price_scale
+        })).unwrap();
+        w.engine.poll_control_commands();
+        // Orders are drained in drain_and_send_orders, called from run() loop.
+        // Call it directly.
+        w.engine.drain_and_send_orders();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let ccp_data = read_all(&mut w.ccp_reader);
+        let farm_data = read_all(&mut w.farm_reader);
+        assert!(!ccp_data.is_empty(), "order should send to CCP");
+        assert!(farm_data.is_empty(), "order should NOT send to farm");
+
+        let parsed = fix::fix_parse(&ccp_data);
+        assert_eq!(parsed.get(&35).map(|s| s.as_str()), Some("D")); // NewOrderSingle
+        assert_eq!(parsed.get(&54).map(|s| s.as_str()), Some("1")); // Buy
+        assert_eq!(parsed.get(&38).map(|s| s.as_str()), Some("100")); // Qty
+        assert_eq!(parsed.get(&40).map(|s| s.as_str()), Some("2")); // Limit
+        assert!(parsed.get(&44).is_some(), "should contain price tag");
+    }
+
+    #[test]
+    fn wire_tbt_subscribe_sends_to_hmds() {
+        let mut w = engine_wired();
+
+        w.tx.send(ControlCommand::SubscribeTbt {
+            con_id: 265598,
+            symbol: "AAPL".into(),
+            tbt_type: crate::types::TbtType::Last,
+        }).unwrap();
+        w.engine.poll_control_commands();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let hmds_data = read_all(&mut w.hmds_reader);
+        assert!(!hmds_data.is_empty(), "TBT subscribe should send to HMDS");
+
+        let parsed = fix::fix_parse(&hmds_data);
+        assert_eq!(parsed.get(&35).map(|s| s.as_str()), Some("W"));
+        let xml = parsed.get(&6118).unwrap();
+        assert!(xml.contains("265598"), "should contain conId");
     }
 }
