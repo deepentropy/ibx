@@ -2553,7 +2553,7 @@ impl HotLoop {
 
         for cmd in cmds {
             match cmd {
-                ControlCommand::Subscribe { con_id, symbol } => {
+                ControlCommand::Subscribe { con_id, symbol, .. } => {
                     let id = self.context.market.register(con_id);
                     self.context.market.set_symbol(id, symbol);
                     self.shared.set_instrument_count(self.context.market.count());
@@ -4482,7 +4482,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
-        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
         engine.poll_control_commands();
 
         // Instrument should be registered
@@ -4510,8 +4510,8 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
-        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
-        tx.send(ControlCommand::Subscribe { con_id: 272093, symbol: "MSFT".into() }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 272093, symbol: "MSFT".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
         tx.send(ControlCommand::UpdateParam { key: "k".into(), value: "v".into() }).unwrap();
         engine.poll_control_commands();
 
@@ -4795,7 +4795,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
 
-        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
         engine.poll_control_commands();
 
         // Should have 2 pending subscriptions (BidAsk + Last) with req_id=1,2
@@ -5170,8 +5170,8 @@ mod tests {
         engine.set_control_rx(rx);
 
         // Subscribe same instrument twice
-        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
-        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
+        tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
         engine.poll_control_commands();
 
         // register() deduplicates, so both should map to instrument 0
@@ -6372,6 +6372,8 @@ mod tests {
         w.tx.send(ControlCommand::Subscribe {
             con_id: 265598,
             symbol: "AAPL".into(),
+            exchange: String::new(),
+            sec_type: String::new(),
         }).unwrap();
         w.engine.poll_control_commands();
 
@@ -6397,6 +6399,8 @@ mod tests {
         w.tx.send(ControlCommand::Subscribe {
             con_id: 265598,
             symbol: "AAPL".into(),
+            exchange: String::new(),
+            sec_type: String::new(),
         }).unwrap();
         w.engine.poll_control_commands();
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -6484,6 +6488,8 @@ mod tests {
         w.tx.send(ControlCommand::Subscribe {
             con_id: 265598,
             symbol: "AAPL".into(),
+            exchange: String::new(),
+            sec_type: String::new(),
         }).unwrap();
         w.engine.poll_control_commands();
         std::thread::sleep(std::time::Duration::from_millis(50));

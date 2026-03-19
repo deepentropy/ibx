@@ -1316,7 +1316,7 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config
         }).unwrap();
     }
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);

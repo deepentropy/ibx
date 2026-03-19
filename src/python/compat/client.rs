@@ -195,6 +195,8 @@ impl EClient {
         tx.send(ControlCommand::Subscribe {
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
+            exchange: contract.exchange.clone(),
+            sec_type: contract.sec_type.clone(),
         })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
 
@@ -2421,6 +2423,8 @@ impl EClient {
         tx.send(ControlCommand::Subscribe {
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
+            exchange: contract.exchange.clone(),
+            sec_type: contract.sec_type.clone(),
         })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
 

@@ -184,7 +184,7 @@ fn main() {
     );
 
     // Subscribe to instrument
-    control_tx.send(ControlCommand::Subscribe { con_id, symbol: symbol.to_string() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id, symbol: symbol.to_string(), exchange: String::new(), sec_type: String::new() }).unwrap();
 
     // Run hot loop in dedicated thread
     let control_tx2 = control_tx.clone();

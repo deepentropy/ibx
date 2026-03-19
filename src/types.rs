@@ -871,11 +871,43 @@ pub struct CompletedOrder {
     pub timestamp_ns: u64,
 }
 
+/// Which farm connection to route a market data subscription to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FarmSlot {
+    /// US stocks (regular + extended hours) — `usfarm`
+    UsFarm,
+    /// Forex (IDEALPRO) — `cashfarm`
+    CashFarm,
+    /// US futures (CME/GLOBEX) — `usfuture`
+    UsFuture,
+    /// European stocks — `eufarm`
+    EuFarm,
+    /// Japan stocks — `jfarm`
+    JFarm,
+}
+
+/// Determine which farm to route a subscription to based on exchange and security type.
+pub fn farm_for_instrument(exchange: &str, sec_type: &str) -> FarmSlot {
+    match sec_type {
+        "FUT" | "CONTFUT" => FarmSlot::UsFuture,
+        "CASH" => FarmSlot::CashFarm,
+        _ => match exchange {
+            "IDEALPRO" => FarmSlot::CashFarm,
+            "CME" | "GLOBEX" | "NYMEX" | "COMEX" | "ECBOT" | "CBOT" => FarmSlot::UsFuture,
+            "AEB" | "BVME" | "DTB" | "IBIS" | "ICEEU" | "LSEETF" | "MOEX" | "SBF" | "SEHK"
+            | "SFB" | "SNFE" | "VSE" | "VIRTX" | "EBS" | "BATEEN" | "FWB" | "IBIS2" => FarmSlot::EuFarm,
+            "TSEJ" | "JPX" | "OSE" => FarmSlot::JFarm,
+            _ => FarmSlot::UsFarm,
+        }
+    }
+}
+
 /// Commands sent from the control plane to the hot loop via SPSC channel.
 #[derive(Debug, Clone)]
 pub enum ControlCommand {
     /// Subscribe to market data for a contract.
-    Subscribe { con_id: i64, symbol: String },
+    /// `exchange` and `sec_type` determine farm routing (empty = UsFarm default).
+    Subscribe { con_id: i64, symbol: String, exchange: String, sec_type: String },
     /// Unsubscribe from market data for an instrument.
     Unsubscribe { instrument: InstrumentId },
     /// Subscribe to tick-by-tick data via historical data connection.
@@ -1378,7 +1410,7 @@ mod tests {
 
     #[test]
     fn control_command_subscribe() {
-        let cmd = ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() };
+        let cmd = ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new() };
         match cmd {
             ControlCommand::Subscribe { con_id, .. } => assert_eq!(con_id, 265598),
             _ => panic!("wrong variant"),
@@ -1408,7 +1440,7 @@ mod tests {
 
     #[test]
     fn control_command_clone() {
-        let cmd = ControlCommand::Subscribe { con_id: 42, symbol: "TEST".into() };
+        let cmd = ControlCommand::Subscribe { con_id: 42, symbol: "TEST".into(), exchange: String::new(), sec_type: String::new() };
         let cmd2 = cmd.clone();
         match cmd2 {
             ControlCommand::Subscribe { con_id, .. } => assert_eq!(con_id, 42),

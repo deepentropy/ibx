@@ -112,6 +112,8 @@ impl BenchSession {
             .send(ControlCommand::Subscribe {
                 con_id,
                 symbol: symbol.to_string(),
+                exchange: String::new(),
+                sec_type: String::new(),
             })
             .unwrap();
     }

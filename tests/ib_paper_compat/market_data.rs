@@ -16,7 +16,7 @@ pub(super) fn phase_market_data(conns: Conns) -> Conns {
         shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -74,9 +74,9 @@ pub(super) fn phase_multi_instrument(conns: Conns) -> Conns {
         shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 272093, symbol: "MSFT".into() }).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 272093, symbol: "MSFT".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -136,7 +136,7 @@ pub(super) fn phase_subscribe_unsubscribe(conns: Conns) -> Conns {
     let (hot_loop, control_tx) = HotLoop::with_connections(
         shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let mut tick_count = 0u32;
@@ -220,7 +220,7 @@ pub(super) fn phase_streaming_validation(conns: Conns) -> Conns {
         shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -348,7 +348,7 @@ pub(super) fn phase_forex_market_data(conns: Conns) -> Conns {
         shared.clone(), Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { con_id, symbol: "EUR".into() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id, symbol: "EUR".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -407,7 +407,7 @@ pub(super) fn phase_forex_streaming_validation(conns: Conns) -> Conns {
     );
 
     // EUR.USD con_id = 12087792 (well-known IB con_id)
-    control_tx.send(ControlCommand::Subscribe { con_id: 12087792, symbol: "EUR".into() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 12087792, symbol: "EUR".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -458,7 +458,7 @@ pub(super) fn phase_forex_reconnection(conns: Conns) -> Conns {
         shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 12087792, symbol: "EUR".into() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 12087792, symbol: "EUR".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -486,7 +486,7 @@ pub(super) fn phase_forex_reconnection(conns: Conns) -> Conns {
         conns1.farm, conns1.ccp, conns1.hmds, None,
     );
 
-    control_tx2.send(ControlCommand::Subscribe { con_id: 12087792, symbol: "EUR".into() }).unwrap();
+    control_tx2.send(ControlCommand::Subscribe { con_id: 12087792, symbol: "EUR".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     let join2 = run_hot_loop(hot_loop2);
 
     let deadline2 = Instant::now() + Duration::from_secs(15);
@@ -524,9 +524,9 @@ pub(super) fn phase_tick_stress_test(conns: Conns) -> Conns {
     );
 
     // Subscribe to 3 high-volume instruments
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into() }).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 272093, symbol: "MSFT".into() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 272093, symbol: "MSFT".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let run_duration = Duration::from_secs(30);
@@ -655,7 +655,7 @@ pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
     );
 
     // Subscribe to both regular market data and TBT simultaneously
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     control_tx.send(ControlCommand::SubscribeTbt {
         con_id: 756733, symbol: "SPY".into(), tbt_type: TbtType::Last,
     }).unwrap();
@@ -753,7 +753,7 @@ pub(super) fn phase_concurrent_subscribe_stress(conns: Conns) -> Conns {
 
     // Subscribe to all 10 simultaneously
     for &(con_id, symbol) in instruments {
-        control_tx.send(ControlCommand::Subscribe { con_id, symbol: symbol.into() }).unwrap();
+        control_tx.send(ControlCommand::Subscribe { con_id, symbol: symbol.into(), exchange: String::new(), sec_type: String::new() }).unwrap();
     }
     let join = run_hot_loop(hot_loop);
 

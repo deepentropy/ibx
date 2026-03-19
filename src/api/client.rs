@@ -220,6 +220,8 @@ impl EClient {
         let _ = self.control_tx.send(ControlCommand::Subscribe {
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
+            exchange: contract.exchange.clone(),
+            sec_type: contract.sec_type.clone(),
         });
 
         let instrument_id = self.wait_for_registration(reg_gen);
@@ -1064,6 +1066,8 @@ impl EClient {
         self.control_tx.send(ControlCommand::Subscribe {
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
+            exchange: contract.exchange.clone(),
+            sec_type: contract.sec_type.clone(),
         }).map_err(|e| format!("Engine stopped: {}", e))?;
 
         Ok(self.wait_for_registration(reg_gen))
@@ -1308,7 +1312,7 @@ mod tests {
         assert!(matches!(cmd1, ControlCommand::RegisterInstrument { con_id: 756733 }));
         let cmd2 = rx.try_recv().unwrap();
         match cmd2 {
-            ControlCommand::Subscribe { con_id, symbol } => {
+            ControlCommand::Subscribe { con_id, symbol, .. } => {
                 assert_eq!(con_id, 756733);
                 assert_eq!(symbol, "SPY");
             }
