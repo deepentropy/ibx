@@ -6159,4 +6159,149 @@ mod tests {
         let order = engine.context_mut().order(200).unwrap();
         assert_eq!(order.status, OrderStatus::Submitted);
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  End-to-end wire tests: ControlCommand → Connection → FIX bytes
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Create a TCP loopback pair and return (engine_conn, reader).
+    /// `engine_conn` is a non-blocking Connection for the hot_loop.
+    /// `reader` is a blocking TcpStream to read what was sent.
+    fn loopback_pair() -> (Connection, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        // server side → engine (non-blocking for send_fix)
+        let conn = Connection::new_raw(server).unwrap();
+        // client side → test reader (blocking with timeout)
+        client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        (conn, client)
+    }
+
+    /// Read all available bytes from a TcpStream.
+    fn read_all(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+        let mut buf = vec![0u8; 8192];
+        let mut out = Vec::new();
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
+                Err(e) => panic!("read error: {}", e),
+            }
+        }
+        out
+    }
+
+    /// Engine with a CCP connection attached via TCP loopback.
+    fn engine_with_ccp() -> (HotLoop, crossbeam_channel::Sender<ControlCommand>, std::net::TcpStream) {
+        let shared = Arc::new(SharedState::new());
+        let (ccp_conn, ccp_reader) = loopback_pair();
+        let (farm_conn, _farm_reader) = loopback_pair();
+        let mut engine = HotLoop::new(shared, None, None);
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        engine.set_control_rx(rx);
+        engine.ccp_conn = Some(ccp_conn);
+        engine.farm_conn = Some(farm_conn);
+        // Set seq to a realistic value (as if logon already happened)
+        engine.ccp_conn.as_mut().unwrap().seq = 100;
+        (engine, tx, ccp_reader)
+    }
+
+    #[test]
+    fn wire_matching_symbols_uses_conn_seq() {
+        let (mut engine, tx, mut reader) = engine_with_ccp();
+
+        tx.send(ControlCommand::FetchMatchingSymbols {
+            req_id: 1,
+            pattern: "SER".into(),
+        }).unwrap();
+        engine.poll_control_commands();
+
+        // Give the non-blocking send a moment to flush
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let data = read_all(&mut reader);
+        assert!(!data.is_empty(), "no bytes sent on CCP connection");
+
+        let parsed = fix::fix_parse(&data);
+        assert_eq!(parsed.get(&35).map(|s| s.as_str()), Some("U"), "msg_type should be U");
+        assert_eq!(parsed.get(&6040).map(|s| s.as_str()), Some("185"), "comm_type should be 185");
+        assert_eq!(parsed.get(&58).map(|s| s.as_str()), Some("SER"), "pattern should be SER");
+        // Seq should be 101 (started at 100, incremented by send_fix)
+        assert_eq!(parsed.get(&34).map(|s| s.as_str()), Some("000101"), "seq should use conn.seq");
+    }
+
+    #[test]
+    fn wire_secdef_by_symbol_sends_correct_tags() {
+        let (mut engine, tx, mut reader) = engine_with_ccp();
+
+        tx.send(ControlCommand::FetchContractDetails {
+            req_id: 5,
+            con_id: 0,
+            symbol: "AAPL".into(),
+            sec_type: "STK".into(),
+            exchange: "SMART".into(),
+            currency: "USD".into(),
+        }).unwrap();
+        engine.poll_control_commands();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let data = read_all(&mut reader);
+        assert!(!data.is_empty(), "no bytes sent on CCP connection");
+
+        let parsed = fix::fix_parse(&data);
+        assert_eq!(parsed.get(&35).map(|s| s.as_str()), Some("c"));
+        assert_eq!(parsed.get(&55).map(|s| s.as_str()), Some("AAPL"));
+        assert_eq!(parsed.get(&167).map(|s| s.as_str()), Some("CS")); // STK → CS
+        assert_eq!(parsed.get(&207).map(|s| s.as_str()), Some("BEST")); // SMART → BEST
+        assert_eq!(parsed.get(&15).map(|s| s.as_str()), Some("USD"));
+        // Should NOT have con_id tag since we sent con_id=0
+        assert!(parsed.get(&6008).is_none(), "should not send conId tag for symbol-based lookup");
+    }
+
+    #[test]
+    fn wire_secdef_by_conid_sends_conid_tag() {
+        let (mut engine, tx, mut reader) = engine_with_ccp();
+
+        tx.send(ControlCommand::FetchContractDetails {
+            req_id: 7,
+            con_id: 265598,
+            symbol: String::new(),
+            sec_type: String::new(),
+            exchange: String::new(),
+            currency: String::new(),
+        }).unwrap();
+        engine.poll_control_commands();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let data = read_all(&mut reader);
+        let parsed = fix::fix_parse(&data);
+        assert_eq!(parsed.get(&35).map(|s| s.as_str()), Some("c"));
+        assert_eq!(parsed.get(&6008).map(|s| s.as_str()), Some("265598"));
+    }
+
+    #[test]
+    fn wire_news_subscribe_goes_to_ccp() {
+        let (mut engine, tx, mut reader) = engine_with_ccp();
+
+        tx.send(ControlCommand::SubscribeNews {
+            con_id: 265598,
+            symbol: "AAPL".into(),
+            providers: "BRFG*BRFUPDN".into(),
+        }).unwrap();
+        engine.poll_control_commands();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let data = read_all(&mut reader);
+        assert!(!data.is_empty(), "news subscribe should send to CCP");
+
+        let parsed = fix::fix_parse(&data);
+        assert_eq!(parsed.get(&35).map(|s| s.as_str()), Some("V")); // market data req
+        assert_eq!(parsed.get(&207).map(|s| s.as_str()), Some("NEWS"));
+        assert_eq!(parsed.get(&264).map(|s| s.as_str()), Some("292"));
+        assert_eq!(parsed.get(&6472).map(|s| s.as_str()), Some("BRFG*BRFUPDN"));
+    }
 }
