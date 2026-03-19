@@ -163,28 +163,31 @@ pub(super) fn phase_cancel_historical(mut conns: Conns, gw: &Gateway, config: &G
         shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
     );
 
-    // Request 1-second bars (large dataset to have time to cancel)
+    // Request 5-min bars for 5 days (multi-chunk response, cancelable)
     control_tx.send(ControlCommand::FetchHistorical {
         req_id: 7700, con_id: 756733, symbol: "SPY".into(),
-        end_date_time: now_ib_timestamp(), duration: "1 D".into(),
-        bar_size: "1 secs".into(), what_to_show: "TRADES".into(), use_rth: true,
+        end_date_time: now_ib_timestamp(), duration: "5 D".into(),
+        bar_size: "5 mins".into(), what_to_show: "TRADES".into(), use_rth: true,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     // Wait for first chunk
     let mut got_first_chunk = false;
-    let first_deadline = Instant::now() + Duration::from_secs(10);
+    let first_deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < first_deadline && !got_first_chunk {
         let results = shared.drain_historical_data();
-        for (req_id, _) in results {
-            if req_id == 7700 { got_first_chunk = true; println!("  First chunk received, sending cancel"); }
+        for (req_id, resp) in &results {
+            if *req_id == 7700 {
+                got_first_chunk = true;
+                println!("  First chunk received ({} bars), sending cancel", resp.bars.len());
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
     if !got_first_chunk {
         let conns = shutdown_and_reclaim(&control_tx, join, account_id);
-        println!("  SKIP: No initial data received to cancel\n");
+        println!("  SKIP: No data received in 15s\n");
         return conns;
     }
 
