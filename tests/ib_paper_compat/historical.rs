@@ -485,65 +485,86 @@ pub(super) fn phase_fundamental_data(gw: &Gateway, config: &GatewayConfig) {
     println!("  PASS\n");
 }
 
+/// TEXTBOOK INTEGRATION TEST PATTERN
+///
+/// Every integration test MUST follow this structure:
+///   1. Connect to real server (Gateway::connect or connect_farm)
+///   2. Create HotLoop with real connections + ControlCommand channel
+///   3. Send ControlCommand through the channel (NOT inject_* or push_*)
+///   4. Let the hot_loop process it → sends FIX to server → receives response
+///   5. Verify SPECIFIC VALUES in the response (not just "did something arrive")
+///   6. Clean up (shutdown_and_reclaim)
+///
+/// This test verifies historical news end-to-end:
+///   ControlCommand::FetchHistoricalNews → hot_loop → HMDS FIX request
+///   → real server → FIX response → hot_loop parses j.c codec + ZIP
+///   → SharedState → drain_historical_news → verify headline values
 pub(super) fn phase_historical_news(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 85: Historical News (AAPL) ---");
+    println!("--- Phase 85: Historical News (AAPL, end-to-end) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let mut hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
 
+    // Step 1: Create HotLoop with ALL real connections (farm + CCP + HMDS)
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
-    let (bg_loop, bg_tx) = HotLoop::with_connections(shared, None, account_id.clone(), conns.farm, conns.ccp, None, None);
-    bg_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into() }).unwrap();
-    let bg_join = run_hot_loop(bg_loop);
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(),
+        conns.farm, conns.ccp, Some(hmds), None,
+    );
 
-    let req = news::HistoricalNewsRequest {
-        query_id: "news_test".to_string(),
-        con_id: 265598, provider_codes: "BRFG+BRFUPDN".to_string(),
-        start_time: String::new(), end_time: String::new(), max_results: 5,
-    };
-    let xml = news::build_historical_news_xml(&req);
-    hmds.send_fixcomp(&[(fix::TAG_MSG_TYPE, "U"), (news::TAG_SUB_PROTOCOL, "10030"), (news::TAG_NEWS_XML, &xml)]).expect("Failed to send historical news request");
+    // Step 2: Send the request through the ControlCommand channel
+    // The hot_loop will build the XML, send to HMDS, receive the response,
+    // decode the j.c codec, decompress the ZIP, parse the Properties,
+    // and push headlines to SharedState.
+    control_tx.send(ControlCommand::FetchHistoricalNews {
+        req_id: 8500,
+        con_id: 265598, // AAPL
+        provider_codes: "BRFG+BRFUPDN+DJ-N+DJ-RTA+DJ-RTE+DJ-RTG+DJ-RTPRO+DJNL".into(),
+        start_time: String::new(),
+        end_time: String::new(),
+        max_results: 5,
+    }).unwrap();
 
-    let mut got_response = false;
+    // Step 3: Run the hot_loop and wait for results
+    let join = run_hot_loop(hot_loop);
     let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_news = false;
 
-    while Instant::now() < deadline && !got_response {
-        match hmds.try_recv() {
-            Ok(0) => { std::thread::sleep(Duration::from_millis(50)); continue; }
-            Err(e) => { println!("  HMDS recv error: {}", e); break; }
-            Ok(_) => {}
-        }
-        for frame in hmds.extract_frames() {
-            let data = match &frame {
-                Frame::FixComp(raw) => { let (u, _) = hmds.unsign(raw); fixcomp::fixcomp_decompress(&u) }
-                Frame::Fix(raw) => vec![raw.clone()],
-                _ => continue,
-            };
-            for msg in data {
-                let tags = fix::fix_parse(&msg);
-                if tags.get(&news::TAG_SUB_PROTOCOL).map(|s| s.as_str()) == Some("10032") {
-                    if let Some(xml_resp) = tags.get(&news::TAG_NEWS_XML) {
-                        if let Some(id) = news::parse_news_response_id(xml_resp) {
-                            println!("  Response ID: {}", id);
-                        }
-                    }
-                    if tags.contains_key(&news::TAG_RAW_DATA) {
-                        println!("  Raw data payload received");
-                    }
-                    got_response = true;
+    while Instant::now() < deadline && !got_news {
+        // Check SharedState for results (the hot_loop pushes here)
+        let results = shared.drain_historical_news();
+        if !results.is_empty() {
+            for (req_id, headlines, has_more) in &results {
+                // Step 4: Verify SPECIFIC VALUES
+                assert_eq!(*req_id, 8500, "req_id should match what we sent");
+                println!("  Got {} headlines (has_more={})", headlines.len(), has_more);
+                assert!(!headlines.is_empty(), "should have at least 1 headline");
+
+                for h in headlines {
+                    // Verify each headline has non-empty fields
+                    assert!(!h.time.is_empty(), "headline time should not be empty");
+                    assert!(!h.provider_code.is_empty(), "provider_code should not be empty");
+                    assert!(!h.article_id.is_empty(), "article_id should not be empty");
+                    assert!(!h.headline.is_empty(), "headline text should not be empty");
+                    // Verify time format looks like a date (starts with 20)
+                    assert!(h.time.starts_with("20"), "time should be a date: {}", h.time);
+                    println!("    {} [{}] {}", h.time, h.provider_code, &h.headline[..h.headline.len().min(80)]);
                 }
             }
+            got_news = true;
         }
+        std::thread::sleep(Duration::from_millis(100));
     }
 
-    let mut bg_conns = shutdown_and_reclaim(&bg_tx, bg_join, account_id);
-    bg_conns.hmds = Some(hmds);
+    // Step 5: Clean up
+    let bg_conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    if !got_response {
+    if !got_news {
         println!("  SKIP: No news response received (may require news subscription)\n");
         return bg_conns;
     }

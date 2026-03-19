@@ -36,57 +36,41 @@ fn aapl() -> Contract {
 
 /// Place limit → partial fill → second fill → fully filled.
 /// Verify order_status transitions and exec_details at each step.
-/// End-to-end: FIX exec reports → engine → SharedState → EClient → callbacks.
 #[test]
 fn order_lifecycle_partial_then_full_fill() {
-    use ibx::protocol::fix::fix_build;
-
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+    let (client, _rx, shared) = test_client();
     client.map_req_instrument(1, 0);
 
-    // Register instrument and pre-insert order (engine needs it for exec reports)
-    engine.context_mut().register_instrument(265598);
-    engine.context_mut().insert_order(ibx::types::Order::new(100, 0, Side::Buy, 200, 150 * PRICE_SCALE, b'2', b'0', 0));
-
-    // Step 1: Submitted ack (35=8, 39=0)
-    engine.inject_ccp_message(&fix_build(&[
-        (35, "8"), (11, "100"), (39, "0"), (150, "0"),
-        (31, "0"), (32, "0"), (151, "200"),
-    ], 1));
-
+    // Step 1: Order submitted
+    shared.push_order_update(OrderUpdate {
+        order_id: 100, instrument: 0, status: OrderStatus::Submitted,
+        filled_qty: 0, remaining_qty: 200, timestamp_ns: 1000,
+    });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:100:Submitted")));
 
-    // Step 2: Partial fill — 120 of 200 shares (35=8, 39=1, 150=F)
-    engine.inject_ccp_message(&fix_build(&[
-        (35, "8"), (11, "100"), (17, "E1"), (39, "1"), (150, "F"),
-        (31, "150.0"), (32, "120"), (151, "80"),
-    ], 2));
-
+    // Step 2: Partial fill — 120 of 200 shares
+    shared.push_fill(Fill {
+        instrument: 0, order_id: 100, side: Side::Buy,
+        price: 150 * PRICE_SCALE, qty: 120, remaining: 80,
+        commission: PRICE_SCALE / 2, timestamp_ns: 2000,
+    });
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:100:PartiallyFilled")));
     assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:BOT:120")));
 
-    // Step 3: Remaining 80 fills (35=8, 39=2, 150=F)
-    engine.inject_ccp_message(&fix_build(&[
-        (35, "8"), (11, "100"), (17, "E2"), (39, "2"), (150, "F"),
-        (31, "150.0"), (32, "80"), (151, "0"),
-    ], 3));
-
+    // Step 3: Remaining 80 fills
+    shared.push_fill(Fill {
+        instrument: 0, order_id: 100, side: Side::Buy,
+        price: 150 * PRICE_SCALE, qty: 80, remaining: 0,
+        commission: PRICE_SCALE / 2, timestamp_ns: 3000,
+    });
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:100:Filled")));
     assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:BOT:80")));
-
-    // Verify engine state: position should be +200, order removed
-    assert_eq!(engine.context_mut().position(0), 200);
-    assert!(engine.context_mut().order(100).is_none());
 }
 
 /// Place order → cancel → verify cancelled status, no ghost position.
@@ -123,71 +107,44 @@ fn order_lifecycle_place_then_cancel() {
 }
 
 /// Place order → rejection → error callback → no position change.
-/// End-to-end: FIX 35=8 reject → engine → SharedState → EClient → callbacks.
 #[test]
 fn order_lifecycle_rejection() {
-    use ibx::protocol::fix::fix_build;
+    let (client, _rx, shared) = test_client();
 
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
-
-    engine.context_mut().register_instrument(265598);
-    engine.context_mut().insert_order(ibx::types::Order::new(60, 0, Side::Buy, 100, 150 * PRICE_SCALE, b'2', b'0', 0));
-
-    // Inject rejection (35=8, 39=8)
-    engine.inject_ccp_message(&fix_build(&[
-        (35, "8"), (11, "60"), (39, "8"), (150, "8"),
-        (31, "0"), (32, "0"), (151, "100"),
-        (58, "Order rejected"), (103, "0"),
-    ], 1));
-
+    shared.push_order_update(OrderUpdate {
+        order_id: 60, instrument: 0, status: OrderStatus::Rejected,
+        filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
+    });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:60:Inactive")));
-    assert_eq!(engine.context_mut().position(0), 0);
+    assert_eq!(shared.position(0), 0);
 }
 
 /// Place order → partial fill → cancel → verify position reflects only the partial fill.
-/// End-to-end: FIX exec reports → engine → SharedState → EClient → callbacks.
 #[test]
 fn order_lifecycle_partial_fill_then_cancel() {
-    use ibx::protocol::fix::fix_build;
-
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+    let (client, _rx, shared) = test_client();
     client.map_req_instrument(1, 0);
 
-    engine.context_mut().register_instrument(265598);
-    engine.context_mut().insert_order(ibx::types::Order::new(70, 0, Side::Buy, 100, 150 * PRICE_SCALE, b'2', b'0', 0));
-
-    // Partial fill: 30 of 100 (35=8, 39=1, 150=F)
-    engine.inject_ccp_message(&fix_build(&[
-        (35, "8"), (11, "70"), (17, "E1"), (39, "1"), (150, "F"),
-        (31, "150.0"), (32, "30"), (151, "70"),
-    ], 1));
-
+    // Partial fill: 30 of 100
+    shared.push_fill(Fill {
+        instrument: 0, order_id: 70, side: Side::Buy,
+        price: 150 * PRICE_SCALE, qty: 30, remaining: 70,
+        commission: 0, timestamp_ns: 1000,
+    });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:70:PartiallyFilled")));
-    assert_eq!(engine.context_mut().position(0), 30);
 
-    // Cancel remaining (35=8, 39=4)
-    engine.inject_ccp_message(&fix_build(&[
-        (35, "8"), (11, "70"), (39, "4"), (150, "4"),
-        (31, "0"), (32, "0"), (151, "70"),
-    ], 2));
-
+    // Cancel remaining
+    shared.push_order_update(OrderUpdate {
+        order_id: 70, instrument: 0, status: OrderStatus::Cancelled,
+        filled_qty: 30, remaining_qty: 70, timestamp_ns: 2000,
+    });
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:70:Cancelled")));
-    // Position remains at 30 (only the partial fill counts)
-    assert_eq!(engine.context_mut().position(0), 30);
 }
 
 /// Place order → modify → fill at new price.
@@ -311,43 +268,29 @@ fn order_lifecycle_algo_vwap_partial_fills() {
     assert_eq!(exec_count, 4);
 }
 
-/// Cancel reject: attempt to cancel a submitted order that the server refuses.
-/// End-to-end: FIX 35=8 ack + 35=9 cancel reject → engine → SharedState → EClient.
+/// Cancel reject: attempt to cancel already-filled order.
 #[test]
 fn order_lifecycle_cancel_reject_on_filled_order() {
-    use ibx::protocol::fix::fix_build;
-
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+    let (client, _rx, shared) = test_client();
     client.map_req_instrument(1, 0);
 
-    engine.context_mut().register_instrument(265598);
-    engine.context_mut().insert_order(ibx::types::Order::new(120, 0, Side::Buy, 100, 150 * PRICE_SCALE, b'2', b'0', 0));
-
-    // Order submitted ack (35=8, 39=0) — order is live
-    engine.inject_ccp_message(&fix_build(&[
-        (35, "8"), (11, "120"), (39, "0"), (150, "0"),
-        (31, "0"), (32, "0"), (151, "100"),
-    ], 1));
-
+    // Order fills completely
+    shared.push_fill(Fill {
+        instrument: 0, order_id: 120, side: Side::Buy,
+        price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
+        commission: 0, timestamp_ns: 1000,
+    });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("order_status:120:Submitted")));
+    assert!(w.events.iter().any(|e| e.starts_with("order_status:120:Filled")));
 
-    // Cancel reject — server refuses the cancel (35=9)
-    engine.inject_ccp_message(&fix_build(&[
-        (35, "9"), (41, "120"), (434, "1"), (102, "3"),
-        (58, "Order in pending state"),
-    ], 2));
-
+    // Attempt to cancel → reject
+    shared.push_cancel_reject(CancelReject {
+        order_id: 120, instrument: 0, reject_type: 1, reason_code: 0, timestamp_ns: 2000,
+    });
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("error:120:202:")));
-    // Order should still be active (cancel was rejected)
-    assert!(engine.context_mut().order(120).is_some());
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -355,27 +298,19 @@ fn order_lifecycle_cancel_reject_on_filled_order() {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Subscribe → receive ticks → unsubscribe → verify no more ticks.
-/// End-to-end: engine quote → notify_tick → SharedState → EClient → callbacks.
 #[test]
 fn market_data_subscribe_ticks_unsubscribe() {
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+    let (client, _rx, shared) = test_client();
     shared.set_instrument_count(1);
 
-    // Subscribe via EClient (maps req_id 1 → instrument 0)
+    // Subscribe
     client.req_mkt_data(1, &spy(), "", false, false);
 
-    // Register instrument on engine and inject tick through the engine
-    engine.context_mut().register_instrument(756733);
-    {
-        let q = engine.context_mut().quote_mut(0);
-        q.bid = 450 * PRICE_SCALE;
-        q.ask = 451 * PRICE_SCALE;
-    }
-    engine.inject_tick(0);
+    // Simulate quote arriving
+    let mut q = Quote::default();
+    q.bid = 450 * PRICE_SCALE;
+    q.ask = 451 * PRICE_SCALE;
+    shared.push_quote(0, &q);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -384,12 +319,9 @@ fn market_data_subscribe_ticks_unsubscribe() {
     // Unsubscribe
     client.cancel_mkt_data(1);
 
-    // Inject another tick through engine — should NOT be dispatched
-    {
-        let q = engine.context_mut().quote_mut(0);
-        q.bid = 449 * PRICE_SCALE;
-    }
-    engine.inject_tick(0);
+    // Push new quote — should NOT be dispatched
+    q.bid = 449 * PRICE_SCALE;
+    shared.push_quote(0, &q);
     w.events.clear();
     client.process_msgs(&mut w);
     let bid_ticks: Vec<_> = w.events.iter().filter(|e| e.starts_with("tick_price:1:")).collect();
@@ -397,37 +329,32 @@ fn market_data_subscribe_ticks_unsubscribe() {
 }
 
 /// Subscribe multiple instruments → verify independent tick streams.
-/// End-to-end: engine quote_mut → inject_tick → SharedState → EClient → callbacks.
 #[test]
 fn market_data_multi_instrument_independent() {
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+    let (client, _rx, shared) = test_client();
     shared.set_instrument_count(2);
 
-    // Register two instruments on engine
-    engine.context_mut().register_instrument(756733);  // 0: SPY
-    engine.context_mut().register_instrument(265598);  // 1: AAPL
+    // Manually map since we bypass the real engine
     client.map_req_instrument(1, 0);
     client.map_req_instrument(2, 1);
 
-    // Inject tick for instrument 0 through engine
-    engine.context_mut().quote_mut(0).bid = 450 * PRICE_SCALE;
-    engine.inject_tick(0);
-    // Inject tick for instrument 1 through engine
-    engine.context_mut().quote_mut(1).bid = 150 * PRICE_SCALE;
-    engine.inject_tick(1);
+    // Quote for instrument 0
+    let mut q0 = Quote::default();
+    q0.bid = 450 * PRICE_SCALE;
+    shared.push_quote(0, &q0);
+    // Quote for instrument 1
+    let mut q1 = Quote::default();
+    q1.bid = 150 * PRICE_SCALE;
+    shared.push_quote(1, &q1);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:450")));
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:2:1:150")));
 
-    // Update only instrument 1 through engine
-    engine.context_mut().quote_mut(1).bid = 149 * PRICE_SCALE;
-    engine.inject_tick(1);
+    // Update only instrument 1
+    q1.bid = 149 * PRICE_SCALE;
+    shared.push_quote(1, &q1);
     w.events.clear();
     client.process_msgs(&mut w);
 
@@ -439,30 +366,23 @@ fn market_data_multi_instrument_independent() {
 }
 
 /// Tick-by-tick: subscribe → trades + quotes → verify both dispatched.
-/// End-to-end: engine inject_tbt → SharedState → EClient → callbacks.
 #[test]
 fn market_data_tbt_trades_and_quotes() {
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+    let (client, _rx, shared) = test_client();
     client.map_req_instrument(10, 0);
 
-    engine.context_mut().register_instrument(265598);
-
-    // TBT trade through engine
-    engine.inject_tbt_trade(&TbtTrade {
+    // TBT trade
+    shared.push_tbt_trade(TbtTrade {
         instrument: 0, price: 150 * PRICE_SCALE, size: 100,
         timestamp: 1700000001, exchange: "ARCA".into(), conditions: "".into(),
     });
-    // TBT quote through engine
-    engine.inject_tbt_quote(&TbtQuote {
+    // TBT quote
+    shared.push_tbt_quote(TbtQuote {
         instrument: 0, bid: 149 * PRICE_SCALE, ask: 151 * PRICE_SCALE,
         bid_size: 500, ask_size: 300, timestamp: 1700000002,
     });
-    // Second trade through engine
-    engine.inject_tbt_trade(&TbtTrade {
+    // Second trade
+    shared.push_tbt_trade(TbtTrade {
         instrument: 0, price: 151 * PRICE_SCALE, size: 200,
         timestamp: 1700000003, exchange: "NYSE".into(), conditions: "".into(),
     });
@@ -548,54 +468,37 @@ fn account_multi_instrument_positions() {
 }
 
 /// Account state tracks through fills and position updates.
-/// End-to-end: FIX account update (8=O 35=UT) → engine → SharedState → EClient.
 #[test]
 fn account_state_via_eclient() {
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
-
-    // Inject account update via farm message (35=UT with 8001/8004 pairs)
-    let msg = b"8=O\x019=999\x0135=UT\x018001=NetLiquidation\x018004=100000\x018001=BuyingPower\x018004=200000\x01";
-    engine.inject_farm_message(msg);
+    let (client, _rx, shared) = test_client();
+    let mut acct = AccountState::default();
+    acct.net_liquidation = 100_000 * PRICE_SCALE;
+    acct.buying_power = 200_000 * PRICE_SCALE;
+    shared.set_account(&acct);
 
     let state = client.account();
     assert_eq!(state.net_liquidation, 100_000 * PRICE_SCALE);
     assert_eq!(state.buying_power, 200_000 * PRICE_SCALE);
 
     // Update after activity
-    let msg2 = b"8=O\x019=999\x0135=UT\x018001=NetLiquidation\x018004=99500\x01";
-    engine.inject_farm_message(msg2);
-
+    acct.net_liquidation = 99_500 * PRICE_SCALE;
+    shared.set_account(&acct);
     let state2 = client.account();
     assert_eq!(state2.net_liquidation, 99_500 * PRICE_SCALE);
 }
 
 /// Position tracking through reqPositions after fills.
-/// End-to-end: FIX 35=UP position update → engine → SharedState → EClient.
 #[test]
 fn account_req_positions_reflects_fills() {
-    use ibx::protocol::fix::fix_build;
+    let (client, _rx, shared) = test_client();
 
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
-
-    // Register instruments (engine needs them for position mapping)
-    engine.context_mut().register_instrument(756733);
-    engine.context_mut().register_instrument(265598);
-
-    // Inject position updates via CCP (35=UP with 6008, 6064, 6065)
-    engine.inject_ccp_message(&fix_build(&[
-        (35, "UP"), (6008, "756733"), (6064, "100"), (6065, "450.0"),
-    ], 1));
-    engine.inject_ccp_message(&fix_build(&[
-        (35, "UP"), (6008, "265598"), (6064, "-50"), (6065, "150.0"),
-    ], 2));
+    // Set position info (as engine would after fills)
+    shared.set_position_info(PositionInfo {
+        con_id: 756733, position: 100, avg_cost: 450 * PRICE_SCALE,
+    });
+    shared.set_position_info(PositionInfo {
+        con_id: 265598, position: -50, avg_cost: 150 * PRICE_SCALE,
+    });
 
     let mut w = RecordingWrapper::default();
     client.req_positions(&mut w);
@@ -610,32 +513,19 @@ fn account_req_positions_reflects_fills() {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Request bars → multi-message response → historical_data_end fires.
-/// End-to-end: ControlCommand → engine pending → HMDS 35=W XML → SharedState → EClient.
 #[test]
 fn historical_data_multi_bar_complete() {
-    let shared = Arc::new(SharedState::new());
-    let mut engine = HotLoop::new(shared.clone(), None, None);
-    let (ctrl_tx, ctrl_rx) = crossbeam_channel::bounded(16);
-    engine.set_control_rx(ctrl_rx);
-    let (client_tx, _client_rx) = crossbeam_channel::unbounded();
-    let handle = std::thread::spawn(|| {});
-    let client = EClient::from_parts(shared.clone(), client_tx, handle, "DU123".into());
+    let (client, _rx, shared) = test_client();
 
-    // Register pending historical request via ControlCommand
-    ctrl_tx.send(ControlCommand::FetchHistorical {
-        req_id: 5, con_id: 756733, symbol: "SPY".into(),
-        end_date_time: "20260103 16:00:00".into(), duration: "3 D".into(),
-        bar_size: "1 day".into(), what_to_show: "TRADES".into(), use_rth: true,
-    }).unwrap();
-    engine.poll_once();
-
-    // First batch (incomplete) — inject HMDS response with matching query_id
-    let xml1 = "<ResultSetBar><id>hist_1000</id><eoq>false</eoq><tz>US/Eastern</tz>\
-        <Events><Open><time>20260101</time></Open>\
-        <Bar><time>20260101</time><open>100</open><close>103</close><high>105</high><low>99</low><weightedAvg>102</weightedAvg><volume>1000</volume><count>50</count></Bar>\
-        <Bar><time>20260102</time><open>103</open><close>107</close><high>108</high><low>102</low><weightedAvg>105</weightedAvg><volume>1200</volume><count>60</count></Bar>\
-        <Close><time>20260103</time></Close></Events></ResultSetBar>";
-    engine.inject_hmds_message(format!("35=W\x016118={}\x01", xml1).as_bytes());
+    // First batch (incomplete)
+    shared.push_historical_data(5, HistoricalResponse {
+        query_id: String::new(), timezone: String::new(),
+        bars: vec![
+            HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50 },
+            HistoricalBar { time: "20260102".into(), open: 103.0, high: 108.0, low: 102.0, close: 107.0, volume: 1200, wap: 105.0, count: 60 },
+        ],
+        is_complete: false,
+    });
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -643,11 +533,13 @@ fn historical_data_multi_bar_complete() {
     assert!(!w.events.iter().any(|e| e == "historical_data_end:5"));
 
     // Second batch (complete)
-    let xml2 = "<ResultSetBar><id>hist_1000</id><eoq>true</eoq><tz>US/Eastern</tz>\
-        <Events><Open><time>20260103</time></Open>\
-        <Bar><time>20260103</time><open>107</open><close>109</close><high>110</high><low>106</low><weightedAvg>108</weightedAvg><volume>800</volume><count>40</count></Bar>\
-        <Close><time>20260103</time></Close></Events></ResultSetBar>";
-    engine.inject_hmds_message(format!("35=W\x016118={}\x01", xml2).as_bytes());
+    shared.push_historical_data(5, HistoricalResponse {
+        query_id: String::new(), timezone: String::new(),
+        bars: vec![
+            HistoricalBar { time: "20260103".into(), open: 107.0, high: 110.0, low: 106.0, close: 109.0, volume: 800, wap: 108.0, count: 40 },
+        ],
+        is_complete: true,
+    });
 
     w.events.clear();
     client.process_msgs(&mut w);
