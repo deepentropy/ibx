@@ -312,8 +312,32 @@ pub fn jc_decode(buf: &[u8]) -> Vec<u8> {
 
 /// Decode a signed-byte-encoded array from an article response.
 /// Each char in the string represents a signed byte value.
+/// Decode a signed-byte-encoded array from an article response.
+/// Format: `{length}#{signed_byte}{signed_byte}...` where each signed byte
+/// is a decimal integer prefixed by `+` or `-`, e.g. `1725#+31-117+8+0`.
 fn decode_byte_array(s: &str) -> Vec<u8> {
-    s.chars().map(|c| c as u8).collect()
+    // Strip length prefix before '#'
+    let data = match s.find('#') {
+        Some(pos) => &s[pos + 1..],
+        None => s,
+    };
+    let mut result = Vec::new();
+    let mut num_start = 0;
+    let bytes = data.as_bytes();
+    let mut i = 0;
+    while i <= bytes.len() {
+        let at_delim = i == bytes.len()
+            || (i > num_start && (bytes[i] == b'+' || bytes[i] == b'-'));
+        if at_delim {
+            let token = &data[num_start..i];
+            if let Ok(val) = token.parse::<i16>() {
+                result.push(val as u8);
+            }
+            num_start = i;
+        }
+        i += 1;
+    }
+    result
 }
 
 /// Parse a news article body from the binary payload in tag 96.
@@ -324,16 +348,18 @@ pub fn parse_article_payload(raw: &[u8]) -> Option<(i32, String)> {
     let entry = extract_zip_entry(&decoded)?;
     let text = String::from_utf8_lossy(&entry);
 
-    let mut body_encoded: Option<&str> = None;
+    let mut body_encoded: Option<String> = None;
 
     for line in text.lines() {
         let line = line.trim();
-        if let Some(val) = line.strip_prefix("b=") {
-            body_encoded = Some(val);
+        // Java Properties: unescape \: and \=
+        let unescaped = line.replace("\\:", ":").replace("\\=", "=");
+        if let Some(val) = unescaped.strip_prefix("b=") {
+            body_encoded = Some(val.to_string());
         }
     }
 
-    if let Some(encoded) = body_encoded {
+    if let Some(encoded) = &body_encoded {
         let compressed = decode_byte_array(encoded);
         let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
         let mut article = String::new();
