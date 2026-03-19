@@ -36,7 +36,7 @@ pub(super) fn phase_ccp_auth(gw: &Gateway, has_hmds: bool, connect_time: Duratio
 pub(super) fn phase_extra_farms(gw: &Gateway, config: &GatewayConfig) {
     println!("--- Phase 18: Additional Farm Connections ---");
 
-    let farms = ["cashhmds", "secdefil", "fundfarm", "usopt"];
+    let farms = ["cashhmds", "secdefil", "fundfarm", "usopt", "cashfarm", "usfuture", "eufarm", "jfarm"];
     let mut connected = 0;
 
     for farm in &farms {
