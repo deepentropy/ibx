@@ -720,6 +720,18 @@ pub struct ContractDetails {
     pub last_trade_date: String,
     #[pyo3(get, set)]
     pub multiplier: String,
+    #[pyo3(get, set)]
+    pub market_rule_id: i64,
+    #[pyo3(get, set)]
+    pub strike: f64,
+    #[pyo3(get, set)]
+    pub right: String,
+    #[pyo3(get, set)]
+    pub primary_exchange: String,
+    #[pyo3(get, set)]
+    pub local_symbol: String,
+    #[pyo3(get, set)]
+    pub trading_class: String,
 }
 
 #[pymethods]
@@ -760,6 +772,12 @@ impl ContractDetails {
             long_name: def.long_name.clone(),
             last_trade_date: def.last_trade_date.clone(),
             multiplier: if def.multiplier != 1.0 { format!("{}", def.multiplier) } else { String::new() },
+            market_rule_id: def.market_rule_id.map(|id| id as i64).unwrap_or(-1),
+            strike: def.strike,
+            right: def.right.map(|r| format!("{:?}", r)).unwrap_or_default(),
+            primary_exchange: def.primary_exchange.clone(),
+            local_symbol: def.local_symbol.clone(),
+            trading_class: def.trading_class.clone(),
         }
     }
 }
