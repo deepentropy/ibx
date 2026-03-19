@@ -32,6 +32,10 @@ pub struct HotLoop {
     pub ccp_conn: Option<Connection>,
     /// Historical farm connection for historical data (optional).
     pub hmds_conn: Option<Connection>,
+    /// Forex tick farm connection (optional).
+    pub cashfarm_conn: Option<Connection>,
+    /// US futures tick farm connection (optional).
+    pub usfuture_conn: Option<Connection>,
     /// Next market data request ID for FIX tag 262.
     next_md_req_id: u32,
     /// Pending subscriptions: MDReqID → InstrumentId (awaiting 35=Q ack).
@@ -152,6 +156,8 @@ impl HotLoop {
             farm_conn: None,
             ccp_conn: None,
             hmds_conn: None,
+            cashfarm_conn: None,
+            usfuture_conn: None,
             next_md_req_id: 1,
             md_req_to_instrument: Vec::new(),
             instrument_md_reqs: Vec::new(),

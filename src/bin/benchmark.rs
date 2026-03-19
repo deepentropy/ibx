@@ -171,7 +171,7 @@ fn main() {
     // 1. Connection time
     println!("Connecting to IB...");
     let connect_start = Instant::now();
-    let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
+    let (gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture) = Gateway::connect(&config)
         .expect("Gateway::connect() failed");
     let connect_time = connect_start.elapsed();
     println!("Connected in {:.3}s (account: {})", connect_time.as_secs_f64(), gw.account_id);

@@ -148,7 +148,7 @@ pub(super) fn phase_connection_recovery(conns: Conns, _gw: &Gateway, config: &Ga
 
     // Reconnect real farm for remaining tests
     let (farm, ccp, hmds) = match Gateway::connect(config) {
-        Ok((_gw2, f, c, h)) => {
+        Ok((_gw2, f, c, h, _, _)) => {
             println!("  Reconnected to IB for remaining tests");
             (f, c, h)
         }

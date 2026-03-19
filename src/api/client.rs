@@ -113,7 +113,7 @@ impl EClient {
             paper: config.paper,
         };
 
-        let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&gw_config)?;
+        let (gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture) = Gateway::connect(&gw_config)?;
         let account_id = gw.account_id.clone();
         let shared = Arc::new(SharedState::new());
 

@@ -421,7 +421,7 @@ pub struct GatewayConfig {
 impl Gateway {
     /// Connect to IB: auth + logon + data farm connections.
     /// Returns Gateway + farm Connection + auth Connection + optional historical data Connection.
-    pub fn connect(config: &GatewayConfig) -> io::Result<(Self, Connection, Connection, Option<Connection>)> {
+    pub fn connect(config: &GatewayConfig) -> io::Result<(Self, Connection, Connection, Option<Connection>, Option<Connection>, Option<Connection>)> {
         Self::connect_to_host(config, &config.host, 0)
     }
 
@@ -430,7 +430,7 @@ impl Gateway {
         config: &GatewayConfig,
         host: &str,
         redirect_depth: u32,
-    ) -> io::Result<(Self, Connection, Connection, Option<Connection>)> {
+    ) -> io::Result<(Self, Connection, Connection, Option<Connection>, Option<Connection>, Option<Connection>)> {
         if redirect_depth > 3 {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -756,6 +756,25 @@ impl Gateway {
             }
         };
 
+        // Secondary tick farms (optional, non-fatal)
+        let cashfarm_conn = match connect_farm(
+            host, "cashfarm",
+            &config.username, config.paper,
+            &server_session_id, &session_key, &hw_info, &encoded,
+        ) {
+            Ok(c) => { log::info!("cashfarm connected"); Some(c) }
+            Err(e) => { log::warn!("cashfarm connection failed (non-fatal): {}", e); None }
+        };
+
+        let usfuture_conn = match connect_farm(
+            host, "usfuture",
+            &config.username, config.paper,
+            &server_session_id, &session_key, &hw_info, &encoded,
+        ) {
+            Ok(c) => { log::info!("usfuture connected"); Some(c) }
+            Err(e) => { log::warn!("usfuture connection failed (non-fatal): {}", e); None }
+        };
+
         let gw = Gateway {
             account_id: if account_id.is_empty() { config.username.clone() } else { account_id },
             session_token: session_key,
@@ -765,7 +784,7 @@ impl Gateway {
             hw_info,
             encoded,
         };
-        Ok((gw, farm_conn, ccp_conn, hmds_conn))
+        Ok((gw, farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn))
     }
 
     /// Create the control channel and build a HotLoop with connected sockets.
@@ -778,6 +797,21 @@ impl Gateway {
         hmds_conn: Option<Connection>,
         core_id: Option<usize>,
     ) -> (HotLoop, Sender<ControlCommand>) {
+        self.into_hot_loop_with_farms(shared, event_tx, farm_conn, ccp_conn, hmds_conn, None, None, core_id)
+    }
+
+    /// Create the control channel and build a HotLoop with all farm connections.
+    pub fn into_hot_loop_with_farms(
+        self,
+        shared: Arc<SharedState>,
+        event_tx: Option<Sender<Event>>,
+        farm_conn: Connection,
+        ccp_conn: Connection,
+        hmds_conn: Option<Connection>,
+        cashfarm_conn: Option<Connection>,
+        usfuture_conn: Option<Connection>,
+        core_id: Option<usize>,
+    ) -> (HotLoop, Sender<ControlCommand>) {
         let (tx, rx) = bounded(64);
         let mut hot_loop = HotLoop::new(shared, event_tx, core_id);
         hot_loop.set_control_rx(rx);
@@ -785,6 +819,8 @@ impl Gateway {
         hot_loop.farm_conn = Some(farm_conn);
         hot_loop.ccp_conn = Some(ccp_conn);
         hot_loop.hmds_conn = hmds_conn;
+        hot_loop.cashfarm_conn = cashfarm_conn;
+        hot_loop.usfuture_conn = usfuture_conn;
         (hot_loop, tx)
     }
 }
