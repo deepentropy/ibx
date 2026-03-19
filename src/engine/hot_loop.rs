@@ -4132,6 +4132,11 @@ impl HotLoop {
         self.process_ccp_message(msg);
     }
 
+    /// Inject a raw HMDS message for testing. Processes historical data, news, etc.
+    pub fn inject_hmds_message(&mut self, msg: &[u8]) {
+        self.process_hmds_message(msg);
+    }
+
     /// Inject a simulated tick for testing.
     pub fn inject_tick(&mut self, instrument: InstrumentId) {
         self.notify_tick(instrument);

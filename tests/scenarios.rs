@@ -36,41 +36,57 @@ fn aapl() -> Contract {
 
 /// Place limit → partial fill → second fill → fully filled.
 /// Verify order_status transitions and exec_details at each step.
+/// End-to-end: FIX exec reports → engine → SharedState → EClient → callbacks.
 #[test]
 fn order_lifecycle_partial_then_full_fill() {
-    let (client, _rx, shared) = test_client();
+    use ibx::protocol::fix::fix_build;
+
+    let shared = Arc::new(SharedState::new());
+    let mut engine = HotLoop::new(shared.clone(), None, None);
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let handle = std::thread::spawn(|| {});
+    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
     client.map_req_instrument(1, 0);
 
-    // Step 1: Order submitted
-    shared.push_order_update(OrderUpdate {
-        order_id: 100, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 200, timestamp_ns: 1000,
-    });
+    // Register instrument and pre-insert order (engine needs it for exec reports)
+    engine.context_mut().register_instrument(265598);
+    engine.context_mut().insert_order(ibx::types::Order::new(100, 0, Side::Buy, 200, 150 * PRICE_SCALE, b'2', b'0', 0));
+
+    // Step 1: Submitted ack (35=8, 39=0)
+    engine.inject_ccp_message(&fix_build(&[
+        (35, "8"), (11, "100"), (39, "0"), (150, "0"),
+        (31, "0"), (32, "0"), (151, "200"),
+    ], 1));
+
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:100:Submitted")));
 
-    // Step 2: Partial fill — 120 of 200 shares
-    shared.push_fill(Fill {
-        instrument: 0, order_id: 100, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 120, remaining: 80,
-        commission: PRICE_SCALE / 2, timestamp_ns: 2000,
-    });
+    // Step 2: Partial fill — 120 of 200 shares (35=8, 39=1, 150=F)
+    engine.inject_ccp_message(&fix_build(&[
+        (35, "8"), (11, "100"), (17, "E1"), (39, "1"), (150, "F"),
+        (31, "150.0"), (32, "120"), (151, "80"),
+    ], 2));
+
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:100:PartiallyFilled")));
     assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:BOT:120")));
 
-    // Step 3: Remaining 80 fills
-    shared.push_fill(Fill {
-        instrument: 0, order_id: 100, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 80, remaining: 0,
-        commission: PRICE_SCALE / 2, timestamp_ns: 3000,
-    });
+    // Step 3: Remaining 80 fills (35=8, 39=2, 150=F)
+    engine.inject_ccp_message(&fix_build(&[
+        (35, "8"), (11, "100"), (17, "E2"), (39, "2"), (150, "F"),
+        (31, "150.0"), (32, "80"), (151, "0"),
+    ], 3));
+
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:100:Filled")));
     assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:BOT:80")));
+
+    // Verify engine state: position should be +200, order removed
+    assert_eq!(engine.context_mut().position(0), 200);
+    assert!(engine.context_mut().order(100).is_none());
 }
 
 /// Place order → cancel → verify cancelled status, no ghost position.
