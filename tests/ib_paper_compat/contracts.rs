@@ -359,7 +359,11 @@ pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
         shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::FetchContractDetails { req_id: 1001, con_id: 756733 }).unwrap();
+    control_tx.send(ControlCommand::FetchContractDetails {
+        req_id: 1001, con_id: 756733,
+        symbol: String::new(), sec_type: String::new(),
+        exchange: String::new(), currency: String::new(),
+    }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(15);

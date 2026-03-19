@@ -607,7 +607,7 @@ fn contract_lookup_then_subscribe() {
     // Step 1: request contract details
     client.req_contract_details(20, &aapl());
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::FetchContractDetails { req_id: 20, con_id: 265598 }));
+    assert!(matches!(cmd, ControlCommand::FetchContractDetails { req_id: 20, con_id: 265598, .. }));
 
     // Step 2: engine responds with contract details
     shared.push_contract_details(20, ContractDefinition {
