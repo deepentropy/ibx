@@ -548,37 +548,54 @@ fn account_multi_instrument_positions() {
 }
 
 /// Account state tracks through fills and position updates.
+/// End-to-end: FIX account update (8=O 35=UT) → engine → SharedState → EClient.
 #[test]
 fn account_state_via_eclient() {
-    let (client, _rx, shared) = test_client();
-    let mut acct = AccountState::default();
-    acct.net_liquidation = 100_000 * PRICE_SCALE;
-    acct.buying_power = 200_000 * PRICE_SCALE;
-    shared.set_account(&acct);
+    let shared = Arc::new(SharedState::new());
+    let mut engine = HotLoop::new(shared.clone(), None, None);
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let handle = std::thread::spawn(|| {});
+    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+
+    // Inject account update via farm message (35=UT with 8001/8004 pairs)
+    let msg = b"8=O\x019=999\x0135=UT\x018001=NetLiquidation\x018004=100000\x018001=BuyingPower\x018004=200000\x01";
+    engine.inject_farm_message(msg);
 
     let state = client.account();
     assert_eq!(state.net_liquidation, 100_000 * PRICE_SCALE);
     assert_eq!(state.buying_power, 200_000 * PRICE_SCALE);
 
     // Update after activity
-    acct.net_liquidation = 99_500 * PRICE_SCALE;
-    shared.set_account(&acct);
+    let msg2 = b"8=O\x019=999\x0135=UT\x018001=NetLiquidation\x018004=99500\x01";
+    engine.inject_farm_message(msg2);
+
     let state2 = client.account();
     assert_eq!(state2.net_liquidation, 99_500 * PRICE_SCALE);
 }
 
 /// Position tracking through reqPositions after fills.
+/// End-to-end: FIX 35=UP position update → engine → SharedState → EClient.
 #[test]
 fn account_req_positions_reflects_fills() {
-    let (client, _rx, shared) = test_client();
+    use ibx::protocol::fix::fix_build;
 
-    // Set position info (as engine would after fills)
-    shared.set_position_info(PositionInfo {
-        con_id: 756733, position: 100, avg_cost: 450 * PRICE_SCALE,
-    });
-    shared.set_position_info(PositionInfo {
-        con_id: 265598, position: -50, avg_cost: 150 * PRICE_SCALE,
-    });
+    let shared = Arc::new(SharedState::new());
+    let mut engine = HotLoop::new(shared.clone(), None, None);
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let handle = std::thread::spawn(|| {});
+    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+
+    // Register instruments (engine needs them for position mapping)
+    engine.context_mut().register_instrument(756733);
+    engine.context_mut().register_instrument(265598);
+
+    // Inject position updates via CCP (35=UP with 6008, 6064, 6065)
+    engine.inject_ccp_message(&fix_build(&[
+        (35, "UP"), (6008, "756733"), (6064, "100"), (6065, "450.0"),
+    ], 1));
+    engine.inject_ccp_message(&fix_build(&[
+        (35, "UP"), (6008, "265598"), (6064, "-50"), (6065, "150.0"),
+    ], 2));
 
     let mut w = RecordingWrapper::default();
     client.req_positions(&mut w);
