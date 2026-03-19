@@ -35,7 +35,8 @@ fn compat_suite() {
     };
 
     let (session, et_min) = market_session();
-    let needs_ticks = matches!(session, MarketSession::Regular | MarketSession::PreMarket | MarketSession::AfterHours);
+    // Only Regular hours — usfarm connection doesn't carry pre/after-hours ticks
+    let needs_ticks = session == MarketSession::Regular;
     let needs_moc = needs_ticks && et_min < 945;
     println!("=== Compatibility Suite (session={:?}) ===\n", session);
     let suite_start = Instant::now();
