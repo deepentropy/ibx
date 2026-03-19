@@ -227,8 +227,18 @@ pub fn parse_secdef_response(data: &[u8]) -> Option<ContractDefinition> {
     if let Some(v) = tags.get(&TAG_SECURITY_TYPE) {
         def.sec_type = SecurityType::from_fix(v);
     }
-    if let Some(v) = tags.get(&TAG_SECURITY_EXCHANGE) {
-        def.exchange = exchange_from_fix(v).to_string();
+    // Tag 207 (exchange) repeats for each valid exchange — use sequential parse
+    // to get the FIRST occurrence (the contract's own exchange, usually BEST/SMART).
+    {
+        use crate::protocol::fix::SOH;
+        let needle = b"207=";
+        for part in data.split(|&b| b == SOH) {
+            if part.starts_with(needle) {
+                let val = std::str::from_utf8(&part[needle.len()..]).unwrap_or("");
+                def.exchange = exchange_from_fix(val).to_string();
+                break;
+            }
+        }
     }
     if let Some(v) = tags.get(&TAG_IB_PRIMARY_EXCHANGE) {
         def.primary_exchange = exchange_from_fix(v).to_string();
