@@ -59,6 +59,8 @@ pub struct HotLoop {
     next_tbt_req_id: u32,
     /// Active TBT subscriptions: InstrumentId → (ticker_id, tbt_type).
     tbt_subscriptions: Vec<(InstrumentId, String, crate::types::TbtType)>,
+    /// Active per-contract news subscriptions: (instrument, ccp_req_id).
+    news_subscriptions: Vec<(InstrumentId, u32)>,
     /// Running price state for TBT decoding: InstrumentId → (last_price_cents, bid_cents, ask_cents).
     tbt_price_state: Vec<(InstrumentId, i64, i64, i64)>,
     /// Next historical query ID for historical/head-timestamp requests.
@@ -165,6 +167,7 @@ impl HotLoop {
             hmds_disconnected: false,
             next_tbt_req_id: 1,
             tbt_subscriptions: Vec::new(),
+            news_subscriptions: Vec::new(),
             tbt_price_state: Vec::new(),
             next_hmds_query_id: 1000,
             pending_historical: Vec::new(),
@@ -609,6 +612,55 @@ impl HotLoop {
             ]);
         }
         self.hb.last_farm_sent = Instant::now();
+    }
+
+    /// Subscribe to per-contract news ticks via CCP (264=292).
+    fn send_news_subscribe(&mut self, con_id: i64, instrument: InstrumentId, providers: &str) {
+        let req_id = self.next_md_req_id;
+        self.next_md_req_id += 1;
+        self.news_subscriptions.push((instrument, req_id));
+
+        if let Some(conn) = self.ccp_conn.as_mut() {
+            let req_id_str = req_id.to_string();
+            let con_id_str = (con_id as u32).to_string();
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+                (fix::TAG_SENDING_TIME, &ts),
+                (263, "1"),           // Subscribe
+                (146, "1"),           // 1 entry
+                (262, &req_id_str),   // MDReqID
+                (6008, &con_id_str),  // ContractID
+                (207, "NEWS"),        // Exchange
+                (167, "CS"),          // SecurityType
+                (264, "292"),         // News tick type
+                (6472, providers),    // Provider list
+            ]);
+            self.hb.last_ccp_sent = Instant::now();
+            log::info!("Sent news subscribe: con_id={} req_id={} providers={}", con_id, req_id, providers);
+        }
+    }
+
+    /// Unsubscribe from per-contract news ticks via CCP.
+    fn send_news_unsubscribe(&mut self, instrument: InstrumentId) {
+        let req_id = match self.news_subscriptions.iter().position(|(id, _)| *id == instrument) {
+            Some(pos) => {
+                let (_, rid) = self.news_subscriptions.remove(pos);
+                rid
+            }
+            None => return,
+        };
+
+        if let Some(conn) = self.ccp_conn.as_mut() {
+            let req_id_str = req_id.to_string();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+                (262, &req_id_str),
+                (263, "2"), // Unsubscribe
+            ]);
+            self.hb.last_ccp_sent = Instant::now();
+            log::info!("Sent news unsubscribe: instrument={:?} req_id={}", instrument, req_id);
+        }
     }
 
     fn drain_and_send_orders(&mut self) {
@@ -2514,6 +2566,16 @@ impl HotLoop {
                 ControlCommand::UnsubscribeTbt { instrument } => {
                     self.send_tbt_unsubscribe(instrument);
                 }
+                ControlCommand::SubscribeNews { con_id, symbol, providers } => {
+                    let id = self.context.market.register(con_id);
+                    self.context.market.set_symbol(id, symbol);
+                    self.shared.set_instrument_count(self.context.market.count());
+                    self.shared.bump_register_gen();
+                    self.send_news_subscribe(con_id, id, &providers);
+                }
+                ControlCommand::UnsubscribeNews { instrument } => {
+                    self.send_news_unsubscribe(instrument);
+                }
                 ControlCommand::UpdateParam { key, value } => {
                     let _ = (key, value);
                 }
@@ -2612,6 +2674,12 @@ impl HotLoop {
                         .iter().map(|(id, _, _)| *id).collect();
                     for instrument in tbt_instruments {
                         self.send_tbt_unsubscribe(instrument);
+                    }
+                    // Unsubscribe all news subscriptions before stopping
+                    let news_instruments: Vec<InstrumentId> = self.news_subscriptions
+                        .iter().map(|(id, _)| *id).collect();
+                    for instrument in news_instruments {
+                        self.send_news_unsubscribe(instrument);
                     }
                     self.running = false;
                     self.emit(Event::Disconnected);

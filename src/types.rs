@@ -882,6 +882,10 @@ pub enum ControlCommand {
     SubscribeTbt { con_id: i64, symbol: String, tbt_type: TbtType },
     /// Unsubscribe from tick-by-tick data.
     UnsubscribeTbt { instrument: InstrumentId },
+    /// Subscribe to per-contract news ticks via CCP (264=292).
+    SubscribeNews { con_id: i64, symbol: String, providers: String },
+    /// Unsubscribe from per-contract news ticks.
+    UnsubscribeNews { instrument: InstrumentId },
     /// Update a strategy parameter.
     UpdateParam { key: String, value: String },
     /// Submit an order from external caller (bridge mode).

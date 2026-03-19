@@ -60,6 +60,8 @@ pub struct EClient {
     executions: Mutex<Vec<(i64, i64, String, String, f64, f64, String)>>,
     /// Whether news bulletins subscription is active.
     bulletin_subscribed: AtomicBool,
+    /// News provider codes for per-contract news ticks (e.g. "BRFG*BRFUPDN").
+    news_providers: Mutex<String>,
 }
 
 #[pymethods]
@@ -86,6 +88,7 @@ impl EClient {
             open_orders: Mutex::new(HashMap::new()),
             executions: Mutex::new(Vec::new()),
             bulletin_subscribed: AtomicBool::new(false),
+            news_providers: Mutex::new("BRFG*BRFUPDN".to_string()),
         }
     }
 
@@ -163,7 +166,14 @@ impl EClient {
         self.connected.load(Ordering::Relaxed)
     }
 
+    /// Set news provider codes for per-contract news ticks (e.g. "BRFG*BRFUPDN").
+    #[pyo3(signature = (providers))]
+    fn set_news_providers(&self, providers: &str) {
+        *self.news_providers.lock().unwrap() = providers.to_string();
+    }
+
     /// Request market data for a contract.
+    /// If generic_tick_list contains "292", also subscribes to news ticks via CCP.
     #[pyo3(signature = (req_id, contract, generic_tick_list="", snapshot=false, regulatory_snapshot=false, mkt_data_options=Vec::new()))]
     fn req_mkt_data(
         &self,
@@ -188,11 +198,23 @@ impl EClient {
         })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
 
+        // If generic_tick_list contains 292 (news), also subscribe via CCP
+        let wants_news = generic_tick_list.split(',')
+            .any(|t| t.trim() == "292" || t.trim() == "mdoff,292" || t.trim().ends_with("292"));
+        if wants_news {
+            let providers = self.news_providers.lock().unwrap().clone();
+            tx.send(ControlCommand::SubscribeNews {
+                con_id: contract.con_id,
+                symbol: contract.symbol.clone(),
+                providers,
+            }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        }
+
         let instrument_id = Self::wait_for_registration(shared, reg_gen);
         self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
         self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
 
-        let _ = (generic_tick_list, snapshot, regulatory_snapshot, mkt_data_options);
+        let _ = (snapshot, regulatory_snapshot, mkt_data_options);
 
         Ok(())
     }
@@ -206,6 +228,8 @@ impl EClient {
                 .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
             tx.send(ControlCommand::Unsubscribe { instrument })
                 .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+            // Also cancel news subscription (idempotent if none active)
+            let _ = tx.send(ControlCommand::UnsubscribeNews { instrument });
         }
         Ok(())
     }
