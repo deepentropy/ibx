@@ -342,10 +342,11 @@ impl SharedState {
         self.market_rules.lock().unwrap().iter().find(|r| r.rule_id == rule_id).cloned()
     }
 
-    /// Drain all enriched open orders (for open_order callbacks).
+    /// Snapshot all enriched orders (for open_order callbacks).
+    /// Does NOT remove entries — they persist for req_completed_orders lookups.
     pub fn drain_open_orders(&self) -> Vec<(u64, RichOrderInfo)> {
-        let mut lock = self.order_cache.lock().unwrap();
-        lock.drain().collect()
+        let lock = self.order_cache.lock().unwrap();
+        lock.iter().map(|(&k, v)| (k, v.clone())).collect()
     }
 
     /// Get enriched order info by order_id.

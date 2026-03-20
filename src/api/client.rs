@@ -738,15 +738,6 @@ impl EClient {
     /// Drain all SharedState queues and dispatch to the Wrapper.
     /// Call this in a loop — it is the Rust equivalent of C++ `EReader::processMsgs()`.
     pub fn process_msgs(&self, wrapper: &mut impl Wrapper) {
-        // Open orders from enriched cache → open_order callbacks
-        for (order_id, info) in self.shared.drain_open_orders() {
-            let state = &info.order_state;
-            // Only deliver non-terminal orders as open_order
-            if !matches!(state.status.as_str(), "Filled" | "Cancelled" | "Inactive") {
-                wrapper.open_order(order_id as i64, &info.contract, &info.order, state);
-            }
-        }
-
         // Fills → order_status + exec_details
         for fill in self.shared.drain_fills() {
             let price_f = fill.price as f64 / PRICE_SCALE_F;
