@@ -34,3 +34,5 @@ DEVLOG.md
 # Added by cargo
 
 /target
+.env
+.idea/
