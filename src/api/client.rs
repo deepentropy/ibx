@@ -1044,15 +1044,31 @@ impl EClient {
             }
         }
 
-        // PnL single → pnl_single callback
+        // PnL single → pnl_single callback (compute unrealized from market data when available)
         {
             let reqs: Vec<(i64, i64)> = self.pnl_single_reqs.lock().unwrap()
                 .iter().map(|(&r, &c)| (r, c)).collect();
             for (req_id, con_id) in reqs {
                 if let Some(pi) = self.shared.position_info(con_id) {
-                    let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
                     let pos = pi.position as f64;
-                    wrapper.pnl_single(req_id, pos, 0.0, 0.0, 0.0, avg_cost * pos);
+                    // Try to find last price from subscribed instruments
+                    let last_price = {
+                        let imap = self.instrument_to_req.lock().unwrap();
+                        imap.keys()
+                            .find_map(|&iid| {
+                                let q = self.shared.quote(iid);
+                                if q.last != 0 { Some(q.last) } else { None }
+                            })
+                            .unwrap_or(0)
+                    };
+                    let (unrealized, value) = if last_price != 0 && pi.avg_cost != 0 {
+                        let u = (last_price - pi.avg_cost) * pi.position;
+                        let v = last_price * pi.position;
+                        (u as f64 / PRICE_SCALE_F, v as f64 / PRICE_SCALE_F)
+                    } else {
+                        (0.0, pi.avg_cost as f64 / PRICE_SCALE_F * pos)
+                    };
+                    wrapper.pnl_single(req_id, pos, 0.0, unrealized, 0.0, value);
                 }
             }
         }

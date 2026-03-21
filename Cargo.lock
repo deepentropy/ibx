@@ -436,6 +436,7 @@ dependencies = [
  "pyo3",
  "quanta",
  "rand",
+ "serde_json",
  "sha1",
  "sha2",
  "tokio",

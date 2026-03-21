@@ -86,6 +86,71 @@ impl<'a> BitReader<'a> {
     }
 }
 
+/// LSB-first bit-level reader for 35=G real-time bar data.
+/// Uses word-aligned u64 loads (1-2 ops per field instead of n iterations per bit).
+struct LsbBitReader<'a> {
+    data: &'a [u8],
+    bit_pos: usize,
+    total_bits: usize,
+}
+
+impl<'a> LsbBitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            bit_pos: 0,
+            total_bits: data.len() * 8,
+        }
+    }
+
+    /// Read n bits as unsigned integer (LSB first).
+    /// Uses word-aligned reads: 1-2 u64 loads instead of n bit iterations.
+    #[inline]
+    fn read(&mut self, n: usize) -> u64 {
+        if n == 0 || self.bit_pos + n > self.total_bits {
+            return 0;
+        }
+        let byte_idx = self.bit_pos >> 3;
+        let bit_offset = self.bit_pos & 7;
+        self.bit_pos += n;
+
+        let remaining_bytes = self.data.len() - byte_idx;
+
+        // Load up to 8 bytes as a little-endian u64
+        let word = if remaining_bytes >= 8 {
+            u64::from_le_bytes(self.data[byte_idx..byte_idx + 8].try_into().unwrap())
+        } else {
+            let mut buf = [0u8; 8];
+            buf[..remaining_bytes].copy_from_slice(&self.data[byte_idx..]);
+            u64::from_le_bytes(buf)
+        };
+
+        let needed = bit_offset + n;
+        if needed <= 64 {
+            // Fast path: single word
+            (word >> bit_offset) & ((1u64 << n) - 1)
+        } else {
+            // Cross-word boundary
+            let lo_bits = 64 - bit_offset;
+            let hi_bits = n - lo_bits;
+            let lo = word >> bit_offset;
+            let hi_word = if byte_idx + 8 < self.data.len() {
+                let rem = self.data.len() - (byte_idx + 8);
+                if rem >= 8 {
+                    u64::from_le_bytes(self.data[byte_idx + 8..byte_idx + 16].try_into().unwrap())
+                } else {
+                    let mut buf = [0u8; 8];
+                    buf[..rem].copy_from_slice(&self.data[byte_idx + 8..]);
+                    u64::from_le_bytes(buf)
+                }
+            } else {
+                0
+            };
+            lo | ((hi_word & ((1u64 << hi_bits) - 1)) << lo_bits)
+        }
+    }
+}
+
 // 8=O binary tick type IDs (what comes off the wire in 35=P)
 pub const O_BID_PRICE: u64 = 0;
 pub const O_ASK_PRICE: u64 = 1;
@@ -294,36 +359,20 @@ pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<RtBar> {
         }
     }
 
-    let mut pos = 0usize;
-    let total_bits = reordered.len() * 8;
-
-    let read_bits = |pos: &mut usize, n: usize| -> u64 {
-        let mut val: u64 = 0;
-        for i in 0..n {
-            if *pos < total_bits {
-                let byte_idx = *pos / 8;
-                let bit_idx = *pos % 8;
-                if byte_idx < reordered.len() {
-                    val |= ((reordered[byte_idx] >> bit_idx) as u64 & 1) << i;
-                }
-                *pos += 1;
-            }
-        }
-        val
-    };
+    let mut reader = LsbBitReader::new(&reordered);
 
     // 4 bits padding
-    read_bits(&mut pos, 4);
+    reader.read(4);
 
     // Count: 1-bit flag selects width
-    let count = if read_bits(&mut pos, 1) == 1 {
-        read_bits(&mut pos, 8) as u32
+    let count = if reader.read(1) == 1 {
+        reader.read(8) as u32
     } else {
-        read_bits(&mut pos, 32) as u32
+        reader.read(32) as u32
     };
 
     // Low price in ticks (31-bit signed)
-    let low_ticks = read_bits(&mut pos, 31) as i64;
+    let low_ticks = reader.read(31) as i64;
     let low_ticks = if low_ticks & (1 << 30) != 0 {
         low_ticks - (1 << 31)
     } else {
@@ -333,19 +382,19 @@ pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<RtBar> {
 
     let (open, high, close, wap_sum);
     if count > 1 {
-        let width = if read_bits(&mut pos, 1) == 1 { 5 } else { 32 };
-        let delta_open = read_bits(&mut pos, width) as f64;
-        let delta_high = read_bits(&mut pos, width) as f64;
-        let delta_close = read_bits(&mut pos, width) as f64;
+        let width = if reader.read(1) == 1 { 5 } else { 32 };
+        let delta_open = reader.read(width) as f64;
+        let delta_high = reader.read(width) as f64;
+        let delta_close = reader.read(width) as f64;
 
         open = low + delta_open * min_tick;
         high = low + delta_high * min_tick;
         close = low + delta_close * min_tick;
 
-        wap_sum = if read_bits(&mut pos, 1) == 1 {
-            read_bits(&mut pos, 18) as f64
+        wap_sum = if reader.read(1) == 1 {
+            reader.read(18) as f64
         } else {
-            read_bits(&mut pos, 32) as f64
+            reader.read(32) as f64
         };
     } else {
         open = low;
@@ -355,10 +404,10 @@ pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<RtBar> {
     }
 
     // Volume: 1-bit flag selects width
-    let volume = if read_bits(&mut pos, 1) == 1 {
-        read_bits(&mut pos, 16) as i64
+    let volume = if reader.read(1) == 1 {
+        reader.read(16) as i64
     } else {
-        read_bits(&mut pos, 32) as i64
+        reader.read(32) as i64
     };
 
     let wap = if count > 1 && volume > 0 {

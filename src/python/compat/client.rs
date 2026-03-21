@@ -2009,6 +2009,7 @@ impl EClient {
                         ("Leverage", acct.leverage as f64 / PRICE_SCALE_F),
                         ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
                         ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
+                        ("DailyPnL", acct.daily_pnl as f64 / PRICE_SCALE_F),
                     ];
                     for (tag, val) in &tag_values {
                         if tags.is_empty() || tags.iter().any(|t| t == tag) {

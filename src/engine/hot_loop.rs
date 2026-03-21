@@ -10,7 +10,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{AlgoParams, CompletedOrder, ControlCommand, Fill, InstrumentId, NewsBulletin, OrderCondition, OrderRequest, PositionInfo, Price, Qty, Side, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
+use crate::types::{AlgoParams, CompletedOrder, ControlCommand, Fill, InstrumentId, NewsBulletin, OrderCondition, OrderRequest, PositionInfo, Price, Qty, Side, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE, MAX_INSTRUMENTS};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 /// Auth server heartbeat interval (10 seconds, configurable).
@@ -66,8 +66,8 @@ pub struct HotLoop {
     tbt_subscriptions: Vec<(InstrumentId, String, crate::types::TbtType)>,
     /// Active per-contract news subscriptions: (instrument, ccp_req_id).
     news_subscriptions: Vec<(InstrumentId, u32)>,
-    /// Running price state for TBT decoding: InstrumentId → (last_price_cents, bid_cents, ask_cents).
-    tbt_price_state: Vec<(InstrumentId, i64, i64, i64)>,
+    /// Running price state for TBT decoding: indexed by InstrumentId → (last_price_cents, bid_cents, ask_cents).
+    tbt_price_state: [(i64, i64, i64); MAX_INSTRUMENTS],
     /// Next historical query ID for historical/head-timestamp requests.
     next_hmds_query_id: u32,
     /// Pending historical data requests: query_id_string → external req_id.
@@ -173,7 +173,7 @@ impl HotLoop {
             next_tbt_req_id: 1,
             tbt_subscriptions: Vec::new(),
             news_subscriptions: Vec::new(),
-            tbt_price_state: Vec::new(),
+            tbt_price_state: [(0, 0, 0); MAX_INSTRUMENTS],
             next_hmds_query_id: 1000,
             pending_historical: Vec::new(),
             pending_head_ts: Vec::new(),
@@ -2342,10 +2342,15 @@ impl HotLoop {
 
         // On fill (exec_type: F=Fill, 1=Partial, 2=Filled)
         // Dedup by ExecID (tag 17) — IB can send duplicate exec reports
+        let mut had_fill = false;
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
             if !exec_id.is_empty() && !self.seen_exec_ids.insert(exec_id.to_string()) {
                 log::warn!("Duplicate ExecID={} — skipping fill", exec_id);
                 return; // Already processed this fill
+            }
+            // Prune exec ID set to prevent unbounded growth (duplicates arrive within seconds)
+            if self.seen_exec_ids.len() > 1024 {
+                self.seen_exec_ids.clear();
             }
             // Look up the order to get instrument and side
             if let Some(order) = self.context.order(clord_id).copied() {
@@ -2369,11 +2374,14 @@ impl HotLoop {
                 };
                 self.context.update_position(order.instrument, delta);
                 self.notify_fill(&fill);
+                had_fill = true;
             }
         }
 
-        // Notify strategy only on actual status changes (dedup repeated reports)
-        if status_changed {
+        // Notify strategy only on actual status changes (dedup repeated reports).
+        // Skip when a fill was already processed — the fill path in process_msgs
+        // already fires order_status with the correct avg_fill_price (#108).
+        if status_changed && !had_fill {
             if let Some(order) = self.context.order(clord_id).copied() {
                 let update = crate::types::OrderUpdate {
                     order_id: clord_id,
@@ -3764,29 +3772,20 @@ impl HotLoop {
     }
 
     /// Update running last-price state for TBT, return new absolute cents.
+    #[inline]
     fn update_tbt_price(&mut self, instrument: InstrumentId, delta: i64, _: i64) -> i64 {
-        for entry in &mut self.tbt_price_state {
-            if entry.0 == instrument {
-                entry.1 += delta;
-                return entry.1;
-            }
-        }
-        // First tick for this instrument
-        self.tbt_price_state.push((instrument, delta, 0, 0));
-        delta
+        let entry = &mut self.tbt_price_state[instrument as usize];
+        entry.0 += delta;
+        entry.0
     }
 
     /// Update running bid/ask state for TBT, return (bid_cents, ask_cents).
+    #[inline]
     fn update_tbt_bid_ask(&mut self, instrument: InstrumentId, bid_delta: i64, ask_delta: i64) -> (i64, i64) {
-        for entry in &mut self.tbt_price_state {
-            if entry.0 == instrument {
-                entry.2 += bid_delta;
-                entry.3 += ask_delta;
-                return (entry.2, entry.3);
-            }
-        }
-        self.tbt_price_state.push((instrument, 0, bid_delta, ask_delta));
-        (bid_delta, ask_delta)
+        let entry = &mut self.tbt_price_state[instrument as usize];
+        entry.1 += bid_delta;
+        entry.2 += ask_delta;
+        (entry.1, entry.2)
     }
 
     /// Parse 8=O|35=G binary tick news (tick type 0x1E90 = 7824).
@@ -3937,7 +3936,7 @@ impl HotLoop {
         }
 
         // Clear price state
-        self.tbt_price_state.retain(|e| e.0 != instrument);
+        self.tbt_price_state[instrument as usize] = (0, 0, 0);
     }
 
     /// Send a historical data request to historical server.
@@ -5763,11 +5762,14 @@ mod tests {
         // Position stays at 40 (partial fill was real), order removed
         assert_eq!(engine.context_mut().position(0), 40);
         assert!(engine.context_mut().order(50).is_none());
-        // Updates: PartiallyFilled, then Cancelled
+        // Fill carries the PartiallyFilled status (no redundant OrderUpdate for fills).
+        // Only the cancel produces a status-only OrderUpdate.
+        let fills = shared.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].qty, 40);
         let updates = shared.drain_order_updates();
-        assert_eq!(updates.len(), 2);
-        assert_eq!(updates[0].status, OrderStatus::PartiallyFilled);
-        assert_eq!(updates[1].status, OrderStatus::Cancelled);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].status, OrderStatus::Cancelled);
     }
 
     #[test]
@@ -5848,6 +5850,37 @@ mod tests {
         // Only one fill should be processed
         assert_eq!(shared.drain_fills().len(), 1);
         assert_eq!(engine.context_mut().position(0), 100); // not 200
+    }
+
+    /// Regression test for #108: full fill must produce exactly 1 fill, 0 order updates.
+    /// The fill path carries the status; a redundant OrderUpdate would cause a duplicate
+    /// order_status callback with avg_fill_price=0.0.
+    #[test]
+    fn full_fill_no_duplicate_order_update() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context_mut().market.register(265598);
+
+        engine.context_mut().insert_order(Order {
+            order_id: 700, instrument: 0, side: Side::Buy,
+            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            status: OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+
+        let msg = fix::fix_build(&[
+            (35, "8"), (11, "700"), (17, "EXEC_FULL"),
+            (39, "2"), (150, "F"),
+            (31, "150.0"), (32, "100"), (151, "0"),
+        ], 1);
+        engine.inject_ccp_message(&msg);
+
+        let fills = shared.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].remaining, 0);
+        // No redundant OrderUpdate — the fill already carries Filled status
+        let updates = shared.drain_order_updates();
+        assert_eq!(updates.len(), 0, "Full fill should not produce a separate OrderUpdate");
     }
 
     #[test]
