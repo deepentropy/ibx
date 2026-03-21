@@ -2327,7 +2327,7 @@ impl HotLoop {
             "0" | "A" | "E" | "5" => crate::types::OrderStatus::Submitted,
             "1" => crate::types::OrderStatus::PartiallyFilled,
             "2" => crate::types::OrderStatus::Filled,
-            "4" | "C" => crate::types::OrderStatus::Cancelled,
+            "4" | "C" | "D" => crate::types::OrderStatus::Cancelled,
             "8" => crate::types::OrderStatus::Rejected,
             "6" => return, // PendingCancel — not terminal
             _ => return,
@@ -3460,26 +3460,15 @@ impl HotLoop {
         if self.hmds_disconnected {
             return;
         }
-        let has_pending = !self.tbt_subscriptions.is_empty()
-            || !self.pending_historical.is_empty()
-            || !self.pending_head_ts.is_empty()
-            || !self.pending_scanner.is_empty()
-            || self.pending_scanner_params
-            || !self.pending_fundamental.is_empty()
-            || !self.pending_histogram.is_empty()
-            || !self.pending_ticks.is_empty()
-            || !self.rtbar_subs.is_empty()
-            || !self.pending_schedule.is_empty()
-            || !self.pending_articles.is_empty()
-            || !self.pending_news.is_empty();
-        if !has_pending {
-            return;
-        }
+        // Always read from HMDS — heartbeats and TestRequests must be handled
+        // even when there are no pending historical requests. Otherwise IB kills
+        // the connection after its heartbeat timeout.
         let messages = match self.hmds_conn.as_mut() {
             None => return,
             Some(conn) => {
                 match conn.try_recv() {
-                    Ok(0) => return,
+                    Ok(0) if !conn.has_buffered_data() => return,
+                    Ok(0) => {}
                     Err(e) => {
                         log::error!("HMDS connection lost: {}", e);
                         self.hmds_disconnected = true;
