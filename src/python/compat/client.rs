@@ -90,6 +90,10 @@ pub struct EClient {
     news_providers: Mutex<String>,
     /// Cache of con_id → Contract for enriching position/execution callbacks.
     contract_cache: Mutex<HashMap<i64, Contract>>,
+    /// Whether account updates subscription is active.
+    account_updates_subscribed: AtomicBool,
+    /// Last account state sent (for change detection).
+    last_account: Mutex<Option<AccountState>>,
 }
 
 #[pymethods]
@@ -118,6 +122,8 @@ impl EClient {
             bulletin_subscribed: AtomicBool::new(false),
             news_providers: Mutex::new("BRFG*BRFUPDN".to_string()),
             contract_cache: Mutex::new(HashMap::new()),
+            account_updates_subscribed: AtomicBool::new(false),
+            last_account: Mutex::new(None),
         }
     }
 
@@ -669,9 +675,12 @@ impl EClient {
     }
 
     /// Request account updates.
-    #[pyo3(signature = (_subscribe, _acct_code=""))]
-    fn req_account_updates(&self, _subscribe: bool, _acct_code: &str) -> PyResult<()> {
-        // Account updates are always being synced via bridge
+    #[pyo3(signature = (subscribe, _acct_code=""))]
+    fn req_account_updates(&self, subscribe: bool, _acct_code: &str) -> PyResult<()> {
+        self.account_updates_subscribed.store(subscribe, Ordering::Release);
+        if !subscribe {
+            *self.last_account.lock().unwrap() = None;
+        }
         Ok(())
     }
 
@@ -768,6 +777,16 @@ impl EClient {
     fn req_all_open_orders(&self, py: Python<'_>) -> PyResult<()> {
         // Same as req_open_orders — we only have one client connection.
         self.req_open_orders(py)
+    }
+
+    /// Automatically bind future orders to this client.
+    /// In ibapi, this tells the gateway to auto-deliver openOrder callbacks for
+    /// orders placed from other clients. In single-client direct-connect model,
+    /// all orders are already ours — order updates flow automatically via run().
+    #[pyo3(signature = (b_auto_bind))]
+    fn req_auto_open_orders(&self, b_auto_bind: bool) -> PyResult<()> {
+        let _ = b_auto_bind;
+        Ok(())
     }
 
     /// Request execution reports.
@@ -1895,29 +1914,60 @@ impl EClient {
 
             // Drain market rules -> market_rule (already served from cache in req_market_rule)
 
-            // Account state -> updateAccountValue (all fields)
-            if !self.account_id.get().map(|s| s.is_empty()).unwrap_or(true) {
+            // Account state -> updateAccountValue + accountDownloadEnd (subscription-gated)
+            if self.account_updates_subscribed.load(Ordering::Acquire) {
                 let acct = shared.account();
                 let account_name = self.account_id.get().map(|s| s.as_str()).unwrap_or("");
-                let fields: &[(&str, i64)] = &[
-                    ("NetLiquidation", acct.net_liquidation),
-                    ("BuyingPower", acct.buying_power),
-                    ("MaintMarginReq", acct.margin_used),
-                    ("UnrealizedPnL", acct.unrealized_pnl),
-                    ("RealizedPnL", acct.realized_pnl),
-                    ("TotalCashValue", acct.total_cash_value),
-                    ("EquityWithLoanValue", acct.equity_with_loan),
-                    ("AvailableFunds", acct.available_funds),
-                    ("ExcessLiquidity", acct.excess_liquidity),
-                    ("DailyPnL", acct.daily_pnl),
+                let mut prev_guard = self.last_account.lock().unwrap();
+                let is_first = prev_guard.is_none();
+                let prev = prev_guard.unwrap_or_default();
+
+                let fields: &[(&str, i64, i64)] = &[
+                    ("NetLiquidation", acct.net_liquidation, prev.net_liquidation),
+                    ("TotalCashValue", acct.total_cash_value, prev.total_cash_value),
+                    ("SettledCash", acct.settled_cash, prev.settled_cash),
+                    ("BuyingPower", acct.buying_power, prev.buying_power),
+                    ("EquityWithLoanValue", acct.equity_with_loan, prev.equity_with_loan),
+                    ("GrossPositionValue", acct.gross_position_value, prev.gross_position_value),
+                    ("InitMarginReq", acct.init_margin_req, prev.init_margin_req),
+                    ("MaintMarginReq", acct.maint_margin_req, prev.maint_margin_req),
+                    ("AvailableFunds", acct.available_funds, prev.available_funds),
+                    ("ExcessLiquidity", acct.excess_liquidity, prev.excess_liquidity),
+                    ("Cushion", acct.cushion, prev.cushion),
+                    ("SMA", acct.sma, prev.sma),
+                    ("UnrealizedPnL", acct.unrealized_pnl, prev.unrealized_pnl),
+                    ("RealizedPnL", acct.realized_pnl, prev.realized_pnl),
+                    ("AccruedCash", acct.accrued_cash, prev.accrued_cash),
+                    ("DailyPnL", acct.daily_pnl, prev.daily_pnl),
                 ];
-                for &(key, val) in fields {
-                    if val != 0 {
-                        let fval = val as f64 / PRICE_SCALE_F;
+
+                let mut delivered = false;
+                for &(key, cur, prv) in fields {
+                    if is_first || cur != prv {
+                        let val_str = format!("{:.2}", cur as f64 / PRICE_SCALE_F);
                         self.wrapper.call_method1(py, "update_account_value",
-                            (key, format!("{:.2}", fval).as_str(), "USD", account_name))?;
+                            (key, val_str.as_str(), "USD", account_name))?;
+                        delivered = true;
                     }
                 }
+                // Integer fields
+                if is_first || acct.day_trades_remaining != prev.day_trades_remaining {
+                    self.wrapper.call_method1(py, "update_account_value",
+                        ("DayTradesRemaining", &acct.day_trades_remaining.to_string(), "", account_name))?;
+                    delivered = true;
+                }
+                if is_first || acct.leverage != prev.leverage {
+                    let val_str = format!("{:.4}", acct.leverage as f64 / PRICE_SCALE_F);
+                    self.wrapper.call_method1(py, "update_account_value",
+                        ("Leverage-S", val_str.as_str(), "", account_name))?;
+                    delivered = true;
+                }
+
+                if delivered {
+                    self.wrapper.call_method1(py, "update_account_time", ("",))?;
+                    self.wrapper.call_method1(py, "account_download_end", (account_name,))?;
+                }
+                *prev_guard = Some(acct);
             }
 
             // P&L dispatch (gateway-computed)
