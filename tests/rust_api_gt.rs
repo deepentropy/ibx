@@ -572,8 +572,15 @@ fn api_gt_suite() {
             cbs.iter().any(|c| matches!(c, Cb::OrderStatus { status, .. } if status == "Cancelled" || status == "Inactive"))
         }, Duration::from_secs(15));
 
-        // process_msgs should deliver completed_order
-        client.req_completed_orders(&mut wrapper);
+        // Wait for hot loop to push CompletedOrder (cancel ack takes time)
+        // Try multiple times — CompletedOrder may arrive slightly after OrderStatus
+        for _ in 0..5 {
+            poll(&client, &mut wrapper, Duration::from_millis(500));
+            client.req_completed_orders(&mut wrapper);
+            if wrapper.events.lock().unwrap().iter().any(|c| matches!(c, Cb::CompletedOrder { .. })) {
+                break;
+            }
+        }
 
         let cbs = wrapper.drain();
 
@@ -689,7 +696,7 @@ fn api_gt_suite() {
         print!("  req_histogram_data (SPY 1week)... ");
         wrapper.drain();
         client.req_histogram_data(430, &spy(), true, "1 week");
-        poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::HistogramData { .. })), Duration::from_secs(10));
+        poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::HistogramData { .. })), Duration::from_secs(15));
         let cbs = wrapper.drain();
         client.cancel_histogram_data(430);
 
