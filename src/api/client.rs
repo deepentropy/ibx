@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use std::collections::HashSet;
 use crossbeam_channel::Sender;
 
 use crate::api::types::{
@@ -90,6 +91,8 @@ pub struct EClient {
     instrument_to_req: Mutex<HashMap<InstrumentId, i64>>,
     // Change detection for quote polling
     last_quotes: Mutex<HashMap<InstrumentId, [i64; 12]>>,
+    // Snapshot req_ids — deliver first ticks then auto-cancel
+    snapshot_reqs: Mutex<HashSet<i64>>,
 
     // PnL subscription state
     pnl_req_id: Mutex<Option<i64>>,
@@ -144,6 +147,7 @@ impl EClient {
             req_to_instrument: Mutex::new(HashMap::new()),
             instrument_to_req: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
+            snapshot_reqs: Mutex::new(HashSet::new()),
             pnl_req_id: Mutex::new(None),
             pnl_single_reqs: Mutex::new(HashMap::new()),
             last_pnl: Mutex::new([0i64; 3]),
@@ -176,6 +180,7 @@ impl EClient {
             req_to_instrument: Mutex::new(HashMap::new()),
             instrument_to_req: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
+            snapshot_reqs: Mutex::new(HashSet::new()),
             pnl_req_id: Mutex::new(None),
             pnl_single_reqs: Mutex::new(HashMap::new()),
             last_pnl: Mutex::new([0i64; 3]),
@@ -219,9 +224,11 @@ impl EClient {
     }
 
     /// Subscribe to market data. Matches `reqMktData` in C++.
+    /// When `snapshot` is true, delivers the first available quote then calls
+    /// `tick_snapshot_end` and auto-cancels the subscription.
     pub fn req_mkt_data(
         &self, req_id: i64, contract: &Contract,
-        _generic_tick_list: &str, _snapshot: bool, _regulatory_snapshot: bool,
+        _generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool,
     ) {
         let reg_gen = self.shared.register_gen();
         let _ = self.control_tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id });
@@ -235,6 +242,9 @@ impl EClient {
         let instrument_id = self.wait_for_registration(reg_gen);
         self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
         self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
+        if snapshot {
+            self.snapshot_reqs.lock().unwrap().insert(req_id);
+        }
     }
 
     /// Cancel market data. Matches `cancelMktData` in C++.
@@ -845,6 +855,7 @@ impl EClient {
         };
 
         let attrib = crate::api::types::TickAttrib::default();
+        let mut snapshot_done: Vec<i64> = Vec::new();
         for (iid, req_id) in instruments {
             let q = self.shared.quote(iid);
             let fields = [
@@ -857,19 +868,30 @@ impl EClient {
                 map.get(&iid).copied().unwrap_or([0i64; 12])
             };
 
-            if fields[0] != last[0] { wrapper.tick_price(req_id, TICK_BID, fields[0] as f64 / PRICE_SCALE_F, &attrib); }
-            if fields[1] != last[1] { wrapper.tick_price(req_id, TICK_ASK, fields[1] as f64 / PRICE_SCALE_F, &attrib); }
-            if fields[2] != last[2] { wrapper.tick_price(req_id, TICK_LAST, fields[2] as f64 / PRICE_SCALE_F, &attrib); }
-            if fields[3] != last[3] { wrapper.tick_size(req_id, TICK_BID_SIZE, fields[3] as f64 / QTY_SCALE as f64); }
-            if fields[4] != last[4] { wrapper.tick_size(req_id, TICK_ASK_SIZE, fields[4] as f64 / QTY_SCALE as f64); }
-            if fields[5] != last[5] { wrapper.tick_size(req_id, TICK_LAST_SIZE, fields[5] as f64 / QTY_SCALE as f64); }
-            if fields[6] != last[6] { wrapper.tick_price(req_id, TICK_HIGH, fields[6] as f64 / PRICE_SCALE_F, &attrib); }
-            if fields[7] != last[7] { wrapper.tick_price(req_id, TICK_LOW, fields[7] as f64 / PRICE_SCALE_F, &attrib); }
-            if fields[8] != last[8] { wrapper.tick_size(req_id, TICK_VOLUME, fields[8] as f64 / QTY_SCALE as f64); }
-            if fields[9] != last[9] { wrapper.tick_price(req_id, TICK_CLOSE, fields[9] as f64 / PRICE_SCALE_F, &attrib); }
-            if fields[10] != last[10] { wrapper.tick_price(req_id, TICK_OPEN, fields[10] as f64 / PRICE_SCALE_F, &attrib); }
+            let mut delivered = false;
+            if fields[0] != last[0] { wrapper.tick_price(req_id, TICK_BID, fields[0] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
+            if fields[1] != last[1] { wrapper.tick_price(req_id, TICK_ASK, fields[1] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
+            if fields[2] != last[2] { wrapper.tick_price(req_id, TICK_LAST, fields[2] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
+            if fields[3] != last[3] { wrapper.tick_size(req_id, TICK_BID_SIZE, fields[3] as f64 / QTY_SCALE as f64); delivered = true; }
+            if fields[4] != last[4] { wrapper.tick_size(req_id, TICK_ASK_SIZE, fields[4] as f64 / QTY_SCALE as f64); delivered = true; }
+            if fields[5] != last[5] { wrapper.tick_size(req_id, TICK_LAST_SIZE, fields[5] as f64 / QTY_SCALE as f64); delivered = true; }
+            if fields[6] != last[6] { wrapper.tick_price(req_id, TICK_HIGH, fields[6] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
+            if fields[7] != last[7] { wrapper.tick_price(req_id, TICK_LOW, fields[7] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
+            if fields[8] != last[8] { wrapper.tick_size(req_id, TICK_VOLUME, fields[8] as f64 / QTY_SCALE as f64); delivered = true; }
+            if fields[9] != last[9] { wrapper.tick_price(req_id, TICK_CLOSE, fields[9] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
+            if fields[10] != last[10] { wrapper.tick_price(req_id, TICK_OPEN, fields[10] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
 
             self.last_quotes.lock().unwrap().insert(iid, fields);
+
+            // Snapshot: after first delivery, signal end and queue for auto-cancel
+            if delivered && self.snapshot_reqs.lock().unwrap().remove(&req_id) {
+                wrapper.tick_snapshot_end(req_id);
+                snapshot_done.push(req_id);
+            }
+        }
+        // Auto-cancel completed snapshots
+        for req_id in snapshot_done {
+            self.cancel_mkt_data(req_id);
         }
 
         // TBT trades → tick_by_tick_all_last

@@ -1,6 +1,6 @@
 //! ibapi-compatible EClient class that wraps IbEngine.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -70,6 +70,8 @@ pub struct EClient {
     instrument_to_req: Mutex<HashMap<u32, i64>>,
     /// Last quote sent per instrument (for change detection).
     last_quotes: Mutex<HashMap<u32, [i64; 12]>>,
+    /// Snapshot req_ids — deliver first ticks then auto-cancel.
+    snapshot_reqs: Mutex<HashSet<i64>>,
     /// P&L subscription reqId (None = not subscribed).
     pnl_req_id: Mutex<Option<i64>>,
     /// Single-position P&L subscriptions: reqId → conId.
@@ -112,6 +114,7 @@ impl EClient {
             req_to_instrument: Mutex::new(HashMap::new()),
             instrument_to_req: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
+            snapshot_reqs: Mutex::new(HashSet::new()),
             pnl_req_id: Mutex::new(None),
             pnl_single_reqs: Mutex::new(HashMap::new()),
             account_summary_req: Mutex::new(None),
@@ -252,7 +255,10 @@ impl EClient {
         self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
         self.contract_cache.lock().unwrap().insert(contract.con_id, contract.clone());
 
-        let _ = (snapshot, regulatory_snapshot, mkt_data_options);
+        if snapshot {
+            self.snapshot_reqs.lock().unwrap().insert(req_id);
+        }
+        let _ = (regulatory_snapshot, mkt_data_options);
 
         Ok(())
     }
@@ -2436,6 +2442,7 @@ impl EClient {
             let map = self.instrument_to_req.lock().unwrap();
             map.iter().map(|(&iid, &req_id)| (iid, req_id)).collect()
         };
+        let mut snapshot_done: Vec<i64> = Vec::new();
         for (iid, req_id) in instruments {
             let q = shared.quote(iid);
             let fields = [
@@ -2449,40 +2456,62 @@ impl EClient {
             let attrib = TickAttrib::default();
             let attrib_obj = Py::new(py, attrib)?.into_any();
 
+            let mut delivered = false;
             if fields[0] != last[0] {
                 self.wrapper.call_method1(py, "tick_price", (req_id, TICK_BID, fields[0] as f64 / PRICE_SCALE_F, &attrib_obj))?;
+                delivered = true;
             }
             if fields[1] != last[1] {
                 self.wrapper.call_method1(py, "tick_price", (req_id, TICK_ASK, fields[1] as f64 / PRICE_SCALE_F, &attrib_obj))?;
+                delivered = true;
             }
             if fields[2] != last[2] {
                 self.wrapper.call_method1(py, "tick_price", (req_id, TICK_LAST, fields[2] as f64 / PRICE_SCALE_F, &attrib_obj))?;
+                delivered = true;
             }
             if fields[3] != last[3] {
                 self.wrapper.call_method1(py, "tick_size", (req_id, TICK_BID_SIZE, fields[3] as f64 / QTY_SCALE as f64))?;
+                delivered = true;
             }
             if fields[4] != last[4] {
                 self.wrapper.call_method1(py, "tick_size", (req_id, TICK_ASK_SIZE, fields[4] as f64 / QTY_SCALE as f64))?;
+                delivered = true;
             }
             if fields[5] != last[5] {
                 self.wrapper.call_method1(py, "tick_size", (req_id, TICK_LAST_SIZE, fields[5] as f64 / QTY_SCALE as f64))?;
+                delivered = true;
             }
             if fields[6] != last[6] {
                 self.wrapper.call_method1(py, "tick_price", (req_id, TICK_HIGH, fields[6] as f64 / PRICE_SCALE_F, &attrib_obj))?;
+                delivered = true;
             }
             if fields[7] != last[7] {
                 self.wrapper.call_method1(py, "tick_price", (req_id, TICK_LOW, fields[7] as f64 / PRICE_SCALE_F, &attrib_obj))?;
+                delivered = true;
             }
             if fields[8] != last[8] {
                 self.wrapper.call_method1(py, "tick_size", (req_id, TICK_VOLUME, fields[8] as f64 / QTY_SCALE as f64))?;
+                delivered = true;
             }
             if fields[9] != last[9] {
                 self.wrapper.call_method1(py, "tick_price", (req_id, TICK_CLOSE, fields[9] as f64 / PRICE_SCALE_F, &attrib_obj))?;
+                delivered = true;
             }
             if fields[10] != last[10] {
                 self.wrapper.call_method1(py, "tick_price", (req_id, TICK_OPEN, fields[10] as f64 / PRICE_SCALE_F, &attrib_obj))?;
+                delivered = true;
             }
             self.last_quotes.lock().unwrap().insert(iid, fields);
+
+            // Snapshot: after first delivery, signal end and queue for auto-cancel
+            if delivered && self.snapshot_reqs.lock().unwrap().remove(&req_id) {
+                self.wrapper.call_method1(py, "tick_snapshot_end", (req_id,))?;
+                snapshot_done.push(req_id);
+            }
+        }
+        // Auto-cancel completed snapshots
+        for req_id in snapshot_done {
+            self.cancel_mkt_data(req_id)?;
         }
 
         // Drain TBT trades -> tick_by_tick_all_last
