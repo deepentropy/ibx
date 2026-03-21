@@ -2488,8 +2488,17 @@ impl HotLoop {
             };
 
             // Merge exec report fields with secdef-cached contract (for tradingClass etc.)
-            let contract = if con_id != 0 {
-                if let Some(mut cached) = self.shared.get_contract(con_id) {
+            // If con_id is missing from FIX, fall back to context order → instrument → con_id.
+            let resolved_con_id = if con_id != 0 {
+                con_id
+            } else if let Some(order) = self.context.order(clord_id) {
+                self.context.market.con_id(order.instrument).unwrap_or(0)
+            } else {
+                0
+            };
+
+            let contract = if resolved_con_id != 0 {
+                if let Some(mut cached) = self.shared.get_contract(resolved_con_id) {
                     if !symbol.is_empty() { cached.symbol = symbol.clone(); }
                     if !sec_type_str.is_empty() { cached.sec_type = sec_type_str.to_string(); }
                     if !exchange.is_empty() { cached.exchange = exchange.clone(); }
@@ -2498,7 +2507,7 @@ impl HotLoop {
                     cached
                 } else {
                     api::Contract {
-                        con_id,
+                        con_id: resolved_con_id,
                         symbol: symbol.clone(),
                         sec_type: sec_type_str.to_string(),
                         exchange: exchange.clone(),
@@ -2518,15 +2527,30 @@ impl HotLoop {
                 }
             };
 
+            // Fall back to context order for fields missing from FIX exec report
+            let (fb_action, fb_tif) = if let Some(ctx_order) = self.context.order(clord_id) {
+                let a = match ctx_order.side {
+                    crate::types::Side::Buy => "BUY",
+                    crate::types::Side::Sell | crate::types::Side::ShortSell => "SELL",
+                };
+                let t = match ctx_order.tif {
+                    b'0' => "DAY", b'1' => "GTC", b'3' => "IOC", b'4' => "FOK",
+                    b'7' => "OPG", b'6' => "GTD", _ => "",
+                };
+                (a, t)
+            } else {
+                ("", "")
+            };
+
             let order = api::Order {
                 order_id: clord_id as i64,
-                action: action.to_string(),
+                action: if action.is_empty() { fb_action.to_string() } else { action.to_string() },
                 total_quantity: total_qty,
                 order_type: order_type_str.to_string(),
                 lmt_price: limit_price,
                 aux_price: stop_px,
-                tif: tif_str.to_string(),
-                account: account.clone(),
+                tif: if tif_str.is_empty() { fb_tif.to_string() } else { tif_str.to_string() },
+                account: if account.is_empty() { self.account_id.clone() } else { account.clone() },
                 perm_id,
                 filled_quantity: leaves_qty as f64,
                 outside_rth,

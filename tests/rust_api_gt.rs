@@ -74,6 +74,8 @@ enum Cb {
     HistoricalNews { req_id: i64, provider_code: String, article_id: String, headline: String },
     HistoricalNewsEnd { req_id: i64, has_more: bool },
     NewsArticle { req_id: i64, article_type: i32 },
+    AccountValue { key: String, value: String, currency: String, account: String },
+    AccountDownloadEnd { account: String },
 }
 
 #[derive(Clone, Debug)]
@@ -326,6 +328,12 @@ impl Wrapper for RecWrapper {
     }
     fn news_article(&mut self, req_id: i64, article_type: i32, _: &str) {
         self.push(Cb::NewsArticle { req_id, article_type });
+    }
+    fn update_account_value(&mut self, key: &str, value: &str, currency: &str, account: &str) {
+        self.push(Cb::AccountValue { key: key.into(), value: value.into(), currency: currency.into(), account: account.into() });
+    }
+    fn account_download_end(&mut self, account: &str) {
+        self.push(Cb::AccountDownloadEnd { account: account.into() });
     }
     fn market_rule(&mut self, id: i64, increments: &[PriceIncrement]) {
         self.push(Cb::MarketRule { id, count: increments.len() });
@@ -946,6 +954,50 @@ fn api_gt_suite() {
         } else {
             println!("  req_news_article... SKIP (no article_id from historical_news)");
             skip_count += 1;
+        }
+    }
+
+    // ── 18. Account Updates ──
+    {
+        print!("  req_account_updates... ");
+        wrapper.drain();
+        client.req_account_updates(true, &client.account_id);
+        poll(&client, &mut wrapper, Duration::from_secs(2));
+        let cbs = wrapper.drain();
+        client.req_account_updates(false, "");
+
+        let values: Vec<_> = cbs.iter().filter_map(|c| if let Cb::AccountValue { key, value, .. } = c { Some((key.clone(), value.clone())) } else { None }).collect();
+        let has_end = cbs.iter().any(|c| matches!(c, Cb::AccountDownloadEnd { .. }));
+
+        if values.is_empty() || !has_end {
+            println!("FAIL (no account values or no end marker)");
+            fail_count += 1;
+        } else {
+            let has_nlv = values.iter().any(|(k, _)| k == "NetLiquidation");
+            let has_bp = values.iter().any(|(k, _)| k == "BuyingPower");
+            if has_nlv && has_bp {
+                println!("PASS ({} values)", values.len());
+                for (k, v) in &values { println!("    {}={}", k, v); }
+                pass_count += 1;
+            } else {
+                println!("FAIL (missing NetLiquidation or BuyingPower)");
+                fail_count += 1;
+            }
+        }
+    }
+
+    // ── 19. Lifecycle: is_connected + next_order_id ──
+    {
+        print!("  is_connected + next_order_id... ");
+        let connected = client.is_connected();
+        let oid1 = client.next_order_id();
+        let oid2 = client.next_order_id();
+        if connected && oid2 > oid1 {
+            println!("PASS (connected={}, oid1={}, oid2={})", connected, oid1, oid2);
+            pass_count += 1;
+        } else {
+            println!("FAIL (connected={}, oid1={}, oid2={})", connected, oid1, oid2);
+            fail_count += 1;
         }
     }
 

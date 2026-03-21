@@ -101,6 +101,10 @@ pub struct EClient {
 
     // News bulletin subscription
     bulletin_subscribed: AtomicBool,
+
+    // Account updates subscription
+    account_updates_subscribed: AtomicBool,
+    last_account: Mutex<Option<AccountState>>,
 }
 
 impl EClient {
@@ -145,6 +149,8 @@ impl EClient {
             last_pnl: Mutex::new([0i64; 3]),
             account_summary_req: Mutex::new(None),
             bulletin_subscribed: AtomicBool::new(false),
+            account_updates_subscribed: AtomicBool::new(false),
+            last_account: Mutex::new(None),
         })
     }
 
@@ -175,6 +181,8 @@ impl EClient {
             last_pnl: Mutex::new([0i64; 3]),
             account_summary_req: Mutex::new(None),
             bulletin_subscribed: AtomicBool::new(false),
+            account_updates_subscribed: AtomicBool::new(false),
+            last_account: Mutex::new(None),
         }
     }
 
@@ -581,6 +589,19 @@ impl EClient {
         let mut req = self.account_summary_req.lock().unwrap();
         if req.as_ref().map(|(r, _)| *r) == Some(req_id) {
             *req = None;
+        }
+    }
+
+    // ── Account Updates ──
+
+    /// Subscribe to account updates. Matches `reqAccountUpdates` in C++.
+    /// Delivers `update_account_value` callbacks via `process_msgs` for each
+    /// account field, then `account_download_end`. Subsequent calls deliver
+    /// only changed values.
+    pub fn req_account_updates(&self, subscribe: bool, _acct_code: &str) {
+        self.account_updates_subscribed.store(subscribe, Ordering::Release);
+        if !subscribe {
+            *self.last_account.lock().unwrap() = None;
         }
     }
 
@@ -1071,6 +1092,58 @@ impl EClient {
                     wrapper.pnl_single(req_id, pos, 0.0, unrealized, 0.0, value);
                 }
             }
+        }
+
+        // Account updates → update_account_value + account_download_end
+        if self.account_updates_subscribed.load(Ordering::Acquire) {
+            let acct = self.shared.account();
+            let prev = *self.last_account.lock().unwrap();
+            let is_first = prev.is_none();
+            let prev = prev.unwrap_or_default();
+
+            let fields: &[(&str, i64, i64)] = &[
+                ("NetLiquidation", acct.net_liquidation, prev.net_liquidation),
+                ("TotalCashValue", acct.total_cash_value, prev.total_cash_value),
+                ("SettledCash", acct.settled_cash, prev.settled_cash),
+                ("BuyingPower", acct.buying_power, prev.buying_power),
+                ("EquityWithLoanValue", acct.equity_with_loan, prev.equity_with_loan),
+                ("GrossPositionValue", acct.gross_position_value, prev.gross_position_value),
+                ("InitMarginReq", acct.init_margin_req, prev.init_margin_req),
+                ("MaintMarginReq", acct.maint_margin_req, prev.maint_margin_req),
+                ("AvailableFunds", acct.available_funds, prev.available_funds),
+                ("ExcessLiquidity", acct.excess_liquidity, prev.excess_liquidity),
+                ("Cushion", acct.cushion, prev.cushion),
+                ("SMA", acct.sma, prev.sma),
+                ("UnrealizedPnL", acct.unrealized_pnl, prev.unrealized_pnl),
+                ("RealizedPnL", acct.realized_pnl, prev.realized_pnl),
+                ("AccruedCash", acct.accrued_cash, prev.accrued_cash),
+                ("DailyPnL", acct.daily_pnl, prev.daily_pnl),
+            ];
+
+            let mut delivered = false;
+            for &(key, cur, prv) in fields {
+                if is_first || cur != prv {
+                    let val_str = format!("{:.2}", cur as f64 / PRICE_SCALE_F);
+                    wrapper.update_account_value(key, &val_str, "USD", &self.account_id);
+                    delivered = true;
+                }
+            }
+            // Integer fields
+            if is_first || acct.day_trades_remaining != prev.day_trades_remaining {
+                wrapper.update_account_value("DayTradesRemaining", &acct.day_trades_remaining.to_string(), "", &self.account_id);
+                delivered = true;
+            }
+            if is_first || acct.leverage != prev.leverage {
+                let val_str = format!("{:.4}", acct.leverage as f64 / PRICE_SCALE_F);
+                wrapper.update_account_value("Leverage-S", &val_str, "", &self.account_id);
+                delivered = true;
+            }
+
+            if delivered {
+                wrapper.update_account_time("");
+                wrapper.account_download_end(&self.account_id);
+            }
+            *self.last_account.lock().unwrap() = Some(acct);
         }
 
         // Account summary → account_summary + account_summary_end (one-shot)
