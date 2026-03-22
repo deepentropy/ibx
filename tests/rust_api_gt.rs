@@ -1240,36 +1240,33 @@ fn api_gt_suite() {
         };
         client.place_order(oid, &spy(), &order).expect("place_order adaptive failed");
 
-        // Wait for Submitted or PreSubmitted
+        // Wait for Submitted, PreSubmitted, or Inactive (rejected)
         poll_until(&client, &mut wrapper, |cbs| {
             cbs.iter().any(|c| matches!(c, Cb::OrderStatus { status, .. }
-                if status == "Submitted" || status == "PreSubmitted"))
+                if status == "Submitted" || status == "PreSubmitted" || status == "Inactive"))
         }, Duration::from_secs(15));
 
         let cbs = wrapper.drain();
         let accepted = cbs.iter().any(|c| matches!(c, Cb::OrderStatus { status, .. }
             if status == "Submitted" || status == "PreSubmitted"));
-
-        // Cancel the adaptive order
-        client.cancel_order(oid, "");
-        poll_until(&client, &mut wrapper, |cbs| {
-            cbs.iter().any(|c| matches!(c, Cb::OrderStatus { status, .. } if status == "Cancelled" || status == "Inactive"))
-        }, Duration::from_secs(15));
-        wrapper.drain();
+        let rejected = cbs.iter().any(|c| matches!(c, Cb::OrderStatus { status, .. }
+            if status == "Inactive"));
 
         if accepted {
+            // Cancel the adaptive order
+            client.cancel_order(oid, "");
+            poll_until(&client, &mut wrapper, |cbs| {
+                cbs.iter().any(|c| matches!(c, Cb::OrderStatus { status, .. } if status == "Cancelled" || status == "Inactive"))
+            }, Duration::from_secs(15));
+            wrapper.drain();
             println!("PASS (adaptive order accepted + cancelled)");
             pass_count += 1;
+        } else if rejected {
+            println!("SKIP (adaptive order rejected — may not be available outside RTH)");
+            skip_count += 1;
         } else {
-            // Check for errors
-            let errors: Vec<_> = cbs.iter().filter_map(|c| if let Cb::Error { msg, .. } = c { Some(msg.clone()) } else { None }).collect();
-            if !errors.is_empty() {
-                println!("SKIP (error: {})", errors[0]);
-                skip_count += 1;
-            } else {
-                println!("FAIL (no order_status received)");
-                fail_count += 1;
-            }
+            println!("FAIL (no order_status received)");
+            fail_count += 1;
         }
     }
 

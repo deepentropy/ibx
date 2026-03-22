@@ -300,6 +300,24 @@ impl EClient {
         let qty = order.total_quantity as u32;
         let order_type = order.order_type.to_uppercase();
 
+        // Adaptive orders (special-cased before generic algo)
+        if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
+            let price = (order.lmt_price * PRICE_SCALE_F) as i64;
+            let priority_str = order.algo_params.iter()
+                .find(|tv| tv.tag == "adaptivePriority")
+                .map(|tv| tv.value.as_str())
+                .unwrap_or("Normal");
+            let priority = match priority_str {
+                "Patient" => AdaptivePriority::Patient,
+                "Urgent" => AdaptivePriority::Urgent,
+                _ => AdaptivePriority::Normal,
+            };
+            let _ = self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitAdaptive {
+                order_id: oid, instrument, side, qty, price, priority,
+            }));
+            return Ok(());
+        }
+
         // Algo orders
         if !order.algo_strategy.is_empty() {
             let algo = parse_algo_params(&order.algo_strategy, &order.algo_params)?;
@@ -412,8 +430,8 @@ impl EClient {
 
     /// Cancel all orders. Matches `reqGlobalCancel` in C++.
     pub fn req_global_cancel(&self) {
-        let map = self.req_to_instrument.lock().unwrap();
-        for &instrument in map.values() {
+        let count = self.shared.instrument_count();
+        for instrument in 0..count {
             let _ = self.control_tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }));
         }
     }
@@ -2033,9 +2051,8 @@ mod tests {
 
     #[test]
     fn req_global_cancel_sends_cancel_all_for_each_instrument() {
-        let (client, rx, _shared) = test_client();
-        client.req_to_instrument.lock().unwrap().insert(1, 0);
-        client.req_to_instrument.lock().unwrap().insert(2, 1);
+        let (client, rx, shared) = test_client();
+        shared.set_instrument_count(2);
         client.req_global_cancel();
         let mut cancel_instruments = vec![];
         while let Ok(cmd) = rx.try_recv() {
