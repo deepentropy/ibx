@@ -31,12 +31,10 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
-use std::collections::HashSet;
 use crossbeam_channel::Sender;
 
 use crate::api::types::{
@@ -47,21 +45,9 @@ use crate::api::types::{
 };
 use crate::api::wrapper::Wrapper;
 use crate::bridge::SharedState;
+use crate::client_core::{ClientCore, order_status_str};
 use crate::gateway::{Gateway, GatewayConfig};
 use crate::types::*;
-
-// Tick type constants matching ibapi.
-const TICK_BID: i32 = 1;
-const TICK_ASK: i32 = 2;
-const TICK_LAST: i32 = 4;
-const TICK_HIGH: i32 = 6;
-const TICK_LOW: i32 = 7;
-const TICK_CLOSE: i32 = 9;
-const TICK_OPEN: i32 = 14;
-const TICK_BID_SIZE: i32 = 0;
-const TICK_ASK_SIZE: i32 = 3;
-const TICK_LAST_SIZE: i32 = 5;
-const TICK_VOLUME: i32 = 8;
 
 // Re-export as public type names for the API surface
 pub type Contract = ApiContract;
@@ -85,29 +71,7 @@ pub struct EClient {
     pub account_id: String,
     connected: AtomicBool,
     next_order_id: AtomicU64,
-
-    // reqId <-> InstrumentId mapping
-    req_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
-    instrument_to_req: Mutex<HashMap<InstrumentId, i64>>,
-    // Change detection for quote polling
-    last_quotes: Mutex<HashMap<InstrumentId, [i64; 12]>>,
-    // Snapshot req_ids — deliver first ticks then auto-cancel
-    snapshot_reqs: Mutex<HashSet<i64>>,
-
-    // PnL subscription state
-    pnl_req_id: Mutex<Option<i64>>,
-    pnl_single_reqs: Mutex<HashMap<i64, i64>>, // req_id → con_id
-    last_pnl: Mutex<[i64; 3]>, // [daily, unrealized, realized]
-
-    // Account summary subscription state (req_id, tags)
-    account_summary_req: Mutex<Option<(i64, Vec<String>)>>,
-
-    // News bulletin subscription
-    bulletin_subscribed: AtomicBool,
-
-    // Account updates subscription
-    account_updates_subscribed: AtomicBool,
-    last_account: Mutex<Option<AccountState>>,
+    core: ClientCore,
 }
 
 impl EClient {
@@ -144,17 +108,7 @@ impl EClient {
             account_id,
             connected: AtomicBool::new(true),
             next_order_id: AtomicU64::new(start_id),
-            req_to_instrument: Mutex::new(HashMap::new()),
-            instrument_to_req: Mutex::new(HashMap::new()),
-            last_quotes: Mutex::new(HashMap::new()),
-            snapshot_reqs: Mutex::new(HashSet::new()),
-            pnl_req_id: Mutex::new(None),
-            pnl_single_reqs: Mutex::new(HashMap::new()),
-            last_pnl: Mutex::new([0i64; 3]),
-            account_summary_req: Mutex::new(None),
-            bulletin_subscribed: AtomicBool::new(false),
-            account_updates_subscribed: AtomicBool::new(false),
-            last_account: Mutex::new(None),
+            core: ClientCore::new(),
         })
     }
 
@@ -177,25 +131,15 @@ impl EClient {
             account_id,
             connected: AtomicBool::new(true),
             next_order_id: AtomicU64::new(start_id),
-            req_to_instrument: Mutex::new(HashMap::new()),
-            instrument_to_req: Mutex::new(HashMap::new()),
-            last_quotes: Mutex::new(HashMap::new()),
-            snapshot_reqs: Mutex::new(HashSet::new()),
-            pnl_req_id: Mutex::new(None),
-            pnl_single_reqs: Mutex::new(HashMap::new()),
-            last_pnl: Mutex::new([0i64; 3]),
-            account_summary_req: Mutex::new(None),
-            bulletin_subscribed: AtomicBool::new(false),
-            account_updates_subscribed: AtomicBool::new(false),
-            last_account: Mutex::new(None),
+            core: ClientCore::new(),
         }
     }
 
     /// Map a reqId to an InstrumentId (for testing without a live engine).
     #[doc(hidden)]
     pub fn map_req_instrument(&self, req_id: i64, instrument: InstrumentId) {
-        self.req_to_instrument.lock().unwrap().insert(req_id, instrument);
-        self.instrument_to_req.lock().unwrap().insert(instrument, req_id);
+        self.core.req_to_instrument.lock().unwrap().insert(req_id, instrument);
+        self.core.instrument_to_req.lock().unwrap().insert(instrument, req_id);
     }
 
     // ── Connection ──
@@ -211,18 +155,6 @@ impl EClient {
 
     // ── Market Data ──
 
-    /// Spin-wait for the hot loop to process a registration command.
-    /// Returns the InstrumentId assigned (instrument_count - 1).
-    fn wait_for_registration(&self, old_gen: u64) -> InstrumentId {
-        for _ in 0..100_000 {
-            if self.shared.register_gen() != old_gen {
-                break;
-            }
-            std::hint::spin_loop();
-        }
-        self.shared.instrument_count().saturating_sub(1)
-    }
-
     /// Subscribe to market data. Matches `reqMktData` in C++.
     /// When `snapshot` is true, delivers the first available quote then calls
     /// `tick_snapshot_end` and auto-cancels the subscription.
@@ -230,28 +162,16 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         _generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool,
     ) {
-        let reg_gen = self.shared.register_gen();
-        let _ = self.control_tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id });
-        let _ = self.control_tx.send(ControlCommand::Subscribe {
-            con_id: contract.con_id,
-            symbol: contract.symbol.clone(),
-            exchange: contract.exchange.clone(),
-            sec_type: contract.sec_type.clone(),
-        });
-
-        let instrument_id = self.wait_for_registration(reg_gen);
-        self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
-        self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
-        if snapshot {
-            self.snapshot_reqs.lock().unwrap().insert(req_id);
-        }
+        let _ = self.core.register_mkt_data(
+            &self.shared, &self.control_tx, req_id,
+            contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+            snapshot,
+        );
     }
 
     /// Cancel market data. Matches `cancelMktData` in C++.
     pub fn cancel_mkt_data(&self, req_id: i64) {
-        if let Some(instrument) = self.req_to_instrument.lock().unwrap().remove(&req_id) {
-            self.instrument_to_req.lock().unwrap().remove(&instrument);
-            self.last_quotes.lock().unwrap().remove(&instrument);
+        if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
             let _ = self.control_tx.send(ControlCommand::Unsubscribe { instrument });
         }
     }
@@ -265,22 +185,16 @@ impl EClient {
             "BidAsk" => TbtType::BidAsk,
             _ => TbtType::Last,
         };
-        let reg_gen = self.shared.register_gen();
-        let _ = self.control_tx.send(ControlCommand::SubscribeTbt {
-            con_id: contract.con_id,
-            symbol: contract.symbol.clone(),
-            tbt_type,
-        });
-
-        let instrument_id = self.wait_for_registration(reg_gen);
-        self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
-        self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
+        let _ = self.core.register_tbt(
+            &self.shared, &self.control_tx, req_id,
+            contract.con_id, &contract.symbol, tbt_type,
+        );
     }
 
     /// Cancel tick-by-tick data. Matches `cancelTickByTickData` in C++.
     pub fn cancel_tick_by_tick_data(&self, req_id: i64) {
-        if let Some(instrument) = self.req_to_instrument.lock().unwrap().remove(&req_id) {
-            self.instrument_to_req.lock().unwrap().remove(&instrument);
+        if let Some(instrument) = self.core.req_to_instrument.lock().unwrap().remove(&req_id) {
+            self.core.instrument_to_req.lock().unwrap().remove(&instrument);
             let _ = self.control_tx.send(ControlCommand::UnsubscribeTbt { instrument });
         }
     }
@@ -295,129 +209,13 @@ impl EClient {
             self.next_order_id.fetch_add(1, Ordering::Relaxed)
         };
 
-        let instrument = self.find_or_register_instrument(contract)?;
-        let side = order.side()?;
-        let qty = order.total_quantity as u32;
-        let order_type = order.order_type.to_uppercase();
+        let instrument = self.core.find_or_register_instrument(
+            &self.shared, &self.control_tx,
+            contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+        )?;
 
-        // Adaptive orders (special-cased before generic algo)
-        if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
-            let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-            let priority_str = order.algo_params.iter()
-                .find(|tv| tv.tag == "adaptivePriority")
-                .map(|tv| tv.value.as_str())
-                .unwrap_or("Normal");
-            let priority = match priority_str {
-                "Patient" => AdaptivePriority::Patient,
-                "Urgent" => AdaptivePriority::Urgent,
-                _ => AdaptivePriority::Normal,
-            };
-            let _ = self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitAdaptive {
-                order_id: oid, instrument, side, qty, price, priority,
-            }));
-            return Ok(());
-        }
-
-        // Algo orders
-        if !order.algo_strategy.is_empty() {
-            let algo = parse_algo_params(&order.algo_strategy, &order.algo_params)?;
-            let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-            let _ = self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitAlgo {
-                order_id: oid, instrument, side, qty, price, algo,
-            }));
-            return Ok(());
-        }
-
-        // What-if orders
-        if order.what_if {
-            let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-            let _ = self.control_tx.send(ControlCommand::Order(OrderRequest::SubmitWhatIf {
-                order_id: oid, instrument, side, qty, price,
-            }));
-            return Ok(());
-        }
-
-        let req = match order_type.as_str() {
-            "MKT" => OrderRequest::SubmitMarket { order_id: oid, instrument, side, qty },
-            "LMT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                if order.has_extended_attrs() || order.tif != "DAY" {
-                    OrderRequest::SubmitLimitEx {
-                        order_id: oid, instrument, side, qty, price,
-                        tif: order.tif_byte(),
-                        attrs: order.attrs(),
-                    }
-                } else {
-                    OrderRequest::SubmitLimit { order_id: oid, instrument, side, qty, price }
-                }
-            }
-            "STP" => {
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitStop { order_id: oid, instrument, side, qty, stop_price: stop }
-            }
-            "STP LMT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitStopLimit { order_id: oid, instrument, side, qty, price, stop_price: stop }
-            }
-            "TRAIL" => {
-                if order.trailing_percent > 0.0 {
-                    let pct = (order.trailing_percent * 100.0) as u32;
-                    OrderRequest::SubmitTrailingStopPct { order_id: oid, instrument, side, qty, trail_pct: pct }
-                } else {
-                    let trail = (order.aux_price * PRICE_SCALE_F) as i64;
-                    OrderRequest::SubmitTrailingStop { order_id: oid, instrument, side, qty, trail_amt: trail }
-                }
-            }
-            "TRAIL LIMIT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                let trail = (order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitTrailingStopLimit { order_id: oid, instrument, side, qty, price, trail_amt: trail }
-            }
-            "MOC" => OrderRequest::SubmitMoc { order_id: oid, instrument, side, qty },
-            "LOC" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitLoc { order_id: oid, instrument, side, qty, price }
-            }
-            "MIT" => {
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitMit { order_id: oid, instrument, side, qty, stop_price: stop }
-            }
-            "LIT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitLit { order_id: oid, instrument, side, qty, price, stop_price: stop }
-            }
-            "MTL" => OrderRequest::SubmitMtl { order_id: oid, instrument, side, qty },
-            "MKT PRT" => OrderRequest::SubmitMktPrt { order_id: oid, instrument, side, qty },
-            "STP PRT" => {
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitStpPrt { order_id: oid, instrument, side, qty, stop_price: stop }
-            }
-            "REL" => {
-                let offset = (order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitRel { order_id: oid, instrument, side, qty, offset }
-            }
-            "PEG MKT" => {
-                let offset = (order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitPegMkt { order_id: oid, instrument, side, qty, offset }
-            }
-            "PEG MID" | "PEG MIDPT" => {
-                let offset = (order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitPegMid { order_id: oid, instrument, side, qty, offset }
-            }
-            "MIDPX" | "MIDPRICE" => {
-                let cap = (order.lmt_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitMidPrice { order_id: oid, instrument, side, qty, price_cap: cap }
-            }
-            "SNAP MKT" => OrderRequest::SubmitSnapMkt { order_id: oid, instrument, side, qty },
-            "SNAP MID" | "SNAP MIDPT" => OrderRequest::SubmitSnapMid { order_id: oid, instrument, side, qty },
-            "SNAP PRI" | "SNAP PRIM" => OrderRequest::SubmitSnapPri { order_id: oid, instrument, side, qty },
-            "BOX TOP" => OrderRequest::SubmitMtl { order_id: oid, instrument, side, qty },
-            _ => return Err(format!("Unsupported order type: '{}'", order.order_type)),
-        };
-
-        let _ = self.control_tx.send(ControlCommand::Order(req));
+        let cmd = ClientCore::build_order_request(order, oid, instrument)?;
+        let _ = self.control_tx.send(cmd);
         Ok(())
     }
 
@@ -430,6 +228,7 @@ impl EClient {
 
     /// Cancel all orders. Matches `reqGlobalCancel` in C++.
     pub fn req_global_cancel(&self) {
+        // Use global instrument count (not just locally-tracked ones)
         let count = self.shared.instrument_count();
         for instrument in 0..count {
             let _ = self.control_tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }));
@@ -577,72 +376,54 @@ impl EClient {
     // ── PnL ──
 
     /// Subscribe to account PnL updates. Matches `reqPnL` in C++.
-    /// PnL updates are delivered via `process_msgs` when values change.
     pub fn req_pnl(&self, req_id: i64, _account: &str, _model_code: &str) {
-        *self.pnl_req_id.lock().unwrap() = Some(req_id);
+        self.core.subscribe_pnl(req_id);
     }
 
     /// Cancel PnL subscription. Matches `cancelPnL` in C++.
     pub fn cancel_pnl(&self, req_id: i64) {
-        let mut pnl = self.pnl_req_id.lock().unwrap();
-        if *pnl == Some(req_id) {
-            *pnl = None;
-        }
+        self.core.unsubscribe_pnl(req_id);
     }
 
     /// Subscribe to single-position PnL updates. Matches `reqPnLSingle` in C++.
     pub fn req_pnl_single(&self, req_id: i64, _account: &str, _model_code: &str, con_id: i64) {
-        self.pnl_single_reqs.lock().unwrap().insert(req_id, con_id);
+        self.core.subscribe_pnl_single(req_id, con_id);
     }
 
     /// Cancel single-position PnL subscription. Matches `cancelPnLSingle` in C++.
     pub fn cancel_pnl_single(&self, req_id: i64) {
-        self.pnl_single_reqs.lock().unwrap().remove(&req_id);
+        self.core.unsubscribe_pnl_single(req_id);
     }
 
     // ── Account Summary ──
 
     /// Request account summary. Matches `reqAccountSummary` in C++.
-    /// Delivered via `process_msgs` as a one-shot response.
     pub fn req_account_summary(&self, req_id: i64, _group: &str, tags: &str) {
-        let tag_list: Vec<String> = tags.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        *self.account_summary_req.lock().unwrap() = Some((req_id, tag_list));
+        self.core.subscribe_account_summary(req_id, tags);
     }
 
     /// Cancel account summary. Matches `cancelAccountSummary` in C++.
     pub fn cancel_account_summary(&self, req_id: i64) {
-        let mut req = self.account_summary_req.lock().unwrap();
-        if req.as_ref().map(|(r, _)| *r) == Some(req_id) {
-            *req = None;
-        }
+        self.core.unsubscribe_account_summary(req_id);
     }
 
     // ── Account Updates ──
 
     /// Subscribe to account updates. Matches `reqAccountUpdates` in C++.
-    /// Delivers `update_account_value` callbacks via `process_msgs` for each
-    /// account field, then `account_download_end`. Subsequent calls deliver
-    /// only changed values.
     pub fn req_account_updates(&self, subscribe: bool, _acct_code: &str) {
-        self.account_updates_subscribed.store(subscribe, Ordering::Release);
-        if !subscribe {
-            *self.last_account.lock().unwrap() = None;
-        }
+        self.core.subscribe_account_updates(subscribe);
     }
 
     // ── News Bulletins ──
 
     /// Subscribe to news bulletins. Matches `reqNewsBulletins` in C++.
     pub fn req_news_bulletins(&self, _all_msgs: bool) {
-        self.bulletin_subscribed.store(true, Ordering::Release);
+        self.core.subscribe_bulletins();
     }
 
     /// Cancel news bulletin subscription. Matches `cancelNewsBulletins` in C++.
     pub fn cancel_news_bulletins(&self) {
-        self.bulletin_subscribed.store(false, Ordering::Release);
+        self.core.unsubscribe_bulletins();
     }
 
     // ── Scanner ──
@@ -779,7 +560,7 @@ impl EClient {
     /// Returns `None` if the reqId is not mapped to a subscription.
     #[inline]
     pub fn quote(&self, req_id: i64) -> Option<Quote> {
-        let map = self.req_to_instrument.lock().unwrap();
+        let map = self.core.req_to_instrument.lock().unwrap();
         map.get(&req_id).map(|&iid| self.shared.quote(iid))
     }
 
@@ -808,7 +589,6 @@ impl EClient {
                 price_f, 0, 0, price_f, 0, "", 0.0,
             );
 
-            // exec_details — use enriched contract + execution from cache
             let side_str = match fill.side {
                 Side::Buy => "BOT",
                 Side::Sell => "SLD",
@@ -816,12 +596,10 @@ impl EClient {
             };
             let (c, exec) = if let Some(info) = self.shared.get_order_info(fill.order_id) {
                 let mut ex = info.last_exec;
-                // Override with fill-specific data
                 ex.side = side_str.into();
                 ex.shares = fill.qty as f64;
                 ex.price = price_f;
                 ex.order_id = fill.order_id as i64;
-                // Enrich contract with secdef cache at read time
                 let contract = if info.contract.con_id != 0 {
                     self.shared.get_contract(info.contract.con_id).unwrap_or(info.contract)
                 } else {
@@ -837,22 +615,13 @@ impl EClient {
                     ..Default::default()
                 })
             };
-            let req_id = self.instrument_to_req.lock().unwrap()
-                .get(&fill.instrument).copied().unwrap_or(-1);
+            let req_id = self.core.req_id_for_instrument(fill.instrument);
             wrapper.exec_details(req_id, &c, &exec);
         }
 
         // Order updates → order_status
         for update in self.shared.drain_order_updates() {
-            let status = match update.status {
-                OrderStatus::PendingSubmit => "PendingSubmit",
-                OrderStatus::Submitted => "Submitted",
-                OrderStatus::Filled => "Filled",
-                OrderStatus::PartiallyFilled => "PreSubmitted",
-                OrderStatus::Cancelled => "Cancelled",
-                OrderStatus::Rejected => "Inactive",
-                OrderStatus::Uncertain => "Unknown",
-            };
+            let status = order_status_str(update.status);
             wrapper.order_status(
                 update.order_id as i64, status, update.filled_qty as f64,
                 update.remaining_qty as f64, 0.0, 0, 0, 0.0, 0, "", 0.0,
@@ -866,56 +635,31 @@ impl EClient {
             wrapper.error(reject.order_id as i64, code, &msg, "");
         }
 
-        // Quote polling → tick_price / tick_size
-        let instruments: Vec<(InstrumentId, i64)> = {
-            let map = self.instrument_to_req.lock().unwrap();
-            map.iter().map(|(&iid, &req_id)| (iid, req_id)).collect()
-        };
-
+        // Quote polling → tick_price / tick_size (via ClientCore)
+        let instruments = self.core.snapshot_instruments();
         let attrib = crate::api::types::TickAttrib::default();
         let mut snapshot_done: Vec<i64> = Vec::new();
         for (iid, req_id) in instruments {
-            let q = self.shared.quote(iid);
-            let fields = [
-                q.bid, q.ask, q.last, q.bid_size, q.ask_size, q.last_size,
-                q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
-            ];
-
-            let last = {
-                let map = self.last_quotes.lock().unwrap();
-                map.get(&iid).copied().unwrap_or([0i64; 12])
-            };
-
-            let mut delivered = false;
-            if fields[0] != last[0] { wrapper.tick_price(req_id, TICK_BID, fields[0] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
-            if fields[1] != last[1] { wrapper.tick_price(req_id, TICK_ASK, fields[1] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
-            if fields[2] != last[2] { wrapper.tick_price(req_id, TICK_LAST, fields[2] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
-            if fields[3] != last[3] { wrapper.tick_size(req_id, TICK_BID_SIZE, fields[3] as f64 / QTY_SCALE as f64); delivered = true; }
-            if fields[4] != last[4] { wrapper.tick_size(req_id, TICK_ASK_SIZE, fields[4] as f64 / QTY_SCALE as f64); delivered = true; }
-            if fields[5] != last[5] { wrapper.tick_size(req_id, TICK_LAST_SIZE, fields[5] as f64 / QTY_SCALE as f64); delivered = true; }
-            if fields[6] != last[6] { wrapper.tick_price(req_id, TICK_HIGH, fields[6] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
-            if fields[7] != last[7] { wrapper.tick_price(req_id, TICK_LOW, fields[7] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
-            if fields[8] != last[8] { wrapper.tick_size(req_id, TICK_VOLUME, fields[8] as f64 / QTY_SCALE as f64); delivered = true; }
-            if fields[9] != last[9] { wrapper.tick_price(req_id, TICK_CLOSE, fields[9] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
-            if fields[10] != last[10] { wrapper.tick_price(req_id, TICK_OPEN, fields[10] as f64 / PRICE_SCALE_F, &attrib); delivered = true; }
-
-            self.last_quotes.lock().unwrap().insert(iid, fields);
-
-            // Snapshot: after first delivery, signal end and queue for auto-cancel
-            if delivered && self.snapshot_reqs.lock().unwrap().remove(&req_id) {
+            let result = self.core.poll_instrument_ticks(&self.shared, iid, req_id);
+            for tick in &result.ticks {
+                if tick.is_price {
+                    wrapper.tick_price(tick.req_id, tick.tick_type, tick.value, &attrib);
+                } else {
+                    wrapper.tick_size(tick.req_id, tick.tick_type, tick.value);
+                }
+            }
+            if self.core.check_snapshot_done(req_id, result.delivered) {
                 wrapper.tick_snapshot_end(req_id);
                 snapshot_done.push(req_id);
             }
         }
-        // Auto-cancel completed snapshots
         for req_id in snapshot_done {
             self.cancel_mkt_data(req_id);
         }
 
         // TBT trades → tick_by_tick_all_last
         for trade in self.shared.drain_tbt_trades() {
-            let req_id = self.instrument_to_req.lock().unwrap()
-                .get(&trade.instrument).copied().unwrap_or(-1);
+            let req_id = self.core.req_id_for_instrument(trade.instrument);
             let attrib_last = TickAttribLast::default();
             wrapper.tick_by_tick_all_last(
                 req_id, 1, trade.timestamp as i64,
@@ -926,8 +670,7 @@ impl EClient {
 
         // TBT quotes → tick_by_tick_bid_ask
         for quote in self.shared.drain_tbt_quotes() {
-            let req_id = self.instrument_to_req.lock().unwrap()
-                .get(&quote.instrument).copied().unwrap_or(-1);
+            let req_id = self.core.req_id_for_instrument(quote.instrument);
             let attrib_ba = TickAttribBidAsk::default();
             wrapper.tick_by_tick_bid_ask(
                 req_id, quote.timestamp as i64,
@@ -938,7 +681,7 @@ impl EClient {
 
         // News → tick_news
         for news in self.shared.drain_tick_news() {
-            let first_req_id = self.instrument_to_req.lock().unwrap()
+            let first_req_id = self.core.instrument_to_req.lock().unwrap()
                 .values().next().copied().unwrap_or(-1);
             wrapper.tick_news(
                 first_req_id, news.timestamp as i64,
@@ -947,7 +690,7 @@ impl EClient {
         }
 
         // News bulletins → update_news_bulletin (only when subscribed)
-        if self.bulletin_subscribed.load(Ordering::Acquire) {
+        if self.core.bulletins_subscribed() {
             for b in self.shared.drain_news_bulletins() {
                 wrapper.update_news_bulletin(b.msg_id as i64, b.msg_type, &b.message, &b.exchange);
             }
@@ -1084,167 +827,36 @@ impl EClient {
             );
         }
 
-        // Market rules (snapshot, not drain — they accumulate)
-        // Delivered on request via req_market_rule(), not here.
-
-        // Position updates are delivered immediately via req_positions(), not polled.
-
-        // PnL → pnl callback (change-detected)
-        if let Some(req_id) = *self.pnl_req_id.lock().unwrap() {
-            let acct = self.shared.account();
-            let pnl = [acct.daily_pnl, acct.unrealized_pnl, acct.realized_pnl];
-            let prev = *self.last_pnl.lock().unwrap();
-            if pnl != prev {
-                wrapper.pnl(
-                    req_id,
-                    acct.daily_pnl as f64 / PRICE_SCALE_F,
-                    acct.unrealized_pnl as f64 / PRICE_SCALE_F,
-                    acct.realized_pnl as f64 / PRICE_SCALE_F,
-                );
-                *self.last_pnl.lock().unwrap() = pnl;
-            }
+        // PnL → pnl callback (change-detected via ClientCore)
+        if let Some(update) = self.core.poll_pnl(&self.shared) {
+            wrapper.pnl(update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl);
         }
 
-        // PnL single → pnl_single callback (compute unrealized from market data when available)
-        {
-            let reqs: Vec<(i64, i64)> = self.pnl_single_reqs.lock().unwrap()
-                .iter().map(|(&r, &c)| (r, c)).collect();
-            for (req_id, con_id) in reqs {
-                if let Some(pi) = self.shared.position_info(con_id) {
-                    let pos = pi.position as f64;
-                    // Try to find last price from subscribed instruments
-                    let last_price = {
-                        let imap = self.instrument_to_req.lock().unwrap();
-                        imap.keys()
-                            .find_map(|&iid| {
-                                let q = self.shared.quote(iid);
-                                if q.last != 0 { Some(q.last) } else { None }
-                            })
-                            .unwrap_or(0)
-                    };
-                    let (unrealized, value) = if last_price != 0 && pi.avg_cost != 0 {
-                        let u = (last_price - pi.avg_cost) * pi.position;
-                        let v = last_price * pi.position;
-                        (u as f64 / PRICE_SCALE_F, v as f64 / PRICE_SCALE_F)
-                    } else {
-                        (0.0, pi.avg_cost as f64 / PRICE_SCALE_F * pos)
-                    };
-                    wrapper.pnl_single(req_id, pos, 0.0, unrealized, 0.0, value);
-                }
-            }
+        // PnL single → pnl_single callback (via ClientCore)
+        for update in self.core.poll_pnl_single(&self.shared) {
+            wrapper.pnl_single(update.req_id, update.pos, update.daily_pnl, update.unrealized_pnl, update.realized_pnl, update.value);
         }
 
-        // Account updates → update_account_value + account_download_end
-        if self.account_updates_subscribed.load(Ordering::Acquire) {
-            let acct = self.shared.account();
-            let prev = *self.last_account.lock().unwrap();
-            let is_first = prev.is_none();
-            let prev = prev.unwrap_or_default();
-
-            let fields: &[(&str, i64, i64)] = &[
-                ("NetLiquidation", acct.net_liquidation, prev.net_liquidation),
-                ("TotalCashValue", acct.total_cash_value, prev.total_cash_value),
-                ("SettledCash", acct.settled_cash, prev.settled_cash),
-                ("BuyingPower", acct.buying_power, prev.buying_power),
-                ("EquityWithLoanValue", acct.equity_with_loan, prev.equity_with_loan),
-                ("GrossPositionValue", acct.gross_position_value, prev.gross_position_value),
-                ("InitMarginReq", acct.init_margin_req, prev.init_margin_req),
-                ("MaintMarginReq", acct.maint_margin_req, prev.maint_margin_req),
-                ("AvailableFunds", acct.available_funds, prev.available_funds),
-                ("ExcessLiquidity", acct.excess_liquidity, prev.excess_liquidity),
-                ("Cushion", acct.cushion, prev.cushion),
-                ("SMA", acct.sma, prev.sma),
-                ("UnrealizedPnL", acct.unrealized_pnl, prev.unrealized_pnl),
-                ("RealizedPnL", acct.realized_pnl, prev.realized_pnl),
-                ("AccruedCash", acct.accrued_cash, prev.accrued_cash),
-                ("DailyPnL", acct.daily_pnl, prev.daily_pnl),
-            ];
-
-            let mut delivered = false;
-            for &(key, cur, prv) in fields {
-                if is_first || cur != prv {
-                    let val_str = format!("{:.2}", cur as f64 / PRICE_SCALE_F);
-                    wrapper.update_account_value(key, &val_str, "USD", &self.account_id);
-                    delivered = true;
-                }
+        // Account updates → update_account_value + account_download_end (via ClientCore)
+        if let Some(batch) = self.core.prepare_account_updates(&self.shared) {
+            for field in &batch.fields {
+                wrapper.update_account_value(field.key, &field.value, field.currency, &self.account_id);
             }
-            // Integer fields
-            if is_first || acct.day_trades_remaining != prev.day_trades_remaining {
-                wrapper.update_account_value("DayTradesRemaining", &acct.day_trades_remaining.to_string(), "", &self.account_id);
-                delivered = true;
-            }
-            if is_first || acct.leverage != prev.leverage {
-                let val_str = format!("{:.4}", acct.leverage as f64 / PRICE_SCALE_F);
-                wrapper.update_account_value("Leverage-S", &val_str, "", &self.account_id);
-                delivered = true;
-            }
-
-            if delivered {
+            if batch.delivered {
                 wrapper.update_account_time("");
                 wrapper.account_download_end(&self.account_id);
             }
-            *self.last_account.lock().unwrap() = Some(acct);
         }
 
-        // Account summary → account_summary + account_summary_end (one-shot)
-        {
-            let req = self.account_summary_req.lock().unwrap().take();
-            if let Some((req_id, tags)) = req {
-                let acct = self.shared.account();
-                let fields: &[(&str, f64)] = &[
-                    ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
-                    ("TotalCashValue", acct.total_cash_value as f64 / PRICE_SCALE_F),
-                    ("SettledCash", acct.settled_cash as f64 / PRICE_SCALE_F),
-                    ("BuyingPower", acct.buying_power as f64 / PRICE_SCALE_F),
-                    ("EquityWithLoanValue", acct.equity_with_loan as f64 / PRICE_SCALE_F),
-                    ("GrossPositionValue", acct.gross_position_value as f64 / PRICE_SCALE_F),
-                    ("InitMarginReq", acct.init_margin_req as f64 / PRICE_SCALE_F),
-                    ("MaintMarginReq", acct.maint_margin_req as f64 / PRICE_SCALE_F),
-                    ("AvailableFunds", acct.available_funds as f64 / PRICE_SCALE_F),
-                    ("ExcessLiquidity", acct.excess_liquidity as f64 / PRICE_SCALE_F),
-                    ("Cushion", acct.cushion as f64 / PRICE_SCALE_F),
-                    ("DayTradesRemaining", acct.day_trades_remaining as f64),
-                    ("Leverage", acct.leverage as f64 / PRICE_SCALE_F),
-                    ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
-                    ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
-                    ("DailyPnL", acct.daily_pnl as f64 / PRICE_SCALE_F),
-                ];
-                for &(tag, val) in fields {
-                    if !tags.is_empty() && !tags.iter().any(|t| t == tag) {
-                        continue;
-                    }
-                    let val_str = format!("{:.2}", val);
-                    wrapper.account_summary(req_id, &self.account_id, tag, &val_str, "USD");
-                }
-                wrapper.account_summary_end(req_id);
+        // Account summary → account_summary + account_summary_end (one-shot via ClientCore)
+        if let Some(batch) = self.core.prepare_account_summary(&self.shared, &self.account_id) {
+            for entry in &batch.entries {
+                wrapper.account_summary(batch.req_id, &self.account_id, entry.tag, &entry.value, entry.currency);
             }
+            wrapper.account_summary_end(batch.req_id);
         }
     }
 
-    // ── Internal helpers ──
-
-    fn find_or_register_instrument(&self, contract: &Contract) -> Result<InstrumentId, String> {
-        // Check if already mapped
-        {
-            let map = self.req_to_instrument.lock().unwrap();
-            for (&_req_id, &iid) in map.iter() {
-                return Ok(iid);
-            }
-        }
-
-        // Register new
-        let reg_gen = self.shared.register_gen();
-        self.control_tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id })
-            .map_err(|e| format!("Engine stopped: {}", e))?;
-        self.control_tx.send(ControlCommand::Subscribe {
-            con_id: contract.con_id,
-            symbol: contract.symbol.clone(),
-            exchange: contract.exchange.clone(),
-            sec_type: contract.sec_type.clone(),
-        }).map_err(|e| format!("Engine stopped: {}", e))?;
-
-        Ok(self.wait_for_registration(reg_gen))
-    }
 }
 
 /// Parse algo strategy and TagValue params into internal AlgoParams.
@@ -1497,13 +1109,13 @@ mod tests {
     fn cancel_mkt_data_sends_unsubscribe() {
         let (client, rx, _shared) = test_client();
         // Pre-register mapping
-        client.req_to_instrument.lock().unwrap().insert(1, 0);
-        client.instrument_to_req.lock().unwrap().insert(0, 1);
+        client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+        client.core.instrument_to_req.lock().unwrap().insert(0, 1);
         client.cancel_mkt_data(1);
         let cmd = rx.try_recv().unwrap();
         assert!(matches!(cmd, ControlCommand::Unsubscribe { instrument: 0 }));
         // Mapping should be cleared
-        assert!(client.req_to_instrument.lock().unwrap().get(&1).is_none());
+        assert!(client.core.req_to_instrument.lock().unwrap().get(&1).is_none());
     }
 
     #[test]
@@ -1544,7 +1156,7 @@ mod tests {
     #[test]
     fn cancel_tick_by_tick_data_sends_unsubscribe_tbt() {
         let (client, rx, _shared) = test_client();
-        client.req_to_instrument.lock().unwrap().insert(10, 3);
+        client.core.req_to_instrument.lock().unwrap().insert(10, 3);
         client.cancel_tick_by_tick_data(10);
         let cmd = rx.try_recv().unwrap();
         assert!(matches!(cmd, ControlCommand::UnsubscribeTbt { instrument: 3 }));
@@ -2379,7 +1991,7 @@ mod tests {
         let handle = std::thread::spawn(|| {});
         let client = EClient::from_parts(shared, tx, handle, "DU123".into());
 
-        client.req_to_instrument.lock().unwrap().insert(5, 0);
+        client.core.req_to_instrument.lock().unwrap().insert(5, 0);
 
         let quote = client.quote(5).unwrap();
         assert_eq!(quote.bid, 200 * PRICE_SCALE);
@@ -2515,8 +2127,8 @@ mod tests {
         q.ask = 151 * PRICE_SCALE;
         shared.push_quote(0, &q);
 
-        client.req_to_instrument.lock().unwrap().insert(1, 0);
-        client.instrument_to_req.lock().unwrap().insert(0, 1);
+        client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+        client.core.instrument_to_req.lock().unwrap().insert(0, 1);
 
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
@@ -2549,8 +2161,8 @@ mod tests {
         };
         shared.push_quote(0, &q);
 
-        client.req_to_instrument.lock().unwrap().insert(1, 0);
-        client.instrument_to_req.lock().unwrap().insert(0, 1);
+        client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+        client.core.instrument_to_req.lock().unwrap().insert(0, 1);
 
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
@@ -2580,10 +2192,10 @@ mod tests {
         q1.bid = 400 * PRICE_SCALE;
         shared.push_quote(1, &q1);
 
-        client.req_to_instrument.lock().unwrap().insert(1, 0);
-        client.instrument_to_req.lock().unwrap().insert(0, 1);
-        client.req_to_instrument.lock().unwrap().insert(2, 1);
-        client.instrument_to_req.lock().unwrap().insert(1, 2);
+        client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+        client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+        client.core.req_to_instrument.lock().unwrap().insert(2, 1);
+        client.core.instrument_to_req.lock().unwrap().insert(1, 2);
 
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
@@ -2598,7 +2210,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_tbt_trade() {
         let (client, _rx, shared) = test_client();
-        client.instrument_to_req.lock().unwrap().insert(0, 10);
+        client.core.instrument_to_req.lock().unwrap().insert(0, 10);
         shared.push_tbt_trade(TbtTrade {
             instrument: 0, price: 150 * PRICE_SCALE, size: 100,
             timestamp: 1700000000, exchange: "ARCA".into(), conditions: "".into(),
@@ -2611,7 +2223,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_tbt_quote() {
         let (client, _rx, shared) = test_client();
-        client.instrument_to_req.lock().unwrap().insert(0, 10);
+        client.core.instrument_to_req.lock().unwrap().insert(0, 10);
         shared.push_tbt_quote(TbtQuote {
             instrument: 0, bid: 150 * PRICE_SCALE, ask: 151 * PRICE_SCALE,
             bid_size: 1000, ask_size: 2000, timestamp: 1700000000,
@@ -2641,7 +2253,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_tick_news() {
         let (client, _rx, shared) = test_client();
-        client.instrument_to_req.lock().unwrap().insert(0, 1);
+        client.core.instrument_to_req.lock().unwrap().insert(0, 1);
         shared.push_tick_news(TickNews {
             provider_code: "BRFG".into(), article_id: "BRFG$123".into(),
             headline: "AAPL beats".into(), timestamp: 1700000000,
@@ -2971,7 +2583,7 @@ mod tests {
     #[test]
     fn process_msgs_fill_uses_instrument_to_req_mapping() {
         let (client, _rx, shared) = test_client();
-        client.instrument_to_req.lock().unwrap().insert(0, 42);
+        client.core.instrument_to_req.lock().unwrap().insert(0, 42);
         shared.push_fill(Fill {
             instrument: 0, order_id: 1, side: Side::Buy,
             price: PRICE_SCALE, qty: 100, remaining: 0,

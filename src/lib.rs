@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod bridge;
+pub mod client_core;
 pub mod config;
 pub mod control;
 pub mod gateway;

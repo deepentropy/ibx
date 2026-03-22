@@ -10,6 +10,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::bridge::SharedState;
+use crate::client_core::{ClientCore, order_status_str};
 use crate::control::historical::{HistoricalBar, HistoricalResponse, HeadTimestampResponse};
 use crate::gateway::{Gateway, GatewayConfig};
 use crate::types::*;
@@ -64,40 +65,20 @@ pub struct EClient {
     /// Set once by connect(), read-only after.
     account_id: OnceLock<String>,
     connected: AtomicBool,
-    /// Maps reqId -> InstrumentId for market data subscriptions.
-    req_to_instrument: Mutex<HashMap<i64, u32>>,
-    /// Maps InstrumentId -> reqId (reverse).
-    instrument_to_req: Mutex<HashMap<u32, i64>>,
-    /// Last quote sent per instrument (for change detection).
-    last_quotes: Mutex<HashMap<u32, [i64; 12]>>,
-    /// Snapshot req_ids — deliver first ticks then auto-cancel.
-    snapshot_reqs: Mutex<HashSet<i64>>,
+    /// Shared subscription tracking and dispatch preparation.
+    core: ClientCore,
     /// Req_ids that have already received a market_data_type callback.
     mdt_sent: Mutex<HashSet<i64>>,
-    /// P&L subscription reqId (None = not subscribed).
-    pnl_req_id: Mutex<Option<i64>>,
-    /// Single-position P&L subscriptions: reqId → conId.
-    pnl_single_reqs: Mutex<HashMap<i64, i64>>,
-    /// Account summary subscription: (reqId, requested_tags).
-    account_summary_req: Mutex<Option<(i64, Vec<String>)>>,
-    /// Last P&L values sent (for change detection).
-    last_pnl: Mutex<[i64; 3]>,
     /// Market data type preference (1=live, 2=frozen, 3=delayed, 4=delayed-frozen).
     market_data_type: AtomicI32,
     /// Track open orders: order_id → StoredOrder (contract + order + status).
     open_orders: Mutex<HashMap<u64, StoredOrder>>,
     /// Track executions with full details.
     executions: Mutex<Vec<StoredExecution>>,
-    /// Whether news bulletins subscription is active.
-    bulletin_subscribed: AtomicBool,
     /// News provider codes for per-contract news ticks (e.g. "BRFG*BRFUPDN").
     news_providers: Mutex<String>,
     /// Cache of con_id → Contract for enriching position/execution callbacks.
     contract_cache: Mutex<HashMap<i64, Contract>>,
-    /// Whether account updates subscription is active.
-    account_updates_subscribed: AtomicBool,
-    /// Last account state sent (for change detection).
-    last_account: Mutex<Option<AccountState>>,
 }
 
 #[pymethods]
@@ -113,23 +94,13 @@ impl EClient {
             _thread: Mutex::new(None),
             account_id: OnceLock::new(),
             connected: AtomicBool::new(false),
-            req_to_instrument: Mutex::new(HashMap::new()),
-            instrument_to_req: Mutex::new(HashMap::new()),
-            last_quotes: Mutex::new(HashMap::new()),
-            snapshot_reqs: Mutex::new(HashSet::new()),
+            core: ClientCore::new(),
             mdt_sent: Mutex::new(HashSet::new()),
-            pnl_req_id: Mutex::new(None),
-            pnl_single_reqs: Mutex::new(HashMap::new()),
-            account_summary_req: Mutex::new(None),
-            last_pnl: Mutex::new([0; 3]),
             market_data_type: AtomicI32::new(1),
             open_orders: Mutex::new(HashMap::new()),
             executions: Mutex::new(Vec::new()),
-            bulletin_subscribed: AtomicBool::new(false),
             news_providers: Mutex::new("BRFG*BRFUPDN".to_string()),
             contract_cache: Mutex::new(HashMap::new()),
-            account_updates_subscribed: AtomicBool::new(false),
-            last_account: Mutex::new(None),
         }
     }
 
@@ -227,19 +198,7 @@ impl EClient {
     ) -> PyResult<()> {
         let tx = self.control_tx.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-
         let shared = self.shared.get().unwrap();
-        let reg_gen = shared.register_gen();
-
-        tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id })
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-        tx.send(ControlCommand::Subscribe {
-            con_id: contract.con_id,
-            symbol: contract.symbol.clone(),
-            exchange: contract.exchange.clone(),
-            sec_type: contract.sec_type.clone(),
-        })
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
 
         // If generic_tick_list contains 292 (news), also subscribe via CCP
         let wants_news = generic_tick_list.split(',')
@@ -253,14 +212,13 @@ impl EClient {
             }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         }
 
-        let instrument_id = Self::wait_for_registration(shared, reg_gen);
-        self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
-        self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
+        self.core.register_mkt_data(
+            shared, tx, req_id,
+            contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+            snapshot,
+        ).map_err(|e| PyRuntimeError::new_err(e))?;
         self.contract_cache.lock().unwrap().insert(contract.con_id, contract.clone());
 
-        if snapshot {
-            self.snapshot_reqs.lock().unwrap().insert(req_id);
-        }
         let _ = (regulatory_snapshot, mkt_data_options);
 
         Ok(())
@@ -268,15 +226,12 @@ impl EClient {
 
     /// Cancel market data.
     fn cancel_mkt_data(&self, req_id: i64) -> PyResult<()> {
-        if let Some(instrument) = self.req_to_instrument.lock().unwrap().remove(&req_id) {
-            self.instrument_to_req.lock().unwrap().remove(&instrument);
-            self.last_quotes.lock().unwrap().remove(&instrument);
+        if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
             self.mdt_sent.lock().unwrap().remove(&req_id);
             let tx = self.control_tx.get()
                 .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
             tx.send(ControlCommand::Unsubscribe { instrument })
                 .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-            // Also cancel news subscription (idempotent if none active)
             let _ = tx.send(ControlCommand::UnsubscribeNews { instrument });
         }
         Ok(())
@@ -302,20 +257,14 @@ impl EClient {
         };
 
         let shared = self.shared.get().unwrap();
+        // RegisterInstrument is sent inside register_tbt for TBT (SubscribeTbt implies it)
         let reg_gen = shared.register_gen();
-
         tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-        tx.send(ControlCommand::SubscribeTbt {
-            con_id: contract.con_id,
-            symbol: contract.symbol.clone(),
-            tbt_type,
-        })
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-
-        let instrument_id = Self::wait_for_registration(shared, reg_gen);
-        self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
-        self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
+        self.core.register_tbt(
+            shared, tx, req_id,
+            contract.con_id, &contract.symbol, tbt_type,
+        ).map_err(|e| PyRuntimeError::new_err(e))?;
 
         let _ = (number_of_ticks, ignore_size);
         Ok(())
@@ -323,8 +272,8 @@ impl EClient {
 
     /// Cancel tick-by-tick data.
     fn cancel_tick_by_tick_data(&self, req_id: i64) -> PyResult<()> {
-        if let Some(instrument) = self.req_to_instrument.lock().unwrap().remove(&req_id) {
-            self.instrument_to_req.lock().unwrap().remove(&instrument);
+        if let Some(instrument) = self.core.req_to_instrument.lock().unwrap().remove(&req_id) {
+            self.core.instrument_to_req.lock().unwrap().remove(&instrument);
             let tx = self.control_tx.get()
                 .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
             tx.send(ControlCommand::UnsubscribeTbt { instrument })
@@ -424,49 +373,42 @@ impl EClient {
     /// Request P&L updates for the account. Gateway-computed from positions × quotes.
     #[pyo3(signature = (req_id, account, model_code=""))]
     fn req_pnl(&self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
-        *self.pnl_req_id.lock().unwrap() = Some(req_id);
+        self.core.subscribe_pnl(req_id);
         let _ = (account, model_code);
         Ok(())
     }
 
     /// Cancel P&L subscription.
     fn cancel_pnl(&self, req_id: i64) -> PyResult<()> {
-        let mut pnl = self.pnl_req_id.lock().unwrap();
-        if *pnl == Some(req_id) {
-            *pnl = None;
-        }
+        self.core.unsubscribe_pnl(req_id);
         Ok(())
     }
 
     /// Request P&L for a single position. Gateway-computed.
     #[pyo3(signature = (req_id, account, model_code, con_id))]
     fn req_pnl_single(&self, req_id: i64, account: &str, model_code: &str, con_id: i64) -> PyResult<()> {
-        self.pnl_single_reqs.lock().unwrap().insert(req_id, con_id);
+        self.core.subscribe_pnl_single(req_id, con_id);
         let _ = (account, model_code);
         Ok(())
     }
 
     /// Cancel single-position P&L subscription.
     fn cancel_pnl_single(&self, req_id: i64) -> PyResult<()> {
-        self.pnl_single_reqs.lock().unwrap().remove(&req_id);
+        self.core.unsubscribe_pnl_single(req_id);
         Ok(())
     }
 
     /// Request account summary.
     #[pyo3(signature = (req_id, group_name, tags))]
     fn req_account_summary(&self, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
-        let tag_list: Vec<String> = tags.split(',').map(|s| s.trim().to_string()).collect();
-        *self.account_summary_req.lock().unwrap() = Some((req_id, tag_list));
+        self.core.subscribe_account_summary(req_id, tags);
         let _ = group_name;
         Ok(())
     }
 
     /// Cancel account summary.
     fn cancel_account_summary(&self, req_id: i64) -> PyResult<()> {
-        let mut req = self.account_summary_req.lock().unwrap();
-        if req.as_ref().map(|(r, _)| *r) == Some(req_id) {
-            *req = None;
-        }
+        self.core.unsubscribe_account_summary(req_id);
         Ok(())
     }
 
@@ -512,9 +454,8 @@ impl EClient {
 
     /// Place an order. Delegates to Rust API's order routing logic.
     fn place_order(&self, py: Python<'_>, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
-        if self.control_tx.get().is_none() {
-            return Err(PyRuntimeError::new_err("Not connected"));
-        }
+        let tx = self.control_tx.get()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
 
         let oid = if order_id > 0 {
             order_id as u64
@@ -523,118 +464,14 @@ impl EClient {
         };
 
         let instrument = self.find_or_register_instrument(contract)?;
-        let tx = self.control_tx.get().unwrap();
 
         // Convert Python Order to Rust API Order and use shared routing logic
         let mut api_order = order.to_api();
         api_order.conditions = order.convert_conditions(py);
-        let side = api_order.side().map_err(|e| PyRuntimeError::new_err(e))?;
-        let qty = api_order.total_quantity as u32;
-        let order_type = api_order.order_type.to_uppercase();
 
-        // Algo orders
-        if !api_order.algo_strategy.is_empty() {
-            let algo = crate::api::client::parse_algo_params(&api_order.algo_strategy, &api_order.algo_params)
-                .map_err(|e| PyRuntimeError::new_err(e))?;
-            let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
-            tx.send(ControlCommand::Order(OrderRequest::SubmitAlgo {
-                order_id: oid, instrument, side, qty, price, algo,
-            })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-            return Ok(());
-        }
-
-        // What-if orders
-        if api_order.what_if {
-            let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
-            tx.send(ControlCommand::Order(OrderRequest::SubmitWhatIf {
-                order_id: oid, instrument, side, qty, price,
-            })).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-            return Ok(());
-        }
-
-        let req = match order_type.as_str() {
-            "MKT" => OrderRequest::SubmitMarket { order_id: oid, instrument, side, qty },
-            "LMT" => {
-                let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
-                if api_order.has_extended_attrs() || api_order.tif != "DAY" {
-                    OrderRequest::SubmitLimitEx {
-                        order_id: oid, instrument, side, qty, price,
-                        tif: api_order.tif_byte(),
-                        attrs: api_order.attrs(),
-                    }
-                } else {
-                    OrderRequest::SubmitLimit { order_id: oid, instrument, side, qty, price }
-                }
-            }
-            "STP" => {
-                let stop = (api_order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitStop { order_id: oid, instrument, side, qty, stop_price: stop }
-            }
-            "STP LMT" => {
-                let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
-                let stop = (api_order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitStopLimit { order_id: oid, instrument, side, qty, price, stop_price: stop }
-            }
-            "TRAIL" => {
-                if api_order.trailing_percent > 0.0 {
-                    let pct = (api_order.trailing_percent * 100.0) as u32;
-                    OrderRequest::SubmitTrailingStopPct { order_id: oid, instrument, side, qty, trail_pct: pct }
-                } else {
-                    let trail = (api_order.aux_price * PRICE_SCALE_F) as i64;
-                    OrderRequest::SubmitTrailingStop { order_id: oid, instrument, side, qty, trail_amt: trail }
-                }
-            }
-            "TRAIL LIMIT" => {
-                let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
-                let trail = (api_order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitTrailingStopLimit { order_id: oid, instrument, side, qty, price, trail_amt: trail }
-            }
-            "MOC" => OrderRequest::SubmitMoc { order_id: oid, instrument, side, qty },
-            "LOC" => {
-                let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitLoc { order_id: oid, instrument, side, qty, price }
-            }
-            "MIT" => {
-                let stop = (api_order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitMit { order_id: oid, instrument, side, qty, stop_price: stop }
-            }
-            "LIT" => {
-                let price = (api_order.lmt_price * PRICE_SCALE_F) as i64;
-                let stop = (api_order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitLit { order_id: oid, instrument, side, qty, price, stop_price: stop }
-            }
-            "MTL" => OrderRequest::SubmitMtl { order_id: oid, instrument, side, qty },
-            "MKT PRT" => OrderRequest::SubmitMktPrt { order_id: oid, instrument, side, qty },
-            "STP PRT" => {
-                let stop = (api_order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitStpPrt { order_id: oid, instrument, side, qty, stop_price: stop }
-            }
-            "REL" => {
-                let offset = (api_order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitRel { order_id: oid, instrument, side, qty, offset }
-            }
-            "PEG MKT" => {
-                let offset = (api_order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitPegMkt { order_id: oid, instrument, side, qty, offset }
-            }
-            "PEG MID" | "PEG MIDPT" => {
-                let offset = (api_order.aux_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitPegMid { order_id: oid, instrument, side, qty, offset }
-            }
-            "MIDPX" | "MIDPRICE" => {
-                let cap = (api_order.lmt_price * PRICE_SCALE_F) as i64;
-                OrderRequest::SubmitMidPrice { order_id: oid, instrument, side, qty, price_cap: cap }
-            }
-            "SNAP MKT" => OrderRequest::SubmitSnapMkt { order_id: oid, instrument, side, qty },
-            "SNAP MID" | "SNAP MIDPT" => OrderRequest::SubmitSnapMid { order_id: oid, instrument, side, qty },
-            "SNAP PRI" | "SNAP PRIM" => OrderRequest::SubmitSnapPri { order_id: oid, instrument, side, qty },
-            "BOX TOP" => OrderRequest::SubmitMtl { order_id: oid, instrument, side, qty },
-            _ => {
-                return Err(PyRuntimeError::new_err(format!("Unsupported order type: '{}'", api_order.order_type)));
-            }
-        };
-
-        tx.send(ControlCommand::Order(req))
+        let cmd = ClientCore::build_order_request(&api_order, oid, instrument)
+            .map_err(|e| PyRuntimeError::new_err(e))?;
+        tx.send(cmd)
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
 
         // Store order info for req_open_orders / req_completed_orders
@@ -668,7 +505,7 @@ impl EClient {
     fn req_global_cancel(&self) -> PyResult<()> {
         let tx = self.control_tx.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-        let map = self.req_to_instrument.lock().unwrap();
+        let map = self.core.req_to_instrument.lock().unwrap();
         for &instrument in map.values() {
             let _ = tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }));
         }
@@ -687,10 +524,7 @@ impl EClient {
     /// Request account updates.
     #[pyo3(signature = (subscribe, _acct_code=""))]
     fn req_account_updates(&self, subscribe: bool, _acct_code: &str) -> PyResult<()> {
-        self.account_updates_subscribed.store(subscribe, Ordering::Release);
-        if !subscribe {
-            *self.last_account.lock().unwrap() = None;
-        }
+        self.core.subscribe_account_updates(subscribe);
         Ok(())
     }
 
@@ -1136,13 +970,13 @@ impl EClient {
     #[pyo3(signature = (all_msgs=true))]
     fn req_news_bulletins(&self, all_msgs: bool) -> PyResult<()> {
         let _ = all_msgs;
-        self.bulletin_subscribed.store(true, Ordering::Release);
+        self.core.subscribe_bulletins();
         Ok(())
     }
 
     /// Cancel news bulletins.
     fn cancel_news_bulletins(&self) -> PyResult<()> {
-        self.bulletin_subscribed.store(false, Ordering::Release);
+        self.core.unsubscribe_bulletins();
         Ok(())
     }
 
@@ -1479,7 +1313,7 @@ impl EClient {
             // Drain fills -> execDetails + orderStatus
             let fills = shared.drain_fills();
             for fill in fills {
-                let req_id = self.instrument_to_req.lock().unwrap()
+                let req_id = self.core.instrument_to_req.lock().unwrap()
                     .get(&fill.instrument).copied().unwrap_or(-1);
                 let side_str = match fill.side {
                     Side::Buy => "BUY",
@@ -1545,15 +1379,7 @@ impl EClient {
             // Drain order updates -> orderStatus
             let updates = shared.drain_order_updates();
             for update in updates {
-                let status = match update.status {
-                    OrderStatus::PendingSubmit => "PendingSubmit",
-                    OrderStatus::Submitted => "Submitted",
-                    OrderStatus::Filled => "Filled",
-                    OrderStatus::PartiallyFilled => "PreSubmitted",
-                    OrderStatus::Cancelled => "Cancelled",
-                    OrderStatus::Rejected => "Inactive",
-                    OrderStatus::Uncertain => "Unknown",
-                };
+                let status = order_status_str(update.status);
                 self.wrapper.call_method(
                     py, "order_status",
                     (update.order_id as i64, status, update.filled_qty as f64,
@@ -1600,7 +1426,7 @@ impl EClient {
             // Poll quotes for changes -> tickPrice/tickSize
             // Snapshot instrument map then release lock before calling Python
             let instruments: Vec<(u32, i64)> = {
-                let map = self.instrument_to_req.lock().unwrap();
+                let map = self.core.instrument_to_req.lock().unwrap();
                 map.iter().map(|(&iid, &req_id)| (iid, req_id)).collect()
             };
 
@@ -1613,7 +1439,7 @@ impl EClient {
 
                 // Read previous values
                 let last = {
-                    let map = self.last_quotes.lock().unwrap();
+                    let map = self.core.last_quotes.lock().unwrap();
                     map.get(&iid).copied().unwrap_or([0i64; 12])
                 };
 
@@ -1668,13 +1494,13 @@ impl EClient {
                 }
 
                 // Update last quotes
-                self.last_quotes.lock().unwrap().insert(iid, fields);
+                self.core.last_quotes.lock().unwrap().insert(iid, fields);
             }
 
             // Drain TBT trades -> tickByTickAllLast
             let tbt_trades = shared.drain_tbt_trades();
             for trade in tbt_trades {
-                let req_id = self.instrument_to_req.lock().unwrap()
+                let req_id = self.core.instrument_to_req.lock().unwrap()
                     .get(&trade.instrument).copied().unwrap_or(-1);
                 let price = trade.price as f64 / PRICE_SCALE_F;
                 let size = trade.size as f64;
@@ -1691,7 +1517,7 @@ impl EClient {
             // Drain TBT quotes -> tickByTickBidAsk
             let tbt_quotes = shared.drain_tbt_quotes();
             for quote in tbt_quotes {
-                let req_id = self.instrument_to_req.lock().unwrap()
+                let req_id = self.core.instrument_to_req.lock().unwrap()
                     .get(&quote.instrument).copied().unwrap_or(-1);
                 let attrib = super::tick_types::TickAttribBidAsk::default();
                 let attrib_obj = Py::new(py, attrib)?.into_any();
@@ -1707,7 +1533,7 @@ impl EClient {
             // Drain news -> tickNews
             let news_items = shared.drain_tick_news();
             for news in news_items {
-                let first_req_id = self.instrument_to_req.lock().unwrap()
+                let first_req_id = self.core.instrument_to_req.lock().unwrap()
                     .values().next().copied();
                 if let Some(req_id) = first_req_id {
                     self.wrapper.call_method(
@@ -1720,7 +1546,7 @@ impl EClient {
             }
 
             // Drain news bulletins -> updateNewsBulletin
-            if self.bulletin_subscribed.load(Ordering::Acquire) {
+            if self.core.bulletin_subscribed.load(Ordering::Acquire) {
                 let bulletins = shared.drain_news_bulletins();
                 for b in bulletins {
                     self.wrapper.call_method(
@@ -1947,166 +1773,60 @@ impl EClient {
 
             // Drain market rules -> market_rule (already served from cache in req_market_rule)
 
-            // Account state -> updateAccountValue + accountDownloadEnd (subscription-gated)
-            if self.account_updates_subscribed.load(Ordering::Acquire) {
-                let acct = shared.account();
+            // Account updates (via ClientCore)
+            if let Some(batch) = self.core.prepare_account_updates(shared) {
                 let account_name = self.account_id.get().map(|s| s.as_str()).unwrap_or("");
-                let mut prev_guard = self.last_account.lock().unwrap();
-                let is_first = prev_guard.is_none();
-                let prev = prev_guard.unwrap_or_default();
-
-                let fields: &[(&str, i64, i64)] = &[
-                    ("NetLiquidation", acct.net_liquidation, prev.net_liquidation),
-                    ("TotalCashValue", acct.total_cash_value, prev.total_cash_value),
-                    ("SettledCash", acct.settled_cash, prev.settled_cash),
-                    ("BuyingPower", acct.buying_power, prev.buying_power),
-                    ("EquityWithLoanValue", acct.equity_with_loan, prev.equity_with_loan),
-                    ("GrossPositionValue", acct.gross_position_value, prev.gross_position_value),
-                    ("InitMarginReq", acct.init_margin_req, prev.init_margin_req),
-                    ("MaintMarginReq", acct.maint_margin_req, prev.maint_margin_req),
-                    ("AvailableFunds", acct.available_funds, prev.available_funds),
-                    ("ExcessLiquidity", acct.excess_liquidity, prev.excess_liquidity),
-                    ("Cushion", acct.cushion, prev.cushion),
-                    ("SMA", acct.sma, prev.sma),
-                    ("UnrealizedPnL", acct.unrealized_pnl, prev.unrealized_pnl),
-                    ("RealizedPnL", acct.realized_pnl, prev.realized_pnl),
-                    ("AccruedCash", acct.accrued_cash, prev.accrued_cash),
-                    ("DailyPnL", acct.daily_pnl, prev.daily_pnl),
-                ];
-
-                let mut delivered = false;
-                for &(key, cur, prv) in fields {
-                    if is_first || cur != prv {
-                        let val_str = format!("{:.2}", cur as f64 / PRICE_SCALE_F);
-                        self.wrapper.call_method1(py, "update_account_value",
-                            (key, val_str.as_str(), "USD", account_name))?;
-                        delivered = true;
-                    }
-                }
-                // Integer fields
-                if is_first || acct.day_trades_remaining != prev.day_trades_remaining {
+                for field in &batch.fields {
                     self.wrapper.call_method1(py, "update_account_value",
-                        ("DayTradesRemaining", &acct.day_trades_remaining.to_string(), "", account_name))?;
-                    delivered = true;
+                        (field.key, field.value.as_str(), field.currency, account_name))?;
                 }
-                if is_first || acct.leverage != prev.leverage {
-                    let val_str = format!("{:.4}", acct.leverage as f64 / PRICE_SCALE_F);
-                    self.wrapper.call_method1(py, "update_account_value",
-                        ("Leverage-S", val_str.as_str(), "", account_name))?;
-                    delivered = true;
-                }
-
-                if delivered {
+                if batch.delivered {
                     self.wrapper.call_method1(py, "update_account_time", ("",))?;
                     self.wrapper.call_method1(py, "account_download_end", (account_name,))?;
                 }
-                *prev_guard = Some(acct);
             }
 
-            // P&L dispatch (gateway-computed)
-            let pnl_req = *self.pnl_req_id.lock().unwrap();
-            if let Some(pnl_req) = pnl_req {
-                let acct = shared.account();
-                let pnl = [acct.daily_pnl, acct.unrealized_pnl, acct.realized_pnl];
-                let prev = *self.last_pnl.lock().unwrap();
-                if pnl != prev {
-                    self.wrapper.call_method(
-                        py, "pnl",
-                        (pnl_req, acct.daily_pnl as f64 / PRICE_SCALE_F,
-                         acct.unrealized_pnl as f64 / PRICE_SCALE_F,
-                         acct.realized_pnl as f64 / PRICE_SCALE_F),
-                        None,
-                    )?;
-                    *self.last_pnl.lock().unwrap() = pnl;
-                }
+            // P&L dispatch (via ClientCore)
+            if let Some(update) = self.core.poll_pnl(shared) {
+                self.wrapper.call_method(
+                    py, "pnl",
+                    (update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl),
+                    None,
+                )?;
             }
 
-            // Per-position P&L dispatch
+            // Per-position P&L dispatch (via ClientCore)
+            for update in self.core.poll_pnl_single(shared) {
+                self.wrapper.call_method(
+                    py, "pnl_single",
+                    (update.req_id, update.pos, update.daily_pnl,
+                     update.unrealized_pnl, update.realized_pnl, update.value),
+                    None,
+                )?;
+            }
+
+            // Account summary dispatch (via ClientCore)
             {
-                let reqs: Vec<(i64, i64)> = {
-                    let map = self.pnl_single_reqs.lock().unwrap();
-                    map.iter().map(|(&r, &c)| (r, c)).collect()
-                };
-                for (req_id, con_id) in reqs {
-                    if let Some(pi) = shared.position_info(con_id) {
-                        let last_price = {
-                            let imap = self.instrument_to_req.lock().unwrap();
-                            imap.keys()
-                                .find_map(|&iid| {
-                                    let q = shared.quote(iid);
-                                    if q.last != 0 { Some(q.last) } else { None }
-                                })
-                                .unwrap_or(0)
-                        };
-
-                        if last_price != 0 && pi.avg_cost != 0 {
-                            let unrealized = (last_price - pi.avg_cost) * pi.position;
-                            let value = last_price * pi.position;
-                            self.wrapper.call_method(
-                                py, "pnl_single",
-                                (req_id, pi.position as f64,
-                                 0.0f64,
-                                 unrealized as f64 / PRICE_SCALE_F,
-                                 0.0f64,
-                                 value as f64 / PRICE_SCALE_F),
-                                None,
-                            )?;
-                        }
+                let acct_name = self.account_id.get().map(|s| s.as_str()).unwrap_or("");
+                if let Some(batch) = self.core.prepare_account_summary(shared, acct_name) {
+                    // Python-specific: also emit AccountType string tag
+                    let tags_orig = self.core.account_summary_req.lock().unwrap().clone();
+                    let tags_list = tags_orig.map(|(_, t)| t).unwrap_or_default();
+                    if tags_list.is_empty() || tags_list.iter().any(|t| t == "AccountType") {
+                        self.wrapper.call_method(
+                            py, "account_summary",
+                            (batch.req_id, acct_name, "AccountType", "INDIVIDUAL", ""),
+                            None,
+                        )?;
                     }
-                }
-            }
-
-            // Account summary dispatch
-            {
-                let summary_req = self.account_summary_req.lock().unwrap().clone();
-                if let Some((req_id, ref tags)) = summary_req {
-                    let acct = shared.account();
-                    let acct_name = self.account_id.get().map(|s| s.as_str()).unwrap_or("");
-                    // String tags (non-numeric)
-                    let string_tags: Vec<(&str, &str, &str)> = vec![
-                        ("AccountType", "INDIVIDUAL", ""),
-                    ];
-                    for (tag, val, currency) in &string_tags {
-                        if tags.is_empty() || tags.iter().any(|t| t == tag) {
-                            self.wrapper.call_method(
-                                py, "account_summary",
-                                (req_id, acct_name, *tag, *val, *currency),
-                                None,
-                            )?;
-                        }
+                    for entry in &batch.entries {
+                        self.wrapper.call_method(
+                            py, "account_summary",
+                            (batch.req_id, acct_name, entry.tag, entry.value.as_str(), entry.currency),
+                            None,
+                        )?;
                     }
-                    // Numeric tags
-                    let tag_values: Vec<(&str, f64)> = vec![
-                        ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
-                        ("TotalCashValue", acct.total_cash_value as f64 / PRICE_SCALE_F),
-                        ("SettledCash", acct.settled_cash as f64 / PRICE_SCALE_F),
-                        ("BuyingPower", acct.buying_power as f64 / PRICE_SCALE_F),
-                        ("EquityWithLoanValue", acct.equity_with_loan as f64 / PRICE_SCALE_F),
-                        ("GrossPositionValue", acct.gross_position_value as f64 / PRICE_SCALE_F),
-                        ("InitMarginReq", acct.init_margin_req as f64 / PRICE_SCALE_F),
-                        ("MaintMarginReq", acct.maint_margin_req as f64 / PRICE_SCALE_F),
-                        ("AvailableFunds", acct.available_funds as f64 / PRICE_SCALE_F),
-                        ("ExcessLiquidity", acct.excess_liquidity as f64 / PRICE_SCALE_F),
-                        ("Cushion", acct.cushion as f64 / PRICE_SCALE_F),
-                        ("DayTradesRemaining", acct.day_trades_remaining as f64),
-                        ("Leverage", acct.leverage as f64 / PRICE_SCALE_F),
-                        ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
-                        ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
-                        ("DailyPnL", acct.daily_pnl as f64 / PRICE_SCALE_F),
-                    ];
-                    for (tag, val) in &tag_values {
-                        if tags.is_empty() || tags.iter().any(|t| t == tag) {
-                            let val_str = format!("{:.2}", val);
-                            self.wrapper.call_method(
-                                py, "account_summary",
-                                (req_id, acct_name, *tag, val_str.as_str(), "USD"),
-                                None,
-                            )?;
-                        }
-                    }
-                    self.wrapper.call_method1(py, "account_summary_end", (req_id,))?;
-                    // One-shot: clear after delivery
-                    *self.account_summary_req.lock().unwrap() = None;
+                    self.wrapper.call_method1(py, "account_summary_end", (batch.req_id,))?;
                 }
             }
 
@@ -2151,8 +1871,8 @@ impl EClient {
     /// Map a reqId to an instrument slot.
     #[doc(hidden)]
     fn _test_map_instrument(&self, req_id: i64, instrument: u32) {
-        self.req_to_instrument.lock().unwrap().insert(req_id, instrument);
-        self.instrument_to_req.lock().unwrap().insert(instrument, req_id);
+        self.core.req_to_instrument.lock().unwrap().insert(req_id, instrument);
+        self.core.instrument_to_req.lock().unwrap().insert(instrument, req_id);
     }
 
     /// Set instrument count on SharedState.
@@ -2352,7 +2072,7 @@ impl EClient {
         // Drain fills -> order_status
         let fills = shared.drain_fills();
         for fill in fills {
-            let req_id = self.instrument_to_req.lock().unwrap()
+            let req_id = self.core.instrument_to_req.lock().unwrap()
                 .get(&fill.instrument).copied().unwrap_or(-1);
             let side_str = match fill.side {
                 Side::Buy => "BUY",
@@ -2451,15 +2171,7 @@ impl EClient {
         // Drain order updates -> order_status
         let updates = shared.drain_order_updates();
         for update in updates {
-            let status = match update.status {
-                OrderStatus::PendingSubmit => "PendingSubmit",
-                OrderStatus::Submitted => "Submitted",
-                OrderStatus::Filled => "Filled",
-                OrderStatus::PartiallyFilled => "PreSubmitted",
-                OrderStatus::Cancelled => "Cancelled",
-                OrderStatus::Rejected => "Inactive",
-                OrderStatus::Uncertain => "Unknown",
-            };
+            let status = order_status_str(update.status);
             self.wrapper.call_method(
                 py, "order_status",
                 (update.order_id as i64, status, update.filled_qty as f64,
@@ -2482,7 +2194,7 @@ impl EClient {
 
         // Poll quotes for changes -> tick_price/tick_size
         let instruments: Vec<(u32, i64)> = {
-            let map = self.instrument_to_req.lock().unwrap();
+            let map = self.core.instrument_to_req.lock().unwrap();
             map.iter().map(|(&iid, &req_id)| (iid, req_id)).collect()
         };
         let mut snapshot_done: Vec<i64> = Vec::new();
@@ -2493,7 +2205,7 @@ impl EClient {
                 q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
             ];
             let last = {
-                let map = self.last_quotes.lock().unwrap();
+                let map = self.core.last_quotes.lock().unwrap();
                 map.get(&iid).copied().unwrap_or([0i64; 12])
             };
             let attrib = TickAttrib::default();
@@ -2557,10 +2269,10 @@ impl EClient {
                 let ts_str = ts_secs.to_string();
                 self.wrapper.call_method1(py, "tick_string", (req_id, TICK_LAST_TIMESTAMP, ts_str.as_str()))?;
             }
-            self.last_quotes.lock().unwrap().insert(iid, fields);
+            self.core.last_quotes.lock().unwrap().insert(iid, fields);
 
             // Snapshot: after first delivery, signal end and queue for auto-cancel
-            if delivered && self.snapshot_reqs.lock().unwrap().remove(&req_id) {
+            if delivered && self.core.snapshot_reqs.lock().unwrap().remove(&req_id) {
                 self.wrapper.call_method1(py, "tick_snapshot_end", (req_id,))?;
                 snapshot_done.push(req_id);
             }
@@ -2573,7 +2285,7 @@ impl EClient {
         // Drain TBT trades -> tick_by_tick_all_last
         let tbt_trades = shared.drain_tbt_trades();
         for trade in tbt_trades {
-            let req_id = self.instrument_to_req.lock().unwrap()
+            let req_id = self.core.instrument_to_req.lock().unwrap()
                 .get(&trade.instrument).copied().unwrap_or(-1);
             let price = trade.price as f64 / PRICE_SCALE_F;
             let attrib = super::tick_types::TickAttribLast::default();
@@ -2589,7 +2301,7 @@ impl EClient {
         // Drain TBT quotes -> tick_by_tick_bid_ask
         let tbt_quotes = shared.drain_tbt_quotes();
         for quote in tbt_quotes {
-            let req_id = self.instrument_to_req.lock().unwrap()
+            let req_id = self.core.instrument_to_req.lock().unwrap()
                 .get(&quote.instrument).copied().unwrap_or(-1);
             let attrib = super::tick_types::TickAttribBidAsk::default();
             let attrib_obj = Py::new(py, attrib)?.into_any();
@@ -2668,74 +2380,37 @@ impl EClient {
             }
         }
 
-        // P&L dispatch
-        let pnl_req = *self.pnl_req_id.lock().unwrap();
-        if let Some(pnl_req) = pnl_req {
-            let acct = shared.account();
-            let pnl = [acct.daily_pnl, acct.unrealized_pnl, acct.realized_pnl];
-            let prev = *self.last_pnl.lock().unwrap();
-            if pnl != prev {
-                self.wrapper.call_method(
-                    py, "pnl",
-                    (pnl_req, acct.daily_pnl as f64 / PRICE_SCALE_F,
-                     acct.unrealized_pnl as f64 / PRICE_SCALE_F,
-                     acct.realized_pnl as f64 / PRICE_SCALE_F),
-                    None,
-                )?;
-                *self.last_pnl.lock().unwrap() = pnl;
-            }
+        // P&L dispatch (via ClientCore)
+        if let Some(update) = self.core.poll_pnl(shared) {
+            self.wrapper.call_method(
+                py, "pnl",
+                (update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl),
+                None,
+            )?;
         }
 
-        // Account summary dispatch
+        // Account summary dispatch (via ClientCore)
         {
-            let summary_req = self.account_summary_req.lock().unwrap().clone();
-            if let Some((req_id, ref tags)) = summary_req {
-                let acct = shared.account();
-                let acct_name = self.account_id.get().map(|s| s.as_str()).unwrap_or("");
-                // String tags (non-numeric)
-                let string_tags: Vec<(&str, &str, &str)> = vec![
-                    ("AccountType", "INDIVIDUAL", ""),
-                ];
-                for (tag, val, currency) in &string_tags {
-                    if tags.is_empty() || tags.iter().any(|t| t == tag) {
-                        self.wrapper.call_method(
-                            py, "account_summary",
-                            (req_id, acct_name, *tag, *val, *currency),
-                            None,
-                        )?;
-                    }
+            let acct_name = self.account_id.get().map(|s| s.as_str()).unwrap_or("");
+            if let Some(batch) = self.core.prepare_account_summary(shared, acct_name) {
+                // Python-specific: also emit AccountType string tag
+                let tags_orig = self.core.account_summary_req.lock().unwrap().clone();
+                let tags_list = tags_orig.map(|(_, t)| t).unwrap_or_default();
+                if tags_list.is_empty() || tags_list.iter().any(|t| t == "AccountType") {
+                    self.wrapper.call_method(
+                        py, "account_summary",
+                        (batch.req_id, acct_name, "AccountType", "INDIVIDUAL", ""),
+                        None,
+                    )?;
                 }
-                // Numeric tags
-                let tag_values: Vec<(&str, f64)> = vec![
-                    ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
-                    ("TotalCashValue", acct.total_cash_value as f64 / PRICE_SCALE_F),
-                    ("SettledCash", acct.settled_cash as f64 / PRICE_SCALE_F),
-                    ("BuyingPower", acct.buying_power as f64 / PRICE_SCALE_F),
-                    ("EquityWithLoanValue", acct.equity_with_loan as f64 / PRICE_SCALE_F),
-                    ("GrossPositionValue", acct.gross_position_value as f64 / PRICE_SCALE_F),
-                    ("InitMarginReq", acct.init_margin_req as f64 / PRICE_SCALE_F),
-                    ("MaintMarginReq", acct.maint_margin_req as f64 / PRICE_SCALE_F),
-                    ("AvailableFunds", acct.available_funds as f64 / PRICE_SCALE_F),
-                    ("ExcessLiquidity", acct.excess_liquidity as f64 / PRICE_SCALE_F),
-                    ("Cushion", acct.cushion as f64 / PRICE_SCALE_F),
-                    ("DayTradesRemaining", acct.day_trades_remaining as f64),
-                    ("Leverage", acct.leverage as f64 / PRICE_SCALE_F),
-                    ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
-                    ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
-                    ("DailyPnL", acct.daily_pnl as f64 / PRICE_SCALE_F),
-                ];
-                for (tag, val) in &tag_values {
-                    if tags.is_empty() || tags.iter().any(|t| t == tag) {
-                        let val_str = format!("{:.2}", val);
-                        self.wrapper.call_method(
-                            py, "account_summary",
-                            (req_id, acct_name, *tag, val_str.as_str(), "USD"),
-                            None,
-                        )?;
-                    }
+                for entry in &batch.entries {
+                    self.wrapper.call_method(
+                        py, "account_summary",
+                        (batch.req_id, acct_name, entry.tag, entry.value.as_str(), entry.currency),
+                        None,
+                    )?;
                 }
-                self.wrapper.call_method1(py, "account_summary_end", (req_id,))?;
-                *self.account_summary_req.lock().unwrap() = None;
+                self.wrapper.call_method1(py, "account_summary_end", (batch.req_id,))?;
             }
         }
 
@@ -2744,44 +2419,15 @@ impl EClient {
 }
 
 impl EClient {
-    /// Spin-wait for the hot loop to process a registration command.
-    fn wait_for_registration(shared: &SharedState, old_gen: u64) -> InstrumentId {
-        for _ in 0..100_000 {
-            if shared.register_gen() != old_gen {
-                break;
-            }
-            std::hint::spin_loop();
-        }
-        shared.instrument_count().saturating_sub(1)
-    }
-
     /// Find instrument ID for a contract, registering if needed.
     fn find_or_register_instrument(&self, contract: &Contract) -> PyResult<u32> {
-        // Check if already registered via any reqId
-        {
-            let map = self.instrument_to_req.lock().unwrap();
-            if let Some((&iid, _)) = map.iter().next() {
-                return Ok(iid);
-            }
-        }
-
-        // Register new instrument
         let tx = self.control_tx.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
         let shared = self.shared.get().unwrap();
-        let reg_gen = shared.register_gen();
-
-        tx.send(ControlCommand::RegisterInstrument { con_id: contract.con_id })
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-        tx.send(ControlCommand::Subscribe {
-            con_id: contract.con_id,
-            symbol: contract.symbol.clone(),
-            exchange: contract.exchange.clone(),
-            sec_type: contract.sec_type.clone(),
-        })
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-
-        Ok(Self::wait_for_registration(shared, reg_gen))
+        self.core.find_or_register_instrument(
+            shared, tx,
+            contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+        ).map_err(|e| PyRuntimeError::new_err(e))
     }
 
 }
