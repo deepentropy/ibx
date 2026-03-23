@@ -1,0 +1,187 @@
+//! Reference data: contract details, historical data, scanners, news, fundamentals.
+
+use crate::types::*;
+
+use super::{Contract, EClient};
+
+impl EClient {
+    // ── Historical Data ──
+
+    /// Request historical data. Matches `reqHistoricalData` in C++.
+    pub fn req_historical_data(
+        &self, req_id: i64, contract: &Contract,
+        end_date_time: &str, duration: &str, bar_size: &str,
+        what_to_show: &str, use_rth: bool, _format_date: i32, _keep_up_to_date: bool,
+    ) {
+        let _ = self.control_tx.send(ControlCommand::FetchHistorical {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            symbol: contract.symbol.clone(),
+            end_date_time: end_date_time.into(),
+            duration: duration.into(),
+            bar_size: bar_size.into(),
+            what_to_show: what_to_show.into(),
+            use_rth,
+        });
+    }
+
+    /// Cancel historical data. Matches `cancelHistoricalData` in C++.
+    pub fn cancel_historical_data(&self, req_id: i64) {
+        let _ = self.control_tx.send(ControlCommand::CancelHistorical { req_id: req_id as u32 });
+    }
+
+    /// Request head timestamp. Matches `reqHeadTimestamp` in C++.
+    pub fn req_head_timestamp(
+        &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool, _format_date: i32,
+    ) {
+        let _ = self.control_tx.send(ControlCommand::FetchHeadTimestamp {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            what_to_show: what_to_show.into(),
+            use_rth,
+        });
+    }
+
+    // ── Contract Details ──
+
+    /// Request contract details. Matches `reqContractDetails` in C++.
+    pub fn req_contract_details(&self, req_id: i64, contract: &Contract) {
+        let _ = self.control_tx.send(ControlCommand::FetchContractDetails {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            symbol: contract.symbol.clone(),
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
+            currency: contract.currency.clone(),
+        });
+    }
+
+    /// Request matching symbols. Matches `reqMatchingSymbols` in C++.
+    pub fn req_matching_symbols(&self, req_id: i64, pattern: &str) {
+        let _ = self.control_tx.send(ControlCommand::FetchMatchingSymbols {
+            req_id: req_id as u32,
+            pattern: pattern.into(),
+        });
+    }
+
+    // ── News Bulletins ──
+
+    /// Subscribe to news bulletins. Matches `reqNewsBulletins` in C++.
+    pub fn req_news_bulletins(&self, _all_msgs: bool) {
+        self.core.subscribe_bulletins();
+    }
+
+    /// Cancel news bulletin subscription. Matches `cancelNewsBulletins` in C++.
+    pub fn cancel_news_bulletins(&self) {
+        self.core.unsubscribe_bulletins();
+    }
+
+    // ── Scanner ──
+
+    pub fn req_scanner_parameters(&self) {
+        let _ = self.control_tx.send(ControlCommand::FetchScannerParams);
+    }
+
+    pub fn req_scanner_subscription(
+        &self, req_id: i64, instrument: &str, location_code: &str,
+        scan_code: &str, max_items: u32,
+    ) {
+        let _ = self.control_tx.send(ControlCommand::SubscribeScanner {
+            req_id: req_id as u32,
+            instrument: instrument.into(),
+            location_code: location_code.into(),
+            scan_code: scan_code.into(),
+            max_items,
+        });
+    }
+
+    pub fn cancel_scanner_subscription(&self, req_id: i64) {
+        let _ = self.control_tx.send(ControlCommand::CancelScanner { req_id: req_id as u32 });
+    }
+
+    // ── News ──
+
+    pub fn req_historical_news(
+        &self, req_id: i64, con_id: i64, provider_codes: &str,
+        start_time: &str, end_time: &str, max_results: u32,
+    ) {
+        let _ = self.control_tx.send(ControlCommand::FetchHistoricalNews {
+            req_id: req_id as u32,
+            con_id: con_id as u32,
+            provider_codes: provider_codes.into(),
+            start_time: start_time.into(),
+            end_time: end_time.into(),
+            max_results,
+        });
+    }
+
+    pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &str) {
+        let _ = self.control_tx.send(ControlCommand::FetchNewsArticle {
+            req_id: req_id as u32,
+            provider_code: provider_code.into(),
+            article_id: article_id.into(),
+        });
+    }
+
+    // ── Fundamental Data ──
+
+    pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) {
+        let _ = self.control_tx.send(ControlCommand::FetchFundamentalData {
+            req_id: req_id as u32,
+            con_id: contract.con_id as u32,
+            report_type: report_type.into(),
+        });
+    }
+
+    pub fn cancel_fundamental_data(&self, req_id: i64) {
+        let _ = self.control_tx.send(ControlCommand::CancelFundamentalData { req_id: req_id as u32 });
+    }
+
+    // ── Histogram ──
+
+    pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) {
+        let _ = self.control_tx.send(ControlCommand::FetchHistogramData {
+            req_id: req_id as u32,
+            con_id: contract.con_id as u32,
+            use_rth,
+            period: period.into(),
+        });
+    }
+
+    pub fn cancel_histogram_data(&self, req_id: i64) {
+        let _ = self.control_tx.send(ControlCommand::CancelHistogramData { req_id: req_id as u32 });
+    }
+
+    // ── Historical Ticks ──
+
+    pub fn req_historical_ticks(
+        &self, req_id: i64, contract: &Contract,
+        start_date_time: &str, end_date_time: &str,
+        number_of_ticks: i32, what_to_show: &str, use_rth: bool,
+    ) {
+        let _ = self.control_tx.send(ControlCommand::FetchHistoricalTicks {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            start_date_time: start_date_time.into(),
+            end_date_time: end_date_time.into(),
+            number_of_ticks: number_of_ticks as u32,
+            what_to_show: what_to_show.into(),
+            use_rth,
+        });
+    }
+
+    // ── Historical Schedule ──
+
+    pub fn req_historical_schedule(
+        &self, req_id: i64, contract: &Contract,
+        end_date_time: &str, duration: &str, use_rth: bool,
+    ) {
+        let _ = self.control_tx.send(ControlCommand::FetchHistoricalSchedule {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            end_date_time: end_date_time.into(),
+            duration: duration.into(),
+            use_rth,
+        });
+    }
+}
