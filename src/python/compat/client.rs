@@ -415,12 +415,12 @@ impl EClient {
     fn req_positions(&self, py: Python<'_>) -> PyResult<()> {
         let shared = self.shared.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-        let positions = shared.position_infos();
+        let positions = shared.portfolio.position_infos();
         let cache = self.contract_cache.lock().unwrap();
         for pi in &positions {
             let c = cache.get(&pi.con_id).cloned().unwrap_or_else(|| {
                 // Fall back to shared contract cache (enriched from CCP exec reports)
-                shared.get_contract(pi.con_id).map(|ac| {
+                shared.reference.get_contract(pi.con_id).map(|ac| {
                     let mut c = super::contract::Contract::default();
                     c.con_id = ac.con_id;
                     c.symbol = ac.symbol;
@@ -569,7 +569,7 @@ impl EClient {
         };
         // Also merge in any orders from shared cache not in our local map
         if let Some(shared) = self.shared.get() {
-            for (oid, info) in shared.drain_open_orders() {
+            for (oid, info) in shared.orders.drain_open_orders() {
                 if !matches!(info.order_state.status.as_str(), "Filled" | "Cancelled" | "Inactive") {
                     // Update local contract cache from enriched data
                     if info.contract.con_id != 0 {
@@ -998,7 +998,7 @@ impl EClient {
         let shared = self.shared.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
         let _ = ledger_and_nlv;
-        let acct = shared.account();
+        let acct = shared.portfolio.account();
         let acct_name = if !account.is_empty() { account } else { self.account_id.get().map(|s| s.as_str()).unwrap_or("") };
         let tag_values: [(&str, f64); 8] = [
             ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
@@ -1034,7 +1034,7 @@ impl EClient {
     fn req_positions_multi(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         let shared = self.shared.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-        let positions = shared.position_infos();
+        let positions = shared.portfolio.position_infos();
         for pi in &positions {
             let mut c = super::contract::Contract::default();
             c.con_id = pi.con_id;
@@ -1104,7 +1104,7 @@ impl EClient {
     fn req_market_rule(&self, py: Python<'_>, market_rule_id: i32) -> PyResult<()> {
         // Market rules are cached from secdef responses.
         if let Some(shared) = self.shared.get() {
-            if let Some(rule) = shared.market_rule(market_rule_id) {
+            if let Some(rule) = shared.reference.market_rule(market_rule_id) {
                 let increments: Vec<(f64, f64)> = rule.price_increments.iter()
                     .map(|pi| (pi.low_edge, pi.increment)).collect();
                 let list = pyo3::types::PyList::new(py, increments.iter().map(|(low, inc)| {
@@ -1237,7 +1237,7 @@ impl EClient {
     fn req_completed_orders(&self, py: Python<'_>, api_only: bool) -> PyResult<()> {
         let _ = api_only;
         if let Some(shared) = self.shared.get() {
-            let completed = shared.drain_completed_orders();
+            let completed = shared.orders.drain_completed_orders();
             for co in &completed {
                 let status_str = match co.status {
                     crate::types::OrderStatus::Filled => "Filled",
@@ -1254,7 +1254,7 @@ impl EClient {
                     let c_py = Py::new(py, so.contract)?.into_any();
                     let o_py = Py::new(py, so.order)?.into_any();
                     self.wrapper.call_method1(py, "completed_order", (&c_py, &o_py, state.as_any()))?;
-                } else if let Some(info) = shared.get_order_info(co.order_id) {
+                } else if let Some(info) = shared.orders.get_order_info(co.order_id) {
                     let c = Contract {
                         con_id: info.contract.con_id,
                         symbol: info.contract.symbol,
@@ -1310,7 +1310,7 @@ impl EClient {
             };
 
             // Drain fills -> execDetails + orderStatus
-            let fills = shared.drain_fills();
+            let fills = shared.orders.drain_fills();
             for fill in fills {
                 let req_id = self.core.instrument_to_req.lock().unwrap()
                     .get(&fill.instrument).copied().unwrap_or(-1);
@@ -1376,7 +1376,7 @@ impl EClient {
             }
 
             // Drain order updates -> orderStatus
-            let updates = shared.drain_order_updates();
+            let updates = shared.orders.drain_order_updates();
             for update in updates {
                 let status = order_status_str(update.status);
                 self.wrapper.call_method(
@@ -1411,7 +1411,7 @@ impl EClient {
             }
 
             // Drain cancel rejects -> error
-            let rejects = shared.drain_cancel_rejects();
+            let rejects = shared.orders.drain_cancel_rejects();
             for reject in rejects {
                 let code = if reject.reject_type == 1 { 202i64 } else { 10147i64 };
                 let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
@@ -1430,7 +1430,7 @@ impl EClient {
             };
 
             for (iid, req_id) in instruments {
-                let q = shared.quote(iid);
+                let q = shared.market.quote(iid);
                 let fields = [
                     q.bid, q.ask, q.last, q.bid_size, q.ask_size, q.last_size,
                     q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
@@ -1497,7 +1497,7 @@ impl EClient {
             }
 
             // Drain TBT trades -> tickByTickAllLast
-            let tbt_trades = shared.drain_tbt_trades();
+            let tbt_trades = shared.market.drain_tbt_trades();
             for trade in tbt_trades {
                 let req_id = self.core.instrument_to_req.lock().unwrap()
                     .get(&trade.instrument).copied().unwrap_or(-1);
@@ -1514,7 +1514,7 @@ impl EClient {
             }
 
             // Drain TBT quotes -> tickByTickBidAsk
-            let tbt_quotes = shared.drain_tbt_quotes();
+            let tbt_quotes = shared.market.drain_tbt_quotes();
             for quote in tbt_quotes {
                 let req_id = self.core.instrument_to_req.lock().unwrap()
                     .get(&quote.instrument).copied().unwrap_or(-1);
@@ -1530,7 +1530,7 @@ impl EClient {
             }
 
             // Drain news -> tickNews
-            let news_items = shared.drain_tick_news();
+            let news_items = shared.market.drain_tick_news();
             for news in news_items {
                 let first_req_id = self.core.instrument_to_req.lock().unwrap()
                     .values().next().copied();
@@ -1546,7 +1546,7 @@ impl EClient {
 
             // Drain news bulletins -> updateNewsBulletin
             if self.core.bulletin_subscribed.load(Ordering::Acquire) {
-                let bulletins = shared.drain_news_bulletins();
+                let bulletins = shared.market.drain_news_bulletins();
                 for b in bulletins {
                     self.wrapper.call_method(
                         py, "update_news_bulletin",
@@ -1557,7 +1557,7 @@ impl EClient {
             }
 
             // Drain what-if responses -> orderStatus with margin info
-            let what_ifs = shared.drain_what_if_responses();
+            let what_ifs = shared.orders.drain_what_if_responses();
             for wi in what_ifs {
                 let msg = format!(
                     "WhatIf: initMargin={:.2}, maintMargin={:.2}, commission={:.2}",
@@ -1574,7 +1574,7 @@ impl EClient {
             }
 
             // Drain historical data -> historicalData + historicalDataEnd
-            let hist_data = shared.drain_historical_data();
+            let hist_data = shared.reference.drain_historical_data();
             for (req_id, response) in hist_data {
                 for bar in &response.bars {
                     let bar_obj = super::contract::BarData::new(
@@ -1594,7 +1594,7 @@ impl EClient {
             }
 
             // Drain head timestamps -> headTimestamp
-            let head_ts = shared.drain_head_timestamps();
+            let head_ts = shared.reference.drain_head_timestamps();
             for (req_id, response) in head_ts {
                 self.wrapper.call_method1(
                     py, "head_timestamp",
@@ -1603,7 +1603,7 @@ impl EClient {
             }
 
             // Drain contract details -> contractDetails + contractDetailsEnd
-            let contract_defs = shared.drain_contract_details();
+            let contract_defs = shared.reference.drain_contract_details();
             for (req_id, def) in contract_defs {
                 let details = super::contract::ContractDetails::from_definition(&def);
                 let details_py = Py::new(py, details)?.into_any();
@@ -1612,13 +1612,13 @@ impl EClient {
                     (req_id as i64, &details_py),
                 )?;
             }
-            let contract_ends = shared.drain_contract_details_end();
+            let contract_ends = shared.reference.drain_contract_details_end();
             for req_id in contract_ends {
                 self.wrapper.call_method1(py, "contract_details_end", (req_id as i64,))?;
             }
 
             // Drain matching symbols -> symbolSamples
-            let symbol_results = shared.drain_matching_symbols();
+            let symbol_results = shared.reference.drain_matching_symbols();
             for (req_id, matches) in symbol_results {
                 let descriptions: Vec<Py<ContractDescription>> = matches.iter().map(|m| {
                     Py::new(py, ContractDescription {
@@ -1635,13 +1635,13 @@ impl EClient {
             }
 
             // Drain scanner params -> scannerParameters
-            let scanner_params = shared.drain_scanner_params();
+            let scanner_params = shared.reference.drain_scanner_params();
             for xml in scanner_params {
                 self.wrapper.call_method1(py, "scanner_parameters", (xml.as_str(),))?;
             }
 
             // Drain scanner data -> scannerData + scannerDataEnd
-            let scanner_results = shared.drain_scanner_data();
+            let scanner_results = shared.reference.drain_scanner_data();
             for (req_id, result) in scanner_results {
                 for (rank, &con_id) in result.con_ids.iter().enumerate() {
                     let mut cd = super::contract::ContractDetails::default();
@@ -1657,7 +1657,7 @@ impl EClient {
             }
 
             // Drain historical news -> historicalNews + historicalNewsEnd
-            let news_results = shared.drain_historical_news();
+            let news_results = shared.reference.drain_historical_news();
             for (req_id, headlines, has_more) in news_results {
                 for h in &headlines {
                     self.wrapper.call_method(
@@ -1671,7 +1671,7 @@ impl EClient {
             }
 
             // Drain news articles -> newsArticle
-            let articles = shared.drain_news_articles();
+            let articles = shared.reference.drain_news_articles();
             for (req_id, article_type, text) in articles {
                 self.wrapper.call_method(
                     py, "news_article",
@@ -1681,13 +1681,13 @@ impl EClient {
             }
 
             // Drain fundamental data -> fundamentalData
-            let fundamentals = shared.drain_fundamental_data();
+            let fundamentals = shared.reference.drain_fundamental_data();
             for (req_id, data) in fundamentals {
                 self.wrapper.call_method1(py, "fundamental_data", (req_id as i64, data.as_str()))?;
             }
 
             // Drain histogram data -> histogram_data
-            let histograms = shared.drain_histogram_data();
+            let histograms = shared.reference.drain_histogram_data();
             for (req_id, entries) in histograms {
                 let tuples: Vec<Bound<'_, pyo3::types::PyTuple>> = entries.iter().map(|e| {
                     pyo3::types::PyTuple::new(py, &[e.price.into_pyobject(py).unwrap().into_any(), e.count.into_pyobject(py).unwrap().into_any()]).unwrap()
@@ -1697,7 +1697,7 @@ impl EClient {
             }
 
             // Drain historical ticks -> historical_ticks / historical_ticks_bid_ask / historical_ticks_last
-            let hist_ticks = shared.drain_historical_ticks();
+            let hist_ticks = shared.reference.drain_historical_ticks();
             for (req_id, data, _what, done) in hist_ticks {
                 match data {
                     crate::types::HistoricalTickData::Midpoint(ticks) => {
@@ -1740,7 +1740,7 @@ impl EClient {
             }
 
             // Drain real-time bars -> real_time_bar
-            let rtbars = shared.drain_real_time_bars();
+            let rtbars = shared.market.drain_real_time_bars();
             for (req_id, bar) in rtbars {
                 self.wrapper.call_method1(py, "real_time_bar", (
                     req_id as i64,
@@ -1751,7 +1751,7 @@ impl EClient {
             }
 
             // Drain historical schedules -> historical_schedule
-            let schedules = shared.drain_historical_schedules();
+            let schedules = shared.reference.drain_historical_schedules();
             for (req_id, resp) in schedules {
                 let sessions: Vec<Bound<'_, pyo3::types::PyTuple>> = resp.sessions.iter().map(|s| {
                     pyo3::types::PyTuple::new(py, &[
@@ -1879,7 +1879,7 @@ impl EClient {
     fn _test_set_instrument_count(&self, count: u32) -> PyResult<()> {
         let shared = self.shared.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-        shared.set_instrument_count(count);
+        shared.market.set_instrument_count(count);
         Ok(())
     }
 
@@ -1904,7 +1904,7 @@ impl EClient {
             low: (low * ps) as i64, close: (close * ps) as i64,
             timestamp_ns: 1,
         };
-        shared.push_quote(instrument, &q);
+        shared.market.push_quote(instrument, &q);
         Ok(())
     }
 
@@ -1924,7 +1924,7 @@ impl EClient {
             _ => return Err(PyRuntimeError::new_err(format!("Invalid side: {}", side))),
         };
         let ps = PRICE_SCALE as f64;
-        shared.push_fill(Fill {
+        shared.orders.push_fill(Fill {
             instrument, order_id, side: s,
             price: (price * ps) as i64, qty, remaining,
             commission: (commission * ps) as i64,
@@ -1949,7 +1949,7 @@ impl EClient {
             "Rejected" => OrderStatus::Rejected,
             _ => return Err(PyRuntimeError::new_err(format!("Invalid status: {}", status))),
         };
-        shared.push_order_update(OrderUpdate {
+        shared.orders.push_order_update(OrderUpdate {
             order_id, instrument, status: st, filled_qty, remaining_qty, timestamp_ns: 100,
         });
         Ok(())
@@ -1960,7 +1960,7 @@ impl EClient {
     fn _test_push_cancel_reject(&self, order_id: u64, instrument: u32, reason_code: i32) -> PyResult<()> {
         let shared = self.shared.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-        shared.push_cancel_reject(CancelReject {
+        shared.orders.push_cancel_reject(CancelReject {
             order_id, instrument, reject_type: 1, reason_code, timestamp_ns: 100,
         });
         Ok(())
@@ -1974,7 +1974,7 @@ impl EClient {
         let shared = self.shared.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
         let ps = PRICE_SCALE as f64;
-        shared.push_tbt_trade(TbtTrade {
+        shared.market.push_tbt_trade(TbtTrade {
             instrument, price: (price * ps) as i64, size,
             exchange: exchange.to_string(), conditions: String::new(), timestamp: 12345,
         });
@@ -1989,7 +1989,7 @@ impl EClient {
         let shared = self.shared.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
         let ps = PRICE_SCALE as f64;
-        shared.push_tbt_quote(TbtQuote {
+        shared.market.push_tbt_quote(TbtQuote {
             instrument,
             bid: (bid * ps) as i64, ask: (ask * ps) as i64,
             bid_size, ask_size, timestamp: 12345,
@@ -2007,7 +2007,7 @@ impl EClient {
         let bar_list: Vec<HistoricalBar> = bars.into_iter().map(|(time, o, h, l, c, v)| {
             HistoricalBar { time, open: o, high: h, low: l, close: c, volume: v, wap: 0.0, count: 0 }
         }).collect();
-        shared.push_historical_data(req_id, HistoricalResponse {
+        shared.reference.push_historical_data(req_id, HistoricalResponse {
             query_id: String::new(), timezone: String::new(), bars: bar_list, is_complete,
         });
         Ok(())
@@ -2018,7 +2018,7 @@ impl EClient {
     fn _test_push_head_timestamp(&self, req_id: u32, timestamp: &str) -> PyResult<()> {
         let shared = self.shared.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-        shared.push_head_timestamp(req_id, HeadTimestampResponse {
+        shared.reference.push_head_timestamp(req_id, HeadTimestampResponse {
             head_timestamp: timestamp.to_string(), timezone: String::new(),
         });
         Ok(())
@@ -2034,13 +2034,13 @@ impl EClient {
         let shared = self.shared.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
         let ps = PRICE_SCALE as f64;
-        let mut acct = shared.account();
+        let mut acct = shared.portfolio.account();
         acct.net_liquidation = (net_liquidation * ps) as i64;
         acct.buying_power = (buying_power * ps) as i64;
         acct.daily_pnl = (daily_pnl * ps) as i64;
         acct.unrealized_pnl = (unrealized_pnl * ps) as i64;
         acct.realized_pnl = (realized_pnl * ps) as i64;
-        shared.set_account(&acct);
+        shared.portfolio.set_account(&acct);
         Ok(())
     }
 
@@ -2050,7 +2050,7 @@ impl EClient {
         let shared = self.shared.get()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
         let ps = PRICE_SCALE as f64;
-        shared.set_position_info(PositionInfo {
+        shared.portfolio.set_position_info(PositionInfo {
             con_id, position, avg_cost: (avg_cost * ps) as i64,
         });
         Ok(())
@@ -2069,7 +2069,7 @@ impl EClient {
             .ok_or_else(|| PyRuntimeError::new_err("No shared state"))?;
 
         // Drain fills -> order_status
-        let fills = shared.drain_fills();
+        let fills = shared.orders.drain_fills();
         for fill in fills {
             let req_id = self.core.instrument_to_req.lock().unwrap()
                 .get(&fill.instrument).copied().unwrap_or(-1);
@@ -2094,7 +2094,7 @@ impl EClient {
             let exec_contract = self.open_orders.lock().unwrap()
                 .get(&fill.order_id).map(|so| so.contract.clone())
                 .or_else(|| {
-                    shared.get_order_info(fill.order_id).map(|info| {
+                    shared.orders.get_order_info(fill.order_id).map(|info| {
                         Contract {
                             con_id: info.contract.con_id,
                             symbol: info.contract.symbol.clone(),
@@ -2168,7 +2168,7 @@ impl EClient {
         }
 
         // Drain order updates -> order_status
-        let updates = shared.drain_order_updates();
+        let updates = shared.orders.drain_order_updates();
         for update in updates {
             let status = order_status_str(update.status);
             self.wrapper.call_method(
@@ -2180,7 +2180,7 @@ impl EClient {
         }
 
         // Drain cancel rejects -> error
-        let rejects = shared.drain_cancel_rejects();
+        let rejects = shared.orders.drain_cancel_rejects();
         for reject in rejects {
             let code = if reject.reject_type == 1 { 202i64 } else { 10147i64 };
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
@@ -2198,7 +2198,7 @@ impl EClient {
         };
         let mut snapshot_done: Vec<i64> = Vec::new();
         for (iid, req_id) in instruments {
-            let q = shared.quote(iid);
+            let q = shared.market.quote(iid);
             let fields = [
                 q.bid, q.ask, q.last, q.bid_size, q.ask_size, q.last_size,
                 q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
@@ -2282,7 +2282,7 @@ impl EClient {
         }
 
         // Drain TBT trades -> tick_by_tick_all_last
-        let tbt_trades = shared.drain_tbt_trades();
+        let tbt_trades = shared.market.drain_tbt_trades();
         for trade in tbt_trades {
             let req_id = self.core.instrument_to_req.lock().unwrap()
                 .get(&trade.instrument).copied().unwrap_or(-1);
@@ -2298,7 +2298,7 @@ impl EClient {
         }
 
         // Drain TBT quotes -> tick_by_tick_bid_ask
-        let tbt_quotes = shared.drain_tbt_quotes();
+        let tbt_quotes = shared.market.drain_tbt_quotes();
         for quote in tbt_quotes {
             let req_id = self.core.instrument_to_req.lock().unwrap()
                 .get(&quote.instrument).copied().unwrap_or(-1);
@@ -2314,7 +2314,7 @@ impl EClient {
         }
 
         // Drain historical data -> historical_data + historical_data_end
-        let hist_data = shared.drain_historical_data();
+        let hist_data = shared.reference.drain_historical_data();
         for (req_id, response) in hist_data {
             for bar in &response.bars {
                 let bar_obj = super::contract::BarData::new(
@@ -2334,7 +2334,7 @@ impl EClient {
         }
 
         // Drain head timestamps -> head_timestamp
-        let head_ts = shared.drain_head_timestamps();
+        let head_ts = shared.reference.drain_head_timestamps();
         for (req_id, response) in head_ts {
             self.wrapper.call_method1(
                 py, "head_timestamp",
@@ -2343,7 +2343,7 @@ impl EClient {
         }
 
         // Drain what-if responses -> order_status with margin info
-        let what_ifs = shared.drain_what_if_responses();
+        let what_ifs = shared.orders.drain_what_if_responses();
         for wi in what_ifs {
             let msg = format!(
                 "WhatIf: initMargin={:.2}, maintMargin={:.2}, commission={:.2}",
@@ -2361,7 +2361,7 @@ impl EClient {
 
         // Account state -> update_account_value (all fields)
         if !self.account_id.get().map(|s| s.is_empty()).unwrap_or(true) {
-            let acct = shared.account();
+            let acct = shared.portfolio.account();
             let account_name = self.account_id.get().map(|s| s.as_str()).unwrap_or("");
             let fields: &[(&str, i64)] = &[
                 ("NetLiquidation", acct.net_liquidation),

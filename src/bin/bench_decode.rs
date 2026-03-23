@@ -130,7 +130,7 @@ fn main() {
                     apply_tick(q, tick, mts);
                 }
             }
-            shared.push_quote(id, market.quote(id));
+            shared.market.push_quote(id, market.quote(id));
         });
     }
 
@@ -153,7 +153,7 @@ fn main() {
                     apply_tick(q, tick, mts);
                 }
             }
-            shared.push_quote(id, market.quote(id));
+            shared.market.push_quote(id, market.quote(id));
             let _ = tx.try_send(Event::Tick(id));
             sent += 1;
             if sent % 60000 == 0 {
@@ -170,7 +170,7 @@ fn main() {
         let account = ibx::engine::context::Context::new();
 
         bench("set_account (Mutex lock)", ITERATIONS, || {
-            shared.set_account(account.account());
+            shared.portfolio.set_account(account.account());
         });
     }
 

@@ -1322,7 +1322,7 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
             Ok(Event::Tick(_)) => {
                 tick_count += 1;
                 if tick_count == 5 && parent_id.is_none() {
-                    let q = shared.quote(inst_id);
+                    let q = shared.market.quote(inst_id);
                     if q.ask <= 0 { continue; }
                     let entry = q.ask + 1_00_000_000;
                     let pid = next_order_id();
@@ -1406,7 +1406,7 @@ pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
-    let initial_rpnl = shared.account().realized_pnl;
+    let initial_rpnl = shared.portfolio.account().realized_pnl;
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut tick_count = 0u32;
     let mut phase = 0u8;
@@ -1428,7 +1428,7 @@ pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
                     phase = 1;
                 }
                 if phase == 3 {
-                    let current = shared.account().realized_pnl;
+                    let current = shared.portfolio.account().realized_pnl;
                     if current != initial_rpnl {
                         realized_pnl = current;
                         pnl_updated = true;
@@ -1459,7 +1459,7 @@ pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
     if sell_filled && !pnl_updated {
         let extra = Instant::now() + Duration::from_secs(5);
         while Instant::now() < extra {
-            let current = shared.account().realized_pnl;
+            let current = shared.portfolio.account().realized_pnl;
             if current != initial_rpnl { realized_pnl = current; pnl_updated = true; break; }
             std::thread::sleep(Duration::from_millis(200));
         }

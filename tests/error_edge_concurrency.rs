@@ -33,7 +33,7 @@ fn spy() -> Contract {
 #[test]
 fn place_order_invalid_action_returns_error() {
     let (client, _rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
     let order = Order {
         action: "INVALID".into(), total_quantity: 100.0,
         order_type: "MKT".into(), ..Default::default()
@@ -46,7 +46,7 @@ fn place_order_invalid_action_returns_error() {
 #[test]
 fn place_order_empty_action_returns_error() {
     let (client, _rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
     let order = Order {
         action: String::new(), total_quantity: 100.0,
         order_type: "MKT".into(), ..Default::default()
@@ -58,7 +58,7 @@ fn place_order_empty_action_returns_error() {
 #[test]
 fn place_order_unsupported_order_type_returns_error() {
     let (client, _rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "NONSENSE".into(), ..Default::default()
@@ -71,7 +71,7 @@ fn place_order_unsupported_order_type_returns_error() {
 #[test]
 fn place_order_unsupported_algo_returns_error() {
     let (client, _rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "LMT".into(), lmt_price: 150.0,
@@ -86,7 +86,7 @@ fn place_order_unsupported_algo_returns_error() {
 #[test]
 fn place_order_zero_con_id_still_sends() {
     let (client, rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
     let contract = Contract { con_id: 0, symbol: "TEST".into(), ..Default::default() };
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0,
@@ -140,7 +140,7 @@ fn req_global_cancel_no_instruments_no_commands() {
 #[test]
 fn disconnect_during_active_subscription() {
     let (client, rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
 
     // Subscribe
     client.req_mkt_data(1, &spy(), "", false, false);
@@ -153,7 +153,7 @@ fn disconnect_during_active_subscription() {
     // Push quote after disconnect — process_msgs should still work (no panic)
     let mut q = Quote::default();
     q.bid = 150 * PRICE_SCALE;
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -165,7 +165,7 @@ fn disconnect_during_pending_order_uncertain_status() {
     let (client, _rx, shared) = test_client();
 
     // Order was pending when we disconnect
-    shared.push_order_update(OrderUpdate {
+    shared.orders.push_order_update(OrderUpdate {
         order_id: 50, instrument: 0, status: OrderStatus::Uncertain,
         filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
     });
@@ -201,7 +201,7 @@ fn fill_dedup_duplicate_exec_id_no_double_position() {
     engine.inject_ccp_message(&msg);
 
     // Only one fill
-    assert_eq!(shared.drain_fills().len(), 1);
+    assert_eq!(shared.orders.drain_fills().len(), 1);
     assert_eq!(engine.context_mut().position(0), 100);
 }
 
@@ -231,7 +231,7 @@ fn fill_dedup_different_exec_ids_both_count() {
     engine.inject_ccp_message(&msg_a);
     engine.inject_ccp_message(&msg_b);
 
-    assert_eq!(shared.drain_fills().len(), 2);
+    assert_eq!(shared.orders.drain_fills().len(), 2);
     assert_eq!(engine.context_mut().position(0), 200);
 }
 
@@ -279,7 +279,7 @@ fn zero_price_quote_dispatches_correctly() {
 
     let q = Quote { bid: 0, ask: 0, last: 0, bid_size: 0, ask_size: 0,
         last_size: 0, high: 0, low: 0, volume: 0, close: 0, open: 0, timestamp_ns: 0 };
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -298,7 +298,7 @@ fn crossed_market_quote_dispatches() {
         last: 0, bid_size: 0, ask_size: 0, last_size: 0,
         high: 0, low: 0, volume: 0, close: 0, open: 0, timestamp_ns: 0,
     };
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -318,7 +318,7 @@ fn negative_price_quote_dispatches() {
         last: 0, bid_size: 0, ask_size: 0, last_size: 0,
         high: 0, low: 0, volume: 0, close: 0, open: 0, timestamp_ns: 0,
     };
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -333,7 +333,7 @@ fn negative_price_quote_dispatches() {
 #[test]
 fn empty_historical_data_response() {
     let (client, _rx, shared) = test_client();
-    shared.push_historical_data(5, HistoricalResponse {
+    shared.reference.push_historical_data(5, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![], // empty
         is_complete: true,
@@ -349,7 +349,7 @@ fn empty_historical_data_response() {
 fn empty_scanner_results() {
     use ibx::control::scanner::ScannerResult;
     let (client, _rx, shared) = test_client();
-    shared.push_scanner_data(3, ScannerResult {
+    shared.reference.push_scanner_data(3, ScannerResult {
         con_ids: vec![],
         scan_time: "2026-03-13".into(),
     });
@@ -362,7 +362,7 @@ fn empty_scanner_results() {
 #[test]
 fn empty_matching_symbols() {
     let (client, _rx, shared) = test_client();
-    shared.push_matching_symbols(8, vec![]);
+    shared.reference.push_matching_symbols(8, vec![]);
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e == "symbol_samples:8:0"));
@@ -371,7 +371,7 @@ fn empty_matching_symbols() {
 #[test]
 fn empty_historical_news() {
     let (client, _rx, shared) = test_client();
-    shared.push_historical_news(4, vec![], true);
+    shared.reference.push_historical_news(4, vec![], true);
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e == "historical_news_end:4:true"));
@@ -384,7 +384,7 @@ fn empty_historical_news() {
 #[test]
 fn process_msgs_multiple_rapid_calls_no_duplicates() {
     let (client, _rx, shared) = test_client();
-    shared.push_fill(Fill {
+    shared.orders.push_fill(Fill {
         instrument: 0, order_id: 1, side: Side::Buy,
         price: PRICE_SCALE, qty: 1, remaining: 0,
         commission: 0, timestamp_ns: 0,
@@ -418,13 +418,13 @@ fn concurrent_seqlock_quote_read_write() {
             q.bid = i * PRICE_SCALE;
             q.ask = (i + 1) * PRICE_SCALE;
             q.last = i * PRICE_SCALE;
-            writer_shared.push_quote(0, &q);
+            writer_shared.market.push_quote(0, &q);
         }
     });
 
     let reader = thread::spawn(move || {
         for _ in 0..10_000 {
-            let q = reader_shared.quote(0);
+            let q = reader_shared.market.quote(0);
             // Consistency check: if bid is set, ask should be bid + PRICE_SCALE
             if q.bid > 0 {
                 assert_eq!(q.ask, q.bid + PRICE_SCALE,
@@ -444,13 +444,13 @@ fn concurrent_seqlock_multiple_readers() {
     let mut q = Quote::default();
     q.bid = 100 * PRICE_SCALE;
     q.ask = 101 * PRICE_SCALE;
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
 
     let handles: Vec<_> = (0..4).map(|_| {
         let s = shared.clone();
         thread::spawn(move || {
             for _ in 0..5_000 {
-                let q = s.quote(0);
+                let q = s.market.quote(0);
                 assert!(q.bid == 0 || q.bid == 100 * PRICE_SCALE);
             }
         })
@@ -475,7 +475,7 @@ fn concurrent_quote_by_instrument() {
     // Write quote
     let mut q = Quote::default();
     q.bid = 200 * PRICE_SCALE;
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
 
     let handles: Vec<_> = (0..4).map(|_| {
         let c = client.clone();
@@ -505,7 +505,7 @@ fn concurrent_disconnect_during_process_msgs() {
 
     // Push lots of data
     for i in 0..100 {
-        shared.push_fill(Fill {
+        shared.orders.push_fill(Fill {
             instrument: 0, order_id: i, side: Side::Buy,
             price: PRICE_SCALE, qty: 1, remaining: 0,
             commission: 0, timestamp_ns: 0,
@@ -534,7 +534,7 @@ fn concurrent_disconnect_during_process_msgs() {
 #[test]
 fn rapid_subscribe_unsubscribe_no_stale_state() {
     let (client, rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
 
     for _ in 0..100 {
         client.req_mkt_data(1, &spy(), "", false, false);
@@ -552,7 +552,7 @@ fn rapid_subscribe_unsubscribe_no_stale_state() {
     let mut w = RecordingWrapper::default();
     let mut q = Quote::default();
     q.bid = 999 * PRICE_SCALE;
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
     client.process_msgs(&mut w);
     // No ticks should arrive since all subscriptions were cancelled
     let ticks: Vec<_> = w.events.iter().filter(|e| e.starts_with("tick_price:1:")).collect();
@@ -566,7 +566,7 @@ fn rapid_subscribe_unsubscribe_no_stale_state() {
 #[test]
 fn concurrent_place_order_and_process_msgs() {
     let shared = Arc::new(SharedState::new());
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
     let (tx, _rx) = crossbeam_channel::unbounded();
     let handle = thread::spawn(|| {});
     let client = Arc::new(EClient::from_parts(shared.clone(), tx, handle, "DU123".into()));
@@ -576,7 +576,7 @@ fn concurrent_place_order_and_process_msgs() {
     let shared_a = shared.clone();
     let process_handle = thread::spawn(move || {
         for i in 0..50 {
-            shared_a.push_fill(Fill {
+            shared_a.orders.push_fill(Fill {
                 instrument: 0, order_id: i, side: Side::Buy,
                 price: PRICE_SCALE, qty: 1, remaining: 0,
                 commission: 0, timestamp_ns: 0,
@@ -617,13 +617,13 @@ fn concurrent_account_read_write() {
             let mut a = AccountState::default();
             a.net_liquidation = i * PRICE_SCALE;
             a.buying_power = i * 2 * PRICE_SCALE;
-            writer_shared.set_account(&a);
+            writer_shared.portfolio.set_account(&a);
         }
     });
 
     let reader = thread::spawn(move || {
         for _ in 0..5_000 {
-            let a = shared.account();
+            let a = shared.portfolio.account();
             // buying_power should always be 2x net_liquidation
             if a.net_liquidation > 0 {
                 assert_eq!(a.buying_power, a.net_liquidation * 2,
@@ -678,30 +678,30 @@ fn shared_state_all_drains_empty_after_first_call() {
     let ss = SharedState::new();
 
     // Push one item to each queue
-    ss.push_fill(Fill { instrument: 0, order_id: 1, side: Side::Buy,
+    ss.orders.push_fill(Fill { instrument: 0, order_id: 1, side: Side::Buy,
         price: PRICE_SCALE, qty: 1, remaining: 0, commission: 0, timestamp_ns: 0 });
-    ss.push_order_update(OrderUpdate { order_id: 1, instrument: 0,
+    ss.orders.push_order_update(OrderUpdate { order_id: 1, instrument: 0,
         status: OrderStatus::Filled, filled_qty: 1, remaining_qty: 0, timestamp_ns: 0 });
-    ss.push_cancel_reject(CancelReject { order_id: 1, instrument: 0,
+    ss.orders.push_cancel_reject(CancelReject { order_id: 1, instrument: 0,
         reject_type: 1, reason_code: 0, timestamp_ns: 0 });
-    ss.push_tbt_trade(TbtTrade { instrument: 0, price: PRICE_SCALE,
+    ss.market.push_tbt_trade(TbtTrade { instrument: 0, price: PRICE_SCALE,
         size: 1, timestamp: 0, exchange: String::new(), conditions: String::new() });
-    ss.push_tbt_quote(TbtQuote { instrument: 0, bid: PRICE_SCALE, ask: PRICE_SCALE,
+    ss.market.push_tbt_quote(TbtQuote { instrument: 0, bid: PRICE_SCALE, ask: PRICE_SCALE,
         bid_size: 1, ask_size: 1, timestamp: 0 });
 
     // First drain
-    assert_eq!(ss.drain_fills().len(), 1);
-    assert_eq!(ss.drain_order_updates().len(), 1);
-    assert_eq!(ss.drain_cancel_rejects().len(), 1);
-    assert_eq!(ss.drain_tbt_trades().len(), 1);
-    assert_eq!(ss.drain_tbt_quotes().len(), 1);
+    assert_eq!(ss.orders.drain_fills().len(), 1);
+    assert_eq!(ss.orders.drain_order_updates().len(), 1);
+    assert_eq!(ss.orders.drain_cancel_rejects().len(), 1);
+    assert_eq!(ss.market.drain_tbt_trades().len(), 1);
+    assert_eq!(ss.market.drain_tbt_quotes().len(), 1);
 
     // Second drain — all empty
-    assert!(ss.drain_fills().is_empty());
-    assert!(ss.drain_order_updates().is_empty());
-    assert!(ss.drain_cancel_rejects().is_empty());
-    assert!(ss.drain_tbt_trades().is_empty());
-    assert!(ss.drain_tbt_quotes().is_empty());
+    assert!(ss.orders.drain_fills().is_empty());
+    assert!(ss.orders.drain_order_updates().is_empty());
+    assert!(ss.orders.drain_cancel_rejects().is_empty());
+    assert!(ss.market.drain_tbt_trades().is_empty());
+    assert!(ss.market.drain_tbt_quotes().is_empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -714,7 +714,7 @@ fn concurrent_drain_fills_no_duplicates() {
 
     // Push 100 fills
     for i in 0..100 {
-        shared.push_fill(Fill {
+        shared.orders.push_fill(Fill {
             instrument: 0, order_id: i, side: Side::Buy,
             price: PRICE_SCALE, qty: 1, remaining: 0,
             commission: 0, timestamp_ns: 0,
@@ -725,8 +725,8 @@ fn concurrent_drain_fills_no_duplicates() {
     let s1 = shared.clone();
     let s2 = shared.clone();
 
-    let h1 = thread::spawn(move || s1.drain_fills().len());
-    let h2 = thread::spawn(move || s2.drain_fills().len());
+    let h1 = thread::spawn(move || s1.orders.drain_fills().len());
+    let h2 = thread::spawn(move || s2.orders.drain_fills().len());
 
     let count1 = h1.join().unwrap();
     let count2 = h2.join().unwrap();

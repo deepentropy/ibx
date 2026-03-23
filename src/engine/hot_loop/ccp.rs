@@ -137,7 +137,7 @@ impl CcpState {
                                 if !matches.is_empty() {
                                     if let Some(req_id) = self.pending_matching_symbols.first().copied() {
                                         self.pending_matching_symbols.remove(0);
-                                        shared.push_matching_symbols(req_id, matches);
+                                        shared.reference.push_matching_symbols(req_id, matches);
                                     }
                                 }
                             }
@@ -162,7 +162,7 @@ impl CcpState {
                             crate::control::contracts::SecurityType::Warrant => "WAR",
                             _ => "STK",
                         };
-                        shared.cache_contract(def.con_id as i64, api::Contract {
+                        shared.reference.cache_contract(def.con_id as i64, api::Contract {
                             con_id: def.con_id as i64,
                             symbol: def.symbol.clone(),
                             sec_type: sec_type_str.to_string(),
@@ -175,18 +175,18 @@ impl CcpState {
                         });
                     }
                     if let Some(&req_id) = self.pending_secdef.first() {
-                        shared.push_contract_details(req_id, def.clone());
+                        shared.reference.push_contract_details(req_id, def.clone());
                         emit(event_tx, Event::ContractDetails { req_id, details: def });
                         if is_last {
                             self.pending_secdef.remove(0);
-                            shared.push_contract_details_end(req_id);
+                            shared.reference.push_contract_details_end(req_id);
                             emit(event_tx, Event::ContractDetailsEnd(req_id));
                         }
                     }
                 }
                 let rules = crate::control::contracts::parse_market_rules(msg);
                 if !rules.is_empty() {
-                    shared.push_market_rules(rules);
+                    shared.reference.push_market_rules(rules);
                 }
             }
             _ => {}
@@ -228,7 +228,7 @@ impl CcpState {
                         response.init_margin_after as f64 / PRICE_SCALE as f64,
                         response.commission as f64 / PRICE_SCALE as f64);
                     context.remove_order(clord_id);
-                    shared.push_what_if(response);
+                    shared.orders.push_what_if(response);
                     emit(event_tx, Event::WhatIf(response));
                 }
             }
@@ -296,8 +296,8 @@ impl CcpState {
                 };
                 context.update_position(order.instrument, delta);
                 // notify_fill inlined
-                shared.push_fill(fill);
-                shared.set_position(fill.instrument, context.position(fill.instrument));
+                shared.orders.push_fill(fill);
+                shared.portfolio.set_position(fill.instrument, context.position(fill.instrument));
                 emit(event_tx, Event::Fill(fill));
                 had_fill = true;
             }
@@ -313,7 +313,7 @@ impl CcpState {
                     remaining_qty: leaves_qty,
                     timestamp_ns: context.now_ns(),
                 };
-                shared.push_order_update(update);
+                shared.orders.push_order_update(update);
                 emit(event_tx, Event::OrderUpdate(update));
             }
         }
@@ -402,7 +402,7 @@ impl CcpState {
             };
 
             let contract = if resolved_con_id != 0 {
-                if let Some(mut cached) = shared.get_contract(resolved_con_id) {
+                if let Some(mut cached) = shared.reference.get_contract(resolved_con_id) {
                     if !symbol.is_empty() { cached.symbol = symbol.clone(); }
                     if !sec_type_str.is_empty() { cached.sec_type = sec_type_str.to_string(); }
                     if !exchange.is_empty() { cached.exchange = exchange.clone(); }
@@ -511,10 +511,10 @@ impl CcpState {
             };
 
             if con_id != 0 {
-                shared.cache_contract(con_id, contract.clone());
+                shared.reference.cache_contract(con_id, contract.clone());
             }
 
-            shared.push_order_info(clord_id, RichOrderInfo {
+            shared.orders.push_order_info(clord_id, RichOrderInfo {
                 contract, order, order_state, last_exec,
             });
         }
@@ -525,7 +525,7 @@ impl CcpState {
             crate::types::OrderStatus::Rejected
         ) {
             if let Some(order) = context.order(clord_id).copied() {
-                shared.push_completed_order(CompletedOrder {
+                shared.orders.push_completed_order(CompletedOrder {
                     order_id: clord_id,
                     instrument: order.instrument,
                     status,
@@ -566,7 +566,7 @@ impl CcpState {
                     reason_code,
                     timestamp_ns: context.now_ns(),
                 };
-                shared.push_cancel_reject(reject);
+                shared.orders.push_cancel_reject(reject);
                 emit(event_tx, Event::CancelReject(reject));
             }
         }
@@ -594,7 +594,7 @@ impl CcpState {
             message,
             exchange,
         };
-        shared.push_news_bulletin(bulletin);
+        shared.market.push_news_bulletin(bulletin);
     }
 
     fn handle_account_summary(&mut self, parsed: &std::collections::HashMap<u32, String>, context: &mut Context, shared: &SharedState) {
@@ -602,7 +602,7 @@ impl CcpState {
             context.account.net_liquidation = (val * PRICE_SCALE as f64) as Price;
             log::info!("Account summary: net_liq=${:.2}", val);
         }
-        shared.set_account(context.account());
+        shared.portfolio.set_account(context.account());
     }
 
     pub(crate) fn drain_and_send_orders(
@@ -2193,7 +2193,7 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
             }
         }
     }
-    shared.set_account(context.account());
+    shared.portfolio.set_account(context.account());
 }
 
 /// Handle position update messages (cross-cutting, called from CCP message processing).
@@ -2222,8 +2222,8 @@ pub(crate) fn handle_position_update(
         if delta != 0 {
             context.update_position(instrument, delta);
         }
-        shared.set_position_info(PositionInfo { con_id, position, avg_cost });
-        shared.set_position(instrument, position);
+        shared.portfolio.set_position_info(PositionInfo { con_id, position, avg_cost });
+        shared.portfolio.set_position(instrument, position);
         emit(event_tx, Event::PositionUpdate { instrument, con_id, position, avg_cost });
     }
 }

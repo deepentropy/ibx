@@ -231,7 +231,7 @@ fn main() {
                     }
                 }
                 // 5. SeqLock + channel notify
-                shared.push_quote(id, market.quote(id));
+                shared.market.push_quote(id, market.quote(id));
                 let _ = tx.try_send(Event::Tick(id));
                 sent += 1;
                 if sent % 60000 == 0 {

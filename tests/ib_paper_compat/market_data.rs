@@ -28,7 +28,7 @@ pub(super) fn phase_market_data(conns: Conns) -> Conns {
             Ok(Event::Tick(instrument)) => {
                 tick_count += 1;
                 if !first_tick {
-                    let q = shared.quote(instrument);
+                    let q = shared.market.quote(instrument);
                     let bid = q.bid as f64 / PRICE_SCALE as f64;
                     let ask = q.ask as f64 / PRICE_SCALE as f64;
                     let last = q.last as f64 / PRICE_SCALE as f64;
@@ -108,7 +108,7 @@ pub(super) fn phase_multi_instrument(conns: Conns) -> Conns {
     // Check each instrument received distinct prices
     let mut instruments_with_data = 0u32;
     for id in 0..3u32 {
-        let q = shared.quote(id);
+        let q = shared.market.quote(id);
         if q.bid > 0 || q.ask > 0 || q.last > 0 {
             instruments_with_data += 1;
             let bid = q.bid as f64 / PRICE_SCALE as f64;
@@ -234,7 +234,7 @@ pub(super) fn phase_streaming_validation(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::Tick(instrument)) => {
                 tick_count += 1;
-                let q = shared.quote(instrument);
+                let q = shared.market.quote(instrument);
                 let bid = q.bid as f64 / PRICE_SCALE as f64;
                 let ask = q.ask as f64 / PRICE_SCALE as f64;
 
@@ -360,7 +360,7 @@ pub(super) fn phase_forex_market_data(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::Tick(instrument)) => {
                 tick_count += 1;
-                let q = shared.quote(instrument);
+                let q = shared.market.quote(instrument);
                 if q.bid > 0 { bid_seen = true; }
                 if q.ask > 0 { ask_seen = true; }
 
@@ -418,7 +418,7 @@ pub(super) fn phase_forex_streaming_validation(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::Tick(instrument)) => {
                 tick_count += 1;
-                let q = shared.quote(instrument);
+                let q = shared.market.quote(instrument);
                 let bid = q.bid as f64 / PRICE_SCALE as f64;
                 let ask = q.ask as f64 / PRICE_SCALE as f64;
 
@@ -494,7 +494,7 @@ pub(super) fn phase_forex_reconnection(conns: Conns) -> Conns {
     while Instant::now() < deadline2 {
         match event_rx2.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::Tick(inst)) => {
-                let q = shared2.quote(inst);
+                let q = shared2.market.quote(inst);
                 println!("  Step 2: Tick after reconnect bid={:.5} ask={:.5}",
                     q.bid as f64 / PRICE_SCALE as f64, q.ask as f64 / PRICE_SCALE as f64);
                 got_ticks_after = true;
@@ -544,7 +544,7 @@ pub(super) fn phase_tick_stress_test(conns: Conns) -> Conns {
                 let idx = instrument as usize;
                 if idx < 3 {
                     per_instrument[idx] += 1;
-                    let q = shared.quote(instrument);
+                    let q = shared.market.quote(instrument);
                     if q.timestamp_ns > 0 && q.timestamp_ns < last_timestamp[idx] {
                         monotonic_violations += 1;
                     }
@@ -673,7 +673,7 @@ pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
             Ok(Event::Tick(instrument)) => {
                 tick_count += 1;
                 if !got_tick {
-                    let q = shared.quote(instrument);
+                    let q = shared.market.quote(instrument);
                     println!("  First regular tick: bid={:.4} ask={:.4}",
                         q.bid as f64 / PRICE_SCALE as f64,
                         q.ask as f64 / PRICE_SCALE as f64);
