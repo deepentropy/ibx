@@ -163,7 +163,7 @@ fn req_ids_calls_wrapper() {
 #[test]
 fn req_mkt_data_sends_register_and_subscribe() {
     let (client, rx, _shared) = test_client();
-    client.req_mkt_data(1, &spy(), "", false, false);
+    let _ = client.req_mkt_data(1, &spy(), "", false, false);
     let cmd1 = rx.try_recv().unwrap();
     assert!(matches!(cmd1, ControlCommand::RegisterInstrument { con_id: 756733, .. }));
     let cmd2 = rx.try_recv().unwrap();
@@ -182,7 +182,7 @@ fn cancel_mkt_data_sends_unsubscribe() {
     // Pre-register mapping
     client.core.req_to_instrument.lock().unwrap().insert(1, 0);
     client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-    client.cancel_mkt_data(1);
+    client.cancel_mkt_data(1).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Unsubscribe { instrument: 0 }));
     // Mapping should be cleared
@@ -192,14 +192,14 @@ fn cancel_mkt_data_sends_unsubscribe() {
 #[test]
 fn cancel_mkt_data_unknown_req_id_no_panic() {
     let (client, rx, _shared) = test_client();
-    client.cancel_mkt_data(999);
+    client.cancel_mkt_data(999).unwrap();
     assert!(rx.try_recv().is_err()); // no commands sent
 }
 
 #[test]
 fn req_tick_by_tick_data_sends_subscribe_tbt() {
     let (client, rx, _shared) = test_client();
-    client.req_tick_by_tick_data(10, &spy(), "BidAsk", 0, false);
+    let _ = client.req_tick_by_tick_data(10, &spy(), "BidAsk", 0, false);
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::SubscribeTbt { con_id, symbol, tbt_type, .. } => {
@@ -214,7 +214,7 @@ fn req_tick_by_tick_data_sends_subscribe_tbt() {
 #[test]
 fn req_tick_by_tick_data_defaults_to_last() {
     let (client, rx, _shared) = test_client();
-    client.req_tick_by_tick_data(10, &spy(), "AllLast", 0, false);
+    let _ = client.req_tick_by_tick_data(10, &spy(), "AllLast", 0, false);
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::SubscribeTbt { tbt_type, .. } => {
@@ -228,7 +228,7 @@ fn req_tick_by_tick_data_defaults_to_last() {
 fn cancel_tick_by_tick_data_sends_unsubscribe_tbt() {
     let (client, rx, _shared) = test_client();
     client.core.req_to_instrument.lock().unwrap().insert(10, 3);
-    client.cancel_tick_by_tick_data(10);
+    client.cancel_tick_by_tick_data(10).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::UnsubscribeTbt { instrument: 3 }));
 }
@@ -236,7 +236,7 @@ fn cancel_tick_by_tick_data_sends_unsubscribe_tbt() {
 #[test]
 fn cancel_tick_by_tick_unknown_req_id_no_panic() {
     let (client, rx, _shared) = test_client();
-    client.cancel_tick_by_tick_data(999);
+    client.cancel_tick_by_tick_data(999).unwrap();
     assert!(rx.try_recv().is_err());
 }
 
@@ -722,7 +722,7 @@ fn place_order_auto_assigns_id_when_zero() {
 #[test]
 fn cancel_order_sends_cancel_command() {
     let (client, rx, _shared) = test_client();
-    client.cancel_order(42, "");
+    client.cancel_order(42, "").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::Order(OrderRequest::Cancel { order_id }) => assert_eq!(order_id, 42),
@@ -734,7 +734,7 @@ fn cancel_order_sends_cancel_command() {
 fn req_global_cancel_sends_cancel_all_for_each_instrument() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(2);
-    client.req_global_cancel();
+    client.req_global_cancel().unwrap();
     let mut cancel_instruments = vec![];
     while let Ok(cmd) = rx.try_recv() {
         if let ControlCommand::Order(OrderRequest::CancelAll { instrument }) = cmd {
@@ -749,7 +749,7 @@ fn req_global_cancel_sends_cancel_all_for_each_instrument() {
 #[test]
 fn req_global_cancel_no_instruments_no_commands() {
     let (client, rx, _shared) = test_client();
-    client.req_global_cancel();
+    client.req_global_cancel().unwrap();
     assert!(rx.try_recv().is_err());
 }
 
@@ -760,7 +760,7 @@ fn req_global_cancel_no_instruments_no_commands() {
 #[test]
 fn req_historical_data_sends_fetch_historical() {
     let (client, rx, _shared) = test_client();
-    client.req_historical_data(5, &spy(), "20260101 16:00:00", "1 D", "1 hour", "TRADES", true, 1, false);
+    client.req_historical_data(5, &spy(), "20260101 16:00:00", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistorical { req_id, con_id, duration, bar_size, what_to_show, use_rth, .. } => {
@@ -778,7 +778,7 @@ fn req_historical_data_sends_fetch_historical() {
 #[test]
 fn cancel_historical_data_sends_cancel() {
     let (client, rx, _shared) = test_client();
-    client.cancel_historical_data(5);
+    client.cancel_historical_data(5).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelHistorical { req_id: 5 }));
 }
@@ -786,7 +786,7 @@ fn cancel_historical_data_sends_cancel() {
 #[test]
 fn req_head_timestamp_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_head_timestamp(10, &spy(), "TRADES", true, 1);
+    client.req_head_timestamp(10, &spy(), "TRADES", true, 1).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHeadTimestamp { req_id, con_id, what_to_show, use_rth } => {
@@ -806,7 +806,7 @@ fn req_head_timestamp_sends_fetch() {
 #[test]
 fn req_contract_details_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_contract_details(7, &spy());
+    client.req_contract_details(7, &spy()).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchContractDetails { req_id, con_id, .. } => {
@@ -820,7 +820,7 @@ fn req_contract_details_sends_fetch() {
 #[test]
 fn req_matching_symbols_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_matching_symbols(8, "AAPL");
+    client.req_matching_symbols(8, "AAPL").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchMatchingSymbols { req_id, pattern } => {
@@ -862,7 +862,7 @@ fn req_positions_empty_still_calls_position_end() {
 #[test]
 fn req_scanner_parameters_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_scanner_parameters();
+    client.req_scanner_parameters().unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::FetchScannerParams));
 }
@@ -870,7 +870,7 @@ fn req_scanner_parameters_sends_fetch() {
 #[test]
 fn req_scanner_subscription_sends_subscribe() {
     let (client, rx, _shared) = test_client();
-    client.req_scanner_subscription(3, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 25);
+    client.req_scanner_subscription(3, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 25).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::SubscribeScanner { req_id, scan_code, max_items, .. } => {
@@ -885,7 +885,7 @@ fn req_scanner_subscription_sends_subscribe() {
 #[test]
 fn cancel_scanner_subscription_sends_cancel() {
     let (client, rx, _shared) = test_client();
-    client.cancel_scanner_subscription(3);
+    client.cancel_scanner_subscription(3).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelScanner { req_id: 3 }));
 }
@@ -897,7 +897,7 @@ fn cancel_scanner_subscription_sends_cancel() {
 #[test]
 fn req_historical_news_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_historical_news(4, 265598, "BRFG", "2026-01-01", "2026-03-01", 10);
+    client.req_historical_news(4, 265598, "BRFG", "2026-01-01", "2026-03-01", 10).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistoricalNews { req_id, con_id, provider_codes, max_results, .. } => {
@@ -913,7 +913,7 @@ fn req_historical_news_sends_fetch() {
 #[test]
 fn req_news_article_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_news_article(5, "BRFG", "BRFG$12345");
+    client.req_news_article(5, "BRFG", "BRFG$12345").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchNewsArticle { req_id, provider_code, article_id } => {
@@ -932,7 +932,7 @@ fn req_news_article_sends_fetch() {
 #[test]
 fn req_fundamental_data_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_fundamental_data(6, &spy(), "ReportSnapshot");
+    client.req_fundamental_data(6, &spy(), "ReportSnapshot").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchFundamentalData { req_id, report_type, .. } => {
@@ -946,7 +946,7 @@ fn req_fundamental_data_sends_fetch() {
 #[test]
 fn cancel_fundamental_data_sends_cancel() {
     let (client, rx, _shared) = test_client();
-    client.cancel_fundamental_data(6);
+    client.cancel_fundamental_data(6).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelFundamentalData { req_id: 6 }));
 }
@@ -958,7 +958,7 @@ fn cancel_fundamental_data_sends_cancel() {
 #[test]
 fn req_histogram_data_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_histogram_data(7, &spy(), true, "1 week");
+    client.req_histogram_data(7, &spy(), true, "1 week").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistogramData { req_id, use_rth, period, .. } => {
@@ -973,7 +973,7 @@ fn req_histogram_data_sends_fetch() {
 #[test]
 fn cancel_histogram_data_sends_cancel() {
     let (client, rx, _shared) = test_client();
-    client.cancel_histogram_data(7);
+    client.cancel_histogram_data(7).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelHistogramData { req_id: 7 }));
 }
@@ -985,7 +985,7 @@ fn cancel_histogram_data_sends_cancel() {
 #[test]
 fn req_historical_ticks_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "", 1000, "TRADES", true);
+    client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "", 1000, "TRADES", true).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistoricalTicks { req_id, con_id, number_of_ticks, what_to_show, .. } => {
@@ -1005,7 +1005,7 @@ fn req_historical_ticks_sends_fetch() {
 #[test]
 fn req_real_time_bars_sends_subscribe() {
     let (client, rx, _shared) = test_client();
-    client.req_real_time_bars(9, &spy(), 5, "TRADES", true);
+    client.req_real_time_bars(9, &spy(), 5, "TRADES", true).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::SubscribeRealTimeBar { req_id, con_id, what_to_show, use_rth, .. } => {
@@ -1021,7 +1021,7 @@ fn req_real_time_bars_sends_subscribe() {
 #[test]
 fn cancel_real_time_bars_sends_cancel() {
     let (client, rx, _shared) = test_client();
-    client.cancel_real_time_bars(9);
+    client.cancel_real_time_bars(9).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelRealTimeBar { req_id: 9 }));
 }
@@ -1033,7 +1033,7 @@ fn cancel_real_time_bars_sends_cancel() {
 #[test]
 fn req_historical_schedule_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_historical_schedule(11, &spy(), "20260101 16:00:00", "1 D", true);
+    client.req_historical_schedule(11, &spy(), "20260101 16:00:00", "1 D", true).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistoricalSchedule { req_id, con_id, use_rth, .. } => {
@@ -1726,7 +1726,7 @@ fn cancel_during_modify_no_panic() {
         order_type: "LMT".into(), lmt_price: 151.0, ..Default::default()
     };
     client.place_order(99, &spy(), &modified).unwrap();
-    client.cancel_order(99, "");
+    client.cancel_order(99, "").unwrap();
 
     let mut has_cancel = false;
     while let Ok(cmd) = rx.try_recv() {

@@ -89,7 +89,7 @@ fn order_lifecycle_place_then_cancel() {
     while rx.try_recv().is_ok() {}
 
     // Cancel order
-    client.cancel_order(50, "");
+    client.cancel_order(50, "").unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 50 })));
 
@@ -317,7 +317,7 @@ fn market_data_subscribe_ticks_unsubscribe() {
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:450")));
 
     // Unsubscribe
-    client.cancel_mkt_data(1);
+    client.cancel_mkt_data(1).unwrap();
 
     // Push new quote — should NOT be dispatched
     q.bid = 449 * PRICE_SCALE;
@@ -553,11 +553,11 @@ fn historical_data_cancel_no_stale_callbacks() {
     let (client, rx, _shared) = test_client();
 
     // Request
-    client.req_historical_data(6, &spy(), "", "1 D", "1 hour", "TRADES", true, 1, false);
+    client.req_historical_data(6, &spy(), "", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
     while rx.try_recv().is_ok() {}
 
     // Cancel
-    client.cancel_historical_data(6);
+    client.cancel_historical_data(6).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::CancelHistorical { req_id: 6 }));
 
@@ -605,7 +605,7 @@ fn contract_lookup_then_subscribe() {
     let (client, rx, shared) = test_client();
 
     // Step 1: request contract details
-    client.req_contract_details(20, &aapl());
+    client.req_contract_details(20, &aapl()).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::FetchContractDetails { req_id: 20, con_id: 265598, .. }));
 
@@ -628,7 +628,7 @@ fn contract_lookup_then_subscribe() {
     assert!(w.events.iter().any(|e| e == "contract_details_end:20"));
 
     // Step 3: now subscribe to market data for this contract
-    client.req_mkt_data(21, &aapl(), "", false, false);
+    let _ = client.req_mkt_data(21, &aapl(), "", false, false);
 
     // Simulate ticks
     let mut q = Quote::default();

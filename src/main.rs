@@ -66,7 +66,7 @@ fn main() {
     contract.exchange = "SMART".into();
     contract.currency = "USD".into();
 
-    client.req_mkt_data(1, &contract, "", false, false);
+    client.req_mkt_data(1, &contract, "", false, false).unwrap();
     println!("Requested market data for SPY (req_id=1)");
 
     // Zero-copy SeqLock escape hatch still available:

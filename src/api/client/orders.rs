@@ -31,24 +31,24 @@ impl EClient {
         )?;
 
         let cmd = ClientCore::build_order_request(order, oid, instrument)?;
-        let _ = self.control_tx.send(cmd);
-        Ok(())
+        self.send(cmd)
     }
 
     /// Cancel an order. Matches `cancelOrder` in C++.
-    pub fn cancel_order(&self, order_id: i64, _manual_order_cancel_time: &str) {
-        let _ = self.control_tx.send(ControlCommand::Order(OrderRequest::Cancel {
+    pub fn cancel_order(&self, order_id: i64, _manual_order_cancel_time: &str) -> Result<(), String> {
+        self.send(ControlCommand::Order(OrderRequest::Cancel {
             order_id: order_id as u64,
-        }));
+        }))
     }
 
     /// Cancel all orders. Matches `reqGlobalCancel` in C++.
-    pub fn req_global_cancel(&self) {
+    pub fn req_global_cancel(&self) -> Result<(), String> {
         // Use global instrument count (not just locally-tracked ones)
         let count = self.shared.market.instrument_count();
         for instrument in 0..count {
-            let _ = self.control_tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }));
+            self.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }))?;
         }
+        Ok(())
     }
 
     /// Request next valid order ID. Matches `reqIds` in C++.

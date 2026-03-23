@@ -23,7 +23,7 @@
 //! }).unwrap();
 //!
 //! client.req_mkt_data(1, &Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() },
-//!     "", false, false);
+//!     "", false, false).unwrap();
 //!
 //! let mut wrapper = MyWrapper;
 //! loop {
@@ -183,6 +183,11 @@ impl EClient {
     #[doc(hidden)]
     pub fn seed_instrument(&self, con_id: i64, instrument: InstrumentId) {
         self.core.con_id_to_instrument.lock().unwrap().insert(con_id, instrument);
+    }
+
+    /// Send a control command to the engine. Returns `Err` if the engine has shut down.
+    pub(crate) fn send(&self, cmd: ControlCommand) -> Result<(), String> {
+        self.control_tx.send(cmd).map_err(|e| format!("Engine stopped: {e}"))
     }
 
     // ── Connection ──

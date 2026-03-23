@@ -441,7 +441,7 @@ fn api_gt_suite() {
         // Wait for CCP init burst to complete before sending secdef request
         poll(&client, &mut wrapper, Duration::from_secs(5));
         wrapper.drain();
-        client.req_contract_details(100, &spy());
+        client.req_contract_details(100, &spy()).unwrap();
         poll_until(&client, &mut wrapper,
             |cbs| cbs.iter().any(|c| matches!(c, Cb::ContractDetails { .. } | Cb::ContractDetailsEnd { .. })),
             Duration::from_secs(20));
@@ -473,7 +473,7 @@ fn api_gt_suite() {
     {
         print!("  req_matching_symbols (AAPL)... ");
         wrapper.drain();
-        client.req_matching_symbols(110, "AAPL");
+        client.req_matching_symbols(110, "AAPL").unwrap();
         poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::SymbolSamples { .. })), Duration::from_secs(10));
         let cbs = wrapper.drain();
 
@@ -584,7 +584,7 @@ fn api_gt_suite() {
         wrapper.drain();
 
         // First fetch secdef to populate contract cache
-        client.req_contract_details(9999, &spy());
+        client.req_contract_details(9999, &spy()).unwrap();
         poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::ContractDetailsEnd { .. })), Duration::from_secs(10));
         wrapper.drain();
 
@@ -612,7 +612,7 @@ fn api_gt_suite() {
         client.req_all_open_orders(&mut wrapper);
 
         // Cancel
-        client.cancel_order(oid, "");
+        client.cancel_order(oid, "").unwrap();
         poll_until(&client, &mut wrapper, |cbs| {
             cbs.iter().any(|c| matches!(c, Cb::OrderStatus { status, .. } if status == "Cancelled" || status == "Inactive"))
         }, Duration::from_secs(15));
@@ -699,7 +699,7 @@ fn api_gt_suite() {
     {
         print!("  req_historical_data (SPY 1D 1min)... ");
         wrapper.drain();
-        client.req_historical_data(410, &spy(), "", "1 D", "1 min", "TRADES", true, 1, false);
+        client.req_historical_data(410, &spy(), "", "1 D", "1 min", "TRADES", true, 1, false).unwrap();
         poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::HistoricalDataEnd { .. })), Duration::from_secs(15));
         let cbs = wrapper.drain();
 
@@ -721,7 +721,7 @@ fn api_gt_suite() {
     {
         print!("  req_head_timestamp (SPY TRADES)... ");
         wrapper.drain();
-        client.req_head_timestamp(400, &spy(), "TRADES", true, 1);
+        client.req_head_timestamp(400, &spy(), "TRADES", true, 1).unwrap();
         poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::HeadTimestamp { .. })), Duration::from_secs(10));
         let cbs = wrapper.drain();
 
@@ -740,10 +740,10 @@ fn api_gt_suite() {
     {
         print!("  req_histogram_data (SPY 1week)... ");
         wrapper.drain();
-        client.req_histogram_data(430, &spy(), true, "1 week");
+        client.req_histogram_data(430, &spy(), true, "1 week").unwrap();
         poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::HistogramData { .. })), Duration::from_secs(15));
         let cbs = wrapper.drain();
-        client.cancel_histogram_data(430);
+        client.cancel_histogram_data(430).unwrap();
 
         let hd: Vec<_> = cbs.iter().filter_map(|c| if let Cb::HistogramData { count, .. } = c { Some(*count) } else { None }).collect();
 
@@ -761,9 +761,9 @@ fn api_gt_suite() {
     {
         print!("  req_mkt_data (SPY ticks)... ");
         wrapper.drain();
-        client.req_mkt_data(500, &spy(), "", false, false);
+        client.req_mkt_data(500, &spy(), "", false, false).unwrap();
         poll(&client, &mut wrapper, Duration::from_secs(5));
-        client.cancel_mkt_data(500);
+        client.cancel_mkt_data(500).unwrap();
         let cbs = wrapper.drain();
 
         let ticks: Vec<_> = cbs.iter().filter(|c| matches!(c, Cb::TickPrice { .. } | Cb::TickSize { .. })).collect();
@@ -781,7 +781,7 @@ fn api_gt_suite() {
     {
         print!("  req_historical_ticks (SPY TRADES)... ");
         wrapper.drain();
-        client.req_historical_ticks(440, &spy(), "20260320 09:30:00", "", 1000, "TRADES", true);
+        client.req_historical_ticks(440, &spy(), "20260320 09:30:00", "", 1000, "TRADES", true).unwrap();
         poll_until(&client, &mut wrapper,
             |cbs| cbs.iter().any(|c| matches!(c, Cb::HistoricalTicks { done: true, .. })),
             Duration::from_secs(15));
@@ -810,7 +810,7 @@ fn api_gt_suite() {
     {
         print!("  req_scanner_parameters... ");
         wrapper.drain();
-        client.req_scanner_parameters();
+        client.req_scanner_parameters().unwrap();
         poll_until(&client, &mut wrapper,
             |cbs| cbs.iter().any(|c| matches!(c, Cb::ScannerParameters)),
             Duration::from_secs(15));
@@ -829,7 +829,7 @@ fn api_gt_suite() {
     {
         print!("  req_historical_schedule (SPY 1 M)... ");
         wrapper.drain();
-        client.req_historical_schedule(450, &spy(), "", "1 M", true);
+        client.req_historical_schedule(450, &spy(), "", "1 M", true).unwrap();
         poll_until(&client, &mut wrapper,
             |cbs| cbs.iter().any(|c| matches!(c, Cb::HistoricalSchedule { .. })),
             Duration::from_secs(15));
@@ -853,12 +853,12 @@ fn api_gt_suite() {
     {
         print!("  req_scanner_subscription (TOP_PERC_GAIN)... ");
         wrapper.drain();
-        client.req_scanner_subscription(460, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 10);
+        client.req_scanner_subscription(460, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 10).unwrap();
         poll_until(&client, &mut wrapper,
             |cbs| cbs.iter().any(|c| matches!(c, Cb::ScannerDataEnd { .. } | Cb::Error { .. })),
             Duration::from_secs(20));
         let cbs = wrapper.drain();
-        client.cancel_scanner_subscription(460);
+        client.cancel_scanner_subscription(460).unwrap();
 
         let sd: Vec<_> = cbs.iter().filter(|c| matches!(c, Cb::ScannerData { .. })).collect();
         let has_end = cbs.iter().any(|c| matches!(c, Cb::ScannerDataEnd { .. }));
@@ -880,7 +880,7 @@ fn api_gt_suite() {
     {
         print!("  req_fundamental_data (AAPL ReportSnapshot)... ");
         wrapper.drain();
-        client.req_fundamental_data(470, &aapl(), "ReportSnapshot");
+        client.req_fundamental_data(470, &aapl(), "ReportSnapshot").unwrap();
         poll_until(&client, &mut wrapper,
             |cbs| cbs.iter().any(|c| matches!(c, Cb::FundamentalData { .. } | Cb::Error { .. })),
             Duration::from_secs(15));
@@ -906,7 +906,7 @@ fn api_gt_suite() {
     {
         print!("  req_historical_news (AAPL)... ");
         wrapper.drain();
-        client.req_historical_news(480, 265598, "BRFG+DJNL+BRFUPDN+BZ+FLY", "", "", 5);
+        client.req_historical_news(480, 265598, "BRFG+DJNL+BRFUPDN+BZ+FLY", "", "", 5).unwrap();
         poll_until(&client, &mut wrapper,
             |cbs| cbs.iter().any(|c| matches!(c, Cb::HistoricalNewsEnd { .. } | Cb::Error { .. })),
             Duration::from_secs(15));
@@ -940,7 +940,7 @@ fn api_gt_suite() {
         if let Some((ref provider, ref article_id)) = news_article_info {
             print!("  req_news_article ({}/{})... ", provider, article_id);
             wrapper.drain();
-            client.req_news_article(490, provider, article_id);
+            client.req_news_article(490, provider, article_id).unwrap();
             poll_until(&client, &mut wrapper,
                 |cbs| cbs.iter().any(|c| matches!(c, Cb::NewsArticle { .. } | Cb::Error { .. })),
                 Duration::from_secs(15));
@@ -1058,11 +1058,11 @@ fn api_gt_suite() {
         print!("  cancel_historical_data (in-flight)... ");
         wrapper.drain();
         // Request 1 month of 1-min bars (~8000 bars) — large enough to cancel mid-stream
-        client.req_historical_data(700, &spy(), "", "1 M", "1 min", "TRADES", true, 1, false);
+        client.req_historical_data(700, &spy(), "", "1 M", "1 min", "TRADES", true, 1, false).unwrap();
         // Brief poll to let some bars arrive
         poll(&client, &mut wrapper, Duration::from_millis(500));
         // Cancel before completion
-        client.cancel_historical_data(700);
+        client.cancel_historical_data(700).unwrap();
         // Drain whatever arrived before + in-flight after cancel
         // (in-flight data is expected — cancel is async, data already buffered still delivers)
         poll(&client, &mut wrapper, Duration::from_secs(2));
@@ -1092,26 +1092,26 @@ fn api_gt_suite() {
         print!("  cancel methods batch... ");
         // Subscribe to scanner, verify data, cancel, verify no more data
         wrapper.drain();
-        client.req_scanner_subscription(600, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 5);
+        client.req_scanner_subscription(600, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 5).unwrap();
         poll_until(&client, &mut wrapper,
             |cbs| cbs.iter().any(|c| matches!(c, Cb::ScannerDataEnd { .. } | Cb::Error { .. })),
             Duration::from_secs(15));
         let cbs = wrapper.drain();
         let scanner_got_data = cbs.iter().any(|c| matches!(c, Cb::ScannerDataEnd { .. }));
-        client.cancel_scanner_subscription(600);
+        client.cancel_scanner_subscription(600).unwrap();
         // After cancel, polling should yield no more scanner data for this req_id
         poll(&client, &mut wrapper, Duration::from_secs(1));
         let after_cancel = wrapper.drain();
         let scanner_after = after_cancel.iter().any(|c| matches!(c, Cb::ScannerData { req_id: 600, .. } | Cb::ScannerDataEnd { req_id: 600 }));
 
         // Now fire all other cancel methods with unused req_ids — verify no crash
-        client.cancel_historical_data(999);
+        client.cancel_historical_data(999).unwrap();
         client.cancel_pnl(999);
         client.cancel_pnl_single(999);
         client.cancel_account_summary(999);
         client.cancel_news_bulletins();
-        client.cancel_fundamental_data(999);
-        client.cancel_histogram_data(999);
+        client.cancel_fundamental_data(999).unwrap();
+        client.cancel_histogram_data(999).unwrap();
 
         if scanner_got_data && !scanner_after {
             println!("PASS (scanner cancel verified, 7 other cancels ok)");
@@ -1132,7 +1132,7 @@ fn api_gt_suite() {
         wrapper.drain();
 
         // Ensure secdef cache is populated for SPY
-        client.req_contract_details(9998, &spy());
+        client.req_contract_details(9998, &spy()).unwrap();
         poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::ContractDetailsEnd { .. })), Duration::from_secs(10));
         wrapper.drain();
 
@@ -1156,7 +1156,7 @@ fn api_gt_suite() {
         wrapper.drain();
 
         // Global cancel
-        client.req_global_cancel();
+        client.req_global_cancel().unwrap();
 
         // Wait for Cancelled
         poll_until(&client, &mut wrapper, |cbs| {
@@ -1254,7 +1254,7 @@ fn api_gt_suite() {
 
         if accepted {
             // Cancel the adaptive order
-            client.cancel_order(oid, "");
+            client.cancel_order(oid, "").unwrap();
             poll_until(&client, &mut wrapper, |cbs| {
                 cbs.iter().any(|c| matches!(c, Cb::OrderStatus { status, .. } if status == "Cancelled" || status == "Inactive"))
             }, Duration::from_secs(15));

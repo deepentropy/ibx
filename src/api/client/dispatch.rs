@@ -131,7 +131,7 @@ impl EClient {
             }
         }
         for req_id in snapshot_done {
-            self.cancel_mkt_data(req_id);
+            let _ = self.cancel_mkt_data(req_id);
         }
 
         // TBT trades → tick_by_tick_all_last

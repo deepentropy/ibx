@@ -109,14 +109,14 @@ fn place_order_zero_con_id_still_sends() {
 #[test]
 fn cancel_mkt_data_unknown_req_id_no_panic() {
     let (client, rx, _shared) = test_client();
-    client.cancel_mkt_data(999);
+    client.cancel_mkt_data(999).unwrap();
     assert!(rx.try_recv().is_err()); // no command sent
 }
 
 #[test]
 fn cancel_tick_by_tick_unknown_req_id_no_panic() {
     let (client, rx, _shared) = test_client();
-    client.cancel_tick_by_tick_data(999);
+    client.cancel_tick_by_tick_data(999).unwrap();
     assert!(rx.try_recv().is_err());
 }
 
@@ -124,7 +124,7 @@ fn cancel_tick_by_tick_unknown_req_id_no_panic() {
 fn cancel_order_nonexistent_sends_cancel_anyway() {
     // cancel_order doesn't validate — it sends the command and lets engine deal with it
     let (client, rx, _shared) = test_client();
-    client.cancel_order(999999, "");
+    client.cancel_order(999999, "").unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 999999 })));
 }
@@ -132,7 +132,7 @@ fn cancel_order_nonexistent_sends_cancel_anyway() {
 #[test]
 fn req_global_cancel_no_instruments_no_commands() {
     let (client, rx, _shared) = test_client();
-    client.req_global_cancel();
+    client.req_global_cancel().unwrap();
     assert!(rx.try_recv().is_err());
 }
 
@@ -146,7 +146,7 @@ fn disconnect_during_active_subscription() {
     shared.market.set_instrument_count(1);
 
     // Subscribe
-    client.req_mkt_data(1, &spy(), "", false, false);
+    let _ = client.req_mkt_data(1, &spy(), "", false, false);
     while rx.try_recv().is_ok() {}
 
     // Disconnect
@@ -540,8 +540,8 @@ fn rapid_subscribe_unsubscribe_no_stale_state() {
     shared.market.set_instrument_count(1);
 
     for _ in 0..100 {
-        client.req_mkt_data(1, &spy(), "", false, false);
-        client.cancel_mkt_data(1);
+        let _ = client.req_mkt_data(1, &spy(), "", false, false);
+        client.cancel_mkt_data(1).unwrap();
     }
 
     // All commands should have been sent without panic

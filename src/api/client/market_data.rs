@@ -13,42 +13,46 @@ impl EClient {
     pub fn req_mkt_data(
         &self, req_id: i64, contract: &Contract,
         _generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool,
-    ) {
-        let _ = self.core.register_mkt_data(
+    ) -> Result<(), String> {
+        self.core.register_mkt_data(
             &self.shared, &self.control_tx, req_id,
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
             snapshot,
-        );
+        )?;
+        Ok(())
     }
 
     /// Cancel market data. Matches `cancelMktData` in C++.
-    pub fn cancel_mkt_data(&self, req_id: i64) {
+    pub fn cancel_mkt_data(&self, req_id: i64) -> Result<(), String> {
         if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
-            let _ = self.control_tx.send(ControlCommand::Unsubscribe { instrument });
+            self.send(ControlCommand::Unsubscribe { instrument })?;
         }
+        Ok(())
     }
 
     /// Subscribe to tick-by-tick data. Matches `reqTickByTickData` in C++.
     pub fn req_tick_by_tick_data(
         &self, req_id: i64, contract: &Contract, tick_type: &str,
         _number_of_ticks: i32, _ignore_size: bool,
-    ) {
+    ) -> Result<(), String> {
         let tbt_type = match tick_type {
             "BidAsk" => TbtType::BidAsk,
             _ => TbtType::Last,
         };
-        let _ = self.core.register_tbt(
+        self.core.register_tbt(
             &self.shared, &self.control_tx, req_id,
             contract.con_id, &contract.symbol, tbt_type,
-        );
+        )?;
+        Ok(())
     }
 
     /// Cancel tick-by-tick data. Matches `cancelTickByTickData` in C++.
-    pub fn cancel_tick_by_tick_data(&self, req_id: i64) {
+    pub fn cancel_tick_by_tick_data(&self, req_id: i64) -> Result<(), String> {
         if let Some(instrument) = self.core.req_to_instrument.lock().unwrap().remove(&req_id) {
             self.core.instrument_to_req.lock().unwrap().remove(&instrument);
-            let _ = self.control_tx.send(ControlCommand::UnsubscribeTbt { instrument });
+            self.send(ControlCommand::UnsubscribeTbt { instrument })?;
         }
+        Ok(())
     }
 
     // ── Real-Time Bars ──
@@ -56,18 +60,18 @@ impl EClient {
     pub fn req_real_time_bars(
         &self, req_id: i64, contract: &Contract,
         _bar_size: i32, what_to_show: &str, use_rth: bool,
-    ) {
-        let _ = self.control_tx.send(ControlCommand::SubscribeRealTimeBar {
+    ) -> Result<(), String> {
+        self.send(ControlCommand::SubscribeRealTimeBar {
             req_id: req_id as u32,
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
             what_to_show: what_to_show.into(),
             use_rth,
-        });
+        })
     }
 
-    pub fn cancel_real_time_bars(&self, req_id: i64) {
-        let _ = self.control_tx.send(ControlCommand::CancelRealTimeBar { req_id: req_id as u32 });
+    pub fn cancel_real_time_bars(&self, req_id: i64) -> Result<(), String> {
+        self.send(ControlCommand::CancelRealTimeBar { req_id: req_id as u32 })
     }
 
     // ── Escape Hatch ──
