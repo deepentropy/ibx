@@ -39,7 +39,7 @@ use crossbeam_channel::Sender;
 
 use crate::api::types::{
     Contract as ApiContract, Order as ApiOrder, TagValue as ApiTagValue,
-    BarData, ContractDetails, ContractDescription, Execution,
+    BarData, CommissionReport, ContractDetails, ContractDescription, Execution, ExecutionFilter,
     TickAttribLast, TickAttribBidAsk,
     PRICE_SCALE_F,
 };
@@ -71,6 +71,13 @@ pub struct EClientConfig {
 /// The thread is **joined** on [`disconnect()`] and on [`Drop`].
 /// Dropping an `EClient` without calling `disconnect()` first is safe:
 /// the `Drop` impl sends `Shutdown` and joins the thread.
+/// A stored execution + commission pair for `req_executions` replay.
+struct StoredFill {
+    contract: ApiContract,
+    execution: Execution,
+    commission: CommissionReport,
+}
+
 pub struct EClient {
     shared: Arc<SharedState>,
     control_tx: Sender<ControlCommand>,
@@ -79,6 +86,7 @@ pub struct EClient {
     connected: AtomicBool,
     next_order_id: AtomicU64,
     core: ClientCore,
+    executions: Mutex<Vec<StoredFill>>,
 }
 
 impl Drop for EClient {
@@ -128,6 +136,7 @@ impl EClient {
             connected: AtomicBool::new(true),
             next_order_id: AtomicU64::new(start_id),
             core: ClientCore::new(),
+            executions: Mutex::new(Vec::new()),
         })
     }
 
@@ -151,6 +160,7 @@ impl EClient {
             connected: AtomicBool::new(true),
             next_order_id: AtomicU64::new(start_id),
             core: ClientCore::new(),
+            executions: Mutex::new(Vec::new()),
         }
     }
 
@@ -397,6 +407,22 @@ impl EClient {
         wrapper.completed_orders_end();
     }
 
+    // ── Executions ──
+
+    /// Request execution reports. Matches `reqExecutions` in C++.
+    /// Replays stored executions (optionally filtered), firing `exec_details` +
+    /// `commission_report` for each, then `exec_details_end`.
+    pub fn req_executions(&self, req_id: i64, filter: &ExecutionFilter, wrapper: &mut impl Wrapper) {
+        let execs = self.executions.lock().unwrap();
+        for sf in execs.iter() {
+            if matches_filter(&sf.contract, &sf.execution, filter) {
+                wrapper.exec_details(req_id, &sf.contract, &sf.execution);
+                wrapper.commission_report(&sf.commission);
+            }
+        }
+        wrapper.exec_details_end(req_id);
+    }
+
     // ── PnL ──
 
     /// Subscribe to account PnL updates. Matches `reqPnL` in C++.
@@ -612,9 +638,10 @@ impl EClient {
     // ── Order / Fill Dispatch ──
 
     fn dispatch_orders(&self, wrapper: &mut impl Wrapper) {
-        // Fills → order_status + exec_details
+        // Fills → order_status + exec_details + commission_report
         for fill in self.shared.orders.drain_fills() {
             let price_f = fill.price as f64 / PRICE_SCALE_F;
+            let commission_f = fill.commission as f64 / PRICE_SCALE_F;
             let status = if fill.remaining == 0 { "Filled" } else { "PartiallyFilled" };
             wrapper.order_status(
                 fill.order_id as i64, status, fill.qty as f64, fill.remaining as f64,
@@ -649,6 +676,21 @@ impl EClient {
             };
             let req_id = self.core.req_id_for_instrument(fill.instrument);
             wrapper.exec_details(req_id, &c, &exec);
+
+            let report = CommissionReport {
+                exec_id: exec.exec_id.clone(),
+                commission: commission_f,
+                currency: "USD".into(),
+                realized_pnl: f64::MAX,
+                yield_amount: f64::MAX,
+                yield_redemption_date: String::new(),
+            };
+            wrapper.commission_report(&report);
+
+            // Store for req_executions replay
+            self.executions.lock().unwrap().push(StoredFill {
+                contract: c, execution: exec, commission: report,
+            });
         }
 
         // Order updates → order_status
@@ -897,6 +939,29 @@ impl EClient {
         }
     }
 
+}
+
+/// Check if an execution matches the given filter. Empty filter fields match everything.
+fn matches_filter(contract: &ApiContract, exec: &Execution, filter: &ExecutionFilter) -> bool {
+    if !filter.symbol.is_empty() && !contract.symbol.eq_ignore_ascii_case(&filter.symbol) {
+        return false;
+    }
+    if !filter.sec_type.is_empty() && !contract.sec_type.eq_ignore_ascii_case(&filter.sec_type) {
+        return false;
+    }
+    if !filter.exchange.is_empty() && !exec.exchange.eq_ignore_ascii_case(&filter.exchange) {
+        return false;
+    }
+    if !filter.side.is_empty() && !exec.side.eq_ignore_ascii_case(&filter.side) {
+        return false;
+    }
+    if !filter.acct_code.is_empty() && !exec.acct_number.eq_ignore_ascii_case(&filter.acct_code) {
+        return false;
+    }
+    if filter.client_id != 0 && exec.client_id != filter.client_id {
+        return false;
+    }
+    true
 }
 
 /// Parse algo strategy and TagValue params into internal AlgoParams.
