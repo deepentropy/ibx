@@ -1,6 +1,7 @@
 pub mod farm;
 pub mod ccp;
 pub mod hmds;
+pub mod order_builder;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -247,7 +248,7 @@ impl HotLoop {
             );
 
             // 2. Drain pending orders → build → sign → send to auth
-            self.ccp.drain_and_send_orders(
+            order_builder::drain_and_send_orders(
                 &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
             );
 
