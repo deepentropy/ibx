@@ -52,6 +52,17 @@ struct StoredExecution {
 /// `frozen` tells PyO3 to skip RefCell borrow-checking, which is required
 /// because `run()` holds a `&self` borrow for the lifetime of the event loop.
 /// Interior mutability is provided by `OnceLock`, `AtomicBool`, and `Mutex`.
+///
+/// # Thread lifecycle
+///
+/// `connect()` spawns a single `ib-engine-hotloop` background thread.
+/// The thread is **joined** on [`disconnect()`] and on [`Drop`].
+/// Dropping an `EClient` without calling `disconnect()` first is safe:
+/// the `Drop` impl sends `Shutdown` and joins the thread.
+///
+/// **Note:** this struct is single-use — `OnceLock` fields cannot be reset,
+/// so calling `connect()` after `disconnect()` on the same instance will panic.
+/// Create a new `EClient` for reconnection.
 #[pyclass(frozen, subclass)]
 pub struct EClient {
     /// Reference to the EWrapper (which is typically `self` in the `App(EWrapper, EClient)` pattern).
@@ -79,6 +90,17 @@ pub struct EClient {
     news_providers: Mutex<String>,
     /// Cache of con_id → Contract for enriching position/execution callbacks.
     contract_cache: Mutex<HashMap<i64, Contract>>,
+}
+
+impl Drop for EClient {
+    fn drop(&mut self) {
+        if let Some(tx) = self.control_tx.get() {
+            let _ = tx.send(ControlCommand::Shutdown);
+        }
+        if let Some(h) = self._thread.lock().unwrap().take() {
+            let _ = h.join();
+        }
+    }
 }
 
 #[pymethods]
@@ -165,10 +187,14 @@ impl EClient {
         Ok(())
     }
 
-    /// Disconnect from IB.
+    /// Disconnect from IB.  Sends `Shutdown` to the hot loop, waits for the
+    /// background thread to exit, and marks the client as disconnected.
     fn disconnect(&self) -> PyResult<()> {
         if let Some(tx) = self.control_tx.get() {
             let _ = tx.send(ControlCommand::Shutdown);
+        }
+        if let Some(h) = self._thread.lock().unwrap().take() {
+            let _ = h.join();
         }
         self.connected.store(false, Ordering::Release);
         Ok(())

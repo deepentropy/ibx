@@ -32,7 +32,7 @@
 //! ```
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crossbeam_channel::Sender;
@@ -64,14 +64,31 @@ pub struct EClientConfig {
 }
 
 /// ibapi-compatible EClient. Matches C++ `EClientSocket` method signatures.
+///
+/// # Thread lifecycle
+///
+/// `connect()` spawns a single `ib-engine-hotloop` background thread.
+/// The thread is **joined** on [`disconnect()`] and on [`Drop`].
+/// Dropping an `EClient` without calling `disconnect()` first is safe:
+/// the `Drop` impl sends `Shutdown` and joins the thread.
 pub struct EClient {
     shared: Arc<SharedState>,
     control_tx: Sender<ControlCommand>,
-    _thread: thread::JoinHandle<()>,
+    thread: Mutex<Option<thread::JoinHandle<()>>>,
     pub account_id: String,
     connected: AtomicBool,
     next_order_id: AtomicU64,
     core: ClientCore,
+}
+
+impl Drop for EClient {
+    fn drop(&mut self) {
+        // Ensure the hot-loop thread is stopped and joined.
+        let _ = self.control_tx.send(ControlCommand::Shutdown);
+        if let Some(h) = self.thread.lock().unwrap().take() {
+            let _ = h.join();
+        }
+    }
 }
 
 impl EClient {
@@ -106,7 +123,7 @@ impl EClient {
         Ok(Self {
             shared,
             control_tx,
-            _thread: handle,
+            thread: Mutex::new(Some(handle)),
             account_id,
             connected: AtomicBool::new(true),
             next_order_id: AtomicU64::new(start_id),
@@ -119,7 +136,7 @@ impl EClient {
     pub fn from_parts(
         shared: Arc<SharedState>,
         control_tx: Sender<ControlCommand>,
-        thread: thread::JoinHandle<()>,
+        handle: thread::JoinHandle<()>,
         account_id: String,
     ) -> Self {
         let start_id = std::time::SystemTime::now()
@@ -129,7 +146,7 @@ impl EClient {
         Self {
             shared,
             control_tx,
-            _thread: thread,
+            thread: Mutex::new(Some(handle)),
             account_id,
             connected: AtomicBool::new(true),
             next_order_id: AtomicU64::new(start_id),
@@ -150,8 +167,13 @@ impl EClient {
         self.connected.load(Ordering::Relaxed)
     }
 
+    /// Disconnect from IB.  Sends `Shutdown` to the hot loop, waits for the
+    /// background thread to exit, and marks the client as disconnected.
     pub fn disconnect(&self) {
         let _ = self.control_tx.send(ControlCommand::Shutdown);
+        if let Some(h) = self.thread.lock().unwrap().take() {
+            let _ = h.join();
+        }
         self.connected.store(false, Ordering::Release);
     }
 
@@ -2902,5 +2924,35 @@ mod tests {
         let ask_ticks: Vec<_> = w.events.iter().filter(|e| e.starts_with("tick_price:1:2:")).collect();
         assert!(!bid_ticks.is_empty(), "Changed bid should dispatch");
         assert!(ask_ticks.is_empty(), "Unchanged ask should NOT dispatch");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Thread lifecycle
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn disconnect_joins_thread() {
+        let (client, _rx, _shared) = test_client();
+        // The test_client helper spawns an empty thread (already exited).
+        // disconnect() should join it without hanging.
+        client.disconnect();
+        assert!(!client.is_connected());
+    }
+
+    #[test]
+    fn drop_without_disconnect_joins_thread() {
+        let (client, _rx, _shared) = test_client();
+        // Dropping without explicit disconnect — Drop impl should join.
+        drop(client);
+        // No hang = success.
+    }
+
+    #[test]
+    fn disconnect_is_idempotent() {
+        let (client, _rx, _shared) = test_client();
+        client.disconnect();
+        // Second disconnect should not panic (thread already joined).
+        client.disconnect();
+        assert!(!client.is_connected());
     }
 }

@@ -177,6 +177,12 @@ impl HotLoop {
         self.poll_control_commands();
     }
 
+    /// Whether the hot loop is still running. For testing.
+    #[doc(hidden)]
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
     /// Build a HotLoop with connections and control channel, without requiring a Gateway.
     pub fn with_connections(
         shared: Arc<SharedState>,
@@ -260,9 +266,20 @@ impl HotLoop {
     }
 
     fn poll_control_commands(&mut self) {
-        let cmds: Vec<ControlCommand> = match self.control_rx.as_ref() {
-            Some(rx) => rx.try_iter().collect(),
+        let rx = match self.control_rx.as_ref() {
+            Some(rx) => rx,
             None => return,
+        };
+
+        let mut cmds: Vec<ControlCommand> = rx.try_iter().collect();
+
+        // try_iter() stops on both Empty and Disconnected — do one extra
+        // try_recv() to distinguish.  If a straggler command arrived between
+        // try_iter() finishing and this call, push it into the batch.
+        let sender_dropped = match rx.try_recv() {
+            Ok(cmd)  => { cmds.push(cmd); false }
+            Err(crossbeam_channel::TryRecvError::Empty)        => false,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => true,
         };
 
         for cmd in cmds {
@@ -428,6 +445,13 @@ impl HotLoop {
                     emit(&self.event_tx, Event::Disconnected);
                 }
             }
+        }
+
+        // All senders dropped — treat as implicit shutdown.
+        if sender_dropped && self.running {
+            log::warn!("Control channel disconnected — shutting down hot loop");
+            self.running = false;
+            emit(&self.event_tx, Event::Disconnected);
         }
     }
 
@@ -909,8 +933,58 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let mut engine = HotLoop::new(shared, None, None);
         engine.set_control_rx(rx);
+        engine.running = true;
         tx.send(ControlCommand::Shutdown).unwrap();
         engine.poll_once();
-        // running should be false now — we can't check directly, but no panic = good
+        assert!(!engine.is_running());
+    }
+
+    #[test]
+    fn channel_disconnect_stops_loop() {
+        let shared = Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let mut engine = HotLoop::new(shared, Some(event_tx), None);
+        engine.set_control_rx(rx);
+        engine.running = true;
+
+        // Drop sender — simulates EClient being dropped without disconnect().
+        drop(tx);
+
+        engine.poll_once();
+        assert!(!engine.is_running(), "hot loop should stop when control channel disconnects");
+
+        // Should emit Disconnected event.
+        let events: Vec<Event> = event_rx.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(e, Event::Disconnected)));
+    }
+
+    #[test]
+    fn run_exits_on_shutdown() {
+        let shared = Arc::new(SharedState::new());
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let mut engine = HotLoop::new(shared, None, None);
+        engine.set_control_rx(rx);
+
+        // Send Shutdown before run() starts — run() should drain it and exit.
+        tx.send(ControlCommand::Shutdown).unwrap();
+
+        // run() should return (not hang).
+        engine.run();
+        assert!(!engine.is_running());
+    }
+
+    #[test]
+    fn run_exits_on_channel_disconnect() {
+        let shared = Arc::new(SharedState::new());
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let mut engine = HotLoop::new(shared, None, None);
+        engine.set_control_rx(rx);
+
+        // Drop sender — run() should detect disconnect and exit.
+        drop(tx);
+
+        engine.run();
+        assert!(!engine.is_running());
     }
 }
