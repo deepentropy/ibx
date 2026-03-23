@@ -214,6 +214,8 @@ pub struct ClientCore {
     // reqId <-> InstrumentId mapping
     pub req_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
     pub instrument_to_req: Mutex<HashMap<InstrumentId, i64>>,
+    // con_id → InstrumentId for find_or_register_instrument lookup
+    pub con_id_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
     // Change detection for quote polling
     pub last_quotes: Mutex<HashMap<InstrumentId, [i64; 12]>>,
     // Snapshot req_ids — deliver first ticks then auto-cancel
@@ -240,6 +242,7 @@ impl ClientCore {
         Self {
             req_to_instrument: Mutex::new(HashMap::new()),
             instrument_to_req: Mutex::new(HashMap::new()),
+            con_id_to_instrument: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
             snapshot_reqs: Mutex::new(HashSet::new()),
             pnl_req_id: Mutex::new(None),
@@ -277,10 +280,10 @@ impl ClientCore {
         exchange: &str,
         sec_type: &str,
     ) -> Result<InstrumentId, String> {
-        // Check if already mapped
+        // Check if already mapped by con_id
         {
-            let map = self.instrument_to_req.lock().unwrap();
-            if let Some((&iid, _)) = map.iter().next() {
+            let map = self.con_id_to_instrument.lock().unwrap();
+            if let Some(&iid) = map.get(&con_id) {
                 return Ok(iid);
             }
         }
@@ -298,8 +301,15 @@ impl ClientCore {
         }).map_err(|e| format!("Engine stopped: {}", e))?;
 
         match Self::recv_registration(reply_rx) {
-            Ok(id) => Ok(id),
-            Err(_) => Ok(shared.market.instrument_count().saturating_sub(1)),
+            Ok(id) => {
+                self.con_id_to_instrument.lock().unwrap().insert(con_id, id);
+                Ok(id)
+            }
+            Err(_) => {
+                let id = shared.market.instrument_count().saturating_sub(1);
+                self.con_id_to_instrument.lock().unwrap().insert(con_id, id);
+                Ok(id)
+            }
         }
     }
 

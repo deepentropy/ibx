@@ -303,8 +303,8 @@ fn market_data_subscribe_ticks_unsubscribe() {
     let (client, _rx, shared) = test_client();
     shared.market.set_instrument_count(1);
 
-    // Subscribe
-    client.req_mkt_data(1, &spy(), "", false, false);
+    // Manually map since we bypass the real engine
+    client.map_req_instrument(1, 0);
 
     // Simulate quote arriving
     let mut q = Quote::default();
