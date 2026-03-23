@@ -171,6 +171,12 @@ impl EClient {
         self.core.instrument_to_req.lock().unwrap().insert(instrument, req_id);
     }
 
+    /// Pre-seed a con_id → InstrumentId mapping (for testing without a live engine).
+    #[doc(hidden)]
+    pub fn seed_instrument(&self, con_id: i64, instrument: InstrumentId) {
+        self.core.con_id_to_instrument.lock().unwrap().insert(con_id, instrument);
+    }
+
     // ── Connection ──
 
     pub fn is_connected(&self) -> bool {
@@ -237,6 +243,9 @@ impl EClient {
 
     /// Place an order. Matches `placeOrder` in C++.
     pub fn place_order(&self, order_id: i64, contract: &Contract, order: &Order) -> Result<(), String> {
+        // Validate order params before registering instrument (fail fast).
+        ClientCore::validate_order(order)?;
+
         let oid = if order_id > 0 {
             order_id as u64
         } else {

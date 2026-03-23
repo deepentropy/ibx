@@ -291,9 +291,9 @@ impl ClientCore {
         &self,
         control_tx: &Sender<ControlCommand>,
         con_id: i64,
-        symbol: &str,
-        exchange: &str,
-        sec_type: &str,
+        _symbol: &str,
+        _exchange: &str,
+        _sec_type: &str,
     ) -> Result<InstrumentId, String> {
         // Check if already mapped by con_id
         {
@@ -303,17 +303,10 @@ impl ClientCore {
             }
         }
 
-        // Register new
+        // Register new — only allocates an InstrumentId slot, does not subscribe to market data.
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
-        control_tx.send(ControlCommand::RegisterInstrument { con_id, reply_tx: None })
+        control_tx.send(ControlCommand::RegisterInstrument { con_id, reply_tx: Some(reply_tx) })
             .map_err(|e| format!("Engine stopped: {}", e))?;
-        control_tx.send(ControlCommand::Subscribe {
-            con_id,
-            symbol: symbol.to_string(),
-            exchange: exchange.to_string(),
-            sec_type: sec_type.to_string(),
-            reply_tx: Some(reply_tx),
-        }).map_err(|e| format!("Engine stopped: {}", e))?;
 
         let id = Self::recv_registration(reply_rx)?;
         self.con_id_to_instrument.lock().unwrap().insert(con_id, id);
@@ -665,6 +658,31 @@ impl ClientCore {
     }
 
     // ── Order routing ──
+
+    /// Pre-validate order fields that don't depend on instrument ID.
+    /// Call this before `find_or_register_instrument` to fail fast.
+    pub fn validate_order(order: &ApiOrder) -> Result<(), String> {
+        order.side()?;
+        let order_type = order.order_type.to_uppercase();
+        if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
+            return Ok(());
+        }
+        if !order.algo_strategy.is_empty() {
+            crate::api::client::parse_algo_params(&order.algo_strategy, &order.algo_params)?;
+            return Ok(());
+        }
+        if order.what_if {
+            return Ok(());
+        }
+        match order_type.as_str() {
+            "MKT" | "LMT" | "STP" | "STP LMT" | "TRAIL" | "TRAIL LIMIT"
+            | "MOC" | "LOC" | "MIT" | "LIT" | "MTL" | "MKT PRT" | "STP PRT"
+            | "REL" | "PEG MKT" | "PEG MID" | "PEG MIDPT" | "MIDPX" | "MIDPRICE"
+            | "SNAP MKT" | "SNAP MID" | "SNAP MIDPT" | "SNAP PRI" | "SNAP PRIM"
+            | "BOX TOP" => Ok(()),
+            _ => Err(format!("Unsupported order type: '{}'", order.order_type)),
+        }
+    }
 
     /// Build an `OrderRequest` from an API `Order`, handling all order types.
     /// This is the shared order-type match block used by both Rust and Python.

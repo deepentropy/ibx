@@ -19,6 +19,9 @@ fn test_client() -> (EClient, crossbeam_channel::Receiver<ControlCommand>, Arc<S
     let (tx, rx) = crossbeam_channel::unbounded();
     let handle = thread::spawn(|| {});
     let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+    // Pre-seed instrument mappings so tests don't need a running hot loop.
+    client.seed_instrument(756733, 0);
+    client.seed_instrument(0, 1);
     (client, rx, shared)
 }
 
