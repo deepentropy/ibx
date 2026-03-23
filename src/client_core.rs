@@ -6,12 +6,14 @@
 //! respective callback formats (Rust `Wrapper` trait calls or PyO3 `call_method`).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
 
 use crossbeam_channel::Sender;
 
 use crate::api::types::{
+    Contract as ApiContract, CommissionReport as ApiCommissionReport,
+    Execution as ApiExecution, ExecutionFilter,
     Order as ApiOrder,
     PRICE_SCALE_F,
 };
@@ -204,6 +206,29 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
     }
 }
 
+// ── Execution storage ──
+
+/// A stored execution + commission pair for `req_executions` replay.
+/// Shared between Rust and Python adapters via `ClientCore`.
+pub struct StoredExecution {
+    pub req_id: i64,
+    pub contract: ApiContract,
+    pub execution: ApiExecution,
+    pub commission: ApiCommissionReport,
+}
+
+// ── Order tracking ──
+
+/// A locally tracked order for `req_open_orders` / dispatch status updates.
+pub struct TrackedOrder {
+    pub contract: ApiContract,
+    pub order: ApiOrder,
+    pub status: String,
+    pub filled: f64,
+    pub remaining: f64,
+    pub instrument: InstrumentId,
+}
+
 // ── ClientCore ──
 
 /// Shared subscription tracking and dispatch preparation logic.
@@ -235,6 +260,23 @@ pub struct ClientCore {
     // Account updates subscription
     pub account_updates_subscribed: AtomicBool,
     pub last_account: Mutex<Option<AccountState>>,
+
+    // Execution replay store
+    pub executions: Mutex<Vec<StoredExecution>>,
+
+    // Open order tracking
+    pub open_orders: Mutex<HashMap<u64, TrackedOrder>>,
+
+    // Market data type callback tracking
+    pub market_data_type: AtomicI32,
+    pub mdt_sent: Mutex<HashSet<i64>>,
+
+    // News subscription state
+    pub news_providers: Mutex<String>,
+    pub news_instruments: Mutex<HashSet<InstrumentId>>,
+
+    // Contract cache for enrichment
+    pub contract_cache: Mutex<HashMap<i64, ApiContract>>,
 }
 
 impl ClientCore {
@@ -252,6 +294,13 @@ impl ClientCore {
             bulletin_subscribed: AtomicBool::new(false),
             account_updates_subscribed: AtomicBool::new(false),
             last_account: Mutex::new(None),
+            executions: Mutex::new(Vec::new()),
+            open_orders: Mutex::new(HashMap::new()),
+            market_data_type: AtomicI32::new(1),
+            mdt_sent: Mutex::new(HashSet::new()),
+            news_providers: Mutex::new("BRFG*BRFUPDN".into()),
+            news_instruments: Mutex::new(HashSet::new()),
+            contract_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -269,6 +318,13 @@ impl ClientCore {
         self.bulletin_subscribed.store(false, Ordering::Relaxed);
         self.account_updates_subscribed.store(false, Ordering::Relaxed);
         *self.last_account.lock().unwrap() = None;
+        self.executions.lock().unwrap().clear();
+        self.open_orders.lock().unwrap().clear();
+        self.market_data_type.store(1, Ordering::Relaxed);
+        self.mdt_sent.lock().unwrap().clear();
+        *self.news_providers.lock().unwrap() = "BRFG*BRFUPDN".into();
+        self.news_instruments.lock().unwrap().clear();
+        self.contract_cache.lock().unwrap().clear();
     }
 
     // ── Registration helpers ──
@@ -316,6 +372,7 @@ impl ClientCore {
     // ── Subscription management ──
 
     /// Register a market data subscription mapping.
+    /// If `generic_tick_list` contains "292", also subscribes to per-contract news.
     pub fn register_mkt_data(
         &self,
         _shared: &SharedState,
@@ -326,7 +383,21 @@ impl ClientCore {
         exchange: &str,
         sec_type: &str,
         snapshot: bool,
+        generic_tick_list: &str,
     ) -> Result<InstrumentId, String> {
+        // News subscription if generic_tick_list contains 292
+        let wants_news = generic_tick_list.split(',')
+            .any(|t| t.trim() == "292" || t.trim() == "mdoff,292" || t.trim().ends_with("292"));
+        if wants_news {
+            let providers = self.news_providers.lock().unwrap().clone();
+            let _ = control_tx.send(ControlCommand::SubscribeNews {
+                con_id,
+                symbol: symbol.to_string(),
+                providers,
+                reply_tx: None,
+            });
+        }
+
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         control_tx.send(ControlCommand::RegisterInstrument { con_id, reply_tx: None })
             .map_err(|e| format!("Engine stopped: {}", e))?;
@@ -344,18 +415,43 @@ impl ClientCore {
         if snapshot {
             self.snapshot_reqs.lock().unwrap().insert(req_id);
         }
+        if wants_news {
+            self.news_instruments.lock().unwrap().insert(instrument_id);
+        }
         Ok(instrument_id)
     }
 
-    /// Unregister a market data subscription. Returns the instrument id if found.
-    pub fn unregister_mkt_data(&self, req_id: i64) -> Option<InstrumentId> {
+    /// Unregister a market data subscription.
+    /// Returns `(instrument_id, needs_news_unsub)`.
+    pub fn unregister_mkt_data(&self, req_id: i64) -> (Option<InstrumentId>, bool) {
         if let Some(instrument) = self.req_to_instrument.lock().unwrap().remove(&req_id) {
             self.instrument_to_req.lock().unwrap().remove(&instrument);
             self.last_quotes.lock().unwrap().remove(&instrument);
-            Some(instrument)
+            self.mdt_sent.lock().unwrap().remove(&req_id);
+            let needs_news = self.news_instruments.lock().unwrap().remove(&instrument);
+            (Some(instrument), needs_news)
         } else {
-            None
+            (None, false)
         }
+    }
+
+    pub fn set_news_providers(&self, providers: &str) {
+        *self.news_providers.lock().unwrap() = providers.to_string();
+    }
+
+    // ── Contract cache ──
+
+    /// Cache a contract for later enrichment.
+    pub fn cache_contract(&self, con_id: i64, contract: ApiContract) {
+        self.contract_cache.lock().unwrap().insert(con_id, contract);
+    }
+
+    /// Look up a contract: local cache first, then shared reference.
+    pub fn get_contract(&self, con_id: i64, shared: &SharedState) -> Option<ApiContract> {
+        if let Some(c) = self.contract_cache.lock().unwrap().get(&con_id) {
+            return Some(c.clone());
+        }
+        shared.reference.get_contract(con_id)
     }
 
     /// Register a TBT subscription mapping.
@@ -435,6 +531,22 @@ impl ClientCore {
         }
     }
 
+    // ── Market data type tracking ──
+
+    pub fn set_market_data_type(&self, mdt: i32) {
+        self.market_data_type.store(mdt, Ordering::Relaxed);
+    }
+
+    /// Check if the `market_data_type` callback should fire for this req_id.
+    /// Returns `Some(mdt)` on the first call per req_id that has data, `None` thereafter.
+    pub fn check_mdt_needed(&self, req_id: i64, has_data: bool) -> Option<i32> {
+        if has_data && self.mdt_sent.lock().unwrap().insert(req_id) {
+            Some(self.market_data_type.load(Ordering::Relaxed))
+        } else {
+            None
+        }
+    }
+
     // ── Bulletin subscription management ──
 
     pub fn subscribe_bulletins(&self) {
@@ -447,6 +559,131 @@ impl ClientCore {
 
     pub fn bulletins_subscribed(&self) -> bool {
         self.bulletin_subscribed.load(Ordering::Acquire)
+    }
+
+    // ── Execution replay store ──
+
+    /// Store an execution for later replay via `req_executions`.
+    pub fn push_execution(&self, req_id: i64, contract: ApiContract, execution: ApiExecution, commission: ApiCommissionReport) {
+        self.executions.lock().unwrap().push(StoredExecution {
+            req_id, contract, execution, commission,
+        });
+    }
+
+    /// Return executions matching the given filter.
+    pub fn filter_executions(&self, filter: &ExecutionFilter) -> Vec<usize> {
+        let execs = self.executions.lock().unwrap();
+        execs.iter().enumerate().filter_map(|(i, se)| {
+            if !filter.symbol.is_empty() && !se.contract.symbol.eq_ignore_ascii_case(&filter.symbol) {
+                return None;
+            }
+            if !filter.sec_type.is_empty() && !se.contract.sec_type.eq_ignore_ascii_case(&filter.sec_type) {
+                return None;
+            }
+            if !filter.exchange.is_empty() && !se.execution.exchange.eq_ignore_ascii_case(&filter.exchange) {
+                return None;
+            }
+            if !filter.side.is_empty() && !se.execution.side.eq_ignore_ascii_case(&filter.side) {
+                return None;
+            }
+            if !filter.acct_code.is_empty() && !se.execution.acct_number.eq_ignore_ascii_case(&filter.acct_code) {
+                return None;
+            }
+            if filter.client_id != 0 && se.execution.client_id != filter.client_id {
+                return None;
+            }
+            Some(i)
+        }).collect()
+    }
+
+    // ── Open order tracking ──
+
+    /// Track a newly placed order.
+    pub fn track_order(&self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId) {
+        let remaining = order.total_quantity;
+        self.open_orders.lock().unwrap().insert(order_id, TrackedOrder {
+            contract, order, status: "PendingSubmit".into(), filled: 0.0, remaining, instrument,
+        });
+    }
+
+    /// Update a tracked order after a fill. Removes the order if fully filled.
+    pub fn update_order_fill(&self, order_id: u64, status: &str, filled: f64, remaining: f64) {
+        let mut orders = self.open_orders.lock().unwrap();
+        if remaining == 0.0 {
+            orders.remove(&order_id);
+        } else if let Some(o) = orders.get_mut(&order_id) {
+            o.status = status.into();
+            o.filled = filled;
+            o.remaining = remaining;
+        }
+    }
+
+    /// Update a tracked order status from an order update event.
+    pub fn update_order_status(&self, order_id: u64, status: &str, filled: f64, remaining: f64) {
+        let mut orders = self.open_orders.lock().unwrap();
+        if let Some(o) = orders.get_mut(&order_id) {
+            o.status = status.into();
+            o.filled = filled;
+            o.remaining = remaining;
+        }
+    }
+
+    /// Collect open orders: merge local tracking with shared state.
+    /// Returns (order_id, contract, order, status, filled, remaining) for non-terminal orders.
+    pub fn collect_open_orders(&self, shared: &SharedState) -> Vec<(u64, TrackedOrder)> {
+        let mut result: Vec<(u64, TrackedOrder)> = Vec::new();
+
+        // Local tracked orders (non-terminal)
+        {
+            let orders = self.open_orders.lock().unwrap();
+            for (&oid, o) in orders.iter() {
+                if !matches!(o.status.as_str(), "Filled" | "Cancelled" | "Inactive") {
+                    result.push((oid, TrackedOrder {
+                        contract: o.contract.clone(),
+                        order: o.order.clone(),
+                        status: o.status.clone(),
+                        filled: o.filled,
+                        remaining: o.remaining,
+                        instrument: o.instrument,
+                    }));
+                }
+            }
+        }
+
+        // Enrich from shared order cache
+        for (oid, info) in shared.orders.drain_open_orders() {
+            if matches!(info.order_state.status.as_str(), "Filled" | "Cancelled" | "Inactive") {
+                continue;
+            }
+            // Update local tracking with enriched data
+            let mut orders = self.open_orders.lock().unwrap();
+            if let Some(o) = orders.get_mut(&oid) {
+                if o.order.account.is_empty() {
+                    o.order.account = info.order.account.clone();
+                }
+                if o.order.perm_id == 0 {
+                    o.order.perm_id = info.order.perm_id;
+                }
+            }
+            // Add to result if not already present from local
+            if !result.iter().any(|(id, _)| *id == oid) {
+                let contract = if info.contract.con_id != 0 {
+                    shared.reference.get_contract(info.contract.con_id).unwrap_or(info.contract)
+                } else {
+                    info.contract
+                };
+                result.push((oid, TrackedOrder {
+                    contract,
+                    order: info.order,
+                    status: info.order_state.status.clone(),
+                    filled: 0.0,
+                    remaining: 0.0,
+                    instrument: 0,
+                }));
+            }
+        }
+
+        result
     }
 
     // ── Dispatch preparation methods ──

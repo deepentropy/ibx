@@ -9,7 +9,11 @@ use crate::bridge::SharedState;
 use crate::client_core::order_status_str;
 use crate::types::*;
 
-use super::{EClient, StoredExecution};
+use crate::api::types::{
+    Contract as ApiContract, Execution as ApiExecution,
+    CommissionReport as ApiCommissionReport,
+};
+use super::EClient;
 use super::super::contract::{Contract, ContractDescription, ContractDetails, BarData, CommissionReport};
 use super::super::tick_types::*;
 use super::super::super::types::PRICE_SCALE_F;
@@ -48,35 +52,48 @@ impl EClient {
                 .map(|i| i.last_exec.cum_qty).unwrap_or(fill.qty as f64);
             let avg_price = rich_info.as_ref()
                 .map(|i| i.last_exec.avg_price).unwrap_or(price);
-            let exec_contract = self.open_orders.lock().unwrap()
-                .get(&fill.order_id).map(|so| so.contract.clone())
+            // Build api-level contract for shared storage
+            let api_contract = self.core.open_orders.lock().unwrap()
+                .get(&fill.order_id).map(|o| o.contract.clone())
                 .or_else(|| {
-                    rich_info.map(|info| {
-                        Contract {
-                            con_id: info.contract.con_id,
-                            symbol: info.contract.symbol,
-                            sec_type: info.contract.sec_type,
-                            exchange: info.contract.exchange,
-                            currency: info.contract.currency,
-                            ..Default::default()
-                        }
-                    })
+                    rich_info.map(|info| info.contract)
                 })
                 .unwrap_or_default();
-            self.executions.lock().unwrap().push(StoredExecution {
-                req_id,
-                contract: exec_contract.clone(),
+
+            let api_exec = ApiExecution {
                 exec_id: exec_id.clone(),
-                side: side_str.to_string(),
-                price,
-                shares: fill.qty as f64,
                 time: now_str.clone(),
-                order_id: fill.order_id,
+                acct_number: self.account(),
+                exchange: exec_exchange.clone(),
+                side: side_str.to_string(),
+                shares: fill.qty as f64,
+                price,
+                order_id: fill.order_id as i64,
                 cum_qty,
                 avg_price,
-                exchange: exec_exchange.clone(),
+                ..Default::default()
+            };
+            let api_commission = ApiCommissionReport {
+                exec_id: exec_id.clone(),
                 commission,
-            });
+                currency: "USD".into(),
+                realized_pnl: f64::MAX,
+                yield_amount: f64::MAX,
+                yield_redemption_date: String::new(),
+            };
+
+            // Build Python contract for callback
+            let exec_contract = Contract {
+                con_id: api_contract.con_id,
+                symbol: api_contract.symbol.clone(),
+                sec_type: api_contract.sec_type.clone(),
+                exchange: api_contract.exchange.clone(),
+                currency: api_contract.currency.clone(),
+                ..Default::default()
+            };
+
+            // Store for req_executions replay via shared core
+            self.core.push_execution(req_id, api_contract, api_exec, api_commission);
 
             let acct_name = self.account();
             let c_py = Py::new(py, exec_contract)?.into_any();
@@ -103,16 +120,7 @@ impl EClient {
             )?;
 
             // Update open order tracking
-            {
-                let mut orders = self.open_orders.lock().unwrap();
-                if fill.remaining == 0 {
-                    orders.remove(&fill.order_id);
-                } else if let Some(so) = orders.get_mut(&fill.order_id) {
-                    so.status = status.to_string();
-                    so.filled = fill.qty as f64;
-                    so.remaining = fill.remaining as f64;
-                }
-            }
+            self.core.update_order_fill(fill.order_id, status, fill.qty as f64, fill.remaining as f64);
 
             // Dispatch commission_report
             let report = CommissionReport {
@@ -139,25 +147,7 @@ impl EClient {
             )?;
 
             // Track open orders
-            {
-                let mut orders = self.open_orders.lock().unwrap();
-                match update.status {
-                    OrderStatus::Filled | OrderStatus::Cancelled | OrderStatus::Rejected => {
-                        if let Some(so) = orders.get_mut(&update.order_id) {
-                            so.status = status.to_string();
-                            so.filled = update.filled_qty as f64;
-                            so.remaining = update.remaining_qty as f64;
-                        }
-                    }
-                    _ => {
-                        if let Some(so) = orders.get_mut(&update.order_id) {
-                            so.status = status.to_string();
-                            so.filled = update.filled_qty as f64;
-                            so.remaining = update.remaining_qty as f64;
-                        }
-                    }
-                }
-            }
+            self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
         }
 
         // Drain cancel rejects -> error
@@ -173,94 +163,35 @@ impl EClient {
         }
 
         // Poll quotes for changes -> tickPrice/tickSize
-        let instruments: Vec<(u32, i64)> = {
-            let map = self.core.instrument_to_req.lock().unwrap();
-            map.iter().map(|(&iid, &req_id)| (iid, req_id)).collect()
-        };
+        // Poll quotes via shared ClientCore (same logic as Rust dispatch)
+        let instruments = self.core.snapshot_instruments();
         let mut snapshot_done: Vec<i64> = Vec::new();
         for (iid, req_id) in instruments {
-            let q = shared.market.quote(iid);
-            let fields = [
-                q.bid, q.ask, q.last, q.bid_size, q.ask_size, q.last_size,
-                q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
-            ];
-
-            let last = {
-                let map = self.core.last_quotes.lock().unwrap();
-                map.get(&iid).copied().unwrap_or([0i64; 12])
-            };
-
-            let attrib = TickAttrib::default();
-            let attrib_obj = Py::new(py, attrib)?.into_any();
+            let result = self.core.poll_instrument_ticks(shared, iid, req_id);
 
             // Fire market_data_type once per subscription on first tick delivery
-            let any_data = fields.iter().any(|&f| f != 0);
-            if any_data && self.mdt_sent.lock().unwrap().insert(req_id) {
-                let mdt = self.market_data_type.load(Ordering::Relaxed);
+            if let Some(mdt) = self.core.check_mdt_needed(req_id, result.delivered) {
                 self.wrapper.call_method1(py, "market_data_type", (req_id, mdt))?;
             }
 
-            let mut delivered = false;
-            if fields[0] != last[0] {
-                self.wrapper.call_method1(py, "tick_price", (req_id, TICK_BID, fields[0] as f64 / PRICE_SCALE_F, &attrib_obj))?;
-                delivered = true;
+            let attrib = TickAttrib::default();
+            let attrib_obj = Py::new(py, attrib)?.into_any();
+            for tick in &result.ticks {
+                if tick.is_price {
+                    self.wrapper.call_method1(py, "tick_price", (tick.req_id, tick.tick_type, tick.value, &attrib_obj))?;
+                } else {
+                    self.wrapper.call_method1(py, "tick_size", (tick.req_id, tick.tick_type, tick.value))?;
+                }
             }
-            if fields[1] != last[1] {
-                self.wrapper.call_method1(py, "tick_price", (req_id, TICK_ASK, fields[1] as f64 / PRICE_SCALE_F, &attrib_obj))?;
-                delivered = true;
+            if let Some(ts) = &result.timestamp {
+                let ts_secs = ts.timestamp_ns / 1_000_000_000;
+                self.wrapper.call_method1(py, "tick_string", (ts.req_id, TICK_LAST_TIMESTAMP, ts_secs.to_string().as_str()))?;
             }
-            if fields[2] != last[2] {
-                self.wrapper.call_method1(py, "tick_price", (req_id, TICK_LAST, fields[2] as f64 / PRICE_SCALE_F, &attrib_obj))?;
-                delivered = true;
-            }
-            if fields[3] != last[3] {
-                self.wrapper.call_method1(py, "tick_size", (req_id, TICK_BID_SIZE, fields[3] as f64 / QTY_SCALE as f64))?;
-                delivered = true;
-            }
-            if fields[4] != last[4] {
-                self.wrapper.call_method1(py, "tick_size", (req_id, TICK_ASK_SIZE, fields[4] as f64 / QTY_SCALE as f64))?;
-                delivered = true;
-            }
-            if fields[5] != last[5] {
-                self.wrapper.call_method1(py, "tick_size", (req_id, TICK_LAST_SIZE, fields[5] as f64 / QTY_SCALE as f64))?;
-                delivered = true;
-            }
-            if fields[6] != last[6] {
-                self.wrapper.call_method1(py, "tick_price", (req_id, TICK_HIGH, fields[6] as f64 / PRICE_SCALE_F, &attrib_obj))?;
-                delivered = true;
-            }
-            if fields[7] != last[7] {
-                self.wrapper.call_method1(py, "tick_price", (req_id, TICK_LOW, fields[7] as f64 / PRICE_SCALE_F, &attrib_obj))?;
-                delivered = true;
-            }
-            if fields[8] != last[8] {
-                self.wrapper.call_method1(py, "tick_size", (req_id, TICK_VOLUME, fields[8] as f64 / QTY_SCALE as f64))?;
-                delivered = true;
-            }
-            if fields[9] != last[9] {
-                self.wrapper.call_method1(py, "tick_price", (req_id, TICK_CLOSE, fields[9] as f64 / PRICE_SCALE_F, &attrib_obj))?;
-                delivered = true;
-            }
-            if fields[10] != last[10] {
-                self.wrapper.call_method1(py, "tick_price", (req_id, TICK_OPEN, fields[10] as f64 / PRICE_SCALE_F, &attrib_obj))?;
-                delivered = true;
-            }
-            // tick_string: LAST_TIMESTAMP as epoch seconds
-            if fields[11] != last[11] && fields[11] != 0 {
-                let ts_secs = fields[11] / 1_000_000_000;
-                let ts_str = ts_secs.to_string();
-                self.wrapper.call_method1(py, "tick_string", (req_id, TICK_LAST_TIMESTAMP, ts_str.as_str()))?;
-            }
-
-            self.core.last_quotes.lock().unwrap().insert(iid, fields);
-
-            // Snapshot: after first delivery, signal end and queue for auto-cancel
-            if delivered && self.core.snapshot_reqs.lock().unwrap().remove(&req_id) {
+            if self.core.check_snapshot_done(req_id, result.delivered) {
                 self.wrapper.call_method1(py, "tick_snapshot_end", (req_id,))?;
                 snapshot_done.push(req_id);
             }
         }
-        // Auto-cancel completed snapshots
         for req_id in snapshot_done {
             self.cancel_mkt_data(req_id)?;
         }

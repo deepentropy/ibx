@@ -8,7 +8,7 @@ use crate::api::wrapper::Wrapper;
 use crate::client_core::order_status_str;
 use crate::types::*;
 
-use super::{Contract, EClient, StoredFill};
+use super::{Contract, EClient};
 
 impl EClient {
     // ── Message Processing ──
@@ -46,7 +46,7 @@ impl EClient {
                 ex.price = price_f;
                 ex.order_id = fill.order_id as i64;
                 let contract = if info.contract.con_id != 0 {
-                    self.shared.reference.get_contract(info.contract.con_id).unwrap_or(info.contract)
+                    self.core.get_contract(info.contract.con_id, &self.shared).unwrap_or(info.contract)
                 } else {
                     info.contract
                 };
@@ -74,9 +74,10 @@ impl EClient {
             wrapper.commission_report(&report);
 
             // Store for req_executions replay
-            self.executions.lock().unwrap().push(StoredFill {
-                contract: c, execution: exec, commission: report,
-            });
+            self.core.push_execution(req_id, c, exec, report);
+
+            // Update open order tracking
+            self.core.update_order_fill(fill.order_id, status, fill.qty as f64, fill.remaining as f64);
         }
 
         // Order updates → order_status
@@ -86,6 +87,7 @@ impl EClient {
                 update.order_id as i64, status, update.filled_qty as f64,
                 update.remaining_qty as f64, 0.0, 0, 0, 0.0, 0, "", 0.0,
             );
+            self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
         }
 
         // Cancel rejects → error
@@ -118,12 +120,20 @@ impl EClient {
         let mut snapshot_done: Vec<i64> = Vec::new();
         for (iid, req_id) in instruments {
             let result = self.core.poll_instrument_ticks(&self.shared, iid, req_id);
+            // Fire market_data_type once per subscription on first tick delivery
+            if let Some(mdt) = self.core.check_mdt_needed(req_id, result.delivered) {
+                wrapper.market_data_type(req_id, mdt);
+            }
             for tick in &result.ticks {
                 if tick.is_price {
                     wrapper.tick_price(tick.req_id, tick.tick_type, tick.value, &attrib);
                 } else {
                     wrapper.tick_size(tick.req_id, tick.tick_type, tick.value);
                 }
+            }
+            if let Some(ts) = &result.timestamp {
+                let ts_secs = ts.timestamp_ns / 1_000_000_000;
+                wrapper.tick_string(ts.req_id, 45, &ts_secs.to_string());
             }
             if self.core.check_snapshot_done(req_id, result.delivered) {
                 wrapper.tick_snapshot_end(req_id);

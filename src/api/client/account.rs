@@ -14,7 +14,7 @@ impl EClient {
     pub fn req_positions(&self, wrapper: &mut impl Wrapper) {
         let positions = self.shared.portfolio.position_infos();
         for pi in &positions {
-            let c = self.shared.reference.get_contract(pi.con_id)
+            let c = self.core.get_contract(pi.con_id, &self.shared)
                 .unwrap_or_else(|| Contract { con_id: pi.con_id, ..Default::default() });
             let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
             wrapper.position(&self.account_id, &c, pi.position as f64, avg_cost);

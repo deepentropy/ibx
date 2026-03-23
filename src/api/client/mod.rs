@@ -79,13 +79,6 @@ pub struct EClientConfig {
 /// The thread is **joined** on [`disconnect()`] and on [`Drop`].
 /// Dropping an `EClient` without calling `disconnect()` first is safe:
 /// the `Drop` impl sends `Shutdown` and joins the thread.
-/// A stored execution + commission pair for `req_executions` replay.
-pub(crate) struct StoredFill {
-    pub(crate) contract: ApiContract,
-    pub(crate) execution: crate::api::types::Execution,
-    pub(crate) commission: crate::api::types::CommissionReport,
-}
-
 pub struct EClient {
     pub(crate) shared: Arc<SharedState>,
     pub(crate) control_tx: Sender<ControlCommand>,
@@ -94,7 +87,6 @@ pub struct EClient {
     pub(crate) connected: AtomicBool,
     pub(crate) next_order_id: AtomicU64,
     pub(crate) core: ClientCore,
-    pub(crate) executions: Mutex<Vec<StoredFill>>,
 }
 
 impl Drop for EClient {
@@ -144,7 +136,6 @@ impl EClient {
             connected: AtomicBool::new(true),
             next_order_id: AtomicU64::new(start_id),
             core: ClientCore::new(),
-            executions: Mutex::new(Vec::new()),
         })
     }
 
@@ -168,7 +159,6 @@ impl EClient {
             connected: AtomicBool::new(true),
             next_order_id: AtomicU64::new(start_id),
             core: ClientCore::new(),
-            executions: Mutex::new(Vec::new()),
         }
     }
 
@@ -204,5 +194,6 @@ impl EClient {
             let _ = h.join();
         }
         self.connected.store(false, Ordering::Release);
+        self.core.reset();
     }
 }

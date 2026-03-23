@@ -8,8 +8,7 @@ mod dispatch;
 mod stubs;
 mod test_helpers;
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -22,34 +21,6 @@ use crate::client_core::ClientCore;
 use crate::gateway::{Gateway, GatewayConfig};
 use crate::types::*;
 use super::contract::{Contract, Order};
-
-/// Stored order info for open_order / completed_order callbacks.
-#[derive(Clone)]
-pub(crate) struct StoredOrder {
-    pub(crate) contract: Contract,
-    pub(crate) order: Order,
-    pub(crate) status: String,
-    pub(crate) filled: f64,
-    pub(crate) remaining: f64,
-    pub(crate) instrument: u32,
-}
-
-/// Stored execution info for exec_details callbacks.
-#[derive(Clone)]
-pub(crate) struct StoredExecution {
-    pub(crate) req_id: i64,
-    pub(crate) contract: Contract,
-    pub(crate) exec_id: String,
-    pub(crate) side: String,
-    pub(crate) price: f64,
-    pub(crate) shares: f64,
-    pub(crate) time: String,
-    pub(crate) order_id: u64,
-    pub(crate) cum_qty: f64,
-    pub(crate) avg_price: f64,
-    pub(crate) exchange: String,
-    pub(crate) commission: f64,
-}
 
 /// ibapi-compatible EClient class.
 /// Wraps the internal engine and dispatches events to an EWrapper subclass.
@@ -84,18 +55,6 @@ pub struct EClient {
     pub(crate) connected: AtomicBool,
     /// Shared subscription tracking and dispatch preparation.
     pub(crate) core: ClientCore,
-    /// Req_ids that have already received a market_data_type callback.
-    pub(crate) mdt_sent: Mutex<HashSet<i64>>,
-    /// Market data type preference (1=live, 2=frozen, 3=delayed, 4=delayed-frozen).
-    pub(crate) market_data_type: AtomicI32,
-    /// Track open orders: order_id → StoredOrder (contract + order + status).
-    pub(crate) open_orders: Mutex<HashMap<u64, StoredOrder>>,
-    /// Track executions with full details.
-    pub(crate) executions: Mutex<Vec<StoredExecution>>,
-    /// News provider codes for per-contract news ticks (e.g. "BRFG*BRFUPDN").
-    pub(crate) news_providers: Mutex<String>,
-    /// Cache of con_id → Contract for enriching position/execution callbacks.
-    pub(crate) contract_cache: Mutex<HashMap<i64, Contract>>,
 }
 
 impl Drop for EClient {
@@ -123,12 +82,6 @@ impl EClient {
             account_id: Mutex::new(None),
             connected: AtomicBool::new(false),
             core: ClientCore::new(),
-            mdt_sent: Mutex::new(HashSet::new()),
-            market_data_type: AtomicI32::new(1),
-            open_orders: Mutex::new(HashMap::new()),
-            executions: Mutex::new(Vec::new()),
-            news_providers: Mutex::new("BRFG*BRFUPDN".to_string()),
-            contract_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -203,12 +156,6 @@ impl EClient {
         *self.control_tx.lock().unwrap() = None;
         *self.account_id.lock().unwrap() = None;
         self.core.reset();
-        self.mdt_sent.lock().unwrap().clear();
-        self.market_data_type.store(1, Ordering::Relaxed);
-        self.open_orders.lock().unwrap().clear();
-        self.executions.lock().unwrap().clear();
-        *self.news_providers.lock().unwrap() = "BRFG*BRFUPDN".to_string();
-        self.contract_cache.lock().unwrap().clear();
         Ok(())
     }
 

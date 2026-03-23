@@ -12,20 +12,24 @@ impl EClient {
     /// `tick_snapshot_end` and auto-cancels the subscription.
     pub fn req_mkt_data(
         &self, req_id: i64, contract: &Contract,
-        _generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool,
+        generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool,
     ) -> Result<(), String> {
         self.core.register_mkt_data(
             &self.shared, &self.control_tx, req_id,
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
-            snapshot,
+            snapshot, generic_tick_list,
         )?;
         Ok(())
     }
 
     /// Cancel market data. Matches `cancelMktData` in C++.
     pub fn cancel_mkt_data(&self, req_id: i64) -> Result<(), String> {
-        if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
+        let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
+        if let Some(instrument) = instrument {
             self.send(ControlCommand::Unsubscribe { instrument })?;
+            if needs_news_unsub {
+                let _ = self.send(ControlCommand::UnsubscribeNews { instrument });
+            }
         }
         Ok(())
     }
@@ -72,6 +76,16 @@ impl EClient {
 
     pub fn cancel_real_time_bars(&self, req_id: i64) -> Result<(), String> {
         self.send(ControlCommand::CancelRealTimeBar { req_id: req_id as u32 })
+    }
+
+    /// Set market data type preference (1=live, 2=frozen, 3=delayed, 4=delayed-frozen).
+    pub fn req_market_data_type(&self, market_data_type: i32) {
+        self.core.set_market_data_type(market_data_type);
+    }
+
+    /// Set news provider codes for per-contract news ticks.
+    pub fn set_news_providers(&self, providers: &str) {
+        self.core.set_news_providers(providers);
     }
 
     // ── Escape Hatch ──

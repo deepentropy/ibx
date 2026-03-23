@@ -2,9 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::api::types::{
-    Contract as ApiContract, Execution, ExecutionFilter,
-};
+use crate::api::types::ExecutionFilter;
 use crate::api::wrapper::Wrapper;
 use crate::client_core::ClientCore;
 use crate::types::*;
@@ -31,7 +29,10 @@ impl EClient {
         )?;
 
         let cmd = ClientCore::build_order_request(order, oid, instrument)?;
-        self.send(cmd)
+        self.send(cmd)?;
+        self.core.cache_contract(contract.con_id, contract.clone());
+        self.core.track_order(oid, contract.clone(), order.clone(), instrument);
+        Ok(())
     }
 
     /// Cancel an order. Matches `cancelOrder` in C++.
@@ -66,16 +67,12 @@ impl EClient {
 
     /// Request all open orders. Matches `reqAllOpenOrders` / `reqOpenOrders` in C++.
     pub fn req_all_open_orders(&self, wrapper: &mut impl Wrapper) {
-        for (order_id, info) in self.shared.orders.drain_open_orders() {
-            if !matches!(info.order_state.status.as_str(), "Filled" | "Cancelled" | "Inactive") {
-                // Enrich contract with secdef cache at read time (may have arrived after exec report)
-                let contract = if info.contract.con_id != 0 {
-                    self.shared.reference.get_contract(info.contract.con_id).unwrap_or(info.contract)
-                } else {
-                    info.contract
-                };
-                wrapper.open_order(order_id as i64, &contract, &info.order, &info.order_state);
-            }
+        for (order_id, tracked) in self.core.collect_open_orders(&self.shared) {
+            let state = crate::api::types::OrderState {
+                status: tracked.status,
+                ..Default::default()
+            };
+            wrapper.open_order(order_id as i64, &tracked.contract, &tracked.order, &state);
         }
         wrapper.open_order_end();
     }
@@ -97,7 +94,7 @@ impl EClient {
                 state.status = status_str.into();
                 // Enrich contract with secdef cache at read time
                 let contract = if info.contract.con_id != 0 {
-                    self.shared.reference.get_contract(info.contract.con_id).unwrap_or(info.contract)
+                    self.core.get_contract(info.contract.con_id, &self.shared).unwrap_or(info.contract)
                 } else {
                     info.contract
                 };
@@ -121,38 +118,15 @@ impl EClient {
     /// Replays stored executions (optionally filtered), firing `exec_details` +
     /// `commission_report` for each, then `exec_details_end`.
     pub fn req_executions(&self, req_id: i64, filter: &ExecutionFilter, wrapper: &mut impl Wrapper) {
-        let execs = self.executions.lock().unwrap();
-        for sf in execs.iter() {
-            if matches_filter(&sf.contract, &sf.execution, filter) {
-                wrapper.exec_details(req_id, &sf.contract, &sf.execution);
-                wrapper.commission_report(&sf.commission);
-            }
+        let indices = self.core.filter_executions(filter);
+        let execs = self.core.executions.lock().unwrap();
+        for i in indices {
+            let se = &execs[i];
+            wrapper.exec_details(req_id, &se.contract, &se.execution);
+            wrapper.commission_report(&se.commission);
         }
         wrapper.exec_details_end(req_id);
     }
-}
-
-/// Check if an execution matches the given filter. Empty filter fields match everything.
-fn matches_filter(contract: &ApiContract, exec: &Execution, filter: &ExecutionFilter) -> bool {
-    if !filter.symbol.is_empty() && !contract.symbol.eq_ignore_ascii_case(&filter.symbol) {
-        return false;
-    }
-    if !filter.sec_type.is_empty() && !contract.sec_type.eq_ignore_ascii_case(&filter.sec_type) {
-        return false;
-    }
-    if !filter.exchange.is_empty() && !exec.exchange.eq_ignore_ascii_case(&filter.exchange) {
-        return false;
-    }
-    if !filter.side.is_empty() && !exec.side.eq_ignore_ascii_case(&filter.side) {
-        return false;
-    }
-    if !filter.acct_code.is_empty() && !exec.acct_number.eq_ignore_ascii_case(&filter.acct_code) {
-        return false;
-    }
-    if filter.client_id != 0 && exec.client_id != filter.client_id {
-        return false;
-    }
-    true
 }
 
 /// Parse algo strategy and TagValue params into internal AlgoParams.

@@ -56,22 +56,19 @@ impl EClient {
     fn req_positions(&self, py: Python<'_>) -> PyResult<()> {
         let shared = self.shared_state()?;
         let positions = shared.portfolio.position_infos();
-        let cache = self.contract_cache.lock().unwrap();
         for pi in &positions {
-            let c = cache.get(&pi.con_id).cloned().unwrap_or_else(|| {
-                shared.reference.get_contract(pi.con_id).map(|ac| {
-                    let mut c = Contract::default();
-                    c.con_id = ac.con_id;
-                    c.symbol = ac.symbol;
-                    c.sec_type = ac.sec_type;
-                    c.exchange = ac.exchange;
-                    c.currency = ac.currency;
-                    c
-                }).unwrap_or_else(|| {
-                    let mut c = Contract::default();
-                    c.con_id = pi.con_id;
-                    c
-                })
+            let c = self.core.get_contract(pi.con_id, &shared).map(|ac| {
+                let mut c = Contract::default();
+                c.con_id = ac.con_id;
+                c.symbol = ac.symbol;
+                c.sec_type = ac.sec_type;
+                c.exchange = ac.exchange;
+                c.currency = ac.currency;
+                c
+            }).unwrap_or_else(|| {
+                let mut c = Contract::default();
+                c.con_id = pi.con_id;
+                c
             });
             let c_py = Py::new(py, c)?.into_any();
             let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;

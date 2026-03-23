@@ -12,7 +12,7 @@ impl EClient {
     /// Set news provider codes for per-contract news ticks (e.g. "BRFG*BRFUPDN").
     #[pyo3(signature = (providers))]
     fn set_news_providers(&self, providers: &str) {
-        *self.news_providers.lock().unwrap() = providers.to_string();
+        self.core.set_news_providers(providers);
     }
 
     /// Request market data for a contract.
@@ -29,25 +29,19 @@ impl EClient {
         let tx = self.tx()?;
         let shared = self.shared_state()?;
 
-        // If generic_tick_list contains 292 (news), also subscribe via CCP
-        let wants_news = generic_tick_list.split(',')
-            .any(|t| t.trim() == "292" || t.trim() == "mdoff,292" || t.trim().ends_with("292"));
-        if wants_news {
-            let providers = self.news_providers.lock().unwrap().clone();
-            tx.send(ControlCommand::SubscribeNews {
-                con_id: contract.con_id,
-                symbol: contract.symbol.clone(),
-                providers,
-                reply_tx: None,
-            }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-        }
-
         self.core.register_mkt_data(
             &shared, &tx, req_id,
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
-            snapshot,
+            snapshot, generic_tick_list,
         ).map_err(|e| PyRuntimeError::new_err(e))?;
-        self.contract_cache.lock().unwrap().insert(contract.con_id, contract.clone());
+        self.core.cache_contract(contract.con_id, crate::api::types::Contract {
+            con_id: contract.con_id,
+            symbol: contract.symbol.clone(),
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
+            currency: contract.currency.clone(),
+            ..Default::default()
+        });
 
         let _ = (regulatory_snapshot, mkt_data_options);
 
@@ -56,12 +50,14 @@ impl EClient {
 
     /// Cancel market data.
     fn cancel_mkt_data(&self, req_id: i64) -> PyResult<()> {
-        if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
-            self.mdt_sent.lock().unwrap().remove(&req_id);
+        let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
+        if let Some(instrument) = instrument {
             let tx = self.tx()?;
             tx.send(ControlCommand::Unsubscribe { instrument })
                 .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
-            let _ = tx.send(ControlCommand::UnsubscribeNews { instrument });
+            if needs_news_unsub {
+                let _ = tx.send(ControlCommand::UnsubscribeNews { instrument });
+            }
         }
         Ok(())
     }
@@ -109,7 +105,7 @@ impl EClient {
 
     /// Set market data type (1=live, 2=frozen, 3=delayed, 4=delayed-frozen).
     fn req_market_data_type(&self, market_data_type: i32) -> PyResult<()> {
-        self.market_data_type.store(market_data_type, std::sync::atomic::Ordering::Relaxed);
+        self.core.set_market_data_type(market_data_type);
         Ok(())
     }
 
