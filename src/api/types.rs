@@ -502,6 +502,20 @@ pub struct Execution {
     pub pending_price_revision: bool,
 }
 
+// ── ExecutionFilter ──
+
+/// ibapi-compatible ExecutionFilter (used in reqExecutions).
+#[derive(Clone, Debug, Default)]
+pub struct ExecutionFilter {
+    pub client_id: i64,
+    pub acct_code: String,
+    pub time: String,
+    pub symbol: String,
+    pub sec_type: String,
+    pub exchange: String,
+    pub side: String,
+}
+
 // ── CommissionReport ──
 
 /// ibapi-compatible CommissionReport.

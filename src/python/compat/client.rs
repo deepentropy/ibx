@@ -42,6 +42,8 @@ struct StoredExecution {
     order_id: u64,
     cum_qty: f64,
     avg_price: f64,
+    exchange: String,
+    commission: f64,
 }
 
 /// ibapi-compatible EClient class.
@@ -659,21 +661,40 @@ impl EClient {
         Ok(())
     }
 
-    /// Request execution reports.
-    #[pyo3(signature = (req_id, _exec_filter=None))]
-    fn req_executions(&self, py: Python<'_>, req_id: i64, _exec_filter: Option<PyObject>) -> PyResult<()> {
+    /// Request execution reports. Replays stored executions filtered by `exec_filter`.
+    #[pyo3(signature = (req_id, exec_filter=None))]
+    fn req_executions(&self, py: Python<'_>, req_id: i64, exec_filter: Option<PyObject>) -> PyResult<()> {
+        // Extract filter fields from Python object (duck-typed: works with dict or ExecutionFilter)
+        let (f_symbol, f_sec_type, f_exchange, f_side, f_acct_code) = if let Some(ref fobj) = exec_filter {
+            let get = |attr: &str| -> String {
+                fobj.getattr(py, pyo3::intern!(py, attr))
+                    .and_then(|v| v.extract::<String>(py))
+                    .unwrap_or_default()
+            };
+            (get("symbol"), get("secType"), get("exchange"), get("side"), get("acctCode"))
+        } else {
+            Default::default()
+        };
+
         let execs: Vec<StoredExecution> = {
             self.executions.lock().unwrap().clone()
         };
         let acct_name = self.account_id.get().map(|s| s.as_str()).unwrap_or("");
         for se in &execs {
+            // Apply filter (empty fields match everything)
+            if !f_symbol.is_empty() && !se.contract.symbol.eq_ignore_ascii_case(&f_symbol) { continue; }
+            if !f_sec_type.is_empty() && !se.contract.sec_type.eq_ignore_ascii_case(&f_sec_type) { continue; }
+            if !f_exchange.is_empty() && !se.exchange.eq_ignore_ascii_case(&f_exchange) { continue; }
+            if !f_side.is_empty() && !se.side.eq_ignore_ascii_case(&f_side) { continue; }
+            if !f_acct_code.is_empty() && !acct_name.eq_ignore_ascii_case(&f_acct_code) { continue; }
+
             let c_py = Py::new(py, se.contract.clone())?.into_any();
 
             let exec_obj = pyo3::types::PyDict::new(py);
             exec_obj.set_item("execId", se.exec_id.as_str())?;
             exec_obj.set_item("time", se.time.as_str())?;
             exec_obj.set_item("acctNumber", acct_name)?;
-            exec_obj.set_item("exchange", se.contract.exchange.as_str())?;
+            exec_obj.set_item("exchange", se.exchange.as_str())?;
             exec_obj.set_item("side", se.side.as_str())?;
             exec_obj.set_item("shares", se.shares)?;
             exec_obj.set_item("price", se.price)?;
@@ -695,6 +716,18 @@ impl EClient {
                 (req_id, &c_py, exec_obj.as_any()),
                 None,
             )?;
+
+            // commission_report alongside each exec_details (matches IB API behavior)
+            let report = super::contract::CommissionReport {
+                exec_id: se.exec_id.clone(),
+                commission: se.commission,
+                currency: "USD".to_string(),
+                realized_pnl: f64::MAX,
+                yield_amount: f64::MAX,
+                yield_redemption_date: String::new(),
+            };
+            let report_py = Py::new(py, report)?.into_any();
+            self.wrapper.call_method1(py, "commission_report", (&report_py,))?;
         }
         self.wrapper.call_method1(py, "exec_details_end", (req_id,))?;
         Ok(())
@@ -1272,16 +1305,22 @@ impl EClient {
                     crate::types::OrderStatus::Rejected => "Inactive",
                     _ => "Unknown",
                 };
-                // Look up stored order info: local open_orders first, then shared enriched cache
-                let stored = self.open_orders.lock().unwrap().get(&co.order_id).cloned();
+                // Always try RichOrderInfo for enrichment (completedTime, contract, order)
+                let rich_info = shared.orders.get_order_info(co.order_id);
                 let state = pyo3::types::PyDict::new(py);
                 state.set_item("status", status_str)?;
-                state.set_item("completedTime", "")?;
+                state.set_item("completedTime",
+                    rich_info.as_ref().map(|i| i.order_state.completed_time.as_str()).unwrap_or(""))?;
+                state.set_item("completedStatus",
+                    rich_info.as_ref().map(|i| i.order_state.completed_status.as_str()).unwrap_or(""))?;
+
+                // Local open_orders first (has full Python Contract/Order), then RichOrderInfo
+                let stored = self.open_orders.lock().unwrap().get(&co.order_id).cloned();
                 if let Some(so) = stored {
                     let c_py = Py::new(py, so.contract)?.into_any();
                     let o_py = Py::new(py, so.order)?.into_any();
                     self.wrapper.call_method1(py, "completed_order", (&c_py, &o_py, state.as_any()))?;
-                } else if let Some(info) = shared.orders.get_order_info(co.order_id) {
+                } else if let Some(info) = rich_info {
                     let c = Contract {
                         con_id: info.contract.con_id,
                         symbol: info.contract.symbol,
@@ -1360,22 +1399,69 @@ impl EClient {
                 // Track execution for req_executions
                 let exec_id = format!("{}.{}", fill.order_id, fill.timestamp_ns);
                 let now_str = format!("{}", fill.timestamp_ns);
-                // Get contract from stored order if available
+                // Get enriched data from RichOrderInfo (exec exchange, cum_qty, avg_price)
+                let rich_info = shared.orders.get_order_info(fill.order_id);
+                let exec_exchange = rich_info.as_ref()
+                    .map(|i| i.last_exec.exchange.as_str()).unwrap_or("").to_string();
+                let cum_qty = rich_info.as_ref()
+                    .map(|i| i.last_exec.cum_qty).unwrap_or(fill.qty as f64);
+                let avg_price = rich_info.as_ref()
+                    .map(|i| i.last_exec.avg_price).unwrap_or(price);
+                // Get contract from stored order if available, fall back to shared order cache
                 let exec_contract = self.open_orders.lock().unwrap()
                     .get(&fill.order_id).map(|so| so.contract.clone())
+                    .or_else(|| {
+                        rich_info.map(|info| {
+                            Contract {
+                                con_id: info.contract.con_id,
+                                symbol: info.contract.symbol,
+                                sec_type: info.contract.sec_type,
+                                exchange: info.contract.exchange,
+                                currency: info.contract.currency,
+                                ..Default::default()
+                            }
+                        })
+                    })
                     .unwrap_or_default();
                 self.executions.lock().unwrap().push(StoredExecution {
                     req_id,
-                    contract: exec_contract,
+                    contract: exec_contract.clone(),
                     exec_id: exec_id.clone(),
                     side: side_str.to_string(),
                     price,
                     shares: fill.qty as f64,
-                    time: now_str,
+                    time: now_str.clone(),
                     order_id: fill.order_id,
-                    cum_qty: fill.qty as f64,
-                    avg_price: price,
+                    cum_qty,
+                    avg_price,
+                    exchange: exec_exchange.clone(),
+                    commission,
                 });
+
+                // exec_details callback (real-time)
+                let acct_name = self.account_id.get().map(|s| s.as_str()).unwrap_or("");
+                let c_py = Py::new(py, exec_contract)?.into_any();
+                let exec_dict = pyo3::types::PyDict::new(py);
+                exec_dict.set_item("execId", exec_id.as_str())?;
+                exec_dict.set_item("time", now_str.as_str())?;
+                exec_dict.set_item("acctNumber", acct_name)?;
+                exec_dict.set_item("exchange", exec_exchange.as_str())?;
+                exec_dict.set_item("side", side_str)?;
+                exec_dict.set_item("price", price)?;
+                exec_dict.set_item("shares", fill.qty as f64)?;
+                exec_dict.set_item("orderId", fill.order_id as i64)?;
+                exec_dict.set_item("cumQty", cum_qty)?;
+                exec_dict.set_item("avgPrice", avg_price)?;
+                exec_dict.set_item("permId", 0i64)?;
+                exec_dict.set_item("clientId", 0i64)?;
+                exec_dict.set_item("liquidation", 0i64)?;
+                exec_dict.set_item("lastLiquidity", 0i64)?;
+                exec_dict.set_item("pendingPriceRevision", false)?;
+                self.wrapper.call_method(
+                    py, "exec_details",
+                    (req_id, &c_py, exec_dict.as_any()),
+                    None,
+                )?;
 
                 // Update open order tracking
                 {
@@ -2117,17 +2203,26 @@ impl EClient {
 
             let exec_id = format!("{}.{}", fill.order_id, fill.timestamp_ns);
             let now_str = format!("{}", fill.timestamp_ns);
-            // Try local open_orders first, then fall back to shared order cache → contract cache
+            let commission = fill.commission as f64 / PRICE_SCALE_F;
+            // Get enriched data from RichOrderInfo
+            let rich_info = shared.orders.get_order_info(fill.order_id);
+            let exec_exchange = rich_info.as_ref()
+                .map(|i| i.last_exec.exchange.as_str()).unwrap_or("").to_string();
+            let cum_qty = rich_info.as_ref()
+                .map(|i| i.last_exec.cum_qty).unwrap_or(fill.qty as f64);
+            let avg_price = rich_info.as_ref()
+                .map(|i| i.last_exec.avg_price).unwrap_or(price);
+            // Try local open_orders first, then fall back to shared order cache
             let exec_contract = self.open_orders.lock().unwrap()
                 .get(&fill.order_id).map(|so| so.contract.clone())
                 .or_else(|| {
-                    shared.orders.get_order_info(fill.order_id).map(|info| {
+                    rich_info.map(|info| {
                         Contract {
                             con_id: info.contract.con_id,
-                            symbol: info.contract.symbol.clone(),
-                            sec_type: info.contract.sec_type.clone(),
-                            exchange: info.contract.exchange.clone(),
-                            currency: info.contract.currency.clone(),
+                            symbol: info.contract.symbol,
+                            sec_type: info.contract.sec_type,
+                            exchange: info.contract.exchange,
+                            currency: info.contract.currency,
                             ..Default::default()
                         }
                     })
@@ -2142,8 +2237,10 @@ impl EClient {
                 shares: fill.qty as f64,
                 time: now_str.clone(),
                 order_id: fill.order_id,
-                cum_qty: fill.qty as f64,
-                avg_price: price,
+                cum_qty,
+                avg_price,
+                exchange: exec_exchange.clone(),
+                commission,
             });
 
             // exec_details callback
@@ -2153,16 +2250,18 @@ impl EClient {
             exec_dict.set_item("execId", exec_id.as_str())?;
             exec_dict.set_item("time", now_str.as_str())?;
             exec_dict.set_item("acctNumber", acct_name)?;
+            exec_dict.set_item("exchange", exec_exchange.as_str())?;
             exec_dict.set_item("side", side_str)?;
             exec_dict.set_item("price", price)?;
             exec_dict.set_item("shares", fill.qty as f64)?;
             exec_dict.set_item("orderId", fill.order_id as i64)?;
-            exec_dict.set_item("cumQty", fill.qty as f64)?;
-            exec_dict.set_item("avgPrice", price)?;
+            exec_dict.set_item("cumQty", cum_qty)?;
+            exec_dict.set_item("avgPrice", avg_price)?;
             exec_dict.set_item("permId", 0i64)?;
             exec_dict.set_item("clientId", 0i64)?;
             exec_dict.set_item("liquidation", 0i64)?;
             exec_dict.set_item("lastLiquidity", 0i64)?;
+            exec_dict.set_item("pendingPriceRevision", false)?;
             self.wrapper.call_method(
                 py, "exec_details",
                 (req_id, &c_py, exec_dict.as_any()),
@@ -2181,9 +2280,8 @@ impl EClient {
             }
 
             // Dispatch commission_report
-            let commission = fill.commission as f64 / PRICE_SCALE_F;
             let report = super::contract::CommissionReport {
-                exec_id: exec_id.clone(),
+                exec_id,
                 commission,
                 currency: "USD".to_string(),
                 realized_pnl: f64::MAX,
