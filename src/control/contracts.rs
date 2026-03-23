@@ -301,14 +301,12 @@ pub fn parse_secdef_response(data: &[u8]) -> Option<ContractDefinition> {
     {
         use crate::protocol::fix::SOH;
         let mut last_alt_id = String::new();
-        let mut last_source = String::new();
         for part in data.split(|&b| b == SOH) {
             let text = String::from_utf8_lossy(part);
             if let Some(val) = text.strip_prefix("455=") {
                 last_alt_id = val.to_string();
             } else if let Some(val) = text.strip_prefix("456=") {
-                last_source = val.to_string();
-                if last_source == "4" { // ISIN
+                if val == "4" { // ISIN
                     def.isin = last_alt_id.clone();
                 }
             }

@@ -46,7 +46,7 @@ fn main() {
     let paper = env::var("IB_PAPER").unwrap_or_else(|_| "true".to_string()) == "true";
     let host = env::var("IB_HOST").unwrap_or_else(|_| "cdc1.ibllc.com".to_string());
 
-    let mut client = EClient::connect(&EClientConfig {
+    let client = EClient::connect(&EClientConfig {
         username,
         password,
         host,

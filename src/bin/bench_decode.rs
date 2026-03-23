@@ -16,7 +16,7 @@ use crossbeam_channel::bounded;
 use ibx::bridge::{Event, SharedState};
 use ibx::engine::market_state::MarketState;
 use ibx::protocol::tick_decoder::{self, RawTick};
-use ibx::types::{Quote, PRICE_SCALE};
+use ibx::types::Quote;
 
 const ITERATIONS: u64 = 1_000_000;
 const WARMUP: u64 = 100_000;
