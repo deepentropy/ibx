@@ -20,7 +20,7 @@ fn full_lifecycle() {
     // Tick pushes quote to shared state
     engine.inject_tick(aapl);
 
-    let quote = shared.quote(aapl);
+    let quote = shared.market.quote(aapl);
     assert_eq!(quote.bid, 150 * PRICE_SCALE);
     assert_eq!(quote.ask, 152 * PRICE_SCALE);
 
@@ -39,7 +39,7 @@ fn full_lifecycle() {
 
     assert_eq!(engine.context_mut().position(aapl), 100);
 
-    let fills = shared.drain_fills();
+    let fills = shared.orders.drain_fills();
     assert_eq!(fills.len(), 1);
     assert_eq!(fills[0].price, 150 * PRICE_SCALE);
 }
@@ -57,8 +57,8 @@ fn multi_instrument_ticks_update_shared_state() {
     engine.inject_tick(aapl);
     engine.inject_tick(msft);
 
-    let qa = shared.quote(aapl);
-    let qm = shared.quote(msft);
+    let qa = shared.market.quote(aapl);
+    let qm = shared.market.quote(msft);
     assert_eq!(qa.bid, 150 * PRICE_SCALE);
     assert_eq!(qm.bid, 400 * PRICE_SCALE);
 }

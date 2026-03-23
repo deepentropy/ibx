@@ -299,7 +299,7 @@ impl ClientCore {
 
         match Self::recv_registration(reply_rx) {
             Ok(id) => Ok(id),
-            Err(_) => Ok(shared.instrument_count().saturating_sub(1)),
+            Err(_) => Ok(shared.market.instrument_count().saturating_sub(1)),
         }
     }
 
@@ -449,7 +449,7 @@ impl ClientCore {
         iid: InstrumentId,
         req_id: i64,
     ) -> QuotePollResult {
-        let q = shared.quote(iid);
+        let q = shared.market.quote(iid);
         let fields = [
             q.bid, q.ask, q.last, q.bid_size, q.ask_size, q.last_size,
             q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
@@ -523,7 +523,7 @@ impl ClientCore {
         let req_id = *self.pnl_req_id.lock().unwrap();
         let req_id = req_id?;
 
-        let acct = shared.account();
+        let acct = shared.portfolio.account();
         let pnl = [acct.daily_pnl, acct.unrealized_pnl, acct.realized_pnl];
         let prev = *self.last_pnl.lock().unwrap();
         if pnl == prev {
@@ -545,13 +545,13 @@ impl ClientCore {
 
         let mut results = Vec::new();
         for (req_id, con_id) in reqs {
-            if let Some(pi) = shared.position_info(con_id) {
+            if let Some(pi) = shared.portfolio.position_info(con_id) {
                 let pos = pi.position as f64;
                 let last_price = {
                     let imap = self.instrument_to_req.lock().unwrap();
                     imap.keys()
                         .find_map(|&iid| {
-                            let q = shared.quote(iid);
+                            let q = shared.market.quote(iid);
                             if q.last != 0 { Some(q.last) } else { None }
                         })
                         .unwrap_or(0)
@@ -579,7 +579,7 @@ impl ClientCore {
             return None;
         }
 
-        let acct = shared.account();
+        let acct = shared.portfolio.account();
         let mut prev_guard = self.last_account.lock().unwrap();
         let is_first = prev_guard.is_none();
         let prev = prev_guard.unwrap_or_default();
@@ -629,7 +629,7 @@ impl ClientCore {
         let req = self.account_summary_req.lock().unwrap().take();
         let (req_id, tags) = req?;
 
-        let acct = shared.account();
+        let acct = shared.portfolio.account();
         let values = account_summary_values(&acct);
 
         let mut entries = Vec::new();

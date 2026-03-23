@@ -1,9 +1,13 @@
 //! Bridge module: shared state and events between the HotLoop and external callers.
 //!
 //! Architecture:
-//! - `SharedState` holds SeqLock-protected quotes, concurrent event queues, and position/account state.
+//! - `SharedState` composes four domain-specific containers:
+//!   - `MarketDataState` — lock-free quotes (SeqLock), TBT, real-time bars, news ticks.
+//!   - `OrderState` — fills, order updates, cancel rejects, what-if, order cache.
+//!   - `ReferenceState` — historical data, contracts, scanners, news archives, market rules.
+//!   - `PortfolioState` — account snapshot, position info, atomic positions.
 //! - `Event` enum carries all events through a crossbeam channel for the `EClient` API.
-//! - The HotLoop pushes to SharedState directly.
+//! - The HotLoop pushes to SharedState sub-containers directly.
 //! - External callers read snapshots and poll events without blocking the hot loop.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,81 +110,30 @@ impl SeqQuote {
     }
 }
 
-/// Shared state between hot loop and external caller.
-pub struct SharedState {
+// ── Domain-specific state containers ──
+
+/// Lock-free quotes, TBT streams, real-time bars, and news ticks.
+pub struct MarketDataState {
     quotes: Box<[SeqQuote; MAX_INSTRUMENTS]>,
-    fills: Mutex<Vec<Fill>>,
-    order_updates: Mutex<Vec<OrderUpdate>>,
-    cancel_rejects: Mutex<Vec<CancelReject>>,
-    tbt_trades: Mutex<Vec<TbtTrade>>,
-    tbt_quotes: Mutex<Vec<TbtQuote>>,
-    tick_news: Mutex<Vec<TickNews>>,
-    news_bulletins: Mutex<Vec<NewsBulletin>>,
-    what_if_responses: Mutex<Vec<WhatIfResponse>>,
-    historical_data: Mutex<Vec<(u32, HistoricalResponse)>>,
-    head_timestamps: Mutex<Vec<(u32, HeadTimestampResponse)>>,
-    contract_details: Mutex<Vec<(u32, ContractDefinition)>>,
-    contract_details_end: Mutex<Vec<u32>>,
-    matching_symbols: Mutex<Vec<(u32, Vec<SymbolMatch>)>>,
-    scanner_params: Mutex<Vec<String>>,
-    scanner_data: Mutex<Vec<(u32, ScannerResult)>>,
-    historical_news: Mutex<Vec<(u32, Vec<NewsHeadline>, bool)>>,
-    news_articles: Mutex<Vec<(u32, i32, String)>>,
-    fundamental_data: Mutex<Vec<(u32, String)>>,
-    histogram_data: Mutex<Vec<(u32, Vec<HistogramEntry>)>>,
-    historical_ticks: Mutex<Vec<(u32, HistoricalTickData, String, bool)>>,
-    real_time_bars: Mutex<Vec<(u32, RealTimeBar)>>,
-    historical_schedules: Mutex<Vec<(u32, HistoricalScheduleResponse)>>,
-    completed_orders: Mutex<Vec<CompletedOrder>>,
-    market_rules: Mutex<Vec<MarketRule>>,
-    /// Enriched order info from CCP exec reports (order_id → RichOrderInfo).
-    /// Used by open_order / completed_order / exec_details callbacks.
-    order_cache: Mutex<HashMap<u64, RichOrderInfo>>,
-    /// Contract cache from CCP exec reports (con_id → api::Contract).
-    /// Used to enrich position and execution callbacks.
-    contract_cache: Mutex<HashMap<i64, api::Contract>>,
-    /// Position info (conId → PositionInfo) for reqPositions and P&L.
-    position_infos: Mutex<HashMap<i64, PositionInfo>>,
-    positions: [AtomicU64; MAX_INSTRUMENTS],
-    account: Mutex<AccountState>,
     /// InstrumentId counter — set by hot loop on RegisterInstrument.
     instrument_count: AtomicU64,
+    tbt_trades: Mutex<Vec<TbtTrade>>,
+    tbt_quotes: Mutex<Vec<TbtQuote>>,
+    real_time_bars: Mutex<Vec<(u32, RealTimeBar)>>,
+    tick_news: Mutex<Vec<TickNews>>,
+    news_bulletins: Mutex<Vec<NewsBulletin>>,
 }
 
-impl SharedState {
-    pub fn new() -> Self {
+impl MarketDataState {
+    fn new() -> Self {
         Self {
             quotes: Box::new(std::array::from_fn(|_| SeqQuote::new())),
-            fills: Mutex::new(Vec::with_capacity(64)),
-            order_updates: Mutex::new(Vec::with_capacity(64)),
-            cancel_rejects: Mutex::new(Vec::with_capacity(16)),
+            instrument_count: AtomicU64::new(0),
             tbt_trades: Mutex::new(Vec::with_capacity(256)),
             tbt_quotes: Mutex::new(Vec::with_capacity(256)),
+            real_time_bars: Mutex::new(Vec::with_capacity(64)),
             tick_news: Mutex::new(Vec::with_capacity(32)),
             news_bulletins: Mutex::new(Vec::with_capacity(16)),
-            what_if_responses: Mutex::new(Vec::with_capacity(8)),
-            historical_data: Mutex::new(Vec::with_capacity(16)),
-            head_timestamps: Mutex::new(Vec::with_capacity(8)),
-            contract_details: Mutex::new(Vec::with_capacity(16)),
-            contract_details_end: Mutex::new(Vec::with_capacity(8)),
-            matching_symbols: Mutex::new(Vec::with_capacity(8)),
-            scanner_params: Mutex::new(Vec::new()),
-            scanner_data: Mutex::new(Vec::with_capacity(8)),
-            historical_news: Mutex::new(Vec::with_capacity(8)),
-            news_articles: Mutex::new(Vec::with_capacity(8)),
-            fundamental_data: Mutex::new(Vec::with_capacity(4)),
-            histogram_data: Mutex::new(Vec::with_capacity(4)),
-            historical_ticks: Mutex::new(Vec::with_capacity(4)),
-            real_time_bars: Mutex::new(Vec::with_capacity(64)),
-            historical_schedules: Mutex::new(Vec::with_capacity(4)),
-            completed_orders: Mutex::new(Vec::with_capacity(64)),
-            market_rules: Mutex::new(Vec::new()),
-            order_cache: Mutex::new(HashMap::new()),
-            contract_cache: Mutex::new(HashMap::new()),
-            position_infos: Mutex::new(HashMap::new()),
-            positions: std::array::from_fn(|_| AtomicU64::new(0)),
-            account: Mutex::new(AccountState::default()),
-            instrument_count: AtomicU64::new(0),
         }
     }
 
@@ -190,152 +143,104 @@ impl SharedState {
         self.quotes[id as usize].read()
     }
 
-    /// Drain all pending fills.
-    pub fn drain_fills(&self) -> Vec<Fill> {
-        let mut lock = self.fills.lock().unwrap();
-        std::mem::take(&mut *lock)
+    /// Number of registered instruments.
+    pub fn instrument_count(&self) -> u32 {
+        self.instrument_count.load(Ordering::Relaxed) as u32
     }
 
-    /// Drain all pending order updates.
-    pub fn drain_order_updates(&self) -> Vec<OrderUpdate> {
-        let mut lock = self.order_updates.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending cancel/modify rejects.
-    pub fn drain_cancel_rejects(&self) -> Vec<CancelReject> {
-        let mut lock = self.cancel_rejects.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending tick-by-tick trades.
     pub fn drain_tbt_trades(&self) -> Vec<TbtTrade> {
-        let mut lock = self.tbt_trades.lock().unwrap();
-        std::mem::take(&mut *lock)
+        std::mem::take(&mut *self.tbt_trades.lock().unwrap())
     }
 
-    /// Drain all pending tick-by-tick quotes.
     pub fn drain_tbt_quotes(&self) -> Vec<TbtQuote> {
-        let mut lock = self.tbt_quotes.lock().unwrap();
-        std::mem::take(&mut *lock)
+        std::mem::take(&mut *self.tbt_quotes.lock().unwrap())
     }
 
-    /// Drain all pending news ticks.
-    pub fn drain_tick_news(&self) -> Vec<TickNews> {
-        let mut lock = self.tick_news.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending news bulletins.
-    pub fn drain_news_bulletins(&self) -> Vec<NewsBulletin> {
-        let mut lock = self.news_bulletins.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending what-if responses.
-    pub fn drain_what_if_responses(&self) -> Vec<WhatIfResponse> {
-        let mut lock = self.what_if_responses.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending historical data responses.
-    pub fn drain_historical_data(&self) -> Vec<(u32, HistoricalResponse)> {
-        let mut lock = self.historical_data.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending head timestamp responses.
-    pub fn drain_head_timestamps(&self) -> Vec<(u32, HeadTimestampResponse)> {
-        let mut lock = self.head_timestamps.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending contract definitions.
-    pub fn drain_contract_details(&self) -> Vec<(u32, ContractDefinition)> {
-        let mut lock = self.contract_details.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending contract details end markers.
-    pub fn drain_contract_details_end(&self) -> Vec<u32> {
-        let mut lock = self.contract_details_end.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending matching symbol results.
-    pub fn drain_matching_symbols(&self) -> Vec<(u32, Vec<SymbolMatch>)> {
-        let mut lock = self.matching_symbols.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending scanner parameter XMLs.
-    pub fn drain_scanner_params(&self) -> Vec<String> {
-        let mut lock = self.scanner_params.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending scanner data results.
-    pub fn drain_scanner_data(&self) -> Vec<(u32, ScannerResult)> {
-        let mut lock = self.scanner_data.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending historical news responses.
-    pub fn drain_historical_news(&self) -> Vec<(u32, Vec<NewsHeadline>, bool)> {
-        let mut lock = self.historical_news.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending news articles.
-    pub fn drain_news_articles(&self) -> Vec<(u32, i32, String)> {
-        let mut lock = self.news_articles.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending fundamental data responses.
-    pub fn drain_fundamental_data(&self) -> Vec<(u32, String)> {
-        let mut lock = self.fundamental_data.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending histogram data responses.
-    pub fn drain_histogram_data(&self) -> Vec<(u32, Vec<HistogramEntry>)> {
-        let mut lock = self.histogram_data.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending historical tick responses: (req_id, data, what_to_show, done).
-    pub fn drain_historical_ticks(&self) -> Vec<(u32, HistoricalTickData, String, bool)> {
-        let mut lock = self.historical_ticks.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Drain all pending real-time bars.
     pub fn drain_real_time_bars(&self) -> Vec<(u32, RealTimeBar)> {
-        let mut lock = self.real_time_bars.lock().unwrap();
-        std::mem::take(&mut *lock)
+        std::mem::take(&mut *self.real_time_bars.lock().unwrap())
     }
 
-    /// Drain all pending historical schedule responses.
-    pub fn drain_historical_schedules(&self) -> Vec<(u32, HistoricalScheduleResponse)> {
-        let mut lock = self.historical_schedules.lock().unwrap();
-        std::mem::take(&mut *lock)
+    pub fn drain_tick_news(&self) -> Vec<TickNews> {
+        std::mem::take(&mut *self.tick_news.lock().unwrap())
     }
 
-    /// Drain all completed orders.
+    pub fn drain_news_bulletins(&self) -> Vec<NewsBulletin> {
+        std::mem::take(&mut *self.news_bulletins.lock().unwrap())
+    }
+
+    // ── Hot-loop-side writers ──
+
+    #[doc(hidden)]
+    pub fn push_quote(&self, id: InstrumentId, quote: &Quote) {
+        self.quotes[id as usize].write(quote);
+    }
+
+    #[doc(hidden)] pub fn push_tbt_trade(&self, trade: TbtTrade) {
+        self.tbt_trades.lock().unwrap().push(trade);
+    }
+
+    #[doc(hidden)] pub fn push_tbt_quote(&self, quote: TbtQuote) {
+        self.tbt_quotes.lock().unwrap().push(quote);
+    }
+
+    #[doc(hidden)] pub fn push_real_time_bar(&self, req_id: u32, bar: RealTimeBar) {
+        self.real_time_bars.lock().unwrap().push((req_id, bar));
+    }
+
+    #[doc(hidden)] pub fn push_tick_news(&self, news: TickNews) {
+        self.tick_news.lock().unwrap().push(news);
+    }
+
+    #[doc(hidden)] pub fn push_news_bulletin(&self, bulletin: NewsBulletin) {
+        self.news_bulletins.lock().unwrap().push(bulletin);
+    }
+
+    #[doc(hidden)] pub fn set_instrument_count(&self, count: u32) {
+        self.instrument_count.store(count as u64, Ordering::Relaxed);
+    }
+}
+
+/// Fills, order status updates, cancel rejects, what-if responses, and order cache.
+pub struct OrderState {
+    fills: Mutex<Vec<Fill>>,
+    order_updates: Mutex<Vec<OrderUpdate>>,
+    cancel_rejects: Mutex<Vec<CancelReject>>,
+    what_if_responses: Mutex<Vec<WhatIfResponse>>,
+    completed_orders: Mutex<Vec<CompletedOrder>>,
+    /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
+    order_cache: Mutex<HashMap<u64, RichOrderInfo>>,
+}
+
+impl OrderState {
+    fn new() -> Self {
+        Self {
+            fills: Mutex::new(Vec::with_capacity(64)),
+            order_updates: Mutex::new(Vec::with_capacity(64)),
+            cancel_rejects: Mutex::new(Vec::with_capacity(16)),
+            what_if_responses: Mutex::new(Vec::with_capacity(8)),
+            completed_orders: Mutex::new(Vec::with_capacity(64)),
+            order_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn drain_fills(&self) -> Vec<Fill> {
+        std::mem::take(&mut *self.fills.lock().unwrap())
+    }
+
+    pub fn drain_order_updates(&self) -> Vec<OrderUpdate> {
+        std::mem::take(&mut *self.order_updates.lock().unwrap())
+    }
+
+    pub fn drain_cancel_rejects(&self) -> Vec<CancelReject> {
+        std::mem::take(&mut *self.cancel_rejects.lock().unwrap())
+    }
+
+    pub fn drain_what_if_responses(&self) -> Vec<WhatIfResponse> {
+        std::mem::take(&mut *self.what_if_responses.lock().unwrap())
+    }
+
     pub fn drain_completed_orders(&self) -> Vec<CompletedOrder> {
-        let mut lock = self.completed_orders.lock().unwrap();
-        std::mem::take(&mut *lock)
-    }
-
-    /// Get cached market rules.
-    pub fn market_rules(&self) -> Vec<MarketRule> {
-        self.market_rules.lock().unwrap().clone()
-    }
-
-    /// Get a market rule by ID.
-    pub fn market_rule(&self, rule_id: i32) -> Option<MarketRule> {
-        self.market_rules.lock().unwrap().iter().find(|r| r.rule_id == rule_id).cloned()
+        std::mem::take(&mut *self.completed_orders.lock().unwrap())
     }
 
     /// Snapshot all enriched orders (for open_order callbacks).
@@ -350,42 +255,7 @@ impl SharedState {
         self.order_cache.lock().unwrap().get(&order_id).cloned()
     }
 
-    /// Get cached contract by con_id.
-    pub fn get_contract(&self, con_id: i64) -> Option<api::Contract> {
-        self.contract_cache.lock().unwrap().get(&con_id).cloned()
-    }
-
-    /// Get all position infos (for reqPositions).
-    pub fn position_infos(&self) -> Vec<PositionInfo> {
-        self.position_infos.lock().unwrap().values().copied().collect()
-    }
-
-    /// Get position info for a single conId (for pnlSingle).
-    pub fn position_info(&self, con_id: i64) -> Option<PositionInfo> {
-        self.position_infos.lock().unwrap().get(&con_id).copied()
-    }
-
-    /// Read current position for an instrument.
-    pub fn position(&self, id: InstrumentId) -> i64 {
-        self.positions[id as usize].load(Ordering::Relaxed) as i64
-    }
-
-    /// Read account state snapshot.
-    pub fn account(&self) -> AccountState {
-        *self.account.lock().unwrap()
-    }
-
-    /// Number of registered instruments.
-    pub fn instrument_count(&self) -> u32 {
-        self.instrument_count.load(Ordering::Relaxed) as u32
-    }
-
     // ── Hot-loop-side writers ──
-
-    #[doc(hidden)]
-    pub fn push_quote(&self, id: InstrumentId, quote: &Quote) {
-        self.quotes[id as usize].write(quote);
-    }
 
     #[doc(hidden)] pub fn push_fill(&self, fill: Fill) {
         self.fills.lock().unwrap().push(fill);
@@ -399,25 +269,128 @@ impl SharedState {
         self.cancel_rejects.lock().unwrap().push(reject);
     }
 
-    #[doc(hidden)] pub fn push_tbt_trade(&self, trade: TbtTrade) {
-        self.tbt_trades.lock().unwrap().push(trade);
-    }
-
-    #[doc(hidden)] pub fn push_tbt_quote(&self, quote: TbtQuote) {
-        self.tbt_quotes.lock().unwrap().push(quote);
-    }
-
-    #[doc(hidden)] pub fn push_tick_news(&self, news: TickNews) {
-        self.tick_news.lock().unwrap().push(news);
-    }
-
-    #[doc(hidden)] pub fn push_news_bulletin(&self, bulletin: NewsBulletin) {
-        self.news_bulletins.lock().unwrap().push(bulletin);
-    }
-
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {
         self.what_if_responses.lock().unwrap().push(response);
     }
+
+    #[doc(hidden)] pub fn push_completed_order(&self, order: CompletedOrder) {
+        self.completed_orders.lock().unwrap().push(order);
+    }
+
+    #[doc(hidden)] pub fn push_order_info(&self, order_id: u64, info: RichOrderInfo) {
+        self.order_cache.lock().unwrap().insert(order_id, info);
+    }
+}
+
+/// Historical data, contract definitions, scanners, news archives, market rules, contract cache.
+pub struct ReferenceState {
+    historical_data: Mutex<Vec<(u32, HistoricalResponse)>>,
+    head_timestamps: Mutex<Vec<(u32, HeadTimestampResponse)>>,
+    contract_details: Mutex<Vec<(u32, ContractDefinition)>>,
+    contract_details_end: Mutex<Vec<u32>>,
+    matching_symbols: Mutex<Vec<(u32, Vec<SymbolMatch>)>>,
+    scanner_params: Mutex<Vec<String>>,
+    scanner_data: Mutex<Vec<(u32, ScannerResult)>>,
+    historical_news: Mutex<Vec<(u32, Vec<NewsHeadline>, bool)>>,
+    news_articles: Mutex<Vec<(u32, i32, String)>>,
+    fundamental_data: Mutex<Vec<(u32, String)>>,
+    histogram_data: Mutex<Vec<(u32, Vec<HistogramEntry>)>>,
+    historical_ticks: Mutex<Vec<(u32, HistoricalTickData, String, bool)>>,
+    historical_schedules: Mutex<Vec<(u32, HistoricalScheduleResponse)>>,
+    market_rules: Mutex<Vec<MarketRule>>,
+    /// Contract cache from CCP exec reports (con_id -> api::Contract).
+    contract_cache: Mutex<HashMap<i64, api::Contract>>,
+}
+
+impl ReferenceState {
+    fn new() -> Self {
+        Self {
+            historical_data: Mutex::new(Vec::with_capacity(16)),
+            head_timestamps: Mutex::new(Vec::with_capacity(8)),
+            contract_details: Mutex::new(Vec::with_capacity(16)),
+            contract_details_end: Mutex::new(Vec::with_capacity(8)),
+            matching_symbols: Mutex::new(Vec::with_capacity(8)),
+            scanner_params: Mutex::new(Vec::new()),
+            scanner_data: Mutex::new(Vec::with_capacity(8)),
+            historical_news: Mutex::new(Vec::with_capacity(8)),
+            news_articles: Mutex::new(Vec::with_capacity(8)),
+            fundamental_data: Mutex::new(Vec::with_capacity(4)),
+            histogram_data: Mutex::new(Vec::with_capacity(4)),
+            historical_ticks: Mutex::new(Vec::with_capacity(4)),
+            historical_schedules: Mutex::new(Vec::with_capacity(4)),
+            market_rules: Mutex::new(Vec::new()),
+            contract_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn drain_historical_data(&self) -> Vec<(u32, HistoricalResponse)> {
+        std::mem::take(&mut *self.historical_data.lock().unwrap())
+    }
+
+    pub fn drain_head_timestamps(&self) -> Vec<(u32, HeadTimestampResponse)> {
+        std::mem::take(&mut *self.head_timestamps.lock().unwrap())
+    }
+
+    pub fn drain_contract_details(&self) -> Vec<(u32, ContractDefinition)> {
+        std::mem::take(&mut *self.contract_details.lock().unwrap())
+    }
+
+    pub fn drain_contract_details_end(&self) -> Vec<u32> {
+        std::mem::take(&mut *self.contract_details_end.lock().unwrap())
+    }
+
+    pub fn drain_matching_symbols(&self) -> Vec<(u32, Vec<SymbolMatch>)> {
+        std::mem::take(&mut *self.matching_symbols.lock().unwrap())
+    }
+
+    pub fn drain_scanner_params(&self) -> Vec<String> {
+        std::mem::take(&mut *self.scanner_params.lock().unwrap())
+    }
+
+    pub fn drain_scanner_data(&self) -> Vec<(u32, ScannerResult)> {
+        std::mem::take(&mut *self.scanner_data.lock().unwrap())
+    }
+
+    pub fn drain_historical_news(&self) -> Vec<(u32, Vec<NewsHeadline>, bool)> {
+        std::mem::take(&mut *self.historical_news.lock().unwrap())
+    }
+
+    pub fn drain_news_articles(&self) -> Vec<(u32, i32, String)> {
+        std::mem::take(&mut *self.news_articles.lock().unwrap())
+    }
+
+    pub fn drain_fundamental_data(&self) -> Vec<(u32, String)> {
+        std::mem::take(&mut *self.fundamental_data.lock().unwrap())
+    }
+
+    pub fn drain_histogram_data(&self) -> Vec<(u32, Vec<HistogramEntry>)> {
+        std::mem::take(&mut *self.histogram_data.lock().unwrap())
+    }
+
+    pub fn drain_historical_ticks(&self) -> Vec<(u32, HistoricalTickData, String, bool)> {
+        std::mem::take(&mut *self.historical_ticks.lock().unwrap())
+    }
+
+    pub fn drain_historical_schedules(&self) -> Vec<(u32, HistoricalScheduleResponse)> {
+        std::mem::take(&mut *self.historical_schedules.lock().unwrap())
+    }
+
+    /// Get cached market rules.
+    pub fn market_rules(&self) -> Vec<MarketRule> {
+        self.market_rules.lock().unwrap().clone()
+    }
+
+    /// Get a market rule by ID.
+    pub fn market_rule(&self, rule_id: i32) -> Option<MarketRule> {
+        self.market_rules.lock().unwrap().iter().find(|r| r.rule_id == rule_id).cloned()
+    }
+
+    /// Get cached contract by con_id.
+    pub fn get_contract(&self, con_id: i64) -> Option<api::Contract> {
+        self.contract_cache.lock().unwrap().get(&con_id).cloned()
+    }
+
+    // ── Hot-loop-side writers ──
 
     #[doc(hidden)] pub fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
         self.historical_data.lock().unwrap().push((req_id, response));
@@ -467,16 +440,8 @@ impl SharedState {
         self.historical_ticks.lock().unwrap().push((req_id, data, what_to_show, done));
     }
 
-    #[doc(hidden)] pub fn push_real_time_bar(&self, req_id: u32, bar: RealTimeBar) {
-        self.real_time_bars.lock().unwrap().push((req_id, bar));
-    }
-
     #[doc(hidden)] pub fn push_historical_schedule(&self, req_id: u32, response: HistoricalScheduleResponse) {
         self.historical_schedules.lock().unwrap().push((req_id, response));
-    }
-
-    #[doc(hidden)] pub fn push_completed_order(&self, order: CompletedOrder) {
-        self.completed_orders.lock().unwrap().push(order);
     }
 
     #[doc(hidden)] pub fn push_market_rules(&self, rules: Vec<MarketRule>) {
@@ -488,12 +453,52 @@ impl SharedState {
         }
     }
 
-    #[doc(hidden)] pub fn push_order_info(&self, order_id: u64, info: RichOrderInfo) {
-        self.order_cache.lock().unwrap().insert(order_id, info);
-    }
-
     #[doc(hidden)] pub fn cache_contract(&self, con_id: i64, contract: api::Contract) {
         self.contract_cache.lock().unwrap().insert(con_id, contract);
+    }
+}
+
+/// Account snapshot, per-position info, and atomic instrument positions.
+pub struct PortfolioState {
+    account: Mutex<AccountState>,
+    /// Position info (conId -> PositionInfo) for reqPositions and P&L.
+    position_infos: Mutex<HashMap<i64, PositionInfo>>,
+    positions: [AtomicU64; MAX_INSTRUMENTS],
+}
+
+impl PortfolioState {
+    fn new() -> Self {
+        Self {
+            account: Mutex::new(AccountState::default()),
+            position_infos: Mutex::new(HashMap::new()),
+            positions: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    /// Read account state snapshot.
+    pub fn account(&self) -> AccountState {
+        *self.account.lock().unwrap()
+    }
+
+    /// Get all position infos (for reqPositions).
+    pub fn position_infos(&self) -> Vec<PositionInfo> {
+        self.position_infos.lock().unwrap().values().copied().collect()
+    }
+
+    /// Get position info for a single conId (for pnlSingle).
+    pub fn position_info(&self, con_id: i64) -> Option<PositionInfo> {
+        self.position_infos.lock().unwrap().get(&con_id).copied()
+    }
+
+    /// Read current position for an instrument.
+    pub fn position(&self, id: InstrumentId) -> i64 {
+        self.positions[id as usize].load(Ordering::Relaxed) as i64
+    }
+
+    // ── Hot-loop-side writers ──
+
+    #[doc(hidden)] pub fn set_account(&self, account: &AccountState) {
+        *self.account.lock().unwrap() = *account;
     }
 
     #[doc(hidden)] pub fn set_position_info(&self, info: PositionInfo) {
@@ -503,15 +508,26 @@ impl SharedState {
     #[doc(hidden)] pub fn set_position(&self, id: InstrumentId, pos: i64) {
         self.positions[id as usize].store(pos as u64, Ordering::Relaxed);
     }
+}
 
-    #[doc(hidden)] pub fn set_account(&self, account: &AccountState) {
-        *self.account.lock().unwrap() = *account;
+/// Shared state between hot loop and external caller.
+/// Composed of domain-specific containers for clear ownership boundaries.
+pub struct SharedState {
+    pub market: MarketDataState,
+    pub orders: OrderState,
+    pub reference: ReferenceState,
+    pub portfolio: PortfolioState,
+}
+
+impl SharedState {
+    pub fn new() -> Self {
+        Self {
+            market: MarketDataState::new(),
+            orders: OrderState::new(),
+            reference: ReferenceState::new(),
+            portfolio: PortfolioState::new(),
+        }
     }
-
-    #[doc(hidden)] pub fn set_instrument_count(&self, count: u32) {
-        self.instrument_count.store(count as u64, Ordering::Relaxed);
-    }
-
 }
 
 #[cfg(test)]
@@ -541,42 +557,42 @@ mod tests {
     #[test]
     fn shared_state_fills_drain() {
         let ss = SharedState::new();
-        ss.push_fill(Fill {
+        ss.orders.push_fill(Fill {
             instrument: 0, order_id: 1, side: Side::Buy,
             price: 100 * PRICE_SCALE, qty: 10, remaining: 0,
             commission: 0, timestamp_ns: 0,
         });
-        ss.push_fill(Fill {
+        ss.orders.push_fill(Fill {
             instrument: 0, order_id: 2, side: Side::Sell,
             price: 101 * PRICE_SCALE, qty: 5, remaining: 0,
             commission: 0, timestamp_ns: 0,
         });
-        let fills = ss.drain_fills();
+        let fills = ss.orders.drain_fills();
         assert_eq!(fills.len(), 2);
         // Second drain should be empty
-        assert!(ss.drain_fills().is_empty());
+        assert!(ss.orders.drain_fills().is_empty());
     }
 
     #[test]
     fn shared_state_order_updates_drain() {
         let ss = SharedState::new();
-        ss.push_order_update(OrderUpdate {
+        ss.orders.push_order_update(OrderUpdate {
             order_id: 1, instrument: 0, status: OrderStatus::Submitted,
             filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
         });
-        let updates = ss.drain_order_updates();
+        let updates = ss.orders.drain_order_updates();
         assert_eq!(updates.len(), 1);
-        assert!(ss.drain_order_updates().is_empty());
+        assert!(ss.orders.drain_order_updates().is_empty());
     }
 
     #[test]
     fn shared_state_position_roundtrip() {
         let ss = SharedState::new();
-        assert_eq!(ss.position(0), 0);
-        ss.set_position(0, 42);
-        assert_eq!(ss.position(0), 42);
-        ss.set_position(0, -10);
-        assert_eq!(ss.position(0), -10);
+        assert_eq!(ss.portfolio.position(0), 0);
+        ss.portfolio.set_position(0, 42);
+        assert_eq!(ss.portfolio.position(0), 42);
+        ss.portfolio.set_position(0, -10);
+        assert_eq!(ss.portfolio.position(0), -10);
     }
 
     #[test]
@@ -584,8 +600,8 @@ mod tests {
         let ss = SharedState::new();
         let mut a = AccountState::default();
         a.net_liquidation = 100_000 * PRICE_SCALE;
-        ss.set_account(&a);
-        let read = ss.account();
+        ss.portfolio.set_account(&a);
+        let read = ss.portfolio.account();
         assert_eq!(read.net_liquidation, 100_000 * PRICE_SCALE);
     }
 

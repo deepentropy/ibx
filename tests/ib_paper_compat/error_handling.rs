@@ -97,7 +97,7 @@ pub(super) fn phase_pacing_violation_recovery(conns: Conns) -> Conns {
 
     while Instant::now() < deadline {
         // Check for historical data responses
-        let data = shared.drain_historical_data();
+        let data = shared.reference.drain_historical_data();
         for (req_id, resp) in &data {
             if *req_id >= 14000 && *req_id < 14000 + num_requests {
                 if resp.is_complete {

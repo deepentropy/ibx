@@ -222,7 +222,7 @@ impl HotLoop {
                     let farm = crate::types::farm_for_instrument(&exchange, &sec_type);
                     let id = self.context.market.register(con_id);
                     self.context.market.set_symbol(id, symbol);
-                    self.shared.set_instrument_count(self.context.market.count());
+                    self.shared.market.set_instrument_count(self.context.market.count());
                     if let Some(tx) = reply_tx { let _ = tx.send(id); }
                     self.farm.send_mktdata_subscribe(
                         con_id, id, farm,
@@ -240,7 +240,7 @@ impl HotLoop {
                 ControlCommand::SubscribeTbt { con_id, symbol, tbt_type, reply_tx } => {
                     let id = self.context.market.register(con_id);
                     self.context.market.set_symbol(id, symbol);
-                    self.shared.set_instrument_count(self.context.market.count());
+                    self.shared.market.set_instrument_count(self.context.market.count());
                     if let Some(tx) = reply_tx { let _ = tx.send(id); }
                     self.hmds.send_tbt_subscribe(con_id, id, tbt_type, &mut self.hmds_conn, &mut self.hb);
                 }
@@ -250,7 +250,7 @@ impl HotLoop {
                 ControlCommand::SubscribeNews { con_id, symbol, providers, reply_tx } => {
                     let id = self.context.market.register(con_id);
                     self.context.market.set_symbol(id, symbol);
-                    self.shared.set_instrument_count(self.context.market.count());
+                    self.shared.market.set_instrument_count(self.context.market.count());
                     if let Some(tx) = reply_tx { let _ = tx.send(id); }
                     // Allocate req_id from farm's counter (shared ID space)
                     let req_id = self.farm.next_md_req_id;
@@ -268,7 +268,7 @@ impl HotLoop {
                 }
                 ControlCommand::RegisterInstrument { con_id, reply_tx } => {
                     let id = self.context.market.register(con_id);
-                    self.shared.set_instrument_count(self.context.market.count());
+                    self.shared.market.set_instrument_count(self.context.market.count());
                     if let Some(tx) = reply_tx { let _ = tx.send(id); }
                 }
                 ControlCommand::FetchHistorical { req_id, con_id, symbol, end_date_time, duration, bar_size, what_to_show, use_rth } => {
@@ -544,18 +544,18 @@ impl HotLoop {
 
     /// Inject a TBT trade for testing. Pushes to SharedState and emits event.
     pub fn inject_tbt_trade(&mut self, trade: &TbtTrade) {
-        self.shared.push_tbt_trade(trade.clone());
+        self.shared.market.push_tbt_trade(trade.clone());
         emit(&self.event_tx, Event::TbtTrade(trade.clone()));
     }
 
     /// Inject a TBT quote for testing. Pushes to SharedState.
     pub fn inject_tbt_quote(&mut self, quote: &TbtQuote) {
-        self.shared.push_tbt_quote(quote.clone());
+        self.shared.market.push_tbt_quote(quote.clone());
     }
 
     /// Inject a simulated tick for testing.
     pub fn inject_tick(&mut self, instrument: InstrumentId) {
-        self.shared.push_quote(instrument, self.context.quote(instrument));
+        self.shared.market.push_quote(instrument, self.context.quote(instrument));
         emit(&self.event_tx, Event::Tick(instrument));
     }
 
@@ -566,8 +566,8 @@ impl HotLoop {
             crate::types::Side::Sell | crate::types::Side::ShortSell => -fill.qty,
         };
         self.context.update_position(fill.instrument, delta);
-        self.shared.push_fill(*fill);
-        self.shared.set_position(fill.instrument, self.context.position(fill.instrument));
+        self.shared.orders.push_fill(*fill);
+        self.shared.portfolio.set_position(fill.instrument, self.context.position(fill.instrument));
         emit(&self.event_tx, Event::Fill(*fill));
     }
 }

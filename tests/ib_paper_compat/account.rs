@@ -38,7 +38,7 @@ pub(super) fn phase_account_data(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Tick(_)) => {
                 if !account_checked {
-                    let acct = shared.account();
+                    let acct = shared.portfolio.account();
                     if acct.net_liquidation != 0 {
                         net_liq = acct.net_liquidation;
                         println!("  ACCOUNT: net_liq={:.2}", net_liq as f64 / PRICE_SCALE as f64);
@@ -98,7 +98,7 @@ pub(super) fn phase_account_pnl(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 if !account_received {
-                    let acct = shared.account();
+                    let acct = shared.portfolio.account();
                     if acct.net_liquidation != 0 {
                         net_liq = acct.net_liquidation;
                         account_received = true;
@@ -113,7 +113,7 @@ pub(super) fn phase_account_pnl(conns: Conns) -> Conns {
             }
             Ok(Event::Tick(_)) => {
                 if !account_received {
-                    let acct = shared.account();
+                    let acct = shared.portfolio.account();
                     if acct.net_liquidation != 0 {
                         net_liq = acct.net_liquidation;
                         account_received = true;
@@ -199,7 +199,7 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
         println!("  SKIP: No ticks received — market closed\n");
     } else if phase == 2 && got_position_update {
         // After buy+sell round trip, position should return to 0 (or near it)
-        let pos = shared.position(0);
+        let pos = shared.portfolio.position(0);
         println!("  Final position: {}", pos);
         assert!(pos.abs() <= 1, "Position after round trip should be 0 (±1 for timing), got {}", pos);
         println!("  PASS (position returned to {})\n", pos);
@@ -232,7 +232,7 @@ pub(super) fn phase_account_summary(conns: Conns) -> Conns {
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Tick(_)) => {
-                let acct = shared.account();
+                let acct = shared.portfolio.account();
                 if acct.net_liquidation > 0 {
                     // Verify individual fields
                     println!("  NetLiquidation:    {:.2}", acct.net_liquidation as f64 / PRICE_SCALE as f64);
@@ -329,7 +329,7 @@ pub(super) fn phase_completed_orders(conns: Conns) -> Conns {
     // Give the hot loop a moment to archive the completed order
     std::thread::sleep(Duration::from_millis(200));
 
-    let completed = shared.drain_completed_orders();
+    let completed = shared.orders.drain_completed_orders();
     println!("  Completed orders drained: {}", completed.len());
     for co in &completed {
         println!("    order_id={} status={:?} filled_qty={}", co.order_id, co.status, co.filled_qty);
@@ -432,14 +432,14 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
     let mut wrapper = GtWrapper { completed: Vec::new(), positions: Vec::new() };
 
     // Manually do what EClient::req_completed_orders does
-    for co in shared.drain_completed_orders() {
+    for co in shared.orders.drain_completed_orders() {
         let status_str = match co.status {
             OrderStatus::Filled => "Filled",
             OrderStatus::Cancelled => "Cancelled",
             OrderStatus::Rejected => "Inactive",
             _ => "Unknown",
         };
-        if let Some(info) = shared.get_order_info(co.order_id) {
+        if let Some(info) = shared.orders.get_order_info(co.order_id) {
             let mut state = info.order_state;
             state.status = status_str.into();
             wrapper.completed_order(&info.contract, &info.order, &state);
@@ -452,8 +452,8 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
     }
 
     // Manually do what EClient::req_positions does
-    for pi in shared.position_infos() {
-        let c = shared.get_contract(pi.con_id)
+    for pi in shared.portfolio.position_infos() {
+        let c = shared.reference.get_contract(pi.con_id)
             .unwrap_or_else(|| api::Contract { con_id: pi.con_id, ..Default::default() });
         let avg_cost = pi.avg_cost as f64 / PRICE_SCALE as f64;
         wrapper.position(&account_id, &c, pi.position as f64, avg_cost);
@@ -585,7 +585,7 @@ pub(super) fn phase_enriched_open_orders(conns: Conns) -> Conns {
 
     // Exercise req_all_open_orders path
     let mut wrapper = OoWrapper { orders: Vec::new() };
-    for (oid, info) in shared.drain_open_orders() {
+    for (oid, info) in shared.orders.drain_open_orders() {
         if !matches!(info.order_state.status.as_str(), "Filled" | "Cancelled" | "Inactive") {
             wrapper.open_order(oid as i64, &info.contract, &info.order, &info.order_state);
         }
@@ -693,8 +693,8 @@ pub(super) fn phase_enriched_positions(conns: Conns) -> Conns {
 
     // Exercise req_positions path
     let mut wrapper = PosWrapper { positions: Vec::new() };
-    for pi in shared.position_infos() {
-        let c = shared.get_contract(pi.con_id)
+    for pi in shared.portfolio.position_infos() {
+        let c = shared.reference.get_contract(pi.con_id)
             .unwrap_or_else(|| api::Contract { con_id: pi.con_id, ..Default::default() });
         let avg_cost = pi.avg_cost as f64 / PRICE_SCALE as f64;
         wrapper.position(&account_id, &c, pi.position as f64, avg_cost);
@@ -815,7 +815,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
 
     // Exercise exec_details path (same as process_msgs)
     let mut wrapper = ExecWrapper { execs: Vec::new() };
-    for fill in shared.drain_fills() {
+    for fill in shared.orders.drain_fills() {
         let price_f = fill.price as f64 / api::PRICE_SCALE_F;
         let side_str = match fill.side {
             Side::Buy => "BOT",
@@ -828,7 +828,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
             order_id: fill.order_id as i64,
             ..Default::default()
         };
-        let c = shared.get_order_info(fill.order_id)
+        let c = shared.orders.get_order_info(fill.order_id)
             .map(|info| info.contract)
             .unwrap_or_default();
         wrapper.exec_details(-1, &c, &exec);
@@ -925,7 +925,7 @@ pub(super) fn phase_pnl_subscription(conns: Conns) -> Conns {
             }
             Ok(Event::Tick(_)) | Ok(_) => {
                 if !pnl_checked {
-                    let acct = shared.account();
+                    let acct = shared.portfolio.account();
                     // DailyPnL is populated from server messages.
                     // At least net_liquidation should be set; PnL fields may be 0
                     // if no positions exist, which is valid.
@@ -986,7 +986,7 @@ pub(super) fn phase_news_bulletins(conns: Conns) -> Conns {
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(500)) {
             _ => {
-                let bulletins = shared.drain_news_bulletins();
+                let bulletins = shared.market.drain_news_bulletins();
                 for b in &bulletins {
                     println!("  Bulletin: id={} type={} exchange={} msg={}",
                         b.msg_id, b.msg_type, b.exchange,

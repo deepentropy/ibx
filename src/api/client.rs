@@ -229,7 +229,7 @@ impl EClient {
     /// Cancel all orders. Matches `reqGlobalCancel` in C++.
     pub fn req_global_cancel(&self) {
         // Use global instrument count (not just locally-tracked ones)
-        let count = self.shared.instrument_count();
+        let count = self.shared.market.instrument_count();
         for instrument in 0..count {
             let _ = self.control_tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }));
         }
@@ -310,9 +310,9 @@ impl EClient {
     /// Request positions. Matches `reqPositions` in C++.
     /// Immediately delivers all positions via wrapper callbacks, then calls position_end.
     pub fn req_positions(&self, wrapper: &mut impl Wrapper) {
-        let positions = self.shared.position_infos();
+        let positions = self.shared.portfolio.position_infos();
         for pi in &positions {
-            let c = self.shared.get_contract(pi.con_id)
+            let c = self.shared.reference.get_contract(pi.con_id)
                 .unwrap_or_else(|| Contract { con_id: pi.con_id, ..Default::default() });
             let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
             wrapper.position(&self.account_id, &c, pi.position as f64, avg_cost);
@@ -324,11 +324,11 @@ impl EClient {
 
     /// Request all open orders. Matches `reqAllOpenOrders` / `reqOpenOrders` in C++.
     pub fn req_all_open_orders(&self, wrapper: &mut impl Wrapper) {
-        for (order_id, info) in self.shared.drain_open_orders() {
+        for (order_id, info) in self.shared.orders.drain_open_orders() {
             if !matches!(info.order_state.status.as_str(), "Filled" | "Cancelled" | "Inactive") {
                 // Enrich contract with secdef cache at read time (may have arrived after exec report)
                 let contract = if info.contract.con_id != 0 {
-                    self.shared.get_contract(info.contract.con_id).unwrap_or(info.contract)
+                    self.shared.reference.get_contract(info.contract.con_id).unwrap_or(info.contract)
                 } else {
                     info.contract
                 };
@@ -343,19 +343,19 @@ impl EClient {
     /// Request completed orders. Matches `reqCompletedOrders` in C++.
     /// Immediately delivers all archived completed orders, then calls `completed_orders_end`.
     pub fn req_completed_orders(&self, wrapper: &mut impl Wrapper) {
-        for order in self.shared.drain_completed_orders() {
+        for order in self.shared.orders.drain_completed_orders() {
             let status_str = match order.status {
                 OrderStatus::Filled => "Filled",
                 OrderStatus::Cancelled => "Cancelled",
                 OrderStatus::Rejected => "Inactive",
                 _ => "Unknown",
             };
-            if let Some(info) = self.shared.get_order_info(order.order_id) {
+            if let Some(info) = self.shared.orders.get_order_info(order.order_id) {
                 let mut state = info.order_state;
                 state.status = status_str.into();
                 // Enrich contract with secdef cache at read time
                 let contract = if info.contract.con_id != 0 {
-                    self.shared.get_contract(info.contract.con_id).unwrap_or(info.contract)
+                    self.shared.reference.get_contract(info.contract.con_id).unwrap_or(info.contract)
                 } else {
                     info.contract
                 };
@@ -561,18 +561,18 @@ impl EClient {
     #[inline]
     pub fn quote(&self, req_id: i64) -> Option<Quote> {
         let map = self.core.req_to_instrument.lock().unwrap();
-        map.get(&req_id).map(|&iid| self.shared.quote(iid))
+        map.get(&req_id).map(|&iid| self.shared.market.quote(iid))
     }
 
     /// Direct SeqLock read by InstrumentId (for callers who track IDs themselves).
     #[inline]
     pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Quote {
-        self.shared.quote(instrument)
+        self.shared.market.quote(instrument)
     }
 
     /// Read account state snapshot.
     pub fn account(&self) -> AccountState {
-        self.shared.account()
+        self.shared.portfolio.account()
     }
 
     // ── Message Processing ──
@@ -589,7 +589,7 @@ impl EClient {
 
     fn dispatch_orders(&self, wrapper: &mut impl Wrapper) {
         // Fills → order_status + exec_details
-        for fill in self.shared.drain_fills() {
+        for fill in self.shared.orders.drain_fills() {
             let price_f = fill.price as f64 / PRICE_SCALE_F;
             let status = if fill.remaining == 0 { "Filled" } else { "PartiallyFilled" };
             wrapper.order_status(
@@ -602,14 +602,14 @@ impl EClient {
                 Side::Sell => "SLD",
                 Side::ShortSell => "SLD",
             };
-            let (c, exec) = if let Some(info) = self.shared.get_order_info(fill.order_id) {
+            let (c, exec) = if let Some(info) = self.shared.orders.get_order_info(fill.order_id) {
                 let mut ex = info.last_exec;
                 ex.side = side_str.into();
                 ex.shares = fill.qty as f64;
                 ex.price = price_f;
                 ex.order_id = fill.order_id as i64;
                 let contract = if info.contract.con_id != 0 {
-                    self.shared.get_contract(info.contract.con_id).unwrap_or(info.contract)
+                    self.shared.reference.get_contract(info.contract.con_id).unwrap_or(info.contract)
                 } else {
                     info.contract
                 };
@@ -628,7 +628,7 @@ impl EClient {
         }
 
         // Order updates → order_status
-        for update in self.shared.drain_order_updates() {
+        for update in self.shared.orders.drain_order_updates() {
             let status = order_status_str(update.status);
             wrapper.order_status(
                 update.order_id as i64, status, update.filled_qty as f64,
@@ -637,14 +637,14 @@ impl EClient {
         }
 
         // Cancel rejects → error
-        for reject in self.shared.drain_cancel_rejects() {
+        for reject in self.shared.orders.drain_cancel_rejects() {
             let code = if reject.reject_type == 1 { 202 } else { 10147 };
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
             wrapper.error(reject.order_id as i64, code, &msg, "");
         }
 
         // What-if → order_status (with margin info in why_held)
-        for wi in self.shared.drain_what_if_responses() {
+        for wi in self.shared.orders.drain_what_if_responses() {
             let msg = format!(
                 "WhatIf: initMargin={:.2}, maintMargin={:.2}, commission={:.2}",
                 wi.init_margin_after as f64 / PRICE_SCALE_F,
@@ -683,7 +683,7 @@ impl EClient {
         }
 
         // TBT trades → tick_by_tick_all_last
-        for trade in self.shared.drain_tbt_trades() {
+        for trade in self.shared.market.drain_tbt_trades() {
             let req_id = self.core.req_id_for_instrument(trade.instrument);
             let attrib_last = TickAttribLast::default();
             wrapper.tick_by_tick_all_last(
@@ -694,7 +694,7 @@ impl EClient {
         }
 
         // TBT quotes → tick_by_tick_bid_ask
-        for quote in self.shared.drain_tbt_quotes() {
+        for quote in self.shared.market.drain_tbt_quotes() {
             let req_id = self.core.req_id_for_instrument(quote.instrument);
             let attrib_ba = TickAttribBidAsk::default();
             wrapper.tick_by_tick_bid_ask(
@@ -709,7 +709,7 @@ impl EClient {
 
     fn dispatch_data(&self, wrapper: &mut impl Wrapper) {
         // News → tick_news
-        for news in self.shared.drain_tick_news() {
+        for news in self.shared.market.drain_tick_news() {
             let first_req_id = self.core.instrument_to_req.lock().unwrap()
                 .values().next().copied().unwrap_or(-1);
             wrapper.tick_news(
@@ -720,13 +720,13 @@ impl EClient {
 
         // News bulletins → update_news_bulletin (only when subscribed)
         if self.core.bulletins_subscribed() {
-            for b in self.shared.drain_news_bulletins() {
+            for b in self.shared.market.drain_news_bulletins() {
                 wrapper.update_news_bulletin(b.msg_id as i64, b.msg_type, &b.message, &b.exchange);
             }
         }
 
         // Historical data → historical_data + historical_data_end
-        for (req_id, response) in self.shared.drain_historical_data() {
+        for (req_id, response) in self.shared.reference.drain_historical_data() {
             for bar in &response.bars {
                 let bd = BarData {
                     date: bar.time.clone(),
@@ -746,21 +746,21 @@ impl EClient {
         }
 
         // Head timestamps → head_timestamp
-        for (req_id, response) in self.shared.drain_head_timestamps() {
+        for (req_id, response) in self.shared.reference.drain_head_timestamps() {
             wrapper.head_timestamp(req_id as i64, &response.head_timestamp);
         }
 
         // Contract details → contract_details + contract_details_end
-        for (req_id, def) in self.shared.drain_contract_details() {
+        for (req_id, def) in self.shared.reference.drain_contract_details() {
             let details = ContractDetails::from_definition(&def);
             wrapper.contract_details(req_id as i64, &details);
         }
-        for req_id in self.shared.drain_contract_details_end() {
+        for req_id in self.shared.reference.drain_contract_details_end() {
             wrapper.contract_details_end(req_id as i64);
         }
 
         // Matching symbols → symbol_samples
-        for (req_id, matches) in self.shared.drain_matching_symbols() {
+        for (req_id, matches) in self.shared.reference.drain_matching_symbols() {
             let descriptions: Vec<ContractDescription> = matches.iter().map(|m| {
                 ContractDescription {
                     con_id: m.con_id as i64,
@@ -775,12 +775,12 @@ impl EClient {
         }
 
         // Scanner params
-        for xml in self.shared.drain_scanner_params() {
+        for xml in self.shared.reference.drain_scanner_params() {
             wrapper.scanner_parameters(&xml);
         }
 
         // Scanner data
-        for (req_id, result) in self.shared.drain_scanner_data() {
+        for (req_id, result) in self.shared.reference.drain_scanner_data() {
             for (rank, con_id) in result.con_ids.iter().enumerate() {
                 let details = ContractDetails {
                     contract: Contract {
@@ -795,7 +795,7 @@ impl EClient {
         }
 
         // Historical news
-        for (req_id, headlines, has_more) in self.shared.drain_historical_news() {
+        for (req_id, headlines, has_more) in self.shared.reference.drain_historical_news() {
             for h in &headlines {
                 wrapper.historical_news(req_id as i64, &h.time, &h.provider_code, &h.article_id, &h.headline);
             }
@@ -803,28 +803,28 @@ impl EClient {
         }
 
         // News articles
-        for (req_id, article_type, text) in self.shared.drain_news_articles() {
+        for (req_id, article_type, text) in self.shared.reference.drain_news_articles() {
             wrapper.news_article(req_id as i64, article_type, &text);
         }
 
         // Fundamental data
-        for (req_id, data) in self.shared.drain_fundamental_data() {
+        for (req_id, data) in self.shared.reference.drain_fundamental_data() {
             wrapper.fundamental_data(req_id as i64, &data);
         }
 
         // Histogram data
-        for (req_id, entries) in self.shared.drain_histogram_data() {
+        for (req_id, entries) in self.shared.reference.drain_histogram_data() {
             let items: Vec<(f64, i64)> = entries.iter().map(|e| (e.price, e.count)).collect();
             wrapper.histogram_data(req_id as i64, &items);
         }
 
         // Historical ticks
-        for (req_id, data, _query_id, done) in self.shared.drain_historical_ticks() {
+        for (req_id, data, _query_id, done) in self.shared.reference.drain_historical_ticks() {
             wrapper.historical_ticks(req_id as i64, &data, done);
         }
 
         // Real-time bars
-        for (req_id, bar) in self.shared.drain_real_time_bars() {
+        for (req_id, bar) in self.shared.market.drain_real_time_bars() {
             wrapper.real_time_bar(
                 req_id as i64, bar.timestamp as i64,
                 bar.open, bar.high, bar.low, bar.close,
@@ -833,7 +833,7 @@ impl EClient {
         }
 
         // Historical schedules
-        for (req_id, schedule) in self.shared.drain_historical_schedules() {
+        for (req_id, schedule) in self.shared.reference.drain_historical_schedules() {
             let sessions: Vec<(String, String, String)> = schedule.sessions.iter()
                 .map(|s| (s.ref_date.clone(), s.open_time.clone(), s.close_time.clone()))
                 .collect();
@@ -1192,7 +1192,7 @@ mod tests {
     #[test]
     fn place_order_market() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order { action: "BUY".into(), total_quantity: 100.0, order_type: "MKT".into(), ..Default::default() };
         client.place_order(1, &spy(), &order).unwrap();
         // Drain RegisterInstrument + Subscribe
@@ -1208,7 +1208,7 @@ mod tests {
     #[test]
     fn place_order_limit() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 50.0, order_type: "LMT".into(),
             lmt_price: 150.25, ..Default::default()
@@ -1228,7 +1228,7 @@ mod tests {
     #[test]
     fn place_order_limit_gtc_uses_limit_ex() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 10.0, order_type: "LMT".into(),
             lmt_price: 100.0, tif: "GTC".into(), ..Default::default()
@@ -1247,7 +1247,7 @@ mod tests {
     #[test]
     fn place_order_limit_hidden_uses_limit_ex() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 10.0, order_type: "LMT".into(),
             lmt_price: 100.0, hidden: true, ..Default::default()
@@ -1266,7 +1266,7 @@ mod tests {
     #[test]
     fn place_order_stop() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "SELL".into(), total_quantity: 100.0, order_type: "STP".into(),
             aux_price: 145.0, ..Default::default()
@@ -1286,7 +1286,7 @@ mod tests {
     #[test]
     fn place_order_stop_limit() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "SELL".into(), total_quantity: 100.0, order_type: "STP LMT".into(),
             lmt_price: 144.0, aux_price: 145.0, ..Default::default()
@@ -1306,7 +1306,7 @@ mod tests {
     #[test]
     fn place_order_trailing_stop_amount() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL".into(),
             aux_price: 2.0, ..Default::default()
@@ -1325,7 +1325,7 @@ mod tests {
     #[test]
     fn place_order_trailing_stop_percent() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL".into(),
             trailing_percent: 5.0, ..Default::default()
@@ -1344,7 +1344,7 @@ mod tests {
     #[test]
     fn place_order_trailing_stop_limit() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL LIMIT".into(),
             lmt_price: 148.0, aux_price: 2.0, ..Default::default()
@@ -1358,7 +1358,7 @@ mod tests {
     #[test]
     fn place_order_moc() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "MOC".into(), ..Default::default()
         };
@@ -1371,7 +1371,7 @@ mod tests {
     #[test]
     fn place_order_loc() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "LOC".into(),
             lmt_price: 150.0, ..Default::default()
@@ -1385,7 +1385,7 @@ mod tests {
     #[test]
     fn place_order_mit() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "MIT".into(),
             aux_price: 148.0, ..Default::default()
@@ -1399,7 +1399,7 @@ mod tests {
     #[test]
     fn place_order_lit() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "LIT".into(),
             lmt_price: 150.0, aux_price: 148.0, ..Default::default()
@@ -1413,7 +1413,7 @@ mod tests {
     #[test]
     fn place_order_mtl() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "MTL".into(), ..Default::default()
         };
@@ -1426,7 +1426,7 @@ mod tests {
     #[test]
     fn place_order_mkt_prt() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "MKT PRT".into(), ..Default::default()
         };
@@ -1439,7 +1439,7 @@ mod tests {
     #[test]
     fn place_order_stp_prt() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "SELL".into(), total_quantity: 100.0, order_type: "STP PRT".into(),
             aux_price: 145.0, ..Default::default()
@@ -1453,7 +1453,7 @@ mod tests {
     #[test]
     fn place_order_rel() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "REL".into(),
             aux_price: 0.10, ..Default::default()
@@ -1467,7 +1467,7 @@ mod tests {
     #[test]
     fn place_order_peg_mkt() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "PEG MKT".into(),
             aux_price: 0.05, ..Default::default()
@@ -1481,7 +1481,7 @@ mod tests {
     #[test]
     fn place_order_peg_mid() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "PEG MID".into(),
             aux_price: 0.02, ..Default::default()
@@ -1495,7 +1495,7 @@ mod tests {
     #[test]
     fn place_order_midprice() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "MIDPRICE".into(),
             lmt_price: 150.0, ..Default::default()
@@ -1509,7 +1509,7 @@ mod tests {
     #[test]
     fn place_order_snap_mkt() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "SNAP MKT".into(), ..Default::default()
         };
@@ -1522,7 +1522,7 @@ mod tests {
     #[test]
     fn place_order_snap_mid() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "SNAP MID".into(), ..Default::default()
         };
@@ -1535,7 +1535,7 @@ mod tests {
     #[test]
     fn place_order_snap_pri() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "SNAP PRI".into(), ..Default::default()
         };
@@ -1548,7 +1548,7 @@ mod tests {
     #[test]
     fn place_order_box_top() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "BOX TOP".into(), ..Default::default()
         };
@@ -1561,7 +1561,7 @@ mod tests {
     #[test]
     fn place_order_sell_side() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "SELL".into(), total_quantity: 50.0, order_type: "MKT".into(), ..Default::default()
         };
@@ -1579,7 +1579,7 @@ mod tests {
     #[test]
     fn place_order_short_sell_side() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "SSHORT".into(), total_quantity: 50.0, order_type: "MKT".into(), ..Default::default()
         };
@@ -1597,7 +1597,7 @@ mod tests {
     #[test]
     fn place_order_algo_vwap() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 1000.0, order_type: "LMT".into(),
             lmt_price: 150.0, algo_strategy: "vwap".into(),
@@ -1613,7 +1613,7 @@ mod tests {
     #[test]
     fn place_order_what_if() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
             lmt_price: 150.0, what_if: true, ..Default::default()
@@ -1627,7 +1627,7 @@ mod tests {
     #[test]
     fn place_order_unsupported_type_returns_error() {
         let (client, _rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "FANTASY".into(), ..Default::default()
         };
@@ -1639,7 +1639,7 @@ mod tests {
     #[test]
     fn place_order_invalid_action_returns_error() {
         let (client, _rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "INVALID".into(), total_quantity: 100.0, order_type: "MKT".into(), ..Default::default()
         };
@@ -1650,7 +1650,7 @@ mod tests {
     #[test]
     fn place_order_auto_assigns_id_when_zero() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0, order_type: "MKT".into(), ..Default::default()
         };
@@ -1680,7 +1680,7 @@ mod tests {
     #[test]
     fn req_global_cancel_sends_cancel_all_for_each_instrument() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(2);
+        shared.market.set_instrument_count(2);
         client.req_global_cancel();
         let mut cancel_instruments = vec![];
         while let Ok(cmd) = rx.try_recv() {
@@ -1785,8 +1785,8 @@ mod tests {
     #[test]
     fn req_positions_delivers_via_wrapper() {
         let (client, _rx, shared) = test_client();
-        shared.set_position_info(PositionInfo { con_id: 265598, position: 100, avg_cost: 150 * PRICE_SCALE });
-        shared.set_position_info(PositionInfo { con_id: 756733, position: -50, avg_cost: 400 * PRICE_SCALE });
+        shared.portfolio.set_position_info(PositionInfo { con_id: 265598, position: 100, avg_cost: 150 * PRICE_SCALE });
+        shared.portfolio.set_position_info(PositionInfo { con_id: 756733, position: -50, avg_cost: 400 * PRICE_SCALE });
         let mut w = RecordingWrapper::default();
         client.req_positions(&mut w);
         let positions: Vec<_> = w.events.iter().filter(|e| e.starts_with("position:")).collect();
@@ -2001,7 +2001,7 @@ mod tests {
         let shared = Arc::new(SharedState::new());
         let mut q = Quote::default();
         q.bid = 200 * PRICE_SCALE;
-        shared.push_quote(0, &q);
+        shared.market.push_quote(0, &q);
 
         let (tx, _rx) = crossbeam_channel::unbounded();
         let handle = std::thread::spawn(|| {});
@@ -2019,7 +2019,7 @@ mod tests {
         let shared = Arc::new(SharedState::new());
         let mut q = Quote::default();
         q.ask = 300 * PRICE_SCALE;
-        shared.push_quote(2, &q);
+        shared.market.push_quote(2, &q);
 
         let (tx, _rx) = crossbeam_channel::unbounded();
         let handle = std::thread::spawn(|| {});
@@ -2034,7 +2034,7 @@ mod tests {
         let (_client, _rx, shared) = test_client();
         let mut a = AccountState::default();
         a.net_liquidation = 100_000 * PRICE_SCALE;
-        shared.set_account(&a);
+        shared.portfolio.set_account(&a);
         let (client2, _rx2, _) = {
             let (tx, rx) = crossbeam_channel::unbounded();
             let handle = std::thread::spawn(|| {});
@@ -2050,7 +2050,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_fill() {
         let (client, _rx, shared) = test_client();
-        shared.push_fill(Fill {
+        shared.orders.push_fill(Fill {
             instrument: 0, order_id: 42, side: Side::Buy,
             price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
             commission: PRICE_SCALE, timestamp_ns: 123456789,
@@ -2064,7 +2064,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_partial_fill() {
         let (client, _rx, shared) = test_client();
-        shared.push_fill(Fill {
+        shared.orders.push_fill(Fill {
             instrument: 0, order_id: 42, side: Side::Buy,
             price: 150 * PRICE_SCALE, qty: 50, remaining: 50,
             commission: PRICE_SCALE, timestamp_ns: 123456789,
@@ -2077,7 +2077,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_sell_fill() {
         let (client, _rx, shared) = test_client();
-        shared.push_fill(Fill {
+        shared.orders.push_fill(Fill {
             instrument: 0, order_id: 43, side: Side::Sell,
             price: 151 * PRICE_SCALE, qty: 100, remaining: 0,
             commission: PRICE_SCALE, timestamp_ns: 0,
@@ -2090,15 +2090,15 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_order_updates() {
         let (client, _rx, shared) = test_client();
-        shared.push_order_update(OrderUpdate {
+        shared.orders.push_order_update(OrderUpdate {
             order_id: 43, instrument: 0, status: OrderStatus::Submitted,
             filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
         });
-        shared.push_order_update(OrderUpdate {
+        shared.orders.push_order_update(OrderUpdate {
             order_id: 44, instrument: 0, status: OrderStatus::Cancelled,
             filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
         });
-        shared.push_order_update(OrderUpdate {
+        shared.orders.push_order_update(OrderUpdate {
             order_id: 45, instrument: 0, status: OrderStatus::Rejected,
             filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
         });
@@ -2112,7 +2112,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_cancel_reject_type_1() {
         let (client, _rx, shared) = test_client();
-        shared.push_cancel_reject(CancelReject {
+        shared.orders.push_cancel_reject(CancelReject {
             order_id: 44, instrument: 0, reject_type: 1, reason_code: 0, timestamp_ns: 0,
         });
         let mut w = RecordingWrapper::default();
@@ -2123,7 +2123,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_cancel_reject_type_2() {
         let (client, _rx, shared) = test_client();
-        shared.push_cancel_reject(CancelReject {
+        shared.orders.push_cancel_reject(CancelReject {
             order_id: 44, instrument: 0, reject_type: 2, reason_code: 5, timestamp_ns: 0,
         });
         let mut w = RecordingWrapper::default();
@@ -2141,7 +2141,7 @@ mod tests {
         let mut q = Quote::default();
         q.bid = 150 * PRICE_SCALE;
         q.ask = 151 * PRICE_SCALE;
-        shared.push_quote(0, &q);
+        shared.market.push_quote(0, &q);
 
         client.core.req_to_instrument.lock().unwrap().insert(1, 0);
         client.core.instrument_to_req.lock().unwrap().insert(0, 1);
@@ -2158,7 +2158,7 @@ mod tests {
 
         // Now change bid
         q.bid = 149 * PRICE_SCALE;
-        shared.push_quote(0, &q);
+        shared.market.push_quote(0, &q);
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:149")));
     }
@@ -2175,7 +2175,7 @@ mod tests {
             close: 149 * PRICE_SCALE, open: 150 * PRICE_SCALE,
             timestamp_ns: 1234567890,
         };
-        shared.push_quote(0, &q);
+        shared.market.push_quote(0, &q);
 
         client.core.req_to_instrument.lock().unwrap().insert(1, 0);
         client.core.instrument_to_req.lock().unwrap().insert(0, 1);
@@ -2203,10 +2203,10 @@ mod tests {
         let (client, _rx, shared) = test_client();
         let mut q0 = Quote::default();
         q0.bid = 150 * PRICE_SCALE;
-        shared.push_quote(0, &q0);
+        shared.market.push_quote(0, &q0);
         let mut q1 = Quote::default();
         q1.bid = 400 * PRICE_SCALE;
-        shared.push_quote(1, &q1);
+        shared.market.push_quote(1, &q1);
 
         client.core.req_to_instrument.lock().unwrap().insert(1, 0);
         client.core.instrument_to_req.lock().unwrap().insert(0, 1);
@@ -2227,7 +2227,7 @@ mod tests {
     fn process_msgs_dispatches_tbt_trade() {
         let (client, _rx, shared) = test_client();
         client.core.instrument_to_req.lock().unwrap().insert(0, 10);
-        shared.push_tbt_trade(TbtTrade {
+        shared.market.push_tbt_trade(TbtTrade {
             instrument: 0, price: 150 * PRICE_SCALE, size: 100,
             timestamp: 1700000000, exchange: "ARCA".into(), conditions: "".into(),
         });
@@ -2240,7 +2240,7 @@ mod tests {
     fn process_msgs_dispatches_tbt_quote() {
         let (client, _rx, shared) = test_client();
         client.core.instrument_to_req.lock().unwrap().insert(0, 10);
-        shared.push_tbt_quote(TbtQuote {
+        shared.market.push_tbt_quote(TbtQuote {
             instrument: 0, bid: 150 * PRICE_SCALE, ask: 151 * PRICE_SCALE,
             bid_size: 1000, ask_size: 2000, timestamp: 1700000000,
         });
@@ -2253,7 +2253,7 @@ mod tests {
     fn process_msgs_tbt_unknown_instrument_uses_neg1() {
         let (client, _rx, shared) = test_client();
         // No mapping for instrument 5
-        shared.push_tbt_trade(TbtTrade {
+        shared.market.push_tbt_trade(TbtTrade {
             instrument: 5, price: 150 * PRICE_SCALE, size: 100,
             timestamp: 0, exchange: "".into(), conditions: "".into(),
         });
@@ -2270,7 +2270,7 @@ mod tests {
     fn process_msgs_dispatches_tick_news() {
         let (client, _rx, shared) = test_client();
         client.core.instrument_to_req.lock().unwrap().insert(0, 1);
-        shared.push_tick_news(TickNews {
+        shared.market.push_tick_news(TickNews {
             provider_code: "BRFG".into(), article_id: "BRFG$123".into(),
             headline: "AAPL beats".into(), timestamp: 1700000000,
         });
@@ -2287,7 +2287,7 @@ mod tests {
     fn process_msgs_dispatches_news_bulletin() {
         let (client, _rx, shared) = test_client();
         client.req_news_bulletins(true);
-        shared.push_news_bulletin(NewsBulletin {
+        shared.market.push_news_bulletin(NewsBulletin {
             msg_id: 1, msg_type: 1,
             message: "Exchange notice".into(), exchange: "NYSE".into(),
         });
@@ -2303,7 +2303,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_what_if() {
         let (client, _rx, shared) = test_client();
-        shared.push_what_if(WhatIfResponse {
+        shared.orders.push_what_if(WhatIfResponse {
             order_id: 42, instrument: 0,
             init_margin_before: 0, maint_margin_before: 0,
             equity_with_loan_before: 0,
@@ -2324,7 +2324,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_historical_data() {
         let (client, _rx, shared) = test_client();
-        shared.push_historical_data(5, HistoricalResponse {
+        shared.reference.push_historical_data(5, HistoricalResponse {
             query_id: String::new(), timezone: String::new(),
             bars: vec![
                 HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50 },
@@ -2342,7 +2342,7 @@ mod tests {
     #[test]
     fn process_msgs_historical_data_incomplete_no_end() {
         let (client, _rx, shared) = test_client();
-        shared.push_historical_data(5, HistoricalResponse {
+        shared.reference.push_historical_data(5, HistoricalResponse {
             query_id: String::new(), timezone: String::new(),
             bars: vec![
                 HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50 },
@@ -2362,7 +2362,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_head_timestamp() {
         let (client, _rx, shared) = test_client();
-        shared.push_head_timestamp(10, HeadTimestampResponse { head_timestamp: "20200101".into(), timezone: String::new() });
+        shared.reference.push_head_timestamp(10, HeadTimestampResponse { head_timestamp: "20200101".into(), timezone: String::new() });
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e == "head_timestamp:10:20200101"));
@@ -2375,7 +2375,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_contract_details() {
         let (client, _rx, shared) = test_client();
-        shared.push_contract_details(7, ContractDefinition {
+        shared.reference.push_contract_details(7, ContractDefinition {
             con_id: 265598, symbol: "AAPL".into(), sec_type: SecurityType::Stock,
             exchange: "SMART".into(), primary_exchange: "NASDAQ".into(),
             currency: "USD".into(), local_symbol: "AAPL".into(),
@@ -2385,7 +2385,7 @@ mod tests {
             last_trade_date: String::new(), right: None, strike: 0.0,
             ..Default::default()
         });
-        shared.push_contract_details_end(7);
+        shared.reference.push_contract_details_end(7);
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e == "contract_details:7:AAPL"));
@@ -2399,7 +2399,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_symbol_samples() {
         let (client, _rx, shared) = test_client();
-        shared.push_matching_symbols(8, vec![
+        shared.reference.push_matching_symbols(8, vec![
             SymbolMatch {
                 con_id: 265598, symbol: "AAPL".into(), sec_type: SecurityType::Stock,
                 currency: "USD".into(), primary_exchange: "NASDAQ".into(),
@@ -2418,7 +2418,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_scanner_params() {
         let (client, _rx, shared) = test_client();
-        shared.push_scanner_params("<scanner>XML</scanner>".into());
+        shared.reference.push_scanner_params("<scanner>XML</scanner>".into());
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e == "scanner_parameters"));
@@ -2427,7 +2427,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_scanner_data() {
         let (client, _rx, shared) = test_client();
-        shared.push_scanner_data(3, ScannerResult {
+        shared.reference.push_scanner_data(3, ScannerResult {
             con_ids: vec![265598, 756733],
             scan_time: "2026-03-13".into(),
         });
@@ -2445,7 +2445,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_historical_news() {
         let (client, _rx, shared) = test_client();
-        shared.push_historical_news(4, vec![
+        shared.reference.push_historical_news(4, vec![
             NewsHeadline {
                 time: "2026-01-15".into(), provider_code: "BRFG".into(),
                 article_id: "BRFG$100".into(), headline: "Earnings beat".into(),
@@ -2465,7 +2465,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_news_article() {
         let (client, _rx, shared) = test_client();
-        shared.push_news_article(5, 0, "Full article text here".into());
+        shared.reference.push_news_article(5, 0, "Full article text here".into());
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e == "news_article:5:0:Full article text here"));
@@ -2478,7 +2478,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_fundamental_data() {
         let (client, _rx, shared) = test_client();
-        shared.push_fundamental_data(6, "<report>data</report>".into());
+        shared.reference.push_fundamental_data(6, "<report>data</report>".into());
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e == "fundamental_data:6"));
@@ -2491,7 +2491,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_histogram_data() {
         let (client, _rx, shared) = test_client();
-        shared.push_histogram_data(7, vec![
+        shared.reference.push_histogram_data(7, vec![
             HistogramEntry { price: 150.0, count: 500 },
             HistogramEntry { price: 151.0, count: 300 },
         ]);
@@ -2507,7 +2507,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_historical_ticks() {
         let (client, _rx, shared) = test_client();
-        shared.push_historical_ticks(8, HistoricalTickData::Midpoint(vec![
+        shared.reference.push_historical_ticks(8, HistoricalTickData::Midpoint(vec![
             HistoricalTickMidpoint { time: "2026-01-15 09:30:00".into(), price: 150.5 },
         ]), "MIDPOINT".into(), true);
         let mut w = RecordingWrapper::default();
@@ -2522,7 +2522,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_real_time_bar() {
         let (client, _rx, shared) = test_client();
-        shared.push_real_time_bar(9, RealTimeBar {
+        shared.market.push_real_time_bar(9, RealTimeBar {
             timestamp: 1700000000, open: 150.0, high: 151.0,
             low: 149.0, close: 150.5, volume: 1000.0, wap: 150.25, count: 50,
         });
@@ -2538,7 +2538,7 @@ mod tests {
     #[test]
     fn process_msgs_dispatches_historical_schedule() {
         let (client, _rx, shared) = test_client();
-        shared.push_historical_schedule(11, HistoricalScheduleResponse {
+        shared.reference.push_historical_schedule(11, HistoricalScheduleResponse {
             query_id: String::new(),
             timezone: "US/Eastern".into(),
             start_date_time: "20260101".into(),
@@ -2569,12 +2569,12 @@ mod tests {
     #[test]
     fn process_msgs_drains_on_first_call_empty_on_second() {
         let (client, _rx, shared) = test_client();
-        shared.push_fill(Fill {
+        shared.orders.push_fill(Fill {
             instrument: 0, order_id: 1, side: Side::Buy,
             price: PRICE_SCALE, qty: 1, remaining: 0,
             commission: 0, timestamp_ns: 0,
         });
-        shared.push_order_update(OrderUpdate {
+        shared.orders.push_order_update(OrderUpdate {
             order_id: 2, instrument: 0, status: OrderStatus::Submitted,
             filled_qty: 0, remaining_qty: 1, timestamp_ns: 0,
         });
@@ -2600,7 +2600,7 @@ mod tests {
     fn process_msgs_fill_uses_instrument_to_req_mapping() {
         let (client, _rx, shared) = test_client();
         client.core.instrument_to_req.lock().unwrap().insert(0, 42);
-        shared.push_fill(Fill {
+        shared.orders.push_fill(Fill {
             instrument: 0, order_id: 1, side: Side::Buy,
             price: PRICE_SCALE, qty: 100, remaining: 0,
             commission: 0, timestamp_ns: 0,
@@ -2616,7 +2616,7 @@ mod tests {
     #[test]
     fn modify_limit_order_price_via_resubmit() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0,
             order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
@@ -2645,7 +2645,7 @@ mod tests {
     #[test]
     fn modify_order_before_ack_no_panic() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         for price in 0..10 {
             let order = Order {
                 action: "BUY".into(), total_quantity: 100.0,
@@ -2662,7 +2662,7 @@ mod tests {
     #[test]
     fn cancel_during_modify_no_panic() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0,
             order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
@@ -2688,7 +2688,7 @@ mod tests {
     fn modify_filled_order_receives_cancel_reject() {
         let (client, _rx, shared) = test_client();
         client.map_req_instrument(1, 0);
-        shared.push_fill(Fill {
+        shared.orders.push_fill(Fill {
             instrument: 0, order_id: 120, side: Side::Buy,
             price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
             commission: 0, timestamp_ns: 1000,
@@ -2697,7 +2697,7 @@ mod tests {
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e.starts_with("order_status:120:Filled")));
 
-        shared.push_cancel_reject(CancelReject {
+        shared.orders.push_cancel_reject(CancelReject {
             order_id: 120, instrument: 0, reject_type: 2, reason_code: 0, timestamp_ns: 2000,
         });
         w.events.clear();
@@ -2709,7 +2709,7 @@ mod tests {
     #[test]
     fn rapid_modify_multiple_prices_no_crash() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         for i in 0..50 {
             let order = Order {
                 action: "BUY".into(), total_quantity: 100.0,
@@ -2728,7 +2728,7 @@ mod tests {
     #[test]
     fn modify_tif_day_to_gtc_via_resubmit() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0,
             order_type: "LMT".into(), lmt_price: 150.0,
@@ -2757,7 +2757,7 @@ mod tests {
     #[test]
     fn modify_price_and_qty_simultaneously() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0,
             order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
@@ -2785,7 +2785,7 @@ mod tests {
     #[test]
     fn modify_order_type_lmt_to_stp() {
         let (client, rx, shared) = test_client();
-        shared.set_instrument_count(1);
+        shared.market.set_instrument_count(1);
         let order = Order {
             action: "BUY".into(), total_quantity: 100.0,
             order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
@@ -2835,7 +2835,7 @@ mod tests {
         let mut q = Quote::default();
         q.bid = 450 * PRICE_SCALE;
         q.ask = 451 * PRICE_SCALE;
-        shared.push_quote(0, &q);
+        shared.market.push_quote(0, &q);
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:450")));
@@ -2848,13 +2848,13 @@ mod tests {
         let mut q = Quote::default();
         q.bid = 300 * PRICE_SCALE;
         q.ask = 301 * PRICE_SCALE;
-        shared.push_quote(0, &q);
+        shared.market.push_quote(0, &q);
 
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:")));
 
-        shared.push_quote(0, &q); // same quote
+        shared.market.push_quote(0, &q); // same quote
         w.events.clear();
         client.process_msgs(&mut w);
         let second_count = w.events.iter().filter(|e| e.starts_with("tick_price:1:")).count();
@@ -2872,7 +2872,7 @@ mod tests {
         let mut q = Quote::default();
         q.bid = 500 * PRICE_SCALE;
         q.ask = 501 * PRICE_SCALE;
-        shared.push_quote(0, &q);
+        shared.market.push_quote(0, &q);
         w.events.clear();
         client.process_msgs(&mut w);
         assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:500")));
@@ -2886,13 +2886,13 @@ mod tests {
         let mut q = Quote::default();
         q.bid = 100 * PRICE_SCALE;
         q.ask = 101 * PRICE_SCALE;
-        shared.push_quote(0, &q);
+        shared.market.push_quote(0, &q);
 
         let mut w = RecordingWrapper::default();
         client.process_msgs(&mut w);
 
         q.bid = 99 * PRICE_SCALE;
-        shared.push_quote(0, &q);
+        shared.market.push_quote(0, &q);
         w.events.clear();
         client.process_msgs(&mut w);
 

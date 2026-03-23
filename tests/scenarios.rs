@@ -42,7 +42,7 @@ fn order_lifecycle_partial_then_full_fill() {
     client.map_req_instrument(1, 0);
 
     // Step 1: Order submitted
-    shared.push_order_update(OrderUpdate {
+    shared.orders.push_order_update(OrderUpdate {
         order_id: 100, instrument: 0, status: OrderStatus::Submitted,
         filled_qty: 0, remaining_qty: 200, timestamp_ns: 1000,
     });
@@ -51,7 +51,7 @@ fn order_lifecycle_partial_then_full_fill() {
     assert!(w.events.iter().any(|e| e.starts_with("order_status:100:Submitted")));
 
     // Step 2: Partial fill — 120 of 200 shares
-    shared.push_fill(Fill {
+    shared.orders.push_fill(Fill {
         instrument: 0, order_id: 100, side: Side::Buy,
         price: 150 * PRICE_SCALE, qty: 120, remaining: 80,
         commission: PRICE_SCALE / 2, timestamp_ns: 2000,
@@ -62,7 +62,7 @@ fn order_lifecycle_partial_then_full_fill() {
     assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:BOT:120")));
 
     // Step 3: Remaining 80 fills
-    shared.push_fill(Fill {
+    shared.orders.push_fill(Fill {
         instrument: 0, order_id: 100, side: Side::Buy,
         price: 150 * PRICE_SCALE, qty: 80, remaining: 0,
         commission: PRICE_SCALE / 2, timestamp_ns: 3000,
@@ -77,7 +77,7 @@ fn order_lifecycle_partial_then_full_fill() {
 #[test]
 fn order_lifecycle_place_then_cancel() {
     let (client, rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
 
     // Place order
     let order = Order {
@@ -94,7 +94,7 @@ fn order_lifecycle_place_then_cancel() {
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::Cancel { order_id: 50 })));
 
     // Simulate cancel ack from engine
-    shared.push_order_update(OrderUpdate {
+    shared.orders.push_order_update(OrderUpdate {
         order_id: 50, instrument: 0, status: OrderStatus::Cancelled,
         filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
     });
@@ -103,7 +103,7 @@ fn order_lifecycle_place_then_cancel() {
     assert!(w.events.iter().any(|e| e.starts_with("order_status:50:Cancelled")));
 
     // Position should be 0 (no fills happened)
-    assert_eq!(shared.position(0), 0);
+    assert_eq!(shared.portfolio.position(0), 0);
 }
 
 /// Place order → rejection → error callback → no position change.
@@ -111,14 +111,14 @@ fn order_lifecycle_place_then_cancel() {
 fn order_lifecycle_rejection() {
     let (client, _rx, shared) = test_client();
 
-    shared.push_order_update(OrderUpdate {
+    shared.orders.push_order_update(OrderUpdate {
         order_id: 60, instrument: 0, status: OrderStatus::Rejected,
         filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:60:Inactive")));
-    assert_eq!(shared.position(0), 0);
+    assert_eq!(shared.portfolio.position(0), 0);
 }
 
 /// Place order → partial fill → cancel → verify position reflects only the partial fill.
@@ -128,7 +128,7 @@ fn order_lifecycle_partial_fill_then_cancel() {
     client.map_req_instrument(1, 0);
 
     // Partial fill: 30 of 100
-    shared.push_fill(Fill {
+    shared.orders.push_fill(Fill {
         instrument: 0, order_id: 70, side: Side::Buy,
         price: 150 * PRICE_SCALE, qty: 30, remaining: 70,
         commission: 0, timestamp_ns: 1000,
@@ -138,7 +138,7 @@ fn order_lifecycle_partial_fill_then_cancel() {
     assert!(w.events.iter().any(|e| e.starts_with("order_status:70:PartiallyFilled")));
 
     // Cancel remaining
-    shared.push_order_update(OrderUpdate {
+    shared.orders.push_order_update(OrderUpdate {
         order_id: 70, instrument: 0, status: OrderStatus::Cancelled,
         filled_qty: 30, remaining_qty: 70, timestamp_ns: 2000,
     });
@@ -151,7 +151,7 @@ fn order_lifecycle_partial_fill_then_cancel() {
 #[test]
 fn order_lifecycle_modify_then_fill() {
     let (client, rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
 
     // Place limit at 150
     let order = Order {
@@ -170,7 +170,7 @@ fn order_lifecycle_modify_then_fill() {
     while rx.try_recv().is_ok() {}
 
     // Fill at new price
-    shared.push_fill(Fill {
+    shared.orders.push_fill(Fill {
         instrument: 0, order_id: 80, side: Side::Buy,
         price: 151 * PRICE_SCALE, qty: 100, remaining: 0,
         commission: PRICE_SCALE, timestamp_ns: 0,
@@ -187,7 +187,7 @@ fn order_lifecycle_modify_then_fill() {
 #[test]
 fn order_lifecycle_what_if_preview() {
     let (client, rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
 
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0,
@@ -206,7 +206,7 @@ fn order_lifecycle_what_if_preview() {
     assert!(found_what_if);
 
     // Simulate what-if response
-    shared.push_what_if(WhatIfResponse {
+    shared.orders.push_what_if(WhatIfResponse {
         order_id: 90, instrument: 0,
         init_margin_before: 0, maint_margin_before: 0, equity_with_loan_before: 0,
         init_margin_after: 15000 * PRICE_SCALE,
@@ -219,14 +219,14 @@ fn order_lifecycle_what_if_preview() {
     assert!(w.events.iter().any(|e| e.starts_with("order_status:90:PreSubmitted")));
 
     // No actual position change
-    assert_eq!(shared.position(0), 0);
+    assert_eq!(shared.portfolio.position(0), 0);
 }
 
 /// Algo order (VWAP): place → multiple partial fills over time.
 #[test]
 fn order_lifecycle_algo_vwap_partial_fills() {
     let (client, rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
     client.map_req_instrument(1, 0);
 
     let order = Order {
@@ -248,7 +248,7 @@ fn order_lifecycle_algo_vwap_partial_fills() {
     for i in 0..4 {
         total_filled += qtys[i];
         let remaining = 1000 - total_filled;
-        shared.push_fill(Fill {
+        shared.orders.push_fill(Fill {
             instrument: 0, order_id: 110, side: Side::Buy,
             price: prices[i as usize], qty: qtys[i] as i64, remaining,
             commission: PRICE_SCALE / 10, timestamp_ns: (i as u64 + 1) * 1000,
@@ -275,7 +275,7 @@ fn order_lifecycle_cancel_reject_on_filled_order() {
     client.map_req_instrument(1, 0);
 
     // Order fills completely
-    shared.push_fill(Fill {
+    shared.orders.push_fill(Fill {
         instrument: 0, order_id: 120, side: Side::Buy,
         price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
         commission: 0, timestamp_ns: 1000,
@@ -285,7 +285,7 @@ fn order_lifecycle_cancel_reject_on_filled_order() {
     assert!(w.events.iter().any(|e| e.starts_with("order_status:120:Filled")));
 
     // Attempt to cancel → reject
-    shared.push_cancel_reject(CancelReject {
+    shared.orders.push_cancel_reject(CancelReject {
         order_id: 120, instrument: 0, reject_type: 1, reason_code: 0, timestamp_ns: 2000,
     });
     w.events.clear();
@@ -301,7 +301,7 @@ fn order_lifecycle_cancel_reject_on_filled_order() {
 #[test]
 fn market_data_subscribe_ticks_unsubscribe() {
     let (client, _rx, shared) = test_client();
-    shared.set_instrument_count(1);
+    shared.market.set_instrument_count(1);
 
     // Subscribe
     client.req_mkt_data(1, &spy(), "", false, false);
@@ -310,7 +310,7 @@ fn market_data_subscribe_ticks_unsubscribe() {
     let mut q = Quote::default();
     q.bid = 450 * PRICE_SCALE;
     q.ask = 451 * PRICE_SCALE;
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -321,7 +321,7 @@ fn market_data_subscribe_ticks_unsubscribe() {
 
     // Push new quote — should NOT be dispatched
     q.bid = 449 * PRICE_SCALE;
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
     w.events.clear();
     client.process_msgs(&mut w);
     let bid_ticks: Vec<_> = w.events.iter().filter(|e| e.starts_with("tick_price:1:")).collect();
@@ -332,7 +332,7 @@ fn market_data_subscribe_ticks_unsubscribe() {
 #[test]
 fn market_data_multi_instrument_independent() {
     let (client, _rx, shared) = test_client();
-    shared.set_instrument_count(2);
+    shared.market.set_instrument_count(2);
 
     // Manually map since we bypass the real engine
     client.map_req_instrument(1, 0);
@@ -341,11 +341,11 @@ fn market_data_multi_instrument_independent() {
     // Quote for instrument 0
     let mut q0 = Quote::default();
     q0.bid = 450 * PRICE_SCALE;
-    shared.push_quote(0, &q0);
+    shared.market.push_quote(0, &q0);
     // Quote for instrument 1
     let mut q1 = Quote::default();
     q1.bid = 150 * PRICE_SCALE;
-    shared.push_quote(1, &q1);
+    shared.market.push_quote(1, &q1);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -354,7 +354,7 @@ fn market_data_multi_instrument_independent() {
 
     // Update only instrument 1
     q1.bid = 149 * PRICE_SCALE;
-    shared.push_quote(1, &q1);
+    shared.market.push_quote(1, &q1);
     w.events.clear();
     client.process_msgs(&mut w);
 
@@ -372,17 +372,17 @@ fn market_data_tbt_trades_and_quotes() {
     client.map_req_instrument(10, 0);
 
     // TBT trade
-    shared.push_tbt_trade(TbtTrade {
+    shared.market.push_tbt_trade(TbtTrade {
         instrument: 0, price: 150 * PRICE_SCALE, size: 100,
         timestamp: 1700000001, exchange: "ARCA".into(), conditions: "".into(),
     });
     // TBT quote
-    shared.push_tbt_quote(TbtQuote {
+    shared.market.push_tbt_quote(TbtQuote {
         instrument: 0, bid: 149 * PRICE_SCALE, ask: 151 * PRICE_SCALE,
         bid_size: 500, ask_size: 300, timestamp: 1700000002,
     });
     // Second trade
-    shared.push_tbt_trade(TbtTrade {
+    shared.market.push_tbt_trade(TbtTrade {
         instrument: 0, price: 151 * PRICE_SCALE, size: 200,
         timestamp: 1700000003, exchange: "NYSE".into(), conditions: "".into(),
     });
@@ -414,7 +414,7 @@ fn account_round_trip_position() {
         commission: PRICE_SCALE, timestamp_ns: 1000,
     });
     assert_eq!(engine.context_mut().position(spy_id), 100);
-    assert_eq!(shared.position(spy_id), 100);
+    assert_eq!(shared.portfolio.position(spy_id), 100);
 
     // Sell 100 @ 152
     engine.inject_fill(&Fill {
@@ -423,10 +423,10 @@ fn account_round_trip_position() {
         commission: PRICE_SCALE, timestamp_ns: 2000,
     });
     assert_eq!(engine.context_mut().position(spy_id), 0);
-    assert_eq!(shared.position(spy_id), 0);
+    assert_eq!(shared.portfolio.position(spy_id), 0);
 
     // Two fills in shared state
-    let fills = shared.drain_fills();
+    let fills = shared.orders.drain_fills();
     assert_eq!(fills.len(), 2);
     assert_eq!(fills[0].side, Side::Buy);
     assert_eq!(fills[1].side, Side::Sell);
@@ -463,8 +463,8 @@ fn account_multi_instrument_positions() {
 
     assert_eq!(engine.context_mut().position(spy_id), 30);
     assert_eq!(engine.context_mut().position(aapl_id), 100);
-    assert_eq!(shared.position(spy_id), 30);
-    assert_eq!(shared.position(aapl_id), 100);
+    assert_eq!(shared.portfolio.position(spy_id), 30);
+    assert_eq!(shared.portfolio.position(aapl_id), 100);
 }
 
 /// Account state tracks through fills and position updates.
@@ -474,7 +474,7 @@ fn account_state_via_eclient() {
     let mut acct = AccountState::default();
     acct.net_liquidation = 100_000 * PRICE_SCALE;
     acct.buying_power = 200_000 * PRICE_SCALE;
-    shared.set_account(&acct);
+    shared.portfolio.set_account(&acct);
 
     let state = client.account();
     assert_eq!(state.net_liquidation, 100_000 * PRICE_SCALE);
@@ -482,7 +482,7 @@ fn account_state_via_eclient() {
 
     // Update after activity
     acct.net_liquidation = 99_500 * PRICE_SCALE;
-    shared.set_account(&acct);
+    shared.portfolio.set_account(&acct);
     let state2 = client.account();
     assert_eq!(state2.net_liquidation, 99_500 * PRICE_SCALE);
 }
@@ -493,10 +493,10 @@ fn account_req_positions_reflects_fills() {
     let (client, _rx, shared) = test_client();
 
     // Set position info (as engine would after fills)
-    shared.set_position_info(PositionInfo {
+    shared.portfolio.set_position_info(PositionInfo {
         con_id: 756733, position: 100, avg_cost: 450 * PRICE_SCALE,
     });
-    shared.set_position_info(PositionInfo {
+    shared.portfolio.set_position_info(PositionInfo {
         con_id: 265598, position: -50, avg_cost: 150 * PRICE_SCALE,
     });
 
@@ -518,7 +518,7 @@ fn historical_data_multi_bar_complete() {
     let (client, _rx, shared) = test_client();
 
     // First batch (incomplete)
-    shared.push_historical_data(5, HistoricalResponse {
+    shared.reference.push_historical_data(5, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![
             HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50 },
@@ -533,7 +533,7 @@ fn historical_data_multi_bar_complete() {
     assert!(!w.events.iter().any(|e| e == "historical_data_end:5"));
 
     // Second batch (complete)
-    shared.push_historical_data(5, HistoricalResponse {
+    shared.reference.push_historical_data(5, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![
             HistoricalBar { time: "20260103".into(), open: 107.0, high: 110.0, low: 106.0, close: 109.0, volume: 800, wap: 108.0, count: 40 },
@@ -574,7 +574,7 @@ fn historical_head_timestamp_then_bars() {
     let (client, _rx, shared) = test_client();
 
     // Step 1: head timestamp response
-    shared.push_head_timestamp(10, HeadTimestampResponse {
+    shared.reference.push_head_timestamp(10, HeadTimestampResponse {
         head_timestamp: "20050101".into(), timezone: "US/Eastern".into(),
     });
     let mut w = RecordingWrapper::default();
@@ -582,7 +582,7 @@ fn historical_head_timestamp_then_bars() {
     assert!(w.events.iter().any(|e| e == "head_timestamp:10:20050101"));
 
     // Step 2: user requests bars from that timestamp
-    shared.push_historical_data(11, HistoricalResponse {
+    shared.reference.push_historical_data(11, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![
             HistoricalBar { time: "20050101".into(), open: 50.0, high: 55.0, low: 49.0, close: 53.0, volume: 5000, wap: 52.0, count: 100 },
@@ -610,7 +610,7 @@ fn contract_lookup_then_subscribe() {
     assert!(matches!(cmd, ControlCommand::FetchContractDetails { req_id: 20, con_id: 265598, .. }));
 
     // Step 2: engine responds with contract details
-    shared.push_contract_details(20, ContractDefinition {
+    shared.reference.push_contract_details(20, ContractDefinition {
         con_id: 265598, symbol: "AAPL".into(), sec_type: SecurityType::Stock,
         exchange: "SMART".into(), primary_exchange: "NASDAQ".into(),
         currency: "USD".into(), local_symbol: "AAPL".into(),
@@ -620,7 +620,7 @@ fn contract_lookup_then_subscribe() {
         last_trade_date: String::new(), right: None, strike: 0.0,
         ..Default::default()
     });
-    shared.push_contract_details_end(20);
+    shared.reference.push_contract_details_end(20);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -634,7 +634,7 @@ fn contract_lookup_then_subscribe() {
     let mut q = Quote::default();
     q.bid = 178 * PRICE_SCALE;
     q.ask = 179 * PRICE_SCALE;
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
 
     // Map (simulating what engine would do)
     client.map_req_instrument(21, 0);
@@ -666,7 +666,7 @@ fn engine_full_trade_lifecycle() {
     engine.inject_tick(spy_id);
 
     // Verify shared state
-    let sq = shared.quote(spy_id);
+    let sq = shared.market.quote(spy_id);
     assert_eq!(sq.bid, 450 * PRICE_SCALE);
 
     // Buy fill
@@ -692,7 +692,7 @@ fn engine_full_trade_lifecycle() {
     assert_eq!(engine.context_mut().position(spy_id), 0);
 
     // Verify all fills flowed to SharedState
-    let fills = shared.drain_fills();
+    let fills = shared.orders.drain_fills();
     assert_eq!(fills.len(), 2);
     assert_eq!(fills[0].price, 450 * PRICE_SCALE);
     assert_eq!(fills[1].price, 455 * PRICE_SCALE);
@@ -775,17 +775,17 @@ fn mixed_ticks_during_fills() {
     let mut q = Quote::default();
     q.bid = 150 * PRICE_SCALE;
     q.ask = 151 * PRICE_SCALE;
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
 
     // Fill arrives at same time
-    shared.push_fill(Fill {
+    shared.orders.push_fill(Fill {
         instrument: 0, order_id: 42, side: Side::Buy,
         price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
         commission: 0, timestamp_ns: 0,
     });
 
     // Order update arrives at same time
-    shared.push_order_update(OrderUpdate {
+    shared.orders.push_order_update(OrderUpdate {
         order_id: 43, instrument: 0, status: OrderStatus::Submitted,
         filled_qty: 0, remaining_qty: 200, timestamp_ns: 0,
     });
@@ -809,19 +809,19 @@ fn mixed_news_between_orders() {
     client.map_req_instrument(1, 0);
 
     // Order submitted
-    shared.push_order_update(OrderUpdate {
+    shared.orders.push_order_update(OrderUpdate {
         order_id: 50, instrument: 0, status: OrderStatus::Submitted,
         filled_qty: 0, remaining_qty: 100, timestamp_ns: 1000,
     });
 
     // News arrives
-    shared.push_tick_news(TickNews {
+    shared.market.push_tick_news(TickNews {
         provider_code: "BRFG".into(), article_id: "BRFG$200".into(),
         headline: "Fed holds rates".into(), timestamp: 1700000000,
     });
 
     // Fill after news
-    shared.push_fill(Fill {
+    shared.orders.push_fill(Fill {
         instrument: 0, order_id: 50, side: Side::Buy,
         price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
         commission: 0, timestamp_ns: 2000,
@@ -844,23 +844,23 @@ fn mixed_all_data_types_single_process() {
     // Quotes
     let mut q = Quote::default();
     q.bid = 150 * PRICE_SCALE;
-    shared.push_quote(0, &q);
+    shared.market.push_quote(0, &q);
 
     // Fill
-    shared.push_fill(Fill {
+    shared.orders.push_fill(Fill {
         instrument: 0, order_id: 1, side: Side::Buy,
         price: PRICE_SCALE, qty: 1, remaining: 0,
         commission: 0, timestamp_ns: 0,
     });
 
     // TBT trade
-    shared.push_tbt_trade(TbtTrade {
+    shared.market.push_tbt_trade(TbtTrade {
         instrument: 0, price: 150 * PRICE_SCALE, size: 50,
         timestamp: 0, exchange: "".into(), conditions: "".into(),
     });
 
     // Historical data
-    shared.push_historical_data(5, HistoricalResponse {
+    shared.reference.push_historical_data(5, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![HistoricalBar {
             time: "20260101".into(), open: 100.0, high: 105.0,
@@ -870,13 +870,13 @@ fn mixed_all_data_types_single_process() {
     });
 
     // News
-    shared.push_tick_news(TickNews {
+    shared.market.push_tick_news(TickNews {
         provider_code: "DJ".into(), article_id: "DJ$1".into(),
         headline: "Breaking".into(), timestamp: 0,
     });
 
     // Scanner params
-    shared.push_scanner_params("<xml/>".into());
+    shared.reference.push_scanner_params("<xml/>".into());
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -898,11 +898,11 @@ fn mixed_all_data_types_single_process() {
 fn req_completed_orders_drains_and_dispatches() {
     let (client, _rx, shared) = test_client();
 
-    shared.push_completed_order(CompletedOrder {
+    shared.orders.push_completed_order(CompletedOrder {
         order_id: 100, instrument: 0, status: OrderStatus::Filled,
         filled_qty: 50, timestamp_ns: 1000,
     });
-    shared.push_completed_order(CompletedOrder {
+    shared.orders.push_completed_order(CompletedOrder {
         order_id: 200, instrument: 0, status: OrderStatus::Cancelled,
         filled_qty: 0, timestamp_ns: 2000,
     });
@@ -943,7 +943,7 @@ fn pnl_subscription_fires_on_change() {
     acct.daily_pnl = 500 * PRICE_SCALE;
     acct.unrealized_pnl = 1000 * PRICE_SCALE;
     acct.realized_pnl = 200 * PRICE_SCALE;
-    shared.set_account(&acct);
+    shared.portfolio.set_account(&acct);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -956,7 +956,7 @@ fn pnl_subscription_fires_on_change() {
 
     // Changed values → fires again
     acct.daily_pnl = 600 * PRICE_SCALE;
-    shared.set_account(&acct);
+    shared.portfolio.set_account(&acct);
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("pnl:10:")), "Changed PnL should fire callback");
@@ -969,7 +969,7 @@ fn cancel_pnl_stops_dispatch() {
     client.req_pnl(10, "DU123", "");
     let mut acct = AccountState::default();
     acct.daily_pnl = 500 * PRICE_SCALE;
-    shared.set_account(&acct);
+    shared.portfolio.set_account(&acct);
 
     // First call should fire
     let mut w = RecordingWrapper::default();
@@ -979,7 +979,7 @@ fn cancel_pnl_stops_dispatch() {
     // Cancel and change value
     client.cancel_pnl(10);
     acct.daily_pnl = 999 * PRICE_SCALE;
-    shared.set_account(&acct);
+    shared.portfolio.set_account(&acct);
 
     w.events.clear();
     client.process_msgs(&mut w);
@@ -992,7 +992,7 @@ fn pnl_single_dispatches_position_info() {
 
     client.req_pnl_single(20, "DU123", "", 265598);
 
-    shared.set_position_info(PositionInfo {
+    shared.portfolio.set_position_info(PositionInfo {
         con_id: 265598,
         position: 100,
         avg_cost: 150 * PRICE_SCALE,
@@ -1021,7 +1021,7 @@ fn account_summary_one_shot_delivery() {
     acct.net_liquidation = 100_000 * PRICE_SCALE;
     acct.buying_power = 400_000 * PRICE_SCALE;
     acct.available_funds = 50_000 * PRICE_SCALE;
-    shared.set_account(&acct);
+    shared.portfolio.set_account(&acct);
 
     client.req_account_summary(5, "All", "NetLiquidation,BuyingPower,AvailableFunds");
 
@@ -1051,7 +1051,7 @@ fn cancel_account_summary_prevents_delivery() {
 
     let mut acct = AccountState::default();
     acct.net_liquidation = 100_000 * PRICE_SCALE;
-    shared.set_account(&acct);
+    shared.portfolio.set_account(&acct);
 
     client.req_account_summary(5, "All", "NetLiquidation");
     client.cancel_account_summary(5);
@@ -1069,7 +1069,7 @@ fn account_summary_empty_tags_returns_all() {
     acct.net_liquidation = 100_000 * PRICE_SCALE;
     acct.buying_power = 400_000 * PRICE_SCALE;
     acct.total_cash_value = 50_000 * PRICE_SCALE;
-    shared.set_account(&acct);
+    shared.portfolio.set_account(&acct);
 
     // Empty tags string → all non-zero fields
     client.req_account_summary(7, "All", "");
@@ -1090,7 +1090,7 @@ fn account_summary_empty_tags_returns_all() {
 fn news_bulletins_gated_by_subscription() {
     let (client, _rx, shared) = test_client();
 
-    shared.push_news_bulletin(NewsBulletin {
+    shared.market.push_news_bulletin(NewsBulletin {
         msg_id: 1, msg_type: 1, message: "Test bulletin".into(), exchange: "NYSE".into(),
     });
 
@@ -1102,7 +1102,7 @@ fn news_bulletins_gated_by_subscription() {
     // Subscribe
     client.req_news_bulletins(true);
 
-    shared.push_news_bulletin(NewsBulletin {
+    shared.market.push_news_bulletin(NewsBulletin {
         msg_id: 2, msg_type: 2, message: "Exchange down".into(), exchange: "ARCA".into(),
     });
 
@@ -1113,7 +1113,7 @@ fn news_bulletins_gated_by_subscription() {
     // Cancel subscription
     client.cancel_news_bulletins();
 
-    shared.push_news_bulletin(NewsBulletin {
+    shared.market.push_news_bulletin(NewsBulletin {
         msg_id: 3, msg_type: 1, message: "After cancel".into(), exchange: "NYSE".into(),
     });
 

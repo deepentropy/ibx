@@ -140,7 +140,7 @@ impl HmdsState {
                         if let Some(pos) = self.pending_historical.iter().position(|(qid, _)| *qid == resp.query_id) {
                             let (_, req_id) = self.pending_historical[pos];
                             let is_complete = resp.is_complete;
-                            shared.push_historical_data(req_id, resp.clone());
+                            shared.reference.push_historical_data(req_id, resp.clone());
                             emit(event_tx, Event::HistoricalData { req_id, data: resp });
                             if is_complete {
                                 self.pending_historical.remove(pos);
@@ -150,28 +150,28 @@ impl HmdsState {
                     else if let Some(resp) = crate::control::historical::parse_head_timestamp_response(xml_tag) {
                         if let Some(pos) = self.pending_head_ts.iter().position(|_| true) {
                             let (_, req_id) = self.pending_head_ts.remove(pos);
-                            shared.push_head_timestamp(req_id, resp.clone());
+                            shared.reference.push_head_timestamp(req_id, resp.clone());
                             emit(event_tx, Event::HeadTimestamp { req_id, data: resp });
                         }
                     }
                     else if let Some(entries) = crate::control::histogram::parse_histogram_response(xml_tag) {
                         if let Some(pos) = self.pending_histogram.iter().position(|_| true) {
                             let (_, req_id) = self.pending_histogram.remove(pos);
-                            shared.push_histogram_data(req_id, entries);
+                            shared.reference.push_histogram_data(req_id, entries);
                         }
                     }
                     else if xml_tag.contains("<ResultSetTick>") {
                         if let Some(pos) = self.pending_ticks.iter().position(|(qid, _, _)| xml_tag.contains(qid.as_str())) {
                             let (_, req_id, what_to_show) = self.pending_ticks.remove(pos);
                             if let Some((_, data, done)) = crate::control::historical::parse_tick_response(xml_tag, &what_to_show) {
-                                shared.push_historical_ticks(req_id, data, what_to_show, done);
+                                shared.reference.push_historical_ticks(req_id, data, what_to_show, done);
                             }
                         }
                     }
                     else if let Some(resp) = crate::control::historical::parse_schedule_response(xml_tag) {
                         if let Some(pos) = self.pending_schedule.iter().position(|(qid, _)| *qid == resp.query_id) {
                             let (_, req_id) = self.pending_schedule.remove(pos);
-                            shared.push_historical_schedule(req_id, resp);
+                            shared.reference.push_historical_schedule(req_id, resp);
                         }
                     }
                     else if let Some(ticker_id_str) = crate::control::historical::parse_ticker_id(xml_tag) {
@@ -204,7 +204,7 @@ impl HmdsState {
                         "10002" => {
                             if let Some(xml) = parsed.get(&6118) {
                                 self.pending_scanner_params = false;
-                                shared.push_scanner_params(xml.clone());
+                                shared.reference.push_scanner_params(xml.clone());
                             }
                         }
                         "10005" => {
@@ -212,7 +212,7 @@ impl HmdsState {
                                 if let Some(result) = crate::control::scanner::parse_scanner_response(xml) {
                                     if let Some((_, req_id)) = self.pending_scanner.first() {
                                         let req_id = *req_id;
-                                        shared.push_scanner_data(req_id, result);
+                                        shared.reference.push_scanner_data(req_id, result);
                                     }
                                 }
                             }
@@ -226,7 +226,7 @@ impl HmdsState {
                                         let (_, req_id) = self.pending_articles.remove(pos);
                                         if let Some(raw) = &raw_bytes {
                                             if let Some((atype, text)) = crate::control::news::parse_article_payload(raw) {
-                                                shared.push_news_article(req_id, atype, text);
+                                                shared.reference.push_news_article(req_id, atype, text);
                                             }
                                         }
                                     }
@@ -234,9 +234,9 @@ impl HmdsState {
                                     let (_, req_id) = self.pending_news.remove(pos);
                                     if let Some(raw) = &raw_bytes {
                                         let (headlines, has_more) = crate::control::news::parse_news_payload(raw);
-                                        shared.push_historical_news(req_id, headlines, has_more);
+                                        shared.reference.push_historical_news(req_id, headlines, has_more);
                                     } else {
-                                        shared.push_historical_news(req_id, Vec::new(), false);
+                                        shared.reference.push_historical_news(req_id, Vec::new(), false);
                                     }
                                 }
                             }
@@ -251,7 +251,7 @@ impl HmdsState {
                                 };
                                 if let Some(pos) = self.pending_fundamental.iter().position(|_| true) {
                                     let (_, req_id) = self.pending_fundamental.remove(pos);
-                                    shared.push_fundamental_data(req_id, data);
+                                    shared.reference.push_fundamental_data(req_id, data);
                                 }
                             }
                         }
@@ -287,7 +287,7 @@ impl HmdsState {
                         exchange: exchange.clone(),
                         conditions: conditions.clone(),
                     };
-                    shared.push_tbt_trade(trade.clone());
+                    shared.market.push_tbt_trade(trade.clone());
                     emit(event_tx, Event::TbtTrade(trade));
                 }
                 tick_decoder::TbtEntry::Quote { timestamp, bid_cents_delta, ask_cents_delta, bid_size, ask_size } => {
@@ -300,7 +300,7 @@ impl HmdsState {
                         ask_size: *ask_size as i64,
                         timestamp: *timestamp,
                     };
-                    shared.push_tbt_quote(quote);
+                    shared.market.push_tbt_quote(quote);
                     emit(event_tx, Event::TbtQuote(quote));
                 }
             }
@@ -327,7 +327,7 @@ impl HmdsState {
         let payload = &body[11..11 + payload_len];
         if let Some(mut bar) = crate::control::historical::decode_bar_payload(payload, min_tick) {
             bar.timestamp = timestamp;
-            shared.push_real_time_bar(req_id, bar);
+            shared.market.push_real_time_bar(req_id, bar);
         }
     }
 

@@ -217,7 +217,7 @@ pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _co
     while Instant::now() < deadline2 {
         match event_rx2.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::Tick(inst)) => {
-                let q = shared2.quote(inst);
+                let q = shared2.market.quote(inst);
                 println!("  Step 2: Tick after reconnect bid={:.4} ask={:.4}",
                     q.bid as f64 / PRICE_SCALE as f64, q.ask as f64 / PRICE_SCALE as f64);
                 got_ticks_after = true;
@@ -280,7 +280,7 @@ pub(super) fn phase_register_instrument_channel(conns: Conns) -> Conns {
     std::thread::sleep(Duration::from_millis(500));
 
     // Verify instrument count increased
-    let count = shared.instrument_count();
+    let count = shared.market.instrument_count();
     println!("  Instrument count after 3 registrations: {}", count);
 
     // Now subscribe to one of the registered instruments

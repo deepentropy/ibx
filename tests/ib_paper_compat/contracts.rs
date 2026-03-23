@@ -185,7 +185,7 @@ pub(super) fn phase_matching_symbols(conns: Conns) -> Conns {
     let mut matches: Option<Vec<contracts::SymbolMatch>> = None;
 
     while Instant::now() < deadline && matches.is_none() {
-        let results = shared.drain_matching_symbols();
+        let results = shared.reference.drain_matching_symbols();
         for (req_id, m) in results {
             if req_id == 8100 {
                 matches = Some(m);
@@ -276,7 +276,7 @@ pub(super) fn phase_matching_symbols_channel(conns: Conns) -> Conns {
     let mut match_count = 0usize;
 
     while Instant::now() < deadline {
-        let results = shared.drain_matching_symbols();
+        let results = shared.reference.drain_matching_symbols();
         for (req_id, matches) in &results {
             if *req_id == 2001 {
                 match_count = matches.len();

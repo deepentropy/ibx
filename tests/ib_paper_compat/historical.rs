@@ -52,7 +52,7 @@ pub(super) fn phase_historical_data(mut conns: Conns, gw: &Gateway, config: &Gat
     let mut complete = false;
 
     while Instant::now() < deadline && !complete {
-        let results = shared.drain_historical_data();
+        let results = shared.reference.drain_historical_data();
         for (req_id, resp) in results {
             if req_id == 1100 {
                 all_bars.extend(resp.bars);
@@ -119,7 +119,7 @@ pub(super) fn phase_historical_daily_bars(mut conns: Conns, gw: &Gateway, config
     let mut complete = false;
 
     while Instant::now() < deadline && !complete {
-        let results = shared.drain_historical_data();
+        let results = shared.reference.drain_historical_data();
         for (req_id, resp) in results {
             if req_id == 7600 {
                 all_bars.extend(resp.bars);
@@ -175,7 +175,7 @@ pub(super) fn phase_cancel_historical(mut conns: Conns, gw: &Gateway, config: &G
     let mut got_first_chunk = false;
     let first_deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < first_deadline && !got_first_chunk {
-        let results = shared.drain_historical_data();
+        let results = shared.reference.drain_historical_data();
         for (req_id, resp) in &results {
             if *req_id == 7700 {
                 got_first_chunk = true;
@@ -226,7 +226,7 @@ pub(super) fn phase_head_timestamp(mut conns: Conns, gw: &Gateway, config: &Gate
     let deadline = Instant::now() + Duration::from_secs(15);
 
     while Instant::now() < deadline && response.is_none() {
-        let results = shared.drain_head_timestamps();
+        let results = shared.reference.drain_head_timestamps();
         for (req_id, resp) in results {
             if req_id == 7900 { response = Some(resp); }
         }
@@ -276,7 +276,7 @@ pub(super) fn phase_scanner_subscription(mut conns: Conns, gw: &Gateway, config:
     let deadline = Instant::now() + Duration::from_secs(15);
 
     while Instant::now() < deadline && result.is_none() {
-        let results = shared.drain_scanner_data();
+        let results = shared.reference.drain_scanner_data();
         for (req_id, r) in results {
             if req_id == 8200 { result = Some(r); }
         }
@@ -329,7 +329,7 @@ pub(super) fn phase_fundamental_data(mut conns: Conns, gw: &Gateway, config: &Ga
     let deadline = Instant::now() + Duration::from_secs(15);
 
     while Instant::now() < deadline && !got_data {
-        let results = shared.drain_fundamental_data();
+        let results = shared.reference.drain_fundamental_data();
         for (req_id, data) in results {
             if req_id == 8300 {
                 println!("  Fundamental data: {} chars", data.len());
@@ -402,7 +402,7 @@ pub(super) fn phase_historical_news(mut conns: Conns, gw: &Gateway, config: &Gat
 
     while Instant::now() < deadline && !got_news {
         // Check SharedState for results (the hot_loop pushes here)
-        let results = shared.drain_historical_news();
+        let results = shared.reference.drain_historical_news();
         if !results.is_empty() {
             for (req_id, headlines, has_more) in &results {
                 // Step 4: Verify SPECIFIC VALUES
@@ -473,7 +473,7 @@ pub(super) fn phase_historical_ticks(mut conns: Conns, gw: &Gateway, config: &Ga
     let mut monotonic_violations = 0u32;
 
     while Instant::now() < deadline {
-        let ticks = shared.drain_historical_ticks();
+        let ticks = shared.reference.drain_historical_ticks();
         for (req_id, data, what, done) in &ticks {
             if *req_id == 2001 {
                 match data {
@@ -545,7 +545,7 @@ pub(super) fn phase_histogram_data(mut conns: Conns, gw: &Gateway, config: &Gate
     let mut entries = Vec::new();
 
     while Instant::now() < deadline {
-        let data = shared.drain_histogram_data();
+        let data = shared.reference.drain_histogram_data();
         for (req_id, ents) in data {
             if req_id == 3001 {
                 entries = ents;
@@ -600,7 +600,7 @@ pub(super) fn phase_historical_schedule(mut conns: Conns, gw: &Gateway, config: 
     let mut schedule: Option<HistoricalScheduleResponse> = None;
 
     while Instant::now() < deadline {
-        let data = shared.drain_historical_schedules();
+        let data = shared.reference.drain_historical_schedules();
         for (req_id, resp) in data {
             if req_id == 4001 {
                 schedule = Some(resp);
@@ -656,7 +656,7 @@ pub(super) fn phase_realtime_bars(mut conns: Conns, gw: &Gateway, config: &Gatew
     let mut bars = Vec::new();
 
     while Instant::now() < deadline {
-        let data = shared.drain_real_time_bars();
+        let data = shared.market.drain_real_time_bars();
         for (req_id, bar) in data {
             if req_id == 5001 {
                 bars.push(bar);
@@ -715,7 +715,7 @@ pub(super) fn phase_news_article(mut conns: Conns, gw: &Gateway, config: &Gatewa
     let mut provider_code: Option<String> = None;
 
     while Instant::now() < deadline && article_id.is_none() {
-        let data = shared.drain_historical_news();
+        let data = shared.reference.drain_historical_news();
         for (req_id, headlines, _done) in data {
             if req_id == 6001 {
                 if let Some(h) = headlines.first() {
@@ -741,7 +741,7 @@ pub(super) fn phase_news_article(mut conns: Conns, gw: &Gateway, config: &Gatewa
         let mut got_article = false;
 
         while Instant::now() < deadline {
-            let articles = shared.drain_news_articles();
+            let articles = shared.reference.drain_news_articles();
             for (req_id, art_type, body) in &articles {
                 if *req_id == 6002 {
                     println!("  Article: type={} len={}", art_type, body.len());
@@ -800,7 +800,7 @@ pub(super) fn phase_fundamental_data_channel(mut conns: Conns, gw: &Gateway, con
     let mut got_data = false;
 
     while Instant::now() < deadline {
-        let data = shared.drain_fundamental_data();
+        let data = shared.reference.drain_fundamental_data();
         for (req_id, xml) in &data {
             if *req_id == 7001 {
                 println!("  Fundamental data: {} bytes", xml.len());
@@ -862,7 +862,7 @@ pub(super) fn phase_parallel_historical(mut conns: Conns, gw: &Gateway, config: 
     let mut received: [bool; 3] = [false; 3];
 
     while Instant::now() < deadline {
-        let data = shared.drain_historical_data();
+        let data = shared.reference.drain_historical_data();
         for (req_id, resp) in &data {
             match *req_id {
                 8001 => { if resp.is_complete { received[0] = true; println!("  req 8001 (1d/5min): {} bars", resp.bars.len()); } }
@@ -920,12 +920,12 @@ pub(super) fn phase_scanner_params(mut conns: Conns, gw: &Gateway, config: &Gate
     let mut got_scan = false;
 
     while Instant::now() < deadline {
-        let params = shared.drain_scanner_params();
+        let params = shared.reference.drain_scanner_params();
         if !params.is_empty() {
             println!("  Scanner params XML: {} bytes", params[0].len());
             got_params = true;
         }
-        let scans = shared.drain_scanner_data();
+        let scans = shared.reference.drain_scanner_data();
         for (req_id, result) in &scans {
             if *req_id == 9001 {
                 println!("  Scanner results: {} contracts", result.con_ids.len());
@@ -985,7 +985,7 @@ pub(super) fn phase_historical_ohlc_validation(conns: Conns, _gw: &Gateway, _con
     let mut bars_data: Option<historical::HistoricalResponse> = None;
 
     while Instant::now() < deadline {
-        let hist = shared.drain_historical_data();
+        let hist = shared.reference.drain_historical_data();
         for (rid, data) in hist {
             if rid == req_id {
                 bars_data = Some(data);
@@ -1081,7 +1081,7 @@ pub(super) fn phase_large_historical_dataset(mut conns: Conns, gw: &Gateway, con
     let mut duplicate_timestamps = 0u32;
 
     while Instant::now() < deadline {
-        let data = shared.drain_historical_data();
+        let data = shared.reference.drain_historical_data();
         for (req_id, resp) in &data {
             if *req_id == 11001 {
                 for bar in &resp.bars {
@@ -1147,7 +1147,7 @@ pub(super) fn phase_dst_boundary_historical(mut conns: Conns, gw: &Gateway, conf
     let mut complete = false;
 
     while Instant::now() < deadline {
-        let data = shared.drain_historical_data();
+        let data = shared.reference.drain_historical_data();
         for (req_id, resp) in &data {
             if *req_id == 12001 {
                 bars.extend(resp.bars.iter().cloned());
@@ -1248,10 +1248,10 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config:
     std::thread::sleep(Duration::from_secs(3));
 
     // Verify no responses arrived for cancelled requests
-    let hist = shared.drain_historical_data();
-    let head = shared.drain_head_timestamps();
-    let fund = shared.drain_fundamental_data();
-    let histo = shared.drain_histogram_data();
+    let hist = shared.reference.drain_historical_data();
+    let head = shared.reference.drain_head_timestamps();
+    let fund = shared.reference.drain_fundamental_data();
+    let histo = shared.reference.drain_histogram_data();
 
     let hist_for_req: Vec<_> = hist.iter().filter(|(id, _)| *id == 20001).collect();
     let head_for_req: Vec<_> = head.iter().filter(|(id, _)| *id == 20002).collect();
@@ -1328,7 +1328,7 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config
 
     while Instant::now() < deadline {
         // Check historical responses
-        let data = shared.drain_historical_data();
+        let data = shared.reference.drain_historical_data();
         for (req_id, resp) in &data {
             if *req_id >= 30001 && *req_id <= 30005 && resp.is_complete {
                 hist_responses.insert(*req_id);

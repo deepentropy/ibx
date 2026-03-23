@@ -223,7 +223,7 @@ impl FarmState {
             let bit = 1u32 << instrument;
             if notified & bit == 0 {
                 notified |= bit;
-                shared.push_quote(instrument, context.quote(instrument));
+                shared.market.push_quote(instrument, context.quote(instrument));
                 emit(event_tx, Event::Tick(instrument));
             }
         }
@@ -459,7 +459,7 @@ impl FarmState {
                 headline,
                 timestamp,
             };
-            shared.push_tick_news(news.clone());
+            shared.market.push_tick_news(news.clone());
             emit(event_tx, Event::News(news));
         }
     }
