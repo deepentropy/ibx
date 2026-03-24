@@ -438,7 +438,7 @@ impl HmdsState {
         let duration = duration.to_lowercase();
         let duration = duration.as_str();
         let end_date_time = if end_date_time.is_empty() {
-            crate::gateway::chrono_free_timestamp()
+            crate::gateway::chrono_free_timestamp().to_string()
         } else {
             end_date_time.to_string()
         };
@@ -698,7 +698,7 @@ impl HmdsState {
             con_id,
             use_rth,
             period: period.to_string(),
-            end_time: chrono_free_timestamp(),
+            end_time: chrono_free_timestamp().to_string(),
         };
         let xml = crate::control::histogram::build_histogram_request_xml(&req);
         let query_id = format!("hg_{}", self.next_hmds_query_id);
@@ -759,7 +759,7 @@ impl HmdsState {
         self.next_hmds_query_id += 1;
         let duration = duration.to_lowercase();
         let end_date_time = if end_date_time.is_empty() {
-            chrono_free_timestamp()
+            chrono_free_timestamp().to_string()
         } else {
             end_date_time.to_string()
         };

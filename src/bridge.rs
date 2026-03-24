@@ -11,7 +11,7 @@
 //! - External callers read snapshots and poll events without blocking the hot loop.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::cell::UnsafeCell;
 
 use std::collections::HashMap;
@@ -151,27 +151,27 @@ impl MarketDataState {
     }
 
     pub fn drain_tbt_trades(&self) -> Vec<TbtTrade> {
-        std::mem::take(&mut *self.tbt_trades.lock().unwrap())
+        self.tbt_trades.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_tbt_quotes(&self) -> Vec<TbtQuote> {
-        std::mem::take(&mut *self.tbt_quotes.lock().unwrap())
+        self.tbt_quotes.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_real_time_bars(&self) -> Vec<(u32, RealTimeBar)> {
-        std::mem::take(&mut *self.real_time_bars.lock().unwrap())
+        self.real_time_bars.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_depth_updates(&self) -> Vec<DepthUpdate> {
-        std::mem::take(&mut *self.depth_updates.lock().unwrap())
+        self.depth_updates.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_tick_news(&self) -> Vec<TickNews> {
-        std::mem::take(&mut *self.tick_news.lock().unwrap())
+        self.tick_news.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_news_bulletins(&self) -> Vec<NewsBulletin> {
-        std::mem::take(&mut *self.news_bulletins.lock().unwrap())
+        self.news_bulletins.lock().unwrap().drain(..).collect()
     }
 
     // ── Hot-loop-side writers ──
@@ -188,6 +188,7 @@ impl MarketDataState {
     #[doc(hidden)] pub fn push_tbt_quote(&self, quote: TbtQuote) {
         self.tbt_quotes.lock().unwrap().push(quote);
     }
+
 
     #[doc(hidden)] pub fn push_real_time_bar(&self, req_id: u32, bar: RealTimeBar) {
         self.real_time_bars.lock().unwrap().push((req_id, bar));
@@ -234,23 +235,23 @@ impl OrderState {
     }
 
     pub fn drain_fills(&self) -> Vec<Fill> {
-        std::mem::take(&mut *self.fills.lock().unwrap())
+        self.fills.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_order_updates(&self) -> Vec<OrderUpdate> {
-        std::mem::take(&mut *self.order_updates.lock().unwrap())
+        self.order_updates.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_cancel_rejects(&self) -> Vec<CancelReject> {
-        std::mem::take(&mut *self.cancel_rejects.lock().unwrap())
+        self.cancel_rejects.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_what_if_responses(&self) -> Vec<WhatIfResponse> {
-        std::mem::take(&mut *self.what_if_responses.lock().unwrap())
+        self.what_if_responses.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_completed_orders(&self) -> Vec<CompletedOrder> {
-        std::mem::take(&mut *self.completed_orders.lock().unwrap())
+        self.completed_orders.lock().unwrap().drain(..).collect()
     }
 
     /// Snapshot all enriched orders (for open_order callbacks).
@@ -334,55 +335,55 @@ impl ReferenceState {
     }
 
     pub fn drain_historical_data(&self) -> Vec<(u32, HistoricalResponse)> {
-        std::mem::take(&mut *self.historical_data.lock().unwrap())
+        self.historical_data.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_head_timestamps(&self) -> Vec<(u32, HeadTimestampResponse)> {
-        std::mem::take(&mut *self.head_timestamps.lock().unwrap())
+        self.head_timestamps.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_contract_details(&self) -> Vec<(u32, ContractDefinition)> {
-        std::mem::take(&mut *self.contract_details.lock().unwrap())
+        self.contract_details.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_contract_details_end(&self) -> Vec<u32> {
-        std::mem::take(&mut *self.contract_details_end.lock().unwrap())
+        self.contract_details_end.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_matching_symbols(&self) -> Vec<(u32, Vec<SymbolMatch>)> {
-        std::mem::take(&mut *self.matching_symbols.lock().unwrap())
+        self.matching_symbols.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_scanner_params(&self) -> Vec<String> {
-        std::mem::take(&mut *self.scanner_params.lock().unwrap())
+        self.scanner_params.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_scanner_data(&self) -> Vec<(u32, ScannerResult)> {
-        std::mem::take(&mut *self.scanner_data.lock().unwrap())
+        self.scanner_data.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_historical_news(&self) -> Vec<(u32, Vec<NewsHeadline>, bool)> {
-        std::mem::take(&mut *self.historical_news.lock().unwrap())
+        self.historical_news.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_news_articles(&self) -> Vec<(u32, i32, String)> {
-        std::mem::take(&mut *self.news_articles.lock().unwrap())
+        self.news_articles.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_fundamental_data(&self) -> Vec<(u32, String)> {
-        std::mem::take(&mut *self.fundamental_data.lock().unwrap())
+        self.fundamental_data.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_histogram_data(&self) -> Vec<(u32, Vec<HistogramEntry>)> {
-        std::mem::take(&mut *self.histogram_data.lock().unwrap())
+        self.histogram_data.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_historical_ticks(&self) -> Vec<(u32, HistoricalTickData, String, bool)> {
-        std::mem::take(&mut *self.historical_ticks.lock().unwrap())
+        self.historical_ticks.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_historical_schedules(&self) -> Vec<(u32, HistoricalScheduleResponse)> {
-        std::mem::take(&mut *self.historical_schedules.lock().unwrap())
+        self.historical_schedules.lock().unwrap().drain(..).collect()
     }
 
     /// Get cached market rules.
@@ -527,6 +528,9 @@ pub struct SharedState {
     pub orders: OrderState,
     pub reference: ReferenceState,
     pub portfolio: PortfolioState,
+    /// Notifier for waking consumers (e.g. Python event loop) when data arrives.
+    notify_mutex: Mutex<bool>,
+    notify_condvar: Condvar,
 }
 
 impl SharedState {
@@ -536,7 +540,34 @@ impl SharedState {
             orders: OrderState::new(),
             reference: ReferenceState::new(),
             portfolio: PortfolioState::new(),
+            notify_mutex: Mutex::new(false),
+            notify_condvar: Condvar::new(),
         }
+    }
+
+    /// Signal that new data is available. Called by hot loop after pushing data.
+    #[inline]
+    pub fn notify(&self) {
+        let mut pending = self.notify_mutex.lock().unwrap();
+        *pending = true;
+        self.notify_condvar.notify_one();
+    }
+
+    /// Wait for data notification with a timeout. Returns true if notified, false if timed out.
+    pub fn wait_for_data(&self, timeout: std::time::Duration) -> bool {
+        let mut pending = self.notify_mutex.lock().unwrap();
+        if *pending {
+            *pending = false;
+            return true;
+        }
+        let (lock, result) = self.notify_condvar.wait_timeout(pending, timeout).unwrap();
+        let had_data = *lock;
+        if had_data {
+            // Reset the flag via a mutable reference obtained from the MutexGuard's deref.
+            drop(lock);
+            *self.notify_mutex.lock().unwrap() = false;
+        }
+        had_data || !result.timed_out()
     }
 }
 

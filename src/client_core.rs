@@ -702,10 +702,9 @@ impl ClientCore {
             q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
         ];
 
-        let last = {
-            let map = self.last_quotes.lock().unwrap();
-            map.get(&iid).copied().unwrap_or([0i64; 12])
-        };
+        // Single lock acquisition for both read and write of last_quotes.
+        let mut map = self.last_quotes.lock().unwrap();
+        let last = map.get(&iid).copied().unwrap_or([0i64; 12]);
 
         let mut ticks = Vec::new();
         let mut delivered = false;
@@ -748,7 +747,7 @@ impl ClientCore {
             None
         };
 
-        self.last_quotes.lock().unwrap().insert(iid, fields);
+        map.insert(iid, fields);
 
         QuotePollResult { ticks, timestamp, delivered }
     }
@@ -772,11 +771,12 @@ impl ClientCore {
 
         let acct = shared.portfolio.account();
         let pnl = [acct.daily_pnl, acct.unrealized_pnl, acct.realized_pnl];
-        let prev = *self.last_pnl.lock().unwrap();
-        if pnl == prev {
+        // Single lock acquisition for both read and write.
+        let mut last = self.last_pnl.lock().unwrap();
+        if pnl == *last {
             return None;
         }
-        *self.last_pnl.lock().unwrap() = pnl;
+        *last = pnl;
         Some(PnlUpdate {
             req_id,
             daily_pnl: acct.daily_pnl as f64 / PRICE_SCALE_F,

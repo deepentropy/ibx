@@ -111,6 +111,38 @@ pub(super) fn next_order_id() -> OrderId {
         .as_millis() as u64 * 1000
 }
 
+/// Check if CCP connection is alive and reconnect the full gateway if not.
+/// Returns updated Conns (and optionally a new Gateway) with fresh connections.
+pub(super) fn ensure_ccp_alive(
+    mut conns: Conns,
+    gw: &mut gateway::Gateway,
+    config: &GatewayConfig,
+) -> Conns {
+    // Probe CCP liveness: try_recv returns Ok(0) if alive (WouldBlock), Err if dead
+    match conns.ccp.try_recv() {
+        Ok(_) => return conns, // alive
+        Err(_) => {
+            println!("  [reconnect] CCP connection dead, re-establishing gateway session...");
+        }
+    }
+
+    // Full reconnection — CCP requires TLS+SRP auth, so we must reconnect everything
+    match gateway::Gateway::connect(config) {
+        Ok((new_gw, farm, ccp, hmds, _, _, _, _)) => {
+            conns.farm = farm;
+            conns.ccp = ccp;
+            conns.hmds = hmds;
+            conns.account_id = new_gw.account_id.clone();
+            *gw = new_gw;
+            println!("  [reconnect] Gateway re-established (farm+ccp+hmds)");
+        }
+        Err(e) => {
+            println!("  [reconnect] Gateway reconnect failed: {} — continuing with dead CCP", e);
+        }
+    }
+    conns
+}
+
 // ─── Market session detection ───
 
 /// US stock market session based on current Eastern Time.

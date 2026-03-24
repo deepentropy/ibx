@@ -6,7 +6,7 @@ use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{AlgoParams, OrderCondition, OrderRequest, Side};
 
-use super::{HeartbeatState, format_price, format_qty};
+use super::{HeartbeatState, format_price, format_qty, format_int, format_uint};
 
 pub(crate) fn drain_and_send_orders(
     ccp_conn: &mut Option<Connection>,
@@ -25,9 +25,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -54,9 +54,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'4', b'0', stop_price,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let stop_str = format_price(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -85,9 +85,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'1', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -118,16 +118,16 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', tif, 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let tif_byte = [tif];
                 let tif_str = std::str::from_utf8(&tif_byte).unwrap_or("0");
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
-                let display_str = attrs.display_size.to_string();
-                let min_qty_str = attrs.min_qty.to_string();
+                let display_str = format_uint(attrs.display_size as u64);
+                let min_qty_str = format_uint(attrs.min_qty as u64);
                 let gat_str = if attrs.good_after > 0 { unix_to_ib_datetime(attrs.good_after) } else { String::new() };
                 let gtd_str = if attrs.good_till > 0 { unix_to_ib_datetime(attrs.good_till) } else { String::new() };
                 let oca_str = if attrs.oca_group > 0 { format!("OCA_{}", attrs.oca_group) } else { String::new() };
@@ -225,9 +225,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'1', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 log::info!("Sending MKT order: clord={} acct={} sym={} side={} qty={}",
@@ -254,9 +254,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, stop_price, b'3', b'0', stop_price,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let stop_str = format_price(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -283,9 +283,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, stop_price, b'3', b'1', stop_price,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let stop_str = format_price(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -316,9 +316,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'4', b'1', stop_price,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let stop_str = format_price(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -351,9 +351,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'3', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -380,9 +380,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'4', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -409,9 +409,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'P', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let trail_str = format_price(trail_amt);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -438,9 +438,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'P', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let trail_str = format_price(trail_amt);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -469,9 +469,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'P', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let pct_str = trail_pct.to_string(); // basis points: 100 = 1%
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -498,9 +498,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'5', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
@@ -525,9 +525,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'B', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -554,9 +554,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, stop_price, b'J', b'0', stop_price,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let stop_str = format_price(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -583,9 +583,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'K', b'0', stop_price,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let stop_str = format_price(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -614,7 +614,7 @@ pub(crate) fn drain_and_send_orders(
                 let exit_side = match side { Side::Buy => Side::Sell, Side::Sell | Side::ShortSell => Side::Buy };
                 let exit_side_str = fix_side(exit_side);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let parent_str = parent_id.to_string();
                 let tp_str = tp_id.to_string();
@@ -706,9 +706,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'R', b'0', offset,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let offset_str = format_price(offset);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -735,9 +735,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'2', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -764,9 +764,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -798,9 +798,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -850,9 +850,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, crate::types::ORD_PEG_BENCH, b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -887,9 +887,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'8', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -916,9 +916,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'K', b'8', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
@@ -944,9 +944,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, crate::types::ORD_WHAT_IF, b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -974,7 +974,7 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, 0, price, b'2', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
                 let qty_str = format_qty(qty);
                 let price_str = format_price(price);
@@ -1005,9 +1005,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'3', b'0', stop_price,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let stop_str = format_price(stop_price);
                 let trigger_str = format_price(trigger_price);
                 let adj_stop_str = format_price(adjusted_stop_price);
@@ -1045,9 +1045,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'K', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
@@ -1072,9 +1072,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'U', b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
@@ -1099,9 +1099,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, crate::types::ORD_STP_PRT, b'0', stop_price,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let stop_str = format_price(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
@@ -1128,9 +1128,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price_cap, crate::types::ORD_MIDPX, b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 let mut fields: Vec<(u32, &str)> = vec![
@@ -1161,9 +1161,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MKT, b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
@@ -1188,9 +1188,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MID, b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
@@ -1215,9 +1215,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_PRI, b'0', 0,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
@@ -1242,9 +1242,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, crate::types::ORD_PEG_MKT, b'0', offset,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 let mut fields: Vec<(u32, &str)> = vec![
@@ -1275,9 +1275,9 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, crate::types::ORD_PEG_MID, b'0', offset,
                 ));
-                let clord_str = order_id.to_string();
+                let clord_str = format_int(order_id as i64);
                 let side_str = fix_side(side);
-                let qty_str = qty.to_string();
+                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 let mut fields: Vec<(u32, &str)> = vec![
@@ -1308,7 +1308,7 @@ pub(crate) fn drain_and_send_orders(
             }
             OrderRequest::Cancel { order_id } => {
                 let clord_str = format!("C{}", order_id);
-                let orig_clord = order_id.to_string();
+                let orig_clord = format_int(order_id as i64);
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
                     (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
@@ -1346,9 +1346,9 @@ pub(crate) fn drain_and_send_orders(
                         orig.ord_type, orig.tif, orig.stop_price,
                     ));
                 }
-                let clord_str = new_order_id.to_string();
-                let orig_clord = order_id.to_string();
-                let qty_str = qty.to_string();
+                let clord_str = format_int(order_id as i64);
+                let orig_clord = format_int(order_id as i64);
+                let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let now = chrono_free_timestamp();
                 let side_str = orig.map(|o| fix_side(o.side)).unwrap_or("1");
@@ -1469,7 +1469,7 @@ fn build_condition_strings(conditions: &[OrderCondition]) -> Vec<String> {
                 out.push(con_id.to_string());                      // conId
                 out.push(exchange.clone());                        // exchange
                 out.push(trigger_method.to_string());              // triggerMethod
-                out.push(format_price(*price));                    // price
+                out.push(format_price(*price).to_string());         // price
                 out.push(String::new());                           // time (unused)
                 out.push(String::new());                           // percent (unused)
                 out.push(String::new());                           // volume (unused)

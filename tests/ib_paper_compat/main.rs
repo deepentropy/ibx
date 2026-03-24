@@ -6,16 +6,17 @@
 //! All tests share a single Gateway connection to avoid session throttling.
 //! Each phase builds a fresh HotLoop, runs it, then reclaims connections.
 
+mod account;
 mod common;
 mod connection;
 mod contracts;
-mod market_data;
-mod historical;
-mod account;
-mod orders;
-mod multi_asset;
-mod heartbeat;
+mod coverage;
 mod error_handling;
+mod heartbeat;
+mod historical;
+mod market_data;
+mod multi_asset;
+mod orders;
 
 use std::time::{Duration, Instant};
 
@@ -28,7 +29,7 @@ use common::*;
 
 #[test]
 fn compat_suite() {
-    let _ = env_logger::try_init();
+    let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
         None => { println!("Skipping: IB credentials not set"); return; }
@@ -42,7 +43,7 @@ fn compat_suite() {
     let suite_start = Instant::now();
 
     let start = Instant::now();
-    let (gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture, _eufarm, _jfarm) = Gateway::connect(&config)
+    let (mut gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture, _eufarm, _jfarm) = Gateway::connect(&config)
         .expect("Gateway::connect() failed");
     let connect_time = start.elapsed();
 
@@ -121,6 +122,25 @@ fn compat_suite() {
         }
         if !got_data {
             println!("  NO DATA received in 15s");
+        }
+
+        // Raw subscribe kills connections (server may close farm, hmds, and/or CCP).
+        // Reconnect everything if CCP died, or just farm+hmds if CCP survived.
+        conns = ensure_ccp_alive(conns, &mut gw, &config);
+        // If CCP was alive but farm/hmds died, reconnect them individually.
+        match ibx::gateway::connect_farm(
+            &config.host, "usfarm", &config.username, config.paper,
+            &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
+        ) {
+            Ok(c) => { conns.farm = c; println!("  farm reconnected"); }
+            Err(e) => { println!("  farm reconnect failed (may already be fresh): {}", e); }
+        }
+        match ibx::gateway::connect_farm(
+            &config.host, "ushmds", &config.username, config.paper,
+            &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
+        ) {
+            Ok(c) => { conns.hmds = Some(c); println!("  hmds reconnected"); }
+            Err(e) => { println!("  hmds reconnect failed (may already be fresh): {}", e); }
         }
         println!();
     } else {
@@ -236,6 +256,8 @@ fn compat_suite() {
     }
 
     conns = market_data::phase_subscribe_unsubscribe(conns);
+    conns = market_data::phase_market_depth(conns);
+    conns = market_data::phase_news_ticks(conns);
     conns = heartbeat::phase_heartbeat_keepalive(conns);
     conns = heartbeat::phase_farm_heartbeat_keepalive(conns);
 
@@ -252,6 +274,11 @@ fn compat_suite() {
     }
 
     conns = heartbeat::phase_heartbeat_timeout_detection(conns);
+
+    // CCP may have died during long-running fill phases or heartbeat timeout test.
+    // Reconnect the full gateway session if needed before CCP-dependent phases.
+    conns = ensure_ccp_alive(conns, &mut gw, &config);
+
     conns = contracts::phase_contract_details_channel(conns);
     conns = orders::phase_cancel_reject(conns);
     conns = historical::phase_historical_ticks(conns, &gw, &config);
@@ -268,6 +295,7 @@ fn compat_suite() {
         println!("--- Phase 97: Position Tracking (SPY) ---\n  SKIP: {:?} — needs fills\n", session);
     }
     conns = connection::phase_connection_recovery(conns, &gw, &config);
+    conns = ensure_ccp_alive(conns, &mut gw, &config);
 
     // ── New compatibility test phases (issues #83-#93) ──
     conns = multi_asset::phase_forex_order(conns);
@@ -352,6 +380,7 @@ fn compat_suite() {
 
     // ── P2: UpdateParam smoke test ──
     conns = connection::phase_update_param(conns);
+    conns = coverage::phase_endpoint_coverage(conns);
 
     // ── Session-independent forex fallback phases (issue #91) ──
     // EUR.USD trades ~24h Sun-Fri, so these cover tick reception when US stocks are closed.
@@ -365,7 +394,7 @@ fn compat_suite() {
 
     // Session-dependent phases: 2,3,4,6,17,27,28,51,52,61,97,102,105,110,124,126,128,129 = 18
     // Forex fallback phases cover 3 of those when !needs_ticks (107,108,109)
-    let total_phases = 125;
+    let total_phases = 128;
     let skipped = if needs_ticks { 0 } else { 18 };
     let forex_fallback = if needs_ticks { 0 } else { 3 };
     let ran = total_phases - skipped + forex_fallback;

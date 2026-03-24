@@ -54,6 +54,8 @@ pub struct HotLoop {
     account_id: String,
     /// Heartbeat state.
     hb: HeartbeatState,
+    /// Reusable buffer for control commands (avoids per-iteration allocation).
+    cmd_buf: Vec<ControlCommand>,
     // ── Subsystems ──
     pub(crate) farm: FarmState,
     pub(crate) ccp: CcpState,
@@ -152,6 +154,7 @@ impl HotLoop {
             running: true,
             account_id: String::new(),
             hb: HeartbeatState::new(),
+            cmd_buf: Vec::with_capacity(16),
             farm: FarmState::new(),
             ccp: CcpState::new(),
             hmds: HmdsState::new(),
@@ -263,6 +266,9 @@ impl HotLoop {
 
             // 5. Heartbeat check (auth 10s, farm 30s)
             self.check_heartbeats();
+
+            // 6. Wake any waiting consumers (e.g. Python event loop)
+            self.shared.notify();
         }
     }
 
@@ -272,17 +278,20 @@ impl HotLoop {
             None => return,
         };
 
-        let mut cmds: Vec<ControlCommand> = rx.try_iter().collect();
+        self.cmd_buf.clear();
+        self.cmd_buf.extend(rx.try_iter());
 
         // try_iter() stops on both Empty and Disconnected — do one extra
         // try_recv() to distinguish.  If a straggler command arrived between
         // try_iter() finishing and this call, push it into the batch.
         let sender_dropped = match rx.try_recv() {
-            Ok(cmd)  => { cmds.push(cmd); false }
+            Ok(cmd)  => { self.cmd_buf.push(cmd); false }
             Err(crossbeam_channel::TryRecvError::Empty)        => false,
             Err(crossbeam_channel::TryRecvError::Disconnected) => true,
         };
 
+        // Drain the buffer so we can mutably borrow self in the loop body.
+        let cmds: Vec<ControlCommand> = self.cmd_buf.drain(..).collect();
         for cmd in cmds {
             match cmd {
                 ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, reply_tx } => {
@@ -750,25 +759,124 @@ impl HotLoop {
 
 // ── Helper functions used by subsystems ──
 
-/// Emit an event to the channel (if connected).
-#[inline]
-pub(crate) fn emit(event_tx: &Option<Sender<Event>>, event: Event) {
-    if let Some(tx) = event_tx {
-        let _ = tx.send(event);
+/// Stack-allocated string (up to 24 bytes). Zero heap allocations.
+pub(crate) struct StackStr {
+    buf: [u8; 24],
+    len: u8,
+}
+
+impl StackStr {
+    #[inline]
+    fn new() -> Self {
+        Self { buf: [0; 24], len: 0 }
+    }
+
+    #[inline]
+    fn push(&mut self, b: u8) {
+        self.buf[self.len as usize] = b;
+        self.len += 1;
+    }
+
+    /// Write an i64 in decimal. Returns number of bytes written.
+    fn write_i64(&mut self, val: i64) {
+        if val < 0 {
+            self.push(b'-');
+            self.write_u64((-val) as u64);
+        } else {
+            self.write_u64(val as u64);
+        }
+    }
+
+    fn write_u64(&mut self, val: u64) {
+        if val == 0 {
+            self.push(b'0');
+            return;
+        }
+        // Write digits in reverse, then reverse them in-place.
+        let start = self.len as usize;
+        let mut v = val;
+        while v > 0 {
+            self.push(b'0' + (v % 10) as u8);
+            v /= 10;
+        }
+        self.buf[start..self.len as usize].reverse();
     }
 }
 
-/// Format a fixed-point Price as a decimal string for FIX tags.
-pub(crate) fn format_price(price: Price) -> String {
+impl std::ops::Deref for StackStr {
+    type Target = str;
+    #[inline]
+    fn deref(&self) -> &str {
+        // SAFETY: We only write ASCII digits, '.', '-', and ':'
+        unsafe { std::str::from_utf8_unchecked(&self.buf[..self.len as usize]) }
+    }
+}
+
+impl std::fmt::Display for StackStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
+}
+
+impl std::fmt::Debug for StackStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
+}
+
+/// Format an integer (order_id, qty, etc.) to a stack string. Zero alloc.
+#[inline]
+pub(crate) fn format_int(val: i64) -> StackStr {
+    let mut s = StackStr::new();
+    s.write_i64(val);
+    s
+}
+
+/// Format an unsigned integer to a stack string. Zero alloc.
+#[inline]
+pub(crate) fn format_uint(val: u64) -> StackStr {
+    let mut s = StackStr::new();
+    s.write_u64(val);
+    s
+}
+
+/// Emit an event to the channel (if connected). Non-blocking — drops event if full.
+#[inline]
+pub(crate) fn emit(event_tx: &Option<Sender<Event>>, event: Event) {
+    if let Some(tx) = event_tx {
+        let _ = tx.try_send(event);
+    }
+}
+
+/// Format a fixed-point Price as a decimal string for FIX tags. Zero alloc.
+pub(crate) fn format_price(price: Price) -> StackStr {
     let whole = price / PRICE_SCALE;
     let frac = (price % PRICE_SCALE).unsigned_abs();
-    if frac == 0 {
-        whole.to_string()
-    } else {
-        let frac_str = format!("{:08}", frac);
-        let trimmed = frac_str.trim_end_matches('0');
-        format!("{}.{}", whole, trimmed)
+    let mut s = StackStr::new();
+    s.write_i64(whole);
+    if frac != 0 {
+        s.push(b'.');
+        // Write 8-digit zero-padded fraction, then trim trailing zeros.
+        let frac_start = s.len as usize;
+        let digits = [
+            b'0' + (frac / 10_000_000 % 10) as u8,
+            b'0' + (frac / 1_000_000 % 10) as u8,
+            b'0' + (frac / 100_000 % 10) as u8,
+            b'0' + (frac / 10_000 % 10) as u8,
+            b'0' + (frac / 1_000 % 10) as u8,
+            b'0' + (frac / 100 % 10) as u8,
+            b'0' + (frac / 10 % 10) as u8,
+            b'0' + (frac % 10) as u8,
+        ];
+        // Find last non-zero digit.
+        let mut end = 8;
+        while end > 0 && digits[end - 1] == b'0' { end -= 1; }
+        for i in 0..end {
+            s.buf[frac_start + i] = digits[i];
+        }
+        s.len = (frac_start + end) as u8;
     }
+    s
 }
 
 /// Parse a FIX tag value as a Price (fixed-point). Returns 0 if absent or unparseable.
@@ -778,17 +886,29 @@ pub(crate) fn parse_price_tag(val: Option<&String>) -> Price {
         .unwrap_or(0)
 }
 
-/// Format a fixed-point Qty (QTY_SCALE = 10^4) to a decimal string.
-pub(crate) fn format_qty(qty: Qty) -> String {
+/// Format a fixed-point Qty (QTY_SCALE = 10^4) to a decimal string. Zero alloc.
+pub(crate) fn format_qty(qty: Qty) -> StackStr {
     let whole = qty / QTY_SCALE;
     let frac = (qty % QTY_SCALE).unsigned_abs();
-    if frac == 0 {
-        whole.to_string()
-    } else {
-        let frac_str = format!("{:04}", frac);
-        let trimmed = frac_str.trim_end_matches('0');
-        format!("{}.{}", whole, trimmed)
+    let mut s = StackStr::new();
+    s.write_i64(whole);
+    if frac != 0 {
+        s.push(b'.');
+        let frac_start = s.len as usize;
+        let digits = [
+            b'0' + (frac / 1_000 % 10) as u8,
+            b'0' + (frac / 100 % 10) as u8,
+            b'0' + (frac / 10 % 10) as u8,
+            b'0' + (frac % 10) as u8,
+        ];
+        let mut end = 4;
+        while end > 0 && digits[end - 1] == b'0' { end -= 1; }
+        for i in 0..end {
+            s.buf[frac_start + i] = digits[i];
+        }
+        s.len = (frac_start + end) as u8;
     }
+    s
 }
 
 /// Fast extraction of FIX tag 35 (MsgType) value via byte scan.
