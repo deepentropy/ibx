@@ -49,7 +49,7 @@ impl EClient {
     }
 
     /// Cancel market data.
-    fn cancel_mkt_data(&self, req_id: i64) -> PyResult<()> {
+    pub fn cancel_mkt_data(&self, req_id: i64) -> PyResult<()> {
         let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
         if let Some(instrument) = instrument {
             let tx = self.tx()?;
