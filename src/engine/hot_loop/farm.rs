@@ -452,7 +452,15 @@ impl FarmState {
         hb: &mut HeartbeatState,
     ) {
         let farm = crate::types::farm_for_instrument(exchange, sec_type);
-        let fix_exchange = if is_smart_depth || exchange == "SMART" { "BEST" } else { exchange };
+        // Map ibapi exchange names to FIX exchange names
+        let fix_exchange = if is_smart_depth || exchange == "SMART" {
+            "BEST"
+        } else {
+            match exchange {
+                "ISLAND" => "NASDAQ",
+                other => other,
+            }
+        };
         let fix_sec_type = match sec_type {
             "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND",
             "CASH" => "CASH", other => other,
@@ -460,36 +468,20 @@ impl FarmState {
         self.depth_subs.push((req_id, farm, is_smart_depth));
 
         if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) {
-            // Depth uses same format as L1: two entries (442=bid/ask, 443=last)
-            let ba_id = req_id;
-            let last_id = req_id + 1;
-            let ba_str = ba_id.to_string();
-            let last_str = last_id.to_string();
+            let req_id_str = req_id.to_string();
             let con_id_str = (con_id as u32).to_string();
-            let ts = chrono_free_timestamp();
+            // Exact format from ib-agent#80 capture: 35=V|263=1|146=1|262={id}|6008={conid}|207={exch}|167=CS|264=626|
             let _ = conn.send_fixcomp(&[
                 (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                (fix::TAG_SENDING_TIME, &ts),
                 (263, "1"),
-                (146, "2"),
-                (262, &ba_str),
+                (146, "1"),
+                (262, &req_id_str),
                 (6008, &con_id_str),
                 (207, fix_exchange),
                 (167, fix_sec_type),
-                (264, "442"),
-                (6088, "Socket"),
-                (9830, "1"),
-                (9839, "1"),
-                (262, &last_str),
-                (6008, &con_id_str),
-                (207, fix_exchange),
-                (167, fix_sec_type),
-                (264, "443"),
-                (6088, "Socket"),
-                (9830, "1"),
-                (9839, "1"),
+                (264, "626"),
             ]);
-            log::info!("Sent depth subscribe: con_id={} req_ids={},{} exchange={}", con_id, ba_id, last_id, fix_exchange);
+            log::info!("Sent depth subscribe: con_id={} req_id={} exchange={}", con_id, req_id, fix_exchange);
             hb.last_farm_sent = Instant::now();
         }
     }
