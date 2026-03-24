@@ -244,13 +244,14 @@ fn try_frame_farm_msg(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
     Some((buf[..total].to_vec(), total))
 }
 
-/// Credentials cached for farm auto-reconnect (no SRP needed).
+/// Credentials cached for auto-reconnect (no SRP needed).
 #[derive(Clone)]
 pub struct ReconnectAuth {
     pub host: String,
     pub username: String,
     pub paper: bool,
     pub session_key: BigUint,
+    pub session_token: BigUint,
     pub server_session_id: String,
     pub hw_info: String,
     pub encoded: String,
@@ -426,10 +427,17 @@ pub fn connect_farm(
 /// Performs TLS + DH + CONNECT_REQUEST, then attempts SOFT_TOKEN auth with cached K.
 /// Falls back to error if server demands full SRP (requires password we don't store).
 pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
-    let host = &auth.host;
-    log::info!("CCP reconnect to {}:{}", host, AUTH_PORT);
+    let token_hash = token_short_hash(&auth.session_token);
+    reconnect_ccp_attempt(auth, &token_hash, &auth.host, 0)
+}
 
-    // TLS connection
+fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, depth: u32) -> io::Result<Connection> {
+    if depth > 5 {
+        return Err(io::Error::new(io::ErrorKind::Other, "CCP reconnect: too many redirects"));
+    }
+    log::info!("CCP reconnect to {}:{} (attempt {})", host, AUTH_PORT, depth + 1);
+
+    // TLS + DH key exchange
     let addr = format!("{}:{}", host, AUTH_PORT)
         .to_socket_addrs()?
         .next()
@@ -442,7 +450,6 @@ pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
         .connect(host, tcp)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-    // DH key exchange
     let mut channel = SecureChannel::new();
     let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
     tls.write_all(&dh_msg)?;
@@ -458,9 +465,8 @@ pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
         ));
     }
     channel.process_server_hello(&parts[2..]);
-    log::info!("CCP reconnect DH complete");
 
-    // CONNECT_REQUEST with existing session ID
+    // CONNECT_REQUEST with SOFT_TOKEN flag + token hash (field 9)
     let flags = session::FLAG_OK_TO_REDIRECT
         | session::FLAG_VERSION
         | session::FLAG_VERSION_PRESENT
@@ -476,7 +482,7 @@ pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
         auth.username.clone()
     };
     let connect_req = format!(
-        "{};{};{};{};{};27;{};{};{};",
+        "{};{};{};{};{};27;{};{};{};{};",
         NS_VERSION_MIN,
         ns::NS_CONNECT_REQUEST,
         display_name,
@@ -485,57 +491,66 @@ pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
         auth.hw_info,
         auth.server_session_id,
         auth.encoded,
+        token_hash,
     );
     session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
-    log::info!("CCP reconnect CONNECT_REQUEST sent (session_id={})", auth.server_session_id);
+    log::info!("CCP reconnect CONNECT_REQUEST sent (session={}, hash={})", auth.server_session_id, token_hash);
 
-    // Receive AUTH_START (consumed but not parsed — server always requires SRP)
-    match session::recv_secure(&mut tls, &mut channel) {
-        Ok(_) => {}
+    // Receive AUTH_START — may get NS_REDIRECT instead
+    let auth_start = match session::recv_secure(&mut tls, &mut channel) {
+        Ok(data) => data,
         Err(e) if e.to_string().starts_with("REDIRECT:") => {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                format!("CCP reconnect redirected: {}", e),
-            ));
+            let target = e.to_string().replace("REDIRECT:", "");
+            let redirect_host = target.split(':').next().unwrap_or(&target).to_string();
+            log::info!("CCP reconnect redirected to {}", redirect_host);
+            drop(tls);
+            return reconnect_ccp_attempt(auth, token_hash, &redirect_host, depth + 1);
         }
         Err(e) => return Err(e),
-    }
+    };
 
-    // Send SRP init to advance protocol — server requires auth even for reconnect.
-    // If the server recognizes our session, it responds with state=7 (PASSED).
-    // Otherwise it demands full SRP (state=2) which requires the password.
-    let msg1 = crate::protocol::xyz::xyz_build_srp_v20(1, &[]);
-    tls.write_all(&crate::protocol::xyz::xyz_wrap(&msg1))?;
+    // Parse AUTH_START field[5] for auth mode: 2=SOFT_TOKEN, 0=SRP required
+    let auth_text = String::from_utf8_lossy(&auth_start);
+    let auth_fields: Vec<&str> = auth_text.split(';').collect();
+    let auth_mode: u32 = auth_fields.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
 
-    let resp = session::recv_msg(&mut tls)?;
-    match resp {
-        session::RecvMsg::Xyz { state, fields, .. } => {
-            if state == 7 {
+    if auth_mode == 2 {
+        // SOFT_TOKEN challenge-response (4 states)
+        do_ccp_soft_token(&mut tls, &auth.session_key)?;
+
+        // Consume AUTH_FINISH (msg_id=771) after SOFT_TOKEN PASSED
+        match session::recv_msg(&mut tls) {
+            Ok(session::RecvMsg::Xyz { state, fields, .. }) => {
                 let result = fields.iter().rev().find(|s| !s.is_empty()).map(|s| s.as_str()).unwrap_or("");
-                if result != "PASSED" {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        format!("CCP reconnect auth rejected: {}", result),
-                    ));
-                }
-                log::info!("CCP reconnect: server recognized session (SRP state=7 PASSED)");
-            } else if state == 2 {
+                log::info!("CCP reconnect AUTH_FINISH: state={} result={}", state, result);
+            }
+            Ok(session::RecvMsg::Ns { msg_type, .. }) => {
+                log::info!("CCP reconnect post-auth NS type={}", msg_type);
+            }
+            Err(e) => {
+                log::warn!("CCP reconnect AUTH_FINISH recv: {}", e);
+            }
+        }
+    } else {
+        // SRP probe fallback
+        let msg1 = crate::protocol::xyz::xyz_build_srp_v20(1, &[]);
+        tls.write_all(&crate::protocol::xyz::xyz_wrap(&msg1))?;
+        let resp = session::recv_msg(&mut tls)?;
+        match resp {
+            session::RecvMsg::Xyz { state, .. } if state == 2 => {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "CCP reconnect: server requires full SRP — password not available",
                 ));
-            } else {
-                log::warn!("CCP reconnect: unexpected SRP state={}, continuing", state);
             }
-        }
-        session::RecvMsg::Ns { msg_type, .. } => {
-            log::warn!("CCP reconnect: unexpected NS response type={} after SRP init", msg_type);
+            _ => {}
         }
     }
 
-    // Post-auth: wait for NS_FIX_START
+    // Post-auth: wait for NS_CONNECT_RESPONSE → NEWCOMMPORTTYPE → NS_FIX_START
+    tls.get_ref().set_read_timeout(Some(Duration::from_secs(30)))?;
     let mut fix_ready = false;
-    for _ in 0..10 {
+    for _ in 0..20 {
         let (payload, _) = match ns::ns_recv(&mut tls) {
             Ok(r) => r,
             Err(e) => {
@@ -572,7 +587,9 @@ pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
                 format!("CCP reconnect post-auth error: {}", inner_parts[2..].join(";")),
             ));
         }
+        // Ignore 530 keepalives and other types
     }
+    tls.get_ref().set_read_timeout(None)?;
     if !fix_ready {
         return Err(io::Error::new(io::ErrorKind::Other, "CCP reconnect: no FIX_START after auth"));
     }
@@ -615,6 +632,61 @@ pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
     Ok(conn)
 }
 
+
+/// SOFT_TOKEN challenge-response over the TLS/NS channel (for CCP reconnect).
+fn do_ccp_soft_token<S: Read + Write>(stream: &mut S, session_key: &BigUint) -> io::Result<()> {
+    use crate::protocol::xyz;
+
+    // State 1: Send empty init
+    let msg1 = xyz::xyz_build_soft_token(1, "", "", "");
+    stream.write_all(&xyz::xyz_wrap(&msg1))?;
+
+    // State 2: Receive challenge
+    let recv2 = session::recv_msg(stream)?;
+    let challenge_hex = match recv2 {
+        session::RecvMsg::Xyz { state, fields, .. } if state == 2 => {
+            fields.get(1).filter(|s| !s.is_empty()).cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "CCP SOFT_TOKEN: empty challenge"))?
+        }
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "CCP SOFT_TOKEN: expected XYZ state 2")),
+    };
+
+    // SHA-1(strip(challenge) || strip(token))
+    let challenge_int = BigUint::parse_bytes(challenge_hex.as_bytes(), 16)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid challenge hex"))?;
+    let challenge_be = challenge_int.to_bytes_be();
+    let challenge_bytes = strip_leading_zeros(&challenge_be);
+    let token_be = session_key.to_bytes_be();
+    let token_bytes = strip_leading_zeros(&token_be);
+
+    let mut hasher = Sha1::new();
+    hasher.update(challenge_bytes);
+    hasher.update(token_bytes);
+    let response_hex = format!("{:x}", BigUint::from_bytes_be(&hasher.finalize()));
+
+    // State 3: Send response
+    let msg3 = xyz::xyz_build_soft_token(3, "", &response_hex, "");
+    stream.write_all(&xyz::xyz_wrap(&msg3))?;
+
+    // State 4: Receive result
+    let recv4 = session::recv_msg(stream)?;
+    let result = match recv4 {
+        session::RecvMsg::Xyz { fields, .. } => {
+            fields.iter().rev().find(|s| !s.is_empty()).cloned().unwrap_or_default()
+        }
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "CCP SOFT_TOKEN: expected XYZ state 4")),
+    };
+
+    if result == "PASSED" {
+        log::info!("CCP SOFT_TOKEN auth passed");
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("CCP SOFT_TOKEN auth failed: {}", result),
+        ))
+    }
+}
 
 /// Configuration for connecting to IB.
 pub struct GatewayConfig {
@@ -1047,6 +1119,7 @@ impl Gateway {
             username: String::new(), // Filled by caller
             paper: false, // Filled by caller
             session_key: self.session_token.clone(),
+            session_token: self.session_token.clone(),
             server_session_id: self.server_session_id.clone(),
             hw_info: self.hw_info.clone(),
             encoded: self.encoded.clone(),

@@ -121,6 +121,7 @@ fn ccp_reconnect_with_cached_credentials() {
         username: cfg.username.clone(),
         paper: cfg.paper,
         session_key: gw.session_token.clone(),
+        session_token: gw.session_token.clone(),
         server_session_id: gw.server_session_id.clone(),
         hw_info: gw.hw_info.clone(),
         encoded: gw.encoded.clone(),
