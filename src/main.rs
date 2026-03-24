@@ -32,7 +32,7 @@ impl Wrapper for QuotePrinter {
 }
 
 fn main() {
-    env_logger::init();
+    let _log = ibx::logging::init(&ibx::logging::LogConfig::from_env());
     println!("ibx v{}", env!("CARGO_PKG_VERSION"));
 
     let username = env::var("IB_USERNAME").unwrap_or_else(|_| {

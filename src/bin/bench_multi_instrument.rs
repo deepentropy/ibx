@@ -28,7 +28,7 @@ const INSTRUMENTS: &[(i64, &str)] = &[
 ];
 
 fn main() {
-    env_logger::init();
+    let _log = ibx::logging::init(&ibx::logging::LogConfig::from_env());
 
     let config = BenchConfig::from_env();
     let collect_ticks = BenchConfig::env_u32("BENCH_TICKS", 10_000);

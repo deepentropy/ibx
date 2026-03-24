@@ -5,6 +5,7 @@ pub mod client_core;
 pub mod config;
 pub mod control;
 pub mod gateway;
+pub mod logging;
 pub mod protocol;
 pub mod types;
 
