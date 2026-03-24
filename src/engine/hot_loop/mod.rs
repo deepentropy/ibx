@@ -793,6 +793,10 @@ impl HotLoop {
             Ok(Err(e)) => {
                 log::error!("Farm auto-reconnect failed (attempt {}): {}", self.farm_reconnect_attempt, e);
                 self.pending_farm_reconnect = None;
+                if self.farm_reconnect_attempt >= 3 {
+                    log::error!("Farm auto-reconnect exhausted {} retries — notifying Python", self.farm_reconnect_attempt);
+                    emit(&self.event_tx, Event::Disconnected);
+                }
             }
             Err(crossbeam_channel::TryRecvError::Empty) => {}
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
@@ -842,6 +846,10 @@ impl HotLoop {
             Ok(Err(e)) => {
                 log::error!("CCP auto-reconnect failed (attempt {}): {}", self.ccp_reconnect_attempt, e);
                 self.pending_ccp_reconnect = None;
+                if self.ccp_reconnect_attempt >= 3 {
+                    log::error!("CCP auto-reconnect exhausted {} retries — notifying Python", self.ccp_reconnect_attempt);
+                    emit(&self.event_tx, Event::Disconnected);
+                }
             }
             Err(crossbeam_channel::TryRecvError::Empty) => {}
             Err(crossbeam_channel::TryRecvError::Disconnected) => {

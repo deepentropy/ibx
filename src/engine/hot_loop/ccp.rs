@@ -731,10 +731,11 @@ impl CcpState {
         let _ = (ccp_conn, hb);
     }
 
-    pub(crate) fn handle_disconnect(&mut self, context: &mut Context, event_tx: &Option<Sender<Event>>) {
+    pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {
         self.disconnected = true;
         context.mark_orders_uncertain();
-        emit(event_tx, Event::Disconnected);
+        // Don't emit Event::Disconnected — auto-reconnect handles CCP drops transparently.
+        // Python is only notified if reconnect exhausts retries.
     }
 
     pub(crate) fn reconnect(

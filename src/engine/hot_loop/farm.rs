@@ -157,7 +157,7 @@ impl FarmState {
         slot: &FarmSlot,
         _context: &mut Context,
         _shared: &SharedState,
-        event_tx: &Option<Sender<Event>>,
+        _event_tx: &Option<Sender<Event>>,
     ) {
         *secondary_conn = None;
         // Collect req IDs and instrument IDs for the disconnected farm slot
@@ -175,7 +175,7 @@ impl FarmState {
         self.md_req_to_instrument.retain(|(rid, _)| !stale_req_ids.contains(rid));
         if affected_count > 0 {
             log::warn!("{:?} disconnected, cleared {} instrument subscriptions", slot, affected_count);
-            emit(event_tx, Event::Disconnected);
+            // Don't emit Event::Disconnected — secondary farm drops are not session-level failures.
         }
     }
 
@@ -693,13 +693,14 @@ impl FarmState {
         }
     }
 
-    pub(crate) fn handle_disconnect(&mut self, context: &mut Context, event_tx: &Option<Sender<Event>>) {
+    pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {
         self.disconnected = true;
         self.md_req_to_instrument.clear();
         self.instrument_md_reqs.clear();
         context.market.clear_server_tags();
         context.market.zero_all_quotes();
-        emit(event_tx, Event::Disconnected);
+        // Don't emit Event::Disconnected — auto-reconnect handles farm drops transparently.
+        // Python is only notified if reconnect exhausts retries.
     }
 
     /// Test-only: set disconnected without clearing state or emitting events.
