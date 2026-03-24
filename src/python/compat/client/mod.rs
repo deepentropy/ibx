@@ -176,7 +176,7 @@ impl EClient {
         self.wrapper.call_method1(py, "managed_accounts", (self.account().as_str(),))?;
         self.wrapper.call_method0(py, "connect_ack")?;
 
-        // Event loop
+        // Event loop — wake immediately on data, or check signals every 1ms.
         while self.connected.load(Ordering::Relaxed) {
             py.check_signals()?;
 
@@ -187,8 +187,12 @@ impl EClient {
 
             self.dispatch_once(py, &shared)?;
 
-            // Sleep to avoid busy-wait (1ms)
-            py.allow_threads(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+            // Wait for hot loop notification instead of fixed sleep.
+            // Releases GIL while waiting; wakes immediately when data arrives.
+            let shared_ref = shared.clone();
+            py.allow_threads(move || {
+                shared_ref.wait_for_data(std::time::Duration::from_millis(1));
+            });
         }
 
         // Signal disconnection to wrapper

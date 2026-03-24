@@ -33,8 +33,28 @@ pub const TIMEOUT_FARM_CONNECT: u64 = 30;
 pub const NS_VERSION: u32 = 50;
 pub const NS_VERSION_MIN: u32 = 38;
 
-/// FIX-compliant UTC timestamp without chrono dependency.
-pub fn chrono_free_timestamp() -> String {
+/// Stack-allocated FIX timestamp ("YYYYMMDD-HH:MM:SS"). Zero heap allocation.
+pub struct TimestampBuf {
+    buf: [u8; 17],
+}
+
+impl std::ops::Deref for TimestampBuf {
+    type Target = str;
+    #[inline]
+    fn deref(&self) -> &str {
+        // SAFETY: buf is all ASCII digits, '-', and ':'
+        unsafe { std::str::from_utf8_unchecked(&self.buf) }
+    }
+}
+
+impl std::fmt::Display for TimestampBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
+}
+
+/// FIX-compliant UTC timestamp without chrono dependency. Zero heap allocation.
+pub fn chrono_free_timestamp() -> TimestampBuf {
     use std::time::SystemTime;
     let dur = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -58,8 +78,7 @@ pub fn chrono_free_timestamp() -> String {
     write_u2(&mut buf[12..], minutes as u8);
     buf[14] = b':';
     write_u2(&mut buf[15..], seconds as u8);
-    // SAFETY: buf is all ASCII digits, '-', and ':'
-    unsafe { String::from_utf8_unchecked(buf.to_vec()) }
+    TimestampBuf { buf }
 }
 
 /// Write a u8 as 2 zero-padded decimal digits into a byte slice.

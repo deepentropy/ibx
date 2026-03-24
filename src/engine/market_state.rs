@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::types::{InstrumentId, Price, Qty, Quote, PRICE_SCALE, MAX_INSTRUMENTS};
 
 /// Max server_tag value for flat lookup array. Server tags are small integers from IB.
@@ -12,16 +13,18 @@ pub struct MarketState {
     quotes: [Quote; MAX_INSTRUMENTS],
     /// Number of active instruments (for iteration bounds).
     active_count: u32,
-    /// Maps IB conId → internal InstrumentId.
-    con_id_to_instrument: Vec<(i64, InstrumentId)>,
+    /// Maps IB conId → internal InstrumentId. O(1) lookup.
+    con_id_to_instrument: HashMap<i64, InstrumentId>,
+    /// Reverse map: InstrumentId → conId. Flat array lookup.
+    instrument_to_con_id: [i64; MAX_INSTRUMENTS],
     /// O(1) server_tag → InstrumentId lookup. Server tags are small integers.
     server_tag_table: Box<[u32; MAX_SERVER_TAG]>,
     /// Per-instrument minTick (from 35=Q). Used to scale tick magnitudes to prices.
     min_ticks: [f64; MAX_INSTRUMENTS],
     /// Pre-computed min_tick * PRICE_SCALE as integer for hot-path price conversion.
     min_tick_scaled: [i64; MAX_INSTRUMENTS],
-    /// Per-instrument symbol name (e.g. "AAPL"). Used for orders.
-    symbols: Vec<(InstrumentId, String)>,
+    /// Per-instrument symbol name. Flat array indexed by InstrumentId.
+    symbols: [Option<String>; MAX_INSTRUMENTS],
 }
 
 impl MarketState {
@@ -29,25 +32,24 @@ impl MarketState {
         Self {
             quotes: [Quote::default(); MAX_INSTRUMENTS],
             active_count: 0,
-            con_id_to_instrument: Vec::new(),
+            con_id_to_instrument: HashMap::new(),
+            instrument_to_con_id: [0; MAX_INSTRUMENTS],
             server_tag_table: Box::new([NO_INSTRUMENT; MAX_SERVER_TAG]),
             min_ticks: [0.0; MAX_INSTRUMENTS],
             min_tick_scaled: [0; MAX_INSTRUMENTS],
-            symbols: Vec::new(),
+            symbols: std::array::from_fn(|_| None),
         }
     }
 
     /// Register an IB contract, returns the assigned InstrumentId.
     pub fn register(&mut self, con_id: i64) -> InstrumentId {
-        // Check if already registered
-        for &(cid, iid) in &self.con_id_to_instrument {
-            if cid == con_id {
-                return iid;
-            }
+        if let Some(&id) = self.con_id_to_instrument.get(&con_id) {
+            return id;
         }
         let id = self.active_count;
         assert!((id as usize) < MAX_INSTRUMENTS, "too many instruments");
-        self.con_id_to_instrument.push((con_id, id));
+        self.con_id_to_instrument.insert(con_id, id);
+        self.instrument_to_con_id[id as usize] = con_id;
         self.active_count += 1;
         id
     }
@@ -66,27 +68,21 @@ impl MarketState {
 
     /// Iterate over all registered (InstrumentId, con_id) pairs.
     pub fn active_instruments(&self) -> impl Iterator<Item = (InstrumentId, i64)> + '_ {
-        self.con_id_to_instrument.iter().map(|&(con_id, iid)| (iid, con_id))
+        (0..self.active_count).map(move |id| (id, self.instrument_to_con_id[id as usize]))
     }
 
-    /// Look up con_id by InstrumentId. Returns None if not registered.
+    /// Look up con_id by InstrumentId. O(1) flat array lookup.
     pub fn con_id(&self, instrument: InstrumentId) -> Option<i64> {
-        for &(cid, iid) in &self.con_id_to_instrument {
-            if iid == instrument {
-                return Some(cid);
-            }
+        if instrument < self.active_count {
+            Some(self.instrument_to_con_id[instrument as usize])
+        } else {
+            None
         }
-        None
     }
 
-    /// Look up InstrumentId by con_id. Returns None if not registered.
+    /// Look up InstrumentId by con_id. O(1) HashMap lookup.
     pub fn instrument_by_con_id(&self, con_id: i64) -> Option<InstrumentId> {
-        for &(cid, iid) in &self.con_id_to_instrument {
-            if cid == con_id {
-                return Some(iid);
-            }
-        }
-        None
+        self.con_id_to_instrument.get(&con_id).copied()
     }
 
     /// Look up InstrumentId by server_tag. O(1) flat array lookup.
@@ -102,23 +98,12 @@ impl MarketState {
 
     /// Set symbol name for an instrument (e.g. "AAPL"). Used for orders.
     pub fn set_symbol(&mut self, id: InstrumentId, symbol: String) {
-        for entry in &mut self.symbols {
-            if entry.0 == id {
-                entry.1 = symbol;
-                return;
-            }
-        }
-        self.symbols.push((id, symbol));
+        self.symbols[id as usize] = Some(symbol);
     }
 
-    /// Get symbol name for an instrument. Returns "?" if not set.
+    /// Get symbol name for an instrument. O(1) flat array lookup.
     pub fn symbol(&self, id: InstrumentId) -> &str {
-        for (iid, sym) in &self.symbols {
-            if *iid == id {
-                return sym;
-            }
-        }
-        "?"
+        self.symbols[id as usize].as_deref().unwrap_or("?")
     }
 
     /// Set minTick for an instrument (from 35=Q). Price ticks = magnitude * min_tick.
