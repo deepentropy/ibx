@@ -100,6 +100,14 @@ impl EClient {
         Ok(())
     }
 
+    /// Request available exchanges for market depth.
+    fn req_mkt_depth_exchanges(&self) -> PyResult<()> {
+        let tx = self.tx()?;
+        tx.send(ControlCommand::FetchMktDepthExchanges)
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
     /// Search for matching symbols.
     fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> PyResult<()> {
         let tx = self.tx()?;

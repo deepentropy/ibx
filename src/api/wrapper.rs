@@ -153,6 +153,7 @@ pub trait Wrapper {
         &mut self, req_id: i64, position: i32, market_maker: &str,
         operation: i32, side: i32, price: f64, size: f64, is_smart_depth: bool,
     ) {}
+    fn mkt_depth_exchanges(&mut self, _descriptions: &[crate::types::DepthMktDataDescription]) {}
 
     // ── Tick Req Params ──
 

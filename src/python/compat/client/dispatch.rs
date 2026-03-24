@@ -14,7 +14,7 @@ use crate::api::types::{
     CommissionReport as ApiCommissionReport,
 };
 use super::EClient;
-use super::super::contract::{Contract, ContractDescription, ContractDetails, BarData, CommissionReport};
+use super::super::contract::{Contract, ContractDescription, ContractDetails, BarData, CommissionReport, DepthMktDataDescriptionPy};
 use super::super::tick_types::*;
 use super::super::super::types::PRICE_SCALE_F;
 
@@ -362,6 +362,22 @@ impl EClient {
             }).collect();
             let list = pyo3::types::PyList::new(py, &descriptions)?;
             self.wrapper.call_method1(py, "symbol_samples", (req_id as i64, list.as_any()))?;
+        }
+
+        // Drain depth exchanges -> mktDepthExchanges
+        let depth_exchanges = shared.reference.drain_depth_exchanges();
+        if !depth_exchanges.is_empty() {
+            let descriptions: Vec<Py<DepthMktDataDescriptionPy>> = depth_exchanges.iter().map(|d| {
+                Py::new(py, DepthMktDataDescriptionPy {
+                    exchange: d.exchange.clone(),
+                    sec_type: d.sec_type.clone(),
+                    listing_exch: d.listing_exch.clone(),
+                    service_data_type: d.service_data_type.clone(),
+                    agg_group: d.agg_group,
+                }).unwrap()
+            }).collect();
+            let list = pyo3::types::PyList::new(py, &descriptions)?;
+            self.wrapper.call_method1(py, "mkt_depth_exchanges", (list.as_any(),))?;
         }
 
         // Drain scanner params -> scannerParameters

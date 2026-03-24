@@ -803,6 +803,16 @@ pub struct DepthUpdate {
     pub is_smart_depth: bool,
 }
 
+/// Exchange metadata for market depth availability.
+#[derive(Debug, Clone)]
+pub struct DepthMktDataDescription {
+    pub exchange: String,
+    pub sec_type: String,
+    pub listing_exch: String,
+    pub service_data_type: String,
+    pub agg_group: i32,
+}
+
 /// A real-time news headline from 8=O|35=G tick type 0x1E90.
 #[derive(Debug, Clone)]
 pub struct TickNews {
@@ -975,6 +985,8 @@ pub enum ControlCommand {
     CancelHeadTimestamp { req_id: u32 },
     /// Search for matching symbols via auth connection.
     FetchMatchingSymbols { req_id: u32, pattern: String },
+    /// Request available exchanges for market depth.
+    FetchMktDepthExchanges,
     /// Request scanner parameter XML via historical data connection.
     FetchScannerParams,
     /// Subscribe to a scanner scan via historical data connection.

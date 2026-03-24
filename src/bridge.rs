@@ -309,6 +309,7 @@ pub struct ReferenceState {
     historical_ticks: Mutex<Vec<(u32, HistoricalTickData, String, bool)>>,
     historical_schedules: Mutex<Vec<(u32, HistoricalScheduleResponse)>>,
     market_rules: Mutex<Vec<MarketRule>>,
+    depth_exchanges: Mutex<Vec<DepthMktDataDescription>>,
     /// Contract cache from CCP exec reports (con_id -> api::Contract).
     contract_cache: Mutex<HashMap<i64, api::Contract>>,
 }
@@ -330,6 +331,7 @@ impl ReferenceState {
             historical_ticks: Mutex::new(Vec::with_capacity(4)),
             historical_schedules: Mutex::new(Vec::with_capacity(4)),
             market_rules: Mutex::new(Vec::new()),
+            depth_exchanges: Mutex::new(Vec::new()),
             contract_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -462,6 +464,14 @@ impl ReferenceState {
                 lock.push(rule);
             }
         }
+    }
+
+    pub fn drain_depth_exchanges(&self) -> Vec<DepthMktDataDescription> {
+        self.depth_exchanges.lock().unwrap().drain(..).collect()
+    }
+
+    #[doc(hidden)] pub fn push_depth_exchanges(&self, descs: Vec<DepthMktDataDescription>) {
+        self.depth_exchanges.lock().unwrap().extend(descs);
     }
 
     #[doc(hidden)] pub fn cache_contract(&self, con_id: i64, contract: api::Contract) {

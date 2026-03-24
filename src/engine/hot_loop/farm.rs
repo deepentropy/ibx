@@ -218,7 +218,9 @@ impl FarmState {
                 super::ccp::handle_position_update(&parsed, context, shared, event_tx);
             }
             b"G" => self.handle_tick_news(msg, context, shared, event_tx),
-            _ => {}
+            other => {
+                log::debug!("Farm unhandled 35={}: {} bytes", String::from_utf8_lossy(other), msg.len());
+            }
         }
     }
 

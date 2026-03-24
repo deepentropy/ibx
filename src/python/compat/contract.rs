@@ -2063,6 +2063,35 @@ impl ContractDescription {
     }
 }
 
+#[pyclass(name = "DepthMktDataDescription")]
+#[derive(Debug, Clone)]
+pub struct DepthMktDataDescriptionPy {
+    #[pyo3(get, set)]
+    pub exchange: String,
+    #[pyo3(get, set)]
+    pub sec_type: String,
+    #[pyo3(get, set)]
+    pub listing_exch: String,
+    #[pyo3(get, set)]
+    pub service_data_type: String,
+    #[pyo3(get, set)]
+    pub agg_group: i32,
+}
+
+#[pymethods]
+impl DepthMktDataDescriptionPy {
+    #[new]
+    #[pyo3(signature = (exchange="".to_string(), sec_type="".to_string(), listing_exch="".to_string(), service_data_type="".to_string(), agg_group=0))]
+    fn new(exchange: String, sec_type: String, listing_exch: String, service_data_type: String, agg_group: i32) -> Self {
+        Self { exchange, sec_type, listing_exch, service_data_type, agg_group }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("DepthMktDataDescription(exchange='{}', secType='{}', listingExch='{}', serviceDataType='{}', aggGroup={})",
+            self.exchange, self.sec_type, self.listing_exch, self.service_data_type, self.agg_group)
+    }
+}
+
 /// Register all compat contract/order classes on the module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Contract>()?;
@@ -2079,6 +2108,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ContractDetails>()?;
     m.add_class::<ContractDescription>()?;
     m.add_class::<CommissionReport>()?;
+    m.add_class::<DepthMktDataDescriptionPy>()?;
     Ok(())
 }
 

@@ -585,6 +585,14 @@ def test_mkt_depth_options_list():
     client.req_mkt_depth(1, contract, 10, True, [])
 
 
+def test_req_mkt_depth_exchanges_signature():
+    """req_mkt_depth_exchanges takes no parameters like ibapi."""
+    client = EClient(EWrapper())
+    # Should not raise (method exists, no params needed)
+    # Note: actual request requires connection, but method should exist
+    assert hasattr(client, "req_mkt_depth_exchanges")
+
+
 def test_real_time_bars_options_list():
     """req_real_time_bars with options list raises when not connected."""
     client = EClient(EWrapper())

@@ -56,6 +56,11 @@ impl EClient {
         })
     }
 
+    /// Request available exchanges for market depth.
+    pub fn req_mkt_depth_exchanges(&self) -> Result<(), String> {
+        self.send(ControlCommand::FetchMktDepthExchanges)
+    }
+
     /// Request matching symbols. Matches `reqMatchingSymbols` in C++.
     pub fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> Result<(), String> {
         self.send(ControlCommand::FetchMatchingSymbols {

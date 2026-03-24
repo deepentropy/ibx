@@ -189,7 +189,9 @@ impl CcpState {
                     shared.reference.push_market_rules(rules);
                 }
             }
-            _ => {}
+            other => {
+                log::debug!("CCP unhandled 35={}: {} bytes", other, msg.len());
+            }
         }
     }
 
@@ -720,6 +722,13 @@ impl CcpState {
             log::info!("Sent matching symbols request: req_id={} pattern='{}'", req_id, pattern);
         }
         self.pending_matching_symbols.push(req_id);
+    }
+
+    pub(crate) fn send_mkt_depth_exchanges_request(&mut self, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        // TODO(ib-agent#79): wire format unknown — need CCP command ID (6040=?)
+        // Once captured, send 35=U with the correct 6040 value
+        log::warn!("reqMktDepthExchanges: CCP command ID unknown (ib-agent#79), request not sent");
+        let _ = (ccp_conn, hb);
     }
 
     pub(crate) fn handle_disconnect(&mut self, context: &mut Context, event_tx: &Option<Sender<Event>>) {
