@@ -18,6 +18,18 @@ use super::super::contract::{Contract, ContractDescription, ContractDetails, Bar
 use super::super::tick_types::*;
 use super::super::super::types::PRICE_SCALE_F;
 
+/// Call a Python wrapper method, catching and logging any exception instead of propagating.
+/// This prevents user callback exceptions from killing the dispatch loop.
+macro_rules! call_wrapper {
+    ($wrapper:expr, $py:expr, $method:expr, $args:expr) => {
+        if let Err(e) = $wrapper.call_method($py, $method, $args, None) {
+            log::error!("Python callback {}() raised: {}", $method, e);
+            e.restore($py);
+            unsafe { pyo3::ffi::PyErr_Clear(); }
+        }
+    };
+}
+
 impl EClient {
     /// Single iteration of event dispatch: drain all shared queues and fire Python callbacks.
     pub(crate) fn dispatch_once(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
@@ -25,11 +37,7 @@ impl EClient {
         if let Some(rx) = self.event_rx.lock().unwrap().as_ref() {
             while let Ok(event) = rx.try_recv() {
                 if matches!(event, Event::Disconnected) {
-                    self.wrapper.call_method(
-                        py, "error",
-                        (-1i64, 1100i64, "Connectivity between client and server has been lost", ""),
-                        None,
-                    )?;
+                    call_wrapper!(self.wrapper, py, "error", (-1i64, 1100i64, "Connectivity between client and server has been lost", ""));
                     self.connected.store(false, Ordering::Release);
                 }
             }
@@ -49,12 +57,8 @@ impl EClient {
             let commission = fill.commission as f64 / PRICE_SCALE_F;
 
             let status = if fill.remaining == 0 { "Filled" } else { "PartiallyFilled" };
-            self.wrapper.call_method(
-                py, "order_status",
-                (fill.order_id as i64, status, fill.qty as f64, fill.remaining as f64,
-                 price, 0i64, 0i64, price, 0i64, "", 0.0f64),
-                None,
-            )?;
+            call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, fill.qty as f64, fill.remaining as f64,
+                 price, 0i64, 0i64, price, 0i64, "", 0.0f64));
 
             // Track execution for req_executions
             let exec_id = format!("{}.{}", fill.order_id, fill.timestamp_ns);
@@ -127,11 +131,7 @@ impl EClient {
             exec_dict.set_item("liquidation", 0i64)?;
             exec_dict.set_item("lastLiquidity", 0i64)?;
             exec_dict.set_item("pendingPriceRevision", false)?;
-            self.wrapper.call_method(
-                py, "exec_details",
-                (req_id, &c_py, exec_dict.as_any()),
-                None,
-            )?;
+            call_wrapper!(self.wrapper, py, "exec_details", (req_id, &c_py, exec_dict.as_any()));
 
             // Update open order tracking
             self.core.update_order_fill(fill.order_id, status, fill.qty as f64, fill.remaining as f64);
@@ -146,19 +146,15 @@ impl EClient {
                 yield_redemption_date: String::new(),
             };
             let report_py = Py::new(py, report)?.into_any();
-            self.wrapper.call_method1(py, "commission_report", (&report_py,))?;
+            call_wrapper!(self.wrapper, py, "commission_report", (&report_py,));
         }
 
         // Drain order updates -> orderStatus
         let updates = shared.orders.drain_order_updates();
         for update in updates {
             let status = order_status_str(update.status);
-            self.wrapper.call_method(
-                py, "order_status",
-                (update.order_id as i64, status, update.filled_qty as f64,
-                 update.remaining_qty as f64, 0.0f64, 0i64, 0i64, 0.0f64, 0i64, "", 0.0f64),
-                None,
-            )?;
+            call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, update.filled_qty as f64,
+                 update.remaining_qty as f64, 0.0f64, 0i64, 0i64, 0.0f64, 0i64, "", 0.0f64));
 
             // Track open orders
             self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
@@ -169,11 +165,7 @@ impl EClient {
         for reject in rejects {
             let code = if reject.reject_type == 1 { 202i64 } else { 10147i64 };
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
-            self.wrapper.call_method(
-                py, "error",
-                (reject.order_id as i64, code, msg.as_str(), ""),
-                None,
-            )?;
+            call_wrapper!(self.wrapper, py, "error", (reject.order_id as i64, code, msg.as_str(), ""));
         }
 
         // Poll quotes for changes -> tickPrice/tickSize
@@ -185,24 +177,24 @@ impl EClient {
 
             // Fire market_data_type once per subscription on first tick delivery
             if let Some(mdt) = self.core.check_mdt_needed(req_id, result.delivered) {
-                self.wrapper.call_method1(py, "market_data_type", (req_id, mdt))?;
+                call_wrapper!(self.wrapper, py, "market_data_type", (req_id, mdt));
             }
 
             let attrib = TickAttrib::default();
             let attrib_obj = Py::new(py, attrib)?.into_any();
             for tick in &result.ticks {
                 if tick.is_price {
-                    self.wrapper.call_method1(py, "tick_price", (tick.req_id, tick.tick_type, tick.value, &attrib_obj))?;
+                    call_wrapper!(self.wrapper, py, "tick_price", (tick.req_id, tick.tick_type, tick.value, &attrib_obj));
                 } else {
-                    self.wrapper.call_method1(py, "tick_size", (tick.req_id, tick.tick_type, tick.value))?;
+                    call_wrapper!(self.wrapper, py, "tick_size", (tick.req_id, tick.tick_type, tick.value));
                 }
             }
             if let Some(ts) = &result.timestamp {
                 let ts_secs = ts.timestamp_ns / 1_000_000_000;
-                self.wrapper.call_method1(py, "tick_string", (ts.req_id, TICK_LAST_TIMESTAMP, ts_secs.to_string().as_str()))?;
+                call_wrapper!(self.wrapper, py, "tick_string", (ts.req_id, TICK_LAST_TIMESTAMP, ts_secs.to_string().as_str()));
             }
             if self.core.check_snapshot_done(req_id, result.delivered) {
-                self.wrapper.call_method1(py, "tick_snapshot_end", (req_id,))?;
+                call_wrapper!(self.wrapper, py, "tick_snapshot_end", (req_id,));
                 snapshot_done.push(req_id);
             }
         }
@@ -219,12 +211,8 @@ impl EClient {
             let size = trade.size as f64;
             let attrib = super::super::tick_types::TickAttribLast::default();
             let attrib_obj = Py::new(py, attrib)?.into_any();
-            self.wrapper.call_method(
-                py, "tick_by_tick_all_last",
-                (req_id, 1i32, trade.timestamp as i64, price, size,
-                 &attrib_obj, trade.exchange.as_str(), trade.conditions.as_str()),
-                None,
-            )?;
+            call_wrapper!(self.wrapper, py, "tick_by_tick_all_last", (req_id, 1i32, trade.timestamp as i64, price, size,
+                 &attrib_obj, trade.exchange.as_str(), trade.conditions.as_str()));
         }
 
         // Drain TBT quotes -> tickByTickBidAsk
@@ -234,31 +222,19 @@ impl EClient {
                 .get(&quote.instrument).copied().unwrap_or(-1);
             let attrib = super::super::tick_types::TickAttribBidAsk::default();
             let attrib_obj = Py::new(py, attrib)?.into_any();
-            self.wrapper.call_method(
-                py, "tick_by_tick_bid_ask",
-                (req_id, quote.timestamp as i64,
+            call_wrapper!(self.wrapper, py, "tick_by_tick_bid_ask", (req_id, quote.timestamp as i64,
                  quote.bid as f64 / PRICE_SCALE_F, quote.ask as f64 / PRICE_SCALE_F,
-                 quote.bid_size as f64, quote.ask_size as f64, &attrib_obj),
-                None,
-            )?;
+                 quote.bid_size as f64, quote.ask_size as f64, &attrib_obj));
         }
 
         // Drain depth updates -> updateMktDepth / updateMktDepthL2
         let depth_updates = shared.market.drain_depth_updates();
         for du in depth_updates {
             if du.market_maker.is_empty() {
-                self.wrapper.call_method(
-                    py, "update_mkt_depth",
-                    (du.req_id as i64, du.position, du.operation, du.side, du.price, du.size),
-                    None,
-                )?;
+                call_wrapper!(self.wrapper, py, "update_mkt_depth", (du.req_id as i64, du.position, du.operation, du.side, du.price, du.size));
             } else {
-                self.wrapper.call_method(
-                    py, "update_mkt_depth_l2",
-                    (du.req_id as i64, du.position, du.market_maker.as_str(),
-                     du.operation, du.side, du.price, du.size, du.is_smart_depth),
-                    None,
-                )?;
+                call_wrapper!(self.wrapper, py, "update_mkt_depth_l2", (du.req_id as i64, du.position, du.market_maker.as_str(),
+                     du.operation, du.side, du.price, du.size, du.is_smart_depth));
             }
         }
 
@@ -266,23 +242,15 @@ impl EClient {
         let news_items = shared.market.drain_tick_news();
         for news in news_items {
             let req_id = self.core.req_id_for_instrument(news.instrument);
-            self.wrapper.call_method(
-                py, "tick_news",
-                (req_id, news.timestamp as i64, news.provider_code.as_str(),
-                 news.article_id.as_str(), news.headline.as_str(), ""),
-                None,
-            )?;
+            call_wrapper!(self.wrapper, py, "tick_news", (req_id, news.timestamp as i64, news.provider_code.as_str(),
+                 news.article_id.as_str(), news.headline.as_str(), ""));
         }
 
         // Drain news bulletins -> updateNewsBulletin
         if self.core.bulletin_subscribed.load(Ordering::Acquire) {
             let bulletins = shared.market.drain_news_bulletins();
             for b in bulletins {
-                self.wrapper.call_method(
-                    py, "update_news_bulletin",
-                    (b.msg_id as i64, b.msg_type, b.message.as_str(), b.exchange.as_str()),
-                    None,
-                )?;
+                call_wrapper!(self.wrapper, py, "update_news_bulletin", (b.msg_id as i64, b.msg_type, b.message.as_str(), b.exchange.as_str()));
             }
         }
 
@@ -295,12 +263,8 @@ impl EClient {
                 wi.maint_margin_after as f64 / PRICE_SCALE_F,
                 wi.commission as f64 / PRICE_SCALE_F,
             );
-            self.wrapper.call_method(
-                py, "order_status",
-                (wi.order_id as i64, "PreSubmitted", 0.0f64, 0.0f64,
-                 0.0f64, 0i64, 0i64, 0.0f64, 0i64, msg.as_str(), 0.0f64),
-                None,
-            )?;
+            call_wrapper!(self.wrapper, py, "order_status", (wi.order_id as i64, "PreSubmitted", 0.0f64, 0.0f64,
+                 0.0f64, 0i64, 0i64, 0.0f64, 0i64, msg.as_str(), 0.0f64));
         }
 
         // Drain historical data -> historicalData + historicalDataEnd
@@ -312,24 +276,18 @@ impl EClient {
                     bar.volume, bar.wap, bar.count as i32,
                 );
                 let bar_py = Py::new(py, bar_obj)?.into_any();
-                self.wrapper.call_method1(py, "historical_data", (req_id as i64, &bar_py))?;
+                call_wrapper!(self.wrapper, py, "historical_data", (req_id as i64, &bar_py));
             }
             if response.is_complete {
-                self.wrapper.call_method(
-                    py, "historical_data_end",
-                    (req_id as i64, "", ""),
-                    None,
-                )?;
+                call_wrapper!(self.wrapper, py, "historical_data_end", (req_id as i64, "", ""));
             }
         }
 
         // Drain head timestamps -> headTimestamp
         let head_ts = shared.reference.drain_head_timestamps();
         for (req_id, response) in head_ts {
-            self.wrapper.call_method1(
-                py, "head_timestamp",
-                (req_id as i64, response.head_timestamp.as_str()),
-            )?;
+            call_wrapper!(self.wrapper, py, "head_timestamp",
+                (req_id as i64, response.head_timestamp.as_str()));
         }
 
         // Drain contract details -> contractDetails + contractDetailsEnd
@@ -337,14 +295,12 @@ impl EClient {
         for (req_id, def) in contract_defs {
             let details = ContractDetails::from_definition(&def);
             let details_py = Py::new(py, details)?.into_any();
-            self.wrapper.call_method1(
-                py, "contract_details",
-                (req_id as i64, &details_py),
-            )?;
+            call_wrapper!(self.wrapper, py, "contract_details",
+                (req_id as i64, &details_py));
         }
         let contract_ends = shared.reference.drain_contract_details_end();
         for req_id in contract_ends {
-            self.wrapper.call_method1(py, "contract_details_end", (req_id as i64,))?;
+            call_wrapper!(self.wrapper, py, "contract_details_end", (req_id as i64,));
         }
 
         // Drain matching symbols -> symbolSamples
@@ -361,7 +317,7 @@ impl EClient {
                 }).unwrap()
             }).collect();
             let list = pyo3::types::PyList::new(py, &descriptions)?;
-            self.wrapper.call_method1(py, "symbol_samples", (req_id as i64, list.as_any()))?;
+            call_wrapper!(self.wrapper, py, "symbol_samples", (req_id as i64, list.as_any()));
         }
 
         // Drain depth exchanges -> mktDepthExchanges
@@ -377,13 +333,13 @@ impl EClient {
                 }).unwrap()
             }).collect();
             let list = pyo3::types::PyList::new(py, &descriptions)?;
-            self.wrapper.call_method1(py, "mkt_depth_exchanges", (list.as_any(),))?;
+            call_wrapper!(self.wrapper, py, "mkt_depth_exchanges", (list.as_any(),));
         }
 
         // Drain scanner params -> scannerParameters
         let scanner_params = shared.reference.drain_scanner_params();
         for xml in scanner_params {
-            self.wrapper.call_method1(py, "scanner_parameters", (xml.as_str(),))?;
+            call_wrapper!(self.wrapper, py, "scanner_parameters", (xml.as_str(),));
         }
 
         // Drain scanner data -> scannerData + scannerDataEnd
@@ -393,43 +349,31 @@ impl EClient {
                 let mut cd = ContractDetails::default();
                 cd.contract.con_id = con_id as i64;
                 let cd_py = Py::new(py, cd)?.into_any();
-                self.wrapper.call_method(
-                    py, "scanner_data",
-                    (req_id as i64, rank as i32, &cd_py, "", "", "", ""),
-                    None,
-                )?;
+                call_wrapper!(self.wrapper, py, "scanner_data", (req_id as i64, rank as i32, &cd_py, "", "", "", ""));
             }
-            self.wrapper.call_method1(py, "scanner_data_end", (req_id as i64,))?;
+            call_wrapper!(self.wrapper, py, "scanner_data_end", (req_id as i64,));
         }
 
         // Drain historical news -> historicalNews + historicalNewsEnd
         let news_results = shared.reference.drain_historical_news();
         for (req_id, headlines, has_more) in news_results {
             for h in &headlines {
-                self.wrapper.call_method(
-                    py, "historical_news",
-                    (req_id as i64, h.time.as_str(), h.provider_code.as_str(),
-                     h.article_id.as_str(), h.headline.as_str()),
-                    None,
-                )?;
+                call_wrapper!(self.wrapper, py, "historical_news", (req_id as i64, h.time.as_str(), h.provider_code.as_str(),
+                     h.article_id.as_str(), h.headline.as_str()));
             }
-            self.wrapper.call_method1(py, "historical_news_end", (req_id as i64, has_more))?;
+            call_wrapper!(self.wrapper, py, "historical_news_end", (req_id as i64, has_more));
         }
 
         // Drain news articles -> newsArticle
         let articles = shared.reference.drain_news_articles();
         for (req_id, article_type, text) in articles {
-            self.wrapper.call_method(
-                py, "news_article",
-                (req_id as i64, article_type, text.as_str()),
-                None,
-            )?;
+            call_wrapper!(self.wrapper, py, "news_article", (req_id as i64, article_type, text.as_str()));
         }
 
         // Drain fundamental data -> fundamentalData
         let fundamentals = shared.reference.drain_fundamental_data();
         for (req_id, data) in fundamentals {
-            self.wrapper.call_method1(py, "fundamental_data", (req_id as i64, data.as_str()))?;
+            call_wrapper!(self.wrapper, py, "fundamental_data", (req_id as i64, data.as_str()));
         }
 
         // Drain histogram data -> histogram_data
@@ -439,7 +383,7 @@ impl EClient {
                 pyo3::types::PyTuple::new(py, &[e.price.into_pyobject(py).unwrap().into_any(), e.count.into_pyobject(py).unwrap().into_any()]).unwrap()
             }).collect();
             let py_list = pyo3::types::PyList::new(py, tuples)?;
-            self.wrapper.call_method1(py, "histogram_data", (req_id as i64, py_list))?;
+            call_wrapper!(self.wrapper, py, "histogram_data", (req_id as i64, py_list));
         }
 
         // Drain historical ticks
@@ -454,7 +398,7 @@ impl EClient {
                         ]).unwrap()
                     }).collect();
                     let list = pyo3::types::PyList::new(py, py_ticks)?;
-                    self.wrapper.call_method1(py, "historical_ticks", (req_id as i64, list, done))?;
+                    call_wrapper!(self.wrapper, py, "historical_ticks", (req_id as i64, list, done));
                 }
                 crate::types::HistoricalTickData::Last(ticks) => {
                     let py_ticks: Vec<Bound<'_, pyo3::types::PyTuple>> = ticks.iter().map(|t| {
@@ -467,7 +411,7 @@ impl EClient {
                         ]).unwrap()
                     }).collect();
                     let list = pyo3::types::PyList::new(py, py_ticks)?;
-                    self.wrapper.call_method1(py, "historical_ticks_last", (req_id as i64, list, done))?;
+                    call_wrapper!(self.wrapper, py, "historical_ticks_last", (req_id as i64, list, done));
                 }
                 crate::types::HistoricalTickData::BidAsk(ticks) => {
                     let py_ticks: Vec<Bound<'_, pyo3::types::PyTuple>> = ticks.iter().map(|t| {
@@ -480,7 +424,7 @@ impl EClient {
                         ]).unwrap()
                     }).collect();
                     let list = pyo3::types::PyList::new(py, py_ticks)?;
-                    self.wrapper.call_method1(py, "historical_ticks_bid_ask", (req_id as i64, list, done))?;
+                    call_wrapper!(self.wrapper, py, "historical_ticks_bid_ask", (req_id as i64, list, done));
                 }
             }
         }
@@ -488,12 +432,12 @@ impl EClient {
         // Drain real-time bars -> real_time_bar
         let rtbars = shared.market.drain_real_time_bars();
         for (req_id, bar) in rtbars {
-            self.wrapper.call_method1(py, "real_time_bar", (
+            call_wrapper!(self.wrapper, py, "real_time_bar", (
                 req_id as i64,
                 bar.timestamp as i64,
                 bar.open, bar.high, bar.low, bar.close,
                 bar.volume, bar.wap, bar.count,
-            ))?;
+            ));
         }
 
         // Drain historical schedules -> historical_schedule
@@ -507,45 +451,36 @@ impl EClient {
                 ]).unwrap()
             }).collect();
             let py_sessions = pyo3::types::PyList::new(py, sessions)?;
-            self.wrapper.call_method1(py, "historical_schedule", (
+            call_wrapper!(self.wrapper, py, "historical_schedule", (
                 req_id as i64,
                 resp.start_date_time.as_str(),
                 resp.end_date_time.as_str(),
                 resp.timezone.as_str(),
                 py_sessions,
-            ))?;
+            ));
         }
 
         // Account updates (via ClientCore)
         if let Some(batch) = self.core.prepare_account_updates(shared) {
             let account_name = self.account();
             for field in &batch.fields {
-                self.wrapper.call_method1(py, "update_account_value",
-                    (field.key, field.value.as_str(), field.currency, account_name.as_str()))?;
+                call_wrapper!(self.wrapper, py, "update_account_value", (field.key, field.value.as_str(), field.currency, account_name.as_str()));
             }
             if batch.delivered {
-                self.wrapper.call_method1(py, "update_account_time", ("",))?;
-                self.wrapper.call_method1(py, "account_download_end", (account_name.as_str(),))?;
+                call_wrapper!(self.wrapper, py, "update_account_time", ("",));
+                call_wrapper!(self.wrapper, py, "account_download_end", (account_name.as_str(),));
             }
         }
 
         // P&L dispatch (via ClientCore)
         if let Some(update) = self.core.poll_pnl(shared) {
-            self.wrapper.call_method(
-                py, "pnl",
-                (update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl),
-                None,
-            )?;
+            call_wrapper!(self.wrapper, py, "pnl", (update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl));
         }
 
         // Per-position P&L dispatch (via ClientCore)
         for update in self.core.poll_pnl_single(shared) {
-            self.wrapper.call_method(
-                py, "pnl_single",
-                (update.req_id, update.pos, update.daily_pnl,
-                 update.unrealized_pnl, update.realized_pnl, update.value),
-                None,
-            )?;
+            call_wrapper!(self.wrapper, py, "pnl_single", (update.req_id, update.pos, update.daily_pnl,
+                 update.unrealized_pnl, update.realized_pnl, update.value));
         }
 
         // Account summary dispatch (via ClientCore)
@@ -555,20 +490,12 @@ impl EClient {
                 let tags_orig = self.core.account_summary_req.lock().unwrap().clone();
                 let tags_list = tags_orig.map(|(_, t)| t).unwrap_or_default();
                 if tags_list.is_empty() || tags_list.iter().any(|t| t == "AccountType") {
-                    self.wrapper.call_method(
-                        py, "account_summary",
-                        (batch.req_id, acct_name.as_str(), "AccountType", "INDIVIDUAL", ""),
-                        None,
-                    )?;
+                    call_wrapper!(self.wrapper, py, "account_summary", (batch.req_id, acct_name.as_str(), "AccountType", "INDIVIDUAL", ""));
                 }
                 for entry in &batch.entries {
-                    self.wrapper.call_method(
-                        py, "account_summary",
-                        (batch.req_id, acct_name.as_str(), entry.tag, entry.value.as_str(), entry.currency),
-                        None,
-                    )?;
+                    call_wrapper!(self.wrapper, py, "account_summary", (batch.req_id, acct_name.as_str(), entry.tag, entry.value.as_str(), entry.currency));
                 }
-                self.wrapper.call_method1(py, "account_summary_end", (batch.req_id,))?;
+                call_wrapper!(self.wrapper, py, "account_summary_end", (batch.req_id,));
             }
         }
 
