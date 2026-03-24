@@ -16,8 +16,10 @@ pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
     pub(crate) instrument_md_reqs: Vec<(InstrumentId, FarmSlot, Vec<u32>)>,
-    /// Active depth subscriptions: (req_id, farm_slot).
-    pub(crate) depth_subs: Vec<(u32, FarmSlot)>,
+    /// Active depth subscriptions: (req_id, farm_slot, is_smart_depth).
+    pub(crate) depth_subs: Vec<(u32, FarmSlot, bool)>,
+    /// Maps server_tag → (depth_req_id, is_smart_depth) for active depth subscriptions.
+    pub(crate) depth_tag_to_req: Vec<(u32, u32, bool)>,
     pub(crate) disconnected: bool,
     pub(crate) tick_buf: Vec<tick_decoder::RawTick>,
     pub(crate) farm_msg_buf: Vec<Vec<u8>>,
@@ -30,6 +32,7 @@ impl FarmState {
             md_req_to_instrument: Vec::new(),
             instrument_md_reqs: Vec::new(),
             depth_subs: Vec::new(),
+            depth_tag_to_req: Vec::new(),
             disconnected: false,
             tick_buf: Vec::with_capacity(16),
             farm_msg_buf: Vec::with_capacity(32),
@@ -217,6 +220,7 @@ impl FarmState {
                 let parsed = fix::fix_parse(msg);
                 super::ccp::handle_position_update(&parsed, context, shared, event_tx);
             }
+            b"Y" => self.handle_depth_35y(msg, shared),
             b"G" => self.handle_tick_news(msg, context, shared, event_tx),
             other => {
                 log::debug!("Farm unhandled 35={}: {} bytes", String::from_utf8_lossy(other), msg.len());
@@ -229,6 +233,15 @@ impl FarmState {
             Some(b) => b,
             None => return,
         };
+
+        // Depth 35=P: body starts with 0x00 delimiter + 3-byte server_tag
+        if body.len() >= 4 && body[0] == 0x00 {
+            let stag = ((body[1] as u32) << 16) | ((body[2] as u32) << 8) | (body[3] as u32);
+            if self.depth_tag_to_req.iter().any(|(s, _, _)| *s == stag) {
+                self.handle_depth_35p(body, shared);
+                return;
+            }
+        }
 
         let mut ticks = std::mem::take(&mut self.tick_buf);
         tick_decoder::decode_ticks_35p_into(body, &mut ticks);
@@ -282,6 +295,19 @@ impl FarmState {
         let req_id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => return };
         let min_tick: f64 = parts[2].parse().unwrap_or(0.01);
 
+        // Depth ack: parts[4]=depthLevels > 0
+        let depth_levels: i32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+        if depth_levels > 0 {
+            let is_smart = parts.get(7).map(|s| *s == "1").unwrap_or(false);
+            if self.depth_subs.iter().any(|(id, _, _)| *id == req_id) {
+                self.depth_tag_to_req.push((server_tag, req_id, is_smart));
+                log::info!("Depth ack: server_tag {} -> req_id {} (levels={}, smart={})",
+                    server_tag, req_id, depth_levels, is_smart);
+            }
+            return;
+        }
+
+        // L1 ack
         let instrument = match self.md_req_to_instrument.iter()
             .position(|(id, _)| *id == req_id)
         {
@@ -431,7 +457,7 @@ impl FarmState {
             "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND",
             "CASH" => "CASH", other => other,
         };
-        self.depth_subs.push((req_id, farm));
+        self.depth_subs.push((req_id, farm, is_smart_depth));
 
         if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) {
             let req_id_str = req_id.to_string();
@@ -467,13 +493,14 @@ impl FarmState {
         jfarm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        let farm = match self.depth_subs.iter().position(|(id, _)| *id == req_id) {
+        let farm = match self.depth_subs.iter().position(|(id, _, _)| *id == req_id) {
             Some(idx) => {
-                let (_, f) = self.depth_subs.remove(idx);
+                let (_, f, _) = self.depth_subs.remove(idx);
                 f
             }
             None => return,
         };
+        self.depth_tag_to_req.retain(|(_, rid, _)| *rid != req_id);
         if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) {
             let req_id_str = req_id.to_string();
             let _ = conn.send_fixcomp(&[
@@ -483,6 +510,186 @@ impl FarmState {
             ]);
             hb.last_farm_sent = Instant::now();
             log::info!("Sent depth unsubscribe: req_id={}", req_id);
+        }
+    }
+
+    /// Parse 35=P depth entries (byte-aligned: [00][3B stag][field tags...][58 terminator])
+    fn handle_depth_35p(&self, body: &[u8], shared: &SharedState) {
+        use crate::types::DepthUpdate;
+        let mut pos = 0;
+        let mut bid_position: i32 = 0;
+        let mut ask_position: i32 = 0;
+
+        while pos < body.len() {
+            // Entry delimiter
+            if body[pos] != 0x00 { pos += 1; continue; }
+            pos += 1;
+            if pos + 3 > body.len() { break; }
+
+            // 3-byte server tag
+            let stag = ((body[pos] as u32) << 16) | ((body[pos+1] as u32) << 8) | (body[pos+2] as u32);
+            pos += 3;
+
+            let (req_id, is_smart) = match self.depth_tag_to_req.iter()
+                .find(|(s, _, _)| *s == stag)
+                .map(|(_, r, sm)| (*r, *sm))
+            {
+                Some(v) => v,
+                None => { continue; }
+            };
+
+            // Parse field tags until 0x58 (terminator) or next 0x00 or end
+            let mut price: f64 = 0.0;
+            let mut size: f64 = 0.0;
+            let mut side: i32 = 1; // default bid
+            let mut is_snapshot = false;
+            let mut has_price = false;
+            let mut has_size = false;
+
+            while pos < body.len() && body[pos] != 0x58 && body[pos] != 0x00 {
+                let tag = body[pos];
+                pos += 1;
+
+                let is_size = tag & 0x20 != 0;
+                let is_ask = tag & 0x08 != 0;
+                let snapshot = tag & 0x04 != 0;
+                let two_byte = tag & 0x01 != 0;
+
+                if is_ask { side = 0; } else { side = 1; }
+                if snapshot { is_snapshot = true; }
+
+                if two_byte {
+                    if pos + 2 > body.len() { break; }
+                    let val = ((body[pos] as u16) << 8) | (body[pos+1] as u16);
+                    pos += 2;
+                    if is_size {
+                        size = val as f64;
+                        has_size = true;
+                    } else {
+                        price = val as f64 / 100.0;
+                        has_price = true;
+                    }
+                } else {
+                    if pos >= body.len() { break; }
+                    let val = body[pos];
+                    pos += 1;
+                    if is_size {
+                        size = val as f64 * 100.0;
+                        has_size = true;
+                    } else {
+                        price = val as f64 / 100.0;
+                        has_price = true;
+                    }
+                }
+            }
+
+            // Skip terminator
+            if pos < body.len() && body[pos] == 0x58 { pos += 1; }
+
+            if has_price || has_size {
+                let position = if side == 0 { let p = ask_position; ask_position += 1; p }
+                              else { let p = bid_position; bid_position += 1; p };
+                let operation = if is_snapshot { 0 } else { 1 }; // insert / update
+                shared.market.push_depth_update(DepthUpdate {
+                    req_id, position, market_maker: String::new(),
+                    operation, side, price, size, is_smart_depth: is_smart,
+                });
+            }
+        }
+    }
+
+    /// Parse 35=Y depth entries (NASDAQ TotalView market-maker level)
+    fn handle_depth_35y(&self, msg: &[u8], shared: &SharedState) {
+        use crate::types::DepthUpdate;
+        let body = match find_body_after_tag(msg, b"35=Y\x01") {
+            Some(b) => b,
+            None => return,
+        };
+
+        let mut pos = 0;
+        let mut bid_position: i32 = 0;
+        let mut ask_position: i32 = 0;
+
+        while pos < body.len() {
+            let prefix = body[pos];
+            // 0xC4 = continuation, 0x44 = terminal entry
+            if prefix != 0xC4 && prefix != 0x44 { pos += 1; continue; }
+            pos += 1;
+
+            if pos + 3 > body.len() { break; }
+            // 3-byte server tag
+            let stag = ((body[pos] as u32) << 16) | ((body[pos+1] as u32) << 8) | (body[pos+2] as u32);
+            pos += 3;
+
+            let (req_id, is_smart) = match self.depth_tag_to_req.iter()
+                .find(|(s, _, _)| *s == stag)
+                .map(|(_, r, sm)| (*r, *sm))
+            {
+                Some(v) => v,
+                None => { continue; }
+            };
+
+            // 4-char market maker ID
+            if pos + 4 > body.len() { break; }
+            let mm = String::from_utf8_lossy(&body[pos..pos+4]).trim().to_string();
+            pos += 4;
+
+            // Parse field tags (same encoding as 35=P)
+            let mut price: f64 = 0.0;
+            let mut size: f64 = 0.0;
+            let mut side: i32 = 1;
+            let mut is_snapshot = false;
+            let mut has_price = false;
+            let mut has_size = false;
+
+            while pos < body.len() && body[pos] != 0x58 && body[pos] != 0xC4 && body[pos] != 0x44 && body[pos] != 0x00 {
+                let tag = body[pos];
+                pos += 1;
+
+                let is_size_field = tag & 0x20 != 0;
+                let is_ask = tag & 0x08 != 0;
+                let snapshot = tag & 0x04 != 0;
+                let two_byte = tag & 0x01 != 0;
+
+                if is_ask { side = 0; } else { side = 1; }
+                if snapshot { is_snapshot = true; }
+
+                if two_byte {
+                    if pos + 2 > body.len() { break; }
+                    let val = ((body[pos] as u16) << 8) | (body[pos+1] as u16);
+                    pos += 2;
+                    if is_size_field {
+                        size = val as f64;
+                        has_size = true;
+                    } else {
+                        price = val as f64 / 100.0;
+                        has_price = true;
+                    }
+                } else {
+                    if pos >= body.len() { break; }
+                    let val = body[pos];
+                    pos += 1;
+                    if is_size_field {
+                        size = val as f64 * 100.0;
+                        has_size = true;
+                    } else {
+                        price = val as f64 / 100.0;
+                        has_price = true;
+                    }
+                }
+            }
+
+            if pos < body.len() && body[pos] == 0x58 { pos += 1; }
+
+            if has_price || has_size {
+                let position = if side == 0 { let p = ask_position; ask_position += 1; p }
+                              else { let p = bid_position; bid_position += 1; p };
+                let operation = if is_snapshot { 0 } else { 1 };
+                shared.market.push_depth_update(DepthUpdate {
+                    req_id, position, market_maker: mm,
+                    operation, side, price, size, is_smart_depth: is_smart,
+                });
+            }
         }
     }
 
