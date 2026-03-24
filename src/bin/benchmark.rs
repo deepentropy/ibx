@@ -128,7 +128,7 @@ fn load_dotenv(path: &str) {
 }
 
 fn main() {
-    env_logger::init();
+    let _log = ibx::logging::init(&ibx::logging::LogConfig::from_env());
 
     // Try loading credentials from .env
     load_dotenv(r"D:\PycharmProjects\ibgw-headless\.env");

@@ -20,7 +20,7 @@ use ibx::types::*;
 use harness::*;
 
 fn main() {
-    env_logger::init();
+    let _log = ibx::logging::init(&ibx::logging::LogConfig::from_env());
 
     let config = BenchConfig::from_env();
     let burst_size = BenchConfig::env_u32("BENCH_BURST_SIZE", 20);
