@@ -422,6 +422,227 @@ pub fn connect_farm(
     Ok(conn)
 }
 
+/// Reconnect to the CCP (order/auth) server using cached session credentials.
+/// Performs TLS + DH + CONNECT_REQUEST, then attempts SOFT_TOKEN auth with cached K.
+/// Falls back to error if server demands full SRP (requires password we don't store).
+pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
+    let host = &auth.host;
+    log::info!("CCP reconnect to {}:{}", host, AUTH_PORT);
+
+    // TLS connection
+    let addr = format!("{}:{}", host, AUTH_PORT)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DNS resolution failed"))?;
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(TIMEOUT_SSL_AUTH))?;
+    let connector = TlsConnector::builder()
+        .build()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let mut tls = connector
+        .connect(host, tcp)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+    // DH key exchange
+    let mut channel = SecureChannel::new();
+    let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
+    tls.write_all(&dh_msg)?;
+
+    let (payload, _) = ns::ns_recv(&mut tls)?;
+    let text = String::from_utf8_lossy(&payload);
+    let parts: Vec<&str> = text.split(';').collect();
+    let msg_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    if msg_type != ns::NS_SECURE_CONNECTION_START {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("CCP reconnect DH: expected 533, got {}", msg_type),
+        ));
+    }
+    channel.process_server_hello(&parts[2..]);
+    log::info!("CCP reconnect DH complete");
+
+    // CONNECT_REQUEST with existing session ID
+    let flags = session::FLAG_OK_TO_REDIRECT
+        | session::FLAG_VERSION
+        | session::FLAG_VERSION_PRESENT
+        | session::FLAG_DEVICE_INFO
+        | session::FLAG_SOFT_TOKEN
+        | session::FLAG_UNKNOWN_U
+        | session::FLAG_UNKNOWN_19
+        | session::FLAG_UNKNOWN_20
+        | if auth.paper { session::FLAG_PAPER_CONNECT } else { 0 };
+    let display_name = if auth.paper {
+        format!("S{}", auth.username)
+    } else {
+        auth.username.clone()
+    };
+    let connect_req = format!(
+        "{};{};{};{};{};27;{};{};{};",
+        NS_VERSION_MIN,
+        ns::NS_CONNECT_REQUEST,
+        display_name,
+        flags,
+        NS_VERSION,
+        auth.hw_info,
+        auth.server_session_id,
+        auth.encoded,
+    );
+    session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
+    log::info!("CCP reconnect CONNECT_REQUEST sent (session_id={})", auth.server_session_id);
+
+    // Receive AUTH_START — server may accept token or demand SRP
+    let _auth_start = match session::recv_secure(&mut tls, &mut channel) {
+        Ok(data) => data,
+        Err(e) if e.to_string().starts_with("REDIRECT:") => {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                format!("CCP reconnect redirected: {}", e),
+            ));
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Attempt SOFT_TOKEN auth using cached session key
+    log::info!("CCP reconnect attempting SOFT_TOKEN auth");
+    do_ccp_soft_token(&mut tls, &auth.session_key)?;
+
+    // Post-auth: wait for NS_FIX_START
+    let mut fix_ready = false;
+    for _ in 0..10 {
+        let (payload, _) = match ns::ns_recv(&mut tls) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("CCP reconnect post-auth recv: {}", e);
+                break;
+            }
+        };
+        let text = String::from_utf8_lossy(&payload);
+        let parts: Vec<&str> = text.split(';').collect();
+        let raw_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+        let inner = if raw_type == ns::NS_SECURE_MESSAGE {
+            let ct = B64.decode(parts[2])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            channel.decrypt(&ct)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        } else {
+            payload
+        };
+
+        let inner_text = String::from_utf8_lossy(&inner);
+        let inner_parts: Vec<&str> = inner_text.split(';').collect();
+        let msg_type: u32 = inner_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+        if msg_type == ns::NS_CONNECT_RESPONSE {
+            let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
+            session::send_secure(&mut tls, &mut channel, newcomm.as_bytes())?;
+        } else if msg_type == ns::NS_FIX_START {
+            fix_ready = true;
+            break;
+        } else if msg_type == ns::NS_ERROR_RESPONSE {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("CCP reconnect post-auth error: {}", inner_parts[2..].join(";")),
+            ));
+        }
+    }
+    if !fix_ready {
+        return Err(io::Error::new(io::ErrorKind::Other, "CCP reconnect: no FIX_START after auth"));
+    }
+
+    // FIX Logon
+    let logon_msg = build_ccp_logon(&auth.hw_info, &auth.encoded, CCP_HEARTBEAT, 1);
+    tls.write_all(&logon_msg)?;
+    tls.flush()?;
+
+    tls.get_ref().set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)))?;
+    for _ in 0..5 {
+        let response = fix_read(&mut tls)?;
+        let fields = fix_parse(&response);
+        let msg_type = fields.get(&35).map(|s| s.as_str()).unwrap_or("");
+        match msg_type {
+            "3" | "5" => {
+                let reason = fields.get(&58).map(|s| s.as_str()).unwrap_or("unknown");
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("CCP reconnect logon rejected: {}", reason),
+                ));
+            }
+            "A" | "U" => break,
+            _ => {}
+        }
+    }
+    tls.get_ref().set_read_timeout(None)?;
+
+    // Order mass status request
+    let mut ccp_seq: u32 = 1;
+    ccp_seq += 1;
+    let now = chrono_free_timestamp();
+    let status_req = fix_build(&[(35, "H"), (52, &now), (11, "*"), (54, "*"), (55, "*")], ccp_seq);
+    tls.write_all(&status_req)?;
+    tls.flush()?;
+
+    let mut conn = Connection::new(tls)?;
+    conn.seq = ccp_seq;
+    log::info!("CCP reconnect complete (seq={})", conn.seq);
+    Ok(conn)
+}
+
+/// SOFT_TOKEN challenge-response over the TLS/NS channel (for CCP reconnect).
+fn do_ccp_soft_token<S: Read + Write>(stream: &mut S, session_token: &BigUint) -> io::Result<()> {
+    use crate::protocol::xyz;
+
+    // State 1: Send empty SOFT_TOKEN init (raw XYZ, not FIX-wrapped — CCP uses NS framing)
+    let msg1 = xyz::xyz_build_soft_token(1, "", "", "");
+    stream.write_all(&xyz::xyz_wrap(&msg1))?;
+
+    // State 2: Receive challenge
+    let recv2 = session::recv_msg(stream)?;
+    let challenge_hex = match recv2 {
+        session::RecvMsg::Xyz { state, fields, .. } if state == 2 => {
+            fields.get(1).filter(|s| !s.is_empty()).cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "CCP SOFT_TOKEN: empty challenge"))?
+        }
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "CCP SOFT_TOKEN: expected XYZ state 2")),
+    };
+
+    // SHA-1(strip(challenge) || strip(token))
+    let challenge_int = BigUint::parse_bytes(challenge_hex.as_bytes(), 16)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid challenge hex"))?;
+    let challenge_be = challenge_int.to_bytes_be();
+    let challenge_bytes = strip_leading_zeros(&challenge_be);
+    let token_be = session_token.to_bytes_be();
+    let token_bytes = strip_leading_zeros(&token_be);
+
+    let mut hasher = Sha1::new();
+    hasher.update(challenge_bytes);
+    hasher.update(token_bytes);
+    let digest = hasher.finalize();
+    let response_hex = format!("{:x}", BigUint::from_bytes_be(&digest));
+
+    // State 3: Send response
+    let msg3 = xyz::xyz_build_soft_token(3, "", &response_hex, "");
+    stream.write_all(&xyz::xyz_wrap(&msg3))?;
+
+    // State 4: Receive result
+    let recv4 = session::recv_msg(stream)?;
+    let result = match recv4 {
+        session::RecvMsg::Xyz { fields, .. } => {
+            fields.iter().rev().find(|s| !s.is_empty()).cloned().unwrap_or_default()
+        }
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "CCP SOFT_TOKEN: expected XYZ state 4")),
+    };
+
+    if result == "PASSED" {
+        log::info!("CCP SOFT_TOKEN auth passed");
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("CCP SOFT_TOKEN auth failed: {} — full re-auth needed", result),
+        ))
+    }
+}
+
 /// Configuration for connecting to IB.
 pub struct GatewayConfig {
     pub username: String,

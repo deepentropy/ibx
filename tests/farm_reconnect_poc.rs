@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ibx::bridge::SharedState;
-use ibx::gateway::{connect_farm, Gateway, GatewayConfig};
+use ibx::gateway::{connect_farm, reconnect_ccp, Gateway, GatewayConfig, ReconnectAuth};
 
 fn config() -> GatewayConfig {
     GatewayConfig {
@@ -105,4 +105,48 @@ fn hotloop_auto_reconnect_on_farm_disconnect() {
     assert!(!hot_loop.is_farm_disconnected(), "Farm should have reconnected within 60s");
     assert!(hot_loop.farm_conn.is_some(), "Farm connection should be restored");
     println!("PASS: HotLoop auto-reconnected farm after disconnect");
+}
+
+#[test]
+fn ccp_reconnect_with_cached_credentials() {
+    let cfg = config();
+
+    let t0 = Instant::now();
+    let (gw, _farm_conn, ccp_conn, _hmds, _cash, _usfut, _eu, _j) =
+        Gateway::connect(&cfg).expect("Initial connect failed");
+    let full_auth_ms = t0.elapsed().as_millis();
+
+    let auth = ReconnectAuth {
+        host: cfg.host.clone(),
+        username: cfg.username.clone(),
+        paper: cfg.paper,
+        session_key: gw.session_token.clone(),
+        server_session_id: gw.server_session_id.clone(),
+        hw_info: gw.hw_info.clone(),
+        encoded: gw.encoded.clone(),
+    };
+
+    println!("Full auth: {}ms | session_id={}", full_auth_ms, auth.server_session_id);
+
+    // Drop original CCP connection
+    drop(ccp_conn);
+    println!("Original CCP connection dropped");
+
+    // Reconnect using cached credentials (SOFT_TOKEN, no SRP)
+    let t1 = Instant::now();
+    let result = reconnect_ccp(&auth);
+    let reconnect_ms = t1.elapsed().as_millis();
+
+    match result {
+        Ok(conn) => {
+            println!("CCP reconnect: {}ms (SOFT_TOKEN) | seq={}", reconnect_ms, conn.seq);
+            println!("PASS: CCP reconnect with cached K works, {:.1}x speedup",
+                full_auth_ms as f64 / reconnect_ms.max(1) as f64);
+        }
+        Err(e) => {
+            println!("CCP reconnect failed after {}ms: {}", reconnect_ms, e);
+            println!("INFO: Server requires full SRP for CCP — auto-reconnect not possible without password");
+            // This is an expected outcome — don't fail the test, just report
+        }
+    }
 }

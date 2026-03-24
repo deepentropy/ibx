@@ -10,7 +10,7 @@ use std::io;
 use crate::bridge::{Event, SharedState};
 use crate::engine::context::Context;
 use crate::config::chrono_free_timestamp;
-use crate::gateway::{connect_farm, ReconnectAuth};
+use crate::gateway::{connect_farm, reconnect_ccp, ReconnectAuth};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{ControlCommand, Fill, InstrumentId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
@@ -66,6 +66,8 @@ pub struct HotLoop {
     reconnect_auth: Option<ReconnectAuth>,
     pending_farm_reconnect: Option<Receiver<io::Result<Connection>>>,
     farm_reconnect_attempt: u32,
+    pending_ccp_reconnect: Option<Receiver<io::Result<Connection>>>,
+    ccp_reconnect_attempt: u32,
 }
 
 /// Per-secondary-farm heartbeat tracking.
@@ -167,6 +169,8 @@ impl HotLoop {
             reconnect_auth: None,
             pending_farm_reconnect: None,
             farm_reconnect_attempt: 0,
+            pending_ccp_reconnect: None,
+            ccp_reconnect_attempt: 0,
         }
     }
 
@@ -269,10 +273,14 @@ impl HotLoop {
             );
 
             // 3. Busy-poll auth socket for execution reports
+            let ccp_was_ok = !self.ccp.disconnected;
             self.ccp.poll_executions(
                 &mut self.ccp_conn, &mut self.context, &self.shared,
                 &self.event_tx, &mut self.hb, &self.account_id,
             );
+            if ccp_was_ok && self.ccp.disconnected {
+                self.spawn_ccp_reconnect();
+            }
 
             // 4. Check control_plane_rx (SPSC) for commands
             self.poll_control_commands();
@@ -280,8 +288,9 @@ impl HotLoop {
             // 5. Heartbeat check (auth 10s, farm 30s)
             self.check_heartbeats();
 
-            // 5b. Poll pending farm reconnect (non-blocking)
+            // 5b. Poll pending reconnects (non-blocking)
             self.poll_farm_reconnect();
+            self.poll_ccp_reconnect();
 
             // 6. Wake any waiting consumers (e.g. Python event loop)
             self.shared.notify();
@@ -528,6 +537,7 @@ impl HotLoop {
                     if now.duration_since(*sent_at).as_secs() > CCP_HEARTBEAT_SECS {
                         log::error!("CCP heartbeat timeout — connection lost");
                         self.ccp.handle_disconnect(&mut self.context, &self.event_tx);
+                        self.spawn_ccp_reconnect();
                     }
                 } else {
                     let test_id = self.hb.next_test_id();
@@ -780,12 +790,60 @@ impl HotLoop {
             Ok(Err(e)) => {
                 log::error!("Farm auto-reconnect failed (attempt {}): {}", self.farm_reconnect_attempt, e);
                 self.pending_farm_reconnect = None;
-                // Will retry on next check_heartbeats cycle
             }
-            Err(crossbeam_channel::TryRecvError::Empty) => {} // still in progress
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
                 log::error!("Farm reconnect thread dropped without result");
                 self.pending_farm_reconnect = None;
+            }
+        }
+    }
+
+    /// Spawn a background thread to reconnect CCP using cached credentials.
+    fn spawn_ccp_reconnect(&mut self) {
+        if self.pending_ccp_reconnect.is_some() { return; }
+        let auth = match self.reconnect_auth.clone() {
+            Some(a) if !a.host.is_empty() => a,
+            _ => {
+                log::warn!("CCP auto-reconnect skipped: no credentials");
+                return;
+            }
+        };
+        self.ccp_reconnect_attempt += 1;
+        let attempt = self.ccp_reconnect_attempt;
+        log::info!("CCP auto-reconnect attempt {} starting (host={})", attempt, auth.host);
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::Builder::new()
+            .name(format!("ccp-reconnect-{}", attempt))
+            .spawn(move || {
+                let _ = tx.send(reconnect_ccp(&auth));
+            })
+            .ok();
+        self.pending_ccp_reconnect = Some(rx);
+    }
+
+    /// Poll for a completed CCP reconnect. Non-blocking.
+    fn poll_ccp_reconnect(&mut self) {
+        let rx = match self.pending_ccp_reconnect.as_ref() {
+            Some(rx) => rx,
+            None => return,
+        };
+        match rx.try_recv() {
+            Ok(Ok(conn)) => {
+                log::info!("CCP auto-reconnect succeeded (attempt {})", self.ccp_reconnect_attempt);
+                self.reconnect_ccp(conn);
+                self.ccp_reconnect_attempt = 0;
+                self.pending_ccp_reconnect = None;
+            }
+            Ok(Err(e)) => {
+                log::error!("CCP auto-reconnect failed (attempt {}): {}", self.ccp_reconnect_attempt, e);
+                self.pending_ccp_reconnect = None;
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                log::error!("CCP reconnect thread dropped without result");
+                self.pending_ccp_reconnect = None;
             }
         }
     }
