@@ -493,6 +493,11 @@ impl FarmState {
         emit(event_tx, Event::Disconnected);
     }
 
+    /// Test-only: set disconnected without clearing state or emitting events.
+    pub fn handle_disconnect_for_test(&mut self) {
+        self.disconnected = true;
+    }
+
     pub(crate) fn reconnect(
         &mut self,
         conn: Connection,

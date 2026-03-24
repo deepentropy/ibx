@@ -5,10 +5,12 @@ pub mod order_builder;
 
 use std::sync::Arc;
 use std::time::Instant;
+use std::io;
 
 use crate::bridge::{Event, SharedState};
 use crate::engine::context::Context;
 use crate::config::chrono_free_timestamp;
+use crate::gateway::{connect_farm, ReconnectAuth};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{ControlCommand, Fill, InstrumentId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
@@ -60,6 +62,10 @@ pub struct HotLoop {
     pub(crate) farm: FarmState,
     pub(crate) ccp: CcpState,
     pub(crate) hmds: HmdsState,
+    // ── Auto-reconnect ──
+    reconnect_auth: Option<ReconnectAuth>,
+    pending_farm_reconnect: Option<Receiver<io::Result<Connection>>>,
+    farm_reconnect_attempt: u32,
 }
 
 /// Per-secondary-farm heartbeat tracking.
@@ -158,6 +164,9 @@ impl HotLoop {
             farm: FarmState::new(),
             ccp: CcpState::new(),
             hmds: HmdsState::new(),
+            reconnect_auth: None,
+            pending_farm_reconnect: None,
+            farm_reconnect_attempt: 0,
         }
     }
 
@@ -219,10 +228,14 @@ impl HotLoop {
             self.context.loop_iterations += 1;
 
             // 1. Busy-poll market data farm socket (non-blocking recv)
+            let farm_was_ok = !self.farm.disconnected;
             self.farm.poll_market_data(
                 &mut self.farm_conn, &mut self.context, &self.shared,
                 &self.event_tx, &mut self.hb,
             );
+            if farm_was_ok && self.farm.disconnected {
+                self.spawn_farm_reconnect();
+            }
             self.farm.poll_secondary_farm(
                 &mut self.cashfarm_conn, &crate::types::FarmSlot::CashFarm,
                 &mut self.farm_conn, &mut self.context, &self.shared,
@@ -266,6 +279,9 @@ impl HotLoop {
 
             // 5. Heartbeat check (auth 10s, farm 30s)
             self.check_heartbeats();
+
+            // 5b. Poll pending farm reconnect (non-blocking)
+            self.poll_farm_reconnect();
 
             // 6. Wake any waiting consumers (e.g. Python event loop)
             self.shared.notify();
@@ -546,6 +562,7 @@ impl HotLoop {
                     if now.duration_since(*sent_at).as_secs() > FARM_HEARTBEAT_SECS {
                         log::error!("Farm heartbeat timeout — connection lost");
                         self.farm.handle_disconnect(&mut self.context, &self.event_tx);
+                        self.spawn_farm_reconnect();
                     }
                 } else {
                     let test_id = self.hb.next_test_id();
@@ -703,9 +720,94 @@ impl HotLoop {
         self.ccp.reconnect(conn, &mut self.ccp_conn, &mut self.hb);
     }
 
+    /// Set cached auth credentials for farm auto-reconnect.
+    pub fn set_reconnect_auth(&mut self, auth: ReconnectAuth) {
+        self.reconnect_auth = Some(auth);
+    }
+
+    /// Update caller-specific fields on the reconnect auth (host, username, paper).
+    pub fn update_reconnect_auth(&mut self, host: String, username: String, paper: bool) {
+        if let Some(auth) = self.reconnect_auth.as_mut() {
+            auth.host = host;
+            auth.username = username;
+            auth.paper = paper;
+        }
+    }
+
+    /// Spawn a background thread to reconnect the farm using cached credentials.
+    fn spawn_farm_reconnect(&mut self) {
+        if self.pending_farm_reconnect.is_some() { return; } // already in progress
+        let auth = match self.reconnect_auth.clone() {
+            Some(a) if !a.host.is_empty() => a,
+            _ => {
+                log::warn!("Farm auto-reconnect skipped: no credentials (host empty or auth missing)");
+                return;
+            }
+        };
+        self.farm_reconnect_attempt += 1;
+        let attempt = self.farm_reconnect_attempt;
+        log::info!("Farm auto-reconnect attempt {} starting (host={}, user={})", attempt, auth.host, auth.username);
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::Builder::new()
+            .name(format!("farm-reconnect-{}", attempt))
+            .spawn(move || {
+                let result = connect_farm(
+                    &auth.host, "usfarm",
+                    &auth.username, auth.paper,
+                    &auth.server_session_id, &auth.session_key,
+                    &auth.hw_info, &auth.encoded,
+                );
+                let _ = tx.send(result);
+            })
+            .ok();
+        self.pending_farm_reconnect = Some(rx);
+    }
+
+    /// Poll for a completed farm reconnect. Non-blocking.
+    fn poll_farm_reconnect(&mut self) {
+        let rx = match self.pending_farm_reconnect.as_ref() {
+            Some(rx) => rx,
+            None => return,
+        };
+        match rx.try_recv() {
+            Ok(Ok(conn)) => {
+                log::info!("Farm auto-reconnect succeeded (attempt {})", self.farm_reconnect_attempt);
+                self.reconnect_farm(conn);
+                self.farm_reconnect_attempt = 0;
+                self.pending_farm_reconnect = None;
+            }
+            Ok(Err(e)) => {
+                log::error!("Farm auto-reconnect failed (attempt {}): {}", self.farm_reconnect_attempt, e);
+                self.pending_farm_reconnect = None;
+                // Will retry on next check_heartbeats cycle
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {} // still in progress
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                log::error!("Farm reconnect thread dropped without result");
+                self.pending_farm_reconnect = None;
+            }
+        }
+    }
+
     /// Access heartbeat state for testing.
     pub fn heartbeat_state(&self) -> &HeartbeatState {
         &self.hb
+    }
+
+    /// Test-only: force farm into disconnected state.
+    pub fn force_farm_disconnect(&mut self) {
+        self.farm.handle_disconnect_for_test();
+    }
+
+    /// Test-only: trigger farm reconnect spawn.
+    pub fn spawn_farm_reconnect_for_test(&mut self) {
+        self.spawn_farm_reconnect();
+    }
+
+    /// Test-only: poll pending farm reconnect.
+    pub fn poll_farm_reconnect_for_test(&mut self) {
+        self.poll_farm_reconnect();
     }
 
     /// Mutably access heartbeat state for testing (e.g., setting timestamps).

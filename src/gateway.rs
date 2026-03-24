@@ -244,6 +244,18 @@ fn try_frame_farm_msg(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
     Some((buf[..total].to_vec(), total))
 }
 
+/// Credentials cached for farm auto-reconnect (no SRP needed).
+#[derive(Clone)]
+pub struct ReconnectAuth {
+    pub host: String,
+    pub username: String,
+    pub paper: bool,
+    pub session_key: BigUint,
+    pub server_session_id: String,
+    pub hw_info: String,
+    pub encoded: String,
+}
+
 /// Full gateway connection.
 pub struct Gateway {
     pub account_id: String,
@@ -836,9 +848,19 @@ impl Gateway {
         core_id: Option<usize>,
     ) -> (HotLoop, Sender<ControlCommand>) {
         let (tx, rx) = bounded(64);
+        let reconnect_auth = ReconnectAuth {
+            host: String::new(), // Filled by caller (Python EClient or Rust API)
+            username: String::new(), // Filled by caller
+            paper: false, // Filled by caller
+            session_key: self.session_token.clone(),
+            server_session_id: self.server_session_id.clone(),
+            hw_info: self.hw_info.clone(),
+            encoded: self.encoded.clone(),
+        };
         let mut hot_loop = HotLoop::new(shared, event_tx, core_id);
         hot_loop.set_control_rx(rx);
         hot_loop.set_account_id(self.account_id.clone());
+        hot_loop.set_reconnect_auth(reconnect_auth);
         hot_loop.farm_conn = Some(farm_conn);
         hot_loop.ccp_conn = Some(ccp_conn);
         hot_loop.hmds_conn = hmds_conn;

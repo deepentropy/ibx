@@ -124,8 +124,12 @@ impl EClient {
         *self.account_id.lock().unwrap() = Some(gw.account_id.clone());
         let shared = Arc::new(SharedState::new());
 
+        let connect_host = config.host.clone();
+        let connect_username = config.username.clone();
+        let connect_paper = config.paper;
         let (event_tx, event_rx) = crossbeam_channel::bounded(256);
         let (mut hot_loop, control_tx) = gw.into_hot_loop_with_farms(shared.clone(), Some(event_tx), farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, core_id);
+        hot_loop.update_reconnect_auth(connect_host, connect_username, connect_paper);
 
         let start_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
