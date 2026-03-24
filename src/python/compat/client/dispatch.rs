@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use pyo3::prelude::*;
 
-use crate::bridge::SharedState;
+use crate::bridge::{Event, SharedState};
 use crate::client_core::order_status_str;
 use crate::types::*;
 
@@ -21,6 +21,20 @@ use super::super::super::types::PRICE_SCALE_F;
 impl EClient {
     /// Single iteration of event dispatch: drain all shared queues and fire Python callbacks.
     pub(crate) fn dispatch_once(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
+        // Drain engine events — surface disconnects as error callbacks.
+        if let Some(rx) = self.event_rx.lock().unwrap().as_ref() {
+            while let Ok(event) = rx.try_recv() {
+                if matches!(event, Event::Disconnected) {
+                    self.wrapper.call_method(
+                        py, "error",
+                        (-1i64, 1100i64, "Connectivity between client and server has been lost", ""),
+                        None,
+                    )?;
+                    self.connected.store(false, Ordering::Release);
+                }
+            }
+        }
+
         // Drain fills -> execDetails + orderStatus
         let fills = shared.orders.drain_fills();
         for fill in fills {

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
-use crate::bridge::SharedState;
+use crate::bridge::{Event, SharedState};
 use crate::control::historical::{HistoricalBar, HistoricalResponse, HeadTimestampResponse};
 use crate::types::*;
 
@@ -23,9 +23,13 @@ impl EClient {
         }
         let shared = Arc::new(SharedState::new());
         let (tx, _rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(256);
         *self.shared.lock().unwrap() = Some(shared);
         *self.control_tx.lock().unwrap() = Some(tx);
+        *self.event_rx.lock().unwrap() = Some(event_rx);
         *self.account_id.lock().unwrap() = Some(account_id);
+        // Store event_tx so _test_push_disconnect_event can use it.
+        *self._test_event_tx.lock().unwrap() = Some(event_tx);
         self.next_order_id.store(1000, Ordering::Relaxed);
         self.connected.store(true, Ordering::Release);
         Ok(())
@@ -217,5 +221,13 @@ impl EClient {
         }
         let shared = self.shared_state()?;
         self.dispatch_once(py, &shared)
+    }
+
+    /// Inject an Event::Disconnected into the event channel (test-only).
+    #[doc(hidden)]
+    fn _test_push_disconnect_event(&self) -> PyResult<()> {
+        let tx = self._test_event_tx.lock().unwrap();
+        let tx = tx.as_ref().ok_or_else(|| PyRuntimeError::new_err("No event channel"))?;
+        tx.send(Event::Disconnected).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))
     }
 }

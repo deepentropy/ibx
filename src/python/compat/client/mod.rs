@@ -12,11 +12,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
-use crate::bridge::SharedState;
+use crate::bridge::{Event, SharedState};
 use crate::client_core::ClientCore;
 use crate::gateway::{Gateway, GatewayConfig};
 use crate::types::*;
@@ -53,6 +53,11 @@ pub struct EClient {
     /// Set by connect(), cleared by disconnect().
     pub(crate) account_id: Mutex<Option<String>>,
     pub(crate) connected: AtomicBool,
+    /// Receiver for engine events (disconnects, etc.).
+    pub(crate) event_rx: Mutex<Option<crossbeam_channel::Receiver<Event>>>,
+    /// Sender for test-injected events (test-only).
+    #[doc(hidden)]
+    pub(crate) _test_event_tx: Mutex<Option<crossbeam_channel::Sender<Event>>>,
     /// Shared subscription tracking and dispatch preparation.
     pub(crate) core: ClientCore,
 }
@@ -81,6 +86,8 @@ impl EClient {
             _thread: Mutex::new(None),
             account_id: Mutex::new(None),
             connected: AtomicBool::new(false),
+            event_rx: Mutex::new(None),
+            _test_event_tx: Mutex::new(None),
             core: ClientCore::new(),
         }
     }
@@ -117,7 +124,8 @@ impl EClient {
         *self.account_id.lock().unwrap() = Some(gw.account_id.clone());
         let shared = Arc::new(SharedState::new());
 
-        let (mut hot_loop, control_tx) = gw.into_hot_loop_with_farms(shared.clone(), None, farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, core_id);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(256);
+        let (mut hot_loop, control_tx) = gw.into_hot_loop_with_farms(shared.clone(), Some(event_tx), farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, core_id);
 
         let start_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -133,6 +141,7 @@ impl EClient {
 
         *self.shared.lock().unwrap() = Some(shared);
         *self.control_tx.lock().unwrap() = Some(control_tx);
+        *self.event_rx.lock().unwrap() = Some(event_rx);
         self.next_order_id.store(start_id, Ordering::Relaxed);
         *self._thread.lock().unwrap() = Some(handle);
         self.connected.store(true, Ordering::Release);
@@ -154,6 +163,7 @@ impl EClient {
         // Reset per-session state so connect() can be called again.
         *self.shared.lock().unwrap() = None;
         *self.control_tx.lock().unwrap() = None;
+        *self.event_rx.lock().unwrap() = None;
         *self.account_id.lock().unwrap() = None;
         self.core.reset();
         Ok(())
