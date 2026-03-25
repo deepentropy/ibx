@@ -364,7 +364,7 @@ pub fn connect_farm(
     // Create Connection (switches to non-blocking), inject routing bytes
     let mut conn = Connection::new_raw(stream)?;
     conn.set_keys(sign_mac_key, final_sign_iv, read_mac_key, read_iv);
-    conn.seq = 1; // routing request used seq 1
+    conn.seq = 0; // first send_fixcomp will be seq=1 (debug: skip heartbeats)
 
     // Inject logon remaining bytes + routing response into connection buffer.
     // Python processes logon remaining before routing, but both need read_iv chaining.

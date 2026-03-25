@@ -104,7 +104,7 @@ impl FarmState {
         &mut self,
         secondary_conn: &mut Option<Connection>,
         slot: &FarmSlot,
-        farm_conn: &mut Option<Connection>,
+        _farm_conn: &mut Option<Connection>,
         context: &mut Context,
         shared: &SharedState,
         event_tx: &Option<Sender<Event>>,
@@ -146,7 +146,7 @@ impl FarmState {
             }
         }
         for msg in &msgs {
-            self.process_farm_message(msg, farm_conn, context, shared, event_tx, hb);
+            self.process_farm_message(msg, secondary_conn, context, shared, event_tx, hb);
         }
     }
 
