@@ -92,7 +92,11 @@ impl Connection {
     /// Sets the stream to non-blocking mode and enables TCP_NODELAY.
     pub fn new_raw(stream: TcpStream) -> io::Result<Self> {
         stream.set_nodelay(true)?;
-        stream.set_nonblocking(true)?;
+        // Use blocking socket with 1ms read timeout instead of non-blocking.
+        // Non-blocking write_all can silently fail (WouldBlock), causing HMAC-signed
+        // messages to never reach the farm — the sign_iv still advances, permanently
+        // breaking the signing chain.
+        stream.set_read_timeout(Some(std::time::Duration::from_millis(1)))?;
         Ok(Self {
             stream: Stream::Raw(stream),
             buf: Vec::with_capacity(RECV_BUF_SIZE),
@@ -141,7 +145,8 @@ impl Connection {
                 self.buf.extend_from_slice(&tmp[..n]);
                 Ok(n)
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                || e.kind() == io::ErrorKind::TimedOut => Ok(0),
             Err(e) => Err(e),
         }
     }
