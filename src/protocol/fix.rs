@@ -247,6 +247,7 @@ pub fn fix_sign(msg: &[u8], mac_key: &[u8], iv: &[u8]) -> (Vec<u8>, Vec<u8>) {
     // 3. XOR-fold → 4 bytes, write as hex directly (no String alloc)
     let folded = xor_fold_bytes(&hmac_res);
 
+
     // 4. Rebuild message with signature (pre-allocate)
     let sig_tag_len = 5 + 8 + 1; // "8349=" + 8 hex chars + SOH
     let signed_body_len = body.len() + sig_tag_len;
