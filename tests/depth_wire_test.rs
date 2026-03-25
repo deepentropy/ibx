@@ -22,10 +22,8 @@ fn raw_farm_subscribe_test() {
 
     eprintln!("Farm connected, seq={}", farm.seq);
 
-    // Test: reset seq to 0 so first subscribe uses seq=1
-    // (farm may not have counted our routing request)
+    eprintln!("sign_iv={:02x?}", &farm.sign_iv[..8]);
     farm.seq = 0;
-    eprintln!("Reset seq to 0");
 
     // L1: 35=V|263=1|146=1|262=1|6008=265598|207=BEST|167=CS|264=0|9830=1|
     let r1 = farm.send_fixcomp(&[
