@@ -106,6 +106,10 @@ impl EClient {
             o.tif = tracked.order.tif.clone();
             o.account = tracked.order.account.clone();
             o.perm_id = tracked.order.perm_id;
+            o.oca_type = tracked.order.oca_type;
+            o.use_price_mgmt_algo = tracked.order.use_price_mgmt_algo;
+            o.trail_stop_price = tracked.order.trail_stop_price;
+            o.algo_strategy = tracked.order.algo_strategy.clone();
             let o_py = Py::new(py, o)?.into_any();
             let state = pyo3::types::PyDict::new(py);
             state.set_item("status", tracked.status.as_str())?;

@@ -452,6 +452,19 @@ impl CcpState {
                 ("", "", "")
             };
 
+            // ib-agent#73: derive 3 order-dependent fields from FIX tags
+            let oca_type: i32 = match parsed.get(&6209).map(|s| s.as_str()) {
+                Some("CancelOnFillWBlock") => 1,
+                Some("ReduceOnFillWBlock") => 2,
+                Some("ReduceOnFillNonBlock") => 3,
+                _ => 3, // default
+            };
+            let algo_strategy = parsed.get(&847).cloned().unwrap_or_default();
+            let use_price_mgmt_algo: i32 = if algo_strategy == "Adaptive" { 1 } else { 0 };
+            let trail_stop_price: f64 = parsed.get(&6117)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(f64::MAX);
+
             let order = api::Order {
                 order_id: clord_id as i64,
                 action: if action.is_empty() { fb_action.to_string() } else { action.to_string() },
@@ -467,6 +480,10 @@ impl CcpState {
                 clearing_intent,
                 auto_cancel_date,
                 submitter: account_id.to_string(),
+                oca_type,
+                use_price_mgmt_algo,
+                trail_stop_price,
+                algo_strategy,
                 ..Default::default()
             };
 
