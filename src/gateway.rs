@@ -280,13 +280,17 @@ pub fn connect_farm(
     hw_info: &str,
     encoded: &str,
 ) -> io::Result<Connection> {
-    log::info!("Connecting to {} {}:{}", farm_id, host, MISC_PORT);
-    let addr = format!("{}:{}", host, MISC_PORT)
+    let port = misc_port();
+    let farm_host = farm_host_override().unwrap_or_else(|| host.to_string());
+    log::info!("Connecting to {} {}:{}", farm_id, farm_host, port);
+    let addr = format!("{}:{}", farm_host, port)
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DNS resolution failed"))?;
-    let farm_tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(TIMEOUT_FARM_CONNECT))?;
+    let farm_tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(TIMEOUT_FARM_CONNECT))
+        .map_err(|e| io::Error::new(e.kind(), format!("{} TCP connect: {}", farm_id, e)))?;
     farm_tcp.set_nodelay(true)?;
+    farm_tcp.set_read_timeout(Some(Duration::from_secs(TIMEOUT_FARM_CONNECT)))?;
 
     // Key exchange (raw TCP)
     let mut channel = SecureChannel::new();
@@ -364,7 +368,7 @@ pub fn connect_farm(
     // Create Connection (switches to non-blocking), inject routing bytes
     let mut conn = Connection::new_raw(stream)?;
     conn.set_keys(sign_mac_key, final_sign_iv, read_mac_key, read_iv);
-    conn.seq = 0; // first send_fixcomp will be seq=1 (debug: skip heartbeats)
+    conn.seq = 1; // routing request was seq=1; next send_fix will be seq=2
 
     // Inject logon remaining bytes + routing response into connection buffer.
     // Python processes logon remaining before routing, but both need read_iv chaining.
@@ -1014,65 +1018,57 @@ impl Gateway {
         // Seed init burst into connection buffer so the hot loop processes 8=O account data
         ccp_conn.seed_buffer(&init_data);
 
-        // --- Phase 3: Data farm connections ---
-        let farm_conn = connect_farm(
-            host, "usfarm",
-            &config.username, config.paper,
-            &server_session_id, &session_key, &hw_info, &encoded,
-        )?;
+        // --- Phase 3: Data farm connections (parallel) ---
+        let (farm_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) =
+            std::thread::scope(|s| {
+                let farm_h = s.spawn(|| connect_farm(
+                    host, "usfarm", &config.username, config.paper,
+                    &server_session_id, &session_key, &hw_info, &encoded,
+                ));
+                let hmds_h = s.spawn(|| connect_farm(
+                    host, "ushmds", &config.username, config.paper,
+                    &server_session_id, &session_key, &hw_info, &encoded,
+                ));
+                let cashfarm_h = s.spawn(|| connect_farm(
+                    host, "cashfarm", &config.username, config.paper,
+                    &server_session_id, &session_key, &hw_info, &encoded,
+                ));
+                let usfuture_h = s.spawn(|| connect_farm(
+                    host, "usfuture", &config.username, config.paper,
+                    &server_session_id, &session_key, &hw_info, &encoded,
+                ));
+                let eufarm_h = s.spawn(|| connect_farm(
+                    host, "eufarm", &config.username, config.paper,
+                    &server_session_id, &session_key, &hw_info, &encoded,
+                ));
+                let jfarm_h = s.spawn(|| connect_farm(
+                    host, "jfarm", &config.username, config.paper,
+                    &server_session_id, &session_key, &hw_info, &encoded,
+                ));
 
-        // Historical data farm (optional)
-        let hmds_conn = match connect_farm(
-            host, "ushmds",
-            &config.username, config.paper,
-            &server_session_id, &session_key, &hw_info, &encoded,
-        ) {
-            Ok(c) => {
-                log::info!("Historical data farm connected");
-                Some(c)
-            }
-            Err(e) => {
-                log::warn!("Historical data farm connection failed (non-fatal): {}", e);
-                None
-            }
-        };
-
-        // Secondary tick farms (optional, non-fatal)
-        let cashfarm_conn = match connect_farm(
-            host, "cashfarm",
-            &config.username, config.paper,
-            &server_session_id, &session_key, &hw_info, &encoded,
-        ) {
-            Ok(c) => { log::info!("cashfarm connected"); Some(c) }
-            Err(e) => { log::warn!("cashfarm connection failed (non-fatal): {}", e); None }
-        };
-
-        let usfuture_conn = match connect_farm(
-            host, "usfuture",
-            &config.username, config.paper,
-            &server_session_id, &session_key, &hw_info, &encoded,
-        ) {
-            Ok(c) => { log::info!("usfuture connected"); Some(c) }
-            Err(e) => { log::warn!("usfuture connection failed (non-fatal): {}", e); None }
-        };
-
-        let eufarm_conn = match connect_farm(
-            host, "eufarm",
-            &config.username, config.paper,
-            &server_session_id, &session_key, &hw_info, &encoded,
-        ) {
-            Ok(c) => { log::info!("eufarm connected"); Some(c) }
-            Err(e) => { log::warn!("eufarm connection failed (non-fatal): {}", e); None }
-        };
-
-        let jfarm_conn = match connect_farm(
-            host, "jfarm",
-            &config.username, config.paper,
-            &server_session_id, &session_key, &hw_info, &encoded,
-        ) {
-            Ok(c) => { log::info!("jfarm connected"); Some(c) }
-            Err(e) => { log::warn!("jfarm connection failed (non-fatal): {}", e); None }
-        };
+                let farm_conn = farm_h.join().unwrap()?;
+                let hmds_conn = match hmds_h.join().unwrap() {
+                    Ok(c) => { log::info!("Historical data farm connected"); Some(c) }
+                    Err(e) => { log::warn!("Historical data farm connection failed (non-fatal): {}", e); None }
+                };
+                let cashfarm_conn = match cashfarm_h.join().unwrap() {
+                    Ok(c) => { log::info!("cashfarm connected"); Some(c) }
+                    Err(e) => { log::warn!("cashfarm connection failed (non-fatal): {}", e); None }
+                };
+                let usfuture_conn = match usfuture_h.join().unwrap() {
+                    Ok(c) => { log::info!("usfuture connected"); Some(c) }
+                    Err(e) => { log::warn!("usfuture connection failed (non-fatal): {}", e); None }
+                };
+                let eufarm_conn = match eufarm_h.join().unwrap() {
+                    Ok(c) => { log::info!("eufarm connected"); Some(c) }
+                    Err(e) => { log::warn!("eufarm connection failed (non-fatal): {}", e); None }
+                };
+                let jfarm_conn = match jfarm_h.join().unwrap() {
+                    Ok(c) => { log::info!("jfarm connected"); Some(c) }
+                    Err(e) => { log::warn!("jfarm connection failed (non-fatal): {}", e); None }
+                };
+                Ok::<_, io::Error>((farm_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn))
+            })?;
 
         let gw = Gateway {
             account_id: if account_id.is_empty() { config.username.clone() } else { account_id },

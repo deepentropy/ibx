@@ -10,7 +10,12 @@ pub const CCP_HOSTS: &[&str] = &[
 ];
 
 /// Network ports.
-pub const MISC_PORT: u16 = 4000;
+pub fn misc_port() -> u16 {
+    std::env::var("IBX_MISC_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(4000)
+}
+pub fn farm_host_override() -> Option<String> {
+    std::env::var("IBX_FARM_HOST").ok()
+}
 pub const AUTH_PORT: u16 = 4001;
 
 /// Heartbeat intervals (seconds).
