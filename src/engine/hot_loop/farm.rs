@@ -234,12 +234,24 @@ impl FarmState {
             None => return,
         };
 
-        // Depth 35=P: body starts with 0x00 delimiter + 3-byte server_tag
-        if body.len() >= 4 && body[0] == 0x00 {
-            let stag = ((body[1] as u32) << 16) | ((body[2] as u32) << 8) | (body[3] as u32);
-            if self.depth_tag_to_req.iter().any(|(s, _, _, _)| *s == stag) {
+        // Depth 35=P entries may be interleaved with L1 tick entries in the same body.
+        // Scan for [0x00][3B stag] patterns matching depth subscriptions.
+        if !self.depth_tag_to_req.is_empty() {
+            let mut has_depth = false;
+            let mut off = 0;
+            while off + 3 < body.len() {
+                if body[off] == 0x00 {
+                    let stag = ((body[off+1] as u32) << 16) | ((body[off+2] as u32) << 8) | (body[off+3] as u32);
+                    if self.depth_tag_to_req.iter().any(|(s, _, _, _)| *s == stag) {
+                        has_depth = true;
+                        break;
+                    }
+                }
+                off += 1;
+            }
+            if has_depth {
                 self.handle_depth_35p(body, shared);
-                return;
+                // Don't return — also process L1 ticks from same body below
             }
         }
 
