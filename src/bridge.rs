@@ -309,7 +309,8 @@ pub struct ReferenceState {
     historical_ticks: Mutex<Vec<(u32, HistoricalTickData, String, bool)>>,
     historical_schedules: Mutex<Vec<(u32, HistoricalScheduleResponse)>>,
     market_rules: Mutex<Vec<MarketRule>>,
-    depth_exchanges: Mutex<Vec<DepthMktDataDescription>>,
+    depth_exchanges_cache: Mutex<Vec<DepthMktDataDescription>>,
+    depth_exchanges_pending: Mutex<bool>,
     /// Contract cache from CCP exec reports (con_id -> api::Contract).
     contract_cache: Mutex<HashMap<i64, api::Contract>>,
 }
@@ -331,7 +332,8 @@ impl ReferenceState {
             historical_ticks: Mutex::new(Vec::with_capacity(4)),
             historical_schedules: Mutex::new(Vec::with_capacity(4)),
             market_rules: Mutex::new(Vec::new()),
-            depth_exchanges: Mutex::new(Vec::new()),
+            depth_exchanges_cache: Mutex::new(Vec::new()),
+            depth_exchanges_pending: Mutex::new(false),
             contract_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -467,11 +469,21 @@ impl ReferenceState {
     }
 
     pub fn drain_depth_exchanges(&self) -> Vec<DepthMktDataDescription> {
-        self.depth_exchanges.lock().unwrap().drain(..).collect()
+        let mut pending = self.depth_exchanges_pending.lock().unwrap();
+        if *pending {
+            *pending = false;
+            self.depth_exchanges_cache.lock().unwrap().clone()
+        } else {
+            Vec::new()
+        }
     }
 
     #[doc(hidden)] pub fn push_depth_exchanges(&self, descs: Vec<DepthMktDataDescription>) {
-        self.depth_exchanges.lock().unwrap().extend(descs);
+        self.depth_exchanges_cache.lock().unwrap().extend(descs);
+    }
+
+    #[doc(hidden)] pub fn notify_depth_exchanges(&self) {
+        *self.depth_exchanges_pending.lock().unwrap() = true;
     }
 
     #[doc(hidden)] pub fn cache_contract(&self, con_id: i64, contract: api::Contract) {

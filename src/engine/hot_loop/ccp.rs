@@ -142,6 +142,7 @@ impl CcpState {
                                 }
                             }
                         }
+                        "102" => self.handle_exchange_list(msg, shared),
                         _ => {}
                     }
                 }
@@ -724,11 +725,56 @@ impl CcpState {
         self.pending_matching_symbols.push(req_id);
     }
 
-    pub(crate) fn send_mkt_depth_exchanges_request(&mut self, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        // TODO(ib-agent#79): wire format unknown — need CCP command ID (6040=?)
-        // Once captured, send 35=U with the correct 6040 value
-        log::warn!("reqMktDepthExchanges: CCP command ID unknown (ib-agent#79), request not sent");
-        let _ = (ccp_conn, hb);
+    pub(crate) fn send_mkt_depth_exchanges_request(&mut self, _ccp_conn: &mut Option<Connection>, _hb: &mut HeartbeatState, shared: &SharedState) {
+        // Depth exchanges are derived from the 6040=102 exchange list received during init.
+        // No separate server request needed — just signal the shared state to deliver cached data.
+        shared.reference.notify_depth_exchanges();
+    }
+
+    /// Parse 6040=102 exchange directory from CCP init into DepthMktDataDescription entries.
+    fn handle_exchange_list(&self, msg: &[u8], shared: &SharedState) {
+        use crate::types::DepthMktDataDescription;
+        let raw = String::from_utf8_lossy(msg);
+        let fields: Vec<&str> = raw.split('\x01').collect();
+
+        // The message has repeating 100=EXCHANGE|6813=NAME pairs grouped by sections.
+        // Sections: 6523=category|6811=category_name for stock categories,
+        //           8128=N and 8129=N separate stock/derivative sections.
+        // We parse all 100/6813 pairs into DepthMktDataDescription entries.
+        let mut descs: Vec<DepthMktDataDescription> = Vec::new();
+        let mut current_sec_type = "STK".to_string();
+        let mut current_agg_group: i32 = 0;
+
+        let mut i = 0;
+        while i < fields.len() {
+            let f = fields[i];
+            if let Some(val) = f.strip_prefix("8128=") {
+                // Section separator — exchanges above are stocks, below are derivatives
+                current_sec_type = "STK".to_string();
+                current_agg_group = val.parse().unwrap_or(0);
+            } else if let Some(val) = f.strip_prefix("8129=") {
+                current_sec_type = "FUT".to_string();
+                current_agg_group = val.parse().unwrap_or(0);
+            } else if let Some(exch) = f.strip_prefix("100=") {
+                // Next field should be 6813=name
+                let name = if i + 1 < fields.len() {
+                    fields[i + 1].strip_prefix("6813=").unwrap_or("")
+                } else {
+                    ""
+                };
+                descs.push(DepthMktDataDescription {
+                    exchange: exch.to_string(),
+                    sec_type: current_sec_type.clone(),
+                    listing_exch: name.to_string(),
+                    service_data_type: if current_sec_type == "STK" { "L1".to_string() } else { "L1".to_string() },
+                    agg_group: current_agg_group,
+                });
+                i += 1; // skip the 6813= field
+            }
+            i += 1;
+        }
+        log::info!("Parsed {} exchanges from 6040=102", descs.len());
+        shared.reference.push_depth_exchanges(descs);
     }
 
     pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {
