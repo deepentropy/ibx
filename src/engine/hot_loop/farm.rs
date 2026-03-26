@@ -20,6 +20,8 @@ pub(crate) struct FarmState {
     pub(crate) depth_subs: Vec<(u32, FarmSlot, bool)>,
     /// Maps server_tag → (depth_req_id, is_smart_depth, min_tick) for active depth subscriptions.
     pub(crate) depth_tag_to_req: Vec<(u32, u32, bool, f64)>,
+    /// SmartDepth fan-out: maps internal sub_req → user's original req_id.
+    depth_fanout_map: Vec<(u32, u32)>,
     pub(crate) disconnected: bool,
     pub(crate) tick_buf: Vec<tick_decoder::RawTick>,
     pub(crate) farm_msg_buf: Vec<Vec<u8>>,
@@ -33,6 +35,7 @@ impl FarmState {
             instrument_md_reqs: Vec::new(),
             depth_subs: Vec::new(),
             depth_tag_to_req: Vec::new(),
+            depth_fanout_map: Vec::new(),
             disconnected: false,
             tick_buf: Vec::with_capacity(16),
             farm_msg_buf: Vec::with_capacity(32),
@@ -235,7 +238,6 @@ impl FarmState {
         };
 
         // Depth 35=P entries may be interleaved with L1 tick entries in the same body.
-        // Scan for [0x00][3B stag] patterns matching depth subscriptions.
         if !self.depth_tag_to_req.is_empty() {
             let mut has_depth = false;
             let mut off = 0;
@@ -312,9 +314,14 @@ impl FarmState {
         let depth_levels: i32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
         if let Some((_, _, is_smart)) = self.depth_subs.iter().find(|(id, _, _)| *id == req_id) {
             let is_smart = *is_smart;
-            self.depth_tag_to_req.push((server_tag, req_id, is_smart, min_tick));
+            // For SmartDepth fan-out, map back to the user's original req_id
+            let user_req = self.depth_fanout_map.iter()
+                .find(|(sub, _)| *sub == req_id)
+                .map(|(_, user)| *user)
+                .unwrap_or(req_id);
+            self.depth_tag_to_req.push((server_tag, user_req, is_smart, min_tick));
             log::info!("Depth ack: server_tag {} -> req_id {} (levels={}, smart={}, min_tick={})",
-                server_tag, req_id, depth_levels, is_smart, min_tick);
+                server_tag, user_req, depth_levels, is_smart, min_tick);
             return;
         }
 
@@ -463,72 +470,49 @@ impl FarmState {
         hb: &mut HeartbeatState,
     ) {
         let farm = crate::types::farm_for_instrument(exchange, sec_type);
-        // Map ibapi exchange names to FIX exchange names
-        let fix_exchange = if is_smart_depth || exchange == "SMART" {
-            "BEST"
-        } else {
-            match exchange {
-                "ISLAND" => "NASDAQ",
-                other => other,
-            }
-        };
         let fix_sec_type = match sec_type {
             "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND",
             "CASH" => "CASH", other => other,
         };
         self.depth_subs.push((req_id, farm, is_smart_depth));
-        log::info!("Depth subscribe: req_id={} con_id={} exchange={} -> {} farm={:?}", req_id, con_id, exchange, fix_exchange, farm);
+
+        // ib-agent#86: SmartDepth requires per-exchange fan-out. The server ACKs a BEST
+        // subscribe but never sends data for it. Data only arrives for individual exchanges.
+        let exchanges: &[&str] = if is_smart_depth {
+            // US equity exchanges that the gateway fans out to (ib-agent#86 capture)
+            &["NASDAQ", "IEX", "BATS", "ARCA", "BEX", "NYSE", "BYX", "NYSENAT", "T24X",
+              "DRCTEDGE", "MEMX", "PEARL", "AMEX", "CHX", "LTSE", "PSX", "ISE", "EDGEA"]
+        } else {
+            // Single exchange subscribe
+            static SINGLE: [&str; 0] = [];
+            &SINGLE
+        };
 
         if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) {
-            let req_id_str = req_id.to_string();
             let con_id_str = (con_id as u32).to_string();
-            // ib-agent#85: depth subscribe requires 9830=1 flag and exchange-specific 264 value.
-            // Direct exchanges (NASDAQ, BATS, ARCA, BEX, NYSE, IEX): 264=0
-            // Socket exchanges (CHX, LTSE, DRCTEDGE, AMEX, etc.): 264=442 + 6088=Socket
-            // Socket alt (BEST, OVERNIGHT, IBEOS): 264=443 + 6088=Socket
-            let is_direct = matches!(fix_exchange, "NASDAQ" | "BATS" | "ARCA" | "BEX" | "NYSE" | "IEX");
-            let is_socket_alt = matches!(fix_exchange, "BEST" | "OVERNIGHT" | "IBEOS");
-            if is_direct {
-                let _ = conn.send_fixcomp(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                    (263, "1"),
-                    (146, "1"),
-                    (262, &req_id_str),
-                    (6008, &con_id_str),
-                    (207, fix_exchange),
-                    (167, fix_sec_type),
-                    (264, "0"),
-                    (9830, "1"),
-                ]);
-            } else if is_socket_alt {
-                let _ = conn.send_fixcomp(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                    (263, "1"),
-                    (146, "1"),
-                    (262, &req_id_str),
-                    (6008, &con_id_str),
-                    (207, fix_exchange),
-                    (167, fix_sec_type),
-                    (264, "443"),
-                    (6088, "Socket"),
-                    (9830, "1"),
-                ]);
+
+            if !exchanges.is_empty() {
+                // SmartDepth: fan-out to individual exchanges.
+                // Each sub gets a unique req_id tracked as a depth subscription.
+                for exch in exchanges {
+                    let sub_req = self.next_md_req_id;
+                    self.next_md_req_id += 1;
+                    self.depth_subs.push((sub_req, farm, true));
+                    self.depth_fanout_map.push((sub_req, req_id));
+                    let sub_req_str = sub_req.to_string();
+                    self.send_depth_one(conn, &sub_req_str, &con_id_str, exch, fix_sec_type);
+                }
+                log::info!("SmartDepth fan-out: req={} con_id={} -> {} exchanges", req_id, con_id, exchanges.len());
             } else {
-                // Socket exchanges (CHX, LTSE, DRCTEDGE, AMEX, etc.)
-                let _ = conn.send_fixcomp(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                    (263, "1"),
-                    (146, "1"),
-                    (262, &req_id_str),
-                    (6008, &con_id_str),
-                    (207, fix_exchange),
-                    (167, fix_sec_type),
-                    (264, "442"),
-                    (6088, "Socket"),
-                    (9830, "1"),
-                ]);
+                // Single exchange
+                let fix_exchange = match exchange {
+                    "ISLAND" => "NASDAQ",
+                    other => other,
+                };
+                let req_id_str = req_id.to_string();
+                self.send_depth_one(conn, &req_id_str, &con_id_str, fix_exchange, fix_sec_type);
+                log::info!("Depth subscribe: req={} con_id={} exchange={}", req_id, con_id, fix_exchange);
             }
-            log::info!("Sent depth subscribe: con_id={} req_id={} exchange={} direct={}", con_id, req_id, fix_exchange, is_direct);
             hb.last_farm_sent = Instant::now();
         }
     }
@@ -563,7 +547,31 @@ impl FarmState {
         }
     }
 
-    /// Parse 35=P depth entries (byte-aligned: [00][3B stag][field tags...][58 terminator])
+    /// Send a single depth subscribe for one exchange.
+    fn send_depth_one(&self, conn: &mut Connection, req_id_str: &str, con_id_str: &str, exchange: &str, sec_type: &str) {
+        let is_direct = matches!(exchange, "NASDAQ" | "BATS" | "ARCA" | "BEX" | "NYSE" | "IEX"
+            | "BYX" | "NYSENAT" | "T24X");
+        if is_direct {
+            let _ = conn.send_fixcomp(&[
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+                (263, "1"), (146, "1"), (262, req_id_str),
+                (6008, con_id_str), (207, exchange), (167, sec_type),
+                (264, "0"), (9830, "1"),
+            ]);
+        } else {
+            // Socket exchanges (DRCTEDGE, MEMX, PEARL, AMEX, CHX, LTSE, PSX, ISE, EDGEA, etc.)
+            let _ = conn.send_fixcomp(&[
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+                (263, "1"), (146, "1"), (262, req_id_str),
+                (6008, con_id_str), (207, exchange), (167, sec_type),
+                (264, "442"), (6088, "Socket"), (9830, "1"),
+            ]);
+        }
+    }
+
+    /// Parse 35=P depth entries (byte-aligned: [00][3B stag][field tags...][58 terminator]).
+    /// SmartDepth entries may contain multiple price+size pairs (bid then ask).
+    /// Field tag encoding: bit 5(0x20)=size, bit 3(0x08)=ask, bit 2(0x04)=snapshot, bit 0(0x01)=2-byte.
     fn handle_depth_35p(&self, body: &[u8], shared: &SharedState) {
         use crate::types::DepthUpdate;
         let mut pos = 0;
@@ -571,12 +579,10 @@ impl FarmState {
         let mut ask_position: i32 = 0;
 
         while pos < body.len() {
-            // Entry delimiter
             if body[pos] != 0x00 { pos += 1; continue; }
             pos += 1;
             if pos + 3 > body.len() { break; }
 
-            // 3-byte server tag
             let stag = ((body[pos] as u32) << 16) | ((body[pos+1] as u32) << 8) | (body[pos+2] as u32);
             pos += 3;
 
@@ -588,63 +594,72 @@ impl FarmState {
                 None => { continue; }
             };
 
-            // Parse field tags until 0x58 (terminator) or next 0x00 or end
+            // Parse field tags, pushing a depth update each time we complete a price+size pair.
             let mut price: f64 = 0.0;
             let mut size: f64 = 0.0;
-            let mut side: i32 = 1; // default bid
+            let mut side: i32 = 1;
             let mut is_snapshot = false;
             let mut has_price = false;
             let mut has_size = false;
 
             while pos < body.len() && body[pos] != 0x58 && body[pos] != 0x00 {
                 let tag = body[pos];
+                // Only recognize tags with known bits (0x20, 0x08, 0x04, 0x01).
+                // Bit 7 (0x80) or bit 6 (0x40) set → unknown encoding, stop.
+                if tag & 0xC0 != 0 { break; }
                 pos += 1;
 
-                let is_size = tag & 0x20 != 0;
+                let is_size_field = tag & 0x20 != 0;
                 let is_ask = tag & 0x08 != 0;
                 let snapshot = tag & 0x04 != 0;
                 let two_byte = tag & 0x01 != 0;
 
-                if is_ask { side = 0; } else { side = 1; }
+                let new_side = if is_ask { 0 } else { 1 };
                 if snapshot { is_snapshot = true; }
+
+                // If side changes and we have a pending pair, flush it first
+                if has_price && has_size && new_side != side {
+                    let position = if side == 0 { let p = ask_position; ask_position += 1; p }
+                                  else { let p = bid_position; bid_position += 1; p };
+                    let operation = if is_snapshot { 0 } else { 1 };
+                    shared.market.push_depth_update(DepthUpdate {
+                        req_id, position, market_maker: String::new(),
+                        operation, side, price, size, is_smart_depth: is_smart,
+                    });
+                    has_price = false;
+                    has_size = false;
+                }
+                side = new_side;
 
                 if two_byte {
                     if pos + 2 > body.len() { break; }
                     let val = ((body[pos] as u16) << 8) | (body[pos+1] as u16);
                     pos += 2;
-                    if is_size {
-                        size = val as f64;
-                        has_size = true;
-                    } else {
-                        price = val as f64 * min_tick;
-                        has_price = true;
-                    }
+                    if is_size_field { size = val as f64; has_size = true; }
+                    else { price = val as f64 * min_tick; has_price = true; }
                 } else {
                     if pos >= body.len() { break; }
                     let val = body[pos];
                     pos += 1;
-                    if is_size {
-                        size = val as f64 * 100.0;
-                        has_size = true;
-                    } else {
-                        price = val as f64 * min_tick;
-                        has_price = true;
-                    }
+                    if is_size_field { size = val as f64 * 100.0; has_size = true; }
+                    else { price = val as f64 * min_tick; has_price = true; }
+                }
+
+                // Flush complete pair immediately
+                if has_price && has_size {
+                    let position = if side == 0 { let p = ask_position; ask_position += 1; p }
+                                  else { let p = bid_position; bid_position += 1; p };
+                    let operation = if is_snapshot { 0 } else { 1 };
+                    shared.market.push_depth_update(DepthUpdate {
+                        req_id, position, market_maker: String::new(),
+                        operation, side, price, size, is_smart_depth: is_smart,
+                    });
+                    has_price = false;
+                    has_size = false;
                 }
             }
 
-            // Skip terminator
             if pos < body.len() && body[pos] == 0x58 { pos += 1; }
-
-            if has_price || has_size {
-                let position = if side == 0 { let p = ask_position; ask_position += 1; p }
-                              else { let p = bid_position; bid_position += 1; p };
-                let operation = if is_snapshot { 0 } else { 1 }; // insert / update
-                shared.market.push_depth_update(DepthUpdate {
-                    req_id, position, market_maker: String::new(),
-                    operation, side, price, size, is_smart_depth: is_smart,
-                });
-            }
         }
     }
 
