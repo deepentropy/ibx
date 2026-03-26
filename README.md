@@ -214,9 +214,10 @@ Jupyter notebooks adapted from [ib_async's examples](https://ib-api-reloaded.git
 | [bar_data](notebooks/bar_data.ipynb) | Head timestamp, historical bars, pandas/matplotlib plot |
 | [tick_data](notebooks/tick_data.ipynb) | L1 streaming, live quote table, tick-by-tick last & bid/ask |
 | [ordering](notebooks/ordering.ipynb) | Limit orders, cancel, market orders, sell to flatten |
+| [market_depth](notebooks/market_depth.ipynb) | L2 order book, depth exchanges, SmartDepth |
 | [scanners](notebooks/scanners.ipynb) | Scanner parameters, market scanner subscriptions, resolve results |
 
-> **Note:** `market_depth` (adapted from [ib_async](https://ib-api-reloaded.github.io/ib_async/notebooks.html)) and `option_chain` notebooks are planned — option_chain is blocked on multi-asset options (#38).
+> **Note:** `option_chain` notebook is planned — blocked on multi-asset options (#38).
 
 ## Architecture
 
