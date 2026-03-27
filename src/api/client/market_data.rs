@@ -85,6 +85,7 @@ impl EClient {
 
     // ── Real-Time Bars ──
 
+    /// Subscribe to real-time 5-second bars. Matches `reqRealTimeBars` in C++.
     pub fn req_real_time_bars(
         &self, req_id: i64, contract: &Contract,
         _bar_size: i32, what_to_show: &str, use_rth: bool,
@@ -98,6 +99,7 @@ impl EClient {
         })
     }
 
+    /// Cancel real-time bars. Matches `cancelRealTimeBars` in C++.
     pub fn cancel_real_time_bars(&self, req_id: i64) -> Result<(), String> {
         self.send(ControlCommand::CancelRealTimeBar { req_id: req_id as u32 })
     }

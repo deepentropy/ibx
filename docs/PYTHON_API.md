@@ -8,7 +8,7 @@
 
 | Method | Description |
 |--------|-------------|
-| `new` |  |
+| `new` | Create a new EClient (or EWrapper) instance. |
 | `connect` | Connect to IB and start the engine. |
 | `disconnect` | Disconnect from IB. |
 | `is_connected` | Check if connected. |
@@ -56,7 +56,7 @@
 |--------|-------------|
 | `set_news_providers` | Set news provider codes for per-contract news ticks (e.g. "BRFG*BRFUPDN"). |
 | `req_mkt_data` | Request market data for a contract. |
-| `cancel_mkt_data` |  |
+| `cancel_mkt_data` | Cancel market data subscription. |
 | `req_tick_by_tick_data` | Request tick-by-tick data. |
 | `cancel_tick_by_tick_data` | Cancel tick-by-tick data. |
 | `req_market_data_type` | Set market data type (1=live, 2=frozen, 3=delayed, 4=delayed-frozen). |
@@ -95,116 +95,116 @@
 
 | Method | Description |
 |--------|-------------|
-| `calculate_implied_volatility` |  |
-| `calculate_option_price` |  |
-| `cancel_calculate_implied_volatility` |  |
-| `cancel_calculate_option_price` |  |
-| `exercise_options` |  |
-| `req_sec_def_opt_params` |  |
-| `req_news_bulletins` |  |
-| `cancel_news_bulletins` |  |
-| `req_current_time` |  |
-| `request_fa` |  |
-| `replace_fa` |  |
-| `query_display_groups` |  |
-| `subscribe_to_group_events` |  |
-| `unsubscribe_from_group_events` |  |
-| `update_display_group` |  |
-| `req_smart_components` |  |
-| `req_news_providers` |  |
-| `req_soft_dollar_tiers` |  |
-| `req_family_codes` |  |
-| `set_server_log_level` |  |
-| `req_user_info` |  |
-| `req_wsh_meta_data` |  |
-| `req_wsh_event_data` |  |
+| `calculate_implied_volatility` | Calculate option implied volatility. Not yet implemented. |
+| `calculate_option_price` | Calculate option theoretical price. Not yet implemented. |
+| `cancel_calculate_implied_volatility` | Cancel implied volatility calculation. |
+| `cancel_calculate_option_price` | Cancel option price calculation. |
+| `exercise_options` | Exercise options. Not yet implemented. |
+| `req_sec_def_opt_params` | Request option chain parameters. Not yet implemented. |
+| `req_news_bulletins` | Subscribe to news bulletins. |
+| `cancel_news_bulletins` | Cancel news bulletin subscription. |
+| `req_current_time` | Request current server time. |
+| `request_fa` | Request FA data. Not yet implemented. |
+| `replace_fa` | Replace FA data. Not yet implemented. |
+| `query_display_groups` | Query display groups. |
+| `subscribe_to_group_events` | Subscribe to display group events. |
+| `unsubscribe_from_group_events` | Unsubscribe from display group events. |
+| `update_display_group` | Update display group. |
+| `req_smart_components` | Request SMART routing component exchanges. |
+| `req_news_providers` | Request available news providers. |
+| `req_soft_dollar_tiers` | Request soft dollar tiers. |
+| `req_family_codes` | Request family codes. |
+| `set_server_log_level` | Set server log level (1=error..5=trace). |
+| `req_user_info` | Request user info (white branding ID). |
+| `req_wsh_meta_data` | Request Wall Street Horizon metadata. Not yet implemented. |
+| `req_wsh_event_data` | Request Wall Street Horizon event data. Not yet implemented. |
 
 ## EWrapper Callbacks
 
 | Callback | Description |
 |----------|-------------|
-| `new` |  |
-| `connect_ack` |  |
-| `connection_closed` |  |
-| `next_valid_id` |  |
-| `managed_accounts` |  |
-| `error` |  |
-| `current_time` |  |
-| `tick_price` |  |
-| `tick_size` |  |
-| `tick_string` |  |
-| `tick_generic` |  |
-| `tick_snapshot_end` |  |
-| `market_data_type` |  |
-| `order_status` |  |
-| `open_order` |  |
-| `open_order_end` |  |
-| `exec_details` |  |
-| `exec_details_end` |  |
-| `commission_report` |  |
-| `update_account_value` |  |
-| `update_portfolio` |  |
-| `update_account_time` |  |
-| `account_download_end` |  |
-| `account_summary` |  |
-| `account_summary_end` |  |
-| `position` |  |
-| `position_end` |  |
-| `pnl` |  |
-| `pnl_single` |  |
-| `historical_data` |  |
-| `historical_data_end` |  |
-| `historical_data_update` |  |
-| `head_timestamp` |  |
-| `contract_details` |  |
-| `contract_details_end` |  |
-| `symbol_samples` |  |
-| `tick_by_tick_all_last` |  |
-| `tick_by_tick_bid_ask` |  |
-| `tick_by_tick_mid_point` |  |
-| `scanner_data` |  |
-| `scanner_data_end` |  |
-| `scanner_parameters` |  |
-| `news_providers` |  |
-| `news_article` |  |
-| `historical_news` |  |
-| `historical_news_end` |  |
-| `tick_news` |  |
-| `update_mkt_depth` |  |
-| `update_mkt_depth_l2` |  |
-| `mkt_depth_exchanges` |  |
-| `real_time_bar` |  |
-| `historical_ticks` |  |
-| `historical_ticks_bid_ask` |  |
-| `historical_ticks_last` |  |
-| `tick_option_computation` |  |
-| `security_definition_option_parameter` |  |
-| `security_definition_option_parameter_end` |  |
-| `fundamental_data` |  |
-| `update_news_bulletin` |  |
-| `receive_fa` |  |
-| `replace_fa_end` |  |
-| `position_multi` |  |
-| `position_multi_end` |  |
-| `account_update_multi` |  |
-| `account_update_multi_end` |  |
-| `display_group_list` |  |
-| `display_group_updated` |  |
-| `market_rule` |  |
-| `smart_components` |  |
-| `soft_dollar_tiers` |  |
-| `family_codes` |  |
-| `histogram_data` |  |
-| `user_info` |  |
-| `wsh_meta_data` |  |
-| `wsh_event_data` |  |
-| `completed_order` |  |
-| `completed_orders_end` |  |
-| `order_bound` |  |
-| `tick_req_params` |  |
-| `bond_contract_details` |  |
-| `delta_neutral_validation` |  |
-| `historical_schedule` |  |
+| `new` | Create a new EClient (or EWrapper) instance. |
+| `connect_ack` | Connection acknowledged. |
+| `connection_closed` | Connection has been closed. |
+| `next_valid_id` | Next valid order ID from the server. |
+| `managed_accounts` | Comma-separated list of managed account IDs. |
+| `error` | Error or informational message from the server. |
+| `current_time` | Current server time (Unix seconds). |
+| `tick_price` | Price tick update (bid, ask, last, etc.). |
+| `tick_size` | Size tick update (bid size, ask size, volume, etc.). |
+| `tick_string` | String tick (e.g. last trade timestamp). |
+| `tick_generic` | Generic numeric tick value. |
+| `tick_snapshot_end` | Snapshot delivery complete; subscription auto-cancelled. |
+| `market_data_type` | Market data type changed (1=live, 2=frozen, 3=delayed, 4=delayed-frozen). |
+| `order_status` | Order status update (filled, remaining, avg price, etc.). |
+| `open_order` | Open order details (contract, order, state). |
+| `open_order_end` | End of open orders list. |
+| `exec_details` | Execution fill details. |
+| `exec_details_end` | End of execution details list. |
+| `commission_report` | Commission report for an execution. |
+| `update_account_value` | Account value update (key/value/currency). |
+| `update_portfolio` | Portfolio position update. |
+| `update_account_time` | Account update timestamp. |
+| `account_download_end` | Account data delivery complete. |
+| `account_summary` | Account summary tag/value entry. |
+| `account_summary_end` | End of account summary. |
+| `position` | Position entry (account, contract, size, avg cost). |
+| `position_end` | End of positions list. |
+| `pnl` | Account P&L update (daily, unrealized, realized). |
+| `pnl_single` | Single-position P&L update. |
+| `historical_data` | Historical OHLCV bar. |
+| `historical_data_end` | End of historical data delivery. |
+| `historical_data_update` | Real-time bar update (keep_up_to_date=true). |
+| `head_timestamp` | Earliest available data timestamp. |
+| `contract_details` | Contract definition details. |
+| `contract_details_end` | End of contract details. |
+| `symbol_samples` | Matching symbol search results. |
+| `tick_by_tick_all_last` | Tick-by-tick last trade. |
+| `tick_by_tick_bid_ask` | Tick-by-tick bid/ask quote. |
+| `tick_by_tick_mid_point` | Tick-by-tick midpoint. |
+| `scanner_data` | Scanner result entry (rank, contract, distance). |
+| `scanner_data_end` | End of scanner results. |
+| `scanner_parameters` | Scanner parameters XML. |
+| `news_providers` | Available news providers list. |
+| `news_article` | Full news article text. |
+| `historical_news` | Historical news headline. |
+| `historical_news_end` | End of historical news. |
+| `tick_news` | Per-contract news tick. |
+| `update_mkt_depth` | L2 book update (single exchange). |
+| `update_mkt_depth_l2` | L2 book update (with market maker). |
+| `mkt_depth_exchanges` | Available exchanges for market depth. |
+| `real_time_bar` | Real-time 5-second OHLCV bar. |
+| `historical_ticks` | Historical tick data (Last, BidAsk, or Midpoint). |
+| `historical_ticks_bid_ask` | Historical bid/ask ticks. |
+| `historical_ticks_last` | Historical last-trade ticks. |
+| `tick_option_computation` | Option implied vol / greeks computation. |
+| `security_definition_option_parameter` | Option chain parameters (strikes, expirations). |
+| `security_definition_option_parameter_end` | End of option chain parameters. |
+| `fundamental_data` | Fundamental data (XML/JSON). |
+| `update_news_bulletin` | News bulletin message. |
+| `receive_fa` | Financial advisor data received. |
+| `replace_fa_end` | Financial advisor replace complete. |
+| `position_multi` | Multi-account position entry. |
+| `position_multi_end` | End of multi-account positions. |
+| `account_update_multi` | Multi-account value update. |
+| `account_update_multi_end` | End of multi-account updates. |
+| `display_group_list` | Display group list. |
+| `display_group_updated` | Display group updated. |
+| `market_rule` | Market rule: price increment schedule. |
+| `smart_components` | SMART routing component exchanges. |
+| `soft_dollar_tiers` | Soft dollar tier list. |
+| `family_codes` | Family codes linking related accounts. |
+| `histogram_data` | Price distribution histogram. |
+| `user_info` | User info (white branding ID). |
+| `wsh_meta_data` | Wall Street Horizon metadata. |
+| `wsh_event_data` | Wall Street Horizon event data. |
+| `completed_order` | Completed (filled/cancelled) order details. |
+| `completed_orders_end` | End of completed orders list. |
+| `order_bound` | Order bound to a perm ID. |
+| `tick_req_params` | Tick parameters: min tick size, BBO exchange, snapshot permissions. |
+| `bond_contract_details` | Bond contract details. |
+| `delta_neutral_validation` | Delta-neutral validation response. |
+| `historical_schedule` | Historical trading schedule (exchange hours). |
 
 ## Full Signatures
 

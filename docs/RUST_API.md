@@ -9,10 +9,10 @@
 | Method | Description |
 |--------|-------------|
 | `connect` | Connect to IB and start the engine. |
-| `from_parts` |  |
-| `map_req_instrument` |  |
-| `seed_instrument` |  |
-| `is_connected` |  |
+| `from_parts` | Construct from pre-built components (for testing or custom setups). |
+| `map_req_instrument` | Map a reqId to an InstrumentId (for testing without a live engine). |
+| `seed_instrument` | Pre-seed a con_id → InstrumentId mapping (for testing without a live engine). |
+| `is_connected` | Check if the client is connected. |
 | `disconnect` | Disconnect from IB.  Sends `Shutdown` to the hot loop, waits for the background thread to exit, and marks the client as disconnected. |
 
 ### Account & Portfolio
@@ -61,12 +61,12 @@
 | `cancel_tick_by_tick_data` | Cancel tick-by-tick data. |
 | `req_mkt_depth` | Subscribe to market depth (L2 order book). |
 | `cancel_mkt_depth` | Cancel market depth. |
-| `req_real_time_bars` |  |
-| `cancel_real_time_bars` |  |
+| `req_real_time_bars` | Subscribe to real-time 5-second bars. |
+| `cancel_real_time_bars` | Cancel real-time bars. |
 | `req_market_data_type` | Set market data type preference (1=live, 2=frozen, 3=delayed, 4=delayed-frozen). |
 | `set_news_providers` | Set news provider codes for per-contract news ticks. |
-| `quote` |  |
-| `quote_by_instrument` |  |
+| `quote` | Zero-copy SeqLock quote read. Maps reqId → InstrumentId → SeqLock. Returns `None` if the reqId is not mapped to a subscription. |
+| `quote_by_instrument` | Direct SeqLock read by InstrumentId (for callers who track IDs themselves). |
 
 ### Reference Data
 
@@ -82,17 +82,17 @@
 | `req_market_rule` | Request market rule by ID. Looks up cached market rules delivered during connection init. |
 | `req_news_bulletins` | Subscribe to news bulletins. |
 | `cancel_news_bulletins` | Cancel news bulletin subscription. |
-| `req_scanner_parameters` |  |
-| `req_scanner_subscription` |  |
-| `cancel_scanner_subscription` |  |
-| `req_historical_news` |  |
-| `req_news_article` |  |
-| `req_fundamental_data` |  |
-| `cancel_fundamental_data` |  |
-| `req_histogram_data` |  |
-| `cancel_histogram_data` |  |
-| `req_historical_ticks` |  |
-| `req_historical_schedule` |  |
+| `req_scanner_parameters` | Request scanner parameters XML. |
+| `req_scanner_subscription` | Subscribe to a market scanner. |
+| `cancel_scanner_subscription` | Cancel a scanner subscription. |
+| `req_historical_news` | Request historical news headlines. |
+| `req_news_article` | Request a news article by provider and article ID. |
+| `req_fundamental_data` | Request fundamental data (e.g. ReportSnapshot, ReportsFinSummary). |
+| `cancel_fundamental_data` | Cancel fundamental data. |
+| `req_histogram_data` | Request price histogram data. |
+| `cancel_histogram_data` | Cancel histogram data. |
+| `req_historical_ticks` | Request historical tick data. |
+| `req_historical_schedule` | Request historical trading schedule. |
 
 ### Gateway-Local & Stubs
 
@@ -118,69 +118,69 @@
 
 | Callback | Description |
 |----------|-------------|
-| `connect_ack` |  |
-| `connection_closed` |  |
-| `next_valid_id` |  |
-| `managed_accounts` |  |
-| `error` |  |
-| `current_time` |  |
-| `tick_price` |  |
-| `tick_size` |  |
-| `tick_string` |  |
-| `tick_generic` |  |
-| `tick_snapshot_end` |  |
-| `market_data_type` |  |
-| `order_status` |  |
-| `open_order` |  |
-| `open_order_end` |  |
-| `exec_details` |  |
-| `exec_details_end` |  |
-| `commission_report` |  |
-| `update_account_value` |  |
-| `update_portfolio` |  |
-| `update_account_time` |  |
-| `account_download_end` |  |
-| `account_summary` |  |
-| `account_summary_end` |  |
-| `position` |  |
-| `position_end` |  |
-| `pnl` |  |
-| `pnl_single` |  |
-| `historical_data` |  |
-| `historical_data_end` |  |
-| `historical_data_update` |  |
-| `head_timestamp` |  |
-| `contract_details` |  |
-| `contract_details_end` |  |
-| `symbol_samples` |  |
-| `tick_by_tick_all_last` |  |
-| `tick_by_tick_bid_ask` |  |
-| `tick_by_tick_mid_point` |  |
-| `scanner_data` |  |
-| `scanner_data_end` |  |
-| `scanner_parameters` |  |
-| `update_news_bulletin` |  |
-| `tick_news` |  |
-| `historical_news` |  |
-| `historical_news_end` |  |
-| `news_article` |  |
-| `real_time_bar` |  |
-| `historical_ticks` |  |
-| `histogram_data` |  |
-| `market_rule` |  |
-| `completed_order` |  |
-| `completed_orders_end` |  |
-| `historical_schedule` |  |
-| `fundamental_data` |  |
-| `update_mkt_depth` |  |
-| `update_mkt_depth_l2` |  |
-| `mkt_depth_exchanges` |  |
-| `tick_req_params` |  |
-| `smart_components` |  |
-| `news_providers` |  |
-| `soft_dollar_tiers` |  |
-| `family_codes` |  |
-| `user_info` |  |
+| `connect_ack` | Connection acknowledged. |
+| `connection_closed` | Connection has been closed. |
+| `next_valid_id` | Next valid order ID from the server. |
+| `managed_accounts` | Comma-separated list of managed account IDs. |
+| `error` | Error or informational message from the server. |
+| `current_time` | Current server time (Unix seconds). |
+| `tick_price` | Price tick update (bid, ask, last, etc.). |
+| `tick_size` | Size tick update (bid size, ask size, volume, etc.). |
+| `tick_string` | String tick (e.g. last trade timestamp). |
+| `tick_generic` | Generic numeric tick value. |
+| `tick_snapshot_end` | Snapshot delivery complete; subscription auto-cancelled. |
+| `market_data_type` | Market data type changed (1=live, 2=frozen, 3=delayed, 4=delayed-frozen). |
+| `order_status` | Order status update (filled, remaining, avg price, etc.). |
+| `open_order` | Open order details (contract, order, state). |
+| `open_order_end` | End of open orders list. |
+| `exec_details` | Execution fill details. |
+| `exec_details_end` | End of execution details list. |
+| `commission_report` | Commission report for an execution. |
+| `update_account_value` | Account value update (key/value/currency). |
+| `update_portfolio` | Portfolio position update. |
+| `update_account_time` | Account update timestamp. |
+| `account_download_end` | Account data delivery complete. |
+| `account_summary` | Account summary tag/value entry. |
+| `account_summary_end` | End of account summary. |
+| `position` | Position entry (account, contract, size, avg cost). |
+| `position_end` | End of positions list. |
+| `pnl` | Account P&L update (daily, unrealized, realized). |
+| `pnl_single` | Single-position P&L update. |
+| `historical_data` | Historical OHLCV bar. |
+| `historical_data_end` | End of historical data delivery. |
+| `historical_data_update` | Real-time bar update (keep_up_to_date=true). |
+| `head_timestamp` | Earliest available data timestamp. |
+| `contract_details` | Contract definition details. |
+| `contract_details_end` | End of contract details. |
+| `symbol_samples` | Matching symbol search results. |
+| `tick_by_tick_all_last` | Tick-by-tick last trade. |
+| `tick_by_tick_bid_ask` | Tick-by-tick bid/ask quote. |
+| `tick_by_tick_mid_point` | Tick-by-tick midpoint. |
+| `scanner_data` | Scanner result entry (rank, contract, distance). |
+| `scanner_data_end` | End of scanner results. |
+| `scanner_parameters` | Scanner parameters XML. |
+| `update_news_bulletin` | News bulletin message. |
+| `tick_news` | Per-contract news tick. |
+| `historical_news` | Historical news headline. |
+| `historical_news_end` | End of historical news. |
+| `news_article` | Full news article text. |
+| `real_time_bar` | Real-time 5-second OHLCV bar. |
+| `historical_ticks` | Historical tick data (Last, BidAsk, or Midpoint). |
+| `histogram_data` | Price distribution histogram. |
+| `market_rule` | Market rule: price increment schedule. |
+| `completed_order` | Completed (filled/cancelled) order details. |
+| `completed_orders_end` | End of completed orders list. |
+| `historical_schedule` | Historical trading schedule (exchange hours). |
+| `fundamental_data` | Fundamental data (XML/JSON). |
+| `update_mkt_depth` | L2 book update (single exchange). |
+| `update_mkt_depth_l2` | L2 book update (with market maker). |
+| `mkt_depth_exchanges` | Available exchanges for market depth. |
+| `tick_req_params` | Tick parameters: min tick size, BBO exchange, snapshot permissions. |
+| `smart_components` | SMART routing component exchanges. |
+| `news_providers` | Available news providers list. |
+| `soft_dollar_tiers` | Soft dollar tier list. |
+| `family_codes` | Family codes linking related accounts. |
+| `user_info` | User info (white branding ID). |
 
 ## Full Signatures
 
@@ -189,9 +189,9 @@
 
 ```rust
 /// Connect to IB and start the engine. pub fn connect(config: &EClientConfig) -> Result<Self, Box<dyn std::error::Error>>
-pub fn from_parts( shared: Arc<SharedState>, control_tx: Sender<ControlCommand>, handle: thread::JoinHandle<()>, account_id: String, ) -> Self
-pub fn map_req_instrument(&self, req_id: i64, instrument: InstrumentId)
-pub fn seed_instrument(&self, con_id: i64, instrument: InstrumentId)
+/// Construct from pre-built components (for testing or custom setups). #[doc(hidden)] pub fn from_parts( shared: Arc<SharedState>, control_tx: Sender<ControlCommand>, handle: thread::JoinHandle<()>, account_id: String, ) -> Self
+/// Map a reqId to an InstrumentId (for testing without a live engine). #[doc(hidden)] pub fn map_req_instrument(&self, req_id: i64, instrument: InstrumentId)
+/// Pre-seed a con_id → InstrumentId mapping (for testing without a live engine). #[doc(hidden)] pub fn seed_instrument(&self, con_id: i64, instrument: InstrumentId)
 pub fn is_connected(&self) -> bool
 /// Disconnect from IB. Sends `Shutdown` to the hot loop, waits for the /// background thread to exit, and marks the client as disconnected. pub fn disconnect(&self)
 /// Request positions. Matches `reqPositions` in C++. /// Immediately delivers all positions via wrapper callbacks, then calls position_end. pub fn req_positions(&self, wrapper: &mut impl Wrapper)
@@ -226,12 +226,12 @@ pub fn is_connected(&self) -> bool
 /// Cancel tick-by-tick data. Matches `cancelTickByTickData` in C++. pub fn cancel_tick_by_tick_data(&self, req_id: i64) -> Result<(), String>
 /// Subscribe to market depth (L2 order book). Matches `reqMktDepth` in C++. pub fn req_mkt_depth( &self, req_id: i64, contract: &Contract, num_rows: i32, is_smart_depth: bool, ) -> Result<(), String>
 /// Cancel market depth. Matches `cancelMktDepth` in C++. pub fn cancel_mkt_depth(&self, req_id: i64) -> Result<(), String>
-pub fn req_real_time_bars( &self, req_id: i64, contract: &Contract, _bar_size: i32, what_to_show: &str, use_rth: bool, ) -> Result<(), String>
-pub fn cancel_real_time_bars(&self, req_id: i64) -> Result<(), String>
+/// Subscribe to real-time 5-second bars. Matches `reqRealTimeBars` in C++. pub fn req_real_time_bars( &self, req_id: i64, contract: &Contract, _bar_size: i32, what_to_show: &str, use_rth: bool, ) -> Result<(), String>
+/// Cancel real-time bars. Matches `cancelRealTimeBars` in C++. pub fn cancel_real_time_bars(&self, req_id: i64) -> Result<(), String>
 /// Set market data type preference (1=live, 2=frozen, 3=delayed, 4=delayed-frozen). pub fn req_market_data_type(&self, market_data_type: i32)
 /// Set news provider codes for per-contract news ticks. pub fn set_news_providers(&self, providers: &str)
-pub fn quote(&self, req_id: i64) -> Option<Quote>
-pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Quote
+/// Zero-copy SeqLock quote read. Maps reqId → InstrumentId → SeqLock. /// Returns `None` if the reqId is not mapped to a subscription. #[inline] pub fn quote(&self, req_id: i64) -> Option<Quote>
+/// Direct SeqLock read by InstrumentId (for callers who track IDs themselves). #[inline] pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Quote
 /// Request historical data. Matches `reqHistoricalData` in C++. pub fn req_historical_data( &self, req_id: i64, contract: &Contract, end_date_time: &str, duration: &str, bar_size: &str, what_to_show: &str, use_rth: bool, _format_date: i32, _keep_up_to_date: bool, ) -> Result<(), String>
 /// Cancel historical data. Matches `cancelHistoricalData` in C++. pub fn cancel_historical_data(&self, req_id: i64) -> Result<(), String>
 /// Request head timestamp. Matches `reqHeadTimeStamp` in C++. pub fn req_head_time_stamp( &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool, _format_date: i32, ) -> Result<(), String>
@@ -242,17 +242,17 @@ pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Quote
 /// Request market rule by ID. Matches `reqMarketRule` in C++. /// Looks up cached market rules delivered during connection init. pub fn req_market_rule(&self, market_rule_id: i32, wrapper: &mut impl crate::api::wrapper::Wrapper)
 /// Subscribe to news bulletins. Matches `reqNewsBulletins` in C++. pub fn req_news_bulletins(&self, _all_msgs: bool)
 /// Cancel news bulletin subscription. Matches `cancelNewsBulletins` in C++. pub fn cancel_news_bulletins(&self)
-pub fn req_scanner_parameters(&self) -> Result<(), String>
-pub fn req_scanner_subscription( &self, req_id: i64, instrument: &str, location_code: &str, scan_code: &str, max_items: u32, ) -> Result<(), String>
-pub fn cancel_scanner_subscription(&self, req_id: i64) -> Result<(), String>
-pub fn req_historical_news( &self, req_id: i64, con_id: i64, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32, ) -> Result<(), String>
-pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &str) -> Result<(), String>
-pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) -> Result<(), String>
-pub fn cancel_fundamental_data(&self, req_id: i64) -> Result<(), String>
-pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) -> Result<(), String>
-pub fn cancel_histogram_data(&self, req_id: i64) -> Result<(), String>
-pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date_time: &str, end_date_time: &str, number_of_ticks: i32, what_to_show: &str, use_rth: bool, ) -> Result<(), String>
-pub fn req_historical_schedule( &self, req_id: i64, contract: &Contract, end_date_time: &str, duration: &str, use_rth: bool, ) -> Result<(), String>
+/// Request scanner parameters XML. Matches `reqScannerParameters` in C++. pub fn req_scanner_parameters(&self) -> Result<(), String>
+/// Subscribe to a market scanner. Matches `reqScannerSubscription` in C++. pub fn req_scanner_subscription( &self, req_id: i64, instrument: &str, location_code: &str, scan_code: &str, max_items: u32, ) -> Result<(), String>
+/// Cancel a scanner subscription. Matches `cancelScannerSubscription` in C++. pub fn cancel_scanner_subscription(&self, req_id: i64) -> Result<(), String>
+/// Request historical news headlines. Matches `reqHistoricalNews` in C++. pub fn req_historical_news( &self, req_id: i64, con_id: i64, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32, ) -> Result<(), String>
+/// Request a news article by provider and article ID. Matches `reqNewsArticle` in C++. pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &str) -> Result<(), String>
+/// Request fundamental data (e.g. ReportSnapshot, ReportsFinSummary). Matches `reqFundamentalData` in C++. pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) -> Result<(), String>
+/// Cancel fundamental data. Matches `cancelFundamentalData` in C++. pub fn cancel_fundamental_data(&self, req_id: i64) -> Result<(), String>
+/// Request price histogram data. Matches `reqHistogramData` in C++. pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) -> Result<(), String>
+/// Cancel histogram data. Matches `cancelHistogramData` in C++. pub fn cancel_histogram_data(&self, req_id: i64) -> Result<(), String>
+/// Request historical tick data. Matches `reqHistoricalTicks` in C++. pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date_time: &str, end_date_time: &str, number_of_ticks: i32, what_to_show: &str, use_rth: bool, ) -> Result<(), String>
+/// Request historical trading schedule. Matches `reqHistoricalSchedule` in C++. pub fn req_historical_schedule( &self, req_id: i64, contract: &Contract, end_date_time: &str, duration: &str, use_rth: bool, ) -> Result<(), String>
 /// Request smart routing components for a BBO exchange. Matches `reqSmartComponents` in C++. /// Gateway-local — returns component exchanges from init data. pub fn req_smart_components(&self, req_id: i64, _bbo_exchange: &str, wrapper: &mut impl Wrapper)
 /// Request available news providers. Matches `reqNewsProviders` in C++. /// Gateway-local — returns provider list from init data. pub fn req_news_providers(&self, wrapper: &mut impl Wrapper)
 /// Request current server time. Matches `reqCurrentTime` in C++. /// Returns local system time (no server round-trip). pub fn req_current_time(&self, wrapper: &mut impl Wrapper)

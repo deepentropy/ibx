@@ -98,10 +98,12 @@ impl EClient {
 
     // ── Scanner ──
 
+    /// Request scanner parameters XML. Matches `reqScannerParameters` in C++.
     pub fn req_scanner_parameters(&self) -> Result<(), String> {
         self.send(ControlCommand::FetchScannerParams)
     }
 
+    /// Subscribe to a market scanner. Matches `reqScannerSubscription` in C++.
     pub fn req_scanner_subscription(
         &self, req_id: i64, instrument: &str, location_code: &str,
         scan_code: &str, max_items: u32,
@@ -115,12 +117,14 @@ impl EClient {
         })
     }
 
+    /// Cancel a scanner subscription. Matches `cancelScannerSubscription` in C++.
     pub fn cancel_scanner_subscription(&self, req_id: i64) -> Result<(), String> {
         self.send(ControlCommand::CancelScanner { req_id: req_id as u32 })
     }
 
     // ── News ──
 
+    /// Request historical news headlines. Matches `reqHistoricalNews` in C++.
     pub fn req_historical_news(
         &self, req_id: i64, con_id: i64, provider_codes: &str,
         start_time: &str, end_time: &str, max_results: u32,
@@ -135,6 +139,7 @@ impl EClient {
         })
     }
 
+    /// Request a news article by provider and article ID. Matches `reqNewsArticle` in C++.
     pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &str) -> Result<(), String> {
         self.send(ControlCommand::FetchNewsArticle {
             req_id: req_id as u32,
@@ -145,6 +150,7 @@ impl EClient {
 
     // ── Fundamental Data ──
 
+    /// Request fundamental data (e.g. ReportSnapshot, ReportsFinSummary). Matches `reqFundamentalData` in C++.
     pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) -> Result<(), String> {
         self.send(ControlCommand::FetchFundamentalData {
             req_id: req_id as u32,
@@ -153,12 +159,14 @@ impl EClient {
         })
     }
 
+    /// Cancel fundamental data. Matches `cancelFundamentalData` in C++.
     pub fn cancel_fundamental_data(&self, req_id: i64) -> Result<(), String> {
         self.send(ControlCommand::CancelFundamentalData { req_id: req_id as u32 })
     }
 
     // ── Histogram ──
 
+    /// Request price histogram data. Matches `reqHistogramData` in C++.
     pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) -> Result<(), String> {
         self.send(ControlCommand::FetchHistogramData {
             req_id: req_id as u32,
@@ -168,12 +176,14 @@ impl EClient {
         })
     }
 
+    /// Cancel histogram data. Matches `cancelHistogramData` in C++.
     pub fn cancel_histogram_data(&self, req_id: i64) -> Result<(), String> {
         self.send(ControlCommand::CancelHistogramData { req_id: req_id as u32 })
     }
 
     // ── Historical Ticks ──
 
+    /// Request historical tick data. Matches `reqHistoricalTicks` in C++.
     pub fn req_historical_ticks(
         &self, req_id: i64, contract: &Contract,
         start_date_time: &str, end_date_time: &str,
@@ -192,6 +202,7 @@ impl EClient {
 
     // ── Historical Schedule ──
 
+    /// Request historical trading schedule. Matches `reqHistoricalSchedule` in C++.
     pub fn req_historical_schedule(
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, use_rth: bool,
