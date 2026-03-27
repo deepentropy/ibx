@@ -255,10 +255,10 @@ impl Connection {
         Ok(())
     }
 
-    /// Build a message, compress, sign, and send. For farm non-heartbeat messages.
+    /// Build a message, compress, sign, and send. For farm subscribe/data messages.
+    /// Uses seq=0 (separate seq space from heartbeats per ib-agent#89).
     pub fn send_fixcomp(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
-        self.seq += 1;
-        let msg = fix::fix_build(fields, self.seq);
+        let msg = fix::fix_build(fields, 0);
         let wrapped = fixcomp::fixcomp_build(&msg);
         let to_send = if self.sign_key.is_empty() {
             wrapped

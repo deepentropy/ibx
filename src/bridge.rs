@@ -198,6 +198,11 @@ impl MarketDataState {
         self.depth_updates.lock().unwrap().push(update);
     }
 
+    /// Remove all buffered depth updates for a given req_id (called on cancel).
+    #[doc(hidden)] pub fn purge_depth_updates(&self, req_id: u32) {
+        self.depth_updates.lock().unwrap().retain(|u| u.req_id != req_id);
+    }
+
     #[doc(hidden)] pub fn push_tick_news(&self, news: TickNews) {
         self.tick_news.lock().unwrap().push(news);
     }

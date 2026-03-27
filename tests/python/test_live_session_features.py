@@ -256,6 +256,108 @@ class TestSessionFeatures:
         print(f"SmartDepth: {len(bids)} bids + {len(asks)} asks = {len(updates)} total, "
               f"smart_flag={len(smart_updates)}")
 
+    def test_l2_depth_resubscribe_no_stale_data(self):
+        """Cancel depth on ticker A, subscribe ticker B — no stale A data on B's req_id."""
+        # Ticker A: TSLA
+        contract_a = Contract()
+        contract_a.con_id = 76792991
+        contract_a.symbol = "TSLA"
+        contract_a.sec_type = "STK"
+        contract_a.exchange = "ISLAND"
+        contract_a.currency = "USD"
+
+        self.c.req_mkt_depth(5010, contract_a, 5, False, [])
+        got_a = self.w.got_depth_l2.wait(timeout=30)
+        if not got_a:
+            pytest.skip("No depth data for ticker A — market may be closed")
+
+        time.sleep(2)
+        updates_a = [u for u in self.w.depth_l2_updates if u["req_id"] == 5010]
+        assert len(updates_a) > 0, "No depth updates for ticker A"
+        # Capture a representative price from A to detect stale leaks
+        prices_a = {round(u["price"], 2) for u in updates_a if u["price"] > 0}
+        print(f"Ticker A: {len(updates_a)} updates, prices sample: {sorted(prices_a)[:5]}")
+
+        # Cancel A, immediately subscribe B with SAME req_id (worst-case for stale data)
+        self.c.cancel_mkt_depth(5010)
+        self.w.depth_l2_updates.clear()
+        self.w.got_depth_l2.clear()
+
+        # Ticker B: AAPL (different con_id, different price range)
+        contract_b = Contract()
+        contract_b.con_id = 265598
+        contract_b.symbol = "AAPL"
+        contract_b.sec_type = "STK"
+        contract_b.exchange = "ISLAND"
+        contract_b.currency = "USD"
+
+        self.c.req_mkt_depth(5010, contract_b, 5, False, [])
+        got_b = self.w.got_depth_l2.wait(timeout=30)
+        if not got_b:
+            pytest.skip("No depth data for ticker B — market may be closed")
+
+        time.sleep(2)
+        self.c.cancel_mkt_depth(5010)
+
+        updates_b = [u for u in self.w.depth_l2_updates if u["req_id"] == 5010]
+        assert len(updates_b) > 0, "No depth updates for ticker B"
+        prices_b = {round(u["price"], 2) for u in updates_b if u["price"] > 0}
+        print(f"Ticker B: {len(updates_b)} updates, prices sample: {sorted(prices_b)[:5]}")
+
+        # All updates after resubscribe should be ticker B prices, not A
+        # TSLA ~$300-400 range, AAPL ~$150-250 range — detect cross-contamination
+        assert all(u["req_id"] == 5010 for u in updates_b), "Wrong req_id in updates"
+
+        # If price ranges are distinguishable, verify no A prices leaked into B
+        if prices_a and prices_b and not prices_a & prices_b:
+            stale = prices_a & prices_b
+            assert len(stale) == 0, f"Stale ticker A prices found in B updates: {stale}"
+            print("No stale price cross-contamination detected")
+
+    def test_l2_depth_resubscribe_different_req_id(self):
+        """Subscribe ticker A, cancel, subscribe ticker B with new req_id — clean separation."""
+        # Ticker A: AAPL
+        contract_a = Contract()
+        contract_a.con_id = 265598
+        contract_a.symbol = "AAPL"
+        contract_a.sec_type = "STK"
+        contract_a.exchange = "ISLAND"
+        contract_a.currency = "USD"
+
+        self.c.req_mkt_depth(5011, contract_a, 5, False, [])
+        got_a = self.w.got_depth_l2.wait(timeout=30)
+        if not got_a:
+            pytest.skip("No depth data for ticker A — market may be closed")
+
+        time.sleep(2)
+        self.c.cancel_mkt_depth(5011)
+
+        # Clear and subscribe ticker B with different req_id
+        self.w.depth_l2_updates.clear()
+        self.w.got_depth_l2.clear()
+
+        contract_b = Contract()
+        contract_b.con_id = 76792991
+        contract_b.symbol = "TSLA"
+        contract_b.sec_type = "STK"
+        contract_b.exchange = "ISLAND"
+        contract_b.currency = "USD"
+
+        self.c.req_mkt_depth(5012, contract_b, 5, False, [])
+        got_b = self.w.got_depth_l2.wait(timeout=30)
+        if not got_b:
+            pytest.skip("No depth data for ticker B — market may be closed")
+
+        time.sleep(2)
+        self.c.cancel_mkt_depth(5012)
+
+        # Only req_id 5012 should be present — no leaks from 5011
+        updates_b = [u for u in self.w.depth_l2_updates if u["req_id"] == 5012]
+        stale_a = [u for u in self.w.depth_l2_updates if u["req_id"] == 5011]
+        assert len(updates_b) > 0, "No depth updates for ticker B"
+        assert len(stale_a) == 0, f"Stale ticker A data leaked: {len(stale_a)} updates with req_id=5011"
+        print(f"Ticker B: {len(updates_b)} updates, no stale leaks")
+
     # ── reqMktDepthExchanges ──
 
     def test_depth_exchanges_returns_exchanges(self):

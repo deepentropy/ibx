@@ -22,6 +22,8 @@ pub(crate) struct FarmState {
     pub(crate) depth_tag_to_req: Vec<(u32, u32, bool, f64)>,
     /// SmartDepth fan-out: maps internal sub_req → user's original req_id.
     depth_fanout_map: Vec<(u32, u32)>,
+    /// Primary depth subscription params for reconnect: (req_id, con_id, exchange, sec_type, num_rows, is_smart_depth).
+    depth_resub_info: Vec<(u32, i64, String, String, i32, bool)>,
     pub(crate) disconnected: bool,
     pub(crate) tick_buf: Vec<tick_decoder::RawTick>,
     pub(crate) farm_msg_buf: Vec<Vec<u8>>,
@@ -36,6 +38,7 @@ impl FarmState {
             depth_subs: Vec::new(),
             depth_tag_to_req: Vec::new(),
             depth_fanout_map: Vec::new(),
+            depth_resub_info: Vec::new(),
             disconnected: false,
             tick_buf: Vec::with_capacity(16),
             farm_msg_buf: Vec::with_capacity(32),
@@ -475,6 +478,7 @@ impl FarmState {
             "CASH" => "CASH", other => other,
         };
         self.depth_subs.push((req_id, farm, is_smart_depth));
+        self.depth_resub_info.push((req_id, con_id, exchange.to_string(), sec_type.to_string(), _num_rows, is_smart_depth));
 
         // ib-agent#86: SmartDepth requires per-exchange fan-out. The server ACKs a BEST
         // subscribe but never sends data for it. Data only arrives for individual exchanges.
@@ -534,8 +538,34 @@ impl FarmState {
             }
             None => return,
         };
+
+        // Remove reconnect params
+        self.depth_resub_info.retain(|(id, _, _, _, _, _)| *id != req_id);
+
+        // Collect SmartDepth fan-out sub_reqs that map to this user req_id
+        let fanout_reqs: Vec<u32> = self.depth_fanout_map.iter()
+            .filter(|(_, user)| *user == req_id)
+            .map(|(sub, _)| *sub)
+            .collect();
+
+        // Remove fan-out entries from depth_subs and depth_fanout_map
+        self.depth_subs.retain(|(id, _, _)| !fanout_reqs.contains(id));
+        self.depth_fanout_map.retain(|(_, user)| *user != req_id);
+
+        // Clear server_tag mappings for this req_id
         self.depth_tag_to_req.retain(|(_, rid, _, _)| *rid != req_id);
+
         if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) {
+            // Send unsub for each fan-out sub_req (SmartDepth per-exchange)
+            for sub_req in &fanout_reqs {
+                let sub_req_str = sub_req.to_string();
+                let _ = conn.send_fixcomp(&[
+                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+                    (262, &sub_req_str),
+                    (263, "2"),
+                ]);
+            }
+            // Send unsub for the primary req_id
             let req_id_str = req_id.to_string();
             let _ = conn.send_fixcomp(&[
                 (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
@@ -543,7 +573,7 @@ impl FarmState {
                 (263, "2"),
             ]);
             hb.last_farm_sent = Instant::now();
-            log::info!("Sent depth unsubscribe: req_id={}", req_id);
+            log::info!("Sent depth unsubscribe: req_id={} (+ {} fan-out)", req_id, fanout_reqs.len());
         }
     }
 
@@ -764,6 +794,11 @@ impl FarmState {
         self.disconnected = true;
         self.md_req_to_instrument.clear();
         self.instrument_md_reqs.clear();
+        // Clear depth wire-state (server_tags become invalid after disconnect).
+        // depth_resub_info is preserved for resubscription on reconnect.
+        self.depth_subs.clear();
+        self.depth_tag_to_req.clear();
+        self.depth_fanout_map.clear();
         context.market.clear_server_tags();
         context.market.zero_all_quotes();
         // Don't emit Event::Disconnected — auto-reconnect handles farm drops transparently.
@@ -803,7 +838,18 @@ impl FarmState {
         for (instrument, farm, con_id) in active {
             self.send_mktdata_subscribe(con_id, instrument, farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, hb);
         }
-        log::info!("Farm reconnected, re-subscribed {} instruments", self.instrument_md_reqs.len());
+
+        // Re-subscribe depth subscriptions (depth_resub_info survived disconnect)
+        let depth_params: Vec<_> = self.depth_resub_info.drain(..).collect();
+        let depth_count = depth_params.len();
+        for (req_id, con_id, exchange, sec_type, num_rows, is_smart_depth) in depth_params {
+            self.send_depth_subscribe(
+                req_id, con_id, &exchange, &sec_type, num_rows, is_smart_depth,
+                farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, hb,
+            );
+        }
+
+        log::info!("Farm reconnected, re-subscribed {} instruments + {} depth", self.instrument_md_reqs.len(), depth_count);
     }
 
     fn handle_tick_news(&mut self, msg: &[u8], context: &Context, shared: &SharedState, event_tx: &Option<Sender<Event>>) {

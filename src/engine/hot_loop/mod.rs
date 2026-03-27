@@ -471,6 +471,8 @@ impl HotLoop {
                         &mut self.eufarm_conn, &mut self.jfarm_conn,
                         &mut self.hb,
                     );
+                    // Purge any already-buffered depth updates so callers never see stale data
+                    self.shared.market.purge_depth_updates(req_id);
                 }
                 ControlCommand::FetchNewsProviders { .. }
                 | ControlCommand::FetchSmartComponents { .. }
