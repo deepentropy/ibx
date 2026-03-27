@@ -765,15 +765,332 @@ def generate_python_md(ver: str) -> str:
     return "\n".join(out), method_count
 
 
+# ── IB API Coverage Matrix ──
+
+# Canonical ibapi EClient methods (source of truth).
+# Category, ibapi method name, ibapi C++ name (for reference).
+IBAPI_ECLIENT: list[tuple[str, str, str]] = [
+    # Connection
+    ("Connection", "connect", "eConnect"),
+    ("Connection", "disconnect", "eDisconnect"),
+    ("Connection", "is_connected", "isConnected"),
+    ("Connection", "set_server_log_level", "setServerLogLevel"),
+    ("Connection", "req_current_time", "reqCurrentTime"),
+    # Market Data
+    ("Market Data", "req_mkt_data", "reqMktData"),
+    ("Market Data", "cancel_mkt_data", "cancelMktData"),
+    ("Market Data", "req_market_data_type", "reqMarketDataType"),
+    ("Market Data", "req_tick_by_tick_data", "reqTickByTickData"),
+    ("Market Data", "cancel_tick_by_tick_data", "cancelTickByTickData"),
+    ("Market Data", "req_mkt_depth", "reqMktDepth"),
+    ("Market Data", "cancel_mkt_depth", "cancelMktDepth"),
+    ("Market Data", "req_mkt_depth_exchanges", "reqMktDepthExchanges"),
+    ("Market Data", "req_smart_components", "reqSmartComponents"),
+    ("Market Data", "req_real_time_bars", "reqRealTimeBars"),
+    ("Market Data", "cancel_real_time_bars", "cancelRealTimeBars"),
+    # Historical Data
+    ("Historical Data", "req_historical_data", "reqHistoricalData"),
+    ("Historical Data", "cancel_historical_data", "cancelHistoricalData"),
+    ("Historical Data", "req_head_time_stamp", "reqHeadTimeStamp"),
+    ("Historical Data", "cancel_head_time_stamp", "cancelHeadTimestamp"),
+    ("Historical Data", "req_historical_ticks", "reqHistoricalTicks"),
+    ("Historical Data", "req_histogram_data", "reqHistogramData"),
+    ("Historical Data", "cancel_histogram_data", "cancelHistogramData"),
+    ("Historical Data", "req_historical_schedule", "reqHistoricalSchedule"),
+    # Orders
+    ("Orders", "place_order", "placeOrder"),
+    ("Orders", "cancel_order", "cancelOrder"),
+    ("Orders", "req_open_orders", "reqOpenOrders"),
+    ("Orders", "req_all_open_orders", "reqAllOpenOrders"),
+    ("Orders", "req_auto_open_orders", "reqAutoOpenOrders"),
+    ("Orders", "req_ids", "reqIds"),
+    ("Orders", "req_global_cancel", "reqGlobalCancel"),
+    ("Orders", "req_completed_orders", "reqCompletedOrders"),
+    # Executions
+    ("Executions", "req_executions", "reqExecutions"),
+    # Account
+    ("Account", "req_account_updates", "reqAccountUpdates"),
+    ("Account", "req_account_summary", "reqAccountSummary"),
+    ("Account", "cancel_account_summary", "cancelAccountSummary"),
+    ("Account", "req_positions", "reqPositions"),
+    ("Account", "cancel_positions", "cancelPositions"),
+    ("Account", "req_pnl", "reqPnL"),
+    ("Account", "cancel_pnl", "cancelPnL"),
+    ("Account", "req_pnl_single", "reqPnLSingle"),
+    ("Account", "cancel_pnl_single", "cancelPnLSingle"),
+    ("Account", "req_managed_accts", "reqManagedAccts"),
+    ("Account", "req_account_updates_multi", "reqAccountUpdatesMulti"),
+    ("Account", "cancel_account_updates_multi", "cancelAccountUpdatesMulti"),
+    ("Account", "req_positions_multi", "reqPositionsMulti"),
+    ("Account", "cancel_positions_multi", "cancelPositionsMulti"),
+    # Contract
+    ("Contract", "req_contract_details", "reqContractDetails"),
+    ("Contract", "req_matching_symbols", "reqMatchingSymbols"),
+    ("Contract", "req_market_rule", "reqMarketRule"),
+    # Scanner
+    ("Scanner", "req_scanner_parameters", "reqScannerParameters"),
+    ("Scanner", "req_scanner_subscription", "reqScannerSubscription"),
+    ("Scanner", "cancel_scanner_subscription", "cancelScannerSubscription"),
+    # News
+    ("News", "req_news_providers", "reqNewsProviders"),
+    ("News", "req_news_article", "reqNewsArticle"),
+    ("News", "req_historical_news", "reqHistoricalNews"),
+    ("News", "req_news_bulletins", "reqNewsBulletins"),
+    ("News", "cancel_news_bulletins", "cancelNewsBulletins"),
+    # Fundamental
+    ("Fundamental", "req_fundamental_data", "reqFundamentalData"),
+    ("Fundamental", "cancel_fundamental_data", "cancelFundamentalData"),
+    # Options
+    ("Options", "calculate_implied_volatility", "calculateImpliedVolatility"),
+    ("Options", "cancel_calculate_implied_volatility", "cancelCalculateImpliedVolatility"),
+    ("Options", "calculate_option_price", "calculateOptionPrice"),
+    ("Options", "cancel_calculate_option_price", "cancelCalculateOptionPrice"),
+    ("Options", "exercise_options", "exerciseOptions"),
+    ("Options", "req_sec_def_opt_params", "reqSecDefOptParams"),
+    # Reference
+    ("Reference", "req_soft_dollar_tiers", "reqSoftDollarTiers"),
+    ("Reference", "req_family_codes", "reqFamilyCodes"),
+    ("Reference", "req_user_info", "reqUserInfo"),
+    # FA
+    ("Financial Advisor", "request_fa", "requestFA"),
+    ("Financial Advisor", "replace_fa", "replaceFA"),
+    # Display Groups
+    ("Display Groups", "query_display_groups", "queryDisplayGroups"),
+    ("Display Groups", "subscribe_to_group_events", "subscribeToGroupEvents"),
+    ("Display Groups", "unsubscribe_from_group_events", "unsubscribeFromGroupEvents"),
+    ("Display Groups", "update_display_group", "updateDisplayGroup"),
+    # WSH
+    ("WSH", "req_wsh_meta_data", "reqWshMetaData"),
+    ("WSH", "req_wsh_event_data", "reqWshEventData"),
+]
+
+IBAPI_EWRAPPER: list[tuple[str, str]] = [
+    ("Connection", "connect_ack"),
+    ("Connection", "connection_closed"),
+    ("Connection", "next_valid_id"),
+    ("Connection", "managed_accounts"),
+    ("Connection", "error"),
+    ("Connection", "current_time"),
+    ("Market Data", "tick_price"),
+    ("Market Data", "tick_size"),
+    ("Market Data", "tick_string"),
+    ("Market Data", "tick_generic"),
+    ("Market Data", "tick_snapshot_end"),
+    ("Market Data", "market_data_type"),
+    ("Market Data", "tick_req_params"),
+    ("Orders", "order_status"),
+    ("Orders", "open_order"),
+    ("Orders", "open_order_end"),
+    ("Orders", "order_bound"),
+    ("Executions", "exec_details"),
+    ("Executions", "exec_details_end"),
+    ("Executions", "commission_report"),
+    ("Account", "update_account_value"),
+    ("Account", "update_portfolio"),
+    ("Account", "update_account_time"),
+    ("Account", "account_download_end"),
+    ("Account", "account_summary"),
+    ("Account", "account_summary_end"),
+    ("Account", "position"),
+    ("Account", "position_end"),
+    ("Account", "pnl"),
+    ("Account", "pnl_single"),
+    ("Account", "position_multi"),
+    ("Account", "position_multi_end"),
+    ("Account", "account_update_multi"),
+    ("Account", "account_update_multi_end"),
+    ("Contract", "contract_details"),
+    ("Contract", "contract_details_end"),
+    ("Contract", "bond_contract_details"),
+    ("Contract", "symbol_samples"),
+    ("Historical Data", "historical_data"),
+    ("Historical Data", "historical_data_end"),
+    ("Historical Data", "historical_data_update"),
+    ("Historical Data", "head_timestamp"),
+    ("Historical Data", "historical_ticks"),
+    ("Historical Data", "historical_ticks_bid_ask"),
+    ("Historical Data", "historical_ticks_last"),
+    ("Historical Data", "histogram_data"),
+    ("Historical Data", "historical_schedule"),
+    ("Market Depth", "update_mkt_depth"),
+    ("Market Depth", "update_mkt_depth_l2"),
+    ("Market Depth", "mkt_depth_exchanges"),
+    ("Tick-by-Tick", "tick_by_tick_all_last"),
+    ("Tick-by-Tick", "tick_by_tick_bid_ask"),
+    ("Tick-by-Tick", "tick_by_tick_mid_point"),
+    ("Scanner", "scanner_data"),
+    ("Scanner", "scanner_data_end"),
+    ("Scanner", "scanner_parameters"),
+    ("News", "news_providers"),
+    ("News", "news_article"),
+    ("News", "historical_news"),
+    ("News", "historical_news_end"),
+    ("News", "tick_news"),
+    ("News", "update_news_bulletin"),
+    ("Real-Time Bars", "real_time_bar"),
+    ("Fundamental", "fundamental_data"),
+    ("Market Rules", "market_rule"),
+    ("Completed Orders", "completed_order"),
+    ("Completed Orders", "completed_orders_end"),
+    ("Options", "tick_option_computation"),
+    ("Options", "security_definition_option_parameter"),
+    ("Options", "security_definition_option_parameter_end"),
+    ("Reference", "smart_components"),
+    ("Reference", "soft_dollar_tiers"),
+    ("Reference", "family_codes"),
+    ("Reference", "user_info"),
+    ("FA", "receive_fa"),
+    ("FA", "replace_fa_end"),
+    ("Display Groups", "display_group_list"),
+    ("Display Groups", "display_group_updated"),
+    ("Other", "delta_neutral_validation"),
+    ("WSH", "wsh_meta_data"),
+    ("WSH", "wsh_event_data"),
+]
+
+
+def _collect_rust_methods() -> set[str]:
+    """Collect all pub fn names from Rust EClient."""
+    names = set()
+    for f in RUST_CLIENT.glob("*.rs"):
+        if f.stem in ("dispatch", "tests"):
+            continue
+        for m in parse_rust_methods(f):
+            names.add(m["name"])
+    return names
+
+
+def _collect_rust_wrapper() -> set[str]:
+    """Collect all Wrapper trait callback names."""
+    return {m["name"] for m in parse_wrapper_trait(RUST_WRAPPER)}
+
+
+def _collect_py_methods() -> set[str]:
+    """Collect all pymethods fn names from Python EClient."""
+    names = set()
+    for f in PY_CLIENT.glob("*.rs"):
+        for m in parse_pymethods(f):
+            names.add(m["name"])
+    return names
+
+
+def _collect_py_wrapper() -> set[str]:
+    """Collect all Python EWrapper callback names."""
+    return {m["name"] for m in parse_py_wrapper(PY_WRAPPER)}
+
+
+def _status_icon(name: str, impl_set: set[str], stub_names: set[str]) -> str:
+    if name in impl_set and name not in stub_names:
+        return "Y"
+    if name in impl_set and name in stub_names:
+        return "STUB"
+    return "-"
+
+
+# Methods that log warnings (stubs, not real implementations)
+STUB_METHODS = {
+    "calculate_implied_volatility", "calculate_option_price",
+    "cancel_calculate_implied_volatility", "cancel_calculate_option_price",
+    "exercise_options", "req_sec_def_opt_params",
+    "request_fa", "replace_fa",
+    "query_display_groups", "subscribe_to_group_events",
+    "unsubscribe_from_group_events", "update_display_group",
+    "req_wsh_meta_data", "req_wsh_event_data",
+}
+
+STUB_CALLBACKS = {
+    "receive_fa", "replace_fa_end",
+    "bond_contract_details", "delta_neutral_validation",
+    "display_group_list", "display_group_updated",
+    "wsh_meta_data", "wsh_event_data",
+    "security_definition_option_parameter", "security_definition_option_parameter_end",
+    "order_bound",
+}
+
+
+def generate_coverage_md(ver: str) -> str:
+    rust_methods = _collect_rust_methods()
+    rust_wrapper = _collect_rust_wrapper()
+    py_methods = _collect_py_methods()
+    py_wrapper = _collect_py_wrapper()
+
+    out = [
+        f"# API Coverage Matrix (v{ver})",
+        "",
+        "*Auto-generated from source — do not edit.*",
+        "",
+        "Canonical IB API methods vs ibx implementation status.",
+        "",
+        "- **Y** = Implemented",
+        "- **STUB** = Accepts call but not wired to server (logs warning or no-op)",
+        "- **-** = Not present",
+        "",
+    ]
+
+    # Summary
+    rust_impl = sum(1 for _, name, _ in IBAPI_ECLIENT if name in rust_methods and name not in STUB_METHODS)
+    rust_stub = sum(1 for _, name, _ in IBAPI_ECLIENT if name in rust_methods and name in STUB_METHODS)
+    py_impl = sum(1 for _, name, _ in IBAPI_ECLIENT if name in py_methods and name not in STUB_METHODS)
+    py_stub = sum(1 for _, name, _ in IBAPI_ECLIENT if name in py_methods and name in STUB_METHODS)
+    total_client = len(IBAPI_ECLIENT)
+
+    rw_impl = sum(1 for _, name in IBAPI_EWRAPPER if name in rust_wrapper and name not in STUB_CALLBACKS)
+    rw_stub = sum(1 for _, name in IBAPI_EWRAPPER if name in rust_wrapper and name in STUB_CALLBACKS)
+    pw_impl = sum(1 for _, name in IBAPI_EWRAPPER if name in py_wrapper and name not in STUB_CALLBACKS)
+    pw_stub = sum(1 for _, name in IBAPI_EWRAPPER if name in py_wrapper and name in STUB_CALLBACKS)
+    total_wrapper = len(IBAPI_EWRAPPER)
+
+    out.append("## Summary")
+    out.append("")
+    out.append("| | IB API | Rust | Python |")
+    out.append("|---|:---:|:---:|:---:|")
+    out.append(f"| **EClient methods** | {total_client} | {rust_impl} impl, {rust_stub} stub | {py_impl} impl, {py_stub} stub |")
+    out.append(f"| **EWrapper callbacks** | {total_wrapper} | {rw_impl} impl, {rw_stub} stub | {pw_impl} impl, {pw_stub} stub |")
+    out.append("")
+
+    # EClient table
+    out.append("## EClient Methods")
+    out.append("")
+    out.append("| Category | IB API Method | C++ Name | Rust | Python |")
+    out.append("|----------|---------------|----------|:----:|:------:|")
+    current_cat = ""
+    for cat, name, cpp_name in IBAPI_ECLIENT:
+        display_cat = cat if cat != current_cat else ""
+        current_cat = cat
+        r = _status_icon(name, rust_methods, STUB_METHODS)
+        p = _status_icon(name, py_methods, STUB_METHODS)
+        out.append(f"| {display_cat} | `{name}` | `{cpp_name}` | {r} | {p} |")
+    out.append("")
+
+    # EWrapper table
+    out.append("## EWrapper Callbacks")
+    out.append("")
+    out.append("| Category | Callback | Rust | Python |")
+    out.append("|----------|----------|:----:|:------:|")
+    current_cat = ""
+    for cat, name in IBAPI_EWRAPPER:
+        display_cat = cat if cat != current_cat else ""
+        current_cat = cat
+        r = _status_icon(name, rust_wrapper, STUB_CALLBACKS)
+        p = _status_icon(name, py_wrapper, STUB_CALLBACKS)
+        out.append(f"| {display_cat} | `{name}` | {r} | {p} |")
+    out.append("")
+
+    return "\n".join(out)
+
+
 def main():
     DOCS.mkdir(exist_ok=True)
     ver = version()
     rust, rc = generate_rust_md(ver)
     py, pc = generate_python_md(ver)
+    cov = generate_coverage_md(ver)
     (DOCS / "RUST_API.md").write_text(rust, encoding="utf-8")
     (DOCS / "PYTHON_API.md").write_text(py, encoding="utf-8")
+    (DOCS / "COVERAGE.md").write_text(cov, encoding="utf-8")
     print(f"docs/RUST_API.md  — {rc} methods")
     print(f"docs/PYTHON_API.md — {pc} methods")
+    print(f"docs/COVERAGE.md  — {len(IBAPI_ECLIENT)} EClient + {len(IBAPI_EWRAPPER)} EWrapper")
 
 
 if __name__ == "__main__":
