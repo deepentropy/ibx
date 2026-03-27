@@ -1,6 +1,6 @@
 [package]
 name = "ibx"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 
 [lib]
@@ -59,6 +59,7 @@ pyo3 = { version = "0.24", features = ["extension-module", "multiple-pymethods"]
 
 [dev-dependencies]
 serde_json = "1"
+env_logger = "0.11"
 
 [profile.release]
 lto = "fat"

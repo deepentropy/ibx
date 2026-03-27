@@ -267,6 +267,12 @@ pub struct Gateway {
     /// Stored for farm reconnection.
     pub hw_info: String,
     pub encoded: String,
+    /// Raw soft dollar tier data from CCP logon tag 6560.
+    pub raw_soft_dollar_tiers: String,
+    /// Raw family code data from CCP logon tag 6823.
+    pub raw_family_codes: String,
+    /// White branding ID from CCP logon (empty for standard accounts).
+    pub white_branding_id: String,
 }
 
 /// Connect to a data farm: key exchange → encrypted logon → token auth → routing → Connection.
@@ -890,6 +896,9 @@ impl Gateway {
         let mut heartbeat_interval = CCP_HEARTBEAT;
         let mut server_session_id = String::new();
         let mut ccp_token = String::new();
+        let mut raw_soft_dollar_tiers = String::new();
+        let mut raw_family_codes = String::new();
+        let mut white_branding_id = String::new();
 
         for _ in 0..5 {
             let response = fix_read(&mut tls)?;
@@ -932,6 +941,17 @@ impl Gateway {
                         }
                     }
                 }
+            }
+
+            // Gateway-local init data from logon response
+            if let Some(v) = fields.get(&6560) {
+                if raw_soft_dollar_tiers.is_empty() { raw_soft_dollar_tiers = v.clone(); }
+            }
+            if let Some(v) = fields.get(&6823) {
+                if raw_family_codes.is_empty() { raw_family_codes = v.clone(); }
+            }
+            if let Some(v) = fields.get(&6571) {
+                if white_branding_id.is_empty() { white_branding_id = v.clone(); }
             }
 
             // Stop once we have the logon ACK or server config message
@@ -996,18 +1016,26 @@ impl Gateway {
             }
         }
         log::info!("Init response: {} bytes", init_data.len());
-        // Search for account ID patterns (DU/DF/U + digits for paper, or from tag 1)
+        // Scan init response for account ID and gateway-local init tags
         let init_str = String::from_utf8_lossy(&init_data);
         for part in init_str.split('\x01') {
             if part.starts_with("1=") && part.len() > 2 {
                 let val = &part[2..];
-                // IB account IDs: DU/DF/U + digits, or similar patterns
                 if val.starts_with("DU") || val.starts_with("DF") || val.starts_with("U") {
                     if account_id.is_empty() || account_id == config.username {
                         account_id = val.to_string();
                         log::info!("Found account ID from init response: {}", account_id);
                     }
                 }
+            } else if part.starts_with("6560=") && raw_soft_dollar_tiers.is_empty() {
+                raw_soft_dollar_tiers = part[5..].to_string();
+                log::info!("Found soft dollar tiers from init response ({} bytes)", raw_soft_dollar_tiers.len());
+            } else if part.starts_with("6823=") && raw_family_codes.is_empty() {
+                raw_family_codes = part[5..].to_string();
+                log::info!("Found family codes from init response ({} bytes)", raw_family_codes.len());
+            } else if part.starts_with("6571=") && white_branding_id.is_empty() {
+                white_branding_id = part[5..].to_string();
+                log::info!("Found white branding ID from init response");
             }
         }
         tls.get_ref().set_read_timeout(None)?;
@@ -1078,8 +1106,99 @@ impl Gateway {
             heartbeat_interval,
             hw_info,
             encoded,
+            raw_soft_dollar_tiers,
+            raw_family_codes,
+            white_branding_id,
         };
         Ok((gw, farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn))
+    }
+
+    /// Populate shared state with gateway-local init data parsed from CCP logon.
+    pub fn populate_init_data(&self, shared: &SharedState) {
+        use crate::types::{SmartComponent, NewsProvider, SoftDollarTier, FamilyCode};
+
+        // Smart components: hardcoded US equity SMART routing exchanges.
+        // Server doesn't send these in a parseable init message; they're
+        // embedded in the Gateway binary. Hardcoded list matches Gateway 10.30+.
+        let smart_components: Vec<SmartComponent> = [
+            ("NASDAQ", "Q"), ("NYSE", "N"), ("ARCA", "P"), ("BATS", "Z"),
+            ("IEX", "V"), ("BEX", "B"), ("BYX", "Y"), ("NYSENAT", "C"),
+            ("DRCTEDGE", "J"), ("MEMX", "U"), ("PEARL", "H"), ("AMEX", "A"),
+            ("CHX", "M"), ("LTSE", "L"), ("PSX", "X"), ("ISE", "I"), ("EDGEA", "K"),
+        ].iter().enumerate().map(|(i, (exch, letter))| SmartComponent {
+            bit_number: i as i32,
+            exchange: exch.to_string(),
+            exchange_letter: letter.to_string(),
+        }).collect();
+        shared.reference.set_smart_components(smart_components);
+
+        // News providers: hardcoded list matching Gateway.
+        let news_providers: Vec<NewsProvider> = [
+            ("BRFG", "Briefing.com General Market Columns"),
+            ("BRFUPDN", "Briefing.com Analyst Actions"),
+            ("DJ-N", "Dow Jones Global Equity Trader"),
+            ("DJ-RTA", "Dow Jones Top Stories Asia Pacific"),
+            ("DJ-RTE", "Dow Jones Top Stories Europe"),
+            ("DJ-RTG", "Dow Jones Top Stories Global"),
+            ("DJ-RTPRO", "Dow Jones Top Stories Pro"),
+            ("DJNL", "Dow Jones Newsletters"),
+        ].iter().map(|(code, name)| NewsProvider {
+            code: code.to_string(), name: name.to_string(),
+        }).collect();
+        shared.reference.set_news_providers(news_providers);
+
+        // Soft dollar tiers: parse from CCP logon tag 6560, fall back to defaults.
+        let tiers = if self.raw_soft_dollar_tiers.is_empty() {
+            // Default tiers matching Gateway 10.30+
+            vec![
+                SoftDollarTier { name: "MaxRebate".into(), val: "1".into(), display_name: "Maximize Rebate".into() },
+                SoftDollarTier { name: "PreferRebate".into(), val: "9".into(), display_name: "Prefer Rebate".into() },
+                SoftDollarTier { name: "PreferFill".into(), val: "11".into(), display_name: "Prefer Fill".into() },
+                SoftDollarTier { name: "MaxFill".into(), val: "12".into(), display_name: "Maximize Fill".into() },
+                SoftDollarTier { name: "Primary".into(), val: "2".into(), display_name: "Primary Exchange".into() },
+                SoftDollarTier { name: "VRebate".into(), val: "3".into(), display_name: "Highest Volume Exchange With Rebate".into() },
+                SoftDollarTier { name: "VLowFee".into(), val: "4".into(), display_name: "High Volume Exchange With Lowest Fee".into() },
+            ]
+        } else {
+            // Parse "name1|val1|display1;name2|val2|display2" format
+            self.raw_soft_dollar_tiers.split(';').filter_map(|entry| {
+                let parts: Vec<&str> = entry.split('|').collect();
+                if parts.len() >= 3 {
+                    Some(SoftDollarTier {
+                        name: parts[0].to_string(),
+                        val: parts[1].to_string(),
+                        display_name: parts[2].to_string(),
+                    })
+                } else {
+                    log::warn!("Unexpected soft dollar tier format: {}", entry);
+                    None
+                }
+            }).collect()
+        };
+        shared.reference.set_soft_dollar_tiers(tiers);
+
+        // Family codes: parse from CCP logon tag 6823.
+        // Empty for paper/single accounts.
+        let codes = if self.raw_family_codes.is_empty() {
+            Vec::new()
+        } else {
+            self.raw_family_codes.split(';').filter_map(|entry| {
+                let parts: Vec<&str> = entry.split('|').collect();
+                if parts.len() >= 2 {
+                    Some(FamilyCode {
+                        account_id: parts[0].to_string(),
+                        family_code_str: parts[1].to_string(),
+                    })
+                } else {
+                    log::warn!("Unexpected family code format: {}", entry);
+                    None
+                }
+            }).collect()
+        };
+        shared.reference.set_family_codes(codes);
+
+        // White branding ID (empty for standard accounts).
+        shared.reference.set_white_branding_id(self.white_branding_id.clone());
     }
 
     /// Create the control channel and build a HotLoop with connected sockets.

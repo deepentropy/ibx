@@ -78,6 +78,12 @@ enum Cb {
     AccountDownloadEnd { account: String },
     NewsBulletin { msg_id: i64, msg_type: i32, message: String },
     PnlSingle { req_id: i64, pos: f64 },
+    SmartComponents { req_id: i64, count: usize },
+    NewsProviders { count: usize },
+    CurrentTime { time: i64 },
+    SoftDollarTiers { req_id: i64, count: usize },
+    FamilyCodes { count: usize },
+    UserInfo { req_id: i64, white_branding_id: String },
 }
 
 #[derive(Clone, Debug)]
@@ -346,6 +352,24 @@ impl Wrapper for RecWrapper {
     fn market_rule(&mut self, id: i64, increments: &[PriceIncrement]) {
         self.push(Cb::MarketRule { id, count: increments.len() });
     }
+    fn smart_components(&mut self, req_id: i64, components: &[ibx::types::SmartComponent]) {
+        self.push(Cb::SmartComponents { req_id, count: components.len() });
+    }
+    fn news_providers(&mut self, providers: &[ibx::types::NewsProvider]) {
+        self.push(Cb::NewsProviders { count: providers.len() });
+    }
+    fn current_time(&mut self, time: i64) {
+        self.push(Cb::CurrentTime { time });
+    }
+    fn soft_dollar_tiers(&mut self, req_id: i64, tiers: &[ibx::types::SoftDollarTier]) {
+        self.push(Cb::SoftDollarTiers { req_id, count: tiers.len() });
+    }
+    fn family_codes(&mut self, codes: &[ibx::types::FamilyCode]) {
+        self.push(Cb::FamilyCodes { count: codes.len() });
+    }
+    fn user_info(&mut self, req_id: i64, white_branding_id: &str) {
+        self.push(Cb::UserInfo { req_id, white_branding_id: white_branding_id.into() });
+    }
 }
 
 // ── Helpers ──
@@ -466,6 +490,38 @@ fn api_gt_suite() {
             ok &= assert_field("currency", &c.currency, "currency", gt_c);
             if ok { println!("PASS"); pass_count += 1; }
             else { println!("FAIL"); fail_count += 1; }
+        }
+    }
+
+    // ── 1b. Contract Details by symbol only (con_id=0, server resolves) ──
+    {
+        print!("  req_contract_details (MSFT, con_id=0)... ");
+        wrapper.drain();
+        let lookup = Contract {
+            con_id: 0, symbol: "MSFT".into(), sec_type: "STK".into(),
+            exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
+        };
+        client.req_contract_details(101, &lookup).unwrap();
+        poll_until(&client, &mut wrapper,
+            |cbs| cbs.iter().any(|c| matches!(c, Cb::ContractDetailsEnd { .. })),
+            Duration::from_secs(20));
+        let cbs = wrapper.drain();
+
+        let cd: Vec<_> = cbs.iter().filter_map(|c| if let Cb::ContractDetails { contract, .. } = c { Some(contract) } else { None }).collect();
+
+        if cd.is_empty() {
+            println!("FAIL (no contractDetails received)");
+            fail_count += 1;
+        } else {
+            let c = &cd[0];
+            let mut ok = true;
+            if c.con_id == 0 { println!("    FAIL conId=0 (not resolved)"); ok = false; }
+            if c.symbol != "MSFT" { println!("    FAIL symbol='{}' expected 'MSFT'", c.symbol); ok = false; }
+            if c.sec_type != "STK" { println!("    FAIL secType='{}'", c.sec_type); ok = false; }
+            if ok {
+                println!("PASS (conId={}, localSymbol='{}')", c.con_id, c.local_symbol);
+                pass_count += 1;
+            } else { fail_count += 1; }
         }
     }
 
@@ -719,9 +775,9 @@ fn api_gt_suite() {
 
     // ── 8. Head Timestamp ──
     {
-        print!("  req_head_timestamp (SPY TRADES)... ");
+        print!("  req_head_time_stamp (SPY TRADES)... ");
         wrapper.drain();
-        client.req_head_timestamp(400, &spy(), "TRADES", true, 1).unwrap();
+        client.req_head_time_stamp(400, &spy(), "TRADES", true, 1).unwrap();
         poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::HeadTimestamp { .. })), Duration::from_secs(10));
         let cbs = wrapper.drain();
 
@@ -1270,7 +1326,119 @@ fn api_gt_suite() {
         }
     }
 
-    // ── 27. Disconnect + verify ──
+    // ── 27. Gateway-local: req_smart_components ──
+    {
+        print!("  req_smart_components... ");
+        wrapper.drain();
+        client.req_smart_components(900, "SMART", &mut wrapper);
+        let cbs = wrapper.drain();
+        let sc: Vec<_> = cbs.iter().filter_map(|c| if let Cb::SmartComponents { count, .. } = c { Some(*count) } else { None }).collect();
+        if sc.is_empty() || sc[0] == 0 {
+            println!("FAIL (no smart components)");
+            fail_count += 1;
+        } else {
+            println!("PASS ({} exchanges)", sc[0]);
+            pass_count += 1;
+        }
+    }
+
+    // ── 28. Gateway-local: req_news_providers ──
+    {
+        print!("  req_news_providers... ");
+        wrapper.drain();
+        client.req_news_providers(&mut wrapper);
+        let cbs = wrapper.drain();
+        let np: Vec<_> = cbs.iter().filter_map(|c| if let Cb::NewsProviders { count, .. } = c { Some(*count) } else { None }).collect();
+        if np.is_empty() || np[0] == 0 {
+            println!("FAIL (no news providers)");
+            fail_count += 1;
+        } else {
+            println!("PASS ({} providers)", np[0]);
+            pass_count += 1;
+        }
+    }
+
+    // ── 29. Gateway-local: req_current_time ──
+    {
+        print!("  req_current_time... ");
+        wrapper.drain();
+        client.req_current_time(&mut wrapper);
+        let cbs = wrapper.drain();
+        let ct: Vec<_> = cbs.iter().filter_map(|c| if let Cb::CurrentTime { time, .. } = c { Some(*time) } else { None }).collect();
+        if ct.is_empty() {
+            println!("FAIL (no current_time callback)");
+            fail_count += 1;
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            if (ct[0] - now).abs() < 5 {
+                println!("PASS (time={})", ct[0]);
+                pass_count += 1;
+            } else {
+                println!("FAIL (time={} too far from now={})", ct[0], now);
+                fail_count += 1;
+            }
+        }
+    }
+
+    // ── 30. Gateway-local: req_soft_dollar_tiers ──
+    {
+        print!("  req_soft_dollar_tiers... ");
+        wrapper.drain();
+        client.req_soft_dollar_tiers(901, &mut wrapper);
+        let cbs = wrapper.drain();
+        let sdt: Vec<_> = cbs.iter().filter_map(|c| if let Cb::SoftDollarTiers { count, .. } = c { Some(*count) } else { None }).collect();
+        if sdt.is_empty() || sdt[0] == 0 {
+            println!("FAIL (no soft dollar tiers)");
+            fail_count += 1;
+        } else {
+            println!("PASS ({} tiers)", sdt[0]);
+            pass_count += 1;
+        }
+    }
+
+    // ── 31. Gateway-local: req_family_codes ──
+    {
+        print!("  req_family_codes... ");
+        wrapper.drain();
+        client.req_family_codes(&mut wrapper);
+        let cbs = wrapper.drain();
+        let fc: Vec<_> = cbs.iter().filter_map(|c| if let Cb::FamilyCodes { count, .. } = c { Some(*count) } else { None }).collect();
+        if fc.is_empty() {
+            println!("FAIL (no family_codes callback)");
+            fail_count += 1;
+        } else {
+            // Paper/single accounts return empty list — that's OK
+            println!("PASS ({} codes)", fc[0]);
+            pass_count += 1;
+        }
+    }
+
+    // ── 32. Gateway-local: req_user_info ──
+    {
+        print!("  req_user_info... ");
+        wrapper.drain();
+        client.req_user_info(902, &mut wrapper);
+        let cbs = wrapper.drain();
+        let ui: Vec<_> = cbs.iter().filter_map(|c| if let Cb::UserInfo { req_id, white_branding_id, .. } = c { Some((*req_id, white_branding_id.clone())) } else { None }).collect();
+        if ui.is_empty() {
+            println!("FAIL (no user_info callback)");
+            fail_count += 1;
+        } else {
+            let (rid, wbid) = &ui[0];
+            if *rid == 902 {
+                println!("PASS (whiteBrandingId='{}')", wbid);
+                pass_count += 1;
+            } else {
+                println!("FAIL (wrong req_id: {})", rid);
+                fail_count += 1;
+            }
+        }
+    }
+
+    // ── 33. Disconnect + verify ──
     {
         print!("  disconnect... ");
         client.disconnect();

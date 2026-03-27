@@ -123,6 +123,7 @@ impl EClient {
 
         *self.account_id.lock().unwrap() = Some(gw.account_id.clone());
         let shared = Arc::new(SharedState::new());
+        gw.populate_init_data(&shared);
 
         let connect_host = config.host.clone();
         let connect_username = config.username.clone();

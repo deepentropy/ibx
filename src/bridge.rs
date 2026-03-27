@@ -313,6 +313,12 @@ pub struct ReferenceState {
     depth_exchanges_pending: Mutex<bool>,
     /// Contract cache from CCP exec reports (con_id -> api::Contract).
     contract_cache: Mutex<HashMap<i64, api::Contract>>,
+    /// Gateway-local init data (populated during connection, read-only after).
+    smart_components: Mutex<Vec<crate::types::SmartComponent>>,
+    news_providers: Mutex<Vec<crate::types::NewsProvider>>,
+    soft_dollar_tiers: Mutex<Vec<crate::types::SoftDollarTier>>,
+    family_codes: Mutex<Vec<crate::types::FamilyCode>>,
+    white_branding_id: Mutex<String>,
 }
 
 impl ReferenceState {
@@ -335,6 +341,11 @@ impl ReferenceState {
             depth_exchanges_cache: Mutex::new(Vec::new()),
             depth_exchanges_pending: Mutex::new(false),
             contract_cache: Mutex::new(HashMap::new()),
+            smart_components: Mutex::new(Vec::new()),
+            news_providers: Mutex::new(Vec::new()),
+            soft_dollar_tiers: Mutex::new(Vec::new()),
+            family_codes: Mutex::new(Vec::new()),
+            white_branding_id: Mutex::new(String::new()),
         }
     }
 
@@ -487,7 +498,61 @@ impl ReferenceState {
     }
 
     #[doc(hidden)] pub fn cache_contract(&self, con_id: i64, contract: api::Contract) {
-        self.contract_cache.lock().unwrap().insert(con_id, contract);
+        let mut cache = self.contract_cache.lock().unwrap();
+        if let Some(existing) = cache.get_mut(&con_id) {
+            // Merge: only overwrite fields that are non-empty in the new contract
+            if !contract.symbol.is_empty() { existing.symbol = contract.symbol; }
+            if !contract.sec_type.is_empty() { existing.sec_type = contract.sec_type; }
+            if !contract.exchange.is_empty() { existing.exchange = contract.exchange; }
+            if !contract.currency.is_empty() { existing.currency = contract.currency; }
+            if !contract.local_symbol.is_empty() { existing.local_symbol = contract.local_symbol; }
+            if !contract.primary_exchange.is_empty() { existing.primary_exchange = contract.primary_exchange; }
+            if !contract.trading_class.is_empty() { existing.trading_class = contract.trading_class; }
+        } else {
+            cache.insert(con_id, contract);
+        }
+    }
+
+    // ── Gateway-local init data ──
+
+    pub fn smart_components(&self) -> Vec<crate::types::SmartComponent> {
+        self.smart_components.lock().unwrap().clone()
+    }
+
+    pub fn news_providers(&self) -> Vec<crate::types::NewsProvider> {
+        self.news_providers.lock().unwrap().clone()
+    }
+
+    pub fn soft_dollar_tiers(&self) -> Vec<crate::types::SoftDollarTier> {
+        self.soft_dollar_tiers.lock().unwrap().clone()
+    }
+
+    pub fn family_codes(&self) -> Vec<crate::types::FamilyCode> {
+        self.family_codes.lock().unwrap().clone()
+    }
+
+    pub fn white_branding_id(&self) -> String {
+        self.white_branding_id.lock().unwrap().clone()
+    }
+
+    #[doc(hidden)] pub fn set_smart_components(&self, components: Vec<crate::types::SmartComponent>) {
+        *self.smart_components.lock().unwrap() = components;
+    }
+
+    #[doc(hidden)] pub fn set_news_providers(&self, providers: Vec<crate::types::NewsProvider>) {
+        *self.news_providers.lock().unwrap() = providers;
+    }
+
+    #[doc(hidden)] pub fn set_soft_dollar_tiers(&self, tiers: Vec<crate::types::SoftDollarTier>) {
+        *self.soft_dollar_tiers.lock().unwrap() = tiers;
+    }
+
+    #[doc(hidden)] pub fn set_family_codes(&self, codes: Vec<crate::types::FamilyCode>) {
+        *self.family_codes.lock().unwrap() = codes;
+    }
+
+    #[doc(hidden)] pub fn set_white_branding_id(&self, id: String) {
+        *self.white_branding_id.lock().unwrap() = id;
     }
 }
 

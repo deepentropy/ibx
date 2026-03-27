@@ -446,12 +446,22 @@ impl ClientCore {
         self.contract_cache.lock().unwrap().insert(con_id, contract);
     }
 
-    /// Look up a contract: local cache first, then shared reference.
+    /// Look up a contract: merge local cache with shared reference for richest data.
     pub fn get_contract(&self, con_id: i64, shared: &SharedState) -> Option<ApiContract> {
-        if let Some(c) = self.contract_cache.lock().unwrap().get(&con_id) {
-            return Some(c.clone());
+        let local = self.contract_cache.lock().unwrap().get(&con_id).cloned();
+        let shared_ref = shared.reference.get_contract(con_id);
+        match (local, shared_ref) {
+            (Some(mut l), Some(s)) => {
+                // Enrich local with shared reference fields (secdef has richer data)
+                if l.local_symbol.is_empty() { l.local_symbol = s.local_symbol; }
+                if l.trading_class.is_empty() { l.trading_class = s.trading_class; }
+                if l.primary_exchange.is_empty() { l.primary_exchange = s.primary_exchange; }
+                Some(l)
+            }
+            (Some(l), None) => Some(l),
+            (None, Some(s)) => Some(s),
+            (None, None) => None,
         }
-        shared.reference.get_contract(con_id)
     }
 
     /// Register a TBT subscription mapping.
@@ -633,13 +643,34 @@ impl ClientCore {
     pub fn collect_open_orders(&self, shared: &SharedState) -> Vec<(u64, TrackedOrder)> {
         let mut result: Vec<(u64, TrackedOrder)> = Vec::new();
 
-        // Local tracked orders (non-terminal)
+        // Drain shared order cache first to enrich local tracking
+        let shared_orders = shared.orders.drain_open_orders();
+        {
+            let mut orders = self.open_orders.lock().unwrap();
+            for (oid, info) in &shared_orders {
+                if let Some(o) = orders.get_mut(oid) {
+                    if o.order.account.is_empty() {
+                        o.order.account = info.order.account.clone();
+                    }
+                    if o.order.perm_id == 0 {
+                        o.order.perm_id = info.order.perm_id;
+                    }
+                }
+            }
+        }
+
+        // Local tracked orders (non-terminal), enriched from secdef cache
         {
             let orders = self.open_orders.lock().unwrap();
             for (&oid, o) in orders.iter() {
                 if !matches!(o.status.as_str(), "Filled" | "Cancelled" | "Inactive") {
+                    let contract = if o.contract.con_id != 0 {
+                        self.get_contract(o.contract.con_id, shared).unwrap_or_else(|| o.contract.clone())
+                    } else {
+                        o.contract.clone()
+                    };
                     result.push((oid, TrackedOrder {
-                        contract: o.contract.clone(),
+                        contract,
                         order: o.order.clone(),
                         status: o.status.clone(),
                         filled: o.filled,
@@ -650,22 +681,11 @@ impl ClientCore {
             }
         }
 
-        // Enrich from shared order cache
-        for (oid, info) in shared.orders.drain_open_orders() {
+        // Add shared-only entries not already present from local
+        for (oid, info) in shared_orders {
             if matches!(info.order_state.status.as_str(), "Filled" | "Cancelled" | "Inactive") {
                 continue;
             }
-            // Update local tracking with enriched data
-            let mut orders = self.open_orders.lock().unwrap();
-            if let Some(o) = orders.get_mut(&oid) {
-                if o.order.account.is_empty() {
-                    o.order.account = info.order.account.clone();
-                }
-                if o.order.perm_id == 0 {
-                    o.order.perm_id = info.order.perm_id;
-                }
-            }
-            // Add to result if not already present from local
             if !result.iter().any(|(id, _)| *id == oid) {
                 let contract = if info.contract.con_id != 0 {
                     shared.reference.get_contract(info.contract.con_id).unwrap_or(info.contract)

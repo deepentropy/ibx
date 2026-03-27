@@ -114,6 +114,7 @@ impl EClient {
         let (gw, farm_conn, ccp_conn, hmds_conn, cashfarm, usfuture, eufarm, jfarm) = Gateway::connect(&gw_config)?;
         let account_id = gw.account_id.clone();
         let shared = Arc::new(SharedState::new());
+        gw.populate_init_data(&shared);
 
         let (mut hot_loop, control_tx) = gw.into_hot_loop_with_farms(
             shared.clone(), None, farm_conn, ccp_conn, hmds_conn,

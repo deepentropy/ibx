@@ -130,18 +130,13 @@ impl EClient {
 
     fn req_smart_components(&self, py: Python<'_>, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
         let _ = bbo_exchange;
-        // US equity exchanges used in SMART routing (from ib-agent#86 capture)
-        let exchanges: &[(&str, &str)] = &[
-            ("NASDAQ", "Q"), ("NYSE", "N"), ("ARCA", "P"), ("BATS", "Z"),
-            ("IEX", "V"), ("BEX", "B"), ("BYX", "Y"), ("NYSENAT", "C"),
-            ("DRCTEDGE", "J"), ("MEMX", "U"), ("PEARL", "H"), ("AMEX", "A"),
-            ("CHX", "M"), ("LTSE", "L"), ("PSX", "X"), ("ISE", "I"), ("EDGEA", "K"),
-        ];
-        let components = pyo3::types::PyList::new(py, exchanges.iter().enumerate().map(|(i, (exch, letter))| {
+        let shared = self.shared_state()?;
+        let sc = shared.reference.smart_components();
+        let components = pyo3::types::PyList::new(py, sc.iter().map(|c| {
             let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("bitNumber", i as i32).unwrap();
-            dict.set_item("exchange", *exch).unwrap();
-            dict.set_item("exchangeLetter", *letter).unwrap();
+            dict.set_item("bitNumber", c.bit_number).unwrap();
+            dict.set_item("exchange", &c.exchange).unwrap();
+            dict.set_item("exchangeLetter", &c.exchange_letter).unwrap();
             dict
         }))?;
         self.wrapper.call_method1(py, "smart_components", (req_id, components.as_any()))?;
@@ -151,20 +146,12 @@ impl EClient {
     // ── News Providers ──
 
     fn req_news_providers(&self, py: Python<'_>) -> PyResult<()> {
-        let providers: &[(&str, &str)] = &[
-            ("BRFG", "Briefing.com General Market Columns"),
-            ("BRFUPDN", "Briefing.com Analyst Actions"),
-            ("DJ-N", "Dow Jones Global Equity Trader"),
-            ("DJ-RTA", "Dow Jones Top Stories Asia Pacific"),
-            ("DJ-RTE", "Dow Jones Top Stories Europe"),
-            ("DJ-RTG", "Dow Jones Top Stories Global"),
-            ("DJ-RTPRO", "Dow Jones Top Stories Pro"),
-            ("DJNL", "Dow Jones Newsletters"),
-        ];
-        let py_list = pyo3::types::PyList::new(py, providers.iter().map(|(code, name)| {
+        let shared = self.shared_state()?;
+        let np = shared.reference.news_providers();
+        let py_list = pyo3::types::PyList::new(py, np.iter().map(|p| {
             let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("code", *code).unwrap();
-            dict.set_item("name", *name).unwrap();
+            dict.set_item("code", &p.code).unwrap();
+            dict.set_item("name", &p.name).unwrap();
             dict
         }))?;
         self.wrapper.call_method1(py, "news_providers", (py_list.as_any(),))?;
@@ -174,21 +161,28 @@ impl EClient {
     // ── Soft Dollar Tiers ──
 
     fn req_soft_dollar_tiers(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
-        let empty_list = pyo3::types::PyList::empty(py);
-        self.wrapper.call_method1(py, "soft_dollar_tiers", (req_id, empty_list.as_any()))?;
+        let shared = self.shared_state()?;
+        let tiers = shared.reference.soft_dollar_tiers();
+        let py_list = pyo3::types::PyList::new(py, tiers.iter().map(|t| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("name", &t.name).unwrap();
+            dict.set_item("val", &t.val).unwrap();
+            dict.set_item("displayName", &t.display_name).unwrap();
+            dict
+        }))?;
+        self.wrapper.call_method1(py, "soft_dollar_tiers", (req_id, py_list.as_any()))?;
         Ok(())
     }
 
     // ── Family Codes ──
 
     fn req_family_codes(&self, py: Python<'_>) -> PyResult<()> {
-        let acct_id = self.account();
-        let account = if !acct_id.is_empty() { acct_id.as_str() } else { "*" };
-        let codes = vec![(account, "")];
-        let py_list = pyo3::types::PyList::new(py, codes.iter().map(|(acct, code)| {
+        let shared = self.shared_state()?;
+        let codes = shared.reference.family_codes();
+        let py_list = pyo3::types::PyList::new(py, codes.iter().map(|fc| {
             pyo3::types::PyTuple::new(py, &[
-                acct.into_pyobject(py).unwrap().into_any(),
-                code.into_pyobject(py).unwrap().into_any(),
+                fc.account_id.as_str().into_pyobject(py).unwrap().into_any(),
+                fc.family_code_str.as_str().into_pyobject(py).unwrap().into_any(),
             ]).unwrap()
         }))?;
         self.wrapper.call_method1(py, "family_codes", (py_list.as_any(),))?;
@@ -214,7 +208,9 @@ impl EClient {
     // ── User Info ──
 
     fn req_user_info(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
-        self.wrapper.call_method1(py, "user_info", (req_id, ""))?;
+        let shared = self.shared_state()?;
+        let id = shared.reference.white_branding_id();
+        self.wrapper.call_method1(py, "user_info", (req_id, id))?;
         Ok(())
     }
 

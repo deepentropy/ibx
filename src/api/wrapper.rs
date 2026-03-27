@@ -329,6 +329,21 @@ pub mod tests {
         fn account_summary_end(&mut self, req_id: i64) {
             self.events.push(format!("account_summary_end:{req_id}"));
         }
+        fn smart_components(&mut self, req_id: i64, components: &[crate::types::SmartComponent]) {
+            self.events.push(format!("smart_components:{req_id}:{}", components.len()));
+        }
+        fn news_providers(&mut self, providers: &[crate::types::NewsProvider]) {
+            self.events.push(format!("news_providers:{}", providers.len()));
+        }
+        fn soft_dollar_tiers(&mut self, req_id: i64, tiers: &[crate::types::SoftDollarTier]) {
+            self.events.push(format!("soft_dollar_tiers:{req_id}:{}", tiers.len()));
+        }
+        fn family_codes(&mut self, codes: &[crate::types::FamilyCode]) {
+            self.events.push(format!("family_codes:{}", codes.len()));
+        }
+        fn user_info(&mut self, req_id: i64, white_branding_id: &str) {
+            self.events.push(format!("user_info:{req_id}:{white_branding_id}"));
+        }
     }
 
     #[test]
