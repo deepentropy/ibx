@@ -130,8 +130,44 @@ impl EClient {
 
     fn req_smart_components(&self, py: Python<'_>, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
         let _ = bbo_exchange;
-        let empty_map = pyo3::types::PyList::empty(py);
-        self.wrapper.call_method1(py, "smart_components", (req_id, empty_map.as_any()))?;
+        // US equity exchanges used in SMART routing (from ib-agent#86 capture)
+        let exchanges: &[(&str, &str)] = &[
+            ("NASDAQ", "Q"), ("NYSE", "N"), ("ARCA", "P"), ("BATS", "Z"),
+            ("IEX", "V"), ("BEX", "B"), ("BYX", "Y"), ("NYSENAT", "C"),
+            ("DRCTEDGE", "J"), ("MEMX", "U"), ("PEARL", "H"), ("AMEX", "A"),
+            ("CHX", "M"), ("LTSE", "L"), ("PSX", "X"), ("ISE", "I"), ("EDGEA", "K"),
+        ];
+        let components = pyo3::types::PyList::new(py, exchanges.iter().enumerate().map(|(i, (exch, letter))| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("bitNumber", i as i32).unwrap();
+            dict.set_item("exchange", *exch).unwrap();
+            dict.set_item("exchangeLetter", *letter).unwrap();
+            dict
+        }))?;
+        self.wrapper.call_method1(py, "smart_components", (req_id, components.as_any()))?;
+        Ok(())
+    }
+
+    // ── News Providers ──
+
+    fn req_news_providers(&self, py: Python<'_>) -> PyResult<()> {
+        let providers: &[(&str, &str)] = &[
+            ("BRFG", "Briefing.com General Market Columns"),
+            ("BRFUPDN", "Briefing.com Analyst Actions"),
+            ("DJ-N", "Dow Jones Global Equity Trader"),
+            ("DJ-RTA", "Dow Jones Top Stories Asia Pacific"),
+            ("DJ-RTE", "Dow Jones Top Stories Europe"),
+            ("DJ-RTG", "Dow Jones Top Stories Global"),
+            ("DJ-RTPRO", "Dow Jones Top Stories Pro"),
+            ("DJNL", "Dow Jones Newsletters"),
+        ];
+        let py_list = pyo3::types::PyList::new(py, providers.iter().map(|(code, name)| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("code", *code).unwrap();
+            dict.set_item("name", *name).unwrap();
+            dict
+        }))?;
+        self.wrapper.call_method1(py, "news_providers", (py_list.as_any(),))?;
         Ok(())
     }
 

@@ -813,6 +813,36 @@ pub struct DepthMktDataDescription {
     pub agg_group: i32,
 }
 
+/// A component exchange in a SMART routing map.
+#[derive(Debug, Clone)]
+pub struct SmartComponent {
+    pub bit_number: i32,
+    pub exchange: String,
+    pub exchange_letter: String,
+}
+
+/// A news data provider.
+#[derive(Debug, Clone)]
+pub struct NewsProvider {
+    pub code: String,
+    pub name: String,
+}
+
+/// A soft dollar tier (commission sharing arrangement).
+#[derive(Debug, Clone)]
+pub struct SoftDollarTier {
+    pub name: String,
+    pub val: String,
+    pub display_name: String,
+}
+
+/// A family code linking related accounts.
+#[derive(Debug, Clone)]
+pub struct FamilyCode {
+    pub account_id: String,
+    pub family_code_str: String,
+}
+
 /// A real-time news headline from 8=O|35=G tick type 0x1E90.
 #[derive(Debug, Clone)]
 pub struct TickNews {

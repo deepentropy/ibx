@@ -158,6 +158,26 @@ pub trait Wrapper {
     // ── Tick Req Params ──
 
     fn tick_req_params(&mut self, ticker_id: i64, min_tick: f64, bbo_exchange: &str, snapshot_permissions: i64) {}
+
+    // ── Smart Components ──
+
+    fn smart_components(&mut self, req_id: i64, components: &[crate::types::SmartComponent]) {}
+
+    // ── News Providers ──
+
+    fn news_providers(&mut self, providers: &[crate::types::NewsProvider]) {}
+
+    // ── Soft Dollar Tiers ──
+
+    fn soft_dollar_tiers(&mut self, req_id: i64, tiers: &[crate::types::SoftDollarTier]) {}
+
+    // ── Family Codes ──
+
+    fn family_codes(&mut self, codes: &[crate::types::FamilyCode]) {}
+
+    // ── User Info ──
+
+    fn user_info(&mut self, req_id: i64, white_branding_id: &str) {}
 }
 
 /// Test helpers for Wrapper-based testing. Hidden from docs.

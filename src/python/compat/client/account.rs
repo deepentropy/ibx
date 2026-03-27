@@ -163,4 +163,35 @@ impl EClient {
         let _ = req_id;
         Ok(())
     }
+
+    /// Read account state snapshot. Returns a dict with all account values.
+    fn account_snapshot(&self) -> PyResult<Option<PyObject>> {
+        let shared = match self.shared.lock().unwrap().clone() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let acct = shared.portfolio.account();
+        Python::with_gil(|py| {
+            let ps = PRICE_SCALE_F;
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("net_liquidation", acct.net_liquidation as f64 / ps)?;
+            dict.set_item("buying_power", acct.buying_power as f64 / ps)?;
+            dict.set_item("total_cash_value", acct.total_cash_value as f64 / ps)?;
+            dict.set_item("gross_position_value", acct.gross_position_value as f64 / ps)?;
+            dict.set_item("unrealized_pnl", acct.unrealized_pnl as f64 / ps)?;
+            dict.set_item("realized_pnl", acct.realized_pnl as f64 / ps)?;
+            dict.set_item("daily_pnl", acct.daily_pnl as f64 / ps)?;
+            dict.set_item("init_margin_req", acct.init_margin_req as f64 / ps)?;
+            dict.set_item("maint_margin_req", acct.maint_margin_req as f64 / ps)?;
+            dict.set_item("available_funds", acct.available_funds as f64 / ps)?;
+            dict.set_item("excess_liquidity", acct.excess_liquidity as f64 / ps)?;
+            dict.set_item("settled_cash", acct.settled_cash as f64 / ps)?;
+            dict.set_item("equity_with_loan", acct.equity_with_loan as f64 / ps)?;
+            dict.set_item("cushion", acct.cushion as f64 / ps)?;
+            dict.set_item("leverage", acct.leverage as f64 / ps)?;
+            dict.set_item("sma", acct.sma as f64 / ps)?;
+            dict.set_item("day_trades_remaining", acct.day_trades_remaining)?;
+            Ok(Some(dict.into_any().unbind()))
+        })
+    }
 }

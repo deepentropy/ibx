@@ -30,8 +30,8 @@ impl EClient {
         self.send(ControlCommand::CancelHistorical { req_id: req_id as u32 })
     }
 
-    /// Request head timestamp. Matches `reqHeadTimestamp` in C++.
-    pub fn req_head_timestamp(
+    /// Request head timestamp. Matches `reqHeadTimeStamp` in C++.
+    pub fn req_head_time_stamp(
         &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool, _format_date: i32,
     ) -> Result<(), String> {
         self.send(ControlCommand::FetchHeadTimestamp {
@@ -67,6 +67,21 @@ impl EClient {
             req_id: req_id as u32,
             pattern: pattern.into(),
         })
+    }
+
+    /// Cancel head timestamp request. Matches `cancelHeadTimestamp` in C++.
+    pub fn cancel_head_time_stamp(&self, req_id: i64) -> Result<(), String> {
+        self.send(ControlCommand::CancelHeadTimestamp { req_id: req_id as u32 })
+    }
+
+    /// Request market rule by ID. Matches `reqMarketRule` in C++.
+    /// Looks up cached market rules delivered during connection init.
+    pub fn req_market_rule(&self, market_rule_id: i32, wrapper: &mut impl crate::api::wrapper::Wrapper) {
+        if let Some(rule) = self.shared.reference.market_rule(market_rule_id) {
+            wrapper.market_rule(market_rule_id as i64, &rule.price_increments.iter()
+                .map(|pi| crate::api::types::PriceIncrement { low_edge: pi.low_edge, increment: pi.increment })
+                .collect::<Vec<_>>());
+        }
     }
 
     // ── News Bulletins ──

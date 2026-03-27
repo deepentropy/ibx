@@ -65,7 +65,12 @@ impl EClient {
 
     // ── Open Orders ──
 
-    /// Request all open orders. Matches `reqAllOpenOrders` / `reqOpenOrders` in C++.
+    /// Request open orders for this client. Matches `reqOpenOrders` in C++.
+    pub fn req_open_orders(&self, wrapper: &mut impl Wrapper) {
+        self.req_all_open_orders(wrapper);
+    }
+
+    /// Request all open orders. Matches `reqAllOpenOrders` in C++.
     pub fn req_all_open_orders(&self, wrapper: &mut impl Wrapper) {
         for (order_id, tracked) in self.core.collect_open_orders(&self.shared) {
             let state = crate::api::types::OrderState {
@@ -113,6 +118,11 @@ impl EClient {
     }
 
     // ── Executions ──
+
+    /// Automatically bind future orders to this client. Matches `reqAutoOpenOrders` in C++.
+    pub fn req_auto_open_orders(&self, _b_auto_bind: bool) {
+        // No-op: single-client engine, all orders are auto-bound.
+    }
 
     /// Request execution reports. Matches `reqExecutions` in C++.
     /// Replays stored executions (optionally filtered), firing `exec_details` +

@@ -174,4 +174,65 @@ impl EClient {
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
     }
+
+    // ── Quote Access ──
+
+    /// Zero-copy SeqLock quote read by req_id.
+    /// Returns a dict with bid, ask, last, bid_size, ask_size, last_size, volume,
+    /// high, low, open, close, or None if the req_id is not mapped.
+    fn quote(&self, req_id: i64) -> PyResult<Option<PyObject>> {
+        let shared = self.shared_state()?;
+        let map = self.core.req_to_instrument.lock().unwrap();
+        let iid = match map.get(&req_id) {
+            Some(&iid) => iid,
+            None => return Ok(None),
+        };
+        drop(map);
+        let q = shared.market.quote(iid);
+        Python::with_gil(|py| {
+            let ps = super::super::super::types::PRICE_SCALE_F;
+            let qs = crate::types::QTY_SCALE as f64;
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("bid", q.bid as f64 / ps)?;
+            dict.set_item("ask", q.ask as f64 / ps)?;
+            dict.set_item("last", q.last as f64 / ps)?;
+            dict.set_item("bid_size", q.bid_size as f64 / qs)?;
+            dict.set_item("ask_size", q.ask_size as f64 / qs)?;
+            dict.set_item("last_size", q.last_size as f64 / qs)?;
+            dict.set_item("volume", q.volume as f64 / qs)?;
+            dict.set_item("high", q.high as f64 / ps)?;
+            dict.set_item("low", q.low as f64 / ps)?;
+            dict.set_item("open", q.open as f64 / ps)?;
+            dict.set_item("close", q.close as f64 / ps)?;
+            Ok(Some(dict.into_any().unbind()))
+        })
+    }
+
+    /// Zero-copy SeqLock quote read by InstrumentId.
+    /// Returns a dict with bid, ask, last, bid_size, ask_size, last_size, volume,
+    /// high, low, open, close, or None if not connected.
+    fn quote_by_instrument(&self, instrument: u32) -> PyResult<Option<PyObject>> {
+        let shared = match self.shared.lock().unwrap().clone() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let q = shared.market.quote(instrument);
+        Python::with_gil(|py| {
+            let ps = super::super::super::types::PRICE_SCALE_F;
+            let qs = crate::types::QTY_SCALE as f64;
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("bid", q.bid as f64 / ps)?;
+            dict.set_item("ask", q.ask as f64 / ps)?;
+            dict.set_item("last", q.last as f64 / ps)?;
+            dict.set_item("bid_size", q.bid_size as f64 / qs)?;
+            dict.set_item("ask_size", q.ask_size as f64 / qs)?;
+            dict.set_item("last_size", q.last_size as f64 / qs)?;
+            dict.set_item("volume", q.volume as f64 / qs)?;
+            dict.set_item("high", q.high as f64 / ps)?;
+            dict.set_item("low", q.low as f64 / ps)?;
+            dict.set_item("open", q.open as f64 / ps)?;
+            dict.set_item("close", q.close as f64 / ps)?;
+            Ok(Some(dict.into_any().unbind()))
+        })
+    }
 }

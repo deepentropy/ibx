@@ -784,9 +784,9 @@ fn cancel_historical_data_sends_cancel() {
 }
 
 #[test]
-fn req_head_timestamp_sends_fetch() {
+fn req_head_time_stamp_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_head_timestamp(10, &spy(), "TRADES", true, 1).unwrap();
+    client.req_head_time_stamp(10, &spy(), "TRADES", true, 1).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHeadTimestamp { req_id, con_id, what_to_show, use_rth } => {

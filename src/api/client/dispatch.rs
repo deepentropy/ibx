@@ -165,6 +165,15 @@ impl EClient {
                 quote.bid_size as f64, quote.ask_size as f64, &attrib_ba,
             );
         }
+
+        // Depth updates → update_mkt_depth / update_mkt_depth_l2
+        for du in self.shared.market.drain_depth_updates() {
+            if du.market_maker.is_empty() {
+                wrapper.update_mkt_depth(du.req_id as i64, du.position, du.operation, du.side, du.price, du.size);
+            } else {
+                wrapper.update_mkt_depth_l2(du.req_id as i64, du.position, &du.market_maker, du.operation, du.side, du.price, du.size, du.is_smart_depth);
+            }
+        }
     }
 
     // ── Historical / News / Account Dispatch ──

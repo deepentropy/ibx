@@ -59,6 +59,30 @@ impl EClient {
         Ok(())
     }
 
+    // ── Market Depth ──
+
+    /// Subscribe to market depth (L2 order book). Matches `reqMktDepth` in C++.
+    pub fn req_mkt_depth(
+        &self, req_id: i64, contract: &Contract,
+        num_rows: i32, is_smart_depth: bool,
+    ) -> Result<(), String> {
+        let exchange = if contract.exchange.is_empty() { "SMART".to_string() } else { contract.exchange.clone() };
+        let sec_type = if contract.sec_type.is_empty() { "STK".to_string() } else { contract.sec_type.clone() };
+        self.send(ControlCommand::SubscribeDepth {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            exchange,
+            sec_type,
+            num_rows,
+            is_smart_depth,
+        })
+    }
+
+    /// Cancel market depth. Matches `cancelMktDepth` in C++.
+    pub fn cancel_mkt_depth(&self, req_id: i64) -> Result<(), String> {
+        self.send(ControlCommand::UnsubscribeDepth { req_id: req_id as u32 })
+    }
+
     // ── Real-Time Bars ──
 
     pub fn req_real_time_bars(

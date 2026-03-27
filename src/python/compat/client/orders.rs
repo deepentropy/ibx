@@ -83,6 +83,11 @@ impl EClient {
         Ok(())
     }
 
+    /// Get the next order ID (local counter, auto-increments).
+    fn next_order_id(&self) -> i64 {
+        self.next_order_id.fetch_add(1, Ordering::Relaxed) as i64
+    }
+
     /// Request all open orders for this client.
     fn req_open_orders(&self, py: Python<'_>) -> PyResult<()> {
         let shared = self.shared_state()?;

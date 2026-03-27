@@ -159,28 +159,6 @@ impl EClient {
         Ok(())
     }
 
-    /// Request news providers.
-    fn req_news_providers(&self, py: Python<'_>) -> PyResult<()> {
-        let providers: &[(&str, &str)] = &[
-            ("BRFG", "Briefing.com General Market Columns"),
-            ("BRFUPDN", "Briefing.com Analyst Actions"),
-            ("DJ-N", "Dow Jones Global Equity Trader"),
-            ("DJ-RTA", "Dow Jones Top Stories Asia Pacific"),
-            ("DJ-RTE", "Dow Jones Top Stories Europe"),
-            ("DJ-RTG", "Dow Jones Top Stories Global"),
-            ("DJ-RTPRO", "Dow Jones Top Stories Pro"),
-            ("DJNL", "Dow Jones Newsletters"),
-        ];
-        let py_list = pyo3::types::PyList::new(py, providers.iter().map(|(code, name)| {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("code", *code).unwrap();
-            dict.set_item("name", *name).unwrap();
-            dict
-        }))?;
-        self.wrapper.call_method1(py, "news_providers", (py_list.as_any(),))?;
-        Ok(())
-    }
-
     /// Request a news article.
     #[pyo3(signature = (req_id, provider_code, article_id, news_article_options=Vec::new()))]
     fn req_news_article(
@@ -315,6 +293,23 @@ impl EClient {
         let tx = self.tx()?;
         tx.send(ControlCommand::CancelHistogramData { req_id: req_id as u32 })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Ok(())
+    }
+
+    /// Request historical trading schedule.
+    #[pyo3(signature = (req_id, contract, end_date_time="", duration_str="1 M", use_rth=true))]
+    fn req_historical_schedule(
+        &self, req_id: i64, contract: &Contract,
+        end_date_time: &str, duration_str: &str, use_rth: bool,
+    ) -> PyResult<()> {
+        let tx = self.tx()?;
+        tx.send(ControlCommand::FetchHistoricalSchedule {
+            req_id: req_id as u32,
+            con_id: contract.con_id,
+            end_date_time: end_date_time.into(),
+            duration: duration_str.into(),
+            use_rth,
+        }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
     }
 }
