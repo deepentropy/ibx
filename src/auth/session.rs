@@ -99,16 +99,16 @@ pub fn send_secure<W: Write>(
 }
 
 /// Receive an encrypted response and decrypt.
-pub fn recv_secure<R: Read>(
-    stream: &mut R,
-    channel: &mut SecureChannel,
-) -> io::Result<Vec<u8>> {
+pub fn recv_secure<R: Read>(stream: &mut R, channel: &mut SecureChannel) -> io::Result<Vec<u8>> {
     let (payload, _) = ns::ns_recv(stream)?;
     let text = String::from_utf8_lossy(&payload);
     let parts: Vec<&str> = text.split(';').collect();
 
     if parts.len() < 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "malformed NS response"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "malformed NS response",
+        ));
     }
 
     let msg_type: u32 = parts[1]
@@ -172,7 +172,10 @@ pub fn recv_msg<R: Read>(stream: &mut R) -> io::Result<RecvMsg> {
 
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("Cannot parse message: {:?}", &payload[..payload.len().min(40)]),
+        format!(
+            "Cannot parse message: {:?}",
+            &payload[..payload.len().min(40)]
+        ),
     ))
 }
 
@@ -203,7 +206,11 @@ fn extract_srp_data(fields: &[String], username: &str) -> Vec<String> {
 /// Execute authentication protocol.
 ///
 /// Returns the session key K as BigUint.
-pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -> io::Result<BigUint> {
+pub fn do_srp<S: Read + Write>(
+    stream: &mut S,
+    username: &str,
+    password: &str,
+) -> io::Result<BigUint> {
     let n = srp::srp_n();
     let g = BigUint::from(srp::SRP_G);
 
@@ -295,16 +302,11 @@ pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -
     let b_hex = &data_fields[1];
     let salt_bytes = hex::decode(salt_hex)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let b_pub = BigUint::parse_bytes(b_hex.as_bytes(), 16).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "Invalid B hex")
-    })?;
+    let b_pub = BigUint::parse_bytes(b_hex.as_bytes(), 16)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid B hex"))?;
 
     // Compute SRP values
-    let x = srp::srp_compute_x(
-        strip_leading_zeros(&salt_bytes),
-        username,
-        password,
-    );
+    let x = srp::srp_compute_x(strip_leading_zeros(&salt_bytes), username, password);
     let u = srp::srp_compute_u(&a_pub, &b_pub);
     let k_mult = BigUint::from(srp::SRP_K);
     let s = srp::srp_compute_s(&b_pub, &a_priv, &u, &x, &n, &g, &k_mult);
@@ -410,6 +412,19 @@ fn extract_xyz(msg: &[u8]) -> &[u8] {
 }
 
 pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Result<()> {
+    do_soft_token_with_proof(stream, session_token, None)
+}
+
+/// Farm token authentication with CCP token proof fallback.
+///
+/// When the farm returns state 5, it wants CCP-mediated authentication.
+/// If a `ccp_proof` is provided (from FixServiceAuthProofResponse tag 8041),
+/// send it to the farm as a CCP_TOKEN_AUTHENTICATION_MESSAGE.
+pub fn do_soft_token_with_proof(
+    stream: &mut TcpStream,
+    session_token: &BigUint,
+    ccp_proof: Option<&str>,
+) -> io::Result<()> {
     use sha1::{Digest, Sha1};
 
     // State 1: Send empty init (FIX-framed for farm)
@@ -419,9 +434,73 @@ pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Res
     // State 2: Receive challenge (FIX-framed)
     let recv2 = recv_8eq1(stream)?;
     let xyz2 = extract_xyz(&recv2);
-    let (_, _, state2, fields2) = xyz::xyz_parse_response(xyz2)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SOFT_TOKEN: invalid XYZ state 2"))?;
+    let (msg_id2, sub_id2, state2, fields2) = xyz::xyz_parse_response(xyz2).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SOFT_TOKEN: invalid XYZ state 2",
+        )
+    })?;
+    log::info!(
+        "SOFT_TOKEN recv: msg_id={} sub_id={} state={} fields={:?}",
+        msg_id2,
+        sub_id2,
+        state2,
+        fields2
+    );
 
+    if state2 == 5 {
+        // State 5: Farm wants CCP-mediated token proof.
+        // Send the CCP auth proof (from FixServiceAuthProofResponse tag 8041)
+        // as a CCP_TOKEN_AUTHENTICATION_MESSAGE via XYZ msg_id=771.
+        if let Some(proof) = ccp_proof {
+            log::info!(
+                "SOFT_TOKEN: farm wants CCP token proof (state 5), sending proof ({} chars)",
+                proof.len()
+            );
+            // Send TOKEN_AUTH (msg_id=771) with proof in the username field
+            let msg = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 3, proof, &[]);
+            stream.write_all(&wrap_xyz_fix(&msg))?;
+
+            // Read farm's response
+            let recv_resp = recv_8eq1(stream)?;
+            let xyz_resp = extract_xyz(&recv_resp);
+            let (_, _, resp_state, fields_resp) =
+                xyz::xyz_parse_response(xyz_resp).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "CCP_TOKEN: invalid response")
+                })?;
+
+            let result = fields_resp
+                .iter()
+                .rev()
+                .find(|s| !s.is_empty())
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            log::info!(
+                "CCP_TOKEN response: state={} result={} fields={:?}",
+                resp_state,
+                result,
+                fields_resp
+            );
+
+            if result == "PASSED" {
+                log::info!("CCP token auth PASSED");
+                return Ok(());
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "CCP token auth failed: state={} result={}",
+                    resp_state, result
+                ),
+            ));
+        } else {
+            // No proof token — return error so caller can handle state 5 gracefully
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SOFT_TOKEN: farm rejected with state 5 (CCP token proof path)",
+            ));
+        }
+    }
     if state2 != 2 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -456,8 +535,12 @@ pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Res
     // State 4: Receive result (FIX-framed)
     let recv4 = recv_8eq1(stream)?;
     let xyz4 = extract_xyz(&recv4);
-    let (_, _, _, fields4) = xyz::xyz_parse_response(xyz4)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SOFT_TOKEN: invalid XYZ state 4"))?;
+    let (_, _, _, fields4) = xyz::xyz_parse_response(xyz4).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SOFT_TOKEN: invalid XYZ state 4",
+        )
+    })?;
 
     let result = fields4
         .get(3)
@@ -472,6 +555,129 @@ pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Res
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("SOFT_TOKEN auth failed: {}", result),
+        ))
+    }
+}
+
+/// Execute SRP authentication on a farm connection (uses 8=1 FIX framing, not NS #%#%).
+///
+/// This is the "PWD protocol" path used when soft token auth is rejected (state 5).
+/// Same SRP math as `do_srp`, but messages are framed in `8=1\x019=...\x0135=X\x01<XYZ payload>`
+/// format via `wrap_xyz_fix`/`recv_8eq1` instead of NS `#%#%` envelope.
+pub fn do_srp_farm(stream: &mut TcpStream, username: &str, password: &str) -> io::Result<BigUint> {
+    let n = srp::srp_n();
+    let g = BigUint::from(srp::SRP_G);
+
+    // State 1: Send AUTH_QUERY (farm-framed)
+    let msg1 = xyz::xyz_build_srp_v20(1, &[]);
+    stream.write_all(&wrap_xyz_fix(&msg1))?;
+
+    // State 2: Receive AUTH_PARAMS (farm-framed)
+    let recv2 = recv_8eq1(stream)?;
+    let xyz2 = extract_xyz(&recv2);
+    let (_, _, state2, fields2) = xyz::xyz_parse_response(xyz2)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid state 2"))?;
+    if state2 != 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Farm SRP: expected state 2, got {} fields={:?}",
+                state2, fields2
+            ),
+        ));
+    }
+
+    let data_fields = extract_srp_data(&fields2, username);
+    let (n, g) = if data_fields.len() >= 2 {
+        if let (Some(server_n), Some(server_g)) = (
+            BigUint::parse_bytes(data_fields[0].as_bytes(), 16),
+            BigUint::parse_bytes(data_fields[1].as_bytes(), 16),
+        ) {
+            (server_n, server_g)
+        } else {
+            (n, g)
+        }
+    } else {
+        (n, g)
+    };
+
+    // Generate client keys
+    let mut a_bytes = [0u8; 4];
+    rand::rng().fill_bytes(&mut a_bytes);
+    let a_priv = BigUint::from_bytes_be(&a_bytes);
+    let a_pub = g.modpow(&a_priv, &n);
+
+    // State 3: Send client public key A (farm-framed)
+    let a_hex = format!("{:x}", a_pub);
+    let msg3 = xyz::xyz_build_srp_v20(3, &[("L", &a_hex)]);
+    stream.write_all(&wrap_xyz_fix(&msg3))?;
+
+    // State 4: Receive salt + server public key B (farm-framed)
+    let recv4 = recv_8eq1(stream)?;
+    let xyz4 = extract_xyz(&recv4);
+    let (_, _, state4, fields4) = xyz::xyz_parse_response(xyz4)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid state 4"))?;
+    if state4 != 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Farm SRP: expected state 4, got {} fields={:?}",
+                state4, fields4
+            ),
+        ));
+    }
+
+    let data_fields = extract_srp_data(&fields4, username);
+    if data_fields.len() < 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Farm SRP: missing salt/B in state 4",
+        ));
+    }
+
+    let salt_hex = &data_fields[0];
+    let b_hex = &data_fields[1];
+    let salt_bytes = hex::decode(salt_hex)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let b_pub = BigUint::parse_bytes(b_hex.as_bytes(), 16)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid B hex"))?;
+
+    // Compute SRP values
+    let x = srp::srp_compute_x(strip_leading_zeros(&salt_bytes), username, password);
+    let u = srp::srp_compute_u(&a_pub, &b_pub);
+    let k_mult = BigUint::from(srp::SRP_K);
+    let s = srp::srp_compute_s(&b_pub, &a_priv, &u, &x, &n, &g, &k_mult);
+    let k = srp::srp_compute_k(&s);
+
+    // Compute client proof M1
+    let salt_int = BigUint::parse_bytes(salt_hex.as_bytes(), 16).unwrap_or_default();
+    let m1 = srp::srp_compute_m1(&n, &g, username, &salt_int, &a_pub, &b_pub, &k);
+
+    // State 5: Send M1 proof (farm-framed)
+    let m1_hex = format!("{:x}", m1);
+    let msg5 = xyz::xyz_build_srp_v20(5, &[("N", &m1_hex)]);
+    stream.write_all(&wrap_xyz_fix(&msg5))?;
+
+    // State 6: Receive result (farm-framed)
+    let recv6 = recv_8eq1(stream)?;
+    let xyz6 = extract_xyz(&recv6);
+    let (_, _, state6, fields6) = xyz::xyz_parse_response(xyz6)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid state 6"))?;
+
+    let result = fields6
+        .get(9)
+        .filter(|s| !s.is_empty())
+        .or_else(|| fields6.iter().rev().find(|s| !s.is_empty()))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    if state6 == 6 && result == "PASSED" {
+        log::info!("Farm SRP auth PASSED");
+        Ok(k)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("Farm SRP auth FAILED (state={}): {}", state6, result),
         ))
     }
 }
@@ -500,7 +706,10 @@ mod tests {
         let id1 = get_session_id();
         std::thread::sleep(std::time::Duration::from_millis(2));
         let id2 = get_session_id();
-        assert_ne!(id1, id2, "Two session IDs generated at different times must differ");
+        assert_ne!(
+            id1, id2,
+            "Two session IDs generated at different times must differ"
+        );
     }
 
     #[test]
@@ -510,7 +719,11 @@ mod tests {
         // Seconds part: lowercase hex, at least 1 char
         assert!(!parts[0].is_empty());
         // Millis part: always 4 hex chars (format {:04x}, range 0..999)
-        assert_eq!(parts[1].len(), 4, "Millis part must be zero-padded to 4 hex chars");
+        assert_eq!(
+            parts[1].len(),
+            4,
+            "Millis part must be zero-padded to 4 hex chars"
+        );
     }
 
     // ── get_hw_info ─────────────────────────────────────────────────────
@@ -561,13 +774,12 @@ mod tests {
 
     #[test]
     fn extract_srp_data_username_and_empties() {
-        let fields = vec![
-            "".to_string(),
-            "user".to_string(),
-            "".to_string(),
-        ];
+        let fields = vec!["".to_string(), "user".to_string(), "".to_string()];
         let result = extract_srp_data(&fields, "user");
-        assert!(result.is_empty(), "Empty strings and username should all be filtered");
+        assert!(
+            result.is_empty(),
+            "Empty strings and username should all be filtered"
+        );
     }
 
     #[test]
@@ -593,7 +805,11 @@ mod tests {
             fields: vec!["a".into(), "b".into()],
         };
         match msg {
-            RecvMsg::Ns { version, msg_type, fields } => {
+            RecvMsg::Ns {
+                version,
+                msg_type,
+                fields,
+            } => {
                 assert_eq!(version, 534);
                 assert_eq!(msg_type, 99);
                 assert_eq!(fields.len(), 2);
@@ -611,7 +827,12 @@ mod tests {
             fields: vec!["PASSED".into()],
         };
         match msg {
-            RecvMsg::Xyz { msg_id, sub_id, state, fields } => {
+            RecvMsg::Xyz {
+                msg_id,
+                sub_id,
+                state,
+                fields,
+            } => {
                 assert_eq!(msg_id, 777);
                 assert_eq!(sub_id, 1);
                 assert_eq!(state, 6);
