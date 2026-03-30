@@ -14,16 +14,16 @@ use std::net::ToSocketAddrs;
 
 use crate::auth::crypto::strip_leading_zeros;
 use crate::auth::dh::SecureChannel;
-use crate::auth::session::{self, do_srp, do_soft_token};
-use crate::config::*;
-use std::sync::Arc;
+use crate::auth::session::{self, do_soft_token, do_srp};
 use crate::bridge::{Event, SharedState};
+use crate::config::*;
 use crate::engine::hot_loop::HotLoop;
 use crate::protocol::connection::Connection;
-use crate::protocol::fix::{self, fix_build, fix_parse, fix_read, SOH};
+use crate::protocol::fix::{self, SOH, fix_build, fix_parse, fix_read};
 use crate::protocol::fixcomp;
 use crate::protocol::ns;
 use crate::types::ControlCommand;
+use std::sync::Arc;
 
 /// Compute token short hash for farm logon.
 pub fn token_short_hash(session_token: &BigUint) -> String {
@@ -134,6 +134,28 @@ pub fn farm_logon_exchange(
     read_mac_key: &[u8],
     initial_read_iv: &[u8],
 ) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    farm_logon_exchange_with_proof(
+        stream,
+        channel,
+        session_token,
+        read_mac_key,
+        initial_read_iv,
+        None,
+        "",
+        "",
+    )
+}
+
+pub fn farm_logon_exchange_with_proof(
+    stream: &mut TcpStream,
+    channel: &mut SecureChannel,
+    session_token: &BigUint,
+    read_mac_key: &[u8],
+    initial_read_iv: &[u8],
+    ccp_proof: Option<&str>,
+    username: &str,
+    password: &str,
+) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     stream.set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FARM_LOGON)))?;
     let mut buf = Vec::new();
     let mut read_iv = initial_read_iv.to_vec();
@@ -172,12 +194,12 @@ pub fn farm_logon_exchange(
             // Check for encrypted content (tags 91/96)
             let enc_tag = fields.get(&91).or_else(|| fields.get(&96));
             if let Some(b64_data) = enc_tag {
-                let encrypted = B64.decode(b64_data).map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, e.to_string())
-                })?;
-                let decrypted = channel.decrypt(&encrypted).map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, e)
-                })?;
+                let encrypted = B64
+                    .decode(b64_data)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                let decrypted = channel
+                    .decrypt(&encrypted)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
                 // Sync HMAC read IV with AES read IV after decryption (CBC chaining)
                 if let Some(iv) = channel.read_iv() {
@@ -186,17 +208,35 @@ pub fn farm_logon_exchange(
 
                 // Check for auth challenge → respond with token
                 if decrypted.windows(5).any(|w| w == b"35=S\x01") {
-                    do_soft_token(stream, session_token)?;
+                    // Try soft token first
+                    match session::do_soft_token_with_proof(stream, session_token, ccp_proof) {
+                        Ok(()) => {
+                            log::info!("Farm soft token auth succeeded");
+                        }
+                        Err(e) if e.to_string().contains("state 5") => {
+                            // Soft token rejected — farm wants PWD (SRP) protocol.
+                            // Fall back to SRP if password is available.
+                            if !password.is_empty() {
+                                log::info!(
+                                    "Farm soft token rejected (state 5), falling back to SRP (PWD protocol)"
+                                );
+                                let _srp_key = session::do_srp_farm(stream, username, password)?;
+                                log::info!("Farm SRP auth completed");
+                            } else {
+                                log::warn!(
+                                    "Farm soft token rejected (state 5) and no password for SRP fallback"
+                                );
+                                // Continue anyway — CCP proof may authorize server-side
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
             } else if fields.get(&35).map(|s| s.as_str()) == Some("A") {
                 // Logon ACK — sign_iv is the current write_iv (mutated by encrypt)
-                let sign_iv = channel
-                    .write_iv()
-                    .map(|iv| iv.to_vec())
-                    .unwrap_or_default();
+                let sign_iv = channel.write_iv().map(|iv| iv.to_vec()).unwrap_or_default();
                 if !buf.is_empty() {
-                    log::warn!("{} bytes remaining in buffer after logon ACK",
-                        buf.len());
+                    log::warn!("{} bytes remaining in buffer after logon ACK", buf.len());
                 }
                 return Ok((read_iv, sign_iv, buf));
             } else if fields.get(&35).map(|s| s.as_str()) == Some("3") {
@@ -236,7 +276,10 @@ fn try_frame_farm_msg(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
     let tag9_pos = buf.windows(3).position(|w| w == b"\x019=")?;
     let val_start = tag9_pos + 3;
     let soh_pos = buf[val_start..].iter().position(|&b| b == SOH)? + val_start;
-    let body_len: usize = std::str::from_utf8(&buf[val_start..soh_pos]).ok()?.parse().ok()?;
+    let body_len: usize = std::str::from_utf8(&buf[val_start..soh_pos])
+        .ok()?
+        .parse()
+        .ok()?;
     let total = soh_pos + 1 + body_len + 7; // +7 for "10=XXX\x01"
     if buf.len() < total {
         return None;
@@ -286,6 +329,59 @@ pub fn connect_farm(
     hw_info: &str,
     encoded: &str,
 ) -> io::Result<Connection> {
+    connect_farm_with_proof(
+        host,
+        farm_id,
+        username,
+        paper,
+        server_session_id,
+        session_key,
+        hw_info,
+        encoded,
+        None,
+    )
+}
+
+/// Connect to a data farm with optional CCP auth proof for modern auth.
+/// When `password` is provided, falls back to SRP (PWD protocol) if soft token is rejected.
+pub fn connect_farm_with_proof(
+    host: &str,
+    farm_id: &str,
+    username: &str,
+    paper: bool,
+    server_session_id: &str,
+    session_key: &BigUint,
+    hw_info: &str,
+    encoded: &str,
+    ccp_proof: Option<&str>,
+) -> io::Result<Connection> {
+    connect_farm_full(
+        host,
+        farm_id,
+        username,
+        "",
+        paper,
+        server_session_id,
+        session_key,
+        hw_info,
+        encoded,
+        ccp_proof,
+    )
+}
+
+/// Connect to a data farm with full auth options.
+pub fn connect_farm_full(
+    host: &str,
+    farm_id: &str,
+    username: &str,
+    password: &str,
+    paper: bool,
+    server_session_id: &str,
+    session_key: &BigUint,
+    hw_info: &str,
+    encoded: &str,
+    ccp_proof: Option<&str>,
+) -> io::Result<Connection> {
     let port = misc_port();
     let farm_host = farm_host_override().unwrap_or_else(|| host.to_string());
     log::info!("Connecting to {} {}:{}", farm_id, farm_host, port);
@@ -324,31 +420,60 @@ pub fn connect_farm(
         server_session_id.to_string()
     };
     let logon_bytes = build_farm_encrypted_logon(
-        &mut channel, username, paper, farm_id,
-        &farm_session_id, session_key, hw_info, encoded,
+        &mut channel,
+        username,
+        paper,
+        farm_id,
+        &farm_session_id,
+        session_key,
+        hw_info,
+        encoded,
     );
     stream.write_all(&logon_bytes)?;
     log::info!("{} encrypted logon sent", farm_id);
 
     // Logon exchange: challenge → token auth → logon ACK
-    let read_mac_key = channel.key_block().map(|kb| kb[84..104].to_vec()).unwrap_or_default();
-    let initial_read_iv = channel.key_block().map(|kb| kb[48..64].to_vec()).unwrap_or_default();
-    let (read_iv, sign_iv, logon_remaining) = farm_logon_exchange(
-        &mut stream, &mut channel, session_key, &read_mac_key, &initial_read_iv,
+    let read_mac_key = channel
+        .key_block()
+        .map(|kb| kb[84..104].to_vec())
+        .unwrap_or_default();
+    let initial_read_iv = channel
+        .key_block()
+        .map(|kb| kb[48..64].to_vec())
+        .unwrap_or_default();
+    let (read_iv, sign_iv, logon_remaining) = farm_logon_exchange_with_proof(
+        &mut stream,
+        &mut channel,
+        session_key,
+        &read_mac_key,
+        &initial_read_iv,
+        ccp_proof,
+        username,
+        password,
     )?;
-    log::info!("{} logon exchange complete, {} bytes remaining", farm_id, logon_remaining.len());
+    log::info!(
+        "{} logon exchange complete, {} bytes remaining",
+        farm_id,
+        logon_remaining.len()
+    );
 
-    let sign_mac_key = channel.key_block().map(|kb| kb[64..84].to_vec()).unwrap_or_default();
+    let sign_mac_key = channel
+        .key_block()
+        .map(|kb| kb[64..84].to_vec())
+        .unwrap_or_default();
 
     // Send routing table request after logon.
     let channel_id = if farm_id == "ushmds" { "2" } else { "1" };
     let now = chrono_free_timestamp();
-    let routing_msg = fix_build(&[
-        (fix::TAG_MSG_TYPE, "U"),
-        (fix::TAG_SENDING_TIME, &now),
-        (6040, "112"),
-        (6556, channel_id),
-    ], 1);
+    let routing_msg = fix_build(
+        &[
+            (fix::TAG_MSG_TYPE, "U"),
+            (fix::TAG_SENDING_TIME, &now),
+            (6040, "112"),
+            (6556, channel_id),
+        ],
+        1,
+    );
     let wrapped = fixcomp::fixcomp_build(&routing_msg);
 
     let (signed, new_sign_iv) = fix::fix_sign(&wrapped, &sign_mac_key, &sign_iv);
@@ -364,8 +489,11 @@ pub fn connect_farm(
         match stream.read(&mut tmp) {
             Ok(0) => break,
             Ok(n) => resp_buf.extend_from_slice(&tmp[..n]),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock
-                || e.kind() == io::ErrorKind::TimedOut => break,
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                break;
+            }
             Err(e) => return Err(e),
         }
     }
@@ -428,7 +556,12 @@ pub fn connect_farm(
         }
     }
     if !frames.is_empty() {
-        log::info!("{} post-logon frames: {} frames, seq now {}", farm_id, frames.len(), conn.seq);
+        log::info!(
+            "{} post-logon frames: {} frames, seq now {}",
+            farm_id,
+            frames.len(),
+            conn.seq
+        );
     }
     Ok(conn)
 }
@@ -441,11 +574,24 @@ pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
     reconnect_ccp_attempt(auth, &token_hash, &auth.host, 0)
 }
 
-fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, depth: u32) -> io::Result<Connection> {
+fn reconnect_ccp_attempt(
+    auth: &ReconnectAuth,
+    token_hash: &str,
+    host: &str,
+    depth: u32,
+) -> io::Result<Connection> {
     if depth > 5 {
-        return Err(io::Error::new(io::ErrorKind::Other, "CCP reconnect: too many redirects"));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "CCP reconnect: too many redirects",
+        ));
     }
-    log::info!("CCP reconnect to {}:{} (attempt {})", host, AUTH_PORT, depth + 1);
+    log::info!(
+        "CCP reconnect to {}:{} (attempt {})",
+        host,
+        AUTH_PORT,
+        depth + 1
+    );
 
     // TLS + DH key exchange
     let addr = format!("{}:{}", host, AUTH_PORT)
@@ -485,7 +631,11 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         | session::FLAG_UNKNOWN_U
         | session::FLAG_UNKNOWN_19
         | session::FLAG_UNKNOWN_20
-        | if auth.paper { session::FLAG_PAPER_CONNECT } else { 0 };
+        | if auth.paper {
+            session::FLAG_PAPER_CONNECT
+        } else {
+            0
+        };
     let display_name = if auth.paper {
         format!("S{}", auth.username)
     } else {
@@ -504,7 +654,11 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         token_hash,
     );
     session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
-    log::info!("CCP reconnect CONNECT_REQUEST sent (session={}, hash={})", auth.server_session_id, token_hash);
+    log::info!(
+        "CCP reconnect CONNECT_REQUEST sent (session={}, hash={})",
+        auth.server_session_id,
+        token_hash
+    );
 
     // Receive AUTH_START — may get NS_REDIRECT instead
     let auth_start = match session::recv_secure(&mut tls, &mut channel) {
@@ -531,8 +685,17 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         // Consume AUTH_FINISH (msg_id=771) after SOFT_TOKEN PASSED
         match session::recv_msg(&mut tls) {
             Ok(session::RecvMsg::Xyz { state, fields, .. }) => {
-                let result = fields.iter().rev().find(|s| !s.is_empty()).map(|s| s.as_str()).unwrap_or("");
-                log::info!("CCP reconnect AUTH_FINISH: state={} result={}", state, result);
+                let result = fields
+                    .iter()
+                    .rev()
+                    .find(|s| !s.is_empty())
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                log::info!(
+                    "CCP reconnect AUTH_FINISH: state={} result={}",
+                    state,
+                    result
+                );
             }
             Ok(session::RecvMsg::Ns { msg_type, .. }) => {
                 log::info!("CCP reconnect post-auth NS type={}", msg_type);
@@ -558,7 +721,8 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     }
 
     // Post-auth: wait for NS_CONNECT_RESPONSE → NEWCOMMPORTTYPE → NS_FIX_START
-    tls.get_ref().set_read_timeout(Some(Duration::from_secs(30)))?;
+    tls.get_ref()
+        .set_read_timeout(Some(Duration::from_secs(30)))?;
     let mut fix_ready = false;
     for _ in 0..20 {
         let (payload, _) = match ns::ns_recv(&mut tls) {
@@ -573,9 +737,11 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         let raw_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
 
         let inner = if raw_type == ns::NS_SECURE_MESSAGE {
-            let ct = B64.decode(parts[2])
+            let ct = B64
+                .decode(parts[2])
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-            channel.decrypt(&ct)
+            channel
+                .decrypt(&ct)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         } else {
             payload
@@ -594,14 +760,20 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         } else if msg_type == ns::NS_ERROR_RESPONSE {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                format!("CCP reconnect post-auth error: {}", inner_parts[2..].join(";")),
+                format!(
+                    "CCP reconnect post-auth error: {}",
+                    inner_parts[2..].join(";")
+                ),
             ));
         }
         // Ignore 530 keepalives and other types
     }
     tls.get_ref().set_read_timeout(None)?;
     if !fix_ready {
-        return Err(io::Error::new(io::ErrorKind::Other, "CCP reconnect: no FIX_START after auth"));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "CCP reconnect: no FIX_START after auth",
+        ));
     }
 
     // FIX Logon
@@ -609,7 +781,8 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     tls.write_all(&logon_msg)?;
     tls.flush()?;
 
-    tls.get_ref().set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)))?;
+    tls.get_ref()
+        .set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)))?;
     for _ in 0..5 {
         let response = fix_read(&mut tls)?;
         let fields = fix_parse(&response);
@@ -632,7 +805,10 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     let mut ccp_seq: u32 = 1;
     ccp_seq += 1;
     let now = chrono_free_timestamp();
-    let status_req = fix_build(&[(35, "H"), (52, &now), (11, "*"), (54, "*"), (55, "*")], ccp_seq);
+    let status_req = fix_build(
+        &[(35, "H"), (52, &now), (11, "*"), (54, "*"), (55, "*")],
+        ccp_seq,
+    );
     tls.write_all(&status_req)?;
     tls.flush()?;
 
@@ -641,7 +817,6 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     log::info!("CCP reconnect complete (seq={})", conn.seq);
     Ok(conn)
 }
-
 
 /// SOFT_TOKEN challenge-response over the TLS/NS channel (for CCP reconnect).
 fn do_ccp_soft_token<S: Read + Write>(stream: &mut S, session_key: &BigUint) -> io::Result<()> {
@@ -654,11 +829,22 @@ fn do_ccp_soft_token<S: Read + Write>(stream: &mut S, session_key: &BigUint) -> 
     // State 2: Receive challenge
     let recv2 = session::recv_msg(stream)?;
     let challenge_hex = match recv2 {
-        session::RecvMsg::Xyz { state, fields, .. } if state == 2 => {
-            fields.get(1).filter(|s| !s.is_empty()).cloned()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "CCP SOFT_TOKEN: empty challenge"))?
+        session::RecvMsg::Xyz { state, fields, .. } if state == 2 => fields
+            .get(1)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "CCP SOFT_TOKEN: empty challenge",
+                )
+            })?,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CCP SOFT_TOKEN: expected XYZ state 2",
+            ));
         }
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "CCP SOFT_TOKEN: expected XYZ state 2")),
     };
 
     // SHA-1(strip(challenge) || strip(token))
@@ -681,10 +867,18 @@ fn do_ccp_soft_token<S: Read + Write>(stream: &mut S, session_key: &BigUint) -> 
     // State 4: Receive result
     let recv4 = session::recv_msg(stream)?;
     let result = match recv4 {
-        session::RecvMsg::Xyz { fields, .. } => {
-            fields.iter().rev().find(|s| !s.is_empty()).cloned().unwrap_or_default()
+        session::RecvMsg::Xyz { fields, .. } => fields
+            .iter()
+            .rev()
+            .find(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_default(),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CCP SOFT_TOKEN: expected XYZ state 4",
+            ));
         }
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "CCP SOFT_TOKEN: expected XYZ state 4")),
     };
 
     if result == "PASSED" {
@@ -712,7 +906,18 @@ pub struct GatewayConfig {
 impl Gateway {
     /// Connect to IB: auth + logon + data farm connections.
     /// Returns Gateway + farm Connection + auth Connection + optional historical data Connection.
-    pub fn connect(config: &GatewayConfig) -> io::Result<(Self, Connection, Connection, Option<Connection>, Option<Connection>, Option<Connection>, Option<Connection>, Option<Connection>)> {
+    pub fn connect(
+        config: &GatewayConfig,
+    ) -> io::Result<(
+        Self,
+        Connection,
+        Connection,
+        Option<Connection>,
+        Option<Connection>,
+        Option<Connection>,
+        Option<Connection>,
+        Option<Connection>,
+    )> {
         Self::connect_to_host(config, &config.host, 0)
     }
 
@@ -721,7 +926,16 @@ impl Gateway {
         config: &GatewayConfig,
         host: &str,
         redirect_depth: u32,
-    ) -> io::Result<(Self, Connection, Connection, Option<Connection>, Option<Connection>, Option<Connection>, Option<Connection>, Option<Connection>)> {
+    ) -> io::Result<(
+        Self,
+        Connection,
+        Connection,
+        Option<Connection>,
+        Option<Connection>,
+        Option<Connection>,
+        Option<Connection>,
+        Option<Connection>,
+    )> {
         if redirect_depth > 3 {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -780,7 +994,11 @@ impl Gateway {
             | session::FLAG_UNKNOWN_U
             | session::FLAG_UNKNOWN_19
             | session::FLAG_UNKNOWN_20
-            | if config.paper { session::FLAG_PAPER_CONNECT } else { 0 };
+            | if config.paper {
+                session::FLAG_PAPER_CONNECT
+            } else {
+                0
+            };
         let display_name = if config.paper {
             format!("S{}", config.username)
         } else {
@@ -835,9 +1053,11 @@ impl Gateway {
 
             // Decrypt if encrypted, otherwise use raw
             let inner = if raw_type == ns::NS_SECURE_MESSAGE {
-                let ct = B64.decode(parts[2])
+                let ct = B64
+                    .decode(parts[2])
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-                channel.decrypt(&ct)
+                channel
+                    .decrypt(&ct)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
             } else if raw_type == ns::NS_SECURE_ERROR {
                 return Err(io::Error::new(
@@ -891,7 +1111,8 @@ impl Gateway {
         tls.flush()?;
 
         // Read FIX messages until we get the logon ACK (35=A) with session info
-        tls.get_ref().set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)))?;
+        tls.get_ref()
+            .set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)))?;
         let mut account_id = String::new();
         let mut heartbeat_interval = CCP_HEARTBEAT;
         let mut server_session_id = String::new();
@@ -918,13 +1139,19 @@ impl Gateway {
             }
 
             if let Some(v) = fields.get(&1) {
-                if account_id.is_empty() { account_id = v.clone(); }
+                if account_id.is_empty() {
+                    account_id = v.clone();
+                }
             }
             if let Some(v) = fields.get(&108) {
-                if let Ok(hb) = v.parse() { heartbeat_interval = hb; }
+                if let Ok(hb) = v.parse() {
+                    heartbeat_interval = hb;
+                }
             }
             if let Some(v) = fields.get(&6386) {
-                if ccp_token.is_empty() { ccp_token = v.clone(); }
+                if ccp_token.is_empty() {
+                    ccp_token = v.clone();
+                }
             }
             // Tag 8035: try parsed fields first, then raw byte search
             if server_session_id.is_empty() {
@@ -935,9 +1162,9 @@ impl Gateway {
                     if let Some(pos) = response.windows(marker.len()).position(|w| w == marker) {
                         let val_start = pos + marker.len();
                         if let Some(end) = response[val_start..].iter().position(|&b| b == SOH) {
-                            server_session_id = String::from_utf8_lossy(
-                                &response[val_start..val_start + end],
-                            ).to_string();
+                            server_session_id =
+                                String::from_utf8_lossy(&response[val_start..val_start + end])
+                                    .to_string();
                         }
                     }
                 }
@@ -945,13 +1172,19 @@ impl Gateway {
 
             // Gateway-local init data from logon response
             if let Some(v) = fields.get(&6560) {
-                if raw_soft_dollar_tiers.is_empty() { raw_soft_dollar_tiers = v.clone(); }
+                if raw_soft_dollar_tiers.is_empty() {
+                    raw_soft_dollar_tiers = v.clone();
+                }
             }
             if let Some(v) = fields.get(&6823) {
-                if raw_family_codes.is_empty() { raw_family_codes = v.clone(); }
+                if raw_family_codes.is_empty() {
+                    raw_family_codes = v.clone();
+                }
             }
             if let Some(v) = fields.get(&6571) {
-                if white_branding_id.is_empty() { white_branding_id = v.clone(); }
+                if white_branding_id.is_empty() {
+                    white_branding_id = v.clone();
+                }
             }
 
             // Stop once we have the logon ACK or server config message
@@ -968,11 +1201,17 @@ impl Gateway {
 
         log::info!(
             "Auth logon: account={} session_id={} hb={}s",
-            account_id, server_session_id, heartbeat_interval
+            account_id,
+            server_session_id,
+            heartbeat_interval
         );
 
         // --- Post-logon init sequence ---
-        let account = if account_id.is_empty() { config.username.clone() } else { account_id.clone() };
+        let account = if account_id.is_empty() {
+            config.username.clone()
+        } else {
+            account_id.clone()
+        };
         let mut ccp_seq: u32 = 1; // logon was seq 1
         let now = chrono_free_timestamp();
         let today_start = format!("{}-00:00:00", &now[..8]);
@@ -985,33 +1224,76 @@ impl Gateway {
             Ok(())
         };
 
-        send_init(&[(35, "U"), (52, &now), (6040, "91"), (1, &account), (6556, "DR.1"), (6712, "1")])?;
-        send_init(&[(35, "U"), (52, &now), (6040, "193"), (6556, "OPR.2"), (8166, "L"), (8176, "1")])?;
+        send_init(&[
+            (35, "U"),
+            (52, &now),
+            (6040, "91"),
+            (1, &account),
+            (6556, "DR.1"),
+            (6712, "1"),
+        ])?;
+        send_init(&[
+            (35, "U"),
+            (52, &now),
+            (6040, "193"),
+            (6556, "OPR.2"),
+            (8166, "L"),
+            (8176, "1"),
+        ])?;
         send_init(&[(35, "U"), (52, &now), (6040, "101")])?;
-        send_init(&[(35, "U"), (52, &now), (6040, "209"), (1, &account), (6556, "AcctConfig3")])?;
-        send_init(&[(35, "U"), (52, &now), (6040, "72"), (6536, &today_start), (6537, &now), (6556, "today4")])?;
+        send_init(&[
+            (35, "U"),
+            (52, &now),
+            (6040, "209"),
+            (1, &account),
+            (6556, "AcctConfig3"),
+        ])?;
+        send_init(&[
+            (35, "U"),
+            (52, &now),
+            (6040, "72"),
+            (6536, &today_start),
+            (6537, &now),
+            (6556, "today4"),
+        ])?;
         send_init(&[(35, "U"), (52, &now), (6040, "74"), (1, ""), (6544, "2")])?;
         send_init(&[(35, "U"), (52, &now), (6040, "76"), (1, ""), (6565, "1")])?;
-        send_init(&[(35, "U"), (52, &now), (6040, "6"), (6036, "1"), (6095, &account), (6529, "AR.3")])?;
+        send_init(&[
+            (35, "U"),
+            (52, &now),
+            (6040, "6"),
+            (6036, "1"),
+            (6095, &account),
+            (6529, "AR.3"),
+        ])?;
         for _ in 0..92 {
             send_init(&[(35, "U"), (52, &now), (6040, "80")])?;
         }
         // Order status request
         ccp_seq += 1;
-        let status_req = fix_build(&[(35, "H"), (52, &now), (11, "*"), (54, "*"), (55, "*")], ccp_seq);
+        let status_req = fix_build(
+            &[(35, "H"), (52, &now), (11, "*"), (54, "*"), (55, "*")],
+            ccp_seq,
+        );
         tls.write_all(&status_req)?;
         tls.flush()?;
         log::info!("Init sequence sent ({} messages, seq now {})", 101, ccp_seq);
 
         // Drain init responses — extract account ID if found
-        tls.get_ref().set_read_timeout(Some(Duration::from_secs(3)))?;
+        tls.get_ref()
+            .set_read_timeout(Some(Duration::from_secs(3)))?;
         let mut init_data = Vec::new();
         let mut tmp_buf = vec![0u8; 65536];
         loop {
             match tls.read(&mut tmp_buf) {
                 Ok(0) => break,
                 Ok(n) => init_data.extend_from_slice(&tmp_buf[..n]),
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => break,
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -1029,16 +1311,114 @@ impl Gateway {
                 }
             } else if part.starts_with("6560=") && raw_soft_dollar_tiers.is_empty() {
                 raw_soft_dollar_tiers = part[5..].to_string();
-                log::info!("Found soft dollar tiers from init response ({} bytes)", raw_soft_dollar_tiers.len());
+                log::info!(
+                    "Found soft dollar tiers from init response ({} bytes)",
+                    raw_soft_dollar_tiers.len()
+                );
             } else if part.starts_with("6823=") && raw_family_codes.is_empty() {
                 raw_family_codes = part[5..].to_string();
-                log::info!("Found family codes from init response ({} bytes)", raw_family_codes.len());
+                log::info!(
+                    "Found family codes from init response ({} bytes)",
+                    raw_family_codes.len()
+                );
             } else if part.starts_with("6571=") && white_branding_id.is_empty() {
                 white_branding_id = part[5..].to_string();
                 log::info!("Found white branding ID from init response");
             }
         }
         tls.get_ref().set_read_timeout(None)?;
+
+        // --- Phase 2.5: Pre-authorize farm connections via CCP ---
+        // Send FixServiceAuthProofRequest (35=U, 6040=144) for each farm.
+        // This tells the CCP server to vouch for our farm connections,
+        // which is required when farms reject soft token auth (state 5).
+        let farm_names = [
+            "usfarm", "ushmds", "cashfarm", "usfuture", "eufarm", "jfarm",
+        ];
+        let mut ccp_auth_proofs: Vec<String> = Vec::new();
+        {
+            let now = chrono_free_timestamp();
+            let display_name = if config.paper {
+                format!("S{}", config.username)
+            } else {
+                config.username.clone()
+            };
+            for farm_name in &farm_names {
+                let slot = match *farm_name {
+                    "usfarm" => 18,
+                    _ => 17,
+                };
+                let service_path = format!("{}/{}/{}", display_name, slot, farm_name);
+                ccp_seq += 1;
+                let req_id = ccp_seq.to_string();
+                let msg = fix_build(
+                    &[
+                        (fix::TAG_MSG_TYPE, "U"),
+                        (fix::TAG_SENDING_TIME, &now),
+                        (6040, "144"),   // FixServiceAuthProofRequest subtype
+                        (6556, &req_id), // request sequence ID
+                        (8039, &server_session_id), // CCP session ID
+                        (8040, &service_path), // full farm service path
+                    ],
+                    ccp_seq,
+                );
+                tls.write_all(&msg)?;
+                log::info!(
+                    "Sent FixServiceAuthProofRequest for {} path={} (seq={})",
+                    farm_name,
+                    service_path,
+                    ccp_seq
+                );
+            }
+            tls.flush()?;
+
+            // Read responses (6040=144 responses with tag 8041=proof)
+            tls.get_ref()
+                .set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut proof_buf = Vec::new();
+            let mut tmp = vec![0u8; 16384];
+            loop {
+                match tls.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => proof_buf.extend_from_slice(&tmp[..n]),
+                    Err(e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            // Parse proof tokens from CCP responses (tag 8041 = proof string)
+            if !proof_buf.is_empty() {
+                log::info!("CCP auth proof responses: {} bytes", proof_buf.len());
+                // Debug: dump first 300 bytes as lossy UTF-8 to understand format
+                let preview = String::from_utf8_lossy(&proof_buf[..proof_buf.len().min(500)]);
+                log::info!("CCP proof raw: {:?}", preview);
+                let proof_str = String::from_utf8_lossy(&proof_buf);
+                // Extract all 8041= values
+                for part in proof_str.split('\x01') {
+                    if let Some(val) = part.strip_prefix("8041=") {
+                        if !val.is_empty() {
+                            ccp_auth_proofs.push(val.to_string());
+                            log::info!("CCP auth proof token: {} chars", val.len());
+                        }
+                    }
+                }
+                // Also save proof data for hot loop
+                init_data.extend_from_slice(&proof_buf);
+            }
+            if ccp_auth_proofs.is_empty() {
+                log::info!("No CCP auth proof tokens parsed (farm auth may use legacy soft token)");
+            } else {
+                log::info!(
+                    "Got {} CCP auth proof tokens for farm connections",
+                    ccp_auth_proofs.len()
+                );
+            }
+        }
 
         // Auth connection (non-blocking TLS for hot loop)
         let mut ccp_conn = Connection::new(tls)?;
@@ -1047,59 +1427,165 @@ impl Gateway {
         ccp_conn.seed_buffer(&init_data);
 
         // --- Phase 3: Data farm connections (parallel) ---
+        // Each farm gets its corresponding CCP auth proof (if available).
+        // Proofs are indexed in the same order as farm_names.
+        let get_proof = |idx: usize| -> Option<String> { ccp_auth_proofs.get(idx).cloned() };
+        let proofs: Vec<Option<String>> = (0..farm_names.len()).map(get_proof).collect();
+
         let (farm_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) =
             std::thread::scope(|s| {
-                let farm_h = s.spawn(|| connect_farm(
-                    host, "usfarm", &config.username, config.paper,
-                    &server_session_id, &session_key, &hw_info, &encoded,
-                ));
-                let hmds_h = s.spawn(|| connect_farm(
-                    host, "ushmds", &config.username, config.paper,
-                    &server_session_id, &session_key, &hw_info, &encoded,
-                ));
-                let cashfarm_h = s.spawn(|| connect_farm(
-                    host, "cashfarm", &config.username, config.paper,
-                    &server_session_id, &session_key, &hw_info, &encoded,
-                ));
-                let usfuture_h = s.spawn(|| connect_farm(
-                    host, "usfuture", &config.username, config.paper,
-                    &server_session_id, &session_key, &hw_info, &encoded,
-                ));
-                let eufarm_h = s.spawn(|| connect_farm(
-                    host, "eufarm", &config.username, config.paper,
-                    &server_session_id, &session_key, &hw_info, &encoded,
-                ));
-                let jfarm_h = s.spawn(|| connect_farm(
-                    host, "jfarm", &config.username, config.paper,
-                    &server_session_id, &session_key, &hw_info, &encoded,
-                ));
+                let farm_h = s.spawn(|| {
+                    connect_farm_full(
+                        host,
+                        "usfarm",
+                        &config.username,
+                        &config.password,
+                        config.paper,
+                        &server_session_id,
+                        &session_key,
+                        &hw_info,
+                        &encoded,
+                        proofs[0].as_deref(),
+                    )
+                });
+                let hmds_h = s.spawn(|| {
+                    connect_farm_full(
+                        host,
+                        "ushmds",
+                        &config.username,
+                        &config.password,
+                        config.paper,
+                        &server_session_id,
+                        &session_key,
+                        &hw_info,
+                        &encoded,
+                        proofs[1].as_deref(),
+                    )
+                });
+                let cashfarm_h = s.spawn(|| {
+                    connect_farm_full(
+                        host,
+                        "cashfarm",
+                        &config.username,
+                        &config.password,
+                        config.paper,
+                        &server_session_id,
+                        &session_key,
+                        &hw_info,
+                        &encoded,
+                        proofs[2].as_deref(),
+                    )
+                });
+                let usfuture_h = s.spawn(|| {
+                    connect_farm_full(
+                        host,
+                        "usfuture",
+                        &config.username,
+                        &config.password,
+                        config.paper,
+                        &server_session_id,
+                        &session_key,
+                        &hw_info,
+                        &encoded,
+                        proofs[3].as_deref(),
+                    )
+                });
+                let eufarm_h = s.spawn(|| {
+                    connect_farm_full(
+                        host,
+                        "eufarm",
+                        &config.username,
+                        &config.password,
+                        config.paper,
+                        &server_session_id,
+                        &session_key,
+                        &hw_info,
+                        &encoded,
+                        proofs[4].as_deref(),
+                    )
+                });
+                let jfarm_h = s.spawn(|| {
+                    connect_farm_full(
+                        host,
+                        "jfarm",
+                        &config.username,
+                        &config.password,
+                        config.paper,
+                        &server_session_id,
+                        &session_key,
+                        &hw_info,
+                        &encoded,
+                        proofs[5].as_deref(),
+                    )
+                });
 
                 let farm_conn = farm_h.join().unwrap()?;
                 let hmds_conn = match hmds_h.join().unwrap() {
-                    Ok(c) => { log::info!("Historical data farm connected"); Some(c) }
-                    Err(e) => { log::warn!("Historical data farm connection failed (non-fatal): {}", e); None }
+                    Ok(c) => {
+                        log::info!("Historical data farm connected");
+                        Some(c)
+                    }
+                    Err(e) => {
+                        log::warn!("Historical data farm connection failed (non-fatal): {}", e);
+                        None
+                    }
                 };
                 let cashfarm_conn = match cashfarm_h.join().unwrap() {
-                    Ok(c) => { log::info!("cashfarm connected"); Some(c) }
-                    Err(e) => { log::warn!("cashfarm connection failed (non-fatal): {}", e); None }
+                    Ok(c) => {
+                        log::info!("cashfarm connected");
+                        Some(c)
+                    }
+                    Err(e) => {
+                        log::warn!("cashfarm connection failed (non-fatal): {}", e);
+                        None
+                    }
                 };
                 let usfuture_conn = match usfuture_h.join().unwrap() {
-                    Ok(c) => { log::info!("usfuture connected"); Some(c) }
-                    Err(e) => { log::warn!("usfuture connection failed (non-fatal): {}", e); None }
+                    Ok(c) => {
+                        log::info!("usfuture connected");
+                        Some(c)
+                    }
+                    Err(e) => {
+                        log::warn!("usfuture connection failed (non-fatal): {}", e);
+                        None
+                    }
                 };
                 let eufarm_conn = match eufarm_h.join().unwrap() {
-                    Ok(c) => { log::info!("eufarm connected"); Some(c) }
-                    Err(e) => { log::warn!("eufarm connection failed (non-fatal): {}", e); None }
+                    Ok(c) => {
+                        log::info!("eufarm connected");
+                        Some(c)
+                    }
+                    Err(e) => {
+                        log::warn!("eufarm connection failed (non-fatal): {}", e);
+                        None
+                    }
                 };
                 let jfarm_conn = match jfarm_h.join().unwrap() {
-                    Ok(c) => { log::info!("jfarm connected"); Some(c) }
-                    Err(e) => { log::warn!("jfarm connection failed (non-fatal): {}", e); None }
+                    Ok(c) => {
+                        log::info!("jfarm connected");
+                        Some(c)
+                    }
+                    Err(e) => {
+                        log::warn!("jfarm connection failed (non-fatal): {}", e);
+                        None
+                    }
                 };
-                Ok::<_, io::Error>((farm_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn))
+                Ok::<_, io::Error>((
+                    farm_conn,
+                    hmds_conn,
+                    cashfarm_conn,
+                    usfuture_conn,
+                    eufarm_conn,
+                    jfarm_conn,
+                ))
             })?;
 
         let gw = Gateway {
-            account_id: if account_id.is_empty() { config.username.clone() } else { account_id },
+            account_id: if account_id.is_empty() {
+                config.username.clone()
+            } else {
+                account_id
+            },
             session_token: session_key,
             server_session_id,
             ccp_token,
@@ -1110,26 +1596,52 @@ impl Gateway {
             raw_family_codes,
             white_branding_id,
         };
-        Ok((gw, farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn))
+        Ok((
+            gw,
+            farm_conn,
+            ccp_conn,
+            hmds_conn,
+            cashfarm_conn,
+            usfuture_conn,
+            eufarm_conn,
+            jfarm_conn,
+        ))
     }
 
     /// Populate shared state with gateway-local init data parsed from CCP logon.
     pub fn populate_init_data(&self, shared: &SharedState) {
-        use crate::types::{SmartComponent, NewsProvider, SoftDollarTier, FamilyCode};
+        use crate::types::{FamilyCode, NewsProvider, SmartComponent, SoftDollarTier};
 
         // Smart components: hardcoded US equity SMART routing exchanges.
         // Server doesn't send these in a parseable init message; they're
         // embedded in the Gateway binary. Hardcoded list matches Gateway 10.30+.
         let smart_components: Vec<SmartComponent> = [
-            ("NASDAQ", "Q"), ("NYSE", "N"), ("ARCA", "P"), ("BATS", "Z"),
-            ("IEX", "V"), ("BEX", "B"), ("BYX", "Y"), ("NYSENAT", "C"),
-            ("DRCTEDGE", "J"), ("MEMX", "U"), ("PEARL", "H"), ("AMEX", "A"),
-            ("CHX", "M"), ("LTSE", "L"), ("PSX", "X"), ("ISE", "I"), ("EDGEA", "K"),
-        ].iter().enumerate().map(|(i, (exch, letter))| SmartComponent {
+            ("NASDAQ", "Q"),
+            ("NYSE", "N"),
+            ("ARCA", "P"),
+            ("BATS", "Z"),
+            ("IEX", "V"),
+            ("BEX", "B"),
+            ("BYX", "Y"),
+            ("NYSENAT", "C"),
+            ("DRCTEDGE", "J"),
+            ("MEMX", "U"),
+            ("PEARL", "H"),
+            ("AMEX", "A"),
+            ("CHX", "M"),
+            ("LTSE", "L"),
+            ("PSX", "X"),
+            ("ISE", "I"),
+            ("EDGEA", "K"),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, (exch, letter))| SmartComponent {
             bit_number: i as i32,
             exchange: exch.to_string(),
             exchange_letter: letter.to_string(),
-        }).collect();
+        })
+        .collect();
         shared.reference.set_smart_components(smart_components);
 
         // News providers: hardcoded list matching Gateway.
@@ -1142,38 +1654,73 @@ impl Gateway {
             ("DJ-RTG", "Dow Jones Top Stories Global"),
             ("DJ-RTPRO", "Dow Jones Top Stories Pro"),
             ("DJNL", "Dow Jones Newsletters"),
-        ].iter().map(|(code, name)| NewsProvider {
-            code: code.to_string(), name: name.to_string(),
-        }).collect();
+        ]
+        .iter()
+        .map(|(code, name)| NewsProvider {
+            code: code.to_string(),
+            name: name.to_string(),
+        })
+        .collect();
         shared.reference.set_news_providers(news_providers);
 
         // Soft dollar tiers: parse from CCP logon tag 6560, fall back to defaults.
         let tiers = if self.raw_soft_dollar_tiers.is_empty() {
             // Default tiers matching Gateway 10.30+
             vec![
-                SoftDollarTier { name: "MaxRebate".into(), val: "1".into(), display_name: "Maximize Rebate".into() },
-                SoftDollarTier { name: "PreferRebate".into(), val: "9".into(), display_name: "Prefer Rebate".into() },
-                SoftDollarTier { name: "PreferFill".into(), val: "11".into(), display_name: "Prefer Fill".into() },
-                SoftDollarTier { name: "MaxFill".into(), val: "12".into(), display_name: "Maximize Fill".into() },
-                SoftDollarTier { name: "Primary".into(), val: "2".into(), display_name: "Primary Exchange".into() },
-                SoftDollarTier { name: "VRebate".into(), val: "3".into(), display_name: "Highest Volume Exchange With Rebate".into() },
-                SoftDollarTier { name: "VLowFee".into(), val: "4".into(), display_name: "High Volume Exchange With Lowest Fee".into() },
+                SoftDollarTier {
+                    name: "MaxRebate".into(),
+                    val: "1".into(),
+                    display_name: "Maximize Rebate".into(),
+                },
+                SoftDollarTier {
+                    name: "PreferRebate".into(),
+                    val: "9".into(),
+                    display_name: "Prefer Rebate".into(),
+                },
+                SoftDollarTier {
+                    name: "PreferFill".into(),
+                    val: "11".into(),
+                    display_name: "Prefer Fill".into(),
+                },
+                SoftDollarTier {
+                    name: "MaxFill".into(),
+                    val: "12".into(),
+                    display_name: "Maximize Fill".into(),
+                },
+                SoftDollarTier {
+                    name: "Primary".into(),
+                    val: "2".into(),
+                    display_name: "Primary Exchange".into(),
+                },
+                SoftDollarTier {
+                    name: "VRebate".into(),
+                    val: "3".into(),
+                    display_name: "Highest Volume Exchange With Rebate".into(),
+                },
+                SoftDollarTier {
+                    name: "VLowFee".into(),
+                    val: "4".into(),
+                    display_name: "High Volume Exchange With Lowest Fee".into(),
+                },
             ]
         } else {
             // Parse "name1|val1|display1;name2|val2|display2" format
-            self.raw_soft_dollar_tiers.split(';').filter_map(|entry| {
-                let parts: Vec<&str> = entry.split('|').collect();
-                if parts.len() >= 3 {
-                    Some(SoftDollarTier {
-                        name: parts[0].to_string(),
-                        val: parts[1].to_string(),
-                        display_name: parts[2].to_string(),
-                    })
-                } else {
-                    log::warn!("Unexpected soft dollar tier format: {}", entry);
-                    None
-                }
-            }).collect()
+            self.raw_soft_dollar_tiers
+                .split(';')
+                .filter_map(|entry| {
+                    let parts: Vec<&str> = entry.split('|').collect();
+                    if parts.len() >= 3 {
+                        Some(SoftDollarTier {
+                            name: parts[0].to_string(),
+                            val: parts[1].to_string(),
+                            display_name: parts[2].to_string(),
+                        })
+                    } else {
+                        log::warn!("Unexpected soft dollar tier format: {}", entry);
+                        None
+                    }
+                })
+                .collect()
         };
         shared.reference.set_soft_dollar_tiers(tiers);
 
@@ -1182,23 +1729,28 @@ impl Gateway {
         let codes = if self.raw_family_codes.is_empty() {
             Vec::new()
         } else {
-            self.raw_family_codes.split(';').filter_map(|entry| {
-                let parts: Vec<&str> = entry.split('|').collect();
-                if parts.len() >= 2 {
-                    Some(FamilyCode {
-                        account_id: parts[0].to_string(),
-                        family_code_str: parts[1].to_string(),
-                    })
-                } else {
-                    log::warn!("Unexpected family code format: {}", entry);
-                    None
-                }
-            }).collect()
+            self.raw_family_codes
+                .split(';')
+                .filter_map(|entry| {
+                    let parts: Vec<&str> = entry.split('|').collect();
+                    if parts.len() >= 2 {
+                        Some(FamilyCode {
+                            account_id: parts[0].to_string(),
+                            family_code_str: parts[1].to_string(),
+                        })
+                    } else {
+                        log::warn!("Unexpected family code format: {}", entry);
+                        None
+                    }
+                })
+                .collect()
         };
         shared.reference.set_family_codes(codes);
 
         // White branding ID (empty for standard accounts).
-        shared.reference.set_white_branding_id(self.white_branding_id.clone());
+        shared
+            .reference
+            .set_white_branding_id(self.white_branding_id.clone());
     }
 
     /// Create the control channel and build a HotLoop with connected sockets.
@@ -1211,7 +1763,9 @@ impl Gateway {
         hmds_conn: Option<Connection>,
         core_id: Option<usize>,
     ) -> (HotLoop, Sender<ControlCommand>) {
-        self.into_hot_loop_with_farms(shared, event_tx, farm_conn, ccp_conn, hmds_conn, None, None, None, None, core_id)
+        self.into_hot_loop_with_farms(
+            shared, event_tx, farm_conn, ccp_conn, hmds_conn, None, None, None, None, core_id,
+        )
     }
 
     /// Create the control channel and build a HotLoop with all farm connections.
@@ -1230,9 +1784,9 @@ impl Gateway {
     ) -> (HotLoop, Sender<ControlCommand>) {
         let (tx, rx) = bounded(64);
         let reconnect_auth = ReconnectAuth {
-            host: String::new(), // Filled by caller (Python EClient or Rust API)
+            host: String::new(),     // Filled by caller (Python EClient or Rust API)
             username: String::new(), // Filled by caller
-            paper: false, // Filled by caller
+            paper: false,            // Filled by caller
             session_key: self.session_token.clone(),
             session_token: self.session_token.clone(),
             server_session_id: self.server_session_id.clone(),

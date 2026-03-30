@@ -4,14 +4,14 @@ pub const IB_VERSION: &str = "c";
 pub const IB_ENCODED: &str = "17.0.10.0.101/W/fr/G";
 
 /// Auth server endpoints.
-pub const CCP_HOSTS: &[&str] = &[
-    "cdc1.ibllc.com",
-    "ndc1.ibllc.com",
-];
+pub const CCP_HOSTS: &[&str] = &["cdc1.ibllc.com", "ndc1.ibllc.com"];
 
 /// Network ports.
 pub fn misc_port() -> u16 {
-    std::env::var("IBX_MISC_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(4000)
+    std::env::var("IBX_MISC_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4000)
 }
 pub fn farm_host_override() -> Option<String> {
     std::env::var("IBX_FARM_HOST").ok()
@@ -30,7 +30,7 @@ pub const FIX_RECV_BUF: usize = 4096;
 /// Timeouts (seconds).
 pub const TIMEOUT_FIX_LOGON: f64 = 10.0;
 pub const TIMEOUT_FIX_READ: f64 = 30.0;
-pub const TIMEOUT_FARM_LOGON: f64 = 5.0;
+pub const TIMEOUT_FARM_LOGON: f64 = 15.0;
 pub const TIMEOUT_SSL_AUTH: u64 = 20;
 pub const TIMEOUT_FARM_CONNECT: u64 = 30;
 
