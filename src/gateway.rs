@@ -1207,79 +1207,61 @@ impl Gateway {
         );
 
         // --- Post-logon init sequence ---
-        let account = if account_id.is_empty() {
-            config.username.clone()
-        } else {
-            account_id.clone()
-        };
+        // Phase A: Send account-independent init requests to trigger a response
+        // that reveals the real account ID (tag 1=DUxxxxxxx for paper accounts).
         let mut ccp_seq: u32 = 1; // logon was seq 1
         let now = chrono_free_timestamp();
         let today_start = format!("{}-00:00:00", &now[..8]);
 
-        // Helper: send_ib_msg builds 35=U with 6040=<comm_type> + extra tags
-        let mut send_init = |fields: &[(u32, &str)]| -> io::Result<()> {
-            ccp_seq += 1;
-            let msg = fix_build(fields, ccp_seq);
+        let mut send_init = |fields: &[(u32, &str)], seq: &mut u32| -> io::Result<()> {
+            *seq += 1;
+            let msg = fix_build(fields, *seq);
             tls.write_all(&msg)?;
             Ok(())
         };
 
-        send_init(&[
-            (35, "U"),
-            (52, &now),
-            (6040, "91"),
-            (1, &account),
-            (6556, "DR.1"),
-            (6712, "1"),
-        ])?;
-        send_init(&[
-            (35, "U"),
-            (52, &now),
-            (6040, "193"),
-            (6556, "OPR.2"),
-            (8166, "L"),
-            (8176, "1"),
-        ])?;
-        send_init(&[(35, "U"), (52, &now), (6040, "101")])?;
-        send_init(&[
-            (35, "U"),
-            (52, &now),
-            (6040, "209"),
-            (1, &account),
-            (6556, "AcctConfig3"),
-        ])?;
-        send_init(&[
-            (35, "U"),
-            (52, &now),
-            (6040, "72"),
-            (6536, &today_start),
-            (6537, &now),
-            (6556, "today4"),
-        ])?;
-        send_init(&[(35, "U"), (52, &now), (6040, "74"), (1, ""), (6544, "2")])?;
-        send_init(&[(35, "U"), (52, &now), (6040, "76"), (1, ""), (6565, "1")])?;
-        send_init(&[
-            (35, "U"),
-            (52, &now),
-            (6040, "6"),
-            (6036, "1"),
-            (6095, &account),
-            (6529, "AR.3"),
-        ])?;
+        // Account-independent requests (don't need real account ID)
+        send_init(
+            &[
+                (35, "U"),
+                (52, &now),
+                (6040, "193"),
+                (6556, "OPR.2"),
+                (8166, "L"),
+                (8176, "1"),
+            ],
+            &mut ccp_seq,
+        )?;
+        send_init(&[(35, "U"), (52, &now), (6040, "101")], &mut ccp_seq)?;
+        send_init(
+            &[
+                (35, "U"),
+                (52, &now),
+                (6040, "72"),
+                (6536, &today_start),
+                (6537, &now),
+                (6556, "today4"),
+            ],
+            &mut ccp_seq,
+        )?;
+        send_init(
+            &[(35, "U"), (52, &now), (6040, "74"), (1, ""), (6544, "2")],
+            &mut ccp_seq,
+        )?;
+        send_init(
+            &[(35, "U"), (52, &now), (6040, "76"), (1, ""), (6565, "1")],
+            &mut ccp_seq,
+        )?;
         for _ in 0..92 {
-            send_init(&[(35, "U"), (52, &now), (6040, "80")])?;
+            send_init(&[(35, "U"), (52, &now), (6040, "80")], &mut ccp_seq)?;
         }
-        // Order status request
-        ccp_seq += 1;
-        let status_req = fix_build(
-            &[(35, "H"), (52, &now), (11, "*"), (54, "*"), (55, "*")],
-            ccp_seq,
-        );
-        tls.write_all(&status_req)?;
         tls.flush()?;
-        log::info!("Init sequence sent ({} messages, seq now {})", 101, ccp_seq);
+        log::info!(
+            "Phase A init sent ({} account-independent messages)",
+            ccp_seq - 1
+        );
 
-        // Drain init responses — extract account ID if found
+        // Drain init responses — extract account ID
         tls.get_ref()
             .set_read_timeout(Some(Duration::from_secs(3)))?;
         let mut init_data = Vec::new();
@@ -1326,6 +1308,76 @@ impl Gateway {
                 log::info!("Found white branding ID from init response");
             }
         }
+        tls.get_ref().set_read_timeout(None)?;
+
+        // Phase B: Send account-dependent init requests now that we have the real account ID.
+        let account = if account_id.is_empty() {
+            config.username.clone()
+        } else {
+            account_id.clone()
+        };
+        log::info!("Phase B init: account={}", account);
+        let now_b = chrono_free_timestamp();
+        ccp_seq += 1;
+        tls.write_all(&fix_build(
+            &[
+                (35, "U"),
+                (52, &now_b),
+                (6040, "91"),
+                (1, &account),
+                (6556, "DR.1"),
+                (6712, "1"),
+            ],
+            ccp_seq,
+        ))?;
+        ccp_seq += 1;
+        tls.write_all(&fix_build(
+            &[
+                (35, "U"),
+                (52, &now_b),
+                (6040, "209"),
+                (1, &account),
+                (6556, "AcctConfig3"),
+            ],
+            ccp_seq,
+        ))?;
+        ccp_seq += 1;
+        tls.write_all(&fix_build(
+            &[
+                (35, "U"),
+                (52, &now_b),
+                (6040, "6"),
+                (6036, "1"),
+                (6095, &account),
+                (6529, "AR.3"),
+            ],
+            ccp_seq,
+        ))?;
+        ccp_seq += 1;
+        tls.write_all(&fix_build(
+            &[(35, "H"), (52, &now_b), (11, "*"), (54, "*"), (55, "*")],
+            ccp_seq,
+        ))?;
+        tls.flush()?;
+        log::info!("Phase B init sent (account-dependent, seq now {})", ccp_seq);
+
+        // Drain Phase B responses (account data with real account ID)
+        tls.get_ref()
+            .set_read_timeout(Some(Duration::from_secs(3)))?;
+        loop {
+            match tls.read(&mut tmp_buf) {
+                Ok(0) => break,
+                Ok(n) => init_data.extend_from_slice(&tmp_buf[..n]),
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        log::info!("Phase B response: {} total init bytes", init_data.len());
         tls.get_ref().set_read_timeout(None)?;
 
         // --- Phase 2.5: Pre-authorize farm connections via CCP ---
