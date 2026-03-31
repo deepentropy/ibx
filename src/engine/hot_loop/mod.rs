@@ -268,8 +268,10 @@ impl HotLoop {
             );
 
             // 2. Drain pending orders → build → sign → send to auth
+            //    Skip if CCP is disconnected — orders stay in buffer for retry after reconnect.
             order_builder::drain_and_send_orders(
                 &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
+                self.ccp.disconnected, &self.shared,
             );
 
             // 3. Busy-poll auth socket for execution reports
