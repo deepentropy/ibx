@@ -3,7 +3,6 @@ use crate::types::*;
 use std::collections::HashMap;
 use std::time::Instant;
 
-
 /// TSC-calibrated clock for hot-path timestamps.
 pub struct Clock {
     start: std::time::Instant,
@@ -121,8 +120,16 @@ impl Context {
     pub fn open_orders_for(&self, id: InstrumentId) -> Vec<&Order> {
         self.open_orders
             .values()
-            .filter(|o| o.instrument == id && matches!(o.status,
-                OrderStatus::PendingSubmit | OrderStatus::Submitted | OrderStatus::PartiallyFilled | OrderStatus::Uncertain))
+            .filter(|o| {
+                o.instrument == id
+                    && matches!(
+                        o.status,
+                        OrderStatus::PendingSubmit
+                            | OrderStatus::Submitted
+                            | OrderStatus::PartiallyFilled
+                            | OrderStatus::Uncertain
+                    )
+            })
             .collect()
     }
 
@@ -155,12 +162,7 @@ impl Context {
         id
     }
 
-    pub fn submit_market(
-        &mut self,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    ) -> OrderId {
+    pub fn submit_market(&mut self, instrument: InstrumentId, side: Side, qty: u32) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitMarket {
@@ -344,14 +346,15 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitTrailingStopLimit {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            price,
-            trail_amt,
-        });
+        self.pending_orders
+            .push(OrderRequest::SubmitTrailingStopLimit {
+                order_id: id,
+                instrument,
+                side,
+                qty,
+                price,
+                trail_amt,
+            });
         id
     }
 
@@ -364,22 +367,18 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitTrailingStopPct {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            trail_pct,
-        });
+        self.pending_orders
+            .push(OrderRequest::SubmitTrailingStopPct {
+                order_id: id,
+                instrument,
+                side,
+                qty,
+                trail_pct,
+            });
         id
     }
 
-    pub fn submit_moc(
-        &mut self,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    ) -> OrderId {
+    pub fn submit_moc(&mut self, instrument: InstrumentId, side: Side, qty: u32) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitMoc {
@@ -563,30 +562,26 @@ impl Context {
         id
     }
 
-    pub fn submit_mtl(
-        &mut self,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    ) -> OrderId {
+    pub fn submit_mtl(&mut self, instrument: InstrumentId, side: Side, qty: u32) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitMtl {
-            order_id: id, instrument, side, qty,
+            order_id: id,
+            instrument,
+            side,
+            qty,
         });
         id
     }
 
-    pub fn submit_mkt_prt(
-        &mut self,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    ) -> OrderId {
+    pub fn submit_mkt_prt(&mut self, instrument: InstrumentId, side: Side, qty: u32) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitMktPrt {
-            order_id: id, instrument, side, qty,
+            order_id: id,
+            instrument,
+            side,
+            qty,
         });
         id
     }
@@ -601,7 +596,11 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitStpPrt {
-            order_id: id, instrument, side, qty, stop_price,
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            stop_price,
         });
         id
     }
@@ -616,49 +615,47 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitMidPrice {
-            order_id: id, instrument, side, qty, price_cap,
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price_cap,
         });
         id
     }
 
-    pub fn submit_snap_mkt(
-        &mut self,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    ) -> OrderId {
+    pub fn submit_snap_mkt(&mut self, instrument: InstrumentId, side: Side, qty: u32) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitSnapMkt {
-            order_id: id, instrument, side, qty,
+            order_id: id,
+            instrument,
+            side,
+            qty,
         });
         id
     }
 
-    pub fn submit_snap_mid(
-        &mut self,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    ) -> OrderId {
+    pub fn submit_snap_mid(&mut self, instrument: InstrumentId, side: Side, qty: u32) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitSnapMid {
-            order_id: id, instrument, side, qty,
+            order_id: id,
+            instrument,
+            side,
+            qty,
         });
         id
     }
 
-    pub fn submit_snap_pri(
-        &mut self,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    ) -> OrderId {
+    pub fn submit_snap_pri(&mut self, instrument: InstrumentId, side: Side, qty: u32) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitSnapPri {
-            order_id: id, instrument, side, qty,
+            order_id: id,
+            instrument,
+            side,
+            qty,
         });
         id
     }
@@ -673,7 +670,11 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitPegMkt {
-            order_id: id, instrument, side, qty, offset,
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            offset,
         });
         id
     }
@@ -688,7 +689,11 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitPegMid {
-            order_id: id, instrument, side, qty, offset,
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            offset,
         });
         id
     }
@@ -705,7 +710,12 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitAlgo {
-            order_id: id, instrument, side, qty, price, algo,
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+            algo,
         });
         id
     }
@@ -726,8 +736,15 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitPegBench {
-            order_id: id, instrument, side, qty, price,
-            ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount,
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
+            ref_con_id,
+            is_peg_decrease,
+            pegged_change_amount,
+            ref_change_amount,
         });
         id
     }
@@ -743,33 +760,30 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitLimitAuc {
-            order_id: id, instrument, side, qty, price,
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
         });
         id
     }
 
     /// Submit a Market-to-Limit order for exchange auction (TIF=AUC).
-    pub fn submit_mtl_auc(
-        &mut self,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    ) -> OrderId {
+    pub fn submit_mtl_auc(&mut self, instrument: InstrumentId, side: Side, qty: u32) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitMtlAuc {
-            order_id: id, instrument, side, qty,
+            order_id: id,
+            instrument,
+            side,
+            qty,
         });
         id
     }
 
     /// Submit a Box Top order (wire-identical to MTL, OrdType K). BOX exchange only.
-    pub fn submit_box_top(
-        &mut self,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    ) -> OrderId {
+    pub fn submit_box_top(&mut self, instrument: InstrumentId, side: Side, qty: u32) -> OrderId {
         self.submit_mtl(instrument, side, qty)
     }
 
@@ -785,7 +799,11 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitWhatIf {
-            order_id: id, instrument, side, qty, price,
+            order_id: id,
+            instrument,
+            side,
+            qty,
+            price,
         });
         id
     }
@@ -801,9 +819,14 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitLimitFractional {
-            order_id: id, instrument, side, qty, price,
-        });
+        self.pending_orders
+            .push(OrderRequest::SubmitLimitFractional {
+                order_id: id,
+                instrument,
+                side,
+                qty,
+                price,
+            });
         id
     }
 
@@ -821,10 +844,18 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitAdjustableStop {
-            order_id: id, instrument, side, qty, stop_price, trigger_price,
-            adjusted_order_type, adjusted_stop_price, adjusted_stop_limit_price,
-        });
+        self.pending_orders
+            .push(OrderRequest::SubmitAdjustableStop {
+                order_id: id,
+                instrument,
+                side,
+                qty,
+                stop_price,
+                trigger_price,
+                adjusted_order_type,
+                adjusted_stop_price,
+                adjusted_stop_limit_price,
+            });
         id
     }
 
@@ -920,11 +951,28 @@ impl Context {
         self.open_orders.remove(&order_id);
     }
 
+    /// Re-queue an order request for retry (e.g., after send failure).
+    pub fn requeue_order(&mut self, req: OrderRequest) {
+        self.pending_orders.push(req);
+    }
+
+    /// Check if there are pending orders waiting to be sent.
+    pub fn has_pending_orders(&self) -> bool {
+        !self.pending_orders.is_empty()
+    }
+
+    /// Number of pending orders waiting to be sent.
+    pub fn pending_order_count(&self) -> usize {
+        self.pending_orders.len()
+    }
+
     /// Mark all live open orders as Uncertain (auth disconnect — status may have changed).
     pub fn mark_orders_uncertain(&mut self) {
         for order in self.open_orders.values_mut() {
             match order.status {
-                OrderStatus::PendingSubmit | OrderStatus::Submitted | OrderStatus::PartiallyFilled => {
+                OrderStatus::PendingSubmit
+                | OrderStatus::Submitted
+                | OrderStatus::PartiallyFilled => {
                     order.status = OrderStatus::Uncertain;
                 }
                 _ => {}
@@ -1343,22 +1391,40 @@ mod tests {
         ctx.register_instrument(265598);
 
         ctx.insert_order(Order {
-            order_id: 1, instrument: 0, side: Side::Buy,
-            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            order_id: 1,
+            instrument: 0,
+            side: Side::Buy,
+            price: 150 * PRICE_SCALE,
+            qty: 100,
+            filled: 0,
             status: OrderStatus::Submitted,
-            ord_type: b'2', tif: b'0', stop_price: 0,
+            ord_type: b'2',
+            tif: b'0',
+            stop_price: 0,
         });
         ctx.insert_order(Order {
-            order_id: 2, instrument: 0, side: Side::Sell,
-            price: 155 * PRICE_SCALE, qty: 50, filled: 0,
+            order_id: 2,
+            instrument: 0,
+            side: Side::Sell,
+            price: 155 * PRICE_SCALE,
+            qty: 50,
+            filled: 0,
             status: OrderStatus::Submitted,
-            ord_type: b'2', tif: b'0', stop_price: 0,
+            ord_type: b'2',
+            tif: b'0',
+            stop_price: 0,
         });
         ctx.insert_order(Order {
-            order_id: 3, instrument: 0, side: Side::Buy,
-            price: 149 * PRICE_SCALE, qty: 200, filled: 0,
+            order_id: 3,
+            instrument: 0,
+            side: Side::Buy,
+            price: 149 * PRICE_SCALE,
+            qty: 200,
+            filled: 0,
             status: OrderStatus::Filled,
-            ord_type: b'2', tif: b'0', stop_price: 0,
+            ord_type: b'2',
+            tif: b'0',
+            stop_price: 0,
         });
 
         // open_orders_for only returns Submitted
@@ -1389,7 +1455,13 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match orders[0] {
-            OrderRequest::SubmitStop { order_id, instrument, side, qty, stop_price } => {
+            OrderRequest::SubmitStop {
+                order_id,
+                instrument,
+                side,
+                qty,
+                stop_price,
+            } => {
                 assert_eq!(order_id, id);
                 assert_eq!(instrument, 0);
                 assert_eq!(side, Side::Sell);
@@ -1404,10 +1476,16 @@ mod tests {
     fn update_order_filled_accumulates() {
         let mut ctx = Context::new();
         ctx.insert_order(Order {
-            order_id: 1, instrument: 0, side: Side::Buy,
-            price: PRICE_SCALE, qty: 100, filled: 0,
+            order_id: 1,
+            instrument: 0,
+            side: Side::Buy,
+            price: PRICE_SCALE,
+            qty: 100,
+            filled: 0,
             status: OrderStatus::PendingSubmit,
-            ord_type: b'2', tif: b'0', stop_price: 0,
+            ord_type: b'2',
+            tif: b'0',
+            stop_price: 0,
         });
         ctx.update_order_filled(1, 30);
         assert_eq!(ctx.order(1).unwrap().filled, 30);
@@ -1419,22 +1497,40 @@ mod tests {
     fn open_orders_for_includes_pending_and_partial() {
         let mut ctx = Context::new();
         ctx.insert_order(Order {
-            order_id: 1, instrument: 0, side: Side::Buy,
-            price: PRICE_SCALE, qty: 100, filled: 0,
+            order_id: 1,
+            instrument: 0,
+            side: Side::Buy,
+            price: PRICE_SCALE,
+            qty: 100,
+            filled: 0,
             status: OrderStatus::PendingSubmit,
-            ord_type: b'2', tif: b'0', stop_price: 0,
+            ord_type: b'2',
+            tif: b'0',
+            stop_price: 0,
         });
         ctx.insert_order(Order {
-            order_id: 2, instrument: 0, side: Side::Buy,
-            price: PRICE_SCALE, qty: 100, filled: 50,
+            order_id: 2,
+            instrument: 0,
+            side: Side::Buy,
+            price: PRICE_SCALE,
+            qty: 100,
+            filled: 50,
             status: OrderStatus::PartiallyFilled,
-            ord_type: b'2', tif: b'0', stop_price: 0,
+            ord_type: b'2',
+            tif: b'0',
+            stop_price: 0,
         });
         ctx.insert_order(Order {
-            order_id: 3, instrument: 0, side: Side::Buy,
-            price: PRICE_SCALE, qty: 100, filled: 100,
+            order_id: 3,
+            instrument: 0,
+            side: Side::Buy,
+            price: PRICE_SCALE,
+            qty: 100,
+            filled: 100,
             status: OrderStatus::Filled,
-            ord_type: b'2', tif: b'0', stop_price: 0,
+            ord_type: b'2',
+            tif: b'0',
+            stop_price: 0,
         });
         let open = ctx.open_orders_for(0);
         // PendingSubmit and PartiallyFilled count as open; Filled does not
@@ -1444,12 +1540,30 @@ mod tests {
     #[test]
     fn submit_peg_bench_drains_correctly() {
         let mut ctx = Context::new();
-        let id = ctx.submit_peg_bench(0, Side::Buy, 100, 150 * PRICE_SCALE, 12345, false, 50_000_000, 50_000_000);
+        let id = ctx.submit_peg_bench(
+            0,
+            Side::Buy,
+            100,
+            150 * PRICE_SCALE,
+            12345,
+            false,
+            50_000_000,
+            50_000_000,
+        );
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitPegBench { order_id, instrument, side, qty, price,
-                ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount } => {
+            OrderRequest::SubmitPegBench {
+                order_id,
+                instrument,
+                side,
+                qty,
+                price,
+                ref_con_id,
+                is_peg_decrease,
+                pegged_change_amount,
+                ref_change_amount,
+            } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);
@@ -1471,7 +1585,13 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitLimitAuc { order_id, instrument, side, qty, price } => {
+            OrderRequest::SubmitLimitAuc {
+                order_id,
+                instrument,
+                side,
+                qty,
+                price,
+            } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);
@@ -1489,7 +1609,12 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitMtlAuc { order_id, instrument, side, qty } => {
+            OrderRequest::SubmitMtlAuc {
+                order_id,
+                instrument,
+                side,
+                qty,
+            } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);
@@ -1506,7 +1631,12 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitMtl { order_id, instrument, side, qty } => {
+            OrderRequest::SubmitMtl {
+                order_id,
+                instrument,
+                side,
+                qty,
+            } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);
@@ -1523,7 +1653,13 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price } => {
+            OrderRequest::SubmitWhatIf {
+                order_id,
+                instrument,
+                side,
+                qty,
+                price,
+            } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);
@@ -1542,7 +1678,13 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitLimitFractional { order_id, instrument, side, qty, price } => {
+            OrderRequest::SubmitLimitFractional {
+                order_id,
+                instrument,
+                side,
+                qty,
+                price,
+            } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);
@@ -1557,7 +1699,9 @@ mod tests {
     fn submit_adjustable_stop_drains_correctly() {
         let mut ctx = Context::new();
         let id = ctx.submit_adjustable_stop(
-            0, Side::Sell, 1,
+            0,
+            Side::Sell,
+            1,
             251_20 * (PRICE_SCALE / 100), // stop_price
             256_20 * (PRICE_SCALE / 100), // trigger_price
             AdjustedOrderType::StopLimit,
@@ -1567,8 +1711,17 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitAdjustableStop { order_id, side, qty, stop_price,
-                trigger_price, adjusted_order_type, adjusted_stop_price, adjusted_stop_limit_price, .. } => {
+            OrderRequest::SubmitAdjustableStop {
+                order_id,
+                side,
+                qty,
+                stop_price,
+                trigger_price,
+                adjusted_order_type,
+                adjusted_stop_price,
+                adjusted_stop_limit_price,
+                ..
+            } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*side, Side::Sell);
                 assert_eq!(*qty, 1);

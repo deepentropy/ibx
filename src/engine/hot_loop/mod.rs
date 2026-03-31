@@ -1,23 +1,25 @@
-pub mod farm;
 pub mod ccp;
+pub mod farm;
 pub mod hmds;
 pub mod order_builder;
 
+use std::io;
 use std::sync::Arc;
 use std::time::Instant;
-use std::io;
 
 use crate::bridge::{Event, SharedState};
-use crate::engine::context::Context;
 use crate::config::chrono_free_timestamp;
-use crate::gateway::{connect_farm, reconnect_ccp, ReconnectAuth};
+use crate::engine::context::Context;
+use crate::gateway::{ReconnectAuth, connect_farm, reconnect_ccp};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
-use crate::types::{ControlCommand, Fill, InstrumentId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crate::types::{
+    ControlCommand, Fill, InstrumentId, PRICE_SCALE, Price, QTY_SCALE, Qty, TbtQuote, TbtTrade,
+};
+use crossbeam_channel::{Receiver, Sender, bounded};
 
-use farm::FarmState;
 use ccp::CcpState;
+use farm::FarmState;
 use hmds::HmdsState;
 
 /// Auth server heartbeat interval (10 seconds, configurable).
@@ -68,6 +70,7 @@ pub struct HotLoop {
     farm_reconnect_attempt: u32,
     pending_ccp_reconnect: Option<Receiver<io::Result<Connection>>>,
     ccp_reconnect_attempt: u32,
+    ccp_reconnect_delay_until: Option<Instant>,
 }
 
 /// Per-secondary-farm heartbeat tracking.
@@ -79,7 +82,11 @@ pub struct SecondaryFarmHb {
 
 impl SecondaryFarmHb {
     fn new(now: Instant) -> Self {
-        Self { last_sent: now, last_recv: now, pending_test: None }
+        Self {
+            last_sent: now,
+            last_recv: now,
+            pending_test: None,
+        }
     }
 }
 
@@ -145,7 +152,11 @@ impl HeartbeatState {
 }
 
 impl HotLoop {
-    pub fn new(shared: Arc<SharedState>, event_tx: Option<Sender<Event>>, core_id: Option<usize>) -> Self {
+    pub fn new(
+        shared: Arc<SharedState>,
+        event_tx: Option<Sender<Event>>,
+        core_id: Option<usize>,
+    ) -> Self {
         Self {
             shared,
             event_tx,
@@ -171,6 +182,7 @@ impl HotLoop {
             farm_reconnect_attempt: 0,
             pending_ccp_reconnect: None,
             ccp_reconnect_attempt: 0,
+            ccp_reconnect_delay_until: None,
         }
     }
 
@@ -234,49 +246,77 @@ impl HotLoop {
             // 1. Busy-poll market data farm socket (non-blocking recv)
             let farm_was_ok = !self.farm.disconnected;
             self.farm.poll_market_data(
-                &mut self.farm_conn, &mut self.context, &self.shared,
-                &self.event_tx, &mut self.hb,
+                &mut self.farm_conn,
+                &mut self.context,
+                &self.shared,
+                &self.event_tx,
+                &mut self.hb,
             );
             if farm_was_ok && self.farm.disconnected {
                 self.spawn_farm_reconnect();
             }
             self.farm.poll_secondary_farm(
-                &mut self.cashfarm_conn, &crate::types::FarmSlot::CashFarm,
-                &mut self.farm_conn, &mut self.context, &self.shared,
-                &self.event_tx, &mut self.hb,
+                &mut self.cashfarm_conn,
+                &crate::types::FarmSlot::CashFarm,
+                &mut self.farm_conn,
+                &mut self.context,
+                &self.shared,
+                &self.event_tx,
+                &mut self.hb,
             );
             self.farm.poll_secondary_farm(
-                &mut self.usfuture_conn, &crate::types::FarmSlot::UsFuture,
-                &mut self.farm_conn, &mut self.context, &self.shared,
-                &self.event_tx, &mut self.hb,
+                &mut self.usfuture_conn,
+                &crate::types::FarmSlot::UsFuture,
+                &mut self.farm_conn,
+                &mut self.context,
+                &self.shared,
+                &self.event_tx,
+                &mut self.hb,
             );
             self.farm.poll_secondary_farm(
-                &mut self.eufarm_conn, &crate::types::FarmSlot::EuFarm,
-                &mut self.farm_conn, &mut self.context, &self.shared,
-                &self.event_tx, &mut self.hb,
+                &mut self.eufarm_conn,
+                &crate::types::FarmSlot::EuFarm,
+                &mut self.farm_conn,
+                &mut self.context,
+                &self.shared,
+                &self.event_tx,
+                &mut self.hb,
             );
             self.farm.poll_secondary_farm(
-                &mut self.jfarm_conn, &crate::types::FarmSlot::JFarm,
-                &mut self.farm_conn, &mut self.context, &self.shared,
-                &self.event_tx, &mut self.hb,
+                &mut self.jfarm_conn,
+                &crate::types::FarmSlot::JFarm,
+                &mut self.farm_conn,
+                &mut self.context,
+                &self.shared,
+                &self.event_tx,
+                &mut self.hb,
             );
 
             // 1b. Busy-poll historical socket for tick-by-tick data
             self.hmds.poll(
-                &mut self.hmds_conn, &self.shared,
-                &self.event_tx, &mut self.hb,
+                &mut self.hmds_conn,
+                &self.shared,
+                &self.event_tx,
+                &mut self.hb,
             );
 
             // 2. Drain pending orders → build → sign → send to auth
             order_builder::drain_and_send_orders(
-                &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
+                &mut self.ccp_conn,
+                &mut self.context,
+                &self.account_id,
+                &mut self.hb,
             );
 
             // 3. Busy-poll auth socket for execution reports
             let ccp_was_ok = !self.ccp.disconnected;
             self.ccp.poll_executions(
-                &mut self.ccp_conn, &mut self.context, &self.shared,
-                &self.event_tx, &mut self.hb, &self.account_id,
+                &mut self.ccp_conn,
+                &mut self.context,
+                &self.shared,
+                &self.event_tx,
+                &mut self.hb,
+                &self.account_id,
             );
             if ccp_was_ok && self.ccp.disconnected {
                 self.spawn_ccp_reconnect();
@@ -310,8 +350,11 @@ impl HotLoop {
         // try_recv() to distinguish.  If a straggler command arrived between
         // try_iter() finishing and this call, push it into the batch.
         let sender_dropped = match rx.try_recv() {
-            Ok(cmd)  => { self.cmd_buf.push(cmd); false }
-            Err(crossbeam_channel::TryRecvError::Empty)        => false,
+            Ok(cmd) => {
+                self.cmd_buf.push(cmd);
+                false
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => false,
             Err(crossbeam_channel::TryRecvError::Disconnected) => true,
         };
 
@@ -319,49 +362,100 @@ impl HotLoop {
         let cmds: Vec<ControlCommand> = self.cmd_buf.drain(..).collect();
         for cmd in cmds {
             match cmd {
-                ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, reply_tx } => {
+                ControlCommand::Subscribe {
+                    con_id,
+                    symbol,
+                    exchange,
+                    sec_type,
+                    reply_tx,
+                } => {
                     let farm = crate::types::farm_for_instrument(&exchange, &sec_type);
                     let id = self.context.market.register(con_id);
                     self.context.market.set_symbol(id, symbol);
-                    self.shared.market.set_instrument_count(self.context.market.count());
-                    if let Some(tx) = reply_tx { let _ = tx.send(id); }
+                    self.shared
+                        .market
+                        .set_instrument_count(self.context.market.count());
+                    if let Some(tx) = reply_tx {
+                        let _ = tx.send(id);
+                    }
                     self.farm.send_mktdata_subscribe(
-                        con_id, id, farm,
-                        &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-                        &mut self.eufarm_conn, &mut self.jfarm_conn,
+                        con_id,
+                        id,
+                        farm,
+                        &mut self.farm_conn,
+                        &mut self.cashfarm_conn,
+                        &mut self.usfuture_conn,
+                        &mut self.eufarm_conn,
+                        &mut self.jfarm_conn,
                         &mut self.hb,
                     );
                 }
                 ControlCommand::Unsubscribe { instrument } => {
                     self.farm.send_mktdata_unsubscribe(
                         instrument,
-                        &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-                        &mut self.eufarm_conn, &mut self.jfarm_conn,
+                        &mut self.farm_conn,
+                        &mut self.cashfarm_conn,
+                        &mut self.usfuture_conn,
+                        &mut self.eufarm_conn,
+                        &mut self.jfarm_conn,
                         &mut self.hb,
                     );
                 }
-                ControlCommand::SubscribeTbt { con_id, symbol, tbt_type, reply_tx } => {
+                ControlCommand::SubscribeTbt {
+                    con_id,
+                    symbol,
+                    tbt_type,
+                    reply_tx,
+                } => {
                     let id = self.context.market.register(con_id);
                     self.context.market.set_symbol(id, symbol);
-                    self.shared.market.set_instrument_count(self.context.market.count());
-                    if let Some(tx) = reply_tx { let _ = tx.send(id); }
-                    self.hmds.send_tbt_subscribe(con_id, id, tbt_type, &mut self.hmds_conn, &mut self.hb);
+                    self.shared
+                        .market
+                        .set_instrument_count(self.context.market.count());
+                    if let Some(tx) = reply_tx {
+                        let _ = tx.send(id);
+                    }
+                    self.hmds.send_tbt_subscribe(
+                        con_id,
+                        id,
+                        tbt_type,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                 }
                 ControlCommand::UnsubscribeTbt { instrument } => {
-                    self.hmds.send_tbt_unsubscribe(instrument, &mut self.hmds_conn, &mut self.hb);
+                    self.hmds
+                        .send_tbt_unsubscribe(instrument, &mut self.hmds_conn, &mut self.hb);
                 }
-                ControlCommand::SubscribeNews { con_id, symbol, providers, reply_tx } => {
+                ControlCommand::SubscribeNews {
+                    con_id,
+                    symbol,
+                    providers,
+                    reply_tx,
+                } => {
                     let id = self.context.market.register(con_id);
                     self.context.market.set_symbol(id, symbol);
-                    self.shared.market.set_instrument_count(self.context.market.count());
-                    if let Some(tx) = reply_tx { let _ = tx.send(id); }
+                    self.shared
+                        .market
+                        .set_instrument_count(self.context.market.count());
+                    if let Some(tx) = reply_tx {
+                        let _ = tx.send(id);
+                    }
                     // Allocate req_id from farm's counter (shared ID space)
                     let req_id = self.farm.next_md_req_id;
                     self.farm.next_md_req_id += 1;
-                    self.ccp.send_news_subscribe(con_id, id, &providers, req_id, &mut self.ccp_conn, &mut self.hb);
+                    self.ccp.send_news_subscribe(
+                        con_id,
+                        id,
+                        &providers,
+                        req_id,
+                        &mut self.ccp_conn,
+                        &mut self.hb,
+                    );
                 }
                 ControlCommand::UnsubscribeNews { instrument } => {
-                    self.ccp.send_news_unsubscribe(instrument, &mut self.ccp_conn, &mut self.hb);
+                    self.ccp
+                        .send_news_unsubscribe(instrument, &mut self.ccp_conn, &mut self.hb);
                 }
                 ControlCommand::UpdateParam { key, value } => {
                     let _ = (key, value);
@@ -369,106 +463,340 @@ impl HotLoop {
                 ControlCommand::Order(req) => {
                     self.context.pending_orders.push(req);
                 }
-                ControlCommand::RegisterInstrument { con_id, symbol, reply_tx } => {
+                ControlCommand::RegisterInstrument {
+                    con_id,
+                    symbol,
+                    reply_tx,
+                } => {
                     let id = self.context.market.register(con_id);
                     self.context.market.set_symbol(id, symbol);
-                    self.shared.market.set_instrument_count(self.context.market.count());
-                    if let Some(tx) = reply_tx { let _ = tx.send(id); }
+                    self.shared
+                        .market
+                        .set_instrument_count(self.context.market.count());
+                    if let Some(tx) = reply_tx {
+                        let _ = tx.send(id);
+                    }
                 }
-                ControlCommand::FetchHistorical { req_id, con_id, symbol, end_date_time, duration, bar_size, what_to_show, use_rth } => {
-                    self.hmds.send_historical_request(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::FetchHistorical {
+                    req_id,
+                    con_id,
+                    symbol,
+                    end_date_time,
+                    duration,
+                    bar_size,
+                    what_to_show,
+                    use_rth,
+                } => {
+                    self.hmds.send_historical_request(
+                        req_id,
+                        con_id,
+                        &end_date_time,
+                        &duration,
+                        &bar_size,
+                        &what_to_show,
+                        use_rth,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                     let _ = symbol;
                 }
                 ControlCommand::CancelHistorical { req_id } => {
-                    if let Some(pos) = self.hmds.pending_historical.iter().position(|(_, rid)| *rid == req_id) {
+                    if let Some(pos) = self
+                        .hmds
+                        .pending_historical
+                        .iter()
+                        .position(|(_, rid)| *rid == req_id)
+                    {
                         let (query_id, _) = self.hmds.pending_historical.remove(pos);
-                        self.hmds.send_historical_cancel(&query_id, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_historical_cancel(
+                            &query_id,
+                            &mut self.hmds_conn,
+                            &mut self.hb,
+                        );
                     }
                 }
-                ControlCommand::FetchHeadTimestamp { req_id, con_id, what_to_show, use_rth } => {
-                    self.hmds.send_head_timestamp_request(req_id, con_id, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::FetchHeadTimestamp {
+                    req_id,
+                    con_id,
+                    what_to_show,
+                    use_rth,
+                } => {
+                    self.hmds.send_head_timestamp_request(
+                        req_id,
+                        con_id,
+                        &what_to_show,
+                        use_rth,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                 }
-                ControlCommand::FetchContractDetails { req_id, con_id, symbol, sec_type, exchange, currency } => {
+                ControlCommand::FetchContractDetails {
+                    req_id,
+                    con_id,
+                    symbol,
+                    sec_type,
+                    exchange,
+                    currency,
+                } => {
                     if con_id > 0 {
-                        self.ccp.send_secdef_request(req_id, con_id, &mut self.ccp_conn, &mut self.hb);
+                        self.ccp.send_secdef_request(
+                            req_id,
+                            con_id,
+                            &mut self.ccp_conn,
+                            &mut self.hb,
+                        );
                     } else {
-                        self.ccp.send_secdef_request_by_symbol(req_id, &symbol, &sec_type, &exchange, &currency, &mut self.ccp_conn, &mut self.hb);
+                        self.ccp.send_secdef_request_by_symbol(
+                            req_id,
+                            &symbol,
+                            &sec_type,
+                            &exchange,
+                            &currency,
+                            &mut self.ccp_conn,
+                            &mut self.hb,
+                        );
                     }
                 }
                 ControlCommand::CancelHeadTimestamp { req_id } => {
-                    if let Some(pos) = self.hmds.pending_head_ts.iter().position(|(_, rid)| *rid == req_id) {
+                    if let Some(pos) = self
+                        .hmds
+                        .pending_head_ts
+                        .iter()
+                        .position(|(_, rid)| *rid == req_id)
+                    {
                         self.hmds.pending_head_ts.remove(pos);
                     }
                 }
                 ControlCommand::FetchMatchingSymbols { req_id, pattern } => {
-                    self.ccp.send_matching_symbols_request(req_id, &pattern, &mut self.ccp_conn, &mut self.hb);
+                    self.ccp.send_matching_symbols_request(
+                        req_id,
+                        &pattern,
+                        &mut self.ccp_conn,
+                        &mut self.hb,
+                    );
                 }
                 ControlCommand::FetchMktDepthExchanges => {
-                    self.ccp.send_mkt_depth_exchanges_request(&mut self.ccp_conn, &mut self.hb, &self.shared);
+                    self.ccp.send_mkt_depth_exchanges_request(
+                        &mut self.ccp_conn,
+                        &mut self.hb,
+                        &self.shared,
+                    );
                 }
                 ControlCommand::FetchScannerParams => {
-                    self.hmds.send_scanner_params_request(&mut self.hmds_conn, &mut self.hb);
+                    self.hmds
+                        .send_scanner_params_request(&mut self.hmds_conn, &mut self.hb);
                 }
-                ControlCommand::SubscribeScanner { req_id, instrument, location_code, scan_code, max_items } => {
-                    self.hmds.send_scanner_subscribe(req_id, &instrument, &location_code, &scan_code, max_items, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::SubscribeScanner {
+                    req_id,
+                    instrument,
+                    location_code,
+                    scan_code,
+                    max_items,
+                } => {
+                    self.hmds.send_scanner_subscribe(
+                        req_id,
+                        &instrument,
+                        &location_code,
+                        &scan_code,
+                        max_items,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                 }
                 ControlCommand::CancelScanner { req_id } => {
-                    if let Some(pos) = self.hmds.pending_scanner.iter().position(|(_, rid)| *rid == req_id) {
+                    if let Some(pos) = self
+                        .hmds
+                        .pending_scanner
+                        .iter()
+                        .position(|(_, rid)| *rid == req_id)
+                    {
                         let (scan_id, _) = self.hmds.pending_scanner.remove(pos);
-                        self.hmds.send_scanner_cancel(&scan_id, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds
+                            .send_scanner_cancel(&scan_id, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
-                ControlCommand::FetchHistoricalNews { req_id, con_id, provider_codes, start_time, end_time, max_results } => {
-                    self.hmds.send_historical_news_request(req_id, con_id, &provider_codes, &start_time, &end_time, max_results, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::FetchHistoricalNews {
+                    req_id,
+                    con_id,
+                    provider_codes,
+                    start_time,
+                    end_time,
+                    max_results,
+                } => {
+                    self.hmds.send_historical_news_request(
+                        req_id,
+                        con_id,
+                        &provider_codes,
+                        &start_time,
+                        &end_time,
+                        max_results,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                 }
-                ControlCommand::FetchNewsArticle { req_id, provider_code, article_id } => {
-                    self.hmds.send_news_article_request(req_id, &provider_code, &article_id, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::FetchNewsArticle {
+                    req_id,
+                    provider_code,
+                    article_id,
+                } => {
+                    self.hmds.send_news_article_request(
+                        req_id,
+                        &provider_code,
+                        &article_id,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                 }
-                ControlCommand::FetchFundamentalData { req_id, con_id, report_type } => {
-                    self.hmds.send_fundamental_data_request(req_id, con_id, &report_type, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::FetchFundamentalData {
+                    req_id,
+                    con_id,
+                    report_type,
+                } => {
+                    self.hmds.send_fundamental_data_request(
+                        req_id,
+                        con_id,
+                        &report_type,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                 }
                 ControlCommand::CancelFundamentalData { req_id } => {
-                    if let Some(pos) = self.hmds.pending_fundamental.iter().position(|(_, rid)| *rid == req_id) {
+                    if let Some(pos) = self
+                        .hmds
+                        .pending_fundamental
+                        .iter()
+                        .position(|(_, rid)| *rid == req_id)
+                    {
                         self.hmds.pending_fundamental.remove(pos);
                     }
                 }
-                ControlCommand::FetchHistogramData { req_id, con_id, use_rth, period } => {
-                    self.hmds.send_histogram_request(req_id, con_id, use_rth, &period, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::FetchHistogramData {
+                    req_id,
+                    con_id,
+                    use_rth,
+                    period,
+                } => {
+                    self.hmds.send_histogram_request(
+                        req_id,
+                        con_id,
+                        use_rth,
+                        &period,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                 }
                 ControlCommand::CancelHistogramData { req_id } => {
-                    if let Some(pos) = self.hmds.pending_histogram.iter().position(|(_, rid)| *rid == req_id) {
+                    if let Some(pos) = self
+                        .hmds
+                        .pending_histogram
+                        .iter()
+                        .position(|(_, rid)| *rid == req_id)
+                    {
                         self.hmds.pending_histogram.remove(pos);
                     }
                 }
-                ControlCommand::FetchHistoricalTicks { req_id, con_id, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth } => {
-                    self.hmds.send_historical_ticks_request(req_id, con_id, &start_date_time, &end_date_time, number_of_ticks, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::FetchHistoricalTicks {
+                    req_id,
+                    con_id,
+                    start_date_time,
+                    end_date_time,
+                    number_of_ticks,
+                    what_to_show,
+                    use_rth,
+                } => {
+                    self.hmds.send_historical_ticks_request(
+                        req_id,
+                        con_id,
+                        &start_date_time,
+                        &end_date_time,
+                        number_of_ticks,
+                        &what_to_show,
+                        use_rth,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                 }
-                ControlCommand::SubscribeRealTimeBar { req_id, con_id, symbol, what_to_show, use_rth } => {
-                    self.hmds.send_realtime_bar_subscribe(req_id, con_id, &symbol, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::SubscribeRealTimeBar {
+                    req_id,
+                    con_id,
+                    symbol,
+                    what_to_show,
+                    use_rth,
+                } => {
+                    self.hmds.send_realtime_bar_subscribe(
+                        req_id,
+                        con_id,
+                        &symbol,
+                        &what_to_show,
+                        use_rth,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                 }
                 ControlCommand::CancelRealTimeBar { req_id } => {
-                    if let Some(pos) = self.hmds.rtbar_subs.iter().position(|(_, rid, _, _)| *rid == req_id) {
+                    if let Some(pos) = self
+                        .hmds
+                        .rtbar_subs
+                        .iter()
+                        .position(|(_, rid, _, _)| *rid == req_id)
+                    {
                         let (query_id, _, ticker_id, _) = self.hmds.rtbar_subs.remove(pos);
                         let cancel_id = ticker_id.map(|t| t.to_string()).unwrap_or(query_id);
-                        self.hmds.send_historical_cancel(&cancel_id, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_historical_cancel(
+                            &cancel_id,
+                            &mut self.hmds_conn,
+                            &mut self.hb,
+                        );
                     }
                 }
-                ControlCommand::FetchHistoricalSchedule { req_id, con_id, end_date_time, duration, use_rth } => {
-                    self.hmds.send_schedule_request(req_id, con_id, &end_date_time, &duration, use_rth, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::FetchHistoricalSchedule {
+                    req_id,
+                    con_id,
+                    end_date_time,
+                    duration,
+                    use_rth,
+                } => {
+                    self.hmds.send_schedule_request(
+                        req_id,
+                        con_id,
+                        &end_date_time,
+                        &duration,
+                        use_rth,
+                        &mut self.hmds_conn,
+                        &mut self.hb,
+                    );
                 }
-                ControlCommand::SubscribeDepth { req_id, con_id, exchange, sec_type, num_rows, is_smart_depth } => {
+                ControlCommand::SubscribeDepth {
+                    req_id,
+                    con_id,
+                    exchange,
+                    sec_type,
+                    num_rows,
+                    is_smart_depth,
+                } => {
                     self.farm.send_depth_subscribe(
-                        req_id, con_id, &exchange, &sec_type, num_rows, is_smart_depth,
-                        &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-                        &mut self.eufarm_conn, &mut self.jfarm_conn,
+                        req_id,
+                        con_id,
+                        &exchange,
+                        &sec_type,
+                        num_rows,
+                        is_smart_depth,
+                        &mut self.farm_conn,
+                        &mut self.cashfarm_conn,
+                        &mut self.usfuture_conn,
+                        &mut self.eufarm_conn,
+                        &mut self.jfarm_conn,
                         &mut self.hb,
                     );
                 }
                 ControlCommand::UnsubscribeDepth { req_id } => {
                     self.farm.send_depth_unsubscribe(
                         req_id,
-                        &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-                        &mut self.eufarm_conn, &mut self.jfarm_conn,
+                        &mut self.farm_conn,
+                        &mut self.cashfarm_conn,
+                        &mut self.usfuture_conn,
+                        &mut self.eufarm_conn,
+                        &mut self.jfarm_conn,
                         &mut self.hb,
                     );
                     // Purge any already-buffered depth updates so callers never see stale data
@@ -483,27 +811,50 @@ impl HotLoop {
                 }
                 ControlCommand::Shutdown => {
                     // Unsubscribe all active market data before stopping
-                    let instruments: Vec<InstrumentId> = self.farm.instrument_md_reqs
-                        .iter().map(|(id, _, _)| *id).collect();
+                    let instruments: Vec<InstrumentId> = self
+                        .farm
+                        .instrument_md_reqs
+                        .iter()
+                        .map(|(id, _, _)| *id)
+                        .collect();
                     for instrument in instruments {
                         self.farm.send_mktdata_unsubscribe(
                             instrument,
-                            &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-                            &mut self.eufarm_conn, &mut self.jfarm_conn,
+                            &mut self.farm_conn,
+                            &mut self.cashfarm_conn,
+                            &mut self.usfuture_conn,
+                            &mut self.eufarm_conn,
+                            &mut self.jfarm_conn,
                             &mut self.hb,
                         );
                     }
                     // Unsubscribe all TBT subscriptions before stopping
-                    let tbt_instruments: Vec<InstrumentId> = self.hmds.tbt_subscriptions
-                        .iter().map(|(id, _, _)| *id).collect();
+                    let tbt_instruments: Vec<InstrumentId> = self
+                        .hmds
+                        .tbt_subscriptions
+                        .iter()
+                        .map(|(id, _, _)| *id)
+                        .collect();
                     for instrument in tbt_instruments {
-                        self.hmds.send_tbt_unsubscribe(instrument, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_tbt_unsubscribe(
+                            instrument,
+                            &mut self.hmds_conn,
+                            &mut self.hb,
+                        );
                     }
                     // Unsubscribe all news subscriptions before stopping
-                    let news_instruments: Vec<InstrumentId> = self.ccp.news_subscriptions
-                        .iter().map(|(id, _)| *id).collect();
+                    let news_instruments: Vec<InstrumentId> = self
+                        .ccp
+                        .news_subscriptions
+                        .iter()
+                        .map(|(id, _)| *id)
+                        .collect();
                     for instrument in news_instruments {
-                        self.ccp.send_news_unsubscribe(instrument, &mut self.ccp_conn, &mut self.hb);
+                        self.ccp.send_news_unsubscribe(
+                            instrument,
+                            &mut self.ccp_conn,
+                            &mut self.hb,
+                        );
                     }
                     self.running = false;
                     emit(&self.event_tx, Event::Disconnected);
@@ -525,106 +876,108 @@ impl HotLoop {
 
         // --- Auth heartbeat (skip if already disconnected) ---
         if !self.ccp.disconnected {
-        if let Some(conn) = self.ccp_conn.as_mut() {
-            let since_sent = now.duration_since(self.hb.last_ccp_sent).as_secs();
-            let since_recv = now.duration_since(self.hb.last_ccp_recv).as_secs();
+            if let Some(conn) = self.ccp_conn.as_mut() {
+                let since_sent = now.duration_since(self.hb.last_ccp_sent).as_secs();
+                let since_recv = now.duration_since(self.hb.last_ccp_recv).as_secs();
 
-            if since_sent >= CCP_HEARTBEAT_SECS {
-                let _ = conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
-                    (fix::TAG_SENDING_TIME, &ts),
-                ]);
-                self.hb.last_ccp_sent = now;
-            }
-
-            if since_recv > CCP_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
-                if let Some((_, sent_at)) = &self.hb.pending_ccp_test {
-                    if now.duration_since(*sent_at).as_secs() > CCP_HEARTBEAT_SECS {
-                        log::error!("CCP heartbeat timeout — connection lost");
-                        self.ccp.handle_disconnect(&mut self.context, &self.event_tx);
-                        self.spawn_ccp_reconnect();
-                    }
-                } else {
-                    let test_id = self.hb.next_test_id();
+                if since_sent >= CCP_HEARTBEAT_SECS {
                     let _ = conn.send_fix(&[
-                        (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                        (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
                         (fix::TAG_SENDING_TIME, &ts),
-                        (fix::TAG_TEST_REQ_ID, &test_id),
                     ]);
-                    self.hb.pending_ccp_test = Some((test_id, now));
                     self.hb.last_ccp_sent = now;
                 }
+
+                if since_recv > CCP_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
+                    if let Some((_, sent_at)) = &self.hb.pending_ccp_test {
+                        if now.duration_since(*sent_at).as_secs() > CCP_HEARTBEAT_SECS {
+                            log::error!("CCP heartbeat timeout — connection lost");
+                            self.ccp
+                                .handle_disconnect(&mut self.context, &self.event_tx);
+                            self.spawn_ccp_reconnect();
+                        }
+                    } else {
+                        let test_id = self.hb.next_test_id();
+                        let _ = conn.send_fix(&[
+                            (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                            (fix::TAG_SENDING_TIME, &ts),
+                            (fix::TAG_TEST_REQ_ID, &test_id),
+                        ]);
+                        self.hb.pending_ccp_test = Some((test_id, now));
+                        self.hb.last_ccp_sent = now;
+                    }
+                }
             }
-        }
         }
 
         // --- Farm heartbeat (skip if already disconnected) ---
         if !self.farm.disconnected {
-        if let Some(conn) = self.farm_conn.as_mut() {
-            let since_sent = now.duration_since(self.hb.last_farm_sent).as_secs();
-            let since_recv = now.duration_since(self.hb.last_farm_recv).as_secs();
+            if let Some(conn) = self.farm_conn.as_mut() {
+                let since_sent = now.duration_since(self.hb.last_farm_sent).as_secs();
+                let since_recv = now.duration_since(self.hb.last_farm_recv).as_secs();
 
-            if since_sent >= FARM_HEARTBEAT_SECS {
-                let _ = conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
-                    (fix::TAG_SENDING_TIME, &ts),
-                ]);
-                self.hb.last_farm_sent = now;
-            }
-
-            if since_recv > FARM_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
-                if let Some((_, sent_at)) = &self.hb.pending_farm_test {
-                    if now.duration_since(*sent_at).as_secs() > FARM_HEARTBEAT_SECS {
-                        log::error!("Farm heartbeat timeout — connection lost");
-                        self.farm.handle_disconnect(&mut self.context, &self.event_tx);
-                        self.spawn_farm_reconnect();
-                    }
-                } else {
-                    let test_id = self.hb.next_test_id();
+                if since_sent >= FARM_HEARTBEAT_SECS {
                     let _ = conn.send_fix(&[
-                        (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                        (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
                         (fix::TAG_SENDING_TIME, &ts),
-                        (fix::TAG_TEST_REQ_ID, &test_id),
                     ]);
-                    self.hb.pending_farm_test = Some((test_id, now));
                     self.hb.last_farm_sent = now;
                 }
+
+                if since_recv > FARM_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
+                    if let Some((_, sent_at)) = &self.hb.pending_farm_test {
+                        if now.duration_since(*sent_at).as_secs() > FARM_HEARTBEAT_SECS {
+                            log::error!("Farm heartbeat timeout — connection lost");
+                            self.farm
+                                .handle_disconnect(&mut self.context, &self.event_tx);
+                            self.spawn_farm_reconnect();
+                        }
+                    } else {
+                        let test_id = self.hb.next_test_id();
+                        let _ = conn.send_fix(&[
+                            (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                            (fix::TAG_SENDING_TIME, &ts),
+                            (fix::TAG_TEST_REQ_ID, &test_id),
+                        ]);
+                        self.hb.pending_farm_test = Some((test_id, now));
+                        self.hb.last_farm_sent = now;
+                    }
+                }
             }
-        }
         }
 
         // --- Historical heartbeat (skip if disconnected or no historical activity) ---
         if !self.hmds.disconnected && self.hmds_conn.is_some() {
-        if let Some(conn) = self.hmds_conn.as_mut() {
-            let since_sent = now.duration_since(self.hb.last_hmds_sent).as_secs();
-            let since_recv = now.duration_since(self.hb.last_hmds_recv).as_secs();
+            if let Some(conn) = self.hmds_conn.as_mut() {
+                let since_sent = now.duration_since(self.hb.last_hmds_sent).as_secs();
+                let since_recv = now.duration_since(self.hb.last_hmds_recv).as_secs();
 
-            if since_sent >= FARM_HEARTBEAT_SECS {
-                let _ = conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
-                    (fix::TAG_SENDING_TIME, &ts),
-                ]);
-                self.hb.last_hmds_sent = now;
-            }
-
-            if since_recv > FARM_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
-                if let Some((_, sent_at)) = &self.hb.pending_hmds_test {
-                    if now.duration_since(*sent_at).as_secs() > FARM_HEARTBEAT_SECS {
-                        log::error!("HMDS heartbeat timeout — connection lost");
-                        self.hmds.disconnected = true;
-                    }
-                } else {
-                    let test_id = self.hb.next_test_id();
+                if since_sent >= FARM_HEARTBEAT_SECS {
                     let _ = conn.send_fix(&[
-                        (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                        (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
                         (fix::TAG_SENDING_TIME, &ts),
-                        (fix::TAG_TEST_REQ_ID, &test_id),
                     ]);
-                    self.hb.pending_hmds_test = Some((test_id, now));
                     self.hb.last_hmds_sent = now;
                 }
+
+                if since_recv > FARM_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS {
+                    if let Some((_, sent_at)) = &self.hb.pending_hmds_test {
+                        if now.duration_since(*sent_at).as_secs() > FARM_HEARTBEAT_SECS {
+                            log::error!("HMDS heartbeat timeout — connection lost");
+                            self.hmds.disconnected = true;
+                        }
+                    } else {
+                        let test_id = self.hb.next_test_id();
+                        let _ = conn.send_fix(&[
+                            (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+                            (fix::TAG_SENDING_TIME, &ts),
+                            (fix::TAG_TEST_REQ_ID, &test_id),
+                        ]);
+                        self.hb.pending_hmds_test = Some((test_id, now));
+                        self.hb.last_hmds_sent = now;
+                    }
+                }
             }
-        }
         }
 
         // --- Secondary farm heartbeats ---
@@ -641,13 +994,17 @@ impl HotLoop {
             (FarmSlot::JFarm, self.jfarm_conn.is_some()),
         ];
         for (slot, has_conn) in &pairs {
-            if !has_conn { continue; }
+            if !has_conn {
+                continue;
+            }
             let shb = self.hb.secondary_hb_mut(slot);
             let since_sent = now.duration_since(shb.last_sent).as_secs();
             let since_recv = now.duration_since(shb.last_recv).as_secs();
             let need_heartbeat = since_sent >= FARM_HEARTBEAT_SECS;
             let timed_out = since_recv > FARM_HEARTBEAT_SECS + HEARTBEAT_GRACE_SECS;
-            let test_expired = shb.pending_test.as_ref()
+            let test_expired = shb
+                .pending_test
+                .as_ref()
                 .map(|(_, sent_at)| now.duration_since(*sent_at).as_secs() > FARM_HEARTBEAT_SECS)
                 .unwrap_or(false);
             let need_test = timed_out && shb.pending_test.is_none();
@@ -679,7 +1036,13 @@ impl HotLoop {
                     FarmSlot::JFarm => &mut self.jfarm_conn,
                     FarmSlot::UsFarm => unreachable!(),
                 };
-                self.farm.handle_secondary_disconnect(conn_opt, slot, &mut self.context, &self.shared, &self.event_tx);
+                self.farm.handle_secondary_disconnect(
+                    conn_opt,
+                    slot,
+                    &mut self.context,
+                    &self.shared,
+                    &self.event_tx,
+                );
             } else if need_test {
                 let test_id = self.hb.next_test_id();
                 let conn = match slot {
@@ -724,9 +1087,13 @@ impl HotLoop {
     pub fn reconnect_farm(&mut self, conn: Connection) {
         self.farm.reconnect(
             conn,
-            &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-            &mut self.eufarm_conn, &mut self.jfarm_conn,
-            &mut self.context, &mut self.hb,
+            &mut self.farm_conn,
+            &mut self.cashfarm_conn,
+            &mut self.usfuture_conn,
+            &mut self.eufarm_conn,
+            &mut self.jfarm_conn,
+            &mut self.context,
+            &mut self.hb,
         );
     }
 
@@ -751,27 +1118,40 @@ impl HotLoop {
 
     /// Spawn a background thread to reconnect the farm using cached credentials.
     fn spawn_farm_reconnect(&mut self) {
-        if self.pending_farm_reconnect.is_some() { return; } // already in progress
+        if self.pending_farm_reconnect.is_some() {
+            return;
+        } // already in progress
         let auth = match self.reconnect_auth.clone() {
             Some(a) if !a.host.is_empty() => a,
             _ => {
-                log::warn!("Farm auto-reconnect skipped: no credentials (host empty or auth missing)");
+                log::warn!(
+                    "Farm auto-reconnect skipped: no credentials (host empty or auth missing)"
+                );
                 return;
             }
         };
         self.farm_reconnect_attempt += 1;
         let attempt = self.farm_reconnect_attempt;
-        log::info!("Farm auto-reconnect attempt {} starting (host={}, user={})", attempt, auth.host, auth.username);
+        log::info!(
+            "Farm auto-reconnect attempt {} starting (host={}, user={})",
+            attempt,
+            auth.host,
+            auth.username
+        );
 
         let (tx, rx) = crossbeam_channel::bounded(1);
         std::thread::Builder::new()
             .name(format!("farm-reconnect-{}", attempt))
             .spawn(move || {
                 let result = connect_farm(
-                    &auth.host, "usfarm",
-                    &auth.username, auth.paper,
-                    &auth.server_session_id, &auth.session_key,
-                    &auth.hw_info, &auth.encoded,
+                    &auth.host,
+                    "usfarm",
+                    &auth.username,
+                    auth.paper,
+                    &auth.server_session_id,
+                    &auth.session_key,
+                    &auth.hw_info,
+                    &auth.encoded,
                 );
                 let _ = tx.send(result);
             })
@@ -787,16 +1167,26 @@ impl HotLoop {
         };
         match rx.try_recv() {
             Ok(Ok(conn)) => {
-                log::info!("Farm auto-reconnect succeeded (attempt {})", self.farm_reconnect_attempt);
+                log::info!(
+                    "Farm auto-reconnect succeeded (attempt {})",
+                    self.farm_reconnect_attempt
+                );
                 self.reconnect_farm(conn);
                 self.farm_reconnect_attempt = 0;
                 self.pending_farm_reconnect = None;
             }
             Ok(Err(e)) => {
-                log::error!("Farm auto-reconnect failed (attempt {}): {}", self.farm_reconnect_attempt, e);
+                log::error!(
+                    "Farm auto-reconnect failed (attempt {}): {}",
+                    self.farm_reconnect_attempt,
+                    e
+                );
                 self.pending_farm_reconnect = None;
                 if self.farm_reconnect_attempt >= 3 {
-                    log::error!("Farm auto-reconnect exhausted {} retries — notifying Python", self.farm_reconnect_attempt);
+                    log::error!(
+                        "Farm auto-reconnect exhausted {} retries — notifying Python",
+                        self.farm_reconnect_attempt
+                    );
                     emit(&self.event_tx, Event::Disconnected);
                 }
             }
@@ -810,7 +1200,16 @@ impl HotLoop {
 
     /// Spawn a background thread to reconnect CCP using cached credentials.
     fn spawn_ccp_reconnect(&mut self) {
-        if self.pending_ccp_reconnect.is_some() { return; }
+        if self.pending_ccp_reconnect.is_some() {
+            return;
+        }
+        // Exponential backoff: respect delay from previous failure
+        if let Some(delay_until) = self.ccp_reconnect_delay_until {
+            if Instant::now() < delay_until {
+                return;
+            }
+            self.ccp_reconnect_delay_until = None;
+        }
         let auth = match self.reconnect_auth.clone() {
             Some(a) if !a.host.is_empty() => a,
             _ => {
@@ -820,7 +1219,11 @@ impl HotLoop {
         };
         self.ccp_reconnect_attempt += 1;
         let attempt = self.ccp_reconnect_attempt;
-        log::info!("CCP auto-reconnect attempt {} starting (host={})", attempt, auth.host);
+        log::info!(
+            "CCP auto-reconnect attempt {} starting (host={})",
+            attempt,
+            auth.host
+        );
 
         let (tx, rx) = crossbeam_channel::bounded(1);
         std::thread::Builder::new()
@@ -840,17 +1243,38 @@ impl HotLoop {
         };
         match rx.try_recv() {
             Ok(Ok(conn)) => {
-                log::info!("CCP auto-reconnect succeeded (attempt {})", self.ccp_reconnect_attempt);
+                log::info!(
+                    "CCP auto-reconnect succeeded (attempt {})",
+                    self.ccp_reconnect_attempt
+                );
                 self.reconnect_ccp(conn);
                 self.ccp_reconnect_attempt = 0;
                 self.pending_ccp_reconnect = None;
             }
             Ok(Err(e)) => {
-                log::error!("CCP auto-reconnect failed (attempt {}): {}", self.ccp_reconnect_attempt, e);
+                log::error!(
+                    "CCP auto-reconnect failed (attempt {}): {}",
+                    self.ccp_reconnect_attempt,
+                    e
+                );
                 self.pending_ccp_reconnect = None;
-                if self.ccp_reconnect_attempt >= 3 {
-                    log::error!("CCP auto-reconnect exhausted {} retries — notifying Python", self.ccp_reconnect_attempt);
+                if self.ccp_reconnect_attempt >= 10 {
+                    log::error!(
+                        "CCP auto-reconnect exhausted {} retries — emitting Disconnected",
+                        self.ccp_reconnect_attempt
+                    );
                     emit(&self.event_tx, Event::Disconnected);
+                } else {
+                    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (capped)
+                    let delay_secs = std::cmp::min(1u64 << (self.ccp_reconnect_attempt - 1), 30);
+                    log::info!(
+                        "CCP reconnect: waiting {}s before retry {}",
+                        delay_secs,
+                        self.ccp_reconnect_attempt + 1
+                    );
+                    self.ccp_reconnect_delay_until = Some(
+                        std::time::Instant::now() + std::time::Duration::from_secs(delay_secs),
+                    );
                 }
             }
             Err(crossbeam_channel::TryRecvError::Empty) => {}
@@ -888,17 +1312,38 @@ impl HotLoop {
 
     /// Inject a raw farm message for testing. Processes it through the full decode pipeline.
     pub fn inject_farm_message(&mut self, msg: &[u8]) {
-        self.farm.process_farm_message(msg, &mut self.farm_conn, &mut self.context, &self.shared, &self.event_tx, &mut self.hb);
+        self.farm.process_farm_message(
+            msg,
+            &mut self.farm_conn,
+            &mut self.context,
+            &self.shared,
+            &self.event_tx,
+            &mut self.hb,
+        );
     }
 
     /// Inject a raw auth message for testing. Processes execution reports, etc.
     pub fn inject_ccp_message(&mut self, msg: &[u8]) {
-        self.ccp.process_ccp_message(msg, &mut self.ccp_conn, &mut self.context, &self.shared, &self.event_tx, &mut self.hb, &self.account_id);
+        self.ccp.process_ccp_message(
+            msg,
+            &mut self.ccp_conn,
+            &mut self.context,
+            &self.shared,
+            &self.event_tx,
+            &mut self.hb,
+            &self.account_id,
+        );
     }
 
     /// Inject a raw HMDS message for testing. Processes historical data, news, etc.
     pub fn inject_hmds_message(&mut self, msg: &[u8]) {
-        self.hmds.process_hmds_message(msg, &mut self.hmds_conn, &self.shared, &self.event_tx, &mut self.hb);
+        self.hmds.process_hmds_message(
+            msg,
+            &mut self.hmds_conn,
+            &self.shared,
+            &self.event_tx,
+            &mut self.hb,
+        );
     }
 
     /// Inject a TBT trade for testing. Pushes to SharedState and emits event.
@@ -914,7 +1359,9 @@ impl HotLoop {
 
     /// Inject a simulated tick for testing.
     pub fn inject_tick(&mut self, instrument: InstrumentId) {
-        self.shared.market.push_quote(instrument, self.context.quote(instrument));
+        self.shared
+            .market
+            .push_quote(instrument, self.context.quote(instrument));
         emit(&self.event_tx, Event::Tick(instrument));
     }
 
@@ -926,7 +1373,9 @@ impl HotLoop {
         };
         self.context.update_position(fill.instrument, delta);
         self.shared.orders.push_fill(*fill);
-        self.shared.portfolio.set_position(fill.instrument, self.context.position(fill.instrument));
+        self.shared
+            .portfolio
+            .set_position(fill.instrument, self.context.position(fill.instrument));
         emit(&self.event_tx, Event::Fill(*fill));
     }
 }
@@ -942,7 +1391,10 @@ pub(crate) struct StackStr {
 impl StackStr {
     #[inline]
     fn new() -> Self {
-        Self { buf: [0; 24], len: 0 }
+        Self {
+            buf: [0; 24],
+            len: 0,
+        }
     }
 
     #[inline]
@@ -1044,7 +1496,9 @@ pub(crate) fn format_price(price: Price) -> StackStr {
         ];
         // Find last non-zero digit.
         let mut end = 8;
-        while end > 0 && digits[end - 1] == b'0' { end -= 1; }
+        while end > 0 && digits[end - 1] == b'0' {
+            end -= 1;
+        }
         for i in 0..end {
             s.buf[frac_start + i] = digits[i];
         }
@@ -1076,7 +1530,9 @@ pub(crate) fn format_qty(qty: Qty) -> StackStr {
             b'0' + (frac % 10) as u8,
         ];
         let mut end = 4;
-        while end > 0 && digits[end - 1] == b'0' { end -= 1; }
+        while end > 0 && digits[end - 1] == b'0' {
+            end -= 1;
+        }
         for i in 0..end {
             s.buf[frac_start + i] = digits[i];
         }
@@ -1120,7 +1576,10 @@ pub(crate) fn extract_raw_tag(msg: &[u8], tag: u32) -> Option<Vec<u8>> {
         if let Ok(data_len) = len_val.parse::<usize>() {
             let needle = format!("{}=", tag);
             let needle_bytes = needle.as_bytes();
-            if let Some(idx) = msg.windows(needle_bytes.len()).position(|w| w == needle_bytes) {
+            if let Some(idx) = msg
+                .windows(needle_bytes.len())
+                .position(|w| w == needle_bytes)
+            {
                 let val_start = idx + needle_bytes.len();
                 let val_end = (val_start + data_len).min(msg.len());
                 return Some(msg[val_start..val_end].to_vec());
@@ -1132,11 +1591,16 @@ pub(crate) fn extract_raw_tag(msg: &[u8], tag: u32) -> Option<Vec<u8>> {
     let mut pos = 0;
     while pos < msg.len() {
         let remaining = &msg[pos..];
-        if let Some(idx) = remaining.windows(needle_bytes.len()).position(|w| w == needle_bytes) {
+        if let Some(idx) = remaining
+            .windows(needle_bytes.len())
+            .position(|w| w == needle_bytes)
+        {
             let abs_idx = pos + idx;
             if abs_idx == 0 || msg[abs_idx - 1] == 0x01 {
                 let val_start = abs_idx + needle_bytes.len();
-                let val_end = msg[val_start..].iter().position(|&b| b == 0x01)
+                let val_end = msg[val_start..]
+                    .iter()
+                    .position(|&b| b == 0x01)
                     .map(|p| val_start + p)
                     .unwrap_or(msg.len());
                 return Some(msg[val_start..val_end].to_vec());
@@ -1156,11 +1620,16 @@ fn extract_text_tag(msg: &[u8], tag: u32) -> Option<String> {
     let mut pos = 0;
     while pos < msg.len() {
         let remaining = &msg[pos..];
-        if let Some(idx) = remaining.windows(needle_bytes.len()).position(|w| w == needle_bytes) {
+        if let Some(idx) = remaining
+            .windows(needle_bytes.len())
+            .position(|w| w == needle_bytes)
+        {
             let abs_idx = pos + idx;
             if abs_idx == 0 || msg[abs_idx - 1] == 0x01 {
                 let val_start = abs_idx + needle_bytes.len();
-                let val_end = msg[val_start..].iter().position(|&b| b == 0x01)
+                let val_end = msg[val_start..]
+                    .iter()
+                    .position(|&b| b == 0x01)
                     .map(|p| val_start + p)
                     .unwrap_or(msg.len());
                 return Some(String::from_utf8_lossy(&msg[val_start..val_end]).into_owned());
@@ -1176,9 +1645,9 @@ fn extract_text_tag(msg: &[u8], tag: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::bridge::{Event, SharedState};
     use crate::types::*;
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[test]
@@ -1192,7 +1661,10 @@ mod tests {
         engine.inject_tick(0);
 
         let events: Vec<Event> = event_rx.try_iter().collect();
-        let tick_count = events.iter().filter(|e| matches!(e, Event::Tick(_))).count();
+        let tick_count = events
+            .iter()
+            .filter(|e| matches!(e, Event::Tick(_)))
+            .count();
         assert_eq!(tick_count, 2);
     }
 
@@ -1208,10 +1680,13 @@ mod tests {
         engine.inject_tick(1);
 
         let events: Vec<Event> = event_rx.try_iter().collect();
-        let tick_events: Vec<_> = events.iter().filter_map(|e| match e {
-            Event::Tick(id) => Some(*id),
-            _ => None,
-        }).collect();
+        let tick_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Tick(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
         assert_eq!(tick_events, vec![0, 1]);
     }
 
@@ -1270,7 +1745,10 @@ mod tests {
         drop(tx);
 
         engine.poll_once();
-        assert!(!engine.is_running(), "hot loop should stop when control channel disconnects");
+        assert!(
+            !engine.is_running(),
+            "hot loop should stop when control channel disconnects"
+        );
 
         // Should emit Disconnected event.
         let events: Vec<Event> = event_rx.try_iter().collect();

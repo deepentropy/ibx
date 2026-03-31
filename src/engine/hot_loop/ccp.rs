@@ -1,16 +1,15 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use crate::bridge::{Event, RichOrderInfo, SharedState};
 use crate::api::types as api;
-use crate::engine::context::Context;
+use crate::bridge::{Event, RichOrderInfo, SharedState};
 use crate::config::chrono_free_timestamp;
+use crate::engine::context::Context;
 use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::types::{
-    CompletedOrder, Fill, InstrumentId, NewsBulletin,
-    PositionInfo, Price, Side, PRICE_SCALE,
+    CompletedOrder, Fill, InstrumentId, NewsBulletin, PRICE_SCALE, PositionInfo, Price, Side,
 };
 use crossbeam_channel::Sender;
 
@@ -46,7 +45,9 @@ impl CcpState {
         hb: &mut HeartbeatState,
         account_id: &str,
     ) {
-        if self.disconnected { return; }
+        if self.disconnected {
+            return;
+        }
         let messages = match ccp_conn.as_mut() {
             None => return,
             Some(conn) => {
@@ -106,12 +107,17 @@ impl CcpState {
         };
         log::debug!("CCP msg 35={}", msg_type);
         match msg_type {
-            fix::MSG_EXEC_REPORT => self.handle_exec_report(&parsed, context, shared, event_tx, account_id),
+            fix::MSG_EXEC_REPORT => {
+                self.handle_exec_report(&parsed, context, shared, event_tx, account_id)
+            }
             fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed, context, shared, event_tx),
             fix::MSG_NEWS => self.handle_news_bulletin(&parsed, shared),
             fix::MSG_HEARTBEAT => {}
             fix::MSG_TEST_REQUEST => {
-                let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
+                let test_id = parsed
+                    .get(&fix::TAG_TEST_REQ_ID)
+                    .cloned()
+                    .unwrap_or_default();
                 if let Some(conn) = ccp_conn.as_mut() {
                     let ts = chrono_free_timestamp();
                     let _ = conn.send_fix(&[
@@ -133,9 +139,13 @@ impl CcpState {
                     match comm.as_str() {
                         "77" => self.handle_account_summary(&parsed, context, shared),
                         "186" => {
-                            if let Some(matches) = crate::control::contracts::parse_matching_symbols_response(msg) {
+                            if let Some(matches) =
+                                crate::control::contracts::parse_matching_symbols_response(msg)
+                            {
                                 if !matches.is_empty() {
-                                    if let Some(req_id) = self.pending_matching_symbols.first().copied() {
+                                    if let Some(req_id) =
+                                        self.pending_matching_symbols.first().copied()
+                                    {
                                         self.pending_matching_symbols.remove(0);
                                         shared.reference.push_matching_symbols(req_id, matches);
                                     }
@@ -163,21 +173,30 @@ impl CcpState {
                             crate::control::contracts::SecurityType::Warrant => "WAR",
                             _ => "STK",
                         };
-                        shared.reference.cache_contract(def.con_id as i64, api::Contract {
-                            con_id: def.con_id as i64,
-                            symbol: def.symbol.clone(),
-                            sec_type: sec_type_str.to_string(),
-                            exchange: def.exchange.clone(),
-                            currency: def.currency.clone(),
-                            local_symbol: def.local_symbol.clone(),
-                            primary_exchange: def.primary_exchange.clone(),
-                            trading_class: def.trading_class.clone(),
-                            ..Default::default()
-                        });
+                        shared.reference.cache_contract(
+                            def.con_id as i64,
+                            api::Contract {
+                                con_id: def.con_id as i64,
+                                symbol: def.symbol.clone(),
+                                sec_type: sec_type_str.to_string(),
+                                exchange: def.exchange.clone(),
+                                currency: def.currency.clone(),
+                                local_symbol: def.local_symbol.clone(),
+                                primary_exchange: def.primary_exchange.clone(),
+                                trading_class: def.trading_class.clone(),
+                                ..Default::default()
+                            },
+                        );
                     }
                     if let Some(&req_id) = self.pending_secdef.first() {
                         shared.reference.push_contract_details(req_id, def.clone());
-                        emit(event_tx, Event::ContractDetails { req_id, details: def });
+                        emit(
+                            event_tx,
+                            Event::ContractDetails {
+                                req_id,
+                                details: def,
+                            },
+                        );
                         if is_last {
                             self.pending_secdef.remove(0);
                             shared.reference.push_contract_details_end(req_id);
@@ -204,14 +223,20 @@ impl CcpState {
         event_tx: &Option<Sender<Event>>,
         account_id: &str,
     ) {
-        let clord_id = parsed.get(&11).and_then(|s| {
-            let stripped = s.strip_prefix('C').unwrap_or(s);
-            stripped.parse::<u64>().ok()
-        }).unwrap_or(0);
+        let clord_id = parsed
+            .get(&11)
+            .and_then(|s| {
+                let stripped = s.strip_prefix('C').unwrap_or(s);
+                stripped.parse::<u64>().ok()
+            })
+            .unwrap_or(0);
 
         // What-If response
         if parsed.get(&6091).map(|s| s.as_str()) == Some("1") {
-            let init_margin_after = parsed.get(&6092).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let init_margin_after = parsed
+                .get(&6092)
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
             if init_margin_after > 0.0 {
                 if let Some(order) = context.order(clord_id).copied() {
                     let response = crate::types::WhatIfResponse {
@@ -225,11 +250,13 @@ impl CcpState {
                         equity_with_loan_after: parse_price_tag(parsed.get(&6094)),
                         commission: parse_price_tag(parsed.get(&6378)),
                     };
-                    log::info!("WhatIf response: clord={} initMargin={:.2}->{:.2} commission={:.2}",
+                    log::info!(
+                        "WhatIf response: clord={} initMargin={:.2}->{:.2} commission={:.2}",
                         clord_id,
                         response.init_margin_before as f64 / PRICE_SCALE as f64,
                         response.init_margin_after as f64 / PRICE_SCALE as f64,
-                        response.commission as f64 / PRICE_SCALE as f64);
+                        response.commission as f64 / PRICE_SCALE as f64
+                    );
                     context.remove_order(clord_id);
                     shared.orders.push_what_if(response);
                     emit(event_tx, Event::WhatIf(response));
@@ -241,21 +268,39 @@ impl CcpState {
         let ord_status = parsed.get(&39).map(|s| s.as_str()).unwrap_or("");
         let exec_type = parsed.get(&150).map(|s| s.as_str()).unwrap_or("");
         let exec_id = parsed.get(&17).map(|s| s.as_str()).unwrap_or("");
-        let last_px = parsed.get(&31).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let last_shares = parsed.get(&32).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-        let leaves_qty = parsed.get(&151).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-        let commission = parsed.get(&12).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let last_px = parsed
+            .get(&31)
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let last_shares = parsed
+            .get(&32)
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let leaves_qty = parsed
+            .get(&151)
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let commission = parsed
+            .get(&12)
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
 
         if ord_status == "8" {
-            log::warn!("ExecReport REJECTED: clord={} reason='{}' 103={}",
+            log::warn!(
+                "ExecReport REJECTED: clord={} reason='{}' 103={}",
                 clord_id,
                 parsed.get(&58).map(|s| s.as_str()).unwrap_or("?"),
-                parsed.get(&103).map(|s| s.as_str()).unwrap_or("?"));
+                parsed.get(&103).map(|s| s.as_str()).unwrap_or("?")
+            );
         } else {
-            log::info!("ExecReport: 39={} 150={} 11={} 58={} 103={}",
-                ord_status, exec_type, clord_id,
+            log::info!(
+                "ExecReport: 39={} 150={} 11={} 58={} 103={}",
+                ord_status,
+                exec_type,
+                clord_id,
                 parsed.get(&58).map(|s| s.as_str()).unwrap_or(""),
-                parsed.get(&103).map(|s| s.as_str()).unwrap_or(""));
+                parsed.get(&103).map(|s| s.as_str()).unwrap_or("")
+            );
         }
 
         let status = match ord_status {
@@ -300,7 +345,9 @@ impl CcpState {
                 context.update_position(order.instrument, delta);
                 // notify_fill inlined
                 shared.orders.push_fill(fill);
-                shared.portfolio.set_position(fill.instrument, context.position(fill.instrument));
+                shared
+                    .portfolio
+                    .set_position(fill.instrument, context.position(fill.instrument));
                 emit(event_tx, Event::Fill(fill));
                 had_fill = true;
             }
@@ -363,27 +410,45 @@ impl CcpState {
             };
 
             let order_type_str = match ord_type_tag {
-                "1" => "MKT", "2" => "LMT", "3" => "STP", "4" => "STP LMT",
-                "P" => "TRAIL", "5" => "MOC", "B" => "LOC", "J" => "MIT",
-                "K" => "MTL", "R" => "REL", _ => ord_type_tag,
+                "1" => "MKT",
+                "2" => "LMT",
+                "3" => "STP",
+                "4" => "STP LMT",
+                "P" => "TRAIL",
+                "5" => "MOC",
+                "B" => "LOC",
+                "J" => "MIT",
+                "K" => "MTL",
+                "R" => "REL",
+                _ => ord_type_tag,
             };
 
             let tif_str = match tif_tag {
-                "0" => "DAY", "1" => "GTC", "3" => "IOC", "4" => "FOK",
-                "2" => "OPG", "6" => "GTD", "8" => "AUC", _ => "DAY",
+                "0" => "DAY",
+                "1" => "GTC",
+                "3" => "IOC",
+                "4" => "FOK",
+                "2" => "OPG",
+                "6" => "GTD",
+                "8" => "AUC",
+                _ => "DAY",
             };
 
             let action = match parsed.get(&54).map(|s| s.as_str()) {
                 Some("1") => "BUY",
                 Some("2") => "SELL",
                 Some("5") => "SSHORT",
-                _ => if let Some(order) = context.order(clord_id) {
-                    match order.side {
-                        Side::Buy => "BUY",
-                        Side::Sell => "SELL",
-                        Side::ShortSell => "SSHORT",
+                _ => {
+                    if let Some(order) = context.order(clord_id) {
+                        match order.side {
+                            Side::Buy => "BUY",
+                            Side::Sell => "SELL",
+                            Side::ShortSell => "SSHORT",
+                        }
+                    } else {
+                        ""
                     }
-                } else { "" },
+                }
             };
 
             let status_str = match status {
@@ -406,11 +471,21 @@ impl CcpState {
 
             let contract = if resolved_con_id != 0 {
                 if let Some(mut cached) = shared.reference.get_contract(resolved_con_id) {
-                    if !symbol.is_empty() { cached.symbol = symbol.clone(); }
-                    if !sec_type_str.is_empty() { cached.sec_type = sec_type_str.to_string(); }
-                    if !exchange.is_empty() { cached.exchange = exchange.clone(); }
-                    if !currency.is_empty() { cached.currency = currency.clone(); }
-                    if !local_symbol.is_empty() { cached.local_symbol = local_symbol.clone(); }
+                    if !symbol.is_empty() {
+                        cached.symbol = symbol.clone();
+                    }
+                    if !sec_type_str.is_empty() {
+                        cached.sec_type = sec_type_str.to_string();
+                    }
+                    if !exchange.is_empty() {
+                        cached.exchange = exchange.clone();
+                    }
+                    if !currency.is_empty() {
+                        cached.currency = currency.clone();
+                    }
+                    if !local_symbol.is_empty() {
+                        cached.local_symbol = local_symbol.clone();
+                    }
                     cached
                 } else {
                     api::Contract {
@@ -434,18 +509,28 @@ impl CcpState {
                 }
             };
 
-            let (fb_action, fb_tif, fb_ord_type) = if let Some(ctx_order) = context.order(clord_id) {
+            let (fb_action, fb_tif, fb_ord_type) = if let Some(ctx_order) = context.order(clord_id)
+            {
                 let a = match ctx_order.side {
                     crate::types::Side::Buy => "BUY",
                     crate::types::Side::Sell | crate::types::Side::ShortSell => "SELL",
                 };
                 let t = match ctx_order.tif {
-                    b'0' => "DAY", b'1' => "GTC", b'3' => "IOC", b'4' => "FOK",
-                    b'7' => "OPG", b'6' => "GTD", _ => "",
+                    b'0' => "DAY",
+                    b'1' => "GTC",
+                    b'3' => "IOC",
+                    b'4' => "FOK",
+                    b'7' => "OPG",
+                    b'6' => "GTD",
+                    _ => "",
                 };
                 let o = match ctx_order.ord_type {
-                    b'1' => "MKT", b'2' => "LMT", b'3' => "STP", b'4' => "STP LMT",
-                    b'P' => "TRAIL", _ => "",
+                    b'1' => "MKT",
+                    b'2' => "LMT",
+                    b'3' => "STP",
+                    b'4' => "STP LMT",
+                    b'P' => "TRAIL",
+                    _ => "",
                 };
                 (a, t, o)
             } else {
@@ -461,19 +546,36 @@ impl CcpState {
             };
             let algo_strategy = parsed.get(&847).cloned().unwrap_or_default();
             let use_price_mgmt_algo: i32 = if algo_strategy == "Adaptive" { 1 } else { 0 };
-            let trail_stop_price: f64 = parsed.get(&6117)
+            let trail_stop_price: f64 = parsed
+                .get(&6117)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(f64::MAX);
 
             let order = api::Order {
                 order_id: clord_id as i64,
-                action: if action.is_empty() { fb_action.to_string() } else { action.to_string() },
+                action: if action.is_empty() {
+                    fb_action.to_string()
+                } else {
+                    action.to_string()
+                },
                 total_quantity: total_qty,
-                order_type: if order_type_str.is_empty() { fb_ord_type.to_string() } else { order_type_str.to_string() },
+                order_type: if order_type_str.is_empty() {
+                    fb_ord_type.to_string()
+                } else {
+                    order_type_str.to_string()
+                },
                 lmt_price: limit_price,
                 aux_price: stop_px,
-                tif: if tif_str.is_empty() { fb_tif.to_string() } else { tif_str.to_string() },
-                account: if account.is_empty() { account_id.to_string() } else { account.clone() },
+                tif: if tif_str.is_empty() {
+                    fb_tif.to_string()
+                } else {
+                    tif_str.to_string()
+                },
+                account: if account.is_empty() {
+                    account_id.to_string()
+                } else {
+                    account.clone()
+                },
                 perm_id,
                 filled_quantity: leaves_qty as f64,
                 outside_rth,
@@ -487,10 +589,11 @@ impl CcpState {
                 ..Default::default()
             };
 
-            let completed_time = if matches!(status,
-                crate::types::OrderStatus::Filled |
-                crate::types::OrderStatus::Cancelled |
-                crate::types::OrderStatus::Rejected
+            let completed_time = if matches!(
+                status,
+                crate::types::OrderStatus::Filled
+                    | crate::types::OrderStatus::Cancelled
+                    | crate::types::OrderStatus::Rejected
             ) {
                 parsed.get(&52).cloned().unwrap_or_default()
             } else {
@@ -499,9 +602,10 @@ impl CcpState {
             let completed_status = match status {
                 crate::types::OrderStatus::Filled => "Filled".to_string(),
                 crate::types::OrderStatus::Cancelled => "Cancelled".to_string(),
-                crate::types::OrderStatus::Rejected => {
-                    parsed.get(&58).cloned().unwrap_or_else(|| "Rejected".to_string())
-                }
+                crate::types::OrderStatus::Rejected => parsed
+                    .get(&58)
+                    .cloned()
+                    .unwrap_or_else(|| "Rejected".to_string()),
                 _ => String::new(),
             };
 
@@ -519,8 +623,14 @@ impl CcpState {
                 acct_number: account,
                 exchange: exec_exchange,
                 side: if let Some(o) = context.order(clord_id) {
-                    match o.side { Side::Buy => "BOT", Side::Sell | Side::ShortSell => "SLD" }.to_string()
-                } else { String::new() },
+                    match o.side {
+                        Side::Buy => "BOT",
+                        Side::Sell | Side::ShortSell => "SLD",
+                    }
+                    .to_string()
+                } else {
+                    String::new()
+                },
                 shares: last_shares as f64,
                 price: last_px,
                 order_id: clord_id as i64,
@@ -534,15 +644,22 @@ impl CcpState {
                 shared.reference.cache_contract(con_id, contract.clone());
             }
 
-            shared.orders.push_order_info(clord_id, RichOrderInfo {
-                contract, order, order_state, last_exec,
-            });
+            shared.orders.push_order_info(
+                clord_id,
+                RichOrderInfo {
+                    contract,
+                    order,
+                    order_state,
+                    last_exec,
+                },
+            );
         }
 
-        if matches!(status,
-            crate::types::OrderStatus::Filled |
-            crate::types::OrderStatus::Cancelled |
-            crate::types::OrderStatus::Rejected
+        if matches!(
+            status,
+            crate::types::OrderStatus::Filled
+                | crate::types::OrderStatus::Cancelled
+                | crate::types::OrderStatus::Rejected
         ) {
             if let Some(order) = context.order(clord_id).copied() {
                 shared.orders.push_completed_order(CompletedOrder {
@@ -565,11 +682,19 @@ impl CcpState {
         event_tx: &Option<Sender<Event>>,
     ) {
         let orig_clord = parsed.get(&41).and_then(|s| s.parse::<u64>().ok());
-        let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("Cancel rejected");
+        let reason = parsed
+            .get(&58)
+            .map(|s| s.as_str())
+            .unwrap_or("Cancel rejected");
         let reject_type: u8 = parsed.get(&434).and_then(|s| s.parse().ok()).unwrap_or(1);
         let reason_code: i32 = parsed.get(&102).and_then(|s| s.parse().ok()).unwrap_or(-1);
-        log::warn!("CancelReject: origClOrd={:?} type={} code={} reason={}",
-            orig_clord, reject_type, reason_code, reason);
+        log::warn!(
+            "CancelReject: origClOrd={:?} type={} code={} reason={}",
+            orig_clord,
+            reject_type,
+            reason_code,
+            reason
+        );
 
         if let Some(oid) = orig_clord {
             if let Some(order) = context.order(oid).copied() {
@@ -592,13 +717,19 @@ impl CcpState {
         }
     }
 
-    fn handle_news_bulletin(&mut self, parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
-        static BULLETIN_TYPE_MAP: &[(i32, i32)] = &[
-            (1, 1), (2, 2), (3, 3), (8, 1), (9, 1), (10, 1),
-        ];
-        let fix_type: i32 = parsed.get(&fix::TAG_URGENCY)
-            .and_then(|s| s.parse().ok()).unwrap_or(0);
-        let api_type = BULLETIN_TYPE_MAP.iter()
+    fn handle_news_bulletin(
+        &mut self,
+        parsed: &std::collections::HashMap<u32, String>,
+        shared: &SharedState,
+    ) {
+        static BULLETIN_TYPE_MAP: &[(i32, i32)] =
+            &[(1, 1), (2, 2), (3, 3), (8, 1), (9, 1), (10, 1)];
+        let fix_type: i32 = parsed
+            .get(&fix::TAG_URGENCY)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let api_type = BULLETIN_TYPE_MAP
+            .iter()
             .find(|(k, _)| *k == fix_type)
             .map(|(_, v)| *v);
         let api_type = match api_type {
@@ -606,7 +737,10 @@ impl CcpState {
             None => return,
         };
         let message = parsed.get(&fix::TAG_HEADLINE).cloned().unwrap_or_default();
-        let exchange = parsed.get(&fix::TAG_SECURITY_EXCHANGE).cloned().unwrap_or_default();
+        let exchange = parsed
+            .get(&fix::TAG_SECURITY_EXCHANGE)
+            .cloned()
+            .unwrap_or_default();
         self.bulletin_next_id += 1;
         let bulletin = NewsBulletin {
             msg_id: self.bulletin_next_id,
@@ -617,7 +751,12 @@ impl CcpState {
         shared.market.push_news_bulletin(bulletin);
     }
 
-    fn handle_account_summary(&mut self, parsed: &std::collections::HashMap<u32, String>, context: &mut Context, shared: &SharedState) {
+    fn handle_account_summary(
+        &mut self,
+        parsed: &std::collections::HashMap<u32, String>,
+        context: &mut Context,
+        shared: &SharedState,
+    ) {
         if let Some(val) = parsed.get(&9806).and_then(|s| s.parse::<f64>().ok()) {
             context.account.net_liquidation = (val * PRICE_SCALE as f64) as Price;
             log::info!("Account summary: net_liq=${:.2}", val);
@@ -652,7 +791,12 @@ impl CcpState {
                 (6472, providers),
             ]);
             hb.last_ccp_sent = Instant::now();
-            log::info!("Sent news subscribe: con_id={} req_id={} providers={}", con_id, req_id, providers);
+            log::info!(
+                "Sent news subscribe: con_id={} req_id={} providers={}",
+                con_id,
+                req_id,
+                providers
+            );
         }
     }
 
@@ -662,7 +806,11 @@ impl CcpState {
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        let req_id = match self.news_subscriptions.iter().position(|(id, _)| *id == instrument) {
+        let req_id = match self
+            .news_subscriptions
+            .iter()
+            .position(|(id, _)| *id == instrument)
+        {
             Some(pos) => {
                 let (_, rid) = self.news_subscriptions.remove(pos);
                 rid
@@ -677,11 +825,21 @@ impl CcpState {
                 (263, "2"),
             ]);
             hb.last_ccp_sent = Instant::now();
-            log::info!("Sent news unsubscribe: instrument={:?} req_id={}", instrument, req_id);
+            log::info!(
+                "Sent news unsubscribe: instrument={:?} req_id={}",
+                instrument,
+                req_id
+            );
         }
     }
 
-    pub(crate) fn send_secdef_request(&mut self, req_id: u32, con_id: i64, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_secdef_request(
+        &mut self,
+        req_id: u32,
+        con_id: i64,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
         if let Some(conn) = ccp_conn.as_mut() {
             let con_id_str = con_id.to_string();
             let req_id_str = req_id.to_string();
@@ -700,13 +858,30 @@ impl CcpState {
         self.pending_secdef.push(req_id);
     }
 
-    pub(crate) fn send_secdef_request_by_symbol(&mut self, req_id: u32, symbol: &str, sec_type: &str, exchange: &str, currency: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_secdef_request_by_symbol(
+        &mut self,
+        req_id: u32,
+        symbol: &str,
+        sec_type: &str,
+        exchange: &str,
+        currency: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
         if let Some(conn) = ccp_conn.as_mut() {
             let req_id_str = req_id.to_string();
             let ts = chrono_free_timestamp();
-            let fix_exchange = if exchange == "SMART" { "BEST" } else { exchange };
+            let fix_exchange = if exchange == "SMART" {
+                "BEST"
+            } else {
+                exchange
+            };
             let fix_sec_type = match sec_type {
-                "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND", other => other,
+                "STK" => "CS",
+                "FUT" => "FUT",
+                "OPT" => "OPT",
+                "IND" => "IND",
+                other => other,
             };
             let _ = conn.send_fix(&[
                 (fix::TAG_MSG_TYPE, "c"),
@@ -719,13 +894,24 @@ impl CcpState {
                 (15, currency),
                 (6088, "Socket"),
             ]);
-            log::info!("Sent secdef-by-symbol: req_id={} symbol={} sec_type={}", req_id, symbol, sec_type);
+            log::info!(
+                "Sent secdef-by-symbol: req_id={} symbol={} sec_type={}",
+                req_id,
+                symbol,
+                sec_type
+            );
             hb.last_ccp_sent = Instant::now();
         }
         self.pending_secdef.push(req_id);
     }
 
-    pub(crate) fn send_matching_symbols_request(&mut self, req_id: u32, pattern: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_matching_symbols_request(
+        &mut self,
+        req_id: u32,
+        pattern: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
         if let Some(conn) = ccp_conn.as_mut() {
             let req_id_str = req_id.to_string();
             let ts = chrono_free_timestamp();
@@ -737,12 +923,21 @@ impl CcpState {
                 (58, pattern),
             ]);
             hb.last_ccp_sent = Instant::now();
-            log::info!("Sent matching symbols request: req_id={} pattern='{}'", req_id, pattern);
+            log::info!(
+                "Sent matching symbols request: req_id={} pattern='{}'",
+                req_id,
+                pattern
+            );
         }
         self.pending_matching_symbols.push(req_id);
     }
 
-    pub(crate) fn send_mkt_depth_exchanges_request(&mut self, _ccp_conn: &mut Option<Connection>, _hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_mkt_depth_exchanges_request(
+        &mut self,
+        _ccp_conn: &mut Option<Connection>,
+        _hb: &mut HeartbeatState,
+        shared: &SharedState,
+    ) {
         // Depth exchanges are derived from the 6040=102 exchange list received during init.
         // No separate server request needed — just signal the shared state to deliver cached data.
         shared.reference.notify_depth_exchanges();
@@ -783,7 +978,11 @@ impl CcpState {
                     exchange: exch.to_string(),
                     sec_type: current_sec_type.clone(),
                     listing_exch: name.to_string(),
-                    service_data_type: if current_sec_type == "STK" { "L1".to_string() } else { "L1".to_string() },
+                    service_data_type: if current_sec_type == "STK" {
+                        "L1".to_string()
+                    } else {
+                        "L1".to_string()
+                    },
                     agg_group: current_agg_group,
                 });
                 i += 1; // skip the 6813= field
@@ -794,7 +993,11 @@ impl CcpState {
         shared.reference.push_depth_exchanges(descs);
     }
 
-    pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {
+    pub(crate) fn handle_disconnect(
+        &mut self,
+        context: &mut Context,
+        _event_tx: &Option<Sender<Event>>,
+    ) {
         self.disconnected = true;
         context.mark_orders_uncertain();
         // Don't emit Event::Disconnected — auto-reconnect handles CCP drops transparently.
@@ -813,23 +1016,9 @@ impl CcpState {
         hb.last_ccp_recv = Instant::now();
         hb.pending_ccp_test = None;
 
-        if let Some(conn) = ccp_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let result = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "H"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (11, "*"),
-                (54, "*"),
-                (55, "*"),
-            ]);
-            match result {
-                Ok(()) => {
-                    hb.last_ccp_sent = Instant::now();
-                    log::info!("CCP reconnected, sent order mass status request");
-                }
-                Err(e) => log::error!("CCP reconnected but mass status request failed: {}", e),
-            }
-        }
+        // Note: mass status request (35=H) is already sent in reconnect_ccp()
+        // (gateway.rs) during the reconnect handshake. No duplicate needed here.
+        log::info!("CCP reconnected (mass status request sent during handshake)");
     }
 }
 
@@ -846,25 +1035,102 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
         } else if let Some(val) = part.strip_prefix("8004=") {
             if let Some(k) = key {
                 match k {
-                    "NetLiquidation" => { if let Ok(v) = val.parse::<f64>() { context.account.net_liquidation = (v * PRICE_SCALE as f64) as Price; } }
-                    "BuyingPower" => { if let Ok(v) = val.parse::<f64>() { context.account.buying_power = (v * PRICE_SCALE as f64) as Price; } }
-                    "MaintMarginReq" => { if let Ok(v) = val.parse::<f64>() { context.account.margin_used = (v * PRICE_SCALE as f64) as Price; } }
-                    "UnrealizedPnL" => { if let Ok(v) = val.parse::<f64>() { context.account.unrealized_pnl = (v * PRICE_SCALE as f64) as Price; } }
-                    "RealizedPnL" => { if let Ok(v) = val.parse::<f64>() { context.account.realized_pnl = (v * PRICE_SCALE as f64) as Price; } }
-                    "TotalCashValue" => { if let Ok(v) = val.parse::<f64>() { context.account.total_cash_value = (v * PRICE_SCALE as f64) as Price; } }
-                    "SettledCash" => { if let Ok(v) = val.parse::<f64>() { context.account.settled_cash = (v * PRICE_SCALE as f64) as Price; } }
-                    "AccruedCash" => { if let Ok(v) = val.parse::<f64>() { context.account.accrued_cash = (v * PRICE_SCALE as f64) as Price; } }
-                    "EquityWithLoanValue" => { if let Ok(v) = val.parse::<f64>() { context.account.equity_with_loan = (v * PRICE_SCALE as f64) as Price; } }
-                    "GrossPositionValue" => { if let Ok(v) = val.parse::<f64>() { context.account.gross_position_value = (v * PRICE_SCALE as f64) as Price; } }
-                    "InitMarginReq" | "FullInitMarginReq" => { if let Ok(v) = val.parse::<f64>() { context.account.init_margin_req = (v * PRICE_SCALE as f64) as Price; } }
-                    "FullMaintMarginReq" => { if let Ok(v) = val.parse::<f64>() { context.account.maint_margin_req = (v * PRICE_SCALE as f64) as Price; } }
-                    "AvailableFunds" | "FullAvailableFunds" => { if let Ok(v) = val.parse::<f64>() { context.account.available_funds = (v * PRICE_SCALE as f64) as Price; } }
-                    "ExcessLiquidity" | "FullExcessLiquidity" => { if let Ok(v) = val.parse::<f64>() { context.account.excess_liquidity = (v * PRICE_SCALE as f64) as Price; } }
-                    "Cushion" => { if let Ok(v) = val.parse::<f64>() { context.account.cushion = (v * PRICE_SCALE as f64) as Price; } }
-                    "SMA" => { if let Ok(v) = val.parse::<f64>() { context.account.sma = (v * PRICE_SCALE as f64) as Price; } }
-                    "DayTradesRemaining" => { if let Ok(v) = val.parse::<i64>() { context.account.day_trades_remaining = v; } }
-                    "Leverage-S" | "Leverage" => { if let Ok(v) = val.parse::<f64>() { context.account.leverage = (v * PRICE_SCALE as f64) as Price; } }
-                    "DailyPnL" => { if let Ok(v) = val.parse::<f64>() { context.account.daily_pnl = (v * PRICE_SCALE as f64) as Price; } }
+                    "NetLiquidation" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.net_liquidation = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "BuyingPower" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.buying_power = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "MaintMarginReq" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.margin_used = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "UnrealizedPnL" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.unrealized_pnl = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "RealizedPnL" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.realized_pnl = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "TotalCashValue" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.total_cash_value = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "SettledCash" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.settled_cash = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "AccruedCash" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.accrued_cash = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "EquityWithLoanValue" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.equity_with_loan = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "GrossPositionValue" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.gross_position_value =
+                                (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "InitMarginReq" | "FullInitMarginReq" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.init_margin_req = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "FullMaintMarginReq" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.maint_margin_req = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "AvailableFunds" | "FullAvailableFunds" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.available_funds = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "ExcessLiquidity" | "FullExcessLiquidity" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.excess_liquidity = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "Cushion" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.cushion = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "SMA" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.sma = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "DayTradesRemaining" => {
+                        if let Ok(v) = val.parse::<i64>() {
+                            context.account.day_trades_remaining = v;
+                        }
+                    }
+                    "Leverage-S" | "Leverage" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.leverage = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
+                    "DailyPnL" => {
+                        if let Ok(v) = val.parse::<f64>() {
+                            context.account.daily_pnl = (v * PRICE_SCALE as f64) as Price;
+                        }
+                    }
                     _ => {}
                 }
                 key = None;
@@ -885,11 +1151,13 @@ pub(crate) fn handle_position_update(
         Some(v) => v,
         None => return,
     };
-    let position: i64 = parsed.get(&6064)
+    let position: i64 = parsed
+        .get(&6064)
         .and_then(|s| s.parse::<f64>().ok())
         .map(|v| v as i64)
         .unwrap_or(0);
-    let avg_cost: Price = parsed.get(&6065)
+    let avg_cost: Price = parsed
+        .get(&6065)
         .and_then(|s| s.parse::<f64>().ok())
         .map(|v| (v * PRICE_SCALE as f64) as Price)
         .unwrap_or(0);
@@ -900,8 +1168,20 @@ pub(crate) fn handle_position_update(
         if delta != 0 {
             context.update_position(instrument, delta);
         }
-        shared.portfolio.set_position_info(PositionInfo { con_id, position, avg_cost });
+        shared.portfolio.set_position_info(PositionInfo {
+            con_id,
+            position,
+            avg_cost,
+        });
         shared.portfolio.set_position(instrument, position);
-        emit(event_tx, Event::PositionUpdate { instrument, con_id, position, avg_cost });
+        emit(
+            event_tx,
+            Event::PositionUpdate {
+                instrument,
+                con_id,
+                position,
+                avg_cost,
+            },
+        );
     }
 }

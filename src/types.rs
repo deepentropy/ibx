@@ -121,15 +121,15 @@ pub struct CancelReject {
 
 /// Multi-char OrdType discriminants (values < 32 to avoid collision with ASCII single-char types).
 /// Used in `Order.ord_type` for order types whose FIX tag 40 value is more than one character.
-pub const ORD_STP_PRT: u8 = 1;   // FIX "SP"  — Stop with Protection
-pub const ORD_MIDPX: u8 = 2;     // FIX "MIDPX" — Mid-Price
-pub const ORD_SNAP_MKT: u8 = 3;  // FIX "SMKT" — Snap to Market
-pub const ORD_SNAP_MID: u8 = 4;  // FIX "SMID" — Snap to Midpoint
-pub const ORD_SNAP_PRI: u8 = 5;  // FIX "SREL" — Snap to Primary
-pub const ORD_PEG_MKT: u8 = 6;   // FIX "E" + ExecInst "P" — Pegged to Market
-pub const ORD_PEG_MID: u8 = 7;   // FIX "E" + ExecInst "M" — Pegged to Midpoint
+pub const ORD_STP_PRT: u8 = 1; // FIX "SP"  — Stop with Protection
+pub const ORD_MIDPX: u8 = 2; // FIX "MIDPX" — Mid-Price
+pub const ORD_SNAP_MKT: u8 = 3; // FIX "SMKT" — Snap to Market
+pub const ORD_SNAP_MID: u8 = 4; // FIX "SMID" — Snap to Midpoint
+pub const ORD_SNAP_PRI: u8 = 5; // FIX "SREL" — Snap to Primary
+pub const ORD_PEG_MKT: u8 = 6; // FIX "E" + ExecInst "P" — Pegged to Market
+pub const ORD_PEG_MID: u8 = 7; // FIX "E" + ExecInst "M" — Pegged to Midpoint
 pub const ORD_PEG_BENCH: u8 = 8; // FIX "PB" — Pegged to Benchmark
-pub const ORD_WHAT_IF: u8 = 9;   // Not a real OrdType — marker for what-if orders
+pub const ORD_WHAT_IF: u8 = 9; // Not a real OrdType — marker for what-if orders
 
 /// Convert an `ord_type` discriminant to the FIX tag 40 string.
 /// Single-char types (ASCII >= 32) are stored as-is; multi-char types use constants above.
@@ -142,9 +142,18 @@ pub fn ord_type_fix_str(t: u8) -> &'static str {
         ORD_SNAP_PRI => "SREL",
         ORD_PEG_MKT | ORD_PEG_MID => "E",
         ORD_PEG_BENCH => "PB",
-        b'1' => "1", b'2' => "2", b'3' => "3", b'4' => "4", b'5' => "5",
-        b'B' => "B", b'E' => "E", b'J' => "J", b'K' => "K",
-        b'P' => "P", b'R' => "R", b'U' => "U",
+        b'1' => "1",
+        b'2' => "2",
+        b'3' => "3",
+        b'4' => "4",
+        b'5' => "5",
+        b'B' => "B",
+        b'E' => "E",
+        b'J' => "J",
+        b'K' => "K",
+        b'P' => "P",
+        b'R' => "R",
+        b'U' => "U",
         _ => "2",
     }
 }
@@ -205,8 +214,28 @@ pub struct Order {
 
 impl Order {
     /// Create a new tracked order with FIX type metadata.
-    pub fn new(order_id: OrderId, instrument: InstrumentId, side: Side, qty: u32, price: Price, ord_type: u8, tif: u8, stop_price: Price) -> Self {
-        Self { order_id, instrument, side, price, qty, filled: 0, status: OrderStatus::PendingSubmit, ord_type, tif, stop_price }
+    pub fn new(
+        order_id: OrderId,
+        instrument: InstrumentId,
+        side: Side,
+        qty: u32,
+        price: Price,
+        ord_type: u8,
+        tif: u8,
+        stop_price: Price,
+    ) -> Self {
+        Self {
+            order_id,
+            instrument,
+            side,
+            price,
+            qty,
+            filled: 0,
+            status: OrderStatus::PendingSubmit,
+            ord_type,
+            tif,
+            stop_price,
+        }
     }
 }
 
@@ -718,6 +747,54 @@ pub enum OrderRequest {
     },
 }
 
+impl OrderRequest {
+    /// Extract the order ID from any variant.
+    pub fn order_id(&self) -> OrderId {
+        match self {
+            Self::SubmitLimit { order_id, .. }
+            | Self::SubmitMarket { order_id, .. }
+            | Self::SubmitStop { order_id, .. }
+            | Self::SubmitStopLimit { order_id, .. }
+            | Self::SubmitLimitGtc { order_id, .. }
+            | Self::SubmitStopGtc { order_id, .. }
+            | Self::SubmitStopLimitGtc { order_id, .. }
+            | Self::SubmitLimitIoc { order_id, .. }
+            | Self::SubmitLimitFok { order_id, .. }
+            | Self::SubmitTrailingStop { order_id, .. }
+            | Self::SubmitTrailingStopLimit { order_id, .. }
+            | Self::SubmitTrailingStopPct { order_id, .. }
+            | Self::SubmitMoc { order_id, .. }
+            | Self::SubmitLoc { order_id, .. }
+            | Self::SubmitMit { order_id, .. }
+            | Self::SubmitLit { order_id, .. }
+            | Self::SubmitLimitEx { order_id, .. }
+            | Self::SubmitRel { order_id, .. }
+            | Self::SubmitLimitOpg { order_id, .. }
+            | Self::SubmitAdaptive { order_id, .. }
+            | Self::SubmitMtl { order_id, .. }
+            | Self::SubmitMktPrt { order_id, .. }
+            | Self::SubmitStpPrt { order_id, .. }
+            | Self::SubmitMidPrice { order_id, .. }
+            | Self::SubmitSnapMkt { order_id, .. }
+            | Self::SubmitSnapMid { order_id, .. }
+            | Self::SubmitSnapPri { order_id, .. }
+            | Self::SubmitPegMkt { order_id, .. }
+            | Self::SubmitPegMid { order_id, .. }
+            | Self::SubmitAlgo { order_id, .. }
+            | Self::SubmitPegBench { order_id, .. }
+            | Self::SubmitLimitAuc { order_id, .. }
+            | Self::SubmitMtlAuc { order_id, .. }
+            | Self::SubmitWhatIf { order_id, .. }
+            | Self::SubmitLimitFractional { order_id, .. }
+            | Self::SubmitAdjustableStop { order_id, .. }
+            | Self::Cancel { order_id, .. } => *order_id,
+            Self::SubmitBracket { parent_id, .. } => *parent_id,
+            Self::CancelAll { instrument } => *instrument as OrderId,
+            Self::Modify { order_id, .. } => *order_id,
+        }
+    }
+}
+
 /// Pre-allocated buffer for pending order requests. Never allocates on the hot path.
 /// Created once with capacity, then push/clear cycle each tick.
 pub struct OrderBuffer {
@@ -742,6 +819,10 @@ impl OrderBuffer {
 
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.buf.len()
     }
 }
 
@@ -953,10 +1034,12 @@ pub fn farm_for_instrument(exchange: &str, sec_type: &str) -> FarmSlot {
             "IDEALPRO" => FarmSlot::CashFarm,
             "CME" | "GLOBEX" | "NYMEX" | "COMEX" | "ECBOT" | "CBOT" => FarmSlot::UsFuture,
             "AEB" | "BVME" | "DTB" | "IBIS" | "ICEEU" | "LSEETF" | "MOEX" | "SBF" | "SEHK"
-            | "SFB" | "SNFE" | "VSE" | "VIRTX" | "EBS" | "BATEEN" | "FWB" | "IBIS2" => FarmSlot::EuFarm,
+            | "SFB" | "SNFE" | "VSE" | "VIRTX" | "EBS" | "BATEEN" | "FWB" | "IBIS2" => {
+                FarmSlot::EuFarm
+            }
             "TSEJ" | "JPX" | "OSE" => FarmSlot::JFarm,
             _ => FarmSlot::UsFarm,
-        }
+        },
     }
 }
 
@@ -965,15 +1048,31 @@ pub fn farm_for_instrument(exchange: &str, sec_type: &str) -> FarmSlot {
 pub enum ControlCommand {
     /// Subscribe to market data for a contract.
     /// `exchange` and `sec_type` determine farm routing (empty = UsFarm default).
-    Subscribe { con_id: i64, symbol: String, exchange: String, sec_type: String, reply_tx: Option<crossbeam_channel::Sender<InstrumentId>> },
+    Subscribe {
+        con_id: i64,
+        symbol: String,
+        exchange: String,
+        sec_type: String,
+        reply_tx: Option<crossbeam_channel::Sender<InstrumentId>>,
+    },
     /// Unsubscribe from market data for an instrument.
     Unsubscribe { instrument: InstrumentId },
     /// Subscribe to tick-by-tick data via historical data connection.
-    SubscribeTbt { con_id: i64, symbol: String, tbt_type: TbtType, reply_tx: Option<crossbeam_channel::Sender<InstrumentId>> },
+    SubscribeTbt {
+        con_id: i64,
+        symbol: String,
+        tbt_type: TbtType,
+        reply_tx: Option<crossbeam_channel::Sender<InstrumentId>>,
+    },
     /// Unsubscribe from tick-by-tick data.
     UnsubscribeTbt { instrument: InstrumentId },
     /// Subscribe to per-contract news ticks via CCP (264=292).
-    SubscribeNews { con_id: i64, symbol: String, providers: String, reply_tx: Option<crossbeam_channel::Sender<InstrumentId>> },
+    SubscribeNews {
+        con_id: i64,
+        symbol: String,
+        providers: String,
+        reply_tx: Option<crossbeam_channel::Sender<InstrumentId>>,
+    },
     /// Unsubscribe from per-contract news ticks.
     UnsubscribeNews { instrument: InstrumentId },
     /// Update a strategy parameter.
@@ -981,7 +1080,11 @@ pub enum ControlCommand {
     /// Submit an order from external caller (bridge mode).
     Order(OrderRequest),
     /// Register an instrument from external caller (bridge mode).
-    RegisterInstrument { con_id: i64, symbol: String, reply_tx: Option<crossbeam_channel::Sender<InstrumentId>> },
+    RegisterInstrument {
+        con_id: i64,
+        symbol: String,
+        reply_tx: Option<crossbeam_channel::Sender<InstrumentId>>,
+    },
     /// Request historical bar data via historical data connection.
     FetchHistorical {
         req_id: u32,
@@ -1129,10 +1232,10 @@ pub struct AccountState {
     pub maint_margin_req: Price,
     pub available_funds: Price,
     pub excess_liquidity: Price,
-    pub cushion: Price,        // percentage * PRICE_SCALE (e.g. 0.45 = 45%)
+    pub cushion: Price, // percentage * PRICE_SCALE (e.g. 0.45 = 45%)
     pub sma: Price,
     pub day_trades_remaining: i64,
-    pub leverage: Price,       // ratio * PRICE_SCALE
+    pub leverage: Price, // ratio * PRICE_SCALE
     pub daily_pnl: Price,
 }
 
@@ -1141,7 +1244,7 @@ pub struct AccountState {
 pub struct PositionInfo {
     pub con_id: i64,
     pub position: i64,
-    pub avg_cost: Price,      // per-share avg cost * PRICE_SCALE
+    pub avg_cost: Price, // per-share avg cost * PRICE_SCALE
 }
 
 #[cfg(test)]
@@ -1388,7 +1491,9 @@ mod tests {
         let mut buf = OrderBuffer::new();
         for cycle in 0..10 {
             for i in 0..5 {
-                buf.push(OrderRequest::Cancel { order_id: (cycle * 5 + i) as u64 });
+                buf.push(OrderRequest::Cancel {
+                    order_id: (cycle * 5 + i) as u64,
+                });
             }
             let drained: Vec<_> = buf.drain().collect();
             assert_eq!(drained.len(), 5);
@@ -1415,7 +1520,13 @@ mod tests {
             price: 150 * PRICE_SCALE,
         };
         match req {
-            OrderRequest::SubmitLimit { instrument, side, qty, price, .. } => {
+            OrderRequest::SubmitLimit {
+                instrument,
+                side,
+                qty,
+                price,
+                ..
+            } => {
                 assert_eq!(instrument, 42);
                 assert_eq!(side, Side::Buy);
                 assert_eq!(qty, 100);
@@ -1434,7 +1545,12 @@ mod tests {
             qty: 50,
         };
         match req {
-            OrderRequest::SubmitMarket { instrument, side, qty, .. } => {
+            OrderRequest::SubmitMarket {
+                instrument,
+                side,
+                qty,
+                ..
+            } => {
                 assert_eq!(instrument, 0);
                 assert_eq!(side, Side::Sell);
                 assert_eq!(qty, 50);
@@ -1445,9 +1561,19 @@ mod tests {
 
     #[test]
     fn order_request_modify_fields() {
-        let req = OrderRequest::Modify { new_order_id: 100, order_id: 99, price: 200 * PRICE_SCALE, qty: 10 };
+        let req = OrderRequest::Modify {
+            new_order_id: 100,
+            order_id: 99,
+            price: 200 * PRICE_SCALE,
+            qty: 10,
+        };
         match req {
-            OrderRequest::Modify { order_id, price, qty, .. } => {
+            OrderRequest::Modify {
+                order_id,
+                price,
+                qty,
+                ..
+            } => {
                 assert_eq!(order_id, 99);
                 assert_eq!(price, 200 * PRICE_SCALE);
                 assert_eq!(qty, 10);
@@ -1489,7 +1615,13 @@ mod tests {
 
     #[test]
     fn control_command_subscribe() {
-        let cmd = ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None };
+        let cmd = ControlCommand::Subscribe {
+            con_id: 265598,
+            symbol: "AAPL".into(),
+            exchange: String::new(),
+            sec_type: String::new(),
+            reply_tx: None,
+        };
         match cmd {
             ControlCommand::Subscribe { con_id, .. } => assert_eq!(con_id, 265598),
             _ => panic!("wrong variant"),
@@ -1507,7 +1639,10 @@ mod tests {
 
     #[test]
     fn control_command_update_param() {
-        let cmd = ControlCommand::UpdateParam { key: "k".into(), value: "v".into() };
+        let cmd = ControlCommand::UpdateParam {
+            key: "k".into(),
+            value: "v".into(),
+        };
         match cmd {
             ControlCommand::UpdateParam { key, value } => {
                 assert_eq!(key, "k");
@@ -1519,7 +1654,13 @@ mod tests {
 
     #[test]
     fn control_command_clone() {
-        let cmd = ControlCommand::Subscribe { con_id: 42, symbol: "TEST".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None };
+        let cmd = ControlCommand::Subscribe {
+            con_id: 42,
+            symbol: "TEST".into(),
+            exchange: String::new(),
+            sec_type: String::new(),
+            reply_tx: None,
+        };
         let cmd2 = cmd.clone();
         match cmd2 {
             ControlCommand::Subscribe { con_id, .. } => assert_eq!(con_id, 42),
