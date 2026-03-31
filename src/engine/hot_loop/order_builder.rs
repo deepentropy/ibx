@@ -1,10 +1,12 @@
+use std::sync::Arc;
 use std::time::Instant;
 
+use crate::bridge::SharedState;
 use crate::config::{chrono_free_timestamp, unix_to_ib_datetime};
 use crate::engine::context::Context;
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
-use crate::types::{AlgoParams, OrderCondition, OrderRequest, Side};
+use crate::types::{AlgoParams, OrderCondition, OrderRequest, OrderStatus, OrderUpdate, Side};
 
 use super::{HeartbeatState, format_price, format_qty, format_int, format_uint};
 
@@ -13,13 +15,22 @@ pub(crate) fn drain_and_send_orders(
     context: &mut Context,
     account_id: &str,
     hb: &mut HeartbeatState,
+    disconnected: bool,
+    shared: &Arc<SharedState>,
 ) {
+    // If CCP is disconnected, leave orders in the pending buffer for retry after reconnect.
+    // See: https://github.com/deepentropy/ibx/issues/116
+    if disconnected {
+        return;
+    }
+
     let orders: Vec<OrderRequest> = context.drain_pending_orders().collect();
     let conn = match ccp_conn.as_mut() {
         Some(c) => c,
         None => return,
     };
     for order_req in orders {
+        let oid = order_req.order_id();
         let result = match order_req {
             OrderRequest::SubmitLimit { order_id, instrument, side, qty, price } => {
                 context.insert_order(crate::types::Order::new(
@@ -1403,7 +1414,24 @@ pub(crate) fn drain_and_send_orders(
         };
         match result {
             Ok(()) => hb.last_ccp_sent = Instant::now(),
-            Err(e) => log::error!("Failed to send order: {}", e),
+            Err(e) => {
+                // Order failed to send — remove from engine state and notify the application.
+                // See: https://github.com/deepentropy/ibx/issues/116
+                log::error!("Failed to send order {}: {} — notifying application", oid, e);
+                if oid != 0 {
+                    context.remove_order(oid);
+                    shared.orders.push_order_update(OrderUpdate {
+                        order_id: oid,
+                        instrument: 0,
+                        status: OrderStatus::Rejected,
+                        filled_qty: 0,
+                        remaining_qty: 0,
+                        perm_id: 0,
+                        parent_id: 0,
+                        timestamp_ns: 0,
+                    });
+                }
+            }
         }
     }
 }

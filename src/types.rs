@@ -720,6 +720,54 @@ pub enum OrderRequest {
     },
 }
 
+impl OrderRequest {
+    /// Extract the order_id from any variant. Returns 0 for CancelAll (no order_id).
+    pub fn order_id(&self) -> OrderId {
+        match self {
+            Self::Cancel { order_id } => *order_id,
+            Self::CancelAll { .. } => 0,
+            Self::Modify { order_id, .. } => *order_id,
+            Self::SubmitLimit { order_id, .. }
+            | Self::SubmitMarket { order_id, .. }
+            | Self::SubmitStop { order_id, .. }
+            | Self::SubmitStopLimit { order_id, .. }
+            | Self::SubmitLimitGtc { order_id, .. }
+            | Self::SubmitStopGtc { order_id, .. }
+            | Self::SubmitStopLimitGtc { order_id, .. }
+            | Self::SubmitLimitIoc { order_id, .. }
+            | Self::SubmitLimitFok { order_id, .. }
+            | Self::SubmitTrailingStop { order_id, .. }
+            | Self::SubmitTrailingStopLimit { order_id, .. }
+            | Self::SubmitTrailingStopPct { order_id, .. }
+            | Self::SubmitMoc { order_id, .. }
+            | Self::SubmitLoc { order_id, .. }
+            | Self::SubmitMit { order_id, .. }
+            | Self::SubmitLit { order_id, .. }
+            | Self::SubmitLimitEx { order_id, .. }
+            | Self::SubmitRel { order_id, .. }
+            | Self::SubmitLimitOpg { order_id, .. }
+            | Self::SubmitAdaptive { order_id, .. }
+            | Self::SubmitMtl { order_id, .. }
+            | Self::SubmitMktPrt { order_id, .. }
+            | Self::SubmitStpPrt { order_id, .. }
+            | Self::SubmitMidPrice { order_id, .. }
+            | Self::SubmitSnapMkt { order_id, .. }
+            | Self::SubmitSnapMid { order_id, .. }
+            | Self::SubmitSnapPri { order_id, .. }
+            | Self::SubmitPegMkt { order_id, .. }
+            | Self::SubmitPegMid { order_id, .. }
+            | Self::SubmitAlgo { order_id, .. }
+            | Self::SubmitPegBench { order_id, .. }
+            | Self::SubmitLimitAuc { order_id, .. }
+            | Self::SubmitMtlAuc { order_id, .. }
+            | Self::SubmitWhatIf { order_id, .. }
+            | Self::SubmitLimitFractional { order_id, .. }
+            | Self::SubmitAdjustableStop { order_id, .. } => *order_id,
+            Self::SubmitBracket { parent_id, .. } => *parent_id,
+        }
+    }
+}
+
 /// Pre-allocated buffer for pending order requests. Never allocates on the hot path.
 /// Created once with capacity, then push/clear cycle each tick.
 pub struct OrderBuffer {
