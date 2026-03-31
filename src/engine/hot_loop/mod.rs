@@ -742,11 +742,12 @@ impl HotLoop {
         self.reconnect_auth = Some(auth);
     }
 
-    /// Update caller-specific fields on the reconnect auth (host, username, paper).
-    pub fn update_reconnect_auth(&mut self, host: String, username: String, paper: bool) {
+    /// Update caller-specific fields on the reconnect auth (host, username, password, paper).
+    pub fn update_reconnect_auth(&mut self, host: String, username: String, password: String, paper: bool) {
         if let Some(auth) = self.reconnect_auth.as_mut() {
             auth.host = host;
             auth.username = username;
+            auth.password = password;
             auth.paper = paper;
         }
     }
@@ -771,7 +772,7 @@ impl HotLoop {
             .spawn(move || {
                 let result = connect_farm(
                     &auth.host, "usfarm",
-                    &auth.username, auth.paper,
+                    &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
                     &auth.hw_info, &auth.encoded,
                 );

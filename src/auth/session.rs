@@ -365,6 +365,9 @@ fn wrap_xyz_fix(xyz_payload: &[u8]) -> Vec<u8> {
     msg
 }
 
+/// Maximum size for a farm auth message (prevents unbounded allocation).
+const MAX_FARM_MSG_SIZE: usize = 65536;
+
 /// Read one framed message from a farm stream.
 fn recv_8eq1(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(4096);
@@ -374,7 +377,7 @@ fn recv_8eq1(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionReset,
-                "farm connection closed during SOFT_TOKEN",
+                "farm connection closed during auth",
             ));
         }
         buf.extend_from_slice(&tmp[..n]);
@@ -388,6 +391,12 @@ fn recv_8eq1(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
                         .ok()
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
+                    if body_len > MAX_FARM_MSG_SIZE {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("farm message body too large: {} bytes", body_len),
+                        ));
+                    }
                     let header_end = val_start + soh_pos + 1;
                     let total = header_end + body_len;
                     if buf.len() >= total {
@@ -409,7 +418,15 @@ fn extract_xyz(msg: &[u8]) -> &[u8] {
     }
 }
 
-pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Result<()> {
+/// Result of soft token authentication attempt.
+pub enum SoftTokenOutcome {
+    /// Token accepted.
+    Passed,
+    /// Token not recognized (state 5 / "UNKNOWN") — SRP fallback needed.
+    Unknown,
+}
+
+pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Result<SoftTokenOutcome> {
     use sha1::{Digest, Sha1};
 
     // State 1: Send empty init (FIX-framed for farm)
@@ -422,6 +439,12 @@ pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Res
     let (_, _, state2, fields2) = xyz::xyz_parse_response(xyz2)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SOFT_TOKEN: invalid XYZ state 2"))?;
 
+    if state2 == 5 {
+        // Farm rejected soft token — SRP fallback needed.
+        // See: https://github.com/deepentropy/ibx/issues/123
+        log::warn!("SOFT_TOKEN: farm returned state 5 (UNKNOWN) — SRP fallback needed");
+        return Ok(SoftTokenOutcome::Unknown);
+    }
     if state2 != 2 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -467,11 +490,138 @@ pub fn do_soft_token(stream: &mut TcpStream, session_token: &BigUint) -> io::Res
         .unwrap_or("");
 
     if result == "PASSED" {
-        Ok(())
+        Ok(SoftTokenOutcome::Passed)
+    } else if result == "UNKNOWN" {
+        log::warn!("SOFT_TOKEN: farm returned UNKNOWN — SRP fallback needed");
+        Ok(SoftTokenOutcome::Unknown)
     } else {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("SOFT_TOKEN auth failed: {}", result),
+        ))
+    }
+}
+
+/// SRP-6 authentication for farm connections using FIX framing (8=1).
+/// Called as fallback when `do_soft_token` returns `SoftTokenOutcome::Unknown`.
+/// Same SRP math as `do_srp`, different wire framing.
+pub fn do_srp_farm(stream: &mut TcpStream, username: &str, password: &str) -> io::Result<()> {
+    let n = srp::srp_n();
+    let g = BigUint::from(srp::SRP_G);
+
+    // State 1: Send AUTH_QUERY (FIX-framed)
+    let msg1 = xyz::xyz_build_srp_v20(1, &[]);
+    stream.write_all(&wrap_xyz_fix(&msg1))?;
+
+    // State 2: Receive AUTH_PARAMS (FIX-framed)
+    let recv2 = recv_8eq1(stream)?;
+    let xyz2 = extract_xyz(&recv2);
+    let (_, _, state2, fields2) = xyz::xyz_parse_response(xyz2)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid state 2"))?;
+
+    if state2 != 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Farm SRP: expected state 2, got {}", state2),
+        ));
+    }
+
+    let data_fields = extract_srp_data(&fields2, username);
+    let (n, g) = if data_fields.len() >= 2 {
+        if let (Some(server_n), Some(server_g)) = (
+            BigUint::parse_bytes(data_fields[0].as_bytes(), 16),
+            BigUint::parse_bytes(data_fields[1].as_bytes(), 16),
+        ) {
+            (server_n, server_g)
+        } else {
+            (n, g)
+        }
+    } else {
+        (n, g)
+    };
+
+    // Generate client keys with 32-byte private key
+    let mut a_bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut a_bytes);
+    let a_priv = BigUint::from_bytes_be(&a_bytes);
+    let a_pub = g.modpow(&a_priv, &n);
+
+    // State 3: Send client public key A (FIX-framed)
+    let a_hex = format!("{:x}", a_pub);
+    let msg3 = xyz::xyz_build_srp_v20(3, &[("L", &a_hex)]);
+    stream.write_all(&wrap_xyz_fix(&msg3))?;
+
+    // State 4: Receive salt + B (FIX-framed)
+    let recv4 = recv_8eq1(stream)?;
+    let xyz4 = extract_xyz(&recv4);
+    let (_, _, state4, fields4) = xyz::xyz_parse_response(xyz4)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid state 4"))?;
+
+    if state4 == 7 {
+        let result = fields4.get(9).map(|s| s.as_str()).unwrap_or("FAILED");
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Farm SRP early error (state 7): {}", result),
+        ));
+    }
+    if state4 != 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Farm SRP: expected state 4, got {}", state4),
+        ));
+    }
+
+    let data_fields = extract_srp_data(&fields4, username);
+    if data_fields.len() < 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Farm SRP: missing salt/B in state 4",
+        ));
+    }
+
+    let salt_hex = &data_fields[0];
+    let b_hex = &data_fields[1];
+    let salt_bytes = hex::decode(salt_hex)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let b_pub = BigUint::parse_bytes(b_hex.as_bytes(), 16).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid B hex")
+    })?;
+
+    // Compute SRP values (same math as do_srp)
+    let x = srp::srp_compute_x(strip_leading_zeros(&salt_bytes), username, password);
+    let u = srp::srp_compute_u(&a_pub, &b_pub);
+    let k_mult = BigUint::from(srp::SRP_K);
+    let s = srp::srp_compute_s(&b_pub, &a_priv, &u, &x, &n, &g, &k_mult);
+    let k = srp::srp_compute_k(&s);
+
+    let salt_int = BigUint::parse_bytes(salt_hex.as_bytes(), 16).unwrap_or_default();
+    let m1 = srp::srp_compute_m1(&n, &g, username, &salt_int, &a_pub, &b_pub, &k);
+
+    // State 5: Send client proof M1 (FIX-framed)
+    let m1_hex = format!("{:x}", m1);
+    let msg5 = xyz::xyz_build_srp_v20(5, &[("N", &m1_hex)]);
+    stream.write_all(&wrap_xyz_fix(&msg5))?;
+
+    // State 6: Receive AUTH_RESULT (FIX-framed)
+    let recv6 = recv_8eq1(stream)?;
+    let xyz6 = extract_xyz(&recv6);
+    let (_, _, state6, fields6) = xyz::xyz_parse_response(xyz6)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid state 6"))?;
+
+    let result = fields6
+        .get(9)
+        .filter(|s| !s.is_empty())
+        .or_else(|| fields6.iter().rev().find(|s| !s.is_empty()))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    if state6 == 6 && result == "PASSED" {
+        log::info!("Farm SRP auth PASSED");
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("Farm SRP FAILED (state={}): {}", state6, result),
         ))
     }
 }

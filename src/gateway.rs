@@ -131,6 +131,8 @@ pub fn farm_logon_exchange(
     stream: &mut TcpStream,
     channel: &mut SecureChannel,
     session_token: &BigUint,
+    username: &str,
+    password: &str,
     read_mac_key: &[u8],
     initial_read_iv: &[u8],
 ) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
@@ -184,9 +186,16 @@ pub fn farm_logon_exchange(
                     read_iv = iv.to_vec();
                 }
 
-                // Check for auth challenge → respond with token
+                // Check for auth challenge → respond with token, fall back to SRP if rejected
                 if decrypted.windows(5).any(|w| w == b"35=S\x01") {
-                    do_soft_token(stream, session_token)?;
+                    match do_soft_token(stream, session_token)? {
+                        session::SoftTokenOutcome::Passed => {}
+                        session::SoftTokenOutcome::Unknown => {
+                            log::warn!("Soft token rejected — falling back to SRP farm auth");
+                            stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+                            session::do_srp_farm(stream, username, password)?;
+                        }
+                    }
                 }
             } else if fields.get(&35).map(|s| s.as_str()) == Some("A") {
                 // Logon ACK — sign_iv is the current write_iv (mutated by encrypt)
@@ -249,6 +258,7 @@ fn try_frame_farm_msg(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
 pub struct ReconnectAuth {
     pub host: String,
     pub username: String,
+    pub password: String,
     pub paper: bool,
     pub session_key: BigUint,
     pub session_token: BigUint,
@@ -280,6 +290,7 @@ pub fn connect_farm(
     host: &str,
     farm_id: &str,
     username: &str,
+    password: &str,
     paper: bool,
     server_session_id: &str,
     session_key: &BigUint,
@@ -334,7 +345,8 @@ pub fn connect_farm(
     let read_mac_key = channel.key_block().map(|kb| kb[84..104].to_vec()).unwrap_or_default();
     let initial_read_iv = channel.key_block().map(|kb| kb[48..64].to_vec()).unwrap_or_default();
     let (read_iv, sign_iv, logon_remaining) = farm_logon_exchange(
-        &mut stream, &mut channel, session_key, &read_mac_key, &initial_read_iv,
+        &mut stream, &mut channel, session_key, username, password,
+        &read_mac_key, &initial_read_iv,
     )?;
     log::info!("{} logon exchange complete, {} bytes remaining", farm_id, logon_remaining.len());
 
@@ -1050,27 +1062,27 @@ impl Gateway {
         let (farm_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) =
             std::thread::scope(|s| {
                 let farm_h = s.spawn(|| connect_farm(
-                    host, "usfarm", &config.username, config.paper,
+                    host, "usfarm", &config.username, &config.password, config.paper,
                     &server_session_id, &session_key, &hw_info, &encoded,
                 ));
                 let hmds_h = s.spawn(|| connect_farm(
-                    host, "ushmds", &config.username, config.paper,
+                    host, "ushmds", &config.username, &config.password, config.paper,
                     &server_session_id, &session_key, &hw_info, &encoded,
                 ));
                 let cashfarm_h = s.spawn(|| connect_farm(
-                    host, "cashfarm", &config.username, config.paper,
+                    host, "cashfarm", &config.username, &config.password, config.paper,
                     &server_session_id, &session_key, &hw_info, &encoded,
                 ));
                 let usfuture_h = s.spawn(|| connect_farm(
-                    host, "usfuture", &config.username, config.paper,
+                    host, "usfuture", &config.username, &config.password, config.paper,
                     &server_session_id, &session_key, &hw_info, &encoded,
                 ));
                 let eufarm_h = s.spawn(|| connect_farm(
-                    host, "eufarm", &config.username, config.paper,
+                    host, "eufarm", &config.username, &config.password, config.paper,
                     &server_session_id, &session_key, &hw_info, &encoded,
                 ));
                 let jfarm_h = s.spawn(|| connect_farm(
-                    host, "jfarm", &config.username, config.paper,
+                    host, "jfarm", &config.username, &config.password, config.paper,
                     &server_session_id, &session_key, &hw_info, &encoded,
                 ));
 
@@ -1232,6 +1244,7 @@ impl Gateway {
         let reconnect_auth = ReconnectAuth {
             host: String::new(), // Filled by caller (Python EClient or Rust API)
             username: String::new(), // Filled by caller
+            password: String::new(), // Filled by caller
             paper: false, // Filled by caller
             session_key: self.session_token.clone(),
             session_token: self.session_token.clone(),
