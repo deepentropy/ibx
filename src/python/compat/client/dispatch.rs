@@ -57,8 +57,11 @@ impl EClient {
             let commission = fill.commission as f64 / PRICE_SCALE_F;
 
             let status = if fill.remaining == 0 { "Filled" } else { "PartiallyFilled" };
+            let (perm_id, parent_id) = shared.orders.get_order_info(fill.order_id)
+                .map(|info| (info.order.perm_id, info.order.parent_id))
+                .unwrap_or((0, 0));
             call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, fill.qty as f64, fill.remaining as f64,
-                 price, 0i64, 0i64, price, 0i64, "", 0.0f64));
+                 price, perm_id, parent_id, price, 0i64, "", 0.0f64));
 
             // Track execution for req_executions
             let exec_id = format!("{}.{}", fill.order_id, fill.timestamp_ns);
@@ -126,7 +129,7 @@ impl EClient {
             exec_dict.set_item("orderId", fill.order_id as i64)?;
             exec_dict.set_item("cumQty", cum_qty)?;
             exec_dict.set_item("avgPrice", avg_price)?;
-            exec_dict.set_item("permId", 0i64)?;
+            exec_dict.set_item("permId", perm_id)?;
             exec_dict.set_item("clientId", 0i64)?;
             exec_dict.set_item("liquidation", 0i64)?;
             exec_dict.set_item("lastLiquidity", 0i64)?;
@@ -154,7 +157,7 @@ impl EClient {
         for update in updates {
             let status = order_status_str(update.status);
             call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, update.filled_qty as f64,
-                 update.remaining_qty as f64, 0.0f64, 0i64, 0i64, 0.0f64, 0i64, "", 0.0f64));
+                 update.remaining_qty as f64, 0.0f64, update.perm_id, update.parent_id, 0.0f64, 0i64, "", 0.0f64));
 
             // Track open orders
             self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);

@@ -41,6 +41,8 @@ pub struct Context {
     pub(crate) account: AccountState,
     clock: Clock,
     next_order_id: OrderId,
+    /// ClOrdID version counter per order for modify chaining (orderId.0 → .1 → .2).
+    pub(crate) modify_versions: HashMap<OrderId, u32>,
     /// Timestamp when the last farm socket recv returned data (for decode latency measurement).
     pub(crate) recv_at: Instant,
     /// Total hot loop iterations since start.
@@ -54,6 +56,7 @@ impl Context {
             positions: [0i64; MAX_INSTRUMENTS],
             open_orders: HashMap::with_capacity(128),
             pending_orders: OrderBuffer::new(),
+            modify_versions: HashMap::new(),
             account: AccountState::default(),
             clock: Clock::new(),
             next_order_id: {
@@ -901,7 +904,10 @@ impl Context {
     }
 
     pub fn insert_order(&mut self, order: Order) {
-        self.open_orders.insert(order.order_id, order);
+        let oid = order.order_id;
+        self.open_orders.insert(oid, order);
+        // Initialize modify version to 0 for new orders (don't reset on modify).
+        self.modify_versions.entry(oid).or_insert(0);
     }
 
     pub fn update_order_status(&mut self, order_id: OrderId, status: OrderStatus) {

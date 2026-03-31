@@ -16,6 +16,23 @@ use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, parse_price_tag};
 
+/// Convert a FIX OrderID hex string (e.g. "00cf16ed.000225ed.69ca0941.0001") to a stable i64 permId.
+/// Uses FNV-1a hash of the first 3 dot-segments (the stable prefix) so that permId
+/// remains constant across modifications (the last segment increments on each modify).
+fn perm_id_from_fix_order_id(s: &str) -> i64 {
+    // Hash only the stable prefix: "00cf16ed.000225ed.69ca0941" (drop ".0001")
+    let stable = match s.rmatch_indices('.').next() {
+        Some((idx, _)) if s[..idx].contains('.') => &s[..idx],
+        _ => s, // no dots or only one segment — hash entire string
+    };
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in stable.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    (h >> 1) as i64
+}
+
 pub(crate) struct CcpState {
     pub(crate) seen_exec_ids: HashSet<String>,
     pub(crate) bulletin_next_id: i32,
@@ -206,7 +223,9 @@ impl CcpState {
     ) {
         let clord_id = parsed.get(&11).and_then(|s| {
             let stripped = s.strip_prefix('C').unwrap_or(s);
-            stripped.parse::<u64>().ok()
+            // Strip versioned suffix (.0, .1, .2) from modify-chained ClOrdIDs
+            let base = stripped.split('.').next().unwrap_or(stripped);
+            base.parse::<u64>().ok()
         }).unwrap_or(0);
 
         // What-If response
@@ -308,12 +327,16 @@ impl CcpState {
 
         if status_changed && !had_fill {
             if let Some(order) = context.order(clord_id).copied() {
+                let perm_id: i64 = parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
+                let parent_id: i64 = parsed.get(&583).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
                 let update = crate::types::OrderUpdate {
                     order_id: clord_id,
                     instrument: order.instrument,
                     status,
                     filled_qty: order.filled as i64,
                     remaining_qty: leaves_qty,
+                    perm_id,
+                    parent_id,
                     timestamp_ns: context.now_ns(),
                 };
                 shared.orders.push_order_update(update);
@@ -331,7 +354,7 @@ impl CcpState {
             let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
             let local_symbol = parsed.get(&6035).cloned().unwrap_or_default();
             let _routing_exchange = parsed.get(&6004).cloned().unwrap_or_default();
-            let perm_id: i64 = parsed.get(&37).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let perm_id: i64 = parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
             let total_qty: f64 = parsed.get(&38).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let ord_type_tag = parsed.get(&40).map(|s| s.as_str()).unwrap_or("");
             let limit_price: f64 = parsed.get(&44).and_then(|s| s.parse().ok()).unwrap_or(0.0);

@@ -608,6 +608,11 @@ impl ClientCore {
 
     // ── Open order tracking ──
 
+    /// Check if an order with this ID is currently tracked (for modify detection).
+    pub fn is_order_tracked(&self, order_id: u64) -> bool {
+        self.open_orders.lock().unwrap().contains_key(&order_id)
+    }
+
     /// Track a newly placed order.
     pub fn track_order(&self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId) {
         let remaining = order.total_quantity;

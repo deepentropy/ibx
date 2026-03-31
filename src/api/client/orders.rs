@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::api::types::ExecutionFilter;
+use crate::api::types::{ExecutionFilter, PRICE_SCALE_F};
 use crate::api::wrapper::Wrapper;
 use crate::client_core::ClientCore;
 use crate::types::*;
@@ -28,7 +28,19 @@ impl EClient {
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
         )?;
 
-        let cmd = ClientCore::build_order_request(order, oid, instrument)?;
+        // If orderId is already tracked, this is a modification — emit Modify instead of Submit.
+        let cmd = if self.core.is_order_tracked(oid) {
+            let price = (order.lmt_price * PRICE_SCALE_F) as i64;
+            let qty = order.total_quantity as u32;
+            ControlCommand::Order(OrderRequest::Modify {
+                new_order_id: oid,
+                order_id: oid,
+                price,
+                qty,
+            })
+        } else {
+            ClientCore::build_order_request(order, oid, instrument)?
+        };
         self.send(cmd)?;
         self.core.cache_contract(contract.con_id, contract.clone());
         self.core.track_order(oid, contract.clone(), order.clone(), instrument);

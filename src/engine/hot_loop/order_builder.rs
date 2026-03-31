@@ -118,7 +118,8 @@ pub(crate) fn drain_and_send_orders(
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', tif, 0,
                 ));
-                let clord_str = format_int(order_id as i64);
+                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
+                let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
@@ -1307,14 +1308,16 @@ pub(crate) fn drain_and_send_orders(
                 conn.send_fix(&fields)
             }
             OrderRequest::Cancel { order_id } => {
+                // Tag 41 must reference the latest versioned ClOrdID
+                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("C{}", order_id);
-                let orig_clord = format_int(order_id as i64);
+                let orig_clord = format!("{}.{}", order_id, ver);
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
                     (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),   // ClOrdID (cancel)
-                    (41, &orig_clord),  // OrigClOrdID
+                    (41, &orig_clord),  // OrigClOrdID (latest version)
                     (60, &now),         // TransactTime
                 ])
             }
@@ -1325,8 +1328,9 @@ pub(crate) fn drain_and_send_orders(
                     .collect();
                 let mut last_result = Ok(());
                 for oid in open_ids {
+                    let ver = *context.modify_versions.get(&oid).unwrap_or(&0);
                     let clord_str = format!("C{}", oid);
-                    let orig_clord = oid.to_string();
+                    let orig_clord = format!("{}.{}", oid, ver);
                     let now = chrono_free_timestamp();
                     last_result = conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
@@ -1346,8 +1350,13 @@ pub(crate) fn drain_and_send_orders(
                         orig.ord_type, orig.tif, orig.stop_price,
                     ));
                 }
-                let clord_str = format_int(order_id as i64);
-                let orig_clord = format_int(order_id as i64);
+                // Versioned ClOrdID chaining: orderId.0 → .1 → .2
+                let prev_ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
+                let new_ver = prev_ver + 1;
+                context.modify_versions.insert(order_id, new_ver);
+                let clord_str = format!("{}.{}", order_id, new_ver);
+                let orig_clord = format!("{}.{}", order_id, prev_ver);
+
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);
                 let now = chrono_free_timestamp();
@@ -1356,24 +1365,30 @@ pub(crate) fn drain_and_send_orders(
                     .unwrap_or_default();
                 let ord_type_str = crate::types::ord_type_fix_str(orig.map(|o| o.ord_type).unwrap_or(b'2')).to_string();
                 let tif_str = std::str::from_utf8(&[orig.map(|o| o.tif).unwrap_or(b'0')]).unwrap_or("0").to_string();
+                let con_id_str = orig.and_then(|o| context.market.con_id(o.instrument))
+                    .map(|c| c.to_string()).unwrap_or_default();
+
+                // Lean modify message — omit identity tags (6121, 6119, 231, 100, 15, 204)
                 let mut fields: Vec<(u32, &str)> = vec![
                     (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
                     (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),   // ClOrdID
-                    (41, &orig_clord),  // OrigClOrdID
-                    (1, account_id),    // Account
-                    (21, "2"),          // HandlInst = Automated
-                    (55, &symbol),      // Symbol
-                    (54, side_str),     // Side
-                    (38, &qty_str),     // OrderQty
-                    (40, &ord_type_str), // OrdType from original order
-                    (44, &price_str),   // Price
-                    (59, &tif_str),     // TIF from original order
-                    (60, &now),         // TransactTime
-                    (167, "STK"),       // SecurityType
-                    (100, "SMART"),     // ExDestination
-                    (15, "USD"),        // Currency
-                    (204, "0"),         // CustomerOrFirm
+                    (11, &clord_str),    // ClOrdID (versioned)
+                    (41, &orig_clord),   // OrigClOrdID (previous version)
+                    (44, &price_str),    // Price
+                    (1, account_id),     // Account
+                    (6122, "c"),         // Client version
+                    (6433, "1"),         // OutsideRTH (preserve from original)
+                    (38, &qty_str),      // OrderQty
+                    (54, side_str),      // Side
+                    (40, &ord_type_str), // OrdType
+                    (55, &symbol),       // Symbol
+                    (167, "STK"),        // SecurityType
+                    (6035, &symbol),     // LocalSymbol echo
+                    (59, &tif_str),      // TIF
+                    (6008, &con_id_str), // ConId
+                    (6088, "Socket"),    // Connection type
+                    (6211, ""),          // Empty (matches reference)
+                    (6238, ""),          // Empty (matches reference)
                 ];
                 // Include stop price for order types that need it
                 let stop_str;
