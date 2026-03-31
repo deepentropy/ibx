@@ -44,7 +44,7 @@ fn order_lifecycle_partial_then_full_fill() {
     // Step 1: Order submitted
     shared.orders.push_order_update(OrderUpdate {
         order_id: 100, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 200, timestamp_ns: 1000,
+        filled_qty: 0, remaining_qty: 200, perm_id: 0, parent_id: 0, timestamp_ns: 1000,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -97,7 +97,7 @@ fn order_lifecycle_place_then_cancel() {
     // Simulate cancel ack from engine
     shared.orders.push_order_update(OrderUpdate {
         order_id: 50, instrument: 0, status: OrderStatus::Cancelled,
-        filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
+        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -114,7 +114,7 @@ fn order_lifecycle_rejection() {
 
     shared.orders.push_order_update(OrderUpdate {
         order_id: 60, instrument: 0, status: OrderStatus::Rejected,
-        filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
+        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -141,7 +141,7 @@ fn order_lifecycle_partial_fill_then_cancel() {
     // Cancel remaining
     shared.orders.push_order_update(OrderUpdate {
         order_id: 70, instrument: 0, status: OrderStatus::Cancelled,
-        filled_qty: 30, remaining_qty: 70, timestamp_ns: 2000,
+        filled_qty: 30, remaining_qty: 70, perm_id: 0, parent_id: 0, timestamp_ns: 2000,
     });
     w.events.clear();
     client.process_msgs(&mut w);
@@ -791,7 +791,7 @@ fn mixed_ticks_during_fills() {
     // Order update arrives at same time
     shared.orders.push_order_update(OrderUpdate {
         order_id: 43, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 200, timestamp_ns: 0,
+        filled_qty: 0, remaining_qty: 200, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
 
     let mut w = RecordingWrapper::default();
@@ -815,7 +815,7 @@ fn mixed_news_between_orders() {
     // Order submitted
     shared.orders.push_order_update(OrderUpdate {
         order_id: 50, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 100, timestamp_ns: 1000,
+        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 1000,
     });
 
     // News arrives

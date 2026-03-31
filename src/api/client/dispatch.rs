@@ -29,9 +29,12 @@ impl EClient {
             let price_f = fill.price as f64 / PRICE_SCALE_F;
             let commission_f = fill.commission as f64 / PRICE_SCALE_F;
             let status = if fill.remaining == 0 { "Filled" } else { "PartiallyFilled" };
+            let (perm_id, parent_id) = self.shared.orders.get_order_info(fill.order_id)
+                .map(|info| (info.order.perm_id, info.order.parent_id))
+                .unwrap_or((0, 0));
             wrapper.order_status(
                 fill.order_id as i64, status, fill.qty as f64, fill.remaining as f64,
-                price_f, 0, 0, price_f, 0, "", 0.0,
+                price_f, perm_id, parent_id, price_f, 0, "", 0.0,
             );
 
             let side_str = match fill.side {
@@ -85,7 +88,7 @@ impl EClient {
             let status = order_status_str(update.status);
             wrapper.order_status(
                 update.order_id as i64, status, update.filled_qty as f64,
-                update.remaining_qty as f64, 0.0, 0, 0, 0.0, 0, "", 0.0,
+                update.remaining_qty as f64, 0.0, update.perm_id, update.parent_id, 0.0, 0, "", 0.0,
             );
             self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
         }

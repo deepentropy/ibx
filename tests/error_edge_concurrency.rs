@@ -170,7 +170,7 @@ fn disconnect_during_pending_order_uncertain_status() {
     // Order was pending when we disconnect
     shared.orders.push_order_update(OrderUpdate {
         order_id: 50, instrument: 0, status: OrderStatus::Uncertain,
-        filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
+        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -684,7 +684,7 @@ fn shared_state_all_drains_empty_after_first_call() {
     ss.orders.push_fill(Fill { instrument: 0, order_id: 1, side: Side::Buy,
         price: PRICE_SCALE, qty: 1, remaining: 0, commission: 0, timestamp_ns: 0 });
     ss.orders.push_order_update(OrderUpdate { order_id: 1, instrument: 0,
-        status: OrderStatus::Filled, filled_qty: 1, remaining_qty: 0, timestamp_ns: 0 });
+        status: OrderStatus::Filled, filled_qty: 1, remaining_qty: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0 });
     ss.orders.push_cancel_reject(CancelReject { order_id: 1, instrument: 0,
         reject_type: 1, reason_code: 0, timestamp_ns: 0 });
     ss.market.push_tbt_trade(TbtTrade { instrument: 0, price: PRICE_SCALE,

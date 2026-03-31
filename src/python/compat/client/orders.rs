@@ -31,8 +31,20 @@ impl EClient {
         let mut api_order = order.to_api();
         api_order.conditions = order.convert_conditions(py);
 
-        let cmd = ClientCore::build_order_request(&api_order, oid, instrument)
-            .map_err(|e| PyRuntimeError::new_err(e))?;
+        // If orderId is already tracked, this is a modification — emit Modify instead of Submit.
+        let cmd = if self.core.is_order_tracked(oid) {
+            let price = (api_order.lmt_price * crate::api::types::PRICE_SCALE_F) as i64;
+            let qty = api_order.total_quantity as u32;
+            ControlCommand::Order(OrderRequest::Modify {
+                new_order_id: oid,
+                order_id: oid,
+                price,
+                qty,
+            })
+        } else {
+            ClientCore::build_order_request(&api_order, oid, instrument)
+                .map_err(|e| PyRuntimeError::new_err(e))?
+        };
         tx.send(cmd)
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
 
@@ -127,7 +139,7 @@ impl EClient {
             self.wrapper.call_method(
                 py, "order_status",
                 (*order_id as i64, tracked.status.as_str(), tracked.filled, tracked.remaining,
-                 0.0f64, 0i64, 0i64, 0.0f64, 0i64, "", 0.0f64),
+                 0.0f64, tracked.order.perm_id, tracked.order.parent_id, 0.0f64, 0i64, "", 0.0f64),
                 None,
             )?;
         }

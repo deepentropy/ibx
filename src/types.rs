@@ -104,6 +104,8 @@ pub struct OrderUpdate {
     pub status: OrderStatus,
     pub filled_qty: i64,
     pub remaining_qty: i64,
+    pub perm_id: i64,
+    pub parent_id: i64,
     pub timestamp_ns: u64,
 }
 

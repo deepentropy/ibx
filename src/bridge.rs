@@ -711,7 +711,7 @@ mod tests {
         let ss = SharedState::new();
         ss.orders.push_order_update(OrderUpdate {
             order_id: 1, instrument: 0, status: OrderStatus::Submitted,
-            filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
+            filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
         });
         let updates = ss.orders.drain_order_updates();
         assert_eq!(updates.len(), 1);

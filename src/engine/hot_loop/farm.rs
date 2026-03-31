@@ -480,9 +480,12 @@ impl FarmState {
         self.depth_subs.push((req_id, farm, is_smart_depth));
         self.depth_resub_info.push((req_id, con_id, exchange.to_string(), sec_type.to_string(), _num_rows, is_smart_depth));
 
-        // ib-agent#86: SmartDepth requires per-exchange fan-out. The server ACKs a BEST
+        // ib-agent#86: SmartDepth requires per-exchange fan-out. The server ACKs a BEST/SMART
         // subscribe but never sends data for it. Data only arrives for individual exchanges.
-        let exchanges: &[&str] = if is_smart_depth {
+        // Auto-enable fan-out when exchange is SMART/BEST (aggregated routing), since
+        // single-exchange depth to SMART returns nothing.
+        let needs_fanout = is_smart_depth || matches!(exchange, "SMART" | "BEST" | "");
+        let exchanges: &[&str] = if needs_fanout {
             // US equity exchanges that the gateway fans out to (ib-agent#86 capture)
             &["NASDAQ", "IEX", "BATS", "ARCA", "BEX", "NYSE", "BYX", "NYSENAT", "T24X",
               "DRCTEDGE", "MEMX", "PEARL", "AMEX", "CHX", "LTSE", "PSX", "ISE", "EDGEA"]
@@ -694,10 +697,13 @@ impl FarmState {
     }
 
     /// Parse 35=Y depth entries (NASDAQ TotalView market-maker level).
-    /// Wire format (from ib-agent#85 capture):
-    ///   Header: [3B misc][3B server_tag]
-    ///   Entry:  [C4|44][4B market_maker][1B position][field_tags...]
-    /// Field tag encoding: bit 7=size, bit 3=ask, bit 2=snapshot, bits 0-1=value_len (00=1B,01=2B,10=3B).
+    /// Wire format (from ib-agent#90 capture):
+    ///   Header: [2B misc][2B stag_uint16_be]
+    ///   Stag switch sentinel: [80 00][2B stag_uint16_be]
+    ///   Snapshot entry: [C4|44][4B market_maker][1B position][field_tags...]
+    ///   Compact entry:  [80|00][1B position][field_tags...]
+    ///     C4/80 = continuation, 44/00 = terminal (last entry for this stag section).
+    /// Field tag encoding: bit 7=size, bit 5=ask, bit 2=snapshot, bits 0-1=value_len (00=1B,01=2B,10=3B).
     fn handle_depth_35y(&self, msg: &[u8], shared: &SharedState) {
         use crate::types::DepthUpdate;
         let body = match find_body_after_tag(msg, b"35=Y\x01") {
@@ -705,89 +711,149 @@ impl FarmState {
             None => return,
         };
 
-        // Header: 6 bytes — [3B misc][3B server_tag]
-        if body.len() < 6 { return; }
-        let stag = ((body[3] as u32) << 16) | ((body[4] as u32) << 8) | (body[5] as u32);
-        let (req_id, is_smart, min_tick) = match self.depth_tag_to_req.iter()
-            .find(|(s, _, _, _)| *s == stag)
-            .map(|(_, r, sm, mt)| (*r, *sm, *mt))
-        {
-            Some(v) => v,
-            None => {
-                log::warn!("35=Y: unknown header stag {} (known: {:?})", stag, self.depth_tag_to_req);
-                return;
-            }
-        };
+        // Header: 2 bytes misc. The stag is set by the first 80 00 [2B stag] sentinel.
+        if body.len() < 4 { return; }
 
-        let mut pos = 6;
+        // Try header stag at body[2..4] (common case).
+        let mut req_id: u32 = 0;
+        let mut is_smart = false;
+        let mut min_tick: f64 = 0.01;
+        let mut pos = 2;
+
+        let hdr_stag = ((body[2] as u32) << 8) | (body[3] as u32);
+        if let Some((r, sm, mt)) = self.lookup_depth_stag(hdr_stag) {
+            req_id = r;
+            is_smart = sm;
+            min_tick = mt;
+            pos = 4;
+        }
+        // If header stag didn't match, start scanning from pos=2;
+        // the first stag switch sentinel will set req_id.
 
         while pos < body.len() {
-            let prefix = body[pos];
-            if prefix != 0xC4 && prefix != 0x44 { pos += 1; continue; }
-            pos += 1;
+            let b = body[pos];
 
-            // 4-char market maker + 1-byte position
-            if pos + 5 > body.len() { break; }
-            let mm = String::from_utf8_lossy(&body[pos..pos+4]).trim().to_string();
-            pos += 4;
-            let book_position = body[pos] as i32;
-            pos += 1;
-
-            // Parse field tags until next entry or end
-            let mut price: f64 = 0.0;
-            let mut size: f64 = 0.0;
-            let mut side: i32 = 1; // default bid
-            let mut is_snapshot = false;
-            let mut has_price = false;
-            let mut has_size = false;
-
-            while pos < body.len() && body[pos] != 0xC4 && body[pos] != 0x44 {
-                let tag = body[pos];
-                pos += 1;
-
-                let is_size_field = tag & 0x80 != 0;
-                let is_ask = tag & 0x20 != 0;
-                let snapshot = tag & 0x04 != 0;
-                let val_len = tag & 0x03; // 00=1B, 01=2B, 10=3B
-
-                if is_ask { side = 0; } else { side = 1; }
-                if snapshot { is_snapshot = true; }
-
-                let val: u32 = match val_len {
-                    0 => {
-                        if pos >= body.len() { break; }
-                        let v = body[pos] as u32; pos += 1; v
-                    }
-                    1 => {
-                        if pos + 2 > body.len() { break; }
-                        let v = ((body[pos] as u32) << 8) | (body[pos+1] as u32);
-                        pos += 2; v
-                    }
-                    _ => { // 2 or 3 → 3-byte
-                        if pos + 3 > body.len() { break; }
-                        let v = ((body[pos] as u32) << 16) | ((body[pos+1] as u32) << 8) | (body[pos+2] as u32);
-                        pos += 3; v
-                    }
-                };
-
-                if is_size_field {
-                    size = val as f64;
-                    has_size = true;
-                } else {
-                    price = val as f64 * min_tick;
-                    has_price = true;
+            // Stag switch sentinel: 80 00 [2B stag] — bid_size=0 repurposed.
+            // Also detect 00 00 [2B stag] (3-byte stag with high byte 0x00, at message boundaries).
+            if (b == 0x80 || b == 0x00) && pos + 4 <= body.len() && body[pos + 1] == 0x00 {
+                let candidate = ((body[pos + 2] as u32) << 8) | (body[pos + 3] as u32);
+                if let Some((r, sm, mt)) = self.lookup_depth_stag(candidate) {
+                    req_id = r;
+                    is_smart = sm;
+                    min_tick = mt;
+                    pos += 4;
+                    continue;
                 }
             }
 
-            if has_price || has_size {
-                let operation = if is_snapshot { 0 } else { 1 };
-                log::trace!("35=Y: mm={} side={} pos={} ${:.4} x {:.0}", mm, side, book_position, price, size);
-                shared.market.push_depth_update(DepthUpdate {
-                    req_id, position: book_position, market_maker: mm,
-                    operation, side, price, size, is_smart_depth: is_smart,
-                });
+            // Snapshot entry: [C4|44][4B market_maker][1B position][field_tags...]
+            if b == 0xC4 || b == 0x44 {
+                pos += 1;
+                if pos + 5 > body.len() { break; }
+                let mm = String::from_utf8_lossy(&body[pos..pos + 4]).trim().to_string();
+                pos += 4;
+                let book_position = body[pos] as i32;
+                pos += 1;
+
+                if let Some((price, size, side, is_snapshot)) = self.parse_depth_fields(body, &mut pos, min_tick) {
+                    shared.market.push_depth_update(DepthUpdate {
+                        req_id, position: book_position, market_maker: mm,
+                        operation: if is_snapshot { 0 } else { 1 },
+                        side, price, size, is_smart_depth: is_smart,
+                    });
+                }
+                continue;
+            }
+
+            // Compact entry: [80|00][1B position][field_tags...]  (no market maker)
+            // 80 = continuation, 00 = terminal for this stag section.
+            // Guard: stag switch sentinel already checked above.
+            // Validate: position must be 0-29 and next byte must be a valid field tag.
+            if (b == 0x80 || b == 0x00) && pos + 2 < body.len() {
+                let candidate_pos = body[pos + 1];
+                let candidate_tag = body[pos + 2];
+                // Valid field tags: only bits 7,5,2,1,0 set (mask 0xAF). Reject bits 6,4,3.
+                if candidate_pos < 30 && candidate_tag & 0x50 == 0 && candidate_tag & 0x08 == 0 {
+                    pos += 1;
+                    let book_position = body[pos] as i32;
+                    pos += 1;
+
+                    if let Some((price, size, side, is_snapshot)) = self.parse_depth_fields(body, &mut pos, min_tick) {
+                        shared.market.push_depth_update(DepthUpdate {
+                            req_id, position: book_position, market_maker: String::new(),
+                            operation: if is_snapshot { 0 } else { 1 },
+                            side, price, size, is_smart_depth: is_smart,
+                        });
+                    }
+                    continue;
+                }
+            }
+
+            // Unknown byte — skip
+            pos += 1;
+        }
+    }
+
+    /// Look up a depth server_tag → (req_id, is_smart, min_tick).
+    fn lookup_depth_stag(&self, stag: u32) -> Option<(u32, bool, f64)> {
+        self.depth_tag_to_req.iter()
+            .find(|(s, _, _, _)| *s == stag)
+            .map(|(_, r, sm, mt)| (*r, *sm, *mt))
+    }
+
+    /// Parse one price + one size field tag pair. Returns (price, size, side, is_snapshot).
+    /// Advances `pos` past consumed bytes.
+    fn parse_depth_fields(&self, body: &[u8], pos: &mut usize, min_tick: f64) -> Option<(f64, f64, i32, bool)> {
+        let mut price: f64 = 0.0;
+        let mut size: f64 = 0.0;
+        let mut side: i32 = 1; // default bid
+        let mut is_snapshot = false;
+        let mut has_price = false;
+        let mut has_size = false;
+
+        // Parse up to 2 field tags (one price + one size).
+        for _ in 0..2 {
+            if *pos >= body.len() { break; }
+            let tag = body[*pos];
+            // Valid field tags use bits 7,5,2,1,0. Reject if bit 6 or bit 4 set.
+            if tag & 0x50 != 0 { break; }
+            // Reject entry/stag prefixes that would start a new entry.
+            if tag == 0xC4 || tag == 0x44 { break; }
+            *pos += 1;
+
+            let is_size_field = tag & 0x80 != 0;
+            let is_ask = tag & 0x20 != 0;
+            if tag & 0x04 != 0 { is_snapshot = true; }
+            if is_ask { side = 0; } else { side = 1; }
+
+            let val_len = tag & 0x03;
+            let val: u32 = match val_len {
+                0 => {
+                    if *pos >= body.len() { break; }
+                    let v = body[*pos] as u32; *pos += 1; v
+                }
+                1 => {
+                    if *pos + 2 > body.len() { break; }
+                    let v = ((body[*pos] as u32) << 8) | (body[*pos + 1] as u32);
+                    *pos += 2; v
+                }
+                _ => {
+                    if *pos + 3 > body.len() { break; }
+                    let v = ((body[*pos] as u32) << 16) | ((body[*pos + 1] as u32) << 8) | (body[*pos + 2] as u32);
+                    *pos += 3; v
+                }
+            };
+
+            if is_size_field {
+                size = val as f64;
+                has_size = true;
+            } else {
+                price = val as f64 * min_tick;
+                has_price = true;
             }
         }
+
+        if has_price || has_size { Some((price, size, side, is_snapshot)) } else { None }
     }
 
     pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {

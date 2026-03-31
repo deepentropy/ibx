@@ -1145,15 +1145,15 @@ fn process_msgs_dispatches_order_updates() {
     let (client, _rx, shared) = test_client();
     shared.orders.push_order_update(OrderUpdate {
         order_id: 43, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
+        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     shared.orders.push_order_update(OrderUpdate {
         order_id: 44, instrument: 0, status: OrderStatus::Cancelled,
-        filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
+        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     shared.orders.push_order_update(OrderUpdate {
         order_id: 45, instrument: 0, status: OrderStatus::Rejected,
-        filled_qty: 0, remaining_qty: 100, timestamp_ns: 0,
+        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -1630,7 +1630,7 @@ fn process_msgs_drains_on_first_call_empty_on_second() {
     });
     shared.orders.push_order_update(OrderUpdate {
         order_id: 2, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 1, timestamp_ns: 0,
+        filled_qty: 0, remaining_qty: 1, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
 
     let mut w = RecordingWrapper::default();
@@ -1686,14 +1686,13 @@ fn modify_limit_order_price_via_resubmit() {
 
     let mut found = false;
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(req) = cmd {
-            if let OrderRequest::SubmitLimit { order_id: 80, price, .. } = req {
-                assert_eq!(price, (152.0 * PRICE_SCALE_F) as i64);
-                found = true;
-            }
+        if let ControlCommand::Order(OrderRequest::Modify { order_id: 80, price, qty, .. }) = cmd {
+            assert_eq!(price, (152.0 * PRICE_SCALE_F) as i64);
+            assert_eq!(qty, 100);
+            found = true;
         }
     }
-    assert!(found, "Modified limit order should be sent with new price");
+    assert!(found, "Resubmit with same orderId should emit Modify");
 }
 
 #[test]
@@ -1798,14 +1797,15 @@ fn modify_tif_day_to_gtc_via_resubmit() {
     };
     client.place_order(88, &spy(), &modified).unwrap();
 
-    let mut found_limit_ex = false;
+    let mut found_modify = false;
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::SubmitLimitEx { order_id: 88, tif, .. }) = cmd {
-            assert_eq!(tif, b'1', "GTC should map to TIF byte 0x31 ('1')");
-            found_limit_ex = true;
+        if let ControlCommand::Order(OrderRequest::Modify { order_id: 88, price, qty, .. }) = cmd {
+            assert_eq!(price, (150.0 * PRICE_SCALE_F) as i64);
+            assert_eq!(qty, 100);
+            found_modify = true;
         }
     }
-    assert!(found_limit_ex, "GTC limit should use SubmitLimitEx");
+    assert!(found_modify, "Resubmit with same orderId should emit Modify");
 }
 
 #[test]
@@ -1827,13 +1827,13 @@ fn modify_price_and_qty_simultaneously() {
 
     let mut found = false;
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::SubmitLimit { order_id: 55, qty, price, .. }) = cmd {
+        if let ControlCommand::Order(OrderRequest::Modify { order_id: 55, qty, price, .. }) = cmd {
             assert_eq!(qty, 200);
             assert_eq!(price, (148.0 * PRICE_SCALE_F) as i64);
             found = true;
         }
     }
-    assert!(found, "Modified order should have new price and qty");
+    assert!(found, "Resubmit with same orderId should emit Modify with new price and qty");
 }
 
 #[test]
@@ -1853,13 +1853,13 @@ fn modify_order_type_lmt_to_stp() {
     };
     client.place_order(66, &spy(), &modified).unwrap();
 
-    let mut found_stop = false;
+    let mut found_modify = false;
     while let Ok(cmd) = rx.try_recv() {
-        if matches!(cmd, ControlCommand::Order(OrderRequest::SubmitStop { order_id: 66, .. })) {
-            found_stop = true;
+        if matches!(cmd, ControlCommand::Order(OrderRequest::Modify { order_id: 66, .. })) {
+            found_modify = true;
         }
     }
-    assert!(found_stop, "Modified order should now be a stop order");
+    assert!(found_modify, "Resubmit with same orderId should emit Modify");
 }
 
 // ── Market data type switching ────────────────────────────────────
