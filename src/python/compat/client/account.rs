@@ -55,6 +55,11 @@ impl EClient {
     /// Request all positions.
     fn req_positions(&self, py: Python<'_>) -> PyResult<()> {
         let shared = self.shared_state()?;
+        // Wait for init burst to deliver account/position data (up to 5s).
+        for _ in 0..500 {
+            if shared.portfolio.account_data_received() { break; }
+            py.allow_threads(|| std::thread::sleep(std::time::Duration::from_millis(10)));
+        }
         let positions = shared.portfolio.position_infos();
         for pi in &positions {
             let c = self.core.get_contract(pi.con_id, &shared).map(|ac| {
@@ -142,6 +147,10 @@ impl EClient {
     #[pyo3(signature = (req_id, account, model_code))]
     fn req_positions_multi(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         let shared = self.shared_state()?;
+        for _ in 0..500 {
+            if shared.portfolio.account_data_received() { break; }
+            py.allow_threads(|| std::thread::sleep(std::time::Duration::from_millis(10)));
+        }
         let positions = shared.portfolio.position_infos();
         for pi in &positions {
             let mut c = Contract::default();

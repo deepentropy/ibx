@@ -10,8 +10,13 @@ impl EClient {
     // ── Positions ──
 
     /// Request positions. Matches `reqPositions` in C++.
-    /// Immediately delivers all positions via wrapper callbacks, then calls position_end.
+    /// Waits for server-pushed account data before delivering, then calls position_end.
     pub fn req_positions(&self, wrapper: &mut impl Wrapper) {
+        // Wait for init burst to deliver account/position data (up to 5s).
+        for _ in 0..500 {
+            if self.shared.portfolio.account_data_received() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let positions = self.shared.portfolio.position_infos();
         for pi in &positions {
             let c = self.core.get_contract(pi.con_id, &self.shared)

@@ -734,7 +734,7 @@ impl HotLoop {
 
     /// Replace the auth connection (after reconnection) and reconcile order state.
     pub fn reconnect_ccp(&mut self, conn: Connection) {
-        self.ccp.reconnect(conn, &mut self.ccp_conn, &mut self.hb);
+        self.ccp.reconnect(conn, &mut self.ccp_conn, &mut self.hb, &self.account_id);
     }
 
     /// Set cached auth credentials for farm auto-reconnect.

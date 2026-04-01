@@ -826,6 +826,7 @@ impl CcpState {
         conn: Connection,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
+        account_id: &str,
     ) {
         *ccp_conn = Some(conn);
         self.disconnected = false;
@@ -835,6 +836,18 @@ impl CcpState {
 
         if let Some(conn) = ccp_conn.as_mut() {
             let ts = chrono_free_timestamp();
+
+            // Re-subscribe to account/position data so server pushes fresh UP/UT/UM messages.
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"), (fix::TAG_SENDING_TIME, &ts),
+                (6040, "91"), (1, account_id), (6556, "DR.1"), (6712, "1"),
+            ]);
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"), (fix::TAG_SENDING_TIME, &ts),
+                (6040, "6"), (6036, "1"), (6095, account_id), (6529, "AR.3"),
+            ]);
+
+            // Mass order status request.
             let result = conn.send_fix(&[
                 (fix::TAG_MSG_TYPE, "H"),
                 (fix::TAG_SENDING_TIME, &ts),
@@ -845,7 +858,7 @@ impl CcpState {
             match result {
                 Ok(()) => {
                     hb.last_ccp_sent = Instant::now();
-                    log::info!("CCP reconnected, sent order mass status request");
+                    log::info!("CCP reconnected, sent account/position re-subscribe + order mass status request");
                 }
                 Err(e) => log::error!("CCP reconnected but mass status request failed: {}", e),
             }
