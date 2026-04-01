@@ -29,6 +29,8 @@ pub(crate) struct HmdsState {
     pub(crate) pending_schedule: Vec<(String, u32)>,
     pub(crate) pending_ticks: Vec<(String, u32, String)>,
     pub(crate) rtbar_subs: Vec<(String, u32, Option<u32>, f64)>,
+    /// req_ids that should keep streaming after initial batch (keepUpToDate=True).
+    pub(crate) keep_up_to_date_reqs: std::collections::HashSet<u32>,
 }
 
 impl HmdsState {
@@ -51,6 +53,7 @@ impl HmdsState {
             pending_schedule: Vec::new(),
             pending_ticks: Vec::new(),
             rtbar_subs: Vec::new(),
+            keep_up_to_date_reqs: std::collections::HashSet::new(),
         }
     }
 
@@ -142,7 +145,7 @@ impl HmdsState {
                             let is_complete = resp.is_complete;
                             shared.reference.push_historical_data(req_id, resp.clone());
                             emit(event_tx, Event::HistoricalData { req_id, data: resp });
-                            if is_complete {
+                            if is_complete && !self.keep_up_to_date_reqs.contains(&req_id) {
                                 self.pending_historical.remove(pos);
                             }
                         }
@@ -187,6 +190,17 @@ impl HmdsState {
                                 log::info!("HMDS rtbar ticker_id={} min_tick={} for req_id={}", ticker_id, min_tick, sub.1);
                                 matched = true;
                                 break;
+                            }
+                        }
+                        if !matched {
+                            // Check keepUpToDate historical queries
+                            for (qid, req_id) in &self.pending_historical {
+                                if xml_tag.contains(qid.as_str()) && self.keep_up_to_date_reqs.contains(req_id) {
+                                    // Store as rtbar subscription so 35=G bars get dispatched
+                                    self.rtbar_subs.push((qid.clone(), *req_id, Some(ticker_id), min_tick));
+                                    matched = true;
+                                    break;
+                                }
                             }
                         }
                         if !matched {
@@ -435,6 +449,22 @@ impl HmdsState {
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
+        self.send_historical_request_ex(req_id, con_id, end_date_time, duration, bar_size, what_to_show, use_rth, false, hmds_conn, hb);
+    }
+
+    pub(crate) fn send_historical_request_ex(
+        &mut self,
+        req_id: u32,
+        con_id: i64,
+        end_date_time: &str,
+        duration: &str,
+        bar_size: &str,
+        what_to_show: &str,
+        use_rth: bool,
+        keep_up_to_date: bool,
+        hmds_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
         let duration = duration.to_lowercase();
         let duration = duration.as_str();
         let end_date_time = if end_date_time.is_empty() {
@@ -494,6 +524,7 @@ impl HmdsState {
             duration: duration.to_string(),
             bar_size: bs,
             use_rth,
+            keep_up_to_date,
         };
 
         let xml = crate::control::historical::build_query_xml(&req);

@@ -279,6 +279,10 @@ pub struct ClientCore {
     pub market_data_type: AtomicI32,
     pub mdt_sent: Mutex<HashSet<i64>>,
 
+    // Historical data keepUpToDate: req_ids that have completed initial batch.
+    // Subsequent bars for these req_ids dispatch as historical_data_update.
+    pub hist_initial_complete: Mutex<HashSet<u32>>,
+
     // News subscription state
     pub news_providers: Mutex<String>,
     pub news_instruments: Mutex<HashSet<InstrumentId>>,
@@ -307,6 +311,7 @@ impl ClientCore {
             open_orders: Mutex::new(HashMap::new()),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
+            hist_initial_complete: Mutex::new(HashSet::new()),
             news_providers: Mutex::new("BRFG*BRFUPDN".into()),
             news_instruments: Mutex::new(HashSet::new()),
             contract_cache: Mutex::new(HashMap::new()),
@@ -332,6 +337,7 @@ impl ClientCore {
         self.open_orders.lock().unwrap().clear();
         self.market_data_type.store(1, Ordering::Relaxed);
         self.mdt_sent.lock().unwrap().clear();
+        self.hist_initial_complete.lock().unwrap().clear();
         *self.news_providers.lock().unwrap() = "BRFG*BRFUPDN".into();
         self.news_instruments.lock().unwrap().clear();
         self.contract_cache.lock().unwrap().clear();

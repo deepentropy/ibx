@@ -1057,6 +1057,7 @@ pub enum ControlCommand {
         bar_size: String,
         what_to_show: String,
         use_rth: bool,
+        keep_up_to_date: bool,
     },
     /// Cancel a historical data request.
     CancelHistorical { req_id: u32 },

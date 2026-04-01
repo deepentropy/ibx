@@ -40,6 +40,12 @@ pub(crate) struct CcpState {
     pub(crate) disconnected: bool,
     pub(crate) pending_secdef: Vec<u32>,
     pub(crate) pending_matching_symbols: Vec<u32>,
+    /// keepUpToDate historical queries routed through CCP: (query_id, req_id)
+    pub(crate) pending_kut_historical: Vec<(String, u32)>,
+    /// tickerId → req_id mapping for keepUpToDate 35=G bar updates
+    pub(crate) kut_ticker_map: std::collections::HashMap<u32, u32>,
+    /// tickerId → minTick for bar decoding
+    pub(crate) kut_min_tick: std::collections::HashMap<u32, f64>,
 }
 
 impl CcpState {
@@ -51,6 +57,9 @@ impl CcpState {
             disconnected: false,
             pending_secdef: Vec::new(),
             pending_matching_symbols: Vec::new(),
+            pending_kut_historical: Vec::new(),
+            kut_ticker_map: std::collections::HashMap::new(),
+            kut_min_tick: std::collections::HashMap::new(),
         }
     }
 
@@ -159,6 +168,74 @@ impl CcpState {
                         }
                         "102" => self.handle_exchange_list(msg, shared),
                         _ => {}
+                    }
+                }
+            }
+            "W" => {
+                // keepUpToDate historical data responses routed through CCP
+                if let Some(xml_tag) = parsed.get(&6118) {
+                    if let Some(resp) = crate::control::historical::parse_bar_response(xml_tag) {
+                        if let Some(pos) = self.pending_kut_historical.iter().position(|(qid, _)| *qid == resp.query_id) {
+                            let (_, req_id) = self.pending_kut_historical[pos];
+                            shared.reference.push_historical_data(req_id, resp.clone());
+                            if resp.is_complete {
+                                // Initial batch done — keep entry for streaming
+                            }
+                        }
+                    }
+                    else if let Some(ticker_id_str) = crate::control::historical::parse_ticker_id(xml_tag) {
+                        let ticker_id: u32 = ticker_id_str.parse().unwrap_or(0);
+                        let min_tick = crate::control::historical::extract_xml_tag(xml_tag, "minTick")
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or(0.01);
+                        // Match ticker to a pending keepUpToDate query
+                        for (qid, req_id) in &self.pending_kut_historical {
+                            if xml_tag.contains(qid) {
+                                self.kut_ticker_map.insert(ticker_id, *req_id);
+                                self.kut_min_tick.insert(ticker_id, min_tick);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            "G" => {
+                // keepUpToDate streaming bar updates (same binary format as rtbar)
+                let body = match super::find_body_after_tag(msg, b"35=G\x01") {
+                    Some(b) => b,
+                    None => return,
+                };
+                let sig_pos = body.windows(6).position(|w| w == b"\x018349=");
+                let body = if let Some(pos) = sig_pos { &body[..pos] } else { body };
+                if body.len() >= 11 {
+                    let ticker_id = u32::from_be_bytes([body[2], body[3], body[4], body[5]]);
+                    let timestamp = u32::from_be_bytes([body[6], body[7], body[8], body[9]]);
+                    let payload_len = body[10] as usize;
+                    if body.len() >= 11 + payload_len {
+                        if let Some(&req_id) = self.kut_ticker_map.get(&ticker_id) {
+                            let min_tick = self.kut_min_tick.get(&ticker_id).copied().unwrap_or(0.01);
+                            let payload = &body[11..11 + payload_len];
+                            if let Some(mut bar) = crate::control::historical::decode_bar_payload(payload, min_tick) {
+                                bar.timestamp = timestamp;
+                                let hist_bar = crate::control::historical::HistoricalBar {
+                                    time: format!("{}", timestamp),
+                                    open: bar.open,
+                                    high: bar.high,
+                                    low: bar.low,
+                                    close: bar.close,
+                                    volume: bar.volume as i64,
+                                    wap: bar.wap,
+                                    count: bar.count as u32,
+                                };
+                                let resp = crate::control::historical::HistoricalResponse {
+                                    query_id: String::new(),
+                                    timezone: String::new(),
+                                    bars: vec![hist_bar],
+                                    is_complete: true,
+                                };
+                                shared.reference.push_historical_data(req_id, resp);
+                            }
+                        }
                     }
                 }
             }
