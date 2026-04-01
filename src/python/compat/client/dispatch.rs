@@ -270,18 +270,24 @@ impl EClient {
                  0.0f64, 0i64, 0i64, 0.0f64, 0i64, msg.as_str(), 0.0f64));
         }
 
-        // Drain historical data -> historicalData + historicalDataEnd
+        // Drain historical data -> historicalData + historicalDataEnd / historicalDataUpdate
         let hist_data = shared.reference.drain_historical_data();
         for (req_id, response) in hist_data {
+            let is_update = self.core.hist_initial_complete.lock().unwrap().contains(&req_id);
             for bar in &response.bars {
                 let bar_obj = BarData::new(
                     bar.time.clone(), bar.open, bar.high, bar.low, bar.close,
                     bar.volume, bar.wap, bar.count as i32,
                 );
                 let bar_py = Py::new(py, bar_obj)?.into_any();
-                call_wrapper!(self.wrapper, py, "historical_data", (req_id as i64, &bar_py));
+                if is_update {
+                    call_wrapper!(self.wrapper, py, "historical_data_update", (req_id as i64, &bar_py));
+                } else {
+                    call_wrapper!(self.wrapper, py, "historical_data", (req_id as i64, &bar_py));
+                }
             }
-            if response.is_complete {
+            if response.is_complete && !is_update {
+                self.core.hist_initial_complete.lock().unwrap().insert(req_id);
                 call_wrapper!(self.wrapper, py, "historical_data_end", (req_id as i64, "", ""));
             }
         }
@@ -432,15 +438,25 @@ impl EClient {
             }
         }
 
-        // Drain real-time bars -> real_time_bar
+        // Drain real-time bars -> real_time_bar or historical_data_update (keepUpToDate)
         let rtbars = shared.market.drain_real_time_bars();
         for (req_id, bar) in rtbars {
-            call_wrapper!(self.wrapper, py, "real_time_bar", (
-                req_id as i64,
-                bar.timestamp as i64,
-                bar.open, bar.high, bar.low, bar.close,
-                bar.volume, bar.wap, bar.count,
-            ));
+            if self.core.hist_initial_complete.lock().unwrap().contains(&req_id) {
+                // keepUpToDate bar → dispatch as historical_data_update
+                let bar_obj = BarData::new(
+                    format!("{}", bar.timestamp), bar.open, bar.high, bar.low, bar.close,
+                    bar.volume as i64, bar.wap, bar.count,
+                );
+                let bar_py = Py::new(py, bar_obj)?.into_any();
+                call_wrapper!(self.wrapper, py, "historical_data_update", (req_id as i64, &bar_py));
+            } else {
+                call_wrapper!(self.wrapper, py, "real_time_bar", (
+                    req_id as i64,
+                    bar.timestamp as i64,
+                    bar.open, bar.high, bar.low, bar.close,
+                    bar.volume, bar.wap, bar.count,
+                ));
+            }
         }
 
         // Drain historical schedules -> historical_schedule

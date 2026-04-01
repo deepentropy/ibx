@@ -25,7 +25,7 @@ impl EClient {
         chart_options: Vec<PyObject>,
     ) -> PyResult<()> {
         let tx = self.tx()?;
-        let _ = (format_date, keep_up_to_date, chart_options);
+        let _ = (format_date, chart_options);
         if what_to_show.eq_ignore_ascii_case("SCHEDULE") {
             tx.send(ControlCommand::FetchHistoricalSchedule {
                 req_id: req_id as u32,
@@ -44,6 +44,7 @@ impl EClient {
                 bar_size: bar_size_setting.to_string(),
                 what_to_show: what_to_show.to_string(),
                 use_rth: use_rth != 0,
+                keep_up_to_date,
             }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         }
         Ok(())

@@ -102,6 +102,7 @@ pub struct HistoricalRequest {
     pub duration: String,
     pub bar_size: BarSize,
     pub use_rth: bool,
+    pub keep_up_to_date: bool,
 }
 
 /// A single historical OHLCV bar parsed from XML.
@@ -134,6 +135,11 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
     };
     let rth = if req.use_rth { "true" } else { "false" };
 
+    // keepUpToDate XML changes (no endTime, add refresh) are correct per capture
+    // but CCP→HMDS cross-routing isn't working yet — use one-shot format for now.
+    let end_time_tag = format!("<endTime>{}</endTime>", req.end_time);
+    let refresh_tag = "";
+
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
          <ListOfQueries>\
@@ -146,22 +152,24 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
          <expired>no</expired>\
          <type>BarData</type>\
          <data>{data}</data>\
-         <endTime>{end}</endTime>\
+         {end_time}\
          <timeLength>{dur}</timeLength>\
          <step>{step}</step>\
          <source>API</source>\
          <needTotalValue>false</needTotalValue>\
          <wholeDays>false</wholeDays>\
          <delay>auto</delay>\
+         {refresh}\
          </Query>\
          </ListOfQueries>",
         id = req.query_id,
         con_id = req.con_id,
         sec_type = req.sec_type,
         data = req.data_type.as_str(),
-        end = req.end_time,
+        end_time = end_time_tag,
         dur = req.duration,
         step = req.bar_size.as_str(),
+        refresh = refresh_tag,
     )
 }
 

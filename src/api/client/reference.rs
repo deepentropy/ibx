@@ -11,7 +11,7 @@ impl EClient {
     pub fn req_historical_data(
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, bar_size: &str,
-        what_to_show: &str, use_rth: bool, _format_date: i32, _keep_up_to_date: bool,
+        what_to_show: &str, use_rth: bool, _format_date: i32, keep_up_to_date: bool,
     ) -> Result<(), String> {
         self.send(ControlCommand::FetchHistorical {
             req_id: req_id as u32,
@@ -22,6 +22,7 @@ impl EClient {
             bar_size: bar_size.into(),
             what_to_show: what_to_show.into(),
             use_rth,
+            keep_up_to_date,
         })
     }
 
