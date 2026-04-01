@@ -18,10 +18,21 @@ pub const NS_NEWCOMMPORTTYPE: u32 = 526;
 pub const NS_BACKUP_HOST: u32 = 527;
 pub const NS_MISC_URLS_REQUEST: u32 = 528;
 pub const NS_MISC_URLS_RESPONSE: u32 = 529;
+pub const NS_TEST_REQUEST: u32 = 530;
+pub const NS_HEART_BEAT: u32 = 531;
 pub const NS_SECURE_CONNECT: u32 = 532;
 pub const NS_SECURE_CONNECTION_START: u32 = 533;
 pub const NS_SECURE_MESSAGE: u32 = 534;
 pub const NS_SECURE_ERROR: u32 = 535;
+
+/// Wrap raw binary data in `#%#%` framing: magic + 4-byte-BE-length + data.
+pub fn ns_wrap_raw(data: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(8 + data.len());
+    msg.extend_from_slice(NS_MAGIC);
+    msg.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    msg.extend_from_slice(data);
+    msg
+}
 
 /// Build an NS message with `#%#%` framing.
 ///
