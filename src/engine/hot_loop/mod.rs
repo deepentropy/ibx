@@ -378,8 +378,10 @@ impl HotLoop {
                     if let Some(tx) = reply_tx { let _ = tx.send(id); }
                 }
                 ControlCommand::FetchHistorical { req_id, con_id, symbol, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date } => {
-                    // Send via HMDS — keepUpToDate uses modified XML (no endTime, add refresh)
-                    self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, keep_up_to_date, &symbol, &mut self.hmds_conn, &mut self.hb);
+                    // keepUpToDate via CCP disabled — unsigned/incorrectly-signed FIXCOMP kills
+                    // the shared CCP/HMDS session. Needs correct 8349 HMAC signing (#103).
+                    // For now, send all requests via HMDS (keepUpToDate silently degrades to one-shot).
+                    self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, &symbol, &mut self.hmds_conn, &mut self.hb);
                     if keep_up_to_date {
                         self.hmds.keep_up_to_date_reqs.insert(req_id);
                     }

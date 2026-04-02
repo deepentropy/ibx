@@ -614,8 +614,15 @@ impl HmdsState {
                 (6118, &xml),
             ], 0);
             let compressed = fixcomp::fixcomp_build(&raw);
-            // Try unsigned FIXCOMP first — gateway may accept without 8349
-            let _ = conn.send_raw(&compressed);
+            let to_send = if !sign_key.is_empty() {
+                let mut iv_guard = sign_iv.lock().unwrap();
+                let (signed, new_iv) = fix::fix_sign(&compressed, sign_key, &iv_guard);
+                *iv_guard = new_iv;
+                signed
+            } else {
+                compressed
+            };
+            let _ = conn.send_raw(&to_send);
             hb.last_ccp_sent = Instant::now();
         }
         self.pending_historical.push((query_id, req_id));
