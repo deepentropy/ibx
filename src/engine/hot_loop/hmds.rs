@@ -140,7 +140,7 @@ impl HmdsState {
             "W" => {
                 if let Some(xml_tag) = parsed.get(&6118) {
                     if let Some(resp) = crate::control::historical::parse_bar_response(xml_tag) {
-                        if let Some(pos) = self.pending_historical.iter().position(|(qid, _)| *qid == resp.query_id) {
+                        if let Some(pos) = self.pending_historical.iter().position(|(qid, _)| resp.query_id.starts_with(qid.as_str())) {
                             let (_, req_id) = self.pending_historical[pos];
                             let is_complete = resp.is_complete;
                             shared.reference.push_historical_data(req_id, resp.clone());
@@ -449,7 +449,7 @@ impl HmdsState {
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        self.send_historical_request_ex(req_id, con_id, end_date_time, duration, bar_size, what_to_show, use_rth, false, hmds_conn, hb);
+        self.send_historical_request_ex(req_id, con_id, end_date_time, duration, bar_size, what_to_show, use_rth, false, "", hmds_conn, hb);
     }
 
     pub(crate) fn send_historical_request_ex(
@@ -462,6 +462,7 @@ impl HmdsState {
         what_to_show: &str,
         use_rth: bool,
         keep_up_to_date: bool,
+        symbol: &str,
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
@@ -516,7 +517,7 @@ impl HmdsState {
         let req = crate::control::historical::HistoricalRequest {
             query_id: query_id.clone(),
             con_id: con_id as u32,
-            symbol: String::new(),
+            symbol: symbol.to_string(),
             sec_type: "CS",
             exchange: "SMART",
             data_type,
