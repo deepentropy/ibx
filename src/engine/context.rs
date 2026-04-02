@@ -125,7 +125,9 @@ impl Context {
         self.open_orders
             .values()
             .filter(|o| o.instrument == id && matches!(o.status,
-                OrderStatus::PendingSubmit | OrderStatus::Submitted | OrderStatus::PartiallyFilled | OrderStatus::Uncertain))
+                OrderStatus::PendingSubmit | OrderStatus::PreSubmitted | OrderStatus::Submitted
+                | OrderStatus::PartiallyFilled | OrderStatus::PendingCancel | OrderStatus::PendingModify
+                | OrderStatus::Uncertain))
             .collect()
     }
 
@@ -930,7 +932,8 @@ impl Context {
     pub fn mark_orders_uncertain(&mut self) {
         for order in self.open_orders.values_mut() {
             match order.status {
-                OrderStatus::PendingSubmit | OrderStatus::Submitted | OrderStatus::PartiallyFilled => {
+                OrderStatus::PendingSubmit | OrderStatus::PreSubmitted | OrderStatus::Submitted
+                | OrderStatus::PartiallyFilled | OrderStatus::PendingCancel | OrderStatus::PendingModify => {
                     order.status = OrderStatus::Uncertain;
                 }
                 _ => {}

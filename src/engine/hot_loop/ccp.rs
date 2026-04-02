@@ -359,13 +359,20 @@ impl CcpState {
         }
 
         let status = match ord_status {
-            "0" | "A" | "E" | "5" => crate::types::OrderStatus::Submitted,
+            "0" => crate::types::OrderStatus::Submitted,
+            "A" => crate::types::OrderStatus::PreSubmitted,
             "1" => crate::types::OrderStatus::PartiallyFilled,
             "2" => crate::types::OrderStatus::Filled,
             "4" | "C" | "D" => crate::types::OrderStatus::Cancelled,
+            "5" => crate::types::OrderStatus::Submitted,
+            "6" => crate::types::OrderStatus::PendingCancel,
             "8" => crate::types::OrderStatus::Rejected,
-            "6" => return,
-            _ => return,
+            "9" => crate::types::OrderStatus::Inactive,
+            "E" => crate::types::OrderStatus::PendingModify,
+            _ => {
+                log::warn!("Unknown OrdStatus '{}' for order {}", ord_status, clord_id);
+                return;
+            }
         };
 
         let prev_status = context.order(clord_id).map(|o| o.status);
@@ -492,11 +499,15 @@ impl CcpState {
 
             let status_str = match status {
                 crate::types::OrderStatus::PendingSubmit => "PendingSubmit",
+                crate::types::OrderStatus::PreSubmitted => "PreSubmitted",
                 crate::types::OrderStatus::Submitted => "Submitted",
                 crate::types::OrderStatus::Filled => "Filled",
-                crate::types::OrderStatus::PartiallyFilled => "PreSubmitted",
+                crate::types::OrderStatus::PartiallyFilled => "PartiallyFilled",
+                crate::types::OrderStatus::PendingCancel => "PendingCancel",
                 crate::types::OrderStatus::Cancelled => "Cancelled",
+                crate::types::OrderStatus::PendingModify => "PendingModify",
                 crate::types::OrderStatus::Rejected => "Inactive",
+                crate::types::OrderStatus::Inactive => "Inactive",
                 crate::types::OrderStatus::Uncertain => "Unknown",
             };
 
@@ -646,7 +657,8 @@ impl CcpState {
         if matches!(status,
             crate::types::OrderStatus::Filled |
             crate::types::OrderStatus::Cancelled |
-            crate::types::OrderStatus::Rejected
+            crate::types::OrderStatus::Rejected |
+            crate::types::OrderStatus::Inactive
         ) {
             if let Some(order) = context.order(clord_id).copied() {
                 shared.orders.push_completed_order(CompletedOrder {
@@ -679,6 +691,8 @@ impl CcpState {
             if let Some(order) = context.order(oid).copied() {
                 let restore_status = if order.filled > 0 {
                     crate::types::OrderStatus::PartiallyFilled
+                } else if order.status == crate::types::OrderStatus::PreSubmitted {
+                    crate::types::OrderStatus::PreSubmitted
                 } else {
                     crate::types::OrderStatus::Submitted
                 };

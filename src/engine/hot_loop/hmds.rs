@@ -622,6 +622,14 @@ impl HmdsState {
             } else {
                 compressed
             };
+            // Debug: dump first 80 bytes hex for wire comparison
+            let hex: String = to_send.iter().take(80).map(|b| format!("{:02x}", b)).collect();
+            log::info!("CCP keepUpToDate 35=W: {} bytes, hex={}", to_send.len(), hex);
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("D:/RustroverProjects/ibx/ibx_kut_debug.log") {
+                use std::io::Write;
+                let full_hex: String = to_send.iter().map(|b| format!("{:02x}", b)).collect();
+                let _ = writeln!(f, "LEN={} HEX={}", to_send.len(), full_hex);
+            }
             let _ = conn.send_raw(&to_send);
             hb.last_ccp_sent = Instant::now();
         }

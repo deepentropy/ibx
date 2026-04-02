@@ -204,11 +204,15 @@ pub struct PortfolioUpdateEntry {
 pub fn order_status_str(status: OrderStatus) -> &'static str {
     match status {
         OrderStatus::PendingSubmit => "PendingSubmit",
+        OrderStatus::PreSubmitted => "PreSubmitted",
         OrderStatus::Submitted => "Submitted",
         OrderStatus::Filled => "Filled",
-        OrderStatus::PartiallyFilled => "PreSubmitted",
+        OrderStatus::PartiallyFilled => "PartiallyFilled",
+        OrderStatus::PendingCancel => "PendingCancel",
         OrderStatus::Cancelled => "Cancelled",
+        OrderStatus::PendingModify => "PendingModify",
         OrderStatus::Rejected => "Inactive",
+        OrderStatus::Inactive => "Inactive",
         OrderStatus::Uncertain => "Unknown",
     }
 }

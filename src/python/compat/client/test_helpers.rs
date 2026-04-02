@@ -107,10 +107,15 @@ impl EClient {
         let shared = self.shared_state()?;
         let st = match status {
             "PendingSubmit" => OrderStatus::PendingSubmit,
+            "PreSubmitted" => OrderStatus::PreSubmitted,
             "Submitted" => OrderStatus::Submitted,
             "Filled" => OrderStatus::Filled,
+            "PartiallyFilled" => OrderStatus::PartiallyFilled,
+            "PendingCancel" => OrderStatus::PendingCancel,
             "Cancelled" => OrderStatus::Cancelled,
+            "PendingModify" => OrderStatus::PendingModify,
             "Rejected" => OrderStatus::Rejected,
+            "Inactive" => OrderStatus::Inactive,
             _ => return Err(PyRuntimeError::new_err(format!("Invalid status: {}", status))),
         };
         shared.orders.push_order_update(OrderUpdate {
