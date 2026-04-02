@@ -1059,11 +1059,18 @@ impl Gateway {
         // Auth connection (non-blocking TLS for hot loop)
         let mut ccp_conn = Connection::new(tls)?;
         ccp_conn.seq = ccp_seq;
-        // CCP signing: selective — only XML messages (35=W) need 8349 HMAC.
-        // The write_iv has evolved through all init messages via AES-CBC encryption,
-        // so it's at the correct position for the first HMAC-signed message.
+        // CCP HMAC signing IV: derived by AES-CBC encrypting the logon message.
+        // The logon was sent as plaintext over TLS, but the AES-CBC computation
+        // evolves the IV — last 16 bytes of ciphertext = new IV for HMAC signing.
         let ccp_sign_key = channel.key_block().map(|kb| kb[64..84].to_vec()).unwrap_or_default();
-        let ccp_sign_iv = channel.write_iv().unwrap_or(&[]).to_vec();
+        let ccp_sign_iv = if let Some(kb) = channel.key_block() {
+            let aes_key = &kb[0..16];
+            let initial_iv = &kb[32..48];
+            let ciphertext = crate::auth::crypto::aes_cbc_encrypt(aes_key, initial_iv, &logon_msg);
+            ciphertext[ciphertext.len() - 16..].to_vec()
+        } else {
+            Vec::new()
+        };
         // Seed init burst into connection buffer so the hot loop processes 8=O account data
         ccp_conn.seed_buffer(&init_data);
 
