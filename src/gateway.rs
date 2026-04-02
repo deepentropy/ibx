@@ -1055,6 +1055,9 @@ impl Gateway {
         // Auth connection (non-blocking TLS for hot loop)
         let mut ccp_conn = Connection::new(tls)?;
         ccp_conn.seq = ccp_seq;
+        // Note: CCP signing keys NOT set on connection — init messages were unsigned,
+        // so setting sign_key would desync the IV chain and break orders.
+        // keepUpToDate needs separate signing state (see #103).
         // Seed init burst into connection buffer so the hot loop processes 8=O account data
         ccp_conn.seed_buffer(&init_data);
 
