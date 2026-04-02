@@ -135,10 +135,16 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
     };
     let rth = if req.use_rth { "true" } else { "false" };
 
-    // keepUpToDate XML changes (no endTime, add refresh) are correct per capture
-    // but CCP→HMDS cross-routing isn't working yet — use one-shot format for now.
-    let end_time_tag = format!("<endTime>{}</endTime>", req.end_time);
-    let refresh_tag = "";
+    let data_str = req.data_type.as_str();
+    // Query ID: structured ;;-delimited format required by gateway parser
+    let graph_name = format!("{}@{} {}", req.symbol, exchange, data_str);
+    let query_id = format!("{};;{};;1;;true;;0;;I", req.query_id, graph_name);
+
+    let (end_time_tag, refresh_tag) = if req.keep_up_to_date {
+        (String::new(), "<refresh>5 secs</refresh>")
+    } else {
+        (format!("<endTime>{}</endTime>", req.end_time), "")
+    };
 
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -153,19 +159,20 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
          <type>BarData</type>\
          <data>{data}</data>\
          {end_time}\
+         <cutoffDate>20090224</cutoffDate>\
+         {refresh}\
          <timeLength>{dur}</timeLength>\
          <step>{step}</step>\
          <source>API</source>\
          <needTotalValue>false</needTotalValue>\
          <wholeDays>false</wholeDays>\
          <delay>auto</delay>\
-         {refresh}\
          </Query>\
          </ListOfQueries>",
-        id = req.query_id,
+        id = query_id,
         con_id = req.con_id,
         sec_type = req.sec_type,
-        data = req.data_type.as_str(),
+        data = data_str,
         end_time = end_time_tag,
         dur = req.duration,
         step = req.bar_size.as_str(),

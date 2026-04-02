@@ -378,13 +378,13 @@ impl HotLoop {
                     if let Some(tx) = reply_tx { let _ = tx.send(id); }
                 }
                 ControlCommand::FetchHistorical { req_id, con_id, symbol, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date } => {
-                    // keepUpToDate needs CCP→HMDS cross-routing (see #103) — not yet working.
-                    // Send via HMDS for now (one-shot works, keepUpToDate pending wire format fix).
-                    self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, keep_up_to_date, &mut self.hmds_conn, &mut self.hb);
                     if keep_up_to_date {
+                        // Cross-connection routing: send via CCP, responses arrive on HMDS
+                        self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, true, &symbol, &mut self.ccp_conn, &mut self.hb);
                         self.hmds.keep_up_to_date_reqs.insert(req_id);
+                    } else {
+                        self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, &symbol, &mut self.hmds_conn, &mut self.hb);
                     }
-                    let _ = symbol;
                 }
                 ControlCommand::CancelHistorical { req_id } => {
                     self.hmds.keep_up_to_date_reqs.remove(&req_id);
