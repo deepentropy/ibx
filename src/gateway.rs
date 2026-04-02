@@ -1059,11 +1059,11 @@ impl Gateway {
         // Auth connection (non-blocking TLS for hot loop)
         let mut ccp_conn = Connection::new(tls)?;
         ccp_conn.seq = ccp_seq;
-        // CCP signing: selective, not global. Only XML-carrying messages (35=W, 6040=10020)
-        // need 8349 HMAC signing. Init messages and orders are sent unsigned.
-        // Store signing material for the hot loop to use on keepUpToDate requests.
+        // CCP signing: selective — only XML messages (35=W) need 8349 HMAC.
+        // The write_iv has evolved through all init messages via AES-CBC encryption,
+        // so it's at the correct position for the first HMAC-signed message.
         let ccp_sign_key = channel.key_block().map(|kb| kb[64..84].to_vec()).unwrap_or_default();
-        let ccp_sign_iv = channel.key_block().map(|kb| kb[48..64].to_vec()).unwrap_or_default();
+        let ccp_sign_iv = channel.write_iv().unwrap_or(&[]).to_vec();
         // Seed init burst into connection buffer so the hot loop processes 8=O account data
         ccp_conn.seed_buffer(&init_data);
 
