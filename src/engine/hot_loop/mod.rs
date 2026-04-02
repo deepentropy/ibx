@@ -379,8 +379,8 @@ impl HotLoop {
                 }
                 ControlCommand::FetchHistorical { req_id, con_id, symbol, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date } => {
                     if keep_up_to_date {
-                        // Cross-connection routing: send via CCP, responses arrive on HMDS
-                        self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, true, &symbol, &mut self.ccp_conn, &mut self.hb);
+                        // CCP route with FIXCOMP — responses arrive on HMDS
+                        self.hmds.send_historical_request_via_ccp(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, &symbol, &mut self.ccp_conn, &mut self.hb);
                         self.hmds.keep_up_to_date_reqs.insert(req_id);
                     } else {
                         self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, &symbol, &mut self.hmds_conn, &mut self.hb);

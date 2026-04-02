@@ -542,6 +542,79 @@ impl HmdsState {
         self.pending_historical.push((query_id, req_id));
     }
 
+    /// Send keepUpToDate historical request via CCP (FIXCOMP compressed).
+    /// Responses arrive on HMDS, not CCP (cross-connection routing).
+    pub(crate) fn send_historical_request_via_ccp(
+        &mut self,
+        req_id: u32,
+        con_id: i64,
+        end_date_time: &str,
+        duration: &str,
+        bar_size: &str,
+        what_to_show: &str,
+        use_rth: bool,
+        symbol: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        // Reuse the same request builder but with keep_up_to_date=true
+        let duration = duration.to_lowercase();
+        let end_date_time = if end_date_time.is_empty() {
+            crate::gateway::chrono_free_timestamp().to_string()
+        } else {
+            end_date_time.to_string()
+        };
+        let qid = self.next_hmds_query_id;
+        self.next_hmds_query_id += 1;
+
+        let data_type = match what_to_show.to_uppercase().as_str() {
+            "MIDPOINT" => crate::control::historical::BarDataType::Midpoint,
+            "BID" => crate::control::historical::BarDataType::Bid,
+            "ASK" => crate::control::historical::BarDataType::Ask,
+            "BID_ASK" => crate::control::historical::BarDataType::BidAsk,
+            "ADJUSTED_LAST" => crate::control::historical::BarDataType::AdjustedLast,
+            "HISTORICAL_VOLATILITY" => crate::control::historical::BarDataType::HistoricalVolatility,
+            "OPTION_IMPLIED_VOLATILITY" => crate::control::historical::BarDataType::ImpliedVolatility,
+            _ => crate::control::historical::BarDataType::Trades,
+        };
+
+        let bs = match bar_size {
+            "1 secs" | "1 sec" => crate::control::historical::BarSize::Sec1,
+            "5 secs" => crate::control::historical::BarSize::Sec5,
+            "5 mins" => crate::control::historical::BarSize::Min5,
+            "1 hour" => crate::control::historical::BarSize::Hour1,
+            "1 day" => crate::control::historical::BarSize::Day1,
+            _ => crate::control::historical::BarSize::Min5,
+        };
+
+        let query_id = format!("hist_{}", qid);
+        let req = crate::control::historical::HistoricalRequest {
+            query_id: query_id.clone(),
+            con_id: con_id as u32,
+            symbol: symbol.to_string(),
+            sec_type: "CS",
+            exchange: "SMART",
+            data_type,
+            end_time: end_date_time,
+            duration: duration.to_string(),
+            bar_size: bs,
+            use_rth,
+            keep_up_to_date: true,
+        };
+
+        let xml = crate::control::historical::build_query_xml(&req);
+        if let Some(conn) = ccp_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "W"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]);
+            hb.last_ccp_sent = Instant::now();
+        }
+        self.pending_historical.push((query_id, req_id));
+    }
+
     pub(crate) fn send_historical_cancel(&mut self, query_id: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         if let Some(conn) = hmds_conn.as_mut() {
             let xml = format!(
