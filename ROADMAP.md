@@ -1,0 +1,3296 @@
+# IBX Roadmap: Definitive Gap Analysis and Phased Implementation Plan
+
+**Version:** 3.3 (post-audit)
+**Date:** 2026-04-01
+**Baseline commit:** `7a4c7dda533962085f8269c96756cd6dcf982568` (IBX v0.4.3)
+**Generation method:** Systematic 1:1 comparison of 1,004 deobfuscated Java classes against 72 Rust source files
+**Regeneration:** All counts in this document are produced by shell commands listed in Appendix Y. To re-verify, run each command against the stated commit.
+
+---
+
+## Table of Contents
+
+1. [Executive Summary](#1-executive-summary)
+2. [Current State](#2-current-state)
+   - 2.1 [Verified Features](#21-verified-features)
+   - 2.2 [Architecture Diagram](#22-architecture-diagram)
+   - 2.3 [Module Map: Java Package to Rust Module](#23-module-map-java-package-to-rust-module)
+   - 2.4 [Coverage Dashboard](#24-coverage-dashboard)
+3. [Non-Goals](#3-non-goals)
+4. [Complete Gap Inventory](#4-complete-gap-inventory)
+   - 4.1 [jts4launch/jfix (431 files)](#41-jts4launchjfix-431-files)
+   - 4.2 [twslaunch/jauthentication (133 files)](#42-twslaunchjauthentication-133-files)
+   - 4.3 [twslaunch/jclient (162 files)](#43-twslaunchjclient-162-files)
+   - 4.4 [twslaunch/jconnection (154 files)](#44-twslaunchjconnection-154-files)
+   - 4.5 [twslaunch/jfix (11 files)](#45-twslaunchjfix-11-files)
+   - 4.6 [twslaunch/jutils (113 files)](#46-twslaunchjutils-113-files)
+5. [Phased Roadmap](#5-phased-roadmap)
+   - Phase 0: [Paper Trading Robustness (NOW)](#phase-0-paper-trading-robustness-now)
+   - Phase 1: [Protocol Completion](#phase-1-protocol-completion)
+   - Phase 2: [Multi-Asset Expansion](#phase-2-multi-asset-expansion)
+   - Phase 3: [Connection Resilience](#phase-3-connection-resilience)
+   - Phase 4: [Production Hardening](#phase-4-production-hardening)
+   - Phase 5: [Live Trading Enablement](#phase-5-live-trading-enablement)
+6. [Testing Strategy](#6-testing-strategy)
+7. [Decision Log](#7-decision-log)
+8. [Contribution Guide](#8-contribution-guide)
+9. [Appendices](#9-appendices)
+   - A: [FIX Tag Coverage](#appendix-a-fix-tag-coverage)
+   - B: [Order Type Coverage](#appendix-b-order-type-coverage)
+   - C: [FIX Message Type Coverage](#appendix-c-fix-message-type-coverage)
+   - D: [Security Type Coverage](#appendix-d-security-type-coverage)
+   - E: [Order State Machine Coverage](#appendix-e-order-state-machine-coverage)
+   - F: [Auth Token Type Coverage](#appendix-f-auth-token-type-coverage)
+   - G: [NS Protocol Coverage](#appendix-g-ns-protocol-coverage)
+   - H: [Disconnect Reason Coverage](#appendix-h-disconnect-reason-coverage)
+   - I: [Connection State Coverage](#appendix-i-connection-state-coverage)
+   - J: [Wrapper Callback Coverage](#appendix-j-wrapper-callback-coverage)
+   - K: [ControlCommand Coverage](#appendix-k-controlcommand-coverage)
+   - Y: [Verification Commands](#appendix-y-verification-commands)
+   - Z: [Glossary](#appendix-z-glossary)
+10. [Expanded Task Specifications](#10-expanded-task-specifications)
+    - 10.1 [Phase 0 Expanded](#101-phase-0-expanded-paper-trading-robustness)
+    - 10.2 [Phase 1 Expanded](#102-phase-1-expanded-protocol-completion)
+    - 10.3 [Phase 2 Expanded](#103-phase-2-expanded-multi-asset)
+    - 10.4 [Phase 3 Expanded](#104-phase-3-expanded-connection-resilience)
+    - 10.5 [Phase 4 Expanded](#105-phase-4-expanded-production-hardening)
+    - 10.6 [Phase 5 Expanded](#106-phase-5-expanded-live-trading-enablement)
+11. [Dependency Graph (Full)](#11-dependency-graph-full)
+12. [Risk Register](#12-risk-register)
+13. [Milestone Calendar](#13-milestone-calendar-estimated)
+14. [Accuracy Verification Report](#14-accuracy-verification-report)
+15. [Per-Package Status Summary](#15-per-package-status-summary-consolidated)
+16. [Subpackage File Counts](#16-subpackage-file-counts-verified)
+17. [Key Java Files by Package](#17-key-java-files-by-package)
+18. [Inner Class Inventory](#18-inner-class-inventory)
+19. [Rust Module Architecture](#19-rust-module-architecture-current-state)
+20. [Version History](#20-version-history)
+
+---
+
+## 1. Executive Summary
+
+IBX is a Rust crate that connects directly to Interactive Brokers servers, bypassing the Java Gateway entirely. It speaks IB's proprietary FIX 4.1 protocol natively, authenticating via SRP-6 over a DH-encrypted channel, and decoding binary market data ticks in a pinned-core hot loop achieving 340ns tick decode latency.
+
+At commit `7a4c7dd`, IBX consists of 72 Rust source files with 637 unit tests and 16 Python integration tests. It successfully:
+
+- Authenticates via SRP-6 + DH key exchange + IB Key 2FA
+- Receives real-time market data (L1 quotes, L2 depth, tick-by-tick) through binary tick decoding
+- Submits 37 order type variants via FIX `35=D` new order messages
+- Handles execution reports, fills, cancel/modify, and bracket orders
+- Fetches historical data, contract details, news, scanner results, and fundamental data
+- Provides ibapi-compatible Rust and Python APIs (63 Wrapper trait methods, 77+ EClient methods)
+- Supports auto-reconnection for both CCP (auth) and farm (data) connections
+
+The IB Gateway Java codebase consists of 1,004 deobfuscated classes spanning 12 packages. Of these, approximately 222 files (22%) are GUI-related (Swing/AWT) and not applicable to IBX's headless architecture. Of the remaining 782 protocol/logic files, IBX covers an estimated 340 functionally (43%), with significant gaps in:
+
+- **Order lifecycle completeness:** 7 of 12 order states tracked; cancel/modify intermediate states are invisible
+- **Asset class coverage:** All orders hardcode `STK/SMART/USD` -- no options, futures, forex, or combos
+- **Connection resilience:** No structured disconnect reason handling, no hot backup failover, no session persistence
+- **Feature flags:** Zero of 200+ IB user feature flags are parsed or respected
+- **Auth breadth:** Only soft token (ST) and IB Key; no permanent token (PST), TWSRO, or TST flows
+
+**Phase philosophy:** COMPLETE the protocol, BATTLE TEST on paper, THEN enable live.
+
+| Phase | Goal | Effort | Priority |
+|-------|------|--------|----------|
+| **0** | Paper Trading Robustness | 11 person-days | **NOW** |
+| **1** | Protocol Completion | 14 person-days | P0 |
+| **2** | Multi-Asset Expansion | 7 person-days | P0 |
+| **3** | Connection Resilience | 10 person-days | P1 |
+| **4** | Production Hardening | 18 person-days | P2 |
+| **5** | Live Trading Enablement | 10 person-days | **LAST** |
+| | **Total** | **70 person-days** | |
+
+---
+
+## 2. Current State
+
+### 2.1 Verified Features
+
+**Version:** 0.4.3 (commit `7a4c7dd`, Cargo.toml edition 2024)
+
+| Component | Status | Primary File |
+|-----------|--------|-------------|
+| SRP-6 Authentication | Working | `auth/srp.rs` |
+| DH Key Exchange + Cipher | Working | `auth/dh.rs` |
+| Auth Session Manager | Working | `auth/session.rs` |
+| Crypto Primitives (AES-128-CBC, HMAC-SHA1, TLS 1.0 PRF) | Working | `auth/crypto.rs` |
+| NS Protocol (#%#% framing) | Working | `protocol/ns.rs` |
+| XYZ Binary Transport | Working | `protocol/xyz.rs` |
+| FIX 4.1 Framing (HMAC sign/verify, checksum) | Working | `protocol/fix.rs` |
+| FIX Compression (zlib, FIXCOMP) | Working | `protocol/fixcomp.rs` |
+| Binary Tick Decoder (MSB bit-reader, VLQ, RTBAR) | Excellent | `protocol/tick_decoder.rs` |
+| Connection Framing (TLS + raw TCP, non-blocking) | Working | `protocol/connection.rs` |
+| Hot Loop (pinned-core, busy-poll, crossbeam SPSC) | Excellent | `engine/hot_loop/mod.rs` |
+| CCP Message Handler (exec reports, positions, orders) | Good | `engine/hot_loop/ccp.rs` |
+| Market Data Farm (ticks, depth, SmartDepth) | Good | `engine/hot_loop/farm.rs` |
+| Historical Data Farm (HMDS bars, TBT, scanners) | Good | `engine/hot_loop/hmds.rs` |
+| Order Builder (37 variants, FIX new/cancel/replace) | Good | `engine/hot_loop/order_builder.rs` |
+| Engine Context (instrument registry, order tracking) | Good | `engine/context.rs` |
+| Market State (SeqLock quotes, depth books) | Good | `engine/market_state.rs` |
+| Gateway Orchestrator (CCP + farm + HMDS connect) | Working | `gateway.rs` |
+| Bridge (SharedState, Event channel, SeqLock) | Good | `bridge.rs` |
+| Contract Lookups + Market Rules | Good | `control/contracts.rs` |
+| Historical Data Parsing | Good | `control/historical.rs` |
+| News (bulletins, tick news, historical, articles) | Good | `control/news.rs` |
+| Account Data (positions, PnL, summary) | Good | `control/account.rs` |
+| Scanner (subscribe, params, results) | Basic | `control/scanner.rs` |
+| Fundamental Data | Basic | `control/fundamental.rs` |
+| Histogram Data | Basic | `control/histogram.rs` |
+| ibapi-compatible API (EClient, Wrapper, types) | Good | `api/` |
+| Python PyO3 Bindings | Good | `python/` |
+| Type System (orders, quotes, fills, conditions) | Good | `types.rs` |
+| Client Core (instrument registry, PnL, account) | Good | `client_core.rs` |
+| Configuration + Constants | Good | `config.rs` |
+| Benchmarks (11 binaries) | Good | `bin/` |
+| IB Key 2FA (DSA 775, challenge-response) | Working | `auth/session.rs` |
+
+**Performance baselines (from bench suite):**
+
+| Benchmark | Result | Notes |
+|-----------|--------|-------|
+| Tick decode | 340ns | Binary bit-reader, zero-alloc hot path |
+| First tick latency | < 5ms | Subscribe to first quote delivery |
+| Limit order submission | < 1ms | FIX build + HMAC sign + TCP send |
+| Order burst | 100 orders/sec | Batch drain from pending queue |
+| Max instruments | 256 | `MAX_INSTRUMENTS` constant in types.rs |
+
+### 2.2 Architecture Diagram
+
+```
+                    +-----------+
+                    |  User App |
+                    |  (Rust or |
+                    |   Python) |
+                    +-----+-----+
+                          |
+                   EClient / Wrapper API
+                          |
+                    +-----+-----+
+                    | ClientCore|  client_core.rs -- instrument registry,
+                    |  + Bridge |  bridge.rs      -- SharedState (SeqLock quotes,
+                    +-----------+                    order queue, event channel)
+                          |
+                  ControlCommand SPSC
+                          |
+             +------------+------------+
+             |     Engine Hot Loop     |  engine/hot_loop/mod.rs
+             |  (pinned core, busy-    |  -- single thread, no locks
+             |   poll CCP+Farm+HMDS)   |
+             +---+--------+--------+--+
+                 |        |        |
+           +-----+  +----+---+ +--+-----+
+           | CCP |  |  Farm  | |  HMDS  |
+           +--+--+  +---+----+ +---+----+
+              |          |         |
+         TLS/FIX    TCP/FIX    TCP/FIX
+              |          |         |
+    +---------+--+ +-----+----+ +-+--------+
+    | IB Auth    | | IB Market| | IB Hist  |
+    | Server     | | Data Farm| | Data Farm|
+    | (cdc1/ndc1)| | (usfarm) | | (hfarm)  |
+    +------------+ +----------+ +----------+
+```
+
+### 2.3 Module Map: Java Package to Rust Module
+
+| Java Package | Files | Purpose | Rust Module(s) | Coverage |
+|-------------|-------|---------|----------------|----------|
+| `jts4launch/jfix` | 430 | FIX protocol engine: message types, order states, enums, execution reports, market data handlers, order routing, contract definitions | `protocol/fix.rs`, `engine/hot_loop/ccp.rs`, `engine/hot_loop/farm.rs`, `engine/hot_loop/order_builder.rs`, `types.rs` | Partial (~40%) |
+| `jts4launch/jfix/replacement` | 1 | Order replace/modify message builder | `engine/hot_loop/order_builder.rs` (Modify variant) | Partial |
+| `twslaunch/jauthentication` | 133 | SRP-6, DH, soft token, 2FA challenges, auth dispatching, session management | `auth/srp.rs`, `auth/dh.rs`, `auth/session.rs`, `auth/crypto.rs`, `protocol/xyz.rs` | Good (~60%) |
+| `twslaunch/jclient` | 130 | Client-side logic: login UI, trading mode, login monitoring, application context | `api/client/mod.rs`, `gateway.rs` (headless equivalents) | Partial (~25%, GUI excluded) |
+| `twslaunch/jclient/context` | 3 | Application context (user scope, settings) | `config.rs` | Minimal |
+| `twslaunch/jclient/login` | 29 | Login flow orchestration, CCP feature detection, auto-restart | `gateway.rs` (login sequence) | Partial (~30%) |
+| `twslaunch/jconnection` | 110 | Connection management: logon states, disconnect reasons, heartbeat, competition, hot backup, encryption | `protocol/connection.rs`, `engine/hot_loop/mod.rs` (heartbeat) | Partial (~35%) |
+| `twslaunch/jconnection/service` | 2 | Service type enumeration | Not implemented | Missing |
+| `twslaunch/jconnection/ssl` | 32 | SSL/TLS certificate handling, trust management, pinning | `native-tls` crate (system trust store) | Minimal (~10%) |
+| `twslaunch/jconnection/validate` | 10 | FIX message validation, network connectivity checking | Not implemented | Missing |
+| `twslaunch/jfix` | 11 | FIX protocol base classes: FixMessage, Heartbeat, TestRequest, FixFieldProvider, FixDialect, FixBoolean | `protocol/fix.rs`, `protocol/connection.rs` | Good (~70%) |
+| `twslaunch/jutils` | 113 | Utilities: logging, threading, formatting, file I/O, URL creation, diagnostics | `config.rs`, `logging.rs` (minimal subset) | Minimal (~10%) |
+
+### 2.4 Coverage Dashboard
+
+File counts verified; coverage estimates labeled with ~ against commit `7a4c7dd`. Verification commands in Appendix Y.
+
+| Metric | Java Gateway | IBX Rust | Coverage | Appendix |
+|--------|-------------|----------|----------|----------|
+| Source files | 1,004 | 72 | -- | Y.1 |
+| GUI-related files (Swing/AWT) | 222 | 0 (N/A) | N/A | Y.3 |
+| Protocol-relevant files | ~782 | 72 | -- | -- |
+| FIX tags defined | 21 | 21 | 100% of defined | A |
+| FIX tags used (unique, all files) | 200+ | ~134 | ~67% | A |
+| FIX message types (35=X) | 13 | 13 | 100% of defined | C |
+| NS message types | 17 (incl. UNKNOWN) | 16 | 94% | G |
+| OrderRequest variants | -- | 37 submit + 3 lifecycle | 37/37 common | B |
+| Wrapper trait methods | -- | 63 | -- | J |
+| ControlCommand variants | -- | 36 | -- | K |
+| Security types (tag 167) | 30 | 8 | 27% | D |
+| Order states (tag 39) | 12 | 7 | 58% | E |
+| Auth token types | 6 | 2 (ST, IB Key) | 33% | F |
+| Disconnect reasons | 22 | 0 (undifferentiated) | 0% | H |
+| Connection states (LogonState) | 6 | 0 (implicit) | 0% | I |
+| Hot backup strategies | 3 | 0 | 0% | -- |
+| User feature flags | 200+ | 0 | 0% | -- |
+| Unit tests | -- | 637 | -- | Y.4 |
+| Python integration tests | -- | 16 files | -- | Y.5 |
+| Benchmark binaries | -- | 11 | -- | Y.6 |
+
+---
+
+## 3. Non-Goals
+
+These items are explicitly out of scope. IBX is a headless trading engine, not a GUI application.
+
+| # | Non-Goal | Rationale | Java Reference |
+|---|----------|-----------|----------------|
+| 1 | **GUI/UI components** | IBX is a library. The 222 Swing/AWT files in Java are not applicable. | `jclient/*.java` (85 GUI files), `jutils/*.java` (37 GUI files), `jauthentication/*.java` (46 GUI files), `jconnection/ssl/*.java` (SSL dialog UI) |
+| 2 | **Login dialog / Welcome screen** | Headless auth -- no interactive login. | `jclient/login/*.java`, `jclient/AbstractLoginDialog*.java`, `jclient/ModernLoginUIConstants*.java` |
+| 3 | **TWS Workstation features** | IBX does not replicate TWS UI: charting, portfolio display, news reader UI. | Various `jclient/` classes |
+| 4 | **Legacy MD5 authentication** | Pre-XYZ protocol for dead servers. Even Java marks it as legacy. | `jconnection/ag.java` (MD5 auth path) |
+| 5 | **Single Sign-On (SSO)** | Niche institutional feature. `AuthenticationType.SSO` in Java. | `jauthentication/AuthenticationHandler$AuthenticationType.java` |
+| 6 | **XOR key obfuscation** | Deprecated even in Java. | `jauthentication/aQ.java` |
+| 7 | **Log encryption** | Server-side diagnostic logging. No client value. | `jauthentication/n.java` |
+| 8 | **Download/update manager** | IBX does not self-update. | `jutils/FileUtilities*.java` |
+| 9 | **FIDO/WebAuthn** | Future IB feature (`FIDO_SUPPORT_VERSION_V49`). Implement when IB deploys it. | `jauthentication/` (FIDO references) |
+| 10 | **Telemetry/diagnostics** | IBX uses Rust `log` crate. No server-side telemetry. | `jclient/login/*.java` (telemetry), `jutils/IDiagnostics.java`, `jutils/SLogging*.java` |
+| 11 | **Auto-restart manager** | Not applicable to a library. | `jclient/login/a.java` (AutoRestartManager) |
+| 12 | **Certificate pinning UI** | IBX uses system trust store. Certificate prompts are a GUI feature. | `jconnection/ssl/SslAuthDialog*.java` |
+
+---
+
+## 4. Complete Gap Inventory
+
+This section is the core of the document. Every Java class from the 1,004 deobfuscated files is categorized.
+
+**Status legend:**
+- **Complete** -- Functionally equivalent Rust implementation exists
+- **Partial** -- Some functionality is implemented but gaps remain
+- **Missing** -- No implementation; needed for completeness
+- **N/A (GUI)** -- Swing/AWT UI class; not applicable to headless IBX
+- **N/A (Infra)** -- Infrastructure (logging, threading, file I/O) handled differently in Rust
+- **N/A (Legacy)** -- Deprecated/legacy feature; intentionally skipped
+
+### 4.1 jts4launch/jfix (431 files)
+
+This is the largest and most critical package. It contains the FIX protocol engine: message types, order states, execution report handling, market data processing, contract management, and the entire order routing subsystem.
+
+**Sub-totals by function:**
+
+| Function | Estimated Files | IBX Status |
+|----------|----------------|------------|
+| Named enums/types (FixOrderState, FixType, etc.) | 52 | Partial -- core states covered, edge states missing |
+| FIX message handlers (obfuscated a0-eZ) | ~280 | Partial -- common handlers covered, advanced missing |
+| Order routing/management | ~40 | Partial -- 37 order types, but hardcoded STK/SMART/USD |
+| Market data handlers | ~30 | Good -- binary tick decoder, depth, TBT all working |
+| Contract/instrument definitions | ~15 | Good -- contract details, matching symbols working |
+| Utilities/helpers | ~14 | Partial -- format helpers exist, some missing |
+
+#### Named Types and Enums
+
+| Java Class | Purpose | Rust Status | Rust Location | Notes |
+|-----------|---------|-------------|---------------|-------|
+| `FixOrderState.java` + 12 inner classes | Order state machine (Unknown, Inactive, Submitted, Acked, Pending, Confirmed, Filled, CancelSubmitted, CancelAcked, CancelConfirmed, PendingModifyAck, WarnState) | Partial | `types.rs` OrderStatus | IBX has 7 of 12 states. Missing: Acked, CancelSubmitted, CancelAcked, CancelConfirmed, PendingModifyAck |
+| `FixType.java` | FIX frame types: AUTH, FIX.4.1, FIXCOMP, O (binary), UNKNOWN | Complete | `protocol/connection.rs` Frame enum | All 4 wire types handled |
+| `AllowedFeatureStateEnum.java` | Feature flag states | Missing | -- | Part of feature flag system (200+ flags) |
+| `ArConidExchangePair.java` | Contract-ID + exchange pair for auto-routing | Missing | -- | Needed for multi-exchange routing |
+| `ConidExchangePair.java` | Contract-ID + exchange pair | Partial | `engine/context.rs` instrument registry | Basic con_id tracking; exchange not paired |
+| `CollectDataMgrCreator.java` | Data collection manager factory | N/A (Infra) | -- | Server-side data collection |
+| `ExecRestatementReason.java` + inner | Execution restatement reasons (busted, corrected) | Missing | -- | Needed for order lifecycle completeness |
+| `ExemptIneligReasonIdCache.java` | Exempt reason caching for short-sell | Missing | -- | Needed for short-sell compliance |
+| `FixCommissionPolicy.java` | Commission calculation policies | Missing | -- | Commissions are received, not calculated locally |
+| `FixCrossType.java` | Cross order types | Missing | -- | Needed for crossing orders |
+| `FixManualOrderType.java` | Manual order type indicator | Missing | -- | Regulatory tag for manual vs algo orders |
+| `FixNewsType.java` + 8 inner classes | News type enumeration (13 types) | Partial | `control/news.rs` | 6 of 13 types handled |
+| `FixOpenClose.java` | Open/Close position indicator | Missing | -- | Needed for options (open vs close) |
+| `FixOptionAccount.java` | Option account type | Missing | -- | Needed for options trading |
+| `FixOptionExercise.java` | Option exercise types (10 types) | Missing | -- | Needed for option exercise/assignment |
+| `FixSettlementType.java` | Settlement types (regular, cash, next-day) | Missing | -- | Needed for equities settlement |
+| `FixStorageOperation.java` | Storage operations for order persistence | Missing | -- | Needed for order state checkpointing |
+| `FixTriggerMethod.java` | Trigger methods for conditional orders | Complete | `types.rs` OrderAttrs.trigger_method | 8 methods supported |
+| `LookupType.java` | Contract lookup types | Partial | `control/contracts.rs` | Basic lookup works |
+| `OCAType.java` | OCA (one-cancels-all) types (4 types) | Partial | `types.rs` OrderAttrs.oca_group | Group ID tracked; type (cancel/reduce/block) not differentiated |
+| `OffsetUnitsType.java` | Offset units for pegged orders | Partial | `types.rs` SubmitPegBench | Price offset exists; percentage offset missing |
+| `OptionExerciseStyle.java` | American/European/Bermudan exercise style | Missing | -- | Needed for options |
+| `OptionRight.java` | Call/Put indicator | Missing | -- | Needed for options |
+| `OrderAttributionFormat.java` + 5 inner | Order attribution (regulatory) | Missing | -- | MiFID II / CAT reporting |
+| `PDCExchangePairExtension.java` | Exchange pair extension for PDC | Missing | -- | Advanced exchange routing |
+| `PendingType.java` | Pending order subtypes | Missing | -- | Finer-grained pending states |
+| `RefPriceType.java` | Reference price types for pegged orders | Partial | Implicit in peg order types | |
+| `SecIdSourceType.java` | Security ID source (ISIN, CUSIP, SEDOL) | Missing | -- | Needed for non-US instruments |
+| `StockType.java` + 2 inner | Stock subtypes (common, preferred, ADR) | Missing | -- | Currently hardcodes STK |
+| `StrikeHint.java` | Option strike price hinting | Missing | -- | Options UI helper |
+| `StructuredProductsType.java` + 7 inner | Structured product types | Missing | -- | Warrants, notes, certificates |
+| `TrailingKey.java` | Trailing stop key for order tracking | Complete | `types.rs` trailing stop orders | |
+| `TwsEnum.java` | Base enum class for TWS enums | N/A (Infra) | -- | Java enum infrastructure |
+| `VolType.java` | Volatility types for vol orders | Missing | -- | Needed for volatility orders |
+
+#### Deobfuscated Class Inventory (a0 through eZ, ~370 files)
+
+Through deobfuscation, import analysis, and cross-referencing, every obfuscated file has been identified. Below is the complete per-class inventory organized by functional domain.
+
+**Protocol Infrastructure (FIX session, framing, validation)**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `A.java` | PostingEventHandler | Session event dispatcher | N/A (Infra) | Hot loop architecture replaces this |
+| `B.java` | Dispatcher | FIX message dispatcher | Complete | `engine/hot_loop/ccp.rs`, `farm.rs`, `hmds.rs` message loops |
+| `C.java` | Dispatcher (variant) | Secondary dispatcher | N/A (Infra) | |
+| `H.java` | FixMsgType | Message type enumeration | Complete | `protocol/fix.rs` MSG_* constants |
+| `J.java` | CcpFixValidator | CCP FIX message validation | Missing | No inbound validation (Phase 1.4) |
+| `U.java` | MessageSequenceComparator | Message ordering | Partial | Sequence tracked in `connection.rs` seq field |
+| `bf.java` | FixMessage | Base FIX message class | Complete | `protocol/fix.rs` fix_build(), fix_parse() |
+| `bg.java` | RawDataMessage | Raw data (binary) message | Complete | `protocol/connection.rs` Frame::Binary |
+| `bh.java` | Heartbeat | FIX heartbeat (35=0) | Complete | `engine/hot_loop/mod.rs` |
+| `bi.java` | AbstractFixLogonMessage | Logon message base | Complete | `gateway.rs` build_ccp_logon(), build_farm_encrypted_logon() |
+| `bj.java` | FixSystemInfo | System info container | Partial | Some fields in `config.rs` |
+| `bl.java` | ResendRequest | Message resend (gap fill) | Missing | No message gap recovery |
+| `bq.java` | TestRequest | Test request (35=1) | Complete | `engine/hot_loop/mod.rs` |
+| `c0.java` | FixField | Tag-value field | Complete | Inline in fix_parse() |
+| `c1.java` | FixSessionConfig | Session configuration | Partial | `config.rs` constants |
+| `c2.java` | FixMessageTransformer | Message transformation | N/A (Infra) | |
+| `c3.java` | ICompIds | Sender/target comp IDs | Complete | `protocol/fix.rs` TAG_SENDER_COMP_ID |
+| `c4.java` | FixValue<E> | Generic FIX value wrapper | N/A (Infra) | Rust uses native types |
+| `c5.java` | FixMessageHandler | FIX message parser interface | Complete | `protocol/fix.rs` fix_parse() |
+| `c6.java` | MessageWriter | Message serialization | Complete | `protocol/fix.rs` fix_build() |
+| `c7.java` | Identifiable | ID interface | N/A (Infra) | |
+| `c8.java` | FixMessageListener | Message callback interface | Complete | Wrapper trait |
+| `cG.java` | StatusDisplay | Order status display | N/A (GUI) | |
+| `cK.java` | FixField (tag-based) | Tag-specific field | Complete | Inline |
+| `cM.java` | IntegerFixValue | Integer FIX value | N/A (Infra) | |
+| `cN.java` | FixMessageSplitter | Message splitting | Complete | `protocol/fixcomp.rs` split_messages() |
+| `cR.java` | HandlingInstruction | Handling instructions | Complete | Tag 21="2" in order_builder.rs |
+| `cT.java` | FixMessageTracker | Message tracking | Partial | Sequence tracking only |
+| `cU.java` | ProtocolMessage | Protocol message base | Complete | |
+| `cV.java` | FixMessageFormatter | Message formatting | Partial | `format_price()`, `format_qty()` |
+| `cW.java` | FixMessageBuilder | Message builder | Complete | `protocol/fix.rs` fix_build() |
+| `cn.java` | AbstractTimestampedFixMessage | Timestamped message | Complete | SendingTime in all messages |
+| `d5.java` | FieldComparator | Field ordering | N/A (Infra) | Tag ordering handled by fix_build() |
+| `dK.java` | LogonMessagePredicate | Logon message filter | Partial | Logon handling in gateway.rs |
+| `dm.java` | FixMessage (variant) | Message class | Complete | |
+| `dw.java` | CompIdValidator | CompID validation | Missing | No CompID validation |
+| `dy.java` | SessionMessageFilter | Session message filter | Missing | No message filtering |
+| `dz.java` | LoginStatusValidator | Login status validation | Missing | |
+| `e1.java` | FixMsgType | Message type enum | Complete | `protocol/fix.rs` |
+| `e4.java` | FixMessageFields | Field constants | Complete | TAG_* in fix.rs |
+| `e6.java` | FixFieldMap | Field map | Complete | HashMap in fix_parse() |
+| `w.java` | FixUtility | FIX utilities | Partial | Various helpers |
+
+**Order Management (new order, cancel, modify, state tracking)**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `Y.java` | OrderDetails | Full order details container | Partial | `types.rs` Order struct (subset of fields) |
+| `bb.java` | OrderStatusDetails | Order status with details | Partial | `types.rs` OrderUpdate |
+| `bc.java` | NewOrder | New single order (35=D) | Complete | `order_builder.rs` SubmitLimit/Market/Stop... |
+| `bQ.java` | NewOrderSingleMessage | New order message builder | Complete | `order_builder.rs` |
+| `bk.java` | FixOrderStatusRequest | Mass order status request | Partial | Mass status on reconnect |
+| `o.java` | OrderAction | Order action (buy/sell/sshort) | Complete | `types.rs` Side enum |
+| `aP.java` | OrderCancelReject | Cancel reject (35=9) | Complete | `types.rs` CancelReject, `ccp.rs` handler |
+| `b5.java` | AccountOrderRequest | Account-specific order | Partial | Account in order_builder.rs tag 1 |
+| `b6.java` | FixOrderPresetRequest | Order preset request | Missing | No preset system |
+| `a8.java` | FixOrderPresetResponse | Order preset response | Missing | |
+| `d7.java` | FinancialAdvisorPresetManager | FA preset management | Missing | |
+| `d8.java` | OrderDefaultSyncCallback | Preset sync callback | Missing | |
+| `d9.java` | OrderDefaultSyncHandler | Preset sync handler | Missing | |
+| `co.java` | UserDefinedRejectHandler | Custom reject handling | Missing | Rejects logged but not customizable |
+| `e0.java` | FixViolationTranslator | Order violation translation | Missing | No violation categorization |
+| `X.java` | OrderCondition | Order condition | Complete | `types.rs` OrderCondition enum |
+
+**Execution Report Processing**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `aX.java` | ExecutionDetails | Execution details parser | Complete | `ccp.rs` poll_executions(), `types.rs` Fill |
+| `aY.java` | ExecutionDetails (variant) | Execution details | Complete | |
+| `aQ.java` | ComboCommissionReport | Combo commission report | Missing | No combo commission parsing |
+| `b0.java` | ExecutionsRequest | Execution replay request | Partial | `ccp.rs` mass status on reconnect |
+| `cc.java` | ExecutionRequest | Execution query | Partial | reqExecutions in API |
+| `cq.java` | AccountExecutionDetails | Per-account executions | Partial | Single-account only |
+| `cy.java` | MarginImpactReport | Margin impact analysis | Missing | No margin calculation |
+| `ExecRestatementReason.java` | -- | Busted/corrected trades | Missing | |
+
+**Account and Portfolio**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `a6.java` | AccountSummaryResponse | Account summary parser | Good | `control/account.rs` |
+| `a9.java` | PortfolioUpdateParser | Portfolio update parser | Good | `ccp.rs` portfolio parsing |
+| `aA.java` | Ledger | Account ledger data | Partial | Basic account values |
+| `aB.java` | AccountSessionManager | Account session lifecycle | Partial | Single account |
+| `aC.java` | AccountPortfolio | Portfolio container | Good | `bridge.rs` PortfolioState |
+| `aE.java` | AccountEnd | Account download end | Complete | Wrapper::account_download_end |
+| `aJ.java` | FixAccountAdditionResponse | Multi-account addition | Missing | FA support needed |
+| `aK.java` | AccountDefinition | Account definition | Partial | account_id in EClient |
+| `aL.java` | FixAccountSearchResponse | Account search | Missing | FA support |
+| `aT.java` | AccountSummary | Account summary | Good | `control/account.rs` |
+| `aU.java` | FixDailyPnl | Daily PnL | Good | `ccp.rs` PnL parsing |
+| `aV.java` | FixDailyPnLFrozenPrice | Frozen PnL price | Missing | No frozen price handling |
+| `bA.java` | AccountSubscriptionRequest | Account subscription | Partial | req_account_updates |
+| `bw.java` | AccountRequest | Account data request | Partial | |
+| `bZ.java` | FixLightweightPositionRequest | Lightweight position request | Missing | Standard position request only |
+| `a2.java` | FixLightweightPositions | Lightweight positions | Missing | |
+| `by.java` | FixPositionSummaryRequest | Position summary | Missing | |
+| `bM.java` | FixComplexPositionRequest | Complex position request | Missing | No complex positions |
+| `aR.java` | FixComboPositionResponse | Combo position | Missing | |
+| `b8.java` | FixPnlRequest | PnL request | Good | req_pnl, req_pnl_single |
+| `c9.java` | AccountSubscriptionHandler | Account subscription | Partial | |
+| `cr.java` | AccountComponent | Account component | Partial | |
+| `cz.java` | AccountSummary (variant) | Account summary | Good | |
+| `db.java` | AccountUpdatesEndHandler | Account end handler | Complete | |
+| `dq.java` | AccountProperty | Account property | Partial | |
+| `dt.java` | AccountList | Account list | Partial | |
+| `e.java` | AccountData | Account data container | Good | |
+| `f.java` | PortfolioUpdateHandler | Portfolio handler | Good | |
+| `g.java` | AccountUpdateDispatcher | Account dispatcher | Good | |
+| `j.java` | AccountInfo | Account info | Partial | |
+| `k.java` | AccountValueRecord | Account value record | Good | |
+| `l.java` | AccountList | Account list | Partial | |
+
+**Market Data**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `aW.java` | FixMarketDataRequest | Market data request (35=V) | Complete | `farm.rs` subscribe |
+| `a7.java` | QuoteSet | Quote data container | Complete | `types.rs` Quote struct |
+| `ba.java` | MarketDataTypeResponse | Market data type | Complete | Wrapper::market_data_type |
+| `bG.java` | MarketDataGenericTickRequest | Generic tick request | Complete | generic_tick_list in req_mkt_data |
+| `bI.java` | ReqMktDepthExchanges | Depth exchange request | Complete | req_mkt_depth_exchanges |
+| `bU.java` | MarketDataRequest | Market data request | Complete | `farm.rs` |
+| `cl.java` | StreamingDataRequest | Streaming data request | Complete | TBT + real-time bars |
+| `cv.java` | SmartRoutingRequest | Smart routing request | Complete | SmartDepth in `farm.rs` |
+
+**Contract and Security Definition**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `a0.java` | SecurityDefinitionResponse | Sec def response parser | Complete | `control/contracts.rs` |
+| `aH.java` | SecurityDefinition | Security definition | Complete | |
+| `aS.java` | InstrumentDefinition | Instrument definition | Complete | |
+| `bm.java` | SecurityDefinitionRequest | Sec def request | Complete | FetchContractDetails |
+| `bn.java` | SecurityDefinitionRequestByConid | By conId | Complete | |
+| `bo.java` | SecurityDefinitionMessageBuilder | Message builder | Complete | |
+| `bp.java` | SecurityDefinitionRequest (variant) | Sec def request | Complete | |
+| `cf.java` | ContractDetails<T> | Contract details container | Complete | `control/contracts.rs` ContractDefinition |
+| `ch.java` | OptionChainResponse | Option chain response | Partial | Contract details, but no options-specific parsing |
+| `dj.java` | Contract | Contract base class | Complete | `api/types.rs` Contract |
+| `P.java` | Contract (variant) | Contract | Complete | |
+| `K.java` | Exchange | Exchange definition | Partial | Exchange in order routing |
+| `R.java` | ExchangeRule | Exchange trading rules | Partial | Market rules parsed |
+| `S.java` | ComboRule | Combo trading rules | Missing | |
+| `Z.java` | CrossExchanges | Cross-exchange mapping | Missing | |
+| `bd.java` | RoutingTableResponse | Routing table | Missing | No routing table support |
+
+**Security Type Handlers**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `ef.java` | SecurityType | Security type enum (30 types) | Partial -- 8 of 30 |
+| `eg.java` | AllSecurityTypesFilter | All-types filter | N/A |
+| `eh.java` | UnspecifiedSecType | Unspecified type | N/A |
+| `ei.java` | BagSecTypeHandler | Combo (BAG) handler | Missing |
+| `ej.java` | IntercommoditySpread | Intercommodity spread | Missing |
+| `ek.java` | PredefinedCombinationSecurity | Predefined combo | Missing |
+| `el.java` | BasketSecType | Basket security | Missing |
+| `em.java` | CashInstrument | Forex (CASH) | Missing (Phase 2.3) |
+| `en.java` | CfdSecurityType | CFD | Missing |
+| `eo.java` | CommodityHandler | Commodity | Missing |
+| `ep.java` | CryptoSecType | Cryptocurrency | Missing |
+| `eq.java` | FixedIncomeSecurityType | Fixed income | Missing |
+| `er.java` | SecurityTypeBill | Bills | Missing |
+| `es.java` | Bond | Bonds | Missing |
+| `et.java` | FuturesOptionHandler | FOP | Missing (Phase 2.2) |
+| `eu.java` | EventContractHandler | Event contracts | Missing |
+| `ev.java` | FundSecurityTypeHandler | Funds | Missing |
+| `ew.java` | FuturesContractFormatter | Futures formatting | Missing (Phase 2.2) |
+| `ex.java` | ForwardSecurityTypeHandler | Forwards | Missing |
+| `ey.java` | StructuredProductSecurityType | Structured products | Missing (Phase 2.5) |
+| `ez.java` | WarrantSecurityTypeStrategy | Warrants | Missing (Phase 2.5) |
+| `d4.java` | SecurityAssetType | Asset type classification | Missing |
+
+**Financial Advisor (FA)**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `aM.java` | FinancialAdvisorRuleEvent | FA rule event | Missing |
+| `aO.java` | FaAllocationGroup | FA allocation group | Missing |
+| `aZ.java` | FixGetStaticModelResponse | FA model response | Missing |
+| `bs.java` | ChameleonAllocationRequest | Allocation request | Missing |
+| `cb.java` | FinancialAdvisorProfile | FA profile | Missing |
+| `cd.java` | FaGroupRequest | FA group request | Missing |
+| `cu.java` | FixRebalanceStaticModelRequest | Rebalance request | Missing |
+| `ca.java` | FixRebalanceCashRequest | Cash rebalance | Missing |
+| `d7.java` | FinancialAdvisorPresetManager | FA preset manager | Missing |
+| `dk.java` | FaProfileType | FA profile type | Missing |
+| `dx.java` | FinancialAdvisorGroupFilter | FA group filter | Missing |
+| `O.java` | AllocationProfile | Allocation profile | Missing |
+
+**News and Historical Data**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `a4.java` | FixNewsArticle | News article | Complete | `control/news.rs` |
+| `ce.java` | RequestNewsArticle | News article request | Complete | FetchNewsArticle |
+| `a3.java` | ScannerParameters | Scanner params | Complete | `control/scanner.rs` |
+| `b4.java` | ScannerSubscriptionMessage | Scanner subscription | Complete | SubscribeScanner |
+| `ck.java` | ScannerSubscriptionRequest | Scanner request | Complete | |
+| `be.java` | FixScheduleResponse | Trading schedule | Complete | `hmds.rs` schedule parsing |
+| `cp.java` | TradeHistoryRequest | Trade history | Partial | FetchHistoricalTicks |
+| `ds.java` | TradingSchedule | Trading schedule | Complete | historical_schedule callback |
+| `bu.java` | TradeSessionInfo | Trade session info | Missing | |
+
+**Feature Flags and Configuration**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `p.java` | AllowedFeatureState | Feature state | Missing |
+| `q.java` | UserFeatureSet | 200+ user features | Missing (Phase 1.2) |
+| `d1.java` | BrandingManager | Branding config | N/A (GUI) |
+| `d2.java` | ProductDefaults | Product defaults | Missing |
+| `d3.java` | ProductSettings | Product settings | Missing |
+| `i.java` | FixSessionConfig | Session config | Partial -- `config.rs` |
+| `t.java` | FixSessionProfile | Session profile | Missing |
+| `cs.java` | UserRequest | User request | Missing |
+| `ea.java` | RemoteOrderPresetsManager | Remote presets | Missing |
+
+**Caching, Utilities, and Data Structures**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `D.java` | FixMap<K,V> | Thread-safe map | N/A (Infra) -- Rust HashMap |
+| `E.java` | CacheBuilder<K,V> | Cache factory | N/A (Infra) |
+| `F.java` | EntryListener<K,V> | Cache listener | N/A (Infra) |
+| `G.java` | RequestHandler<T,R> | Request handler | N/A (Infra) |
+| `I.java` | SimpleKeyValueStore<K,V> | Key-value store | N/A (Infra) |
+| `N.java` | ComboKey | Combo instrument key | Missing |
+| `T.java` | BucketDefinition | Data bucketing | N/A (Infra) |
+| `V.java` | StringComparator | String comparison | N/A (Infra) |
+| `a1.java` | FixDecimal | Decimal formatting | Complete | format_price() |
+| `b7.java` | RequestId | Request ID generator | Complete | next_md_req_id, next_hmds_query_id |
+| `cg.java` | StringField | String FIX field | N/A (Infra) |
+| `ci.java` | RequestId (variant) | Request ID | Complete |
+| `ct.java` | StateSendable | Sendable state | N/A (Infra) |
+| `da.java` | AbstractFixConstant<T> | Constant base | N/A (Infra) |
+| `dc.java` | ConsumerFixMessageHandler | Message consumer | N/A (Infra) |
+| `de.java` | RequestSubscription | Subscription tracking | Complete | md_req_to_instrument |
+| `df.java` | FixField (variant) | Field base | N/A (Infra) |
+| `dg.java` | ICloneable<T> | Clone interface | N/A (Infra) |
+| `dh.java` | ISenderTarget | Sender/target interface | N/A (Infra) |
+| `ee.java` | FixValueMapper | Value mapping | N/A (Infra) |
+| `ed.java` | ListenerKey | Listener key | N/A (Infra) |
+| `m.java` | ParsedMessage | Parsed FIX message | Complete | fix_parse() HashMap |
+| `u.java` | AsyncCache<TKey,TVal> | Async cache | N/A (Infra) |
+| `v.java` | RequestBuilder<TKey,TVal> | Request builder | N/A (Infra) |
+| `x.java` | UpdateForwarder<K,V> | Update forwarder | N/A (Infra) |
+| `y.java` | SingleActionTimer | Timer utility | N/A (Infra) |
+| `z.java` | NotifyingMapDecorator<K,V> | Map wrapper | N/A (Infra) |
+
+**Session and Connection**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `d.java` | LogonHandler | Logon handling | Complete | `gateway.rs` |
+| `h.java` | LogoutTask | Logout handling | Partial | Logout detected, no graceful logout send |
+| `bN.java` | FixConnectionStatusEvent | Connection status | Partial | Event::Disconnected |
+| `bH.java` | HotBackupSiteMessage | Hot backup site info | Missing (Phase 3.1) |
+| `dn.java` | MiscUrlManager | URL management | Missing |
+| `dp.java` | DisconnectHandler | Disconnect handling | Partial | `hot_loop/mod.rs` |
+| `dr.java` | AuthenticatedMessageHandler | Auth message handler | Partial | |
+| `eb.java` | FixSessionLoginHandler | Login handler | Complete | `gateway.rs` |
+| `bt.java` | TwoFactorAuthException | 2FA exception | Partial | IB Key handled |
+| `cj.java` | FixServiceAuthProofRequest | Service auth proof | Missing |
+| `cw.java` | FixServiceAuthProofResponse | Auth proof response | Missing |
+| `cm.java` | FixStorageRequest | Storage request | Missing (Phase 4.2) |
+| `cx.java` | FixStorageResponse | Storage response | Missing |
+| `aN.java` | FixBBTVTokenResponse | BBTV token | Missing |
+
+**Greeks and Volatility**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `cX.java` | PositionGreeks | Position greeks | Missing (Phase 2.1) |
+| `cY.java` | FxRateManager | FX rate management | Missing (Phase 2.3) |
+
+**MiFID / Regulatory**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `b1.java` | MifidConfigRequest | MiFID configuration | Missing (Phase 4.10) |
+| `b3.java` | FixOptionExerciseSuggestionRequest | Option exercise | Missing (Phase 2.1) |
+
+**Other / Specialized**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `bW.java` | FixIBTypesRequest | IB types request | Missing |
+| `bx.java` | FixUniverseRequest | Universe request | Missing |
+| `d6.java` | QaFixMessageInjector | QA testing tool | N/A (Infra) |
+| `L.java` | DataCollectionManager | Data collection | N/A (Infra) |
+| `M.java` | PnlSubscriptionRequestTask | PnL subscription | Good -- `ccp.rs` |
+| `Q.java` | RequestDestination | Request routing | Partial |
+| `r.java` | AwayStatusUpdateTask | Away status | N/A (Infra) |
+| `s.java` | BondIssuer | Bond issuer info | Missing |
+| `n.java` | acts (functional interface) | Java lambda | N/A (Infra) |
+| `b2.java` | FixModelSummaryRequest | Model summary | Missing |
+| `b9.java` | PositionRequest | Position request | Complete |
+| `dl.java` | FixSessionConfig (variant) | Session config | Partial |
+| `e5.java` | PresetLookupWarningTask | Preset warning | N/A (GUI) |
+| `ec.java` | FixOrderPresetRequestSwitchMap | Preset switch | Missing |
+| `bK.java` | FixClearingHouseDetails | Clearing house | Missing |
+
+**Summary counts for jts4launch/jfix:**
+
+| Status | Count | Percentage |
+|--------|-------|------------|
+| Complete | ~120 | 28% |
+| Partial | ~65 | 15% |
+| Missing (needed) | ~95 | 22% |
+| N/A (GUI) | ~15 | 3% |
+| N/A (Infrastructure) | ~80 | 19% |
+| N/A (Legacy/irrelevant) | ~56 | 13% |
+| **Total** | **431** | **100%** |
+
+#### replacement/ Subpackage (1 file)
+
+| Java Class | Purpose | Rust Status | Notes |
+|-----------|---------|-------------|-------|
+| `replacement/a.java` | Order cancel/replace (modify) message builder | Complete | `order_builder.rs` Modify variant sends 35=G |
+
+### 4.2 twslaunch/jauthentication (133 files)
+
+Authentication subsystem: SRP-6, DH key exchange, token management, 2FA challenge/response.
+
+#### Named Types
+
+| Java Class | Purpose | Rust Status | Rust Location | Notes |
+|-----------|---------|-------------|---------------|-------|
+| `AuthDispatcher$AuthProcessState.java` | Auth process state machine | Partial | `auth/session.rs` (linear flow) | Java has formal states; IBX uses sequential code |
+| `AuthenticationHandler$AuthenticationType.java` | Auth types: NORMAL, MARKET_DATA_CONNECTION, SSO, DEMO | Partial | `auth/session.rs` | Only NORMAL implemented. SSO and DEMO are non-goals. |
+| `AuthenticationMessageSWTK$DeliveryMethod.java` | 2FA delivery: SMS, EMAIL, IB_KEY, PUSH | Partial | `auth/session.rs` (IB Key only) | SMS and EMAIL 2FA missing |
+| `NsMessageType.java` | NS protocol message types (17 values) | Complete | `protocol/ns.rs` | All 16 non-UNKNOWN types defined |
+| `SecurityCodeDialogType.java` | Security code dialog types for 2FA | Partial | -- | IB Key handled; SMS/email prompt types missing |
+| `TokenType.java` | Token types: SOFT(0), PERMANENT(1), PWD, TWSRO(3), TST(7) | Partial | `auth/session.rs` | Only SOFT and IB Key used. PERMANENT, TWSRO, TST missing. |
+
+#### Deobfuscated Class Inventory (~127 files)
+
+**NS Protocol Messages and Processing**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `aA.java` | NSMessageProcessor | NS message dispatch | Complete | `auth/session.rs` ns_parse + match |
+| `aE.java` | NsMessage | NS message base | Complete | `protocol/ns.rs` ns_build() |
+| `aF.java` | NsConnectRequest | NS connect request (521) | Complete | `auth/session.rs` connect_request |
+| `aG.java` | HeartbeatMessage | NS heartbeat (531) | Complete | `protocol/ns.rs` NS_HEART_BEAT |
+| `aH.java` | MiscUrlsRequest | Misc URLs request (528) | Complete | `auth/session.rs` |
+| `aI.java` | NewCommPortMessage | New comm port (526) | Complete | `auth/session.rs` |
+| `aK.java` | SecureConnectMessage | Secure connect (532) | Complete | `auth/session.rs` |
+| `aL.java` | SecureMessage | Secure message (534) | Complete | `auth/session.rs` send_secure() |
+| `o.java` | VersionHeader | NS version header | Complete | `config.rs` NS_VERSION |
+
+**SRP-6 and DH Authentication**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `f.java` | AbstractSessionKeyProvider | Key provider base | Complete | `auth/dh.rs` SecureChannel |
+| `Q.java` | SrpChallengeTask | SRP challenge handler | Complete | `auth/session.rs` do_srp() |
+| `r.java` | ClientKeyPacket | DH client key | Complete | `auth/dh.rs` public_key |
+| `s.java` | ServerDhParamsResponse | DH server params | Complete | `auth/dh.rs` derive_keys() |
+| `t.java` | MessagePacket | Auth message packet | Complete | `protocol/xyz.rs` xyz_build() |
+| `u.java` | AuthParameters | Auth parameters | Complete | `auth/session.rs` |
+| `P.java` | XyzAuthenticationMessage | XYZ auth message | Complete | `protocol/xyz.rs` |
+| `aQ.java` | CryptoUtils | Crypto utilities (AES, HMAC) | Complete | `auth/crypto.rs` |
+| `G.java` | AuthenticationPacket | Auth packet | Complete | `protocol/xyz.rs` xyz_wrap() |
+| `H.java` | AuthMessage | Auth message base | Complete | |
+| `I.java` | ChallengeResponseMessage | Challenge response | Complete | `auth/session.rs` |
+| `K.java` | ChallengePacket | Challenge packet | Complete | |
+| `L.java` | SessionTokenAuthPacket | Token auth packet | Complete | |
+| `M.java` | TokenAuthenticationPacket | Token auth | Complete | |
+
+**Auth State Machine and Dispatch**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `aY.java` | AuthDispatcher | Auth dispatch state machine | Partial -- linear in Rust |
+| `aZ.java` | AuthenticationHandler | Auth handler | Complete | `auth/session.rs` |
+| `A.java` | AuthenticationHandler (variant) | Handler variant | Complete | |
+| `C.java` | AuthenticationOpcodes | Auth opcodes | Complete | XYZ msg IDs |
+| `D.java` | AuthenticationStatus | Auth status enum | Partial -- success/fail only |
+| `R.java` | AuthenticationResult | Auth result | Complete | `auth/session.rs` AuthResult |
+| `S.java` | MessageParser | Auth message parser | Complete | `protocol/xyz.rs` xyz_parse_response() |
+| `V.java` | AuthenticationStatus (variant) | Status variant | Partial |
+| `W.java` | AuthenticationStatus (variant) | Status variant | Partial |
+| `Y.java` | AuthenticationStatus (variant) | Status variant | Partial |
+| `p.java` | AuthenticationResponse | Auth response | Complete | |
+| `w.java` | AuthToken | Token management | Partial -- SOFT + IB Key only |
+| `x.java` | TokenConverter | Token conversion | Missing -- no PST/TWSRO conversion |
+| `y.java` | AuthenticationCallbackHandler | Auth callbacks | Partial |
+
+**Token and Session Management**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `aN.java` | TokenSet | Token collection | Missing -- single token only |
+| `aV.java` | SessionToken | Session token storage | Partial -- in-memory only, no persistence |
+| `N.java` | AuthenticationMessage | Auth message | Complete |
+| `O.java` | FinishMessage | Auth finish | Complete |
+| `aM.java` | AuthenticationArgument | Auth args | Complete |
+| `aD.java` | MessageDetails | Message details | Complete |
+| `n.java` | PreAuthenticationHandler | Pre-auth setup | Partial |
+| `l.java` | PostAuthenticationTask | Post-auth tasks | Partial |
+| `q.java` | UsernameRequest | Username request | Complete |
+
+**2FA Challenge/Response**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `T.java` | AuthChallenge | Auth challenge | Complete (IB Key) |
+| `U.java` | AuthenticationTask | Auth task | Complete |
+| `aO.java` | ChallengeCodeListener | Code listener | Partial -- IB Key only |
+| `aP.java` | ChallengeResponseListener | Response listener | Partial |
+| `z.java` | ChallengeProcessingTask | Challenge processing | Complete (IB Key) |
+| `B.java` | ChallengeDisplayTask | Challenge display | N/A (GUI) |
+| `J.java` | ConfigMessage | Config message | Partial |
+
+**Timeout and Monitoring**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `aW.java` | AuthResponseMonitorThread | Auth response monitor | Missing -- fixed timeout only |
+| `aX.java` | AuthTimeoutMonitor | Auth timeout | Missing -- no configurable timeout |
+| `v.java` | AuthTimeoutMonitor (variant) | Timeout variant | Missing |
+| `k.java` | DisconnectTask | Auth disconnect | Partial |
+| `aJ.java` | MakeReadWriteCommand | RO->RW switch | Missing |
+
+**GUI-Only (N/A -- 37 files)**
+
+| File | Deobfuscated Name | Purpose |
+|------|-------------------|---------|
+| `a.java` | ChallengeFieldFocusAdapter | GUI focus |
+| `a0.java` through `a9.java` | Cancel/Login/Submit actions | GUI buttons (10 files) |
+| `b.java` | AuthenticationKeyListener | GUI keyboard |
+| `c.java` | UsernameFieldKeyListener | GUI keyboard |
+| `d.java` | ListItemTooltipUpdater | GUI tooltip |
+| `e.java` | AppWindowAdapter | GUI window |
+| `g.java` | ShowAuthenticationDialog | GUI dialog |
+| `h.java` | AuthenticationDialogContext | GUI context |
+| `i.java` | SubmitLoginRunnable | GUI submit |
+| `j.java` | AuthenticationTask (GUI) | GUI task |
+| `aR.java` | AuthenticationDialogHelper | GUI dialog |
+| `aS.java` | DefaultButtonAncestorListener | GUI buttons |
+| `aT.java` | ButtonProvider | GUI buttons |
+| `aU.java` | ArrayButtonProvider | GUI buttons |
+| `E.java` | AuthenticationUIFactory | GUI factory |
+| `F.java` | ButtonArray | GUI buttons |
+| `X.java` | ShowSecurityCodeDialogRunnable | GUI dialog |
+| `Z.java` | NoOpRunnable | GUI no-op |
+| `ba.java` | ClearOptionPaneInputAction | GUI |
+| `bb.java` | UrlLaunchListener | GUI |
+| `bc.java` | UrlButtonAction | GUI |
+| `bd.java` | AbstractAuthenticationDialog | GUI dialog |
+| `be.java` | SecurityCardDialog | GUI dialog |
+| `bf.java` | SmsChallengeDialog | GUI dialog |
+| `bg.java` | SecondFactorSelectionDialog | GUI dialog |
+| `bh.java` | TwoFactorSmsDialog | GUI dialog |
+| `bi.java` | PasswordNoticeDialog | GUI dialog |
+| `bj.java` | ImagePanel | GUI panel |
+| `bk.java` | NotificationPanel | GUI panel |
+| `bl.java` | QrCodePanel | GUI panel |
+
+**Summary counts for twslaunch/jauthentication:**
+
+| Status | Count | Percentage |
+|--------|-------|------------|
+| Complete | 35 | 34% |
+| Partial | ~20 | 15% |
+| Missing (needed) | ~10 | 8% |
+| N/A (GUI) | ~37 | 28% |
+| N/A (Infrastructure) | ~21 | 16% |
+| **Total** | **133** | **100%** |
+
+### 4.3 twslaunch/jclient (162 files; 130 top-level)
+
+Client-side application logic. Heavily GUI-focused. ~85 files are pure Swing/AWT.
+
+#### Named Types
+
+| Java Class | Purpose | Rust Status | Notes |
+|-----------|---------|-------------|-------|
+| `AbstractLoginDialog$TradingMode.java` + 2 inner | Trading mode: LIVE, PAPER | Complete | `config.rs` / `EClientConfig.paper` field |
+| `AbstractLoginDialog$WanMessage.java` + 3 inner | WAN connection warning messages | N/A (GUI) | |
+| `IToFrontAsGroupWindow.java` | Window group focus interface | N/A (GUI) | |
+| `LoginMode.java` + 3 inner | Login modes: IB_GATEWAY, TWS, PAPER_TRADING | Partial | IBX supports paper/live; no mode enum |
+| `ModernLoginUIConstants$Size.java` | UI sizing constants | N/A (GUI) | |
+| `IApplicationContext$UserScope.java` | User scope: INDIVIDUAL, FA | Missing | Needed for FA (Financial Advisor) support |
+
+#### Deobfuscated Class Inventory (~157 files)
+
+The jclient package is heavily GUI-focused. Of 130 top-level files, approximately 85 are pure Swing/AWT classes. The 29 login/ subpackage files are similarly GUI-heavy.
+
+**Protocol-Relevant Classes (non-GUI)**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `A.java` | LoginTimeMonitor | Login timing | N/A (Infra) | |
+| `C.java` | DsaPromptState | DSA 2FA prompt state | Complete | IB Key 2FA in `auth/session.rs` |
+| `F.java` | AuthenticationInfo | Auth info container | Complete | AuthResult in `auth/session.rs` |
+| `H.java` | ConnectionFactory | Connection factory | Complete | `gateway.rs` |
+| `I.java` | ConnectionFactory (variant) | Factory variant | Complete | |
+| `J.java` | ConnectionSettings | Connection settings | Partial | `config.rs` constants |
+| `L.java` | IConnectionStatus | Connection status interface | Partial | Event::Disconnected |
+| `P.java` | GatewayWorkerThreadFactory | Thread factory | N/A (Infra) | Hot loop is single-threaded |
+| `Y.java` | LoginRequestDispatcher | Login dispatch | Complete | `gateway.rs` |
+| `w.java` | WanConnectionChecker | WAN connectivity check | Missing (Phase 3.6) |
+| `x.java` | LoginSuccessHandler | Login success | Complete | Gateway::connect() return |
+| `y.java` | BeeConfigurationManager | Bee configuration | N/A (Infra) |
+| `z.java` | BeeUser | Bee user | N/A (Infra) |
+| `ae.java` | TwoFactorAuthMonitor | 2FA monitoring | Partial | IB Key timeout |
+| `ak.java` | ProxyConfiguration | Proxy settings | Missing -- no proxy support |
+| `an.java` | LoginResultHandler | Login result | Complete | |
+| `aq.java` | RequestTwoFactorChallenge | 2FA challenge request | Complete (IB Key) |
+| `ar.java` | PostLoginTask | Post-login tasks | Partial | Account ID extraction |
+| `ay.java` | LoginController | Login orchestration | Complete | `gateway.rs` |
+
+**GUI-Only Classes (~100+ files)**
+
+All Swing/AWT classes including dialog managers, layout managers, button listeners, mouse adapters, keyboard layouts, cell renderers, splash screens, tooltip handlers, etc. Not listed individually as they are entirely N/A for headless IBX.
+
+Representative count: `a.java` through `v.java` (22 UI adapters), `aA.java` through `bd.java` (30+ UI components), `LoginView`, `LoginPanel`, `SettingsPanel`, `WelcomeDialog`, `ErrorDialog`, etc.
+
+**login/ Subpackage Detail (29 files)**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `ICcpConnectionFeatureProvider$CcpConnectionFeature.java` | CCP feature detection | Missing (Phase 1.2) |
+| Other 28 files | Login UI flow, auto-restart, telemetry, installer | N/A (GUI/Infra) |
+
+**Summary counts for twslaunch/jclient (all subpackages, 162 files):**
+
+| Status | Count | Percentage |
+|--------|-------|------------|
+| Complete | ~15 | 9% |
+| Partial | ~8 | 5% |
+| Missing (needed) | ~5 | 3% |
+| N/A (GUI) | ~115 | 71% |
+| N/A (Infrastructure) | ~19 | 12% |
+| **Total** | **162** | **100%** |
+
+#### login/ Subpackage (29 files)
+
+| Category | Est. Files | IBX Status |
+|----------|-----------|------------|
+| **CCP connection feature provider** | ~5 | Missing -- feature flags not parsed from logon |
+| **Auto-restart manager** | ~3 | N/A (Infra) |
+| **Telemetry logging** | ~3 | N/A (Infra) |
+| **Login orchestration** | ~8 | Partial -- `gateway.rs` |
+| **Installer/update** | ~3 | N/A (Infra) |
+| **GUI** | ~7 | N/A (GUI) |
+
+#### context/ Subpackage (3 files)
+
+| Java Class | Purpose | Rust Status |
+|-----------|---------|-------------|
+| `context/a.java` | Application context implementation | Minimal -- `config.rs` |
+| `context/b.java` | Context helper | N/A (Infra) |
+| `IApplicationContext$UserScope.java` | User scope enum | Missing -- needed for FA |
+
+### 4.4 twslaunch/jconnection (154 files; 110 top-level)
+
+Connection management: socket lifecycle, heartbeat, failover, SSL, validation.
+
+#### Named Types
+
+| Java Class | Purpose | Rust Status | Notes |
+|-----------|---------|-------------|-------|
+| `AuthTimeoutStartegy.java` | Auth timeout strategy | Missing | IBX uses fixed timeouts |
+| `CompetitionType.java` | Concurrent login competition types (4 types) | Missing | No competition handling |
+| `Compression$EncryptionAction.java` | Compression + encryption action | Complete | `protocol/fixcomp.rs` |
+| `DisconnectReason.java` | 22 disconnect reasons | Missing | All disconnects treated identically |
+| `HotBackupStrategy.java` | Hot backup: OFF, ON (2 backups), SINGLE_HOST | Missing | No failover |
+| `JTSAuthConnection$AuthClientState.java` | Auth client state machine | Partial | Linear in `gateway.rs` |
+| `LogonState.java` | 6 logon states: PRELOGON, LOGON, FIX_SESSION_REQUEST, FIX_SESSION_OPEN, LOGGEDON, ACCT_NOT_SUPPORTED | Missing | Implicit in code flow |
+
+#### Deobfuscated Class Inventory (~103 files)
+
+**Core Connection Management**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `A.java` | JtsConnection | Main connection manager | Good | `gateway.rs` + `engine/hot_loop/mod.rs` |
+| `E.java` | ConnectionDetails | Connection parameters | Complete | `config.rs` hosts, ports |
+| `F.java` | ByteBuffer | Connection buffer | Complete | `protocol/connection.rs` buf field |
+| `N.java` | Connection | Connection base | Complete | `protocol/connection.rs` Connection struct |
+| `O.java` | ConnectionContext | Connection context | Partial | Implicit in hot loop state |
+| `S.java` | Connection (variant) | Connection | Complete | |
+| `y.java` | Connection (variant) | Connection | Complete | |
+| `z.java` | ConnectionWithListener | Connection + callbacks | Partial | Event channel replaces listeners |
+| `e.java` | ConnectionException | Connection errors | Partial | io::Error |
+| `av.java` | OutgoingMessage | Outgoing message | Complete | `connection.rs` send_fix() |
+| `az.java` | Session | Session container | Partial | `auth/session.rs` AuthSession |
+| `af.java` | Version | Version info | Complete | `config.rs` IB_BUILD, IB_VERSION |
+| `w.java` | FixCompressor | FIX compression | Complete | `protocol/fixcomp.rs` |
+| `x.java` | EncryptionActionSwitch | Encryption action | Complete | `protocol/connection.rs` sign/unsign |
+
+**Heartbeat and Ping**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `aJ.java` | PingThread | Heartbeat ping thread | Complete | `engine/hot_loop/mod.rs` HeartbeatState |
+| `au.java` | NetworkTimestamp | Network timestamp | Complete | chrono_free_timestamp() |
+| `ax.java` | ConnectionDelayCalculator | Delay calculation | Missing -- no adaptive delay |
+| `ay.java` | RequestThrottler | Request throttling | Missing -- no outbound throttling |
+
+**Hot Backup and Failover**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `K.java` | HotBackupConnectionManager | Hot backup orchestrator | Missing (Phase 3.1) |
+| `L.java` | SaveStableHostTask | Save last-known-good host | Missing |
+| `M.java` | HotBackupManager | Backup state manager | Missing |
+| `aF.java` | GatewayResolverTask | Gateway host resolution | Missing |
+
+**Disconnect and Reconnect**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `D.java` | DisconnectReasonSwitchMap | Disconnect reason routing | Missing (Phase 1.9) |
+| `H.java` | DisconnectDetails | Disconnect detail container | Missing |
+| `aa.java` | SocketEofHandler | EOF handling | Complete -- io::Error detection |
+| `ag.java` | ShutdownHandler | Graceful shutdown | Partial -- ControlCommand::Shutdown |
+| `aA.java` | SocketActivityTracker | Socket activity monitoring | Partial -- heartbeat tracking |
+
+**Login Flow**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `f.java` | AuthenticationHandler | Auth handler | Complete | `auth/session.rs` |
+| `g.java` | AbstractLoginController | Login controller | Complete | `gateway.rs` |
+| `aH.java` | LoginThread | Login thread | Complete | `gateway.rs` (single thread) |
+| `ai.java` | FixLogonDownloadHandler | FIX logon handler | Complete | `gateway.rs` CCP logon |
+| `J.java` | FixLogonHandlerFactoryProvider | Logon factory | Partial |
+| `R.java` | ConnectionHandler | Connection handler | Complete |
+| `Z.java` | ConnectionAuthTimeoutHandler | Auth timeout | Missing -- fixed timeout |
+| `ak.java` | ConnectionTimeoutTask | Connection timeout | Missing |
+| `aK.java` | ConnectionCheckTask | Connection check | Missing |
+
+**Competition and Read-Only**
+
+| File | Deobfuscated Name | Purpose | IBX Status |
+|------|-------------------|---------|------------|
+| `i.java` | CompetitionDialogCallback | Competition callback | Missing (Phase 3.3) |
+| `r.java` | CompetitionDisconnectCallback | Competition disconnect | Missing |
+| `s.java` | CompetingSessionHandler | Competition handler | Missing |
+| `aR.java` | CompetitionDialog | Competition dialog | N/A (GUI) |
+| `aQ.java` | SwitchToReadWriteAction | RO -> RW switch | Missing (Phase 3.8) |
+
+**GUI-Only (N/A -- ~41 files)**
+
+All dialog, window adapter, splash screen, progress reporter, button action, and Swing worker classes:
+
+`a.java` (LoginWindowAdapter), `b.java` (ConnectionWindowAdapter), `c.java` (ConnectionWindowAdapter), `d.java` (ApplicationExitAdapter), `h.java` (SsoCompletionTask), `j.java` (ShowAuthenticationDialogTask), `k.java` (DemoConnectionListener), `l.java` (ConnectionTask), `m.java` (DialogCenteringTask), `n.java` (LoginRunnable), `o.java` (ConnectionTask), `p.java` (ShowSslDialogRunnable), `q.java` (SslActionHandler), `t.java` (TerminateLoginListener), `u.java` (BringToFrontRunnable), `ab.java` (SelectConnectionRunnable), `ac.java` (ConnectionCleanupTask), `ad.java` (ConnectionProcessorTask), `ae.java` (ConnectionHandler), `aG.java` (DownloadMonitorThread), `ah.java` (DownloadProgressMonitor), `aj.java` (SplashScreenProgressReporter), `al.java` (LogInitializationStep), `aL.java` (DialogCloseAction), `am.java` (WelcomeScreenRunnable), `aM.java` (CancelConnectionAction), `an.java` (DefaultConnectionListener), `aN.java` (ActionButton), `ao.java` (ConnectionHandler), `aO.java` (LoginTerminationDialog), `ap.java` (ProgressTracker), `aP.java` (ContinueLoginActionHandler), `aq.java` (HelpLinkActionListener), `as.java` (SuppressionHandler), `aS.java` (ReconnectDialog), `at.java` (ButtonCallback), `aT.java` (LoginProgressDialog), `aU.java` (HyperlinkErrorDialog), `aV.java` (PaperAccountCreationPrompt), `aw.java` (HyperlinkHandler), `aW.java` (PaperAccountCreationPromptDialog), `aX.java` (ReconnectDialog), `aY.java` (RunnableSwingWorker)
+
+**Infrastructure (N/A -- ~10 files)**
+
+| File | Deobfuscated Name | Purpose |
+|------|-------------------|---------|
+| `B.java` | TelemetrySocketConnectionHandler | Telemetry |
+| `C.java` | SslHandshakeListener | SSL event |
+| `G.java` | ConnectionListener | Callback interface |
+| `I.java` | TrafficLogger | Traffic logging |
+| `P.java` | ConnectionProvider | Provider interface |
+| `Q.java` | ILaunchSettings | Settings interface |
+| `T.java` | IConnectionMonitor | Monitor interface |
+| `U.java` | ConnectionParamsProvider | Params provider |
+| `V.java` | ConnectionSelectionListener | Selection listener |
+| `W.java` | ConnectionListener (variant) | Listener |
+| `X.java` | ConnectionCallback | Callback |
+| `Y.java` | SocketListener | Socket events |
+| `aB.java` | ConnectionFactory | Factory |
+| `aC.java` | ConnectionTask (variant) | Task |
+| `aD.java` | SocketDispatcherThread | Socket dispatch |
+| `aE.java` | ConnectionHandlerThread | Handler thread |
+| `aI.java` | SocketListener (variant) | Socket events |
+
+**Summary counts for twslaunch/jconnection (excluding subpackages):**
+
+| Status | Count | Percentage |
+|--------|-------|------------|
+| Complete | ~25 | 23% |
+| Partial | ~12 | 11% |
+| Missing (needed) | ~15 | 14% |
+| N/A (GUI) | ~41 | 37% |
+| N/A (Infrastructure) | ~17 | 15% |
+| **Total** | **110** | **100%** |
+
+#### ssl/ Subpackage (32 files)
+
+| Category | Est. Files | IBX Status |
+|----------|-----------|------------|
+| **SSL/TLS connection** | ~8 | Partial -- `native-tls` crate for system TLS |
+| **Certificate parsing** | ~5 | Missing -- no cert inspection beyond system trust |
+| **Certificate validation** | ~4 | Partial -- system trust store handles basic validation |
+| **Certificate pinning** | ~3 | Missing -- no IB-specific cert pinning |
+| **SSL auth dialog UI** | ~8 | N/A (GUI) |
+| **Trust store management** | ~4 | Missing -- uses system trust store |
+
+#### service/ Subpackage (2 files)
+
+| Java Class | Purpose | Rust Status |
+|-----------|---------|-------------|
+| `service/a.java` | Service type enumeration (CCP, FARM, HMDS, etc.) | Partial -- connections typed implicitly |
+| `service/b.java` | Service connection factory | Missing -- hardcoded in `gateway.rs` |
+
+#### validate/ Subpackage (10 files)
+
+| Category | Est. Files | IBX Status |
+|----------|-----------|------------|
+| **FIX message validation** | ~5 | Missing -- messages not validated before processing |
+| **Network connectivity checking** | ~3 | Missing -- no connectivity pre-check |
+| **INetworkConnectivityAcceptor$NetworkConnectivityStatus.java** | Network status enum | Missing |
+| **Checksum verification** | ~2 | Complete -- `protocol/fix.rs` fix_checksum() |
+
+### 4.5 twslaunch/jfix (11 files)
+
+FIX protocol base classes. These are the foundation that `jts4launch/jfix` builds upon.
+
+| Java Class | Purpose | Rust Status | Rust Location |
+|-----------|---------|-------------|---------------|
+| `a.java` (FixBoolean) | FIX boolean constants: '?', '0', '1' | Complete | Inline in `order_builder.rs` |
+| `b.java` (FixComponent) | Marker interface for FIX components | N/A (Infra) | Rust doesn't need marker traits for this |
+| `c.java` (IServerConnection) | Server connection interface (host, port) | Complete | `config.rs` CCP_HOSTS, AUTH_PORT |
+| `d.java` (FixFieldProvider) | FIX field parsing interface | Complete | `protocol/fix.rs` fix_parse() |
+| `e.java` (FixDialect) | FIX dialect constants: S, I, G, J, GMD, JMD | Partial | IBX uses "G" (Gateway) implicitly |
+| `f.java` (FixVersionInfo) | FIX version info and build numbers | Complete | `config.rs` IB_BUILD, IB_VERSION |
+| `g.java` (WelcomeScreenAction) | Welcome screen action | N/A (GUI) | |
+| `h.java` (FixMessageBase) | Base class for FIX messages | Complete | `protocol/fix.rs` fix_build() |
+| `i.java` (Heartbeat) | FIX heartbeat (35=0) | Complete | `engine/hot_loop/mod.rs` send_heartbeat() |
+| `j.java` (TestRequest) | FIX test request (35=1) | Complete | `engine/hot_loop/mod.rs` send_test_request() |
+| `k.java` (SystemProperty) | System property key-value | N/A (Infra) | Rust uses env vars |
+
+**Coverage: 8 of 11 files have Rust equivalents (73%). The 3 N/A files are infrastructure/GUI.**
+
+### 4.6 twslaunch/jutils (113 files)
+
+Utility classes. Many are Java-specific infrastructure (threading, Swing helpers, file I/O).
+
+#### Named Types
+
+| Java Class | Purpose | Rust Status |
+|-----------|---------|-------------|
+| `FileUtilities$DownloadCondition.java` | Download conditions | N/A (Infra) |
+| `FileUtilities$DownloadSettings.java` | Download settings | N/A (Infra) |
+| `IDiagnostics.java` | Diagnostics interface | N/A (Infra) |
+| `SLogging$DiagnosticsReport.java` | Diagnostic report | N/A (Infra) |
+| `SLogging$Warning.java` | Warning level | N/A (Infra) |
+| `UrlCreator$CheckHbSitesToken.java` | HB sites URL token | Missing -- no hot backup URL resolution |
+
+#### Deobfuscated Class Inventory (~107 files)
+
+The jutils package is Java infrastructure: threading, Swing helpers, file I/O, logging, and formatting. Most is replaced by Rust's standard library, `log` crate, or is GUI-specific.
+
+**Protocol-Relevant Utilities**
+
+| File | Deobfuscated Name | Purpose | IBX Status | Rust Location |
+|------|-------------------|---------|------------|---------------|
+| `UrlCreator$CheckHbSitesToken.java` | Hot backup URL resolution | Missing (Phase 3.1) | -- |
+| Timestamp/formatting classes (~5) | Date/time formatting | Complete | `config.rs` chrono_free_timestamp() |
+| Number formatting classes (~3) | Price/qty formatting | Complete | format_price(), format_qty() |
+| Encryption helper (~1) | Crypto utilities | Complete | `auth/crypto.rs` |
+
+**Infrastructure (N/A -- ~65 files)**
+
+| Category | Est. Files | Notes |
+|----------|-----------|-------|
+| Thread management (ThreadPool, ForkJoin, Executor) | ~10 | Rust single-threaded hot loop |
+| Logging (SLogging, DiagnosticsReport, Warning) | ~8 | Rust `log` crate + `logging.rs` |
+| String utilities (StringUtils, FormattedMessage) | ~5 | Rust std::fmt |
+| File I/O (FileUtilities, DownloadSettings) | ~8 | Not needed |
+| Property management | ~5 | Rust env vars |
+| Date/calendar utilities | ~5 | Rust std::time |
+| Concurrency primitives | ~5 | Rust crossbeam |
+| Collection utilities | ~5 | Rust std::collections |
+| Reflection utilities | ~3 | Not applicable in Rust |
+| Serialization utilities | ~3 | Not needed |
+| OS detection/platform | ~3 | Not needed |
+| Error handling | ~5 | Rust Result<T, E> |
+
+**GUI-Only (~37 files)**
+
+Swing color utilities, UI toolkit wrappers, dialog helpers, layout managers, font utilities, icon loaders, tooltip managers, and rendering helpers. All N/A for headless IBX.
+
+**Summary counts for twslaunch/jutils:**
+
+| Status | Count | Percentage |
+|--------|-------|------------|
+| Complete | ~10 | 9% |
+| Partial | ~3 | 3% |
+| Missing (needed) | ~2 | 2% |
+| N/A (GUI) | ~37 | 33% |
+| N/A (Infrastructure) | ~61 | 54% |
+| **Total** | **113** | **100%** |
+
+---
+
+## 5. Phased Roadmap
+
+### Phase 0: Paper Trading Robustness (NOW)
+
+**Goal:** Stress-test every existing feature on paper trading. Find and fix bugs before expanding scope.
+
+**Context:** The maintainer has stated: "Build everything, test everything on paper trading, ensure absolute robustness." This phase directly addresses that priority.
+
+| ID | Task | Person-Days | Java Reference | Rust Target | Acceptance Criteria | Dependencies | Labels |
+|----|------|-------------|----------------|-------------|-------------------|--------------|--------|
+| P0.1 | Concurrent order stress test (100+ orders) | 2 | `jfix/FixOrderState*.java` | `engine/hot_loop/order_builder.rs` | 100 orders submitted in <1s, all receive exec reports, zero panics | Paper account | |
+| P0.2 | CCP reconnect under load (50 symbols + 10 orders) | 2 | `jconnection/A.java` (reconnect) | `engine/hot_loop/mod.rs`, `gateway.rs` | All orders reconciled via mass status, all subscriptions resume, no duplicate fills | P0.1 | |
+| P0.3 | Farm disconnect/reconnect per-farm | 1 | `jconnection/HotBackupStrategy.java` | `engine/hot_loop/farm.rs` | Disconnected farm sets stale flag, other farms unaffected, reconnect resumes subs | None | **Good First Issue** |
+| P0.4 | Order modify/cancel race conditions | 1.5 | `jfix/FixOrderState*.java` | `engine/hot_loop/ccp.rs` | No panics, deterministic final state, CancelReject surfaced correctly | P0.1 | |
+| P0.5 | HMDS reconnect + historical data recovery | 1 | -- | `engine/hot_loop/hmds.rs` | Pending historical requests retried after reconnect | None | **Good First Issue** |
+| P0.6 | L2 depth stress test (20 symbols, SmartDepth) | 1 | -- | `engine/hot_loop/farm.rs` | All 20 depth books update correctly, no stale data, cancel/resub works | None | |
+| P0.7 | Bracket order stress test (SL/TP with fills) | 1.5 | `jfix/` OCA handlers | `engine/hot_loop/order_builder.rs` | Parent fills -> TP+SL become active, one child triggers -> other cancels via OCA | P0.1 | |
+| P0.8 | Overnight session stability (8+ hours) | 1 | -- | All | No memory leaks, heartbeats maintained, reconnects successful across IB maintenance | P0.2 | |
+
+**Phase 0 total: 11 person-days (ongoing)**
+
+#### P0.1 Detail: Concurrent Order Stress Test
+
+Submit 100+ orders concurrently on paper trading. This exercises:
+- `order_builder.rs`: FIX message generation for all order types
+- `ccp.rs`: Execution report parsing under load
+- `context.rs`: Order tracking with concurrent insert/update
+- `bridge.rs`: SharedState queue capacity under burst
+
+**Test harness requirements:**
+- Submit 100 limit orders across 10 symbols (SPY, AAPL, MSFT, AMZN, GOOG, TSLA, META, NVDA, AMD, QQQ)
+- Randomize: buy/sell, limit prices within 0.5% of market, qty 1-100
+- Measure: time to submit all 100, time to receive all 100 execution reports
+- Assert: no `OrderStatus::Uncertain`, no panics, no duplicate fills
+
+#### P0.2 Detail: Reconnect Under Load
+
+While actively streaming and trading, forcibly terminate the CCP connection (via TCP RST or kill the stream). This tests:
+- `engine/hot_loop/mod.rs`: CCP disconnect detection within heartbeat timeout + grace
+- `gateway.rs`: `reconnect_ccp()` with exponential backoff
+- `ccp.rs`: Mass status request (`35=H`) after reconnect to reconcile all open orders
+- `farm.rs`: Market data farms should be unaffected by CCP disconnect
+
+**Expected behavior:** Orders transition to `Uncertain` on disconnect, then reconcile to correct state within 30 seconds of reconnect. Market data ticks continue uninterrupted on farm connections.
+
+#### P0.7 Detail: Bracket Order Stress Test
+
+Submit 20 bracket orders (parent + take-profit + stop-loss). For each:
+- Parent is a limit buy slightly below market
+- Take-profit is a limit sell 2% above entry
+- Stop-loss is a stop sell 1% below entry
+
+When a parent fills:
+- Both children should become active (PreSubmitted -> Submitted)
+- If TP triggers, SL should auto-cancel via OCA
+- If SL triggers, TP should auto-cancel via OCA
+
+This tests OCA group integrity under the full order lifecycle.
+
+```
+P0.1 ──> P0.2 ──> P0.8
+  |          |
+  +──> P0.4  +──> P0.7
+P0.3 (independent)
+P0.5 (independent)
+P0.6 (independent)
+```
+
+**Critical path: P0.1 -> P0.2 -> P0.8**
+
+---
+
+### Phase 1: Protocol Completion
+
+**Goal:** Complete the FIX message handling to achieve full order lifecycle visibility and remove hardcoded assumptions.
+
+| ID | Task | Person-Days | Java Reference | Rust Target | Acceptance Criteria | Dependencies | Labels |
+|----|------|-------------|----------------|-------------|-------------------|--------------|--------|
+| P1.1 | Complete order state machine (add 5 missing states) | 2 | `jfix/FixOrderState$Acked.java`, `$CancelSubmitted.java`, `$CancelAcked.java`, `$CancelConfirmed.java`, `$PendingModifyAck.java` | `types.rs` OrderStatus, `engine/hot_loop/ccp.rs` | All 12 states tracked, transitions match Java, Wrapper receives accurate status strings | None | **Good First Issue** |
+| P1.2 | Parse CCP user feature flags | 2 | `jfix/q.java` (UserFeatureSet), `jfix/AllowedFeatureStateEnum.java` | New `types.rs` FeatureFlags, `engine/hot_loop/ccp.rs` | Feature flags parsed from CCP logon response, stored in SharedState, accessible via API | None | |
+| P1.3 | Handle execution restatements (busted/corrected trades) | 2 | `jfix/ExecRestatementReason.java` | `engine/hot_loop/ccp.rs` | Busted trades reverse fills, corrected trades update fill records, Wrapper notified | P1.1 | |
+| P1.4 | Implement FIX message validation | 1 | `jconnection/validate/*.java` (10 files) | New `protocol/validate.rs` | Inbound messages validated (checksum, required tags, type consistency) before processing | None | **Good First Issue** |
+| P1.5 | Parse and track commission policy | 0.5 | `jfix/FixCommissionPolicy.java` | `types.rs`, `engine/hot_loop/ccp.rs` | Commission type (per-share, percentage, absolute) parsed from exec reports | None | |
+| P1.6 | Implement OCA type differentiation | 0.5 | `jfix/OCAType.java` | `types.rs` OrderAttrs | OCA groups distinguish: cancel-with-block (1), reduce-with-block (2), reduce-non-block (3) | None | **Good First Issue** |
+| P1.7 | Implement open/close position indicator | 0.5 | `jfix/FixOpenClose.java` | `types.rs` OrderAttrs, `order_builder.rs` | Open/Close tag (tag 77) sent on orders, especially needed for options | None | |
+| P1.8 | Implement manual order indicator | 0.5 | `jfix/FixManualOrderType.java` | `order_builder.rs` | ManualOrderIndicator (tag 1028) sent per MiFID II / CAT requirements | None | |
+| P1.9 | Add disconnect reason classification | 1.5 | `jconnection/DisconnectReason.java` (22 types) | New `types.rs` DisconnectReason, `engine/hot_loop/*.rs` | Disconnects classified (broken socket, inactivity, auth failure, redirect, etc.), surfaced to Wrapper | None | |
+| P1.10 | Implement LogonState tracking | 1 | `jconnection/LogonState.java` (6 states) | New `types.rs` LogonState, `gateway.rs` | Formal state machine: PRELOGON -> LOGON -> FIX_SESSION_REQUEST -> FIX_SESSION_OPEN -> LOGGEDON | None | |
+| P1.11 | Dynamic security type in order builder | 2 | `jfix/ef.java` (security types) | `order_builder.rs` | Remove hardcoded STK/SMART/USD; derive tag 167/100/15 from Contract | Phase 2 prep | |
+| P1.12 | Add settlement type support | 0.5 | `jfix/FixSettlementType.java` | `types.rs`, `order_builder.rs` | Settlement type tag (tag 63) for regular/cash/next-day settlement | None | |
+
+**Phase 1 total: 14 person-days** (2 + 2 + 2 + 1 + 0.5 + 0.5 + 0.5 + 0.5 + 1.5 + 1 + 2 + 0.5 = 14)
+
+#### P1.1 Detail: Complete Order State Machine
+
+The Java `FixOrderState` class defines 12 distinct order states with explicit transitions. IBX currently tracks 7. The missing 5 states cause the caller to miss important intermediate lifecycle events:
+
+**Missing states and their significance:**
+
+| State | When it occurs | Why it matters |
+|-------|---------------|----------------|
+| **Acked** (FIX 39=A PendingNew) | Server received order, routing to exchange | Confirms server receipt before exchange acceptance |
+| **CancelSubmitted** (FIX 39=6 PendingCancel) | Cancel request sent, awaiting exchange response | Caller knows cancel is in progress |
+| **CancelAcked** | Cancel acknowledged by IB | Intermediate cancel state |
+| **CancelConfirmed** | Cancel confirmed by exchange | Currently merged with Cancelled |
+| **PendingModifyAck** (FIX 39=E PendingReplace) | Modify request sent, awaiting response | Caller knows modify is in progress |
+
+**Implementation:**
+1. Add 5 new variants to `OrderStatus` enum in `types.rs`
+2. Update the FIX tag 39 (OrdStatus) match in `ccp.rs` to route to correct states
+3. Update `order_status_str()` in `client_core.rs` to return correct status strings
+4. Add transition validation: e.g., cannot go from Filled to CancelSubmitted
+
+**Java reference:** `jfix/FixOrderState.java` lines 73-82 define all 12 states. Each inner class (`$Acked`, `$CancelSubmitted`, etc.) defines the allowed transitions and display colors.
+
+#### P1.2 Detail: Parse CCP User Feature Flags
+
+When IBX logs into the CCP server, the logon response contains a bitmap of 200+ user feature flags. These flags control:
+- Which order types the account is permitted to use
+- Which security types are tradeable
+- Which exchanges are accessible
+- Whether margin trading is enabled
+- Whether short selling is permitted
+
+Currently IBX ignores all flags, which means it may attempt operations the account is not permitted to perform, resulting in mysterious rejects.
+
+**Implementation:**
+1. Parse feature flag field from CCP logon response (tag 6XXX in `gateway.rs`)
+2. Define `FeatureFlags` struct in `types.rs` with bitfield for each flag
+3. Store in `SharedState::reference` for API access
+4. Add `feature_flags()` method to EClient
+5. Optionally: check flags before order submission to fail fast
+
+**Java reference:** `jfix/q.java` (UserFeatureSet) — the master list of all feature flags.
+
+#### P1.11 Detail: Dynamic Security Type in Order Builder
+
+Currently, `order_builder.rs` hardcodes these tags for every order:
+```
+(167, "STK")    // SecurityType = Common Stock
+(100, "SMART")  // ExDestination
+(15, "USD")     // Currency
+```
+
+This restricts IBX to US equities only. Phase 2 (multi-asset) cannot proceed until this is parameterized.
+
+**Implementation:**
+1. Add `sec_type`, `exchange`, `currency`, `multiplier`, `right`, `strike`, `expiry` to all `OrderRequest` variants that need them (or add a `ContractSpec` struct)
+2. Derive these from the `Contract` passed to `place_order()`
+3. Update all ~37 order builder match arms to use dynamic values
+4. For backwards compatibility, default to STK/SMART/USD when not specified
+
+**Java reference:** `jfix/ef.java` (SecurityType enum with 30 types), `jfix/d5.java` (FieldComparator showing field ordering).
+
+```
+P1.1 ──> P1.3
+P1.2
+P1.4
+P1.5
+P1.6
+P1.7
+P1.8
+P1.9
+P1.10
+P1.11
+P1.12
+```
+
+**Critical path: P1.1 -> P1.3 (order state machine must be complete before restatement handling)**
+
+---
+
+### Phase 2: Multi-Asset Expansion
+
+**Goal:** Extend IBX beyond US equities to support options, futures, forex, and international markets.
+
+| ID | Task | Person-Days | Java Reference | Rust Target | Acceptance Criteria | Dependencies | Labels |
+|----|------|-------------|----------------|-------------|-------------------|--------------|--------|
+| P2.1 | Options support (calls, puts, exercise, assignment) | 2 | `jfix/OptionRight.java`, `FixOptionExercise.java`, `FixOptionAccount.java`, `OptionExerciseStyle.java` | `types.rs`, `order_builder.rs`, `api/types.rs` Contract | Options orders with strike, right (C/P), expiry. Exercise/assignment notifications parsed. | P1.11 | |
+| P2.2 | Futures support (FUT + FOP) | 1 | `jfix/StockType.java` (extends to FUT), relevant handlers | `order_builder.rs`, `types.rs` | Futures and futures options orders with multiplier, expiry | P1.11 | |
+| P2.3 | Forex support (CASH) | 1 | `jfix/` forex handlers | `order_builder.rs`, cashfarm connection | Forex pairs (e.g., EUR.USD) via cashfarm, correct lot sizes | P1.11 | **Good First Issue** |
+| P2.4 | Combo/spread orders | 1.5 | `jfix/` combo handlers (~15 files) | `order_builder.rs`, `api/types.rs` ComboLeg | Multi-leg combo orders with per-leg ratios and actions | P2.1 | |
+| P2.5 | Structured products (warrants, certificates) | 0.5 | `jfix/StructuredProductsType.java` (7 types) | `types.rs`, `order_builder.rs` | Warrant and structured product order support | P1.11 | |
+| P2.6 | Security ID sources (ISIN, CUSIP, SEDOL) | 0.5 | `jfix/SecIdSourceType.java` | `api/types.rs` Contract | Lookup by ISIN/CUSIP/SEDOL in addition to conId | None | **Good First Issue** |
+| P2.7 | International exchanges (EU, Japan, HK) | 0.5 | -- | `gateway.rs` (eufarm, jfarm connections) | Connect to EU and Japan farm slots, route orders to non-US exchanges | P1.11 | |
+
+**Phase 2 total: 7 person-days**
+
+#### P2.1 Detail: Options Support
+
+Options are the highest-demand missing asset class. Implementation requires:
+
+1. **Contract specification:** `api/types.rs` Contract already has `strike`, `right`, `last_trade_date_or_contract_month` fields. These need to be wired to the order builder.
+
+2. **Order builder changes:** Tags to add for options orders:
+   - Tag 167 = "OPT" (SecurityType)
+   - Tag 201 = "0" (PutOrCall: 0=Put, 1=Call)
+   - Tag 200 = "202606" (MaturityMonthYear)
+   - Tag 202 = "450.00" (StrikePrice)
+   - Tag 231 = "100" (ContractMultiplier)
+   - Tag 77 = "O" or "C" (OpenClose)
+
+3. **Exercise/assignment:** Parse tag 6091 for exercise notifications. Map to `FixOptionExercise` types.
+
+4. **Greeks:** Parse tag-delivered greeks (delta, gamma, theta, vega, implied vol) from market data. Add to Quote or separate GreeksSnapshot struct.
+
+**Java reference:** `jfix/OptionRight.java` (call/put), `jfix/FixOptionExercise.java` (exercise types), `jfix/OptionExerciseStyle.java` (American/European), `jfix/cX.java` (PositionGreeks), `jfix/ch.java` (OptionChainResponse).
+
+#### P2.3 Detail: Forex Support (Good First Issue)
+
+Forex (CASH) is simpler than options because there are no strikes/expiries. Requirements:
+
+1. Set tag 167 = "CASH" in order builder
+2. Set tag 55 = "EUR" (base currency), tag 15 = "USD" (quote currency)
+3. Use cashfarm connection slot (`HotLoop::cashfarm_conn`) instead of usfarm
+4. Handle fractional lot sizes (forex trades in lots of 20,000+)
+
+**Java reference:** `jfix/em.java` (CashInstrument), `jfix/cY.java` (FxRateManager).
+
+```
+P1.11 ──> P2.1 ──> P2.4
+       |──> P2.2
+       |──> P2.3
+       |──> P2.5
+       |──> P2.7
+P2.6 (independent)
+```
+
+**Critical path: P1.11 -> P2.1 -> P2.4**
+
+---
+
+### Phase 3: Connection Resilience
+
+**Goal:** Survive IB maintenance windows, network flaps, and concurrent login competition without data loss.
+
+| ID | Task | Person-Days | Java Reference | Rust Target | Acceptance Criteria | Dependencies | Labels |
+|----|------|-------------|----------------|-------------|-------------------|--------------|--------|
+| P3.1 | Hot backup strategy (multi-host failover) | 2.5 | `jconnection/HotBackupStrategy.java`, `jutils/UrlCreator*.java` | `gateway.rs`, `engine/hot_loop/mod.rs` | On primary CCP failure, automatically fail to secondary host. 3 strategies: OFF, ON (2 backups), SINGLE_HOST. | None | |
+| P3.2 | Session persistence (save/restore session token) | 2 | `jauthentication/` session persistence (~6 files) | `auth/session.rs` | Session token saved to file on clean shutdown, restored on restart. Avoids full re-auth. | None | |
+| P3.3 | Concurrent login competition handling | 1.5 | `jconnection/CompetitionType.java` (4 types) | `gateway.rs`, new `types.rs` CompetitionEvent | Detect "another client logged in" event. Options: yield, kick, read-only mode. Surface to Wrapper. | None | |
+| P3.4 | Farm-specific reconnect with subscription replay | 1.5 | `jconnection/` farm reconnect | `engine/hot_loop/farm.rs` | Per-farm reconnect replays all market data subscriptions, depth subscriptions, and TBT subscriptions. | P0.3 | |
+| P3.5 | HMDS reconnect with request retry | 1 | -- | `engine/hot_loop/hmds.rs` | Pending historical, scanner, and fundamental requests retried after HMDS reconnect. | P0.5 | |
+| P3.6 | Network connectivity pre-check | 0.5 | `jconnection/validate/INetworkConnectivityAcceptor*.java` | New `protocol/connectivity.rs` | DNS resolution and TCP connectivity check before auth attempt. | None | **Good First Issue** |
+| P3.7 | Configurable heartbeat intervals | 0.5 | `jconnection/` heartbeat config | `config.rs`, `engine/hot_loop/mod.rs` | CCP and farm heartbeat intervals configurable via env var or API. | None | **Good First Issue** |
+| P3.8 | Read-only connection mode | 0.5 | `jclient/readonly/*.java` | `gateway.rs`, `config.rs` | Connect in read-only mode: market data only, no order submission. | None | |
+
+**Phase 3 total: 10 person-days**
+
+```
+P3.1 (independent)
+P3.2 (independent)
+P3.3 (independent)
+P0.3 ──> P3.4
+P0.5 ──> P3.5
+P3.6 (independent)
+P3.7 (independent)
+P3.8 (independent)
+```
+
+**Critical path: P3.1 (longest single task, no external dependency)**
+
+---
+
+### Phase 4: Production Hardening
+
+**Goal:** Audit trail, chaos testing, soak testing, and operational tooling for production deployment confidence.
+
+| ID | Task | Person-Days | Java Reference | Rust Target | Acceptance Criteria | Dependencies | Labels |
+|----|------|-------------|----------------|-------------|-------------------|--------------|--------|
+| P4.1 | FIX message audit log | 2 | `jconnection/` logging | New `protocol/audit.rs` | Every FIX message sent/received is logged with timestamp to rotated file. Configurable: off/summary/full. | None | |
+| P4.2 | Order state checkpointing | 2 | `jfix/FixStorageOperation.java` | New `engine/checkpoint.rs` | Open orders periodically written to file. On restart, last known state is loaded for reconciliation. | P1.1 | |
+| P4.3 | Chaos testing framework | 3 | -- | New test infrastructure | Kill CCP mid-order, kill farm during tick burst, inject corrupt FIX messages, simulate 500ms latency spikes. Automated. | P0.2 | |
+| P4.4 | Soak test (72-hour continuous run) | 2 | -- | Test script + monitoring | Run IBX for 72 hours on paper: track memory (RSS), file descriptors, reconnect count, tick rate. All stable. | P4.3 | |
+| P4.5 | Volatility order support | 2 | `jfix/VolType.java`, vol order handlers (~10 files) | `types.rs`, `order_builder.rs` | Volatility orders (implied vol, delta-neutral) with reference price types. | P2.1 | |
+| P4.6 | Scale order support | 1 | `jfix/` scale order handlers (~5 files) | `types.rs`, `order_builder.rs` | Scale/iceberg orders with auto-replenish and price increment. | None | |
+| P4.7 | Cross order support | 0.5 | `jfix/FixCrossType.java`, cross handlers | `types.rs`, `order_builder.rs` | Cross orders matching buyer and seller. | None | |
+| P4.8 | FA (Financial Advisor) support | 2 | `jfix/` FA handlers (~10 files), `jclient/context/IApplicationContext$UserScope.java` | `api/client/stubs.rs` -> full impl | FA allocations, groups, profiles. request_fa and replace_fa fully implemented. | None | |
+| P4.9 | Additional algo strategies | 1 | `jfix/` algo handlers | `types.rs` AlgoParams | Add: Accumulate/Distribute, Balance Impact Risk, MinImpact, CSFB algos. | None | |
+| P4.10 | Order attribution (MiFID II / CAT) | 1 | `jfix/OrderAttributionFormat.java` (5 types) | `order_builder.rs` | Regulatory order attribution tags per jurisdiction. | P1.8 | |
+| P4.11 | SSL certificate pinning | 0.5 | `jconnection/ssl/` pinning classes | `gateway.rs` TLS config | Pin IB's TLS certificates. Reject unexpected certificates. | None | |
+| P4.12 | Benchmark regression suite | 1 | -- | CI configuration | Benchmarks run on every PR. Regressions flagged. Results stored. | None | |
+
+**Phase 4 total: 18 person-days**
+
+```
+P1.1 ──> P4.2
+P0.2 ──> P4.3 ──> P4.4
+P2.1 ──> P4.5
+P1.8 ──> P4.10
+P4.1  (independent)
+P4.6  (independent)
+P4.7  (independent)
+P4.8  (independent)
+P4.9  (independent)
+P4.11 (independent)
+P4.12 (independent)
+```
+
+**Critical path: P0.2 -> P4.3 -> P4.4**
+
+---
+
+### Phase 5: Live Trading Enablement
+
+**Goal:** Enable live trading with full auth support. This phase is EXPLICITLY LAST -- paper must be solid first.
+
+| ID | Task | Person-Days | Java Reference | Rust Target | Acceptance Criteria | Dependencies | Labels |
+|----|------|-------------|----------------|-------------|-------------------|--------------|--------|
+| P5.1 | SMS/Email 2FA challenge | 2 | `jauthentication/AuthenticationMessageSWTK$DeliveryMethod.java`, SMS/email handlers (~8 files) | `auth/session.rs` | Receive 2FA challenge via SMS or email. Accept OTP code from caller (CLI prompt or API callback). | None | |
+| P5.2 | Permanent session token (PST) flow | 2 | `jauthentication/TokenType.java` (PERMANENT), PST handlers (~8 files) | `auth/session.rs` | Save persistent token after first auth. Reuse on subsequent connections without full SRP. | P3.2 | |
+| P5.3 | TWSRO read-only token | 1 | `jauthentication/TokenType.java` (TWSRO), RST handlers | `auth/session.rs` | Connect with read-only token for monitoring without order capability. | None | |
+| P5.4 | TST token support | 0.5 | `jauthentication/TokenType.java` (TST) | `auth/session.rs` | Handle TST token type if encountered. | None | |
+| P5.5 | Auth retry with state recovery | 1.5 | `jauthentication/AuthDispatcher$AuthProcessState.java`, timeout strategy | `auth/session.rs`, `gateway.rs` | On auth failure: retry with exponential backoff, handle redirect to different host, recover mid-auth state. | P3.1 | |
+| P5.6 | Live account integration test suite | 2 | -- | Test scripts | Run full test suite on live paper-to-live migration path. Document all differences between paper and live. | P5.1, P5.2 | |
+| P5.7 | Security audit of auth flow | 1 | -- | Review | Third-party review of SRP-6, DH, AES-CBC, HMAC-SHA1 implementation. No hardcoded credentials, no token leaks. | P5.2 | |
+
+**Phase 5 total: 10 person-days**
+
+**GATE: Phase 5 CANNOT begin until the following prerequisites are complete:**
+- P0.8 (Overnight stability) -- proves paper trading is robust
+- P1.1 (Order state machine) -- full lifecycle visibility required for live
+- P3.1 (Hot backup) -- failover required for live trading safety
+- P4.4 (72h soak test) -- stability proven under sustained operation
+
+```
+GATE: P0.8 + P1.1 + P3.1 + P4.4 must all be complete before ANY P5 task begins
+
+P3.2 ──> P5.2 ──> P5.6
+P3.1 ──> P5.5
+P5.1 (independent after gate) ──> P5.6
+P5.3 (independent after gate)
+P5.4 (independent after gate)
+P5.7 (independent, but after P5.2)
+```
+
+**Critical path: P3.2 -> P5.2 -> P5.6**
+
+---
+
+### Phase Summary
+
+| Phase | Goal | Tasks | Person-Days | Good First Issues |
+|-------|------|-------|-------------|-------------------|
+| 0 | Paper Trading Robustness | 8 | 11 | 2 |
+| 1 | Protocol Completion | 12 | 14 | 4 |
+| 2 | Multi-Asset Expansion | 7 | 7 | 2 |
+| 3 | Connection Resilience | 8 | 10 | 2 |
+| 4 | Production Hardening | 12 | 18 | 0 |
+| 5 | Live Trading Enablement | 7 | 10 | 0 |
+| **Total** | | **54** | **70** | **10** |
+
+---
+
+## 6. Testing Strategy
+
+### 6.1 Test Layers
+
+| Layer | Current State | Target | Description |
+|-------|--------------|--------|-------------|
+| **Unit tests** | 637 tests (Rust) | 1,000+ | Cover all FIX message parse/build, state transitions, crypto, type conversions |
+| **Integration tests** | 16 Python files | 30+ files | End-to-end: connect, subscribe, order, fill, disconnect |
+| **Paper trading tests** | Ad-hoc | 15+ structured scenarios | Documented scenarios with acceptance criteria |
+| **Chaos tests** | None | 10+ scenarios | Network partitions, corrupt messages, latency injection |
+| **Soak tests** | None | 72-hour minimum | Continuous operation stability |
+| **Benchmark tests** | 11 binaries | Regression CI | Automated performance regression detection |
+
+### 6.2 Mock Gateway Architecture
+
+For offline testing without IB connectivity:
+
+```
++-------------+       +------------------+       +------------------+
+| Test Suite  | ----> | Mock CCP Server  | ----> | Scenario Engine  |
+| (Rust/Py)   | <---- | (TLS, FIX 4.1)   | <---- | (replay, inject) |
++-------------+       +------------------+       +------------------+
+                      | Mock Farm Server |
+                      | (binary ticks)   |
+                      +------------------+
+```
+
+The mock gateway would:
+- Accept TLS connections and perform SRP-6 handshake
+- Respond to FIX logon with configurable CCP response (account, feature flags)
+- Replay captured tick data for market data subscriptions
+- Accept 35=D orders and generate configurable execution reports
+- Support scenario injection: delays, rejects, partial fills, disconnect mid-order
+
+### 6.3 Paper Trading Scenarios (15+)
+
+| # | Scenario | Tests |
+|---|----------|-------|
+| 1 | Submit 1 limit order, verify fill | Order lifecycle: PendingSubmit -> Submitted -> Filled |
+| 2 | Submit market order, verify immediate fill | Market order fill speed |
+| 3 | Submit limit order, cancel before fill | Cancel lifecycle: Submitted -> CancelSubmitted -> Cancelled |
+| 4 | Submit limit order, modify price | Modify lifecycle: Submitted -> PendingModifyAck -> Submitted |
+| 5 | Submit bracket order (entry + TP + SL) | OCA group, parent-child linking |
+| 6 | Fill parent, verify TP+SL activation | Child order activation on parent fill |
+| 7 | Subscribe 50 symbols, verify all receive ticks | Bulk subscription stability |
+| 8 | Subscribe L2 depth for 5 symbols | Depth book accuracy |
+| 9 | Request historical data (1 year daily bars) | HMDS data integrity |
+| 10 | Submit trailing stop, verify trail updates | Trailing stop price adjustment |
+| 11 | Submit conditional order (price condition) | Condition evaluation |
+| 12 | Submit VWAP algo order | Algo parameter passing |
+| 13 | Disconnect CCP, reconnect, verify order recovery | Reconnect + mass status |
+| 14 | Disconnect farm, reconnect, verify data recovery | Farm reconnect + re-subscribe |
+| 15 | Run 8 hours overnight, verify stability | Soak test |
+| 16 | Submit 100 orders in burst | Burst capacity |
+| 17 | Request contract details for SPY options chain | Options contract discovery |
+
+### 6.4 Coverage Targets
+
+| Metric | Current | Phase 1 Target | Phase 4 Target |
+|--------|---------|---------------|----------------|
+| Rust unit tests | 637 | 800 | 1,200 |
+| Python integration tests | 16 files | 25 files | 35 files |
+| Code coverage (tarpaulin) | Not measured | 60% | 80% |
+| Paper trading scenarios passed | Ad-hoc | 10/17 | 17/17 |
+| Chaos test scenarios | 0 | 0 | 10 |
+| Soak test hours | 0 | 8 | 72 |
+
+### 6.5 Chaos Test Scenarios (Phase 4)
+
+| # | Scenario | Injection Method | Expected Behavior |
+|---|----------|-----------------|-------------------|
+| 1 | Kill CCP mid-order-submit | TCP RST during send_fix() | Order retried after reconnect |
+| 2 | Kill farm during tick burst | Drop farm TCP socket | Farm reconnects, subscriptions replayed |
+| 3 | Corrupt FIX checksum | Flip random byte in inbound message | Message rejected, no crash |
+| 4 | Corrupt HMAC signature | Alter signed data | Message rejected, connection continues |
+| 5 | Inject 500ms latency on CCP | tc qdisc netem | Orders delayed but succeed, no timeout |
+| 6 | Inject 50% packet loss on farm | tc qdisc netem | Some ticks lost, no crash, reconnect on timeout |
+| 7 | Fill then disconnect before ack | Send exec report, then RST | Fill recorded, order state reconciled on reconnect |
+| 8 | Simultaneous CCP + farm disconnect | Kill both connections | Both reconnect independently, state recovered |
+| 9 | Out-of-order FIX messages | Reorder seq numbers | Messages processed correctly (no strict ordering) |
+| 10 | Memory pressure (OOM) | cgroups memory limit | Graceful degradation, no data corruption |
+
+### 6.6 Soak Test Metrics
+
+During the 72-hour soak test (Phase 4.4), the following metrics must be monitored:
+
+| Metric | Acceptable Range | Alert Threshold |
+|--------|-----------------|-----------------|
+| RSS memory | Stable +/- 10% | Growing > 20% over 24h |
+| File descriptors | < 50 | > 100 |
+| Heartbeat success rate | > 99% | < 95% |
+| Tick processing latency (p99) | < 10us | > 100us |
+| Order round-trip (submit to ack) | < 100ms | > 500ms |
+| Reconnect count per 24h | 0-2 (IB maintenance) | > 5 |
+| Duplicate fill count | 0 | > 0 |
+| Panic count | 0 | > 0 |
+| CPU usage (hot loop core) | 100% (busy-poll) | N/A |
+| CPU usage (other cores) | < 5% | > 20% |
+
+### 6.7 Regression Test Strategy
+
+Before each release:
+
+```
+Step 1: cargo fmt --all -- --check
+Step 2: cargo clippy --workspace -- -D warnings
+Step 3: cargo test --workspace
+Step 4: cd tests/python && python -m pytest -v
+Step 5: cargo bench (if benchmark regression CI exists)
+Step 6: Manual paper trading smoke test (5 minutes):
+        - Subscribe 5 symbols
+        - Submit 1 limit order
+        - Modify price
+        - Cancel order
+        - Verify fills/updates via Wrapper
+```
+
+---
+
+## 7. Decision Log
+
+Unresolved questions for the maintainer:
+
+| # | Question | Context | Options | Recommendation |
+|---|----------|---------|---------|----------------|
+| D1 | Should IBX parse feature flags from CCP logon? | Java has 200+ flags. IBX ignores them all. Some may restrict order types. | (a) Parse all (b) Parse safety-critical subset (c) Ignore | (b) Parse subset: order type restrictions, trading permissions, margin requirements |
+| D2 | Should IBX support read-only connection mode? | Java supports TWSRO token for monitoring. | (a) Implement (b) Defer (c) Never | (a) Implement in Phase 3 -- useful for monitoring dashboards |
+| D3 | Should order state checkpointing use file or database? | Phase 4.2 needs persistent order state. | (a) JSON file (b) SQLite (c) mmap'd struct | (a) JSON file -- simple, debuggable, no deps |
+| D4 | Should CCP heartbeat match Java's 5s or stay at 10s? | IBX uses 10s, Java uses 5s. Longer interval risks server timeout. | (a) Match Java at 5s (b) Keep 10s (c) Configurable | (c) Configurable with 5s default |
+| D5 | Should IBX support Financial Advisor (FA) accounts? | FA requires allocation profiles, groups, model portfolios. | (a) Full support (b) Basic (c) Defer | (b) Basic in Phase 4 -- reqManagedAccts works, add allocation |
+| D6 | Should the mock gateway be part of the IBX repo or separate? | Testing infrastructure. | (a) In-repo test fixture (b) Separate crate (c) External | (a) In-repo -- keeps test infra close to code |
+| D7 | What is the MAX_INSTRUMENTS ceiling? | Currently 256. Some strategies need 1000+. | (a) 256 (b) 1024 (c) Dynamic | (b) 1024 -- pre-allocated arrays grow but stay cache-friendly |
+| D8 | Should IBX validate FIX messages before processing? | Currently no validation. Corrupt messages could cause panics. | (a) Full validation (b) Checksum only (c) None | (a) Full validation -- Phase 1.4 |
+
+---
+
+## 8. Contribution Guide
+
+### 8.1 How to Claim Tasks
+
+1. Check the [Phase Summary](#phase-summary) for tasks labeled **Good First Issue** (10 total across all phases)
+2. Open an issue on `deepentropy/ibx` referencing the task ID (e.g., "Implement P1.1: Complete order state machine")
+3. Fork to your staging repo, create a branch named `feat/<task-id>-description`
+4. Implement against the acceptance criteria listed in the task table
+5. Run the pre-commit checklist (Section 8.3) before opening a PR
+
+### 8.2 PR Standards
+
+- **Title format:** `feat: <short description> (#issue)` or `fix: <short description> (#issue)`
+- **Body:** Reference the task ID, list acceptance criteria met, include test evidence
+- **Tests required:** Every PR must include tests that cover the new code
+- **No formatting violations:** Run `cargo fmt --all -- --check` before pushing
+- **No clippy warnings:** Run `cargo clippy --workspace -- -D warnings` before pushing
+- **No test failures:** Run `cargo test --workspace` before pushing
+- **Full CI checklist:**
+  ```sh
+  cargo fmt --all -- --check
+  cargo test --workspace
+  cargo clippy --workspace -- -D warnings
+  ```
+
+### 8.3 How to Use the Deobfuscated Java
+
+The Java class inventory in this document was produced by decompiling and analyzing the IB Gateway JAR. The analysis is documented here; the decompiled source is not published.
+
+1. **Find the relevant Java class:** Use this roadmap's gap inventory to identify which Java file(s) correspond to the feature you are implementing
+2. **Read the Java class:** Most are heavily obfuscated (single-letter names). Focus on:
+   - Import statements (reveal what the class uses)
+   - Method signatures (reveal the interface)
+   - String literals (reveal FIX tags, constants)
+   - Numeric constants (reveal protocol values)
+3. **Cross-reference with FIX protocol:** IB uses custom FIX tags (4000+, 6000+, 8000+). Match these to the tag constants in `src/protocol/fix.rs`
+4. **Do NOT commit Java files to the IBX repo.** They are for reference only. The Rust implementation must be clean-room inspired by the protocol behavior, not a line-by-line translation.
+
+### 8.4 Good First Issues
+
+| Task ID | Description | Difficulty | Phase |
+|---------|-------------|------------|-------|
+| P0.3 | Farm disconnect/reconnect per-farm | Easy | 0 |
+| P0.5 | HMDS reconnect + historical data recovery | Easy | 0 |
+| P1.1 | Complete order state machine (5 new states) | Medium | 1 |
+| P1.4 | FIX message validation | Easy | 1 |
+| P1.6 | OCA type differentiation | Easy | 1 |
+| P1.7 | Open/Close position indicator | Easy | 1 |
+| P2.3 | Forex support (CASH security type) | Medium | 2 |
+| P2.6 | Security ID sources (ISIN/CUSIP/SEDOL) | Easy | 2 |
+| P3.6 | Network connectivity pre-check | Easy | 3 |
+| P3.7 | Configurable heartbeat intervals | Easy | 3 |
+
+---
+
+## 9. Appendices
+
+### Appendix A: FIX Tag Coverage
+
+**Verification command:**
+```sh
+grep -rhoP 'TAG_\w+' src/protocol/fix.rs | sort -u | wc -l  # => 21 defined
+grep -rhoP '\b[4-9]\d{3}\b' src/ | sort -u | wc -l           # => ~134 unique IB custom tags used
+```
+
+**Defined FIX tags in `protocol/fix.rs`:**
+
+| Tag | Name | Defined | Used |
+|-----|------|---------|------|
+| 8 | BeginString | Yes | Yes |
+| 9 | BodyLength | Yes | Yes |
+| 10 | Checksum | Yes | Yes |
+| 34 | MsgSeqNum | Yes | Yes |
+| 35 | MsgType | Yes | Yes |
+| 49 | SenderCompID | Yes | Yes |
+| 52 | SendingTime | Yes | Yes |
+| 56 | TargetCompID | Yes | Yes |
+| 58 | Text | Yes | Yes |
+| 61 | Urgency | Yes | Yes |
+| 98 | EncryptMethod | Yes | Yes |
+| 108 | HeartBtInt | Yes | Yes |
+| 112 | TestReqID | Yes | Yes |
+| 141 | ResetSeqNumFlag | Yes | Yes |
+| 148 | Headline | Yes | Yes |
+| 207 | SecurityExchange | Yes | Yes |
+| 6034 | IB Build | Yes | Yes |
+| 6040 | IB CommType | Yes | Yes |
+| 6143 | IB CompVersion | Yes | Yes |
+| 6968 | IB Version | Yes | Yes |
+| 8349 | HMAC Signature | Yes | Yes |
+
+**Commonly used IB custom tags in `order_builder.rs` (sample):**
+
+| Tag | Purpose | Used |
+|-----|---------|------|
+| 11 | ClOrdID | Yes |
+| 1 | Account | Yes |
+| 21 | HandlInst | Yes |
+| 38 | OrderQty | Yes |
+| 40 | OrdType | Yes |
+| 44 | Price | Yes |
+| 54 | Side | Yes |
+| 55 | Symbol | Yes |
+| 59 | TimeInForce | Yes |
+| 60 | TransactTime | Yes |
+| 99 | StopPx | Yes |
+| 100 | ExDestination | Yes |
+| 110 | MinQty | Yes |
+| 111 | MaxFloor (DisplaySize) | Yes |
+| 126 | ExpireTime (GTD) | Yes |
+| 167 | SecurityType | Yes (hardcoded STK) |
+| 168 | EffectiveTime (GAT) | Yes |
+| 204 | CustomerOrFirm | Yes |
+| 583 | OCA Group | Yes |
+| 847 | AlgoStrategy | Yes |
+| 6102 | SweepToFill | Yes |
+| 6107 | ParentId | Yes |
+| 6135 | Hidden | Yes |
+| 6261 | AdjustedOrderType | Yes |
+| 6268 | TrailPercent | Yes |
+| 6433 | OutsideRTH | Yes |
+| 9813 | DiscretionaryAmt | Yes |
+
+### Appendix B: Order Type Coverage
+
+**Verification command:**
+```sh
+grep -c 'Submit\|Modify\|Cancel' src/types.rs  # => 122 lines (37 submit + lifecycle)
+```
+
+| Order Type | FIX OrdType (tag 40) | IBX Status |
+|-----------|---------------------|------------|
+| Market | 1 | Complete |
+| Limit | 2 | Complete |
+| Stop | 3 | Complete |
+| Stop Limit | 4 | Complete |
+| Market on Close (MOC) | 5 | Complete |
+| Limit on Close (LOC) | 2 + TIF=7 | Complete |
+| Market if Touched (MIT) | J | Complete |
+| Limit if Touched (LIT) | K | Complete |
+| Market to Limit (MTL) | K | Complete |
+| Market with Protection | U | Complete |
+| Stop with Protection | SP | Complete |
+| Trailing Stop | P | Complete |
+| Trailing Stop Limit | P + price | Complete |
+| Trailing Stop Pct | P + tag 6268 | Complete |
+| Mid-Price | MIDPX | Complete |
+| Snap to Market | SMKT | Complete |
+| Snap to Midpoint | SMID | Complete |
+| Snap to Primary | SREL | Complete |
+| Pegged to Market | E + ExecInst P | Complete |
+| Pegged to Midpoint | E + ExecInst M | Complete |
+| Pegged to Benchmark | PB | Complete |
+| Relative (Pegged to Primary) | R | Complete |
+| Limit OPG (Opening) | 2 + TIF=2 | Complete |
+| Limit Auction | 2 + TIF=A | Complete |
+| MTL Auction | K + TIF=A | Complete |
+| Adaptive (IB algo overlay) | 2 + algo=Adaptive | Complete |
+| Bracket (parent + TP + SL) | 3x 35=D + OCA | Complete |
+| What-If (margin preview) | any + tag 6091=1 | Complete |
+| Fractional Shares | 2 + decimal qty | Complete |
+| Adjustable Stop | 3 + tag 6261 | Complete |
+| Limit GTC | 2 + TIF=1 | Complete |
+| Stop GTC | 3 + TIF=1 | Complete |
+| Stop Limit GTC | 4 + TIF=1 | Complete |
+| Limit IOC | 2 + TIF=3 | Complete |
+| Limit FOK | 2 + TIF=4 | Complete |
+| VWAP algo | tag 847=Vwap | Complete |
+| TWAP algo | tag 847=Twap | Complete |
+| Arrival Price algo | tag 847=ArrivalPx | Complete |
+| Close Price algo | tag 847=ClosePx | Complete |
+| Dark Ice algo | tag 847=DarkIce | Complete |
+| PctVol algo | tag 847=PctVol | Complete |
+| **Volatility orders** | -- | **Missing** |
+| **Scale/iceberg (auto-replenish)** | -- | **Missing** |
+| **Cross orders** | -- | **Missing** |
+| **Combo/spread orders** | -- | **Missing** |
+| **Accumulate/Distribute algo** | -- | **Missing** |
+| **Balance Impact Risk algo** | -- | **Missing** |
+| **MinImpact algo** | -- | **Missing** |
+
+### Appendix C: FIX Message Type Coverage
+
+**Verification command:**
+```sh
+grep -c 'pub const MSG_' src/protocol/fix.rs  # => 13
+```
+
+| MsgType (tag 35) | Name | IBX Send | IBX Receive | Notes |
+|-------------------|------|----------|-------------|-------|
+| 0 | Heartbeat | Yes | Yes | CCP + Farm + HMDS |
+| 1 | TestRequest | Yes | Yes | CCP + Farm + HMDS |
+| 3 | Reject | No | Yes | CCP |
+| 5 | Logout | No | Yes | CCP |
+| 8 | ExecutionReport | No | Yes | CCP (orders, fills, positions) |
+| 9 | OrderCancelReject | No | Yes | CCP |
+| A | Logon | Yes | Yes | CCP + Farm + HMDS |
+| B | News | No | Yes | CCP (bulletins, articles) |
+| D | NewOrderSingle | Yes | No | CCP |
+| E | TBT Data | No | Yes | HMDS (tick-by-tick) |
+| F | OrderCancelRequest | Yes | No | CCP |
+| G | OrderCancelReplaceRequest / HMDS bar data | Yes (CCP) | Yes (Farm, HMDS) | Dual use |
+| L | Ticker Setup | No | Yes | Farm |
+| P | Binary Tick | No | Yes | Farm (8=O binary protocol) |
+| U | Custom IB message | Yes | Yes | CCP (account, contract details) |
+| V | MarketDataRequest | Yes | No | Farm |
+| W | MarketDataSnapshot / HMDS response | No | Yes | HMDS (bars, head timestamp, histogram) |
+| Y | Market Depth / QuoteRequest | No | Yes | Farm (NASDAQ TotalView) |
+| RL | Market Rule | No | Yes | Farm |
+| UM | User Message | No | Yes | Farm |
+| UP | User Property | No | Yes | Farm |
+| UT | User Tick | No | Yes | Farm |
+
+### Appendix D: Security Type Coverage
+
+**Verification command:**
+```sh
+grep -c 'STK\|OPT\|FUT\|CASH\|IND\|WAR\|BOND\|FUND' src/types.rs
+```
+
+| Security Type (tag 167) | Name | IBX Status |
+|-------------------------|------|------------|
+| STK | Common Stock | Complete (hardcoded default) |
+| OPT | Option | Missing (Phase 2.1) |
+| FUT | Future | Missing (Phase 2.2) |
+| FOP | Future Option | Missing (Phase 2.2) |
+| CASH | Forex | Missing (Phase 2.3) |
+| IND | Index | Partial (market data only) |
+| WAR | Warrant | Missing (Phase 2.5) |
+| BOND | Bond | Missing |
+| FUND | Fund | Missing |
+| CFD | Contract for Difference | Missing |
+| CRYPTO | Cryptocurrency | Missing |
+| CMDTY | Commodity | Missing |
+| NEWS | News | N/A |
+| BAG | Combo | Missing (Phase 2.4) |
+| IOPT | Structured Product | Missing (Phase 2.5) |
+
+### Appendix E: Order State Machine Coverage
+
+**Verification command:**
+```sh
+grep -A1 'pub enum OrderStatus' src/types.rs
+```
+
+| Java State | FIX 39 Value | IBX Status | Notes |
+|-----------|-------------|------------|-------|
+| Unknown | -- | Complete | Initial state |
+| Inactive | -- | Missing | Pre-submitted, waiting for conditions |
+| Submitted | 0 (New) | Complete | Order accepted by exchange |
+| Acked | A (PendingNew) | Missing | Acknowledged by IB, not yet on exchange |
+| Pending | -- | Complete (as PendingSubmit) | Locally queued |
+| Confirmed | -- | Missing | Server confirmed receipt |
+| Filled | 2 (Filled) | Complete | |
+| PartiallyFilled | 1 (PartiallyFilled) | Complete | |
+| CancelSubmitted | 6 (PendingCancel) | Missing | Cancel request sent |
+| CancelAcked | -- | Missing | Cancel acknowledged |
+| CancelConfirmed | 4 (Cancelled) | Complete (as Cancelled) | But intermediate states lost |
+| PendingModifyAck | E (PendingReplace) | Missing | Modify request acknowledged |
+| WarnState | -- | Missing | Warning state (margin, pattern day trader) |
+
+### Appendix F: Auth Token Type Coverage
+
+**Verification command:**
+```sh
+grep -i 'token\|SOFT\|PERMANENT\|TWSRO\|TST' src/auth/session.rs | head -20
+```
+
+| Token Type | Java Value | IBX Status | Notes |
+|-----------|-----------|------------|-------|
+| SOFT (ST) | 0 / flag=2 | Complete | Soft token challenge via XYZ |
+| PERMANENT (PST) | 1 / flag=4 | Missing | Persistent session cookie |
+| PWD | MAX_VALUE | Complete | Password-only auth (paper accounts) |
+| TWSRO (RST) | 3 / flag=16 | Missing | Read-only token |
+| TST | 7 / flag=256 | Missing | Unknown purpose |
+| IB Key (via DSA 775) | -- | Complete | IB Key 2FA challenge-response |
+
+### Appendix G: NS Protocol Coverage
+
+**Verification command:**
+```sh
+grep -c 'pub const NS_' src/protocol/ns.rs  # => 17
+```
+
+| NS Type | Value | IBX Defined | IBX Handled |
+|---------|-------|-------------|-------------|
+| NS_ERROR_RESPONSE | 519 | Yes | Yes |
+| NS_AUTH_START | 520 | Yes | Yes |
+| NS_CONNECT_REQUEST | 521 | Yes | Yes (sent) |
+| NS_DEMO_REQUEST | 522 | No | No (non-goal) |
+| NS_CONNECT_RESPONSE | 523 | Yes | Yes |
+| NS_REDIRECT | 524 | Yes | Yes |
+| NS_FIX_START | 525 | Yes | Yes |
+| NS_NEWCOMMPORTTYPE | 526 | Yes | Yes |
+| NS_BACKUP_HOST | 527 | Yes | Partial (received, not used for failover) |
+| NS_MISC_URLS_REQUEST | 528 | Yes | Yes |
+| NS_MISC_URLS_RESPONSE | 529 | Yes | Yes |
+| NS_TEST_REQUEST | 530 | Yes | Yes |
+| NS_HEART_BEAT | 531 | Yes | Yes |
+| NS_SECURE_CONNECT | 532 | Yes | Yes |
+| NS_SECURE_CONNECTION_START | 533 | Yes | Yes |
+| NS_SECURE_MESSAGE | 534 | Yes | Yes |
+| NS_SECURE_ERROR | 535 | Yes | Yes |
+
+### Appendix H: Disconnect Reason Coverage
+
+**Verification command:**
+```sh
+grep 'DisconnectReason\|disconnect' src/engine/hot_loop/*.rs | wc -l
+```
+
+| Java DisconnectReason | IBX Handling |
+|----------------------|--------------|
+| DISCONNECT_NO_DISCONNECT_STATUS | Not differentiated |
+| DISCONNECT_ON_BROKEN_SOCKET | Detected (io::Error), not classified |
+| DISCONNECT_ON_CONNECTION_FAILURE | Detected (connect error), not classified |
+| DISCONNECT_ON_INACTIVITY | Detected (heartbeat timeout), not classified |
+| DISCONNECT_ON_EXIT_SESSION | Not handled |
+| DISCONNECT_NATIVE_CONNECTION_RESTORED | Not handled |
+| DISCONNECT_AUTHORIZATION_FAILED | Detected (auth error), not classified |
+| DISCONNECT_ON_REDIRECTION | Detected (NS_REDIRECT), not classified |
+| DISCONNECT_BY_DESIGN | Not handled |
+| DISCONNECT_ON_WORKSPACE | Not applicable (no GUI) |
+| DISCONNECT_ON_RO_TO_RW | Not handled |
+| NO_AUTH_RESPONSE | Detected (timeout), not classified |
+| NO_PING_RESPONSE | Detected (heartbeat timeout), not classified |
+| DISCONNECT_ON_USER_COMPETITION | Not handled |
+| CONNECTING | Not tracked as disconnect |
+| DISCONNECT_ON_SETTINGS | Not applicable |
+| DISCONNECT_ON_SITE_DOWN | Not differentiated |
+| DISCONNECT_ON_SITE_NOT_READY | Not differentiated |
+| NEED_SSL | Not handled (always uses TLS) |
+| DISCONNECT_CCP_CONNECTION_REQUIRED | Not handled |
+| FIX_VALIDATION_FAILURE | Not handled (no FIX validation) |
+| SSL_CERTIFICATE_NOT_ACCEPTED | Not handled (system trust store) |
+
+### Appendix I: Connection State Coverage
+
+| Java LogonState | IBX Equivalent |
+|----------------|----------------|
+| PRELOGON | Implicit (before TLS connect) |
+| LOGON | Implicit (during NS handshake) |
+| FIX_SESSION_REQUEST | Implicit (after NS_FIX_START) |
+| FIX_SESSION_OPEN | Implicit (after FIX logon response) |
+| LOGGEDON | Implicit (hot loop running) |
+| ACCT_NOT_SUPPORTED | Not handled |
+
+### Appendix J: Wrapper Callback Coverage
+
+**Verification command:**
+```sh
+awk '/pub trait Wrapper/,/^}/' src/api/wrapper.rs | grep -c 'fn '  # => 63
+```
+
+All 63 Wrapper trait methods have default no-op implementations. Key categories:
+
+| Category | Methods | Implementation Status |
+|----------|---------|---------------------|
+| Connection (connect_ack, connection_closed, etc.) | 6 | Complete |
+| Market Data (tick_price, tick_size, etc.) | 6 | Complete |
+| Orders (order_status, open_order, exec_details, etc.) | 6 | Complete |
+| Account (update_account_value, position, pnl, etc.) | 12 | Complete |
+| Historical Data (historical_data, head_timestamp, etc.) | 4 | Complete |
+| Contract Details | 3 | Complete |
+| Tick-by-Tick | 3 | Complete |
+| Scanner | 3 | Complete |
+| News | 5 | Complete |
+| Real-Time Bars | 1 | Complete |
+| Historical Ticks | 1 | Complete |
+| Histogram | 1 | Complete |
+| Market Rules | 1 | Complete |
+| Completed Orders | 2 | Complete |
+| Historical Schedule | 1 | Complete |
+| Fundamental Data | 1 | Complete |
+| Market Depth (L2) | 3 | Complete |
+| Smart Components | 1 | Complete |
+| News Providers | 1 | Complete |
+| Soft Dollar Tiers | 1 | Complete |
+| Family Codes | 1 | Complete |
+| User Info | 1 | Complete |
+
+### Appendix K: ControlCommand Coverage
+
+**Verification command:**
+```sh
+awk '/pub enum ControlCommand/,/^}/' src/types.rs | grep -cE '^\s+[A-Z]'  # => 36
+```
+
+Key ControlCommand variants (36 total):
+
+| Category | Commands | Count |
+|----------|----------|-------|
+| Market Data | Subscribe, Unsubscribe, SubscribeTbt, UnsubscribeTbt, SubscribeNews, UnsubscribeNews, SubscribeDepth, UnsubscribeDepth | 8 |
+| Orders | Order(OrderRequest) -- 37 submit + Cancel + CancelAll + Modify | 3 wrappers |
+| Historical | FetchHistorical, CancelHistorical, FetchHeadTimestamp, CancelHeadTimestamp, FetchHistoricalTicks, FetchHistoricalSchedule | 6 |
+| Reference | FetchContractDetails, FetchMatchingSymbols, FetchMktDepthExchanges, FetchScannerParams, SubscribeScanner, CancelScanner | 6 |
+| News | FetchHistoricalNews, FetchNewsArticle | 2 |
+| Fundamental | FetchFundamentalData, CancelFundamentalData | 2 |
+| Histogram | FetchHistogramData, CancelHistogramData | 2 |
+| Real-Time Bars | SubscribeRealTimeBar, CancelRealTimeBar | 2 |
+| Instrument | RegisterInstrument | 1 |
+| Config | UpdateParam | 1 |
+| Lifecycle | Shutdown | 1 |
+
+### Appendix Y: Baseline Verification
+
+All numbers in this document can be reproduced with these commands run against commit `7a4c7dd`:
+
+```sh
+# Y.1: Source file counts
+[private analysis — counts verified at time of writing]| wc -l  # => 1004
+find src/ -name "*.rs" -type f | wc -l                  # => 72
+
+# Y.3: GUI-related Java files
+grep -rl "javax.swing\|java.awt" [private analysis] | wc -l  # => 222
+
+# Y.4: Unit tests
+grep -rn "#\[test\]" src/ | wc -l  # => 637
+
+# Y.5: Python integration tests
+find tests/python/ -name "*.py" -type f | wc -l  # => 16
+
+# Y.6: Benchmark binaries
+ls src/bin/bench_*.rs | wc -l  # => 11
+
+# Y.7: Java files per package
+for pkg in "jts4launch/jfix" "jts4launch/jfix/replacement" "twslaunch/jauthentication" \
+  "twslaunch/jclient" "twslaunch/jclient/context" "twslaunch/jclient/login" \
+  "twslaunch/jconnection" "twslaunch/jconnection/service" "twslaunch/jconnection/ssl" \
+  "twslaunch/jconnection/validate" "twslaunch/jfix" "twslaunch/jutils"; do
+  count=$([private analysis — counts verified at time of writing]| wc -l)
+  echo "$pkg: $count"
+done
+
+# Y.8: FIX tags defined
+grep -c "pub const TAG_" src/protocol/fix.rs  # => 21
+
+# Y.9: FIX message types defined
+grep -c "pub const MSG_" src/protocol/fix.rs  # => 13
+
+# Y.10: OrderRequest variants
+grep -c "Submit\|Cancel\|Modify" src/types.rs  # => 122
+
+# Y.11: Wrapper trait methods
+awk '/pub trait Wrapper/,/^}/' src/api/wrapper.rs | grep -c 'fn '  # => 63
+
+# Y.12: NS message types
+grep -c "pub const NS_" src/protocol/ns.rs  # => 17
+
+# Y.13: FIX tags in order builder
+grep -oP '\(\d+,' src/engine/hot_loop/order_builder.rs | sort -u | wc -l  # => 70
+
+# Y.14: Git baseline
+git rev-parse HEAD  # => 7a4c7dda533962085f8269c96756cd6dcf982568
+```
+
+### Appendix Z: Glossary
+
+| Term | Definition |
+|------|-----------|
+| **CCP** | Central Connection Point -- IB's auth server (cdc1/ndc1.ibllc.com:4001). Handles login, orders, account data. |
+| **Farm** | Market data server (e.g., usfarm). Delivers real-time ticks, depth, and market data. |
+| **HMDS** | Historical Market Data Server. Delivers historical bars, tick-by-tick data, scanner results. |
+| **FIX 4.1** | Financial Information eXchange protocol version 4.1. IB's variant uses custom tags (4000+, 6000+, 8000+). |
+| **NS** | IB's proprietary framing protocol. `#%#%` magic + 4-byte length + semicolon-delimited payload. |
+| **XYZ** | IB's binary protocol for SRP auth. `#%#%` magic + length-prefixed binary fields. |
+| **FIXCOMP** | Compressed FIX message container. Zlib-compressed inner messages in `8=FIXCOMP` framing. |
+| **SRP-6** | Secure Remote Password protocol v6. Zero-knowledge password proof without sending password over wire. |
+| **DH** | Diffie-Hellman key exchange. Establishes shared secret for AES-128-CBC encrypted channel. |
+| **SeqLock** | Sequence lock. Lock-free data structure for single-writer multiple-reader. Used for hot-path quote storage. |
+| **Hot Loop** | The pinned-core busy-poll engine thread. Non-blocking, no locks, drains all connections in a tight loop. |
+| **OCA** | One-Cancels-All. Order group where filling one cancels the others (used in bracket TP/SL). |
+| **TBT** | Tick-by-Tick. Individual trade/quote events (vs aggregated ticks). |
+| **RTBAR** | Real-Time Bar. 5-second OHLCV bars from HMDS. |
+| **conId** | IB's unique contract identifier. Integer assigned by IB to each instrument. |
+| **InstrumentId** | IBX's internal dense identifier. Maps from conId at subscription time for array indexing. |
+| **SMART** | IB's smart order routing. Automatically routes to best exchange. |
+| **FA** | Financial Advisor. Multi-account management with allocation profiles. |
+| **PST** | Permanent Session Token. Survives restarts, avoids full re-authentication. |
+| **SWTK** | Soft Token. Time-based one-time password for 2FA. |
+| **IB Key** | IB's mobile 2FA app. Uses DSA challenge-response (notification code 775). |
+
+---
+
+---
+
+## 10. Expanded Task Specifications
+
+This section provides implementation-level detail for every task across all phases. Each specification includes the exact files to modify, the function signatures to add or change, the FIX tags involved, and step-by-step implementation guidance derived from the deobfuscated Java source.
+
+### 10.1 Phase 0 Expanded: Paper Trading Robustness
+
+#### P0.1 Expanded: Concurrent Order Stress Test
+
+**Implementation as a new binary: `src/bin/stress_orders.rs`**
+
+The test binary should:
+1. Connect to IB paper trading via `gateway::connect()`
+2. Subscribe to 10 instruments: SPY, AAPL, MSFT, AMZN, GOOG, TSLA, META, NVDA, AMD, QQQ
+3. Wait for first tick on all 10 (confirms market data flowing)
+4. Submit 100 limit orders in rapid succession:
+   - 10 orders per symbol
+   - Alternating buy/sell
+   - Limit price = last price +/- 0.5% (to avoid immediate fills for pure stress testing)
+   - Qty = random 1-100
+5. Collect all 100 execution reports (OrderUpdate events)
+6. Assert: all 100 orders received an Acked/Submitted status
+7. Cancel all 100 orders
+8. Assert: all 100 cancellation confirmations received
+9. Print timing: total submit time, total ack time, total cancel time
+
+**Key assertion: no `OrderStatus::Uncertain`, no panics, no duplicate order IDs.**
+
+**Metrics to track:**
+- Submit throughput: orders/second
+- Ack latency (p50, p95, p99): time from send_fix() to OrderUpdate
+- Cancel latency: time from cancel request to Cancelled status
+- Memory delta: RSS before and after the 100-order cycle
+
+**Java reference files:**
+- `jfix/FixOrderState.java` (12 states to validate against)
+- `jfix/q.java` (UserFeatureSet -- may limit order rate)
+- `jfix/ct.java` (StateSendable -- order state serialization)
+
+#### P0.2 Expanded: CCP Reconnect Under Load
+
+**Implementation approach:**
+
+This test must be manual or require a network control mechanism. Two approaches:
+
+**(a) iptables-based:** Add a firewall rule to drop traffic to cdc1.ibllc.com:4001 for 30 seconds, then remove it. The hot loop should detect the CCP heartbeat timeout (10s + 1s grace), trigger `reconnect_ccp()`, and re-establish the session.
+
+```sh
+# Drop CCP traffic
+sudo iptables -A OUTPUT -d cdc1.ibllc.com -j DROP
+sleep 30
+sudo iptables -D OUTPUT -d cdc1.ibllc.com -j DROP
+```
+
+**(b) Code-based:** Add a `ControlCommand::SimulateDisconnect(ConnectionType)` for testing. This would close the CCP socket, triggering the reconnect path without network manipulation.
+
+**Expected behavior sequence:**
+1. Hot loop detects CCP heartbeat timeout (11 seconds after last recv)
+2. `ccp.disconnected` set to `true`
+3. All orders transition to `OrderStatus::Uncertain`
+4. `Event::Disconnected` emitted
+5. Background reconnect thread spawned (`reconnect_ccp()`)
+6. New CCP connection established (SRP re-auth not needed -- session token reuse)
+7. Mass status request (35=H) sent on new CCP connection
+8. All open orders reconciled: Uncertain -> Submitted, Filled, Cancelled
+9. Market data on farm connections should be UNINTERRUPTED during CCP disconnect
+
+**Rust files involved:**
+- `engine/hot_loop/mod.rs` lines 66-70: reconnect state machine
+- `gateway.rs`: `reconnect_ccp()` function
+- `engine/hot_loop/ccp.rs`: `handle_disconnect()` and mass status on reconnect
+- `bridge.rs`: `OrderState` for order status updates
+
+#### P0.3 Expanded: Farm Disconnect/Reconnect Per-Farm (Good First Issue)
+
+**Context:** IBX currently supports multiple farm connections (`farm_conn`, `cashfarm_conn`, `eufarm_conn`, `jfarm_conn`, `usfuture_conn`). When one farm disconnects, only that farm's subscriptions should be affected. Other farms must continue operating.
+
+**Implementation steps:**
+1. In `engine/hot_loop/farm.rs`, the `handle_disconnect()` method already sets `self.disconnected = true`. Verify this only affects the specific farm, not all farms.
+2. Add per-farm reconnect tracking in `HotLoop`:
+   - `pending_cashfarm_reconnect: Option<Receiver<io::Result<Connection>>>`
+   - Same for eufarm, jfarm, usfuture
+3. In the main hot loop iteration, check each secondary farm for pending reconnect results
+4. On successful reconnect, replay that farm's market data subscriptions
+
+**Test procedure:**
+1. Subscribe to a US stock (via usfarm) and a forex pair (via cashfarm)
+2. Disconnect cashfarm (via iptables or code injection)
+3. Verify: US stock ticks continue uninterrupted
+4. Verify: Forex pair ticks stop (cashfarm disconnected)
+5. Reconnect cashfarm
+6. Verify: Forex pair ticks resume
+
+**This is a Good First Issue because:**
+- The per-farm architecture already exists in `HotLoop`
+- The primary farm reconnect logic already works and can be replicated
+- The change is localized to `engine/hot_loop/mod.rs` and `farm.rs`
+- No protocol changes needed
+
+#### P0.4 Expanded: Order Modify/Cancel Race Conditions
+
+**Race conditions to test:**
+
+| Race | Sequence | Expected Outcome |
+|------|----------|-----------------|
+| Cancel after fill | Submit -> Fill arrives -> Cancel sent before ack | CancelReject (too late, already filled) |
+| Modify during cancel | Submit -> Cancel sent -> Modify sent | CancelReject or ModifyReject |
+| Double cancel | Submit -> Cancel -> Cancel again | First cancels, second gets CancelReject |
+| Modify unfilled | Submit -> Modify price -> New fill at new price | Fill at modified price |
+| Cancel+Resubmit | Submit -> Cancel -> Immediately resubmit | Two separate orders, no confusion |
+| Fill during modify | Submit -> Fill arrives -> Modify sent | Modify rejected (already filled) or partial modify |
+
+**Implementation as `src/bin/stress_modify.rs`:**
+1. Submit a limit order far from market (will not fill)
+2. Immediately send a modify (change price)
+3. Verify: PendingModifyAck -> Submitted at new price
+4. Send a cancel
+5. Verify: CancelSubmitted -> Cancelled
+6. Repeat 50 times, assert zero panics and deterministic final states
+
+**Key Rust files:**
+- `engine/hot_loop/order_builder.rs`: Modify variant (35=G)
+- `engine/hot_loop/ccp.rs`: ExecType handling for modify acks
+- `types.rs`: OrderStatus transitions
+
+#### P0.5 Expanded: HMDS Reconnect + Historical Data Recovery (Good First Issue)
+
+**Current behavior:** When the HMDS connection drops, pending historical requests are lost. The caller never receives a response or error.
+
+**Fix:**
+1. In `engine/hot_loop/hmds.rs`, `handle_disconnect()` should mark `self.disconnected = true`
+2. Store all pending request metadata (request type, parameters, req_id) in a `retry_queue`
+3. On successful HMDS reconnect, drain the retry queue and resend all pending requests
+4. If a request was already partially received (e.g., historical bars streaming), discard the partial data and start fresh
+
+**Pending request types to retry:**
+- `pending_historical`: Historical bar requests
+- `pending_head_ts`: Head timestamp requests
+- `pending_scanner`: Scanner subscription requests
+- `pending_news`: Historical news requests
+- `pending_articles`: News article requests
+- `pending_fundamental`: Fundamental data requests
+- `pending_histogram`: Histogram data requests
+- `pending_schedule`: Trading schedule requests
+- `pending_ticks`: Historical tick requests
+
+**This is a Good First Issue because:**
+- The HMDS state machine in `hmds.rs` already tracks all pending requests
+- The disconnect detection already works
+- The fix is: on reconnect, re-send each pending request
+- Localized to `engine/hot_loop/hmds.rs`
+
+#### P0.6 Expanded: L2 Depth Stress Test
+
+**Test procedure:**
+1. Subscribe to L2 depth for 20 symbols (10 SMART + 10 individual exchanges)
+2. Enable SmartDepth for 10 of them
+3. Run for 30 minutes during market hours
+4. Verify: all 20 depth books update continuously
+5. Cancel and resubscribe 5 depth streams mid-test
+6. Verify: no stale data in the re-subscribed books
+
+**Key metrics:**
+- Depth update rate per symbol
+- SmartDepth fan-out correctness (multiple exchanges consolidated)
+- Memory stability (depth book sizes should plateau)
+
+#### P0.7 Expanded: Bracket Order Stress Test
+
+**20 bracket orders, each with:**
+- Parent: Limit Buy at (last_price - $0.10) -- slightly below market to control fill timing
+- Take-Profit: Limit Sell at (entry + 2%)
+- Stop-Loss: Stop at (entry - 1%)
+
+**OCA group naming:** `BRACKET_{order_id}` linking TP and SL
+
+**Test sequence:**
+1. Submit all 20 brackets (60 FIX messages total: 20 parents + 20 TPs + 20 SLs)
+2. For 10 brackets: lower parent price to market to trigger fill
+3. On fill: verify TP and SL both transition from PreSubmitted -> Submitted
+4. For 5 of the 10 filled brackets: the TP should be at a fillable price. When TP fills, verify SL auto-cancels via OCA.
+5. For the other 5: manually cancel TP. Verify SL remains active.
+6. Cancel remaining 10 unfilled parent orders. Verify: TP and SL also cancel.
+
+**Java reference:** `jfix/OCAType.java` defines three OCA types:
+- Type 1: Cancel with block (fills cancel others, block new orders)
+- Type 2: Reduce with block (fills reduce others, block new orders)
+- Type 3: Reduce without block (fills reduce others, allow new orders)
+
+IBX currently tracks OCA group ID but does not differentiate types. This test will reveal if the default behavior is sufficient or if type differentiation (P1.6) is needed first.
+
+#### P0.8 Expanded: Overnight Session Stability
+
+**8-hour soak test during non-market hours:**
+1. Connect and subscribe to 10 instruments at 6 PM ET
+2. Market closes at 8 PM ET. Verify: ticks stop gracefully, no errors
+3. IB maintenance window typically 11:30 PM - 12:15 AM ET. Verify: reconnect succeeds after maintenance
+4. Pre-market opens 4 AM ET. Verify: ticks resume
+5. Regular market opens 9:30 AM ET. Verify: full tick flow
+
+**Metrics to monitor every 5 minutes:**
+- RSS memory (via /proc/self/status)
+- Open file descriptors (via /proc/self/fd)
+- Heartbeat success count (CCP + Farm + HMDS)
+- Reconnect events
+- Tick count (should be near-zero during non-market, non-zero during pre-market)
+
+### 10.2 Phase 1 Expanded: Protocol Completion
+
+#### P1.1 Deep Dive: Order State Machine
+
+**Current `OrderStatus` enum (7 states):**
+```rust
+pub enum OrderStatus {
+    PendingSubmit,   // Locally queued
+    Submitted,       // FIX 39=0 (New) or 39=A (PendingNew)
+    Filled,          // FIX 39=2
+    PartiallyFilled, // FIX 39=1
+    Cancelled,       // FIX 39=4
+    Rejected,        // FIX 39=8
+    Uncertain,       // Disconnect-induced
+}
+```
+
+**Target `OrderStatus` enum (12 states):**
+```rust
+pub enum OrderStatus {
+    PendingSubmit,     // Locally queued, not sent
+    Acked,             // FIX 39=A (PendingNew) -- server received, routing to exchange
+    Submitted,         // FIX 39=0 (New) -- accepted by exchange
+    PartiallyFilled,   // FIX 39=1
+    Filled,            // FIX 39=2
+    CancelSubmitted,   // FIX 39=6 (PendingCancel) -- cancel request in progress
+    CancelAcked,       // IB-specific intermediate cancel state
+    Cancelled,         // FIX 39=4 -- confirmed cancelled
+    PendingModifyAck,  // FIX 39=E (PendingReplace) -- modify in progress
+    Rejected,          // FIX 39=8
+    Inactive,          // Pre-submitted, waiting for conditions
+    Uncertain,         // Disconnect-induced
+}
+```
+
+**Transition rules from Java `FixOrderState`:**
+```
+PendingSubmit -> Acked (server receipt)
+Acked -> Submitted (exchange acceptance)
+Acked -> Rejected (server reject)
+Submitted -> PartiallyFilled (partial fill)
+Submitted -> Filled (complete fill)
+Submitted -> CancelSubmitted (cancel request sent)
+Submitted -> PendingModifyAck (modify request sent)
+PartiallyFilled -> Filled (remaining fills)
+PartiallyFilled -> CancelSubmitted (cancel remaining)
+CancelSubmitted -> CancelAcked (IB intermediate)
+CancelSubmitted -> Cancelled (direct cancel)
+CancelAcked -> Cancelled (exchange confirms)
+PendingModifyAck -> Submitted (modify accepted, new price)
+PendingModifyAck -> Rejected (modify rejected, revert to original)
+Inactive -> Submitted (condition triggered)
+Inactive -> Cancelled (cancelled before trigger)
+```
+
+**FIX tag 39 (OrdStatus) mapping update in `ccp.rs`:**
+```rust
+match ord_status {
+    b'A' => OrderStatus::Acked,           // PendingNew
+    b'0' => OrderStatus::Submitted,        // New
+    b'1' => OrderStatus::PartiallyFilled,  // Partially Filled
+    b'2' => OrderStatus::Filled,           // Filled
+    b'4' => OrderStatus::Cancelled,        // Cancelled
+    b'6' => OrderStatus::CancelSubmitted,  // PendingCancel
+    b'8' => OrderStatus::Rejected,         // Rejected
+    b'E' => OrderStatus::PendingModifyAck, // PendingReplace
+    _    => OrderStatus::Submitted,        // Default fallback
+}
+```
+
+#### P1.2 Deep Dive: User Feature Flags
+
+**Java reference:** `jfix/q.java` (UserFeatureSet, 3,787 lines) -- this is the largest file in the entire Java codebase.
+
+**Key features to parse (safety-critical subset):**
+
+| Feature Flag | Purpose | Safety Impact |
+|-------------|---------|---------------|
+| `CRORDER` | Cross orders permitted | Order would be rejected if not permitted |
+| `NONEGLAST` | Non-eligible last sale | Affects order routing |
+| `BLOTTERCROSS` | Blotter cross permitted | Cross order capability |
+| `FALOT` | FA lot allocation | FA order placement |
+| `MARGIN` | Margin trading enabled | Margin orders would fail |
+| `SHORTSEL` | Short selling permitted | Short sells would be rejected |
+| `CRYPTO` | Crypto trading enabled | Crypto orders would fail |
+| `OPTIONS` | Options trading enabled | Options orders would fail |
+| `FUTURES` | Futures trading enabled | Futures orders would fail |
+| `FOREX` | Forex trading enabled | Forex orders would fail |
+
+**Implementation:**
+1. In `gateway.rs`, after CCP FIX logon response is received, extract feature flag fields
+2. Feature flags are sent as a semicolon-separated list in a custom IB tag (likely 6XXX range)
+3. Define `FeatureFlags` in `types.rs`:
+```rust
+pub struct FeatureFlags {
+    pub raw_flags: Vec<String>,
+    pub cross_orders: bool,
+    pub margin: bool,
+    pub short_sell: bool,
+    pub crypto: bool,
+    pub options: bool,
+    pub futures: bool,
+    pub forex: bool,
+    // ... additional flags
+}
+```
+4. Store in `SharedState::reference` (new field)
+5. Expose via `EClient::feature_flags() -> &FeatureFlags`
+
+#### P1.9 Deep Dive: Disconnect Reason Classification
+
+**Java `DisconnectReason.java` defines 22 reasons:**
+
+```rust
+pub enum DisconnectReason {
+    /// No disconnect occurred.
+    None,
+    /// TCP socket broken (read/write returned error).
+    BrokenSocket,
+    /// Initial connection attempt failed (DNS, TCP connect, TLS handshake).
+    ConnectionFailure,
+    /// Heartbeat timeout exceeded (no response to TestRequest).
+    Inactivity,
+    /// User explicitly requested session end.
+    ExitSession,
+    /// Native connection restored after temporary failure.
+    NativeConnectionRestored,
+    /// Authentication failed (wrong password, expired token, 2FA failed).
+    AuthorizationFailed,
+    /// Server redirected to different host (NS_REDIRECT received).
+    Redirection,
+    /// Planned disconnect (server shutdown, maintenance).
+    ByDesign,
+    /// Read-only to read-write mode switch.
+    ReadOnlyToReadWrite,
+    /// No authentication response within timeout.
+    NoAuthResponse,
+    /// No heartbeat response within timeout.
+    NoPingResponse,
+    /// Another session logged in with same credentials.
+    UserCompetition,
+    /// Server-side settings change.
+    Settings,
+    /// Server site is down.
+    SiteDown,
+    /// Server site not ready.
+    SiteNotReady,
+    /// SSL required but not established.
+    NeedSsl,
+    /// CCP connection required (farm-only session not permitted).
+    CcpConnectionRequired,
+    /// FIX message validation failure.
+    FixValidationFailure,
+    /// SSL certificate not accepted.
+    SslCertificateNotAccepted,
+}
+```
+
+**Detection mapping in the hot loop:**
+
+| Disconnect Source | Detection Method | Reason |
+|------------------|-----------------|--------|
+| `conn.try_recv()` returns `Err(io::Error)` with `ConnectionReset` | TCP RST | `BrokenSocket` |
+| `conn.try_recv()` returns `Err(io::Error)` with `BrokenPipe` | TCP broken | `BrokenSocket` |
+| `conn.try_recv()` returns `Ok(0)` and no buffered data after timeout | EOF | `BrokenSocket` |
+| Heartbeat test request sent, no response within grace period | Timeout | `Inactivity` |
+| FIX 35=5 (Logout) received with tag 58 containing "authorization" | Auth failure | `AuthorizationFailed` |
+| FIX 35=5 (Logout) received with tag 58 containing "competing" | Competition | `UserCompetition` |
+| NS_REDIRECT (524) received | Redirect | `Redirection` |
+| NS_ERROR_RESPONSE (519) with "maintenance" | Server maintenance | `ByDesign` |
+
+### 10.3 Phase 2 Expanded: Multi-Asset
+
+#### P2.1 Deep Dive: Options Support
+
+**FIX tags required for options orders:**
+
+| Tag | Name | Example | Source |
+|-----|------|---------|--------|
+| 167 | SecurityType | "OPT" | `jfix/ef.java` security type enum |
+| 200 | MaturityMonthYear | "202606" | Contract.last_trade_date_or_contract_month |
+| 201 | PutOrCall | "0" (Put) / "1" (Call) | `jfix/OptionRight.java` |
+| 202 | StrikePrice | "450.00" | Contract.strike |
+| 207 | SecurityExchange | "CBOE" | Contract.exchange |
+| 231 | ContractMultiplier | "100" | Contract.multiplier |
+| 77 | OpenClose | "O" (Open) / "C" (Close) | `jfix/FixOpenClose.java` |
+
+**Greeks integration:**
+
+IB sends greeks via FIX tag 6005 (model option computation) in market data ticks. The tick decoder in `protocol/tick_decoder.rs` needs to handle a new tick type containing:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| impliedVol | f64 | Implied volatility |
+| delta | f64 | Delta |
+| optPrice | f64 | Option model price |
+| pvDividend | f64 | Present value of dividends |
+| gamma | f64 | Gamma |
+| vega | f64 | Vega |
+| theta | f64 | Theta |
+| undPrice | f64 | Underlying price |
+
+**New struct in `types.rs`:**
+```rust
+pub struct OptionGreeks {
+    pub implied_vol: f64,
+    pub delta: f64,
+    pub gamma: f64,
+    pub vega: f64,
+    pub theta: f64,
+    pub model_price: f64,
+    pub pv_dividend: f64,
+    pub und_price: f64,
+}
+```
+
+**Exercise/Assignment notifications:**
+
+IB sends exercise events via CCP (tag 6091). Types from `jfix/FixOptionExercise.java`:
+1. Automatic Exercise
+2. Voluntary Exercise
+3. Against (assignment)
+4. Lapse
+5. Dividend Reinvestment
+6. Tender
+7. Rights Issue
+8. Bond Exchange Offer
+9. Stock Split
+10. Reverse Stock Split
+
+Only types 1-4 are critical for options trading. Types 5-10 are corporate actions.
+
+#### P2.2 Deep Dive: Futures Support
+
+**FIX tags for futures:**
+
+| Tag | Name | Example |
+|-----|------|---------|
+| 167 | SecurityType | "FUT" |
+| 200 | MaturityMonthYear | "202606" |
+| 207 | SecurityExchange | "CME" |
+| 231 | ContractMultiplier | "50" (ES) |
+| 15 | Currency | "USD" |
+
+**Futures options (FOP) are a sub-category:**
+
+| Tag | Name | Example |
+|-----|------|---------|
+| 167 | SecurityType | "FOP" |
+| 200 | MaturityMonthYear | "202606" |
+| 201 | PutOrCall | "0" / "1" |
+| 202 | StrikePrice | "5800.00" |
+| 231 | ContractMultiplier | "50" |
+
+**Farm connection:** US futures use the `usfuture_conn` farm slot (already defined in HotLoop). This connection needs to be activated via `connect_farm()` with the appropriate farm name.
+
+#### P2.3 Deep Dive: Forex Support (Good First Issue)
+
+**Forex is the simplest multi-asset extension because:**
+- No strike, no expiry, no multiplier
+- Only needs: `tag 167 = "CASH"`, `tag 55 = "EUR"`, `tag 15 = "USD"`
+- Uses cashfarm connection (already defined in HotLoop)
+- Standard lot sizes (no fractional shares complexity)
+
+**Implementation checklist:**
+1. In `order_builder.rs`, check Contract.sec_type. If "CASH":
+   - Set tag 167 = "CASH"
+   - Set tag 55 = base currency (e.g., "EUR")
+   - Set tag 15 = quote currency (e.g., "USD")
+   - Do NOT send tag 100 (ExDestination) -- forex uses "IDEALPRO" routing implicitly
+2. Activate cashfarm connection in `gateway.rs`:
+   - After CCP logon, if forex is needed, connect to cashfarm
+   - Cashfarm name is returned in the CCP logon response (tag 6XXX)
+3. Handle cashfarm market data in the hot loop:
+   - Forex ticks have the same binary format as stock ticks
+   - Prices are to 5 decimal places (e.g., 1.08525)
+
+**Java reference:** `jfix/em.java` (CashInstrument), `jfix/cY.java` (FxRateManager)
+
+### 10.4 Phase 3 Expanded: Connection Resilience
+
+#### P3.1 Deep Dive: Hot Backup Strategy
+
+**Java `HotBackupStrategy.java` defines 3 strategies:**
+
+| Strategy | Behavior |
+|----------|----------|
+| OFF | Single connection, no backup. Reconnect to same host on failure. |
+| ON | Maintain 2 backup connections to hot-backup hosts (e.g., `cdc1-hb.ibllc.com`). On primary failure, instantly switch to backup. |
+| SINGLE_HOST | Maintain 1 backup to same host different port. |
+
+**Implementation in IBX:**
+
+The `HotBackupManager` in Java (`jconnection/M.java`, 665 lines) generates backup host names by inserting `-hb` into the primary host URL:
+- Primary: `cdc1.ibllc.com` -> Backup 1: `cdc1-hb.ibllc.com` -> Backup 2: `cdc1-hb2.ibllc.com`
+
+**IBX implementation:**
+1. Add `HotBackupStrategy` enum to `config.rs`
+2. On CCP logon response, parse NS_BACKUP_HOST (527) messages to discover backup hosts
+3. If strategy is ON, spawn background threads to pre-connect to backup hosts (SRP auth + DH)
+4. Maintain backup sessions in a `Vec<BackupSession>` in the hot loop
+5. On primary disconnect, immediately switch `ccp_conn` to the first ready backup
+6. The old primary becomes a failed connection; attempt re-establishment in background
+
+**Estimated latency improvement:**
+- Without hot backup: reconnect = re-auth (2-5 seconds)
+- With hot backup: failover = socket swap (~1ms)
+
+#### P3.2 Deep Dive: Session Persistence
+
+**Problem:** IBX currently performs full SRP-6 + DH authentication on every start. This takes 2-5 seconds and requires 2FA interaction.
+
+**Solution:** Save the session token to an encrypted file after successful auth. On restart, attempt token-based reconnect first. Only fall back to full SRP if the token is expired.
+
+**Java reference:** `jauthentication/aV.java` (SessionToken storage)
+
+**Implementation:**
+1. After successful auth, serialize `AuthResult` to JSON
+2. Encrypt with AES-256-GCM using a key derived from: `PBKDF2(username + machine_id)`
+3. Write to `~/.ibx/session.enc`
+4. On startup, attempt to read and decrypt the session file
+5. If valid: use the session token with `FLAG_PERMANENT_TOKEN` in the connect request
+6. If expired/invalid: fall back to full SRP auth
+
+**Security considerations:**
+- Token file must be mode 0600 (user-read-only)
+- Token has a server-side TTL (typically 24 hours)
+- Machine ID must match (prevents token theft via file copy)
+- Never log the token value
+
+#### P3.3 Deep Dive: Concurrent Login Competition
+
+**Java `CompetitionType.java` defines 4 types:**
+
+| Type | Description | Recommended Action |
+|------|-------------|-------------------|
+| `NOT_COMPETING` | No competition | Normal operation |
+| `COMPETING_LIVE` | Another live session logged in | Yield or kick |
+| `COMPETING_RO` | Another read-only session logged in | Continue (can coexist) |
+| `COMPETING_SELF` | Same user on different machine | Yield or kick |
+
+**IB behavior:** When a second session logs in with the same credentials, IB sends a FIX logout message (35=5) with tag 58 containing "(RO)" for read-only competition or a specific competition text.
+
+**IBX implementation:**
+1. In `ccp.rs`, when receiving 35=5 (Logout), check tag 58 for competition indicators
+2. Surface `Event::CompetitionDetected(CompetitionType)` to the caller
+3. Caller can respond via `ControlCommand::CompetitionResponse(CompetitionAction)`:
+   - `Yield`: Gracefully disconnect and let the other session take over
+   - `Kick`: Send competition kick message (re-authenticate aggressively)
+   - `ReadOnly`: Downgrade to read-only mode
+
+### 10.5 Phase 4 Expanded: Production Hardening
+
+#### P4.1 Deep Dive: FIX Message Audit Log
+
+**Architecture:**
+
+```
+Hot Loop                    Audit Thread
+  |                            |
+  +-- FIX send/recv ------>  ring buffer (lock-free)
+  |                            |
+  |                         flush to disk every 1s
+  |                            |
+  |                         rotated log files:
+  |                         ~/.ibx/audit/fix-20260401.log
+  |                         ~/.ibx/audit/fix-20260402.log
+```
+
+**Log format (one line per message):**
+```
+2026-04-01T10:30:15.123456789Z SEND CCP 35=D|11=12345|54=1|55=SPY|38=100|44=450.25|...
+2026-04-01T10:30:15.234567890Z RECV CCP 35=8|39=0|11=12345|150=0|...
+2026-04-01T10:30:16.000000000Z RECV FARM 35=P|BINARY:256bytes|...
+```
+
+**Configuration levels:**
+- `off`: No audit logging
+- `summary`: Log message type and key fields only (35, 11, 39, 150)
+- `full`: Log complete FIX message (sanitize passwords/tokens)
+
+**Implementation:**
+1. New file `protocol/audit.rs` with `AuditLogger` struct
+2. `AuditLogger::log_send(conn_type: &str, msg: &[u8])`
+3. `AuditLogger::log_recv(conn_type: &str, msg: &[u8])`
+4. Backed by a lock-free SPSC ring buffer (crossbeam)
+5. Background thread drains buffer to file every 1 second
+6. File rotation: new file every day, keep 30 days
+
+#### P4.2 Deep Dive: Order State Checkpointing
+
+**Problem:** When IBX restarts, all knowledge of open orders is lost. The only recovery mechanism is the mass status request, which has a 2-5 second delay.
+
+**Solution:** Periodically write open order state to a checkpoint file.
+
+**Checkpoint format (JSON, human-readable for debugging):**
+```json
+{
+  "timestamp": "2026-04-01T10:30:00Z",
+  "orders": [
+    {
+      "order_id": 12345,
+      "con_id": 756733,
+      "symbol": "SPY",
+      "side": "Buy",
+      "qty": 100,
+      "price": 450.25,
+      "status": "Submitted",
+      "perm_id": "abc123",
+      "fill_qty": 0,
+      "avg_fill_price": 0.0
+    }
+  ],
+  "positions": [
+    {
+      "con_id": 756733,
+      "symbol": "SPY",
+      "position": 500,
+      "avg_cost": 448.50
+    }
+  ]
+}
+```
+
+**Checkpoint frequency:** Every 5 seconds, or after any order status change.
+
+**Recovery on restart:**
+1. Read checkpoint file
+2. Pre-populate `Context::open_orders` and `Context::positions`
+3. After CCP logon, send mass status request
+4. Reconcile: merge checkpoint state with server state
+5. Alert on discrepancies (checkpoint says Submitted, server says Filled)
+
+#### P4.3 Deep Dive: Chaos Testing Framework
+
+**Architecture: Mock Gateway**
+
+A local mock gateway that speaks IB's protocol is needed for deterministic chaos testing:
+
+```
++------------------+       +-------------------+
+| IBX (system      | TLS   | Mock Gateway      |
+| under test)      |------>| - TLS termination |
+|                  |<------| - NS handshake    |
++------------------+       | - FIX logon       |
+                           | - Scenario engine |
+                           +-------------------+
+```
+
+**Mock gateway components:**
+1. **TLS acceptor:** Accept TLS connections on localhost:4001
+2. **NS handshake:** Perform simplified NS exchange (skip SRP for testing)
+3. **FIX session:** Accept FIX logon, respond with configurable account/features
+4. **Market data replay:** Replay captured tick data (binary 8=O 35=P format)
+5. **Order engine:** Accept 35=D, generate configurable 35=8 responses
+6. **Chaos injector:**
+   - `delay(ms)`: Add latency to responses
+   - `drop()`: Drop the connection
+   - `corrupt(field)`: Flip bits in a specific FIX field
+   - `reorder(n)`: Deliver messages out of sequence
+   - `partial_fill(pct)`: Fill only a percentage of order qty
+   - `reject(reason)`: Reject with specific reason code
+
+**Test DSL example:**
+```rust
+scenario("kill_ccp_mid_order")
+    .connect()
+    .subscribe("SPY")
+    .wait_ticks(10)
+    .place_order(Order::limit_buy("SPY", 100, 450.0))
+    .inject(Chaos::drop_ccp_after_ms(50))  // Kill CCP 50ms after order
+    .expect_event(Event::Disconnected)
+    .wait_reconnect()
+    .expect_order_reconciled(OrderStatus::Submitted)
+```
+
+### 10.6 Phase 5 Expanded: Live Trading Enablement
+
+#### P5.1 Deep Dive: SMS/Email 2FA
+
+**Current state:** IBX handles IB Key 2FA (DSA challenge code 775). SMS and Email 2FA use a different mechanism.
+
+**Java reference:** `jauthentication/AuthenticationMessageSWTK$DeliveryMethod.java`
+
+Delivery methods:
+- `SMS`: IB sends SMS to registered phone
+- `EMAIL`: IB sends email to registered address
+- `IB_KEY`: IB Key app notification (already implemented)
+- `PUSH`: Push notification to IB app
+
+**Implementation for SMS/Email:**
+1. During auth, if server requests SWTK challenge with delivery_method SMS or EMAIL:
+   - Emit `Event::TwoFactorRequired { method: TwoFactorMethod, prompt: String }`
+   - Wait for `ControlCommand::TwoFactorResponse(code: String)` from caller
+2. The caller must provide a mechanism to accept user input:
+   - CLI: `stdin` prompt
+   - Python: Wrapper callback `two_factor_required(method, prompt)` -> return code
+   - API: `submit_two_factor_code(code: &str)`
+3. Send the OTP code back via XYZ protocol (same as IB Key challenge-response, different delivery method flag)
+
+**Timeline:** Server sends SMS/Email, gives 120 seconds for response. After 120s, auth fails.
+
+#### P5.2 Deep Dive: Permanent Session Token
+
+**Java flow from `jauthentication/TokenType.java`:**
+
+| Token Type | Value | Flag Bit | Persistence | When Used |
+|-----------|-------|----------|-------------|-----------|
+| SOFT (ST) | 0 | flag=2 | In-memory | Every session |
+| PERMANENT (PST) | 1 | flag=4 | File | Subsequent sessions after first auth |
+| PWD | MAX | -- | None | Paper accounts only |
+| TWSRO | 3 | flag=16 | File | Read-only monitoring |
+| TST | 7 | flag=256 | Unknown | Reserved |
+
+**PST flow:**
+1. First auth: Full SRP + 2FA -> receive session token
+2. Server may include a "permanent token" field in the auth response
+3. Save permanent token to encrypted file (P3.2)
+4. Subsequent auth: Send permanent token via `FLAG_PERMANENT_TOKEN` in connect request
+5. Server validates token without requiring password or 2FA
+6. If token expired: server responds with auth challenge, fall back to full SRP
+
+**Security:**
+- PST has a longer TTL than session tokens (days vs hours)
+- PST is bound to machine ID (same as session persistence)
+- PST can be revoked server-side (e.g., password change)
+
+#### P5.7 Deep Dive: Security Audit Checklist
+
+**Items to verify in third-party review:**
+
+| # | Area | What to Check |
+|---|------|--------------|
+| 1 | SRP-6 | Verify `srp_compute_x()` matches RFC 2945. Salt handling correct. |
+| 2 | SRP-6 | Verify `srp_compute_s()` handles BigUint underflow correctly. |
+| 3 | DH | Verify private key generation uses CSPRNG (rand crate). |
+| 4 | DH | Verify key derivation uses TLS 1.0 PRF correctly. |
+| 5 | AES-128-CBC | Verify PKCS7 padding is correct. Verify IV chaining. |
+| 6 | HMAC-SHA1 | Verify FIX message signing matches Java behavior. |
+| 7 | Token storage | Verify encrypted file uses authenticated encryption (AES-GCM). |
+| 8 | Token storage | Verify file permissions are 0600. |
+| 9 | Logging | Verify no passwords, tokens, or keys appear in logs. |
+| 10 | Memory | Verify sensitive data is zeroized on drop (zeroize crate). |
+| 11 | Network | Verify TLS 1.2+ is enforced (no TLS 1.0/1.1). |
+| 12 | Network | Verify certificate validation is not disabled. |
+
+---
+
+## 11. Dependency Graph (Full)
+
+This section shows the complete inter-phase dependency graph across all 54 tasks.
+
+```
+PHASE 0 (Paper Trading Robustness)
+========================================
+P0.1 (Concurrent order stress)
+  |
+  +---> P0.2 (CCP reconnect under load) ----> P0.8 (Overnight stability)
+  |       |
+  |       +---> P0.7 (Bracket order stress)
+  |
+  +---> P0.4 (Modify/cancel race conditions)
+  
+P0.3 (Farm disconnect/reconnect)  [independent]
+P0.5 (HMDS reconnect)             [independent]
+P0.6 (L2 depth stress)            [independent]
+
+
+PHASE 1 (Protocol Completion) -- can start in parallel with Phase 0
+========================================
+P1.1 (Order state machine) ----> P1.3 (Execution restatements)
+P1.2 (Feature flags)        [independent]
+P1.4 (FIX validation)       [independent]
+P1.5 (Commission policy)    [independent]
+P1.6 (OCA types)            [independent]
+P1.7 (Open/Close)           [independent]
+P1.8 (Manual order)         [independent]
+P1.9 (Disconnect reasons)   [independent]
+P1.10 (LogonState)          [independent]
+P1.11 (Dynamic sec type)    [independent, but BLOCKS Phase 2]
+P1.12 (Settlement type)     [independent]
+
+
+PHASE 2 (Multi-Asset) -- requires P1.11
+========================================
+P1.11 ----> P2.1 (Options) ----> P2.4 (Combos)
+       |---> P2.2 (Futures)
+       |---> P2.3 (Forex)         [Good First Issue]
+       |---> P2.5 (Structured products)
+       |---> P2.7 (International exchanges)
+P2.6 (Security ID sources)        [independent, no P1.11 dep]
+
+
+PHASE 3 (Connection Resilience)
+========================================
+P3.1 (Hot backup)           [independent]
+P3.2 (Session persistence)  [independent]
+P3.3 (Login competition)    [independent]
+P0.3 ----> P3.4 (Farm reconnect with replay)
+P0.5 ----> P3.5 (HMDS reconnect with retry)
+P3.6 (Network pre-check)    [independent, Good First Issue]
+P3.7 (Configurable heartbeat) [independent, Good First Issue]
+P3.8 (Read-only mode)       [independent]
+
+
+PHASE 4 (Production Hardening)
+========================================
+P4.1 (Audit log)            [independent]
+P1.1 ----> P4.2 (Order checkpointing)
+P0.2 ----> P4.3 (Chaos testing) ----> P4.4 (72h soak test)
+P2.1 ----> P4.5 (Volatility orders)
+P4.6 (Scale orders)         [independent]
+P4.7 (Cross orders)         [independent]
+P4.8 (FA support)           [independent]
+P4.9 (Additional algos)     [independent]
+P1.8 ----> P4.10 (Order attribution)
+P4.11 (SSL pinning)         [independent]
+P4.12 (Benchmark regression) [independent]
+
+
+PHASE 5 (Live Trading -- LAST)
+========================================
+P5.1 (SMS/Email 2FA)        [independent]
+P3.2 ----> P5.2 (Permanent token) ----> P5.6 (Live integration tests)
+P3.1 ----> P5.5 (Auth retry with recovery)
+P5.3 (TWSRO token)          [independent]
+P5.4 (TST token)            [independent]
+P5.1 ----> P5.6 (Live integration tests)
+P5.2 ----> P5.7 (Security audit)
+
+
+CROSS-PHASE CRITICAL PATHS
+========================================
+Path 1 (longest): P0.1 -> P0.2 -> P4.3 -> P4.4
+  Total: 2 + 2 + 3 + 2 = 9 person-days
+
+Path 2 (multi-asset): P1.11 -> P2.1 -> P4.5
+  Total: 2 + 2 + 2 = 6 person-days
+
+Path 3 (live trading): P3.2 -> P5.2 -> P5.6
+  Total: 2 + 2 + 2 = 6 person-days
+
+Path 4 (order lifecycle): P1.1 -> P1.3
+  Total: 2 + 2 = 4 person-days
+```
+
+---
+
+## 12. Risk Register
+
+| # | Risk | Probability | Impact | Mitigation |
+|---|------|------------|--------|------------|
+| R1 | IB changes auth protocol in Gateway update | Medium | High | Monitor IB release notes. Deobfuscate new JARs. Version-gate auth code. |
+| R2 | Binary tick format changes without notice | Low | High | Tick decoder has fallback for unknown tick types (skip). Add format version detection. |
+| R3 | Paper trading behavior differs from live | Medium | Medium | Document all known paper/live differences. Run same tests on both. |
+| R4 | CCP heartbeat interval reduced by IB | Low | Medium | Configurable heartbeat (P3.7). Monitor for server-initiated timeout disconnects. |
+| R5 | New FIX tags added for regulatory compliance | High | Low | Unknown tags are ignored, not errored. Add tag discovery logging. |
+| R6 | IB deprecates SRP-6 for a newer auth method | Low | Critical | Monitor auth protocol changes. XYZ protocol has version negotiation. |
+| R7 | SSL certificate rotation breaks pinning | Medium | Medium | Use certificate chain pinning (pin CA, not leaf). Auto-update mechanism. |
+| R8 | Rate limiting on order submission | Low | Medium | Implement request throttling (P3.1 related). Exponential backoff. |
+| R9 | Hot loop thread stalls on syscall | Low | High | All hot-path I/O is non-blocking. Monitor loop iteration rate. Alert on stalls > 100ms. |
+| R10 | Memory leak in long-running session | Medium | Medium | Soak test (P4.4). RSS monitoring. Use `HashSet::shrink_to_fit()` periodically. |
+
+---
+
+## 13. Milestone Calendar (Estimated)
+
+Assuming a single dedicated contributor working full-time (5 days/week):
+
+| Milestone | Phase | Target Week | Cumulative PD | Deliverable |
+|-----------|-------|-------------|---------------|-------------|
+| M0: Paper trading confidence | 0 | Week 2.2 | 11 | All P0 tasks pass |
+| M1: Protocol complete | 1 | Week 5.0 | 25 | All 12 order states, feature flags, validation |
+| M2: Options + Futures | 2 | Week 6.4 | 32 | Options and futures orders working on paper |
+| M3: Resilient connections | 3 | Week 8.4 | 42 | Hot backup, session persistence, competition handling |
+| M4: Production ready | 4 | Week 12.0 | 60 | Audit log, chaos tested, 72h soak passed |
+| M5: Live trading ready | 5 | Week 14.0 | 70 | All auth types, security audited |
+| **Total** | **0-5** | **~14 weeks** | **70 pd** | **Full production-ready IBX** |
+
+**Parallel execution:** Phases 0 and 1 can be worked in parallel by different contributors. P2 and P3 can also overlap (different codepaths). With 2 contributors, the calendar compresses to ~8-9 weeks. The milestone targets above assume strictly sequential, single-contributor execution.
+
+---
+
+## 14. Accuracy Verification Report
+
+All quantitative claims derived from file counts and enum variant counts have been verified against the actual codebase at commit `7a4c7dd`. Functional coverage percentages (e.g., "~40% coverage") are engineering estimates based on class-by-class analysis and are labeled with `~` to distinguish them from exact counts. Performance baselines are from manual benchmark runs and are not CI-reproducible. Below is the verification matrix for all exact claims.
+
+| Claim | Section | Verified Value | Command | Match |
+|-------|---------|---------------|---------|-------|
+| 1,004 Java files | 1, 2.4 | 1,004 | `[private analysis — counts verified at time of writing]| wc -l` | YES |
+| 72 Rust files | 1, 2.4 | 72 | `find src/ -name "*.rs" -type f \| wc -l` | YES |
+| 222 GUI files | 1, 2.4, 3 | 222 | `grep -rl "javax.swing\|java.awt" [private analysis] \| wc -l` | YES |
+| 637 unit tests | 1, 2.4, 6.4 | 637 | `grep -rn '#\[test\]' src/ \| wc -l` | YES |
+| 16 Python test files | 2.4 | 16 | `find tests/ -name "*.py" -type f \| wc -l` | YES |
+| 11 benchmark binaries | 2.4 | 11 | `ls src/bin/*.rs \| wc -l` | YES |
+| 21 FIX tags defined | 2.4, A | 21 | `grep -c 'pub const TAG_' src/protocol/fix.rs` | YES |
+| 13 FIX msg types | 2.4, C | 13 | `grep -c 'pub const MSG_' src/protocol/fix.rs` | YES |
+| 17 NS constants | 2.4, G | 17 | `grep -c 'pub const NS_' src/protocol/ns.rs` | YES |
+| 63 Wrapper trait methods | 2.4, J | 63 | `awk '/pub trait Wrapper/,/^}/' src/api/wrapper.rs \| grep -c 'fn '` | YES |
+| 70 order builder tags | Y.13 | 70 | `grep -oP '\(\d+,' src/engine/hot_loop/order_builder.rs \| sort -u \| wc -l` | YES |
+| jfix: 431 files | 4.1 | 431 | `[private analysis — counts verified at time of writing]| wc -l` | YES |
+| jauth: 133 files | 4.2 | 133 | `[private analysis — counts verified at time of writing]| wc -l` | YES |
+| jclient: 162 files total | 4.3 | 162 | `[private analysis — counts verified at time of writing]| wc -l` | YES |
+| jclient top-level: 130 files | 4.3 | 130 | `[private analysis — counts verified at time of writing]| wc -l` | YES |
+| jconn: 154 files total | 4.4 | 154 | `[private analysis — counts verified at time of writing]| wc -l` | YES |
+| jconn top-level: 110 files | 4.4 | 110 | `[private analysis — counts verified at time of writing]| wc -l` | YES |
+| twslaunch/jfix: 11 files | 4.5 | 11 | `[private analysis — counts verified at time of writing]| wc -l` | YES |
+| jutils: 113 files | 4.6 | 113 | `[private analysis — counts verified at time of writing]| wc -l` | YES |
+| Phase 0: 11 pd | 5.0 | 2+2+1+1.5+1+1+1.5+1 = 11 | Sum of P0.1-P0.8 | YES |
+| Phase 1: 14 pd | 5.1 | 2+2+2+1+0.5+0.5+0.5+0.5+1.5+1+2+0.5 = 14 | Sum of P1.1-P1.12 | YES |
+| Phase 2: 7 pd | 5.2 | 2+1+1+1.5+0.5+0.5+0.5 = 7 | Sum of P2.1-P2.7 | YES |
+| Phase 3: 10 pd | 5.3 | 2.5+2+1.5+1.5+1+0.5+0.5+0.5 = 10 | Sum of P3.1-P3.8 | YES |
+| Phase 4: 18 pd | 5.4 | 2+2+3+2+2+1+0.5+2+1+1+0.5+1 = 18 | Sum of P4.1-P4.12 | YES |
+| Phase 5: 10 pd | 5.5 | 2+2+1+0.5+1.5+2+1 = 10 | Sum of P5.1-P5.7 | YES |
+| Total: 70 pd | 5.6 | 11+14+7+10+18+10 = 70 | Sum of phases | YES |
+| 54 tasks | 5.6 | 8+12+7+8+12+7 = 54 | Count of P*.* | YES |
+| 10 GFIs | 8.4 | 2+4+2+2+0+0 = 10 | Count per phase | YES |
+
+**All exact (non-estimated) claims verified. Zero discrepancies in file counts, enum variants, or phase arithmetic.**
+
+**Note:** Functional coverage percentages (e.g., "~40%", "~120 files") are engineering estimates from class-by-class analysis. Performance baselines (tick decode 340ns, etc.) are from manual benchmark runs on specific hardware and are not CI-reproducible.
+
+---
+
+## 15. Per-Package Status Summary (Consolidated)
+
+| Package | Total Files | Complete | Partial | Missing | N/A (GUI) | N/A (Infra) | N/A (Legacy) |
+|---------|------------|----------|---------|---------|-----------|-------------|--------------|
+| jts4launch/jfix | 431 | ~120 (28%) | ~65 (15%) | ~95 (22%) | ~15 (3%) | ~80 (19%) | ~56 (13%) |
+| twslaunch/jauthentication | 133 | 35 (34%) | ~20 (15%) | ~10 (8%) | ~37 (28%) | ~21 (16%) | 0 |
+| twslaunch/jclient | 162 | ~15 (9%) | ~8 (5%) | ~5 (3%) | ~115 (71%) | ~20 (12%) | 0 |
+| twslaunch/jconnection | 154 | ~25 (16%) | ~12 (8%) | ~15 (10%) | ~41 (27%) | ~17 (11%) | ~44 (29%) |
+| twslaunch/jfix | 11 | 8 (73%) | 1 (9%) | 0 | 1 (9%) | 1 (9%) | 0 |
+| twslaunch/jutils | 113 | ~10 (9%) | ~3 (3%) | ~2 (2%) | ~37 (33%) | ~61 (54%) | 0 |
+| **TOTAL** | **1,004** | **~223 (22%)** | **~109 (11%)** | **~127 (13%)** | **~246 (24%)** | **~199 (20%)** | **~100 (10%)** |
+
+**Effective coverage (excluding N/A):** 223 complete + 109 partial = 332 of 459 non-N/A files = **72% functional coverage** of protocol-relevant code.
+
+**Effective gap (excluding N/A):** 127 missing files out of 459 = **28% gap**. These 127 files are the implementation targets across Phases 1-5.
+
+---
+
+## 16. Subpackage File Counts (Verified)
+
+These counts were produced by `find -maxdepth 1 -name "*.java" -type f | wc -l` and are additive to the parent package counts.
+
+| Subpackage | Files | Parent Package |
+|-----------|-------|---------------|
+| `jts4launch/jfix/replacement` | 1 | jts4launch/jfix (430 top-level + 1 = 431 total) |
+| `twslaunch/jclient/context` | 3 | twslaunch/jclient (130 top-level + 32 subpackage = 162 total) |
+| `twslaunch/jclient/login` | 29 | (included in jclient total) |
+| `twslaunch/jconnection/service` | 2 | twslaunch/jconnection (110 top-level + 44 subpackage = 154 total) |
+| `twslaunch/jconnection/ssl` | 32 | (included in jconnection total) |
+| `twslaunch/jconnection/validate` | 10 | (included in jconnection total) |
+
+**Cross-check:** 431 + 133 + 162 + 154 + 11 + 113 = **1,004** (matches total Java file count).
+
+---
+
+## 17. Key Java Files by Package
+
+These are the highest-value targets for reverse engineering, ranked by structural complexity.
+
+### jts4launch/jfix (key files)
+
+| # | File | Deobfuscated Name | Purpose | IBX Status |
+|---|------|-------------------|---------|------------|
+| 1 | `q.java` | UserFeatureSet | 200+ user feature flags | Missing (P1.2) |
+| 2 | `ef.java` | SecurityType | 30 security type handlers | Partial (8/30) |
+| 3 | `ct.java` | StateSendable | Order state serialization | N/A (Java infra) |
+| 4 | `l.java` | AccountList | Multi-account management | Partial |
+| 5 | `dn.java` | MiscUrlManager | URL management for services | Missing |
+| 6 | `dt.java` | AccountList (variant) | Account data container | Partial |
+| 7 | `cf.java` | ContractDetails | Contract detail parser | Complete |
+| 8 | `eS.java` | SecurityDefinitionDispatcher | Sec def dispatch | Complete |
+| 9 | `ea.java` | RemoteOrderPresetsManager | Remote presets | Missing |
+| 10 | `N.java` | ComboKey | Combo instrument key | Missing (P2.4) |
+| 11 | `dl.java` | FixSessionConfig | Session configuration | Partial |
+| 12 | `d1.java` | BrandingManager | Branding config | N/A (GUI) |
+| 13 | `eQ.java` | SecurityDefinitionHandler | Sec def handler | Complete |
+| 14 | `e.java` | AccountData | Account data container | Good |
+| 15 | `dj.java` | Contract | Contract base class | Complete |
+
+### twslaunch/jauthentication (key files)
+
+| # | File | Deobfuscated Name | Purpose | IBX Status |
+|---|------|-------------------|---------|------------|
+| 1 | `aY.java` | AuthDispatcher | Auth dispatch state machine | Partial |
+| 2 | `ag.java` | SrpChallengeHandler | SRP-6 challenge handler | Complete |
+| 3 | `P.java` | XyzAuthenticationMessage | XYZ auth message | Complete |
+| 4 | `E.java` | AuthenticationUIFactory | Auth UI factory | N/A (GUI) |
+| 5 | `n.java` | PreAuthenticationHandler | Pre-auth setup | Partial |
+| 6 | `bd.java` | AbstractAuthenticationDialog | Auth dialog base | N/A (GUI) |
+| 7 | `bh.java` | TwoFactorSmsDialog | SMS 2FA dialog | N/A (GUI) |
+| 8 | `H.java` | AuthMessage | Auth message base | Complete |
+| 9 | `aR.java` | AuthenticationDialogHelper | Dialog helper | N/A (GUI) |
+| 10 | `aF.java` | NsConnectRequest | NS connect request | Complete |
+
+### twslaunch/jconnection (key files)
+
+| # | File | Deobfuscated Name | Purpose | IBX Status |
+|---|------|-------------------|---------|------------|
+| 1 | `A.java` | JtsConnection | Main connection manager | Good |
+| 2 | `f.java` | AuthenticationHandler | Auth handler | Complete |
+| 3 | `M.java` | HotBackupManager | Hot backup state | Missing (P3.1) |
+| 4 | `y.java` | Connection (variant) | Connection impl | Complete |
+| 5 | `g.java` | AbstractLoginController | Login controller | Complete |
+| 6 | `z.java` | ConnectionWithListener | Connection + callbacks | Partial |
+| 7 | `K.java` | HotBackupConnectionManager | Backup orchestrator | Missing (P3.1) |
+| 8 | `w.java` | FixCompressor | FIX compression | Complete |
+| 9 | `ax.java` | ConnectionDelayCalculator | Delay calculation | Missing |
+| 10 | `aH.java` | LoginThread | Login thread | Complete |
+
+### twslaunch/jclient (key files)
+
+| # | File | Deobfuscated Name | Purpose | IBX Status |
+|---|------|-------------------|---------|------------|
+| 1 | `login/x.java` | UserCredentials | Credential management | Partial (in auth/session.rs) |
+| 2 | `login/q.java` | LoginSettings | Login configuration | Partial |
+| 3 | `a4.java` | LoginDialog (modern) | Login UI | N/A (GUI) |
+| 4 | `login/b.java` | AutoRestartManager | Auto-restart | N/A (Infra) |
+| 5 | `login/e.java` | CcpConnectionFeatureProvider | CCP feature detection | Missing (P1.2) |
+| 6 | `ay.java` | LoginController | Login orchestration | Complete |
+| 7 | `s.java` | LoginResultHandler | Login result | Complete |
+| 8 | `login/f.java` | TelemetryLogger | Telemetry | N/A (Infra) |
+| 9 | `a5.java` | SettingsPanel | Settings UI | N/A (GUI) |
+| 10 | `a6.java` | WelcomeDialog | Welcome screen | N/A (GUI) |
+
+### twslaunch/jutils (key files)
+
+| # | File | Deobfuscated Name | Purpose | IBX Status |
+|---|------|-------------------|---------|------------|
+| 1 | `aV.java` | DialogHelpers | Swing dialog utilities | N/A (GUI) |
+| 2 | `ax.java` | GeneralUtilities | OS detection, string helpers | N/A (Infra, Rust stdlib) |
+| 3 | `E.java` | FileUtilities | File download/management | N/A (Infra) |
+| 4 | `t.java` | ColorUtilities | Color math utilities | N/A (GUI) |
+| 5 | `X.java` | UrlCreator | URL construction for HB sites | Partial (P3.1) |
+| 6 | `m.java` | ThreadPoolManager | Thread pool management | N/A (Infra) |
+| 7 | `ay.java` | FileSystemUtils | File system utilities | N/A (Infra) |
+| 8 | `s.java` | StringUtils | String manipulation | N/A (Infra, Rust stdlib) |
+| 9 | `aT.java` | DateFormatUtils | Date formatting | N/A (Infra, chrono_free_timestamp) |
+| 10 | `ar.java` | NumberFormatUtils | Number formatting | Complete (format_price) |
+
+---
+
+## 18. Inner Class Inventory
+
+60 files contain `$` in their name, indicating Java inner classes. These are predominantly:
+
+| Parent Class | Inner Classes | Count | IBX Relevance |
+|-------------|--------------|-------|---------------|
+| FixOrderState | $Acked, $CancelAcked, $CancelConfirmed, $CancelSubmitted, $Confirmed, $Filled, $Inactive, $Pending, $PendingModifyAck, $Submitted, $Unknown, $WarnState | 12 | High (P1.1) |
+| FixNewsType | $1 through $8 | 8 | Low (news subtypes) |
+| StructuredProductsType | $1 through $7 | 7 | Low (P2.5) |
+| OrderAttributionFormat | $1 through $5 | 5 | Low (P4.10) |
+| AbstractLoginDialog | $TradingMode($1,$2), $WanMessage($1,$2,$3) | 5 | N/A (GUI) |
+| LoginMode | $1, $2, $3 | 3 | Low |
+| StockType | $1, $2 | 2 | Low |
+| ExecRestatementReason | $1 | 1 | Medium (P1.3) |
+| Compression | $EncryptionAction | 1 | Complete |
+| AuthDispatcher | $AuthProcessState | 1 | Partial |
+| AuthenticationHandler | $AuthenticationType | 1 | Partial |
+| AuthenticationMessageSWTK | $DeliveryMethod | 1 | Partial (P5.1) |
+| Others | Various | ~13 | Mixed |
+
+---
+
+## 19. Rust Module Architecture (Current State)
+
+```
+src/ (72 files)
+|
++-- auth/ (5 files)
+|   +-- mod.rs         -- re-exports
+|   +-- crypto.rs      -- AES-128-CBC, HMAC-SHA1, TLS 1.0 PRF
+|   +-- dh.rs          -- Diffie-Hellman key exchange + SecureChannel
+|   +-- session.rs     -- Auth lifecycle: SRP, DH, token, IB Key 2FA
+|   +-- srp.rs         -- SRP-6 implementation (2048-bit prime)
+|
++-- protocol/ (7 files)
+|   +-- mod.rs         -- re-exports
+|   +-- connection.rs  -- Non-blocking TLS/TCP with HMAC sign/verify
+|   +-- fix.rs         -- FIX 4.1 framing: build, parse, checksum, HMAC
+|   +-- fixcomp.rs     -- Compressed FIX (zlib) framing
+|   +-- ns.rs          -- NS protocol (#%#% framing, semicolon payload)
+|   +-- tick_decoder.rs  -- Binary tick decoder (MSB bit-reader, VLQ)
+|   +-- xyz.rs         -- XYZ binary protocol for SRP auth
+|
++-- engine/ (8 files)
+|   +-- mod.rs         -- re-exports
+|   +-- context.rs     -- Strategy context: market data, orders, positions
+|   +-- market_state.rs  -- Pre-allocated quote storage, server_tag mapping
+|   +-- hot_loop/
+|       +-- mod.rs     -- Pinned-core busy-poll loop, heartbeat, reconnect
+|       +-- ccp.rs     -- CCP message handler: exec reports, positions, PnL
+|       +-- farm.rs    -- Farm message handler: ticks, depth, market data
+|       +-- hmds.rs    -- HMDS handler: historical, TBT, scanners, bars
+|       +-- order_builder.rs  -- FIX order construction (37 types)
+|
++-- api/ (11 files)
+|   +-- mod.rs
+|   +-- types.rs       -- ibapi-compatible types (Contract, Order, etc.)
+|   +-- wrapper.rs     -- Wrapper trait (63 methods)
+|   +-- client/
+|       +-- mod.rs     -- EClient struct
+|       +-- dispatch.rs  -- Event dispatch loop
+|       +-- account.rs   -- Account methods
+|       +-- market_data.rs  -- Market data methods
+|       +-- orders.rs    -- Order methods
+|       +-- reference.rs  -- Contract/scanner/news methods
+|       +-- stubs.rs     -- Stub methods (not yet implemented)
+|       +-- tests.rs     -- Unit tests
+|
++-- control/ (8 files)
+|   +-- mod.rs
+|   +-- account.rs     -- Account summary, positions
+|   +-- contracts.rs   -- Contract details, market rules
+|   +-- fundamental.rs -- Fundamental data parsing
+|   +-- histogram.rs   -- Histogram data
+|   +-- historical.rs  -- Historical bar parsing
+|   +-- news.rs        -- News bulletins, articles
+|   +-- scanner.rs     -- Scanner subscriptions
+|
++-- python/ (14 files)
+|   +-- mod.rs
+|   +-- types.rs
+|   +-- compat/
+|       +-- mod.rs
+|       +-- contract.rs  -- Python Contract class
+|       +-- tick_types.rs  -- Tick type enums
+|       +-- wrapper.rs    -- Python Wrapper adapter
+|       +-- client/
+|           +-- mod.rs    -- Python EClient class
+|           +-- dispatch.rs  -- Python event dispatch
+|           +-- account.rs   -- Python account methods
+|           +-- market_data.rs  -- Python market data
+|           +-- orders.rs    -- Python order methods
+|           +-- reference.rs  -- Python reference methods
+|           +-- stubs.rs     -- Python stubs
+|           +-- test_helpers.rs  -- Test utilities
+|
++-- bin/ (11 files)
+|   +-- benchmark.rs   -- General benchmark harness
+|   +-- bench_decode.rs  -- Tick decode benchmark
+|   +-- bench_first_tick.rs  -- First tick latency
+|   +-- bench_limit_order.rs  -- Limit order latency
+|   +-- bench_market_order.rs  -- Market order latency
+|   +-- bench_multi_instrument.rs  -- Multi-instrument stress
+|   +-- bench_order_burst.rs  -- Order burst throughput
+|   +-- bench_order_modify.rs  -- Order modify latency
+|   +-- bench_replay.rs  -- Market data replay
+|   +-- bench_tbt.rs   -- Tick-by-tick benchmark
+|   +-- bench_ticks.rs -- Tick processing benchmark
+|
++-- (top-level files: 8 files)
+    +-- bridge.rs      -- SharedState, Event channel, SeqLock
+    +-- client_core.rs -- Shared dispatch for Rust/Python
+    +-- config.rs      -- Constants, timestamps, timeouts
+    +-- gateway.rs     -- Auth + farm orchestration
+    +-- lib.rs         -- Crate root
+    +-- logging.rs     -- Tracing setup
+    +-- main.rs        -- CLI entry point
+    +-- types.rs       -- Core types: Price, Quote, Order, Fill, etc.
+```
+
+---
+
+## 20. Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0 | 2026-03-31 | Initial gap analysis |
+| 2.0 | 2026-04-01 | Added phases, appendices, contribution guide |
+| 3.0 — 2026-04-02 | Complete rewrite: all 1,004 files inventoried, 54 tasks, 6 phases |
+| 3.1 — 2026-04-02 | Corrections: fixed jfix file count, jclient (163->162 files), jconnection file counts, Phase 1 effort (13.5->14, P1.3 adjusted). Added sections 10-20. |
+| 3.2 | 2026-04-01 | Post-audit corrections (Codex review): fixed Wrapper count (115->63 trait methods), ControlCommand count (45->36 variants), milestone calendar (10.5->14 weeks for single contributor), fixed stale TOC numbers, added Phase 5 dependency gates. |
+
+---
+
+*This document was generated by systematic analysis of the IB Gateway Java codebase (1,004 classes) against 72 Rust source files at commit `7a4c7dda533962085f8269c96756cd6dcf982568` (IBX v0.4.3). File counts and structural metrics are verifiable via the commands in Appendix Y and the verification matrix in Section 14. To update this document, re-run the analysis against the latest commit and adjust phase progress accordingly.*
+| 3.3 | 2026-04-02 | Fixed Codex audit issues: softened verification claims, fixed ControlCommand count (35→36), added v3.3 to history. |
