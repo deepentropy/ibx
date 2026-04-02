@@ -287,6 +287,8 @@ pub struct Gateway {
     pub ccp_sign_key: Vec<u8>,
     /// CCP HMAC initial IV (kb[48..64]) for selective signing.
     pub ccp_sign_iv: Vec<u8>,
+    /// Receivers for secondary farm connections started before the hot loop.
+    pub pending_secondary_farms: Vec<(String, crossbeam_channel::Receiver<io::Result<Connection>>)>,
 }
 
 /// Connect to a data farm: key exchange → encrypted logon → token auth → routing → Connection.
@@ -1074,8 +1076,12 @@ impl Gateway {
         // Seed init burst into connection buffer so the hot loop processes 8=O account data
         ccp_conn.seed_buffer(&init_data);
 
-        // --- Phase 3: Data farm connections (parallel) ---
-        let (farm_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) =
+        // --- Phase 3: Data farm connections ---
+        // Critical farms (usfarm, ushmds) connect synchronously inside thread::scope.
+        // Secondary farms (cashfarm, usfuture, eufarm, jfarm) connect asynchronously
+        // via regular threads so the hot loop can start immediately and service
+        // heartbeats on already-connected farms without starvation.
+        let (farm_conn, hmds_conn) =
             std::thread::scope(|s| {
                 let farm_h = s.spawn(|| connect_farm(
                     host, "usfarm", &config.username, &config.password, config.paper,
@@ -1085,46 +1091,37 @@ impl Gateway {
                     host, "ushmds", &config.username, &config.password, config.paper,
                     &server_session_id, &session_key, &hw_info, &encoded,
                 ));
-                let cashfarm_h = s.spawn(|| connect_farm(
-                    host, "cashfarm", &config.username, &config.password, config.paper,
-                    &server_session_id, &session_key, &hw_info, &encoded,
-                ));
-                let usfuture_h = s.spawn(|| connect_farm(
-                    host, "usfuture", &config.username, &config.password, config.paper,
-                    &server_session_id, &session_key, &hw_info, &encoded,
-                ));
-                let eufarm_h = s.spawn(|| connect_farm(
-                    host, "eufarm", &config.username, &config.password, config.paper,
-                    &server_session_id, &session_key, &hw_info, &encoded,
-                ));
-                let jfarm_h = s.spawn(|| connect_farm(
-                    host, "jfarm", &config.username, &config.password, config.paper,
-                    &server_session_id, &session_key, &hw_info, &encoded,
-                ));
 
                 let farm_conn = farm_h.join().unwrap()?;
                 let hmds_conn = match hmds_h.join().unwrap() {
                     Ok(c) => { log::info!("Historical data farm connected"); Some(c) }
                     Err(e) => { log::warn!("Historical data farm connection failed (non-fatal): {}", e); None }
                 };
-                let cashfarm_conn = match cashfarm_h.join().unwrap() {
-                    Ok(c) => { log::info!("cashfarm connected"); Some(c) }
-                    Err(e) => { log::warn!("cashfarm connection failed (non-fatal): {}", e); None }
-                };
-                let usfuture_conn = match usfuture_h.join().unwrap() {
-                    Ok(c) => { log::info!("usfuture connected"); Some(c) }
-                    Err(e) => { log::warn!("usfuture connection failed (non-fatal): {}", e); None }
-                };
-                let eufarm_conn = match eufarm_h.join().unwrap() {
-                    Ok(c) => { log::info!("eufarm connected"); Some(c) }
-                    Err(e) => { log::warn!("eufarm connection failed (non-fatal): {}", e); None }
-                };
-                let jfarm_conn = match jfarm_h.join().unwrap() {
-                    Ok(c) => { log::info!("jfarm connected"); Some(c) }
-                    Err(e) => { log::warn!("jfarm connection failed (non-fatal): {}", e); None }
-                };
-                Ok::<_, io::Error>((farm_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn))
+                Ok::<_, io::Error>((farm_conn, hmds_conn))
             })?;
+
+        // Spawn deferred connection threads for secondary farms.
+        let mut pending_secondary = Vec::new();
+        for farm_id in ["cashfarm", "usfuture", "eufarm", "jfarm"] {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let host = host.to_string();
+            let username = config.username.clone();
+            let password = config.password.clone();
+            let paper = config.paper;
+            let ssid = server_session_id.clone();
+            let skey = session_key.clone();
+            let hw = hw_info.clone();
+            let enc = encoded.clone();
+            let farm = farm_id.to_string();
+            if let Err(e) = std::thread::Builder::new()
+                .name(format!("{}-connect", farm_id))
+                .spawn(move || {
+                    let _ = tx.send(connect_farm(&host, &farm, &username, &password, paper, &ssid, &skey, &hw, &enc));
+                }) {
+                log::warn!("{} connection thread spawn failed: {}", farm_id, e);
+            }
+            pending_secondary.push((farm_id.to_string(), rx));
+        }
 
         let gw = Gateway {
             account_id: if account_id.is_empty() { config.username.clone() } else { account_id },
@@ -1139,8 +1136,9 @@ impl Gateway {
             white_branding_id,
             ccp_sign_key,
             ccp_sign_iv,
+            pending_secondary_farms: pending_secondary,
         };
-        Ok((gw, farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn))
+        Ok((gw, farm_conn, ccp_conn, hmds_conn, None, None, None, None))
     }
 
     /// Populate shared state with gateway-local init data parsed from CCP logon.
@@ -1246,7 +1244,7 @@ impl Gateway {
 
     /// Create the control channel and build a HotLoop with all farm connections.
     pub fn into_hot_loop_with_farms(
-        self,
+        mut self,
         shared: Arc<SharedState>,
         event_tx: Option<Sender<Event>>,
         farm_conn: Connection,
@@ -1283,6 +1281,7 @@ impl Gateway {
         hot_loop.usfuture_conn = usfuture_conn;
         hot_loop.eufarm_conn = eufarm_conn;
         hot_loop.jfarm_conn = jfarm_conn;
+        hot_loop.pending_secondary_farms = std::mem::take(&mut self.pending_secondary_farms);
         (hot_loop, tx)
     }
 }

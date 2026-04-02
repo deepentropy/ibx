@@ -68,6 +68,8 @@ pub struct HotLoop {
     farm_reconnect_attempt: u32,
     pending_ccp_reconnect: Option<Receiver<io::Result<Connection>>>,
     ccp_reconnect_attempt: u32,
+    // ── Deferred secondary farm connections ──
+    pub pending_secondary_farms: Vec<(String, crossbeam_channel::Receiver<io::Result<Connection>>)>,
 }
 
 /// Per-secondary-farm heartbeat tracking.
@@ -171,6 +173,7 @@ impl HotLoop {
             farm_reconnect_attempt: 0,
             pending_ccp_reconnect: None,
             ccp_reconnect_attempt: 0,
+            pending_secondary_farms: Vec::new(),
         }
     }
 
@@ -293,6 +296,7 @@ impl HotLoop {
             // 5b. Poll pending reconnects (non-blocking)
             self.poll_farm_reconnect();
             self.poll_ccp_reconnect();
+            self.poll_pending_secondary_farms();
 
             // 6. Wake any waiting consumers (e.g. Python event loop)
             self.shared.notify();
@@ -872,6 +876,35 @@ impl HotLoop {
                 self.pending_ccp_reconnect = None;
             }
         }
+    }
+
+    /// Poll deferred secondary farm connection threads. Non-blocking.
+    /// Completed connections are installed into the corresponding `*_conn` slot.
+    fn poll_pending_secondary_farms(&mut self) {
+        self.pending_secondary_farms.retain(|(name, rx)| {
+            match rx.try_recv() {
+                Ok(Ok(conn)) => {
+                    log::info!("{} connected (deferred)", name);
+                    match name.as_str() {
+                        "cashfarm" => { self.cashfarm_conn = Some(conn); }
+                        "usfuture" => { self.usfuture_conn = Some(conn); }
+                        "eufarm"   => { self.eufarm_conn = Some(conn); }
+                        "jfarm"    => { self.jfarm_conn = Some(conn); }
+                        _ => {}
+                    }
+                    false // remove from pending
+                }
+                Ok(Err(e)) => {
+                    log::warn!("{} deferred connection failed (non-fatal): {}", name, e);
+                    false // remove from pending
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => true, // still pending
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    log::warn!("{} connection thread died", name);
+                    false
+                }
+            }
+        });
     }
 
     /// Access heartbeat state for testing.
