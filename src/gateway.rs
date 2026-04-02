@@ -1102,6 +1102,12 @@ impl Gateway {
                     &server_session_id, &session_key, &hw_info, &encoded,
                 ));
 
+                // Join usfarm first — it's the critical path for US equity market data.
+                // Other farms are non-critical; the hot loop handles missing farms.
+                // With TIMEOUT_FARM_CONNECT = 8s, unreachable farms fail within 8s
+                // (the common case). SRP fallback has its own 15s read timeout per
+                // round-trip if triggered. All farms run in parallel, so total join
+                // time is bounded by the slowest farm, not the sum.
                 let farm_conn = farm_h.join().unwrap()?;
                 let hmds_conn = match hmds_h.join().unwrap() {
                     Ok(c) => { log::info!("Historical data farm connected"); Some(c) }
