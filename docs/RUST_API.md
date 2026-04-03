@@ -1,4 +1,4 @@
-# Rust API Reference (v0.4.2)
+# Rust API Reference (v0.4.4)
 
 *Auto-generated from source — do not edit.*
 
@@ -104,7 +104,7 @@ pub fn disconnect(&self)
 
 #### `req_positions`
 
-Request positions. Immediately delivers all positions via wrapper callbacks, then calls position_end.
+Request positions. Waits for server-pushed account data before delivering, then calls position_end.
 
 ```rust
 pub fn req_positions(&self, wrapper: &mut impl Wrapper)
@@ -697,7 +697,7 @@ pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Quote
 Request historical data.
 
 ```rust
-pub fn req_historical_data( &self, req_id: i64, contract: &Contract, end_date_time: &str, duration: &str, bar_size: &str, what_to_show: &str, use_rth: bool, _format_date: i32, _keep_up_to_date: bool, ) -> Result<(), String>
+pub fn req_historical_data( &self, req_id: i64, contract: &Contract, end_date_time: &str, duration: &str, bar_size: &str, what_to_show: &str, use_rth: bool, _format_date: i32, keep_up_to_date: bool, ) -> Result<(), String>
 ```
 
 | Parameter | Type | Description |

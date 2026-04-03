@@ -1,4 +1,4 @@
-# API Coverage Matrix (v0.4.2)
+# API Coverage Matrix (v0.4.4)
 
 *Auto-generated from source — do not edit.*
 
