@@ -255,20 +255,6 @@ Jupyter notebooks adapted from [ib_async's examples](https://ib-api-reloaded.git
 
 **Python bridge**: Same engine, ibapi-compatible `EClient`/`EWrapper` API. SeqLock quote reads, crossbeam order channel. No GIL contention on the hot path.
 
-## Testing
-
-```bash
-# Unit tests (813+)
-cargo test
-
-# Compatibility tests — 125 phases (requires IB_USERNAME/IB_PASSWORD env vars)
-cargo test --test ib_paper_compat -- --nocapture
-
-# Python module
-maturin develop --features python
-python -c "import ibx; print('ok')"
-```
-
 ## Requirements
 
 - Rust 2024 edition (1.85+)
