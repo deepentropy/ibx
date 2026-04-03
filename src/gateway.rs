@@ -818,8 +818,8 @@ impl Gateway {
         );
         session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
 
-        // Receive AUTH_START (may get a redirect instead for paper accounts)
-        let _auth_start = match session::recv_secure(&mut tls, &mut channel) {
+        // Receive AUTH_START — contains token type for 2FA (if enabled).
+        let auth_start = match session::recv_secure(&mut tls, &mut channel) {
             Ok(data) => data,
             Err(e) if e.to_string().starts_with("REDIRECT:") => {
                 let target = e.to_string().strip_prefix("REDIRECT:").unwrap().to_string();
@@ -832,14 +832,57 @@ impl Gateway {
             Err(e) => return Err(e),
         };
 
-        // Authentication
+        // Parse token type and subtype from AUTH_START field[4] (e.g., "5.2i").
+        // Token type 5 = DSA/IB Key; subtype identifies the registered device.
+        let token_subtype = {
+            let text = String::from_utf8_lossy(&auth_start);
+            let parts: Vec<&str> = text.split(';').collect();
+            parts.get(4).and_then(|f| {
+                let dot = f.find('.')?;
+                let token_type: u32 = f[..dot].parse().ok()?;
+                if token_type == 5 { Some(f[dot + 1..].to_string()) } else { None }
+            }).unwrap_or_default()
+        };
+
+        // Authentication (SRP-6)
         log::info!("Starting auth for {}", config.username);
         let session_key = do_srp(&mut tls, &config.username, &config.password)?;
         log::info!("Auth complete");
 
-        // Receive post-auth messages (encrypted via 534)
+        // For live accounts with IB Key 2FA (token type 5): send DSA challenge
+        // (msg_id=775, state=1) as #%#%-framed XYZ directly over TLS.
+        // Post-SRP 2FA messages bypass the application-level DH encryption —
+        // the Gateway writes them to the TLS socket without DH wrapping.
+        // The TLS layer still provides transport encryption.
+        if !config.paper && !token_subtype.is_empty() {
+            let sub = token_subtype.as_bytes();
+            let mut dsa = Vec::with_capacity(48);
+            dsa.extend_from_slice(&20u32.to_be_bytes());   // version
+            dsa.extend_from_slice(&775u32.to_be_bytes());  // msg_id (DSA)
+            dsa.extend_from_slice(&1u32.to_be_bytes());    // sub_id
+            dsa.extend_from_slice(&1u32.to_be_bytes());    // state (initiate)
+            dsa.extend_from_slice(&0u32.to_be_bytes());    // username
+            dsa.extend_from_slice(&0u32.to_be_bytes());    // y
+            dsa.extend_from_slice(&0u32.to_be_bytes());    // A
+            dsa.extend_from_slice(&0u32.to_be_bytes());    // B
+            dsa.extend_from_slice(&(sub.len() as u32).to_be_bytes());
+            dsa.extend_from_slice(sub);
+            let pad = (4 - sub.len() % 4) % 4; // align to 4-byte boundary
+            for _ in 0..pad { dsa.push(0); }
+            tls.write_all(&ns::ns_wrap_raw(&dsa))?;
+            tls.flush()?;
+            log::info!("Sent IB Key 2FA challenge (DSA 775, subtype='{}')", token_subtype);
+        }
+
+        // Receive post-auth messages.
+        // Paper: server sends 534(523) → 534(525) immediately.
+        // Live 2FA: server sends DSA result (775, state=2), then waits for
+        // user to approve on IB Key, then sends 534(523) → 534(525).
+        // Timeout: 5 minutes for 2FA approval, 30s for paper.
+        let post_auth_timeout = if token_subtype.is_empty() { 30 } else { 300 };
+        tls.get_ref().set_read_timeout(Some(Duration::from_secs(post_auth_timeout)))?;
         let mut fix_ready = false;
-        for _ in 0..10 {
+        for _ in 0..60 {
             let (payload, _) = match ns::ns_recv(&mut tls) {
                 Ok(r) => r,
                 Err(e) => {
@@ -847,9 +890,31 @@ impl Gateway {
                     break;
                 }
             };
+            // DSA response arrives as raw XYZ binary (not NS text).
+            if payload.len() >= 16 {
+                let mid = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                if mid == 775 {
+                    let state = u32::from_be_bytes([payload[12], payload[13], payload[14], payload[15]]);
+                    log::info!("IB Key 2FA: DSA state={}", state);
+                    if state == 4 {
+                        // State 4 = denied/failed.
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "IB Key 2FA denied by user or expired",
+                        ));
+                    }
+                    continue;
+                }
+            }
+
             let text = String::from_utf8_lossy(&payload);
             let parts: Vec<&str> = text.split(';').collect();
             let raw_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+            // Server keepalives during 2FA approval wait.
+            if raw_type == ns::NS_TEST_REQUEST || raw_type == ns::NS_HEART_BEAT {
+                continue;
+            }
 
             // Decrypt if encrypted, otherwise use raw
             let inner = if raw_type == ns::NS_SECURE_MESSAGE {
