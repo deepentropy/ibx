@@ -728,6 +728,7 @@ mod tests {
             duration: "1 d".to_string(),
             bar_size: BarSize::Min5,
             use_rth: true,
+            keep_up_to_date: false,
         };
         let xml = build_query_xml(&req);
         assert!(xml.contains("<id>q1</id>"));
@@ -752,6 +753,7 @@ mod tests {
             duration: "1 d".to_string(),
             bar_size: BarSize::Min5,
             use_rth: true,
+            keep_up_to_date: false,
         };
         let msg = build_historical_request(&req, 1);
         let tags = fix::fix_parse(&msg);

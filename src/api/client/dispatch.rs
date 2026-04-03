@@ -329,7 +329,7 @@ impl EClient {
         // Account updates → update_account_value + account_download_end (via ClientCore)
         if let Some(batch) = self.core.prepare_account_updates(&self.shared) {
             for field in &batch.fields {
-                wrapper.update_account_value(field.key, &field.value, field.currency, &self.account_id);
+                wrapper.update_account_value(&field.key, &field.value, &field.currency, &self.account_id);
             }
             if batch.delivered {
                 wrapper.update_account_time("");

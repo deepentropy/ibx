@@ -58,7 +58,7 @@ fn farm_reconnect_with_cached_credentials() {
 fn hotloop_auto_reconnect_on_farm_disconnect() {
     let cfg = config();
 
-    let (gw, farm_conn, ccp_conn, hmds, cash, usfut, eu, j) =
+    let (gw, farm_conn, ccp_conn, hmds, cash, usfut, eu, j, usopt) =
         Gateway::connect(&cfg).expect("Initial connect failed");
 
     let shared = Arc::new(SharedState::new());
@@ -66,7 +66,7 @@ fn hotloop_auto_reconnect_on_farm_disconnect() {
 
     let (mut hot_loop, _control_tx) = gw.into_hot_loop_with_farms(
         shared.clone(), Some(event_tx),
-        farm_conn, ccp_conn, hmds, cash, usfut, eu, j, None,
+        farm_conn, ccp_conn, hmds, cash, usfut, eu, j, usopt, None,
     );
     hot_loop.update_reconnect_auth(cfg.host.clone(), cfg.username.clone(), cfg.paper);
     println!("Reconnect auth set: host={}, user={}, paper={}", cfg.host, cfg.username, cfg.paper);

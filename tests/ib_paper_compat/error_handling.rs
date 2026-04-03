@@ -26,7 +26,7 @@ pub(super) fn phase_ib_error_handling(conns: Conns) -> Conns {
         order_id: oid, instrument: bogus_inst, side: Side::Buy, qty: 1,
     })).unwrap();
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -85,10 +85,11 @@ pub(super) fn phase_pacing_violation_recovery(conns: Conns) -> Conns {
             req_id: 14000 + i, con_id: 756733, symbol: "SPY".to_string(),
             end_date_time: end_dt.clone(), duration: "1 d".to_string(),
             bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+        keep_up_to_date: false,
         }).unwrap();
     }
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);

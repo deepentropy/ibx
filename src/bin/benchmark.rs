@@ -172,7 +172,7 @@ fn main() {
     // 1. Connection time
     println!("Connecting to IB...");
     let connect_start = Instant::now();
-    let (gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture, _eufarm, _jfarm) = Gateway::connect(&config)
+    let (gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture, _eufarm, _jfarm, _usopt) = Gateway::connect(&config)
         .expect("Gateway::connect() failed");
     let connect_time = connect_start.elapsed();
     println!("Connected in {:.3}s (account: {})", connect_time.as_secs_f64(), gw.account_id);
@@ -185,7 +185,7 @@ fn main() {
     );
 
     // Subscribe to instrument
-    control_tx.send(ControlCommand::Subscribe { con_id, symbol: symbol.to_string(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id, symbol: symbol.to_string(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
 
     // Run hot loop in dedicated thread
     let control_tx2 = control_tx.clone();

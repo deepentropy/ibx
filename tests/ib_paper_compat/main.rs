@@ -43,7 +43,7 @@ fn compat_suite() {
     let suite_start = Instant::now();
 
     let start = Instant::now();
-    let (mut gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture, _eufarm, _jfarm) = Gateway::connect(&config)
+    let (mut gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture, _eufarm, _jfarm, _usopt) = Gateway::connect(&config)
         .expect("Gateway::connect() failed");
     let connect_time = start.elapsed();
 
@@ -129,14 +129,14 @@ fn compat_suite() {
         conns = ensure_ccp_alive(conns, &mut gw, &config);
         // If CCP was alive but farm/hmds died, reconnect them individually.
         match ibx::gateway::connect_farm(
-            &config.host, "usfarm", &config.username, config.paper,
+            &config.host, "usfarm", &config.username, &config.password, config.paper,
             &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
         ) {
             Ok(c) => { conns.farm = c; println!("  farm reconnected"); }
             Err(e) => { println!("  farm reconnect failed (may already be fresh): {}", e); }
         }
         match ibx::gateway::connect_farm(
-            &config.host, "ushmds", &config.username, config.paper,
+            &config.host, "ushmds", &config.username, &config.password, config.paper,
             &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
         ) {
             Ok(c) => { conns.hmds = Some(c); println!("  hmds reconnected"); }

@@ -17,6 +17,16 @@ impl EClient {
             if self.shared.portfolio.account_data_received() { break; }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        // Position updates (UP msgs) may still be in-flight after account data arrives.
+        // If account shows positions exist but none received yet, wait up to 2s.
+        if self.shared.portfolio.account().gross_position_value > 0
+            && self.shared.portfolio.position_infos().is_empty()
+        {
+            for _ in 0..200 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                if !self.shared.portfolio.position_infos().is_empty() { break; }
+            }
+        }
         let positions = self.shared.portfolio.position_infos();
         for pi in &positions {
             let c = self.core.get_contract(pi.con_id, &self.shared)

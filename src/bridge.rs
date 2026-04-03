@@ -566,6 +566,8 @@ pub struct PortfolioState {
     account: Mutex<AccountState>,
     /// True once the first gateway account message ("UT"/"UM"/"RL") has been received.
     account_data_received: AtomicBool,
+    /// True once the CCP init burst has been fully processed.
+    account_download_complete: AtomicBool,
     /// Position info (conId -> PositionInfo) for reqPositions and P&L.
     position_infos: Mutex<HashMap<i64, PositionInfo>>,
     positions: [AtomicU64; MAX_INSTRUMENTS],
@@ -576,6 +578,7 @@ impl PortfolioState {
         Self {
             account: Mutex::new(AccountState::default()),
             account_data_received: AtomicBool::new(false),
+            account_download_complete: AtomicBool::new(false),
             position_infos: Mutex::new(HashMap::new()),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
         }
@@ -611,6 +614,16 @@ impl PortfolioState {
     #[doc(hidden)] pub fn set_account(&self, account: &AccountState) {
         *self.account.lock().unwrap() = *account;
         self.account_data_received.store(true, Ordering::Release);
+    }
+
+    /// Mark account download as complete (init burst processed).
+    #[doc(hidden)] pub fn set_account_download_complete(&self) {
+        self.account_download_complete.store(true, Ordering::Release);
+    }
+
+    /// True once the CCP init burst has been fully processed.
+    pub fn account_download_complete(&self) -> bool {
+        self.account_download_complete.load(Ordering::Acquire)
     }
 
     #[doc(hidden)] pub fn set_position_info(&self, info: PositionInfo) {

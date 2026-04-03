@@ -118,7 +118,7 @@ impl EClient {
         };
 
         let result = py.allow_threads(|| Gateway::connect(&config));
-        let (gw, farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) = result
+        let (gw, farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn) = result
             .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
 
         *self.account_id.lock().unwrap() = Some(gw.account_id.clone());
@@ -130,7 +130,7 @@ impl EClient {
         let connect_password = config.password.clone();
         let connect_paper = config.paper;
         let (event_tx, event_rx) = crossbeam_channel::bounded(256);
-        let (mut hot_loop, control_tx) = gw.into_hot_loop_with_farms(shared.clone(), Some(event_tx), farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, core_id);
+        let (mut hot_loop, control_tx) = gw.into_hot_loop_with_farms(shared.clone(), Some(event_tx), farm_conn, ccp_conn, hmds_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn, core_id);
         hot_loop.update_reconnect_auth(connect_host, connect_username, connect_password, connect_paper);
 
         let start_id = std::time::SystemTime::now()

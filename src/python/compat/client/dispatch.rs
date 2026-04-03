@@ -483,7 +483,7 @@ impl EClient {
         if let Some(batch) = self.core.prepare_account_updates(shared) {
             let account_name = self.account();
             for field in &batch.fields {
-                call_wrapper!(self.wrapper, py, "update_account_value", (field.key, field.value.as_str(), field.currency, account_name.as_str()));
+                call_wrapper!(self.wrapper, py, "update_account_value", (field.key.as_str(), field.value.as_str(), field.currency.as_str(), account_name.as_str()));
             }
 
             // Portfolio updates (position entries)

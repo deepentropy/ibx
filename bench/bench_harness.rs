@@ -84,7 +84,7 @@ impl BenchSession {
         };
 
         let connect_start = Instant::now();
-        let (gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture, _eufarm, _jfarm) =
+        let (gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture, _eufarm, _jfarm, _usopt) =
             Gateway::connect(&gw_config).expect("Gateway::connect() failed");
         let connect_time = connect_start.elapsed();
         let account_id = gw.account_id.clone();
@@ -115,6 +115,10 @@ impl BenchSession {
                 symbol: symbol.to_string(),
                 exchange: String::new(),
                 sec_type: String::new(),
+                last_trade_date: String::new(),
+                strike: 0.0,
+                right: String::new(),
+                multiplier: String::new(),
                 reply_tx: None,
             })
             .unwrap();

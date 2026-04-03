@@ -24,6 +24,8 @@ pub(crate) struct FarmState {
     depth_fanout_map: Vec<(u32, u32)>,
     /// Primary depth subscription params for reconnect: (req_id, con_id, exchange, sec_type, num_rows, is_smart_depth).
     depth_resub_info: Vec<(u32, i64, String, String, i32, bool)>,
+    /// Option resub info: (instrument, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier).
+    md_resub_info: Vec<(InstrumentId, String, String, String, String, f64, String, String)>,
     pub(crate) disconnected: bool,
     pub(crate) tick_buf: Vec<tick_decoder::RawTick>,
     pub(crate) farm_msg_buf: Vec<Vec<u8>>,
@@ -39,6 +41,7 @@ impl FarmState {
             depth_tag_to_req: Vec::new(),
             depth_fanout_map: Vec::new(),
             depth_resub_info: Vec::new(),
+            md_resub_info: Vec::new(),
             disconnected: false,
             tick_buf: Vec::with_capacity(16),
             farm_msg_buf: Vec::with_capacity(32),
@@ -372,6 +375,13 @@ impl FarmState {
     pub(crate) fn send_mktdata_subscribe(
         &mut self,
         con_id: i64,
+        symbol: &str,
+        exchange: &str,
+        sec_type: &str,
+        last_trade_date: &str,
+        strike: f64,
+        right: &str,
+        multiplier: &str,
         instrument: InstrumentId,
         farm: FarmSlot,
         farm_conn: &mut Option<Connection>,
@@ -379,6 +389,7 @@ impl FarmState {
         usfuture_conn: &mut Option<Connection>,
         eufarm_conn: &mut Option<Connection>,
         jfarm_conn: &mut Option<Connection>,
+        usopt_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
         let bid_ask_id = self.next_md_req_id;
@@ -392,36 +403,74 @@ impl FarmState {
             Some((_, _, reqs)) => { reqs.push(bid_ask_id); reqs.push(last_id); }
             None => self.instrument_md_reqs.push((instrument, farm, vec![bid_ask_id, last_id])),
         }
+        if self.md_resub_info.iter().all(|(id, ..)| *id != instrument) {
+            self.md_resub_info.push((instrument, symbol.to_string(), exchange.to_string(), sec_type.to_string(), last_trade_date.to_string(), strike, right.to_string(), multiplier.to_string()));
+        }
 
-        if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) {
+        if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn) {
             let bid_ask_str = bid_ask_id.to_string();
             let last_str = last_id.to_string();
             let con_id_str = (con_id as u32).to_string();
             let ts = chrono_free_timestamp();
-            let _ = conn.send_fixcomp(&[
-                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                (fix::TAG_SENDING_TIME, &ts),
-                (263, "1"),
-                (146, "2"),
-                (262, &bid_ask_str),
-                (6008, &con_id_str),
-                (207, "BEST"),
-                (167, "CS"),
-                (264, "442"),
-                (6088, "Socket"),
-                (9830, "1"),
-                (9839, "1"),
-                (262, &last_str),
-                (6008, &con_id_str),
-                (207, "BEST"),
-                (167, "CS"),
-                (264, "443"),
-                (6088, "Socket"),
-                (9830, "1"),
-                (9839, "1"),
-            ]);
-            log::info!("Sent 35=V subscribe: con_id={} ids={},{} seq={}",
-                con_id, bid_ask_id, last_id, conn.seq);
+
+            // When con_id is known, use the proven minimal format (con_id + BEST + CS).
+            // The server resolves the full contract details from con_id regardless of sec_type.
+            // When con_id is 0, include descriptive fields so the server can resolve by description.
+            if con_id > 0 {
+                let _ = conn.send_fixcomp(&[
+                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+                    (fix::TAG_SENDING_TIME, &ts),
+                    (263, "1"),
+                    (146, "2"),
+                    (262, &bid_ask_str),
+                    (6008, &con_id_str),
+                    (207, "BEST"),
+                    (167, "CS"),
+                    (264, "442"),
+                    (6088, "Socket"),
+                    (9830, "1"),
+                    (9839, "1"),
+                    (262, &last_str),
+                    (6008, &con_id_str),
+                    (207, "BEST"),
+                    (167, "CS"),
+                    (264, "443"),
+                    (6088, "Socket"),
+                    (9830, "1"),
+                    (9839, "1"),
+                ]);
+            } else {
+                // No con_id — send descriptive fields
+                let fix_exchange = crate::control::contracts::exchange_to_fix(exchange);
+                let fix_sec_type = match sec_type {
+                    "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND",
+                    "CASH" => "CASH", other => other,
+                };
+                let strike_str = if strike > 0.0 { strike.to_string() } else { String::new() };
+                let mut tags: Vec<(u32, &str)> = vec![
+                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+                    (fix::TAG_SENDING_TIME, &ts),
+                    (263, "1"),
+                    (146, "2"),
+                ];
+                for (req_str, depth) in [(&bid_ask_str, "442"), (&last_str, "443")] {
+                    tags.push((262, req_str));
+                    tags.push((55, symbol));
+                    tags.push((207, fix_exchange));
+                    tags.push((167, fix_sec_type));
+                    if !last_trade_date.is_empty() { tags.push((200, last_trade_date)); }
+                    if strike > 0.0 { tags.push((202, &strike_str)); }
+                    if !right.is_empty() { tags.push((201, right)); }
+                    if !multiplier.is_empty() { tags.push((231, multiplier)); }
+                    tags.push((264, depth));
+                    tags.push((6088, "Socket"));
+                    tags.push((9830, "1"));
+                    tags.push((9839, "1"));
+                }
+                let _ = conn.send_fixcomp(&tags);
+            }
+            log::info!("Sent 35=V subscribe: con_id={} sec_type={} farm={:?} ids={},{} seq={}",
+                con_id, sec_type, farm, bid_ask_id, last_id, conn.seq);
             hb.last_farm_sent = Instant::now();
         }
     }
@@ -434,6 +483,7 @@ impl FarmState {
         usfuture_conn: &mut Option<Connection>,
         eufarm_conn: &mut Option<Connection>,
         jfarm_conn: &mut Option<Connection>,
+        usopt_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
         let (farm, reqs) = match self.instrument_md_reqs.iter()
@@ -445,8 +495,9 @@ impl FarmState {
             }
             None => return,
         };
+        self.md_resub_info.retain(|(id, ..)| *id != instrument);
 
-        let conn = match farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) {
+        let conn = match farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn) {
             Some(c) => c,
             None => return,
         };
@@ -475,6 +526,7 @@ impl FarmState {
         usfuture_conn: &mut Option<Connection>,
         eufarm_conn: &mut Option<Connection>,
         jfarm_conn: &mut Option<Connection>,
+        usopt_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
         let farm = crate::types::farm_for_instrument(exchange, sec_type);
@@ -500,7 +552,7 @@ impl FarmState {
             &SINGLE
         };
 
-        if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) {
+        if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn) {
             let con_id_str = (con_id as u32).to_string();
 
             if !exchanges.is_empty() {
@@ -537,6 +589,7 @@ impl FarmState {
         usfuture_conn: &mut Option<Connection>,
         eufarm_conn: &mut Option<Connection>,
         jfarm_conn: &mut Option<Connection>,
+        usopt_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
         let farm = match self.depth_subs.iter().position(|(id, _, _)| *id == req_id) {
@@ -563,7 +616,7 @@ impl FarmState {
         // Clear server_tag mappings for this req_id
         self.depth_tag_to_req.retain(|(_, rid, _, _)| *rid != req_id);
 
-        if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn) {
+        if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn) {
             // Send unsub for each fan-out sub_req (SmartDepth per-exchange)
             for sub_req in &fanout_reqs {
                 let sub_req_str = sub_req.to_string();
@@ -889,6 +942,7 @@ impl FarmState {
         usfuture_conn: &mut Option<Connection>,
         eufarm_conn: &mut Option<Connection>,
         jfarm_conn: &mut Option<Connection>,
+        usopt_conn: &mut Option<Connection>,
         context: &mut Context,
         hb: &mut HeartbeatState,
     ) {
@@ -898,17 +952,25 @@ impl FarmState {
         hb.last_farm_recv = Instant::now();
         hb.pending_farm_test = None;
 
-        // Preserve original farm slots for re-subscription
-        let active: Vec<(InstrumentId, FarmSlot, i64)> = self.instrument_md_reqs.iter()
+        // Preserve original farm slots and option fields for re-subscription
+        let active: Vec<(InstrumentId, FarmSlot, i64, String, String, String, String, f64, String, String)> = self.instrument_md_reqs.iter()
             .filter_map(|(id, slot, _)| {
-                context.market.con_id(*id).map(|con_id| (*id, *slot, con_id))
+                context.market.con_id(*id).map(|con_id| {
+                    let (sym, exch, st, ltd, strike, right, mult) = self.md_resub_info.iter()
+                        .find(|(iid, ..)| *iid == *id)
+                        .map(|(_, s, e, st, l, k, r, m)| (s.clone(), e.clone(), st.clone(), l.clone(), *k, r.clone(), m.clone()))
+                        .unwrap_or_default();
+                    (*id, *slot, con_id, sym, exch, st, ltd, strike, right, mult)
+                })
             })
             .collect();
         self.md_req_to_instrument.clear();
         self.instrument_md_reqs.clear();
-        for (instrument, farm, con_id) in active {
-            self.send_mktdata_subscribe(con_id, instrument, farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, hb);
+        let old_resub = std::mem::take(&mut self.md_resub_info);
+        for (instrument, farm, con_id, sym, exch, st, ltd, strike, right, mult) in active {
+            self.send_mktdata_subscribe(con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn, hb);
         }
+        drop(old_resub);
 
         // Re-subscribe depth subscriptions (depth_resub_info survived disconnect)
         let depth_params: Vec<_> = self.depth_resub_info.drain(..).collect();
@@ -916,7 +978,7 @@ impl FarmState {
         for (req_id, con_id, exchange, sec_type, num_rows, is_smart_depth) in depth_params {
             self.send_depth_subscribe(
                 req_id, con_id, &exchange, &sec_type, num_rows, is_smart_depth,
-                farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, hb,
+                farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn, hb,
             );
         }
 
@@ -999,9 +1061,18 @@ pub(crate) fn farm_conn_for_slot<'a>(
     usfuture_conn: &'a mut Option<Connection>,
     eufarm_conn: &'a mut Option<Connection>,
     jfarm_conn: &'a mut Option<Connection>,
+    usopt_conn: &'a mut Option<Connection>,
 ) -> Option<&'a mut Connection> {
     match slot {
         FarmSlot::UsFarm => farm_conn.as_mut(),
+        FarmSlot::UsOpt => {
+            if usopt_conn.is_some() {
+                usopt_conn.as_mut()
+            } else {
+                log::warn!("UsOpt unavailable, falling back to UsFarm");
+                farm_conn.as_mut()
+            }
+        }
         FarmSlot::CashFarm => {
             if cashfarm_conn.is_some() {
                 cashfarm_conn.as_mut()

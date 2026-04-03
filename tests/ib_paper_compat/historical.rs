@@ -16,7 +16,7 @@ pub(super) fn phase_historical_data(mut conns: Conns, gw: &Gateway, config: &Gat
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(
         &config.host, "ushmds",
-        &config.username, config.paper,
+        &config.username, &config.password, config.paper,
         &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
     ) {
         Ok(c) => { println!("  HMDS reconnected"); c }
@@ -43,6 +43,7 @@ pub(super) fn phase_historical_data(mut conns: Conns, gw: &Gateway, config: &Gat
         bar_size: "5 mins".into(),
         what_to_show: "TRADES".into(),
         use_rth: true,
+        keep_up_to_date: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -88,7 +89,7 @@ pub(super) fn phase_historical_daily_bars(mut conns: Conns, gw: &Gateway, config
     println!("--- Phase 76: Historical Daily Bars (SPY, 5 days of 1-day bars) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -110,6 +111,7 @@ pub(super) fn phase_historical_daily_bars(mut conns: Conns, gw: &Gateway, config
         bar_size: "1 day".into(),
         what_to_show: "TRADES".into(),
         use_rth: true,
+        keep_up_to_date: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -152,7 +154,7 @@ pub(super) fn phase_cancel_historical(mut conns: Conns, gw: &Gateway, config: &G
     println!("--- Phase 77: Cancel Historical Request (SPY) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -168,6 +170,7 @@ pub(super) fn phase_cancel_historical(mut conns: Conns, gw: &Gateway, config: &G
         req_id: 7700, con_id: 756733, symbol: "SPY".into(),
         end_date_time: now_ib_timestamp(), duration: "5 D".into(),
         bar_size: "5 mins".into(), what_to_show: "TRADES".into(), use_rth: true,
+        keep_up_to_date: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -205,7 +208,7 @@ pub(super) fn phase_head_timestamp(mut conns: Conns, gw: &Gateway, config: &Gate
     println!("--- Phase 79: Head Timestamp (SPY, TRADES) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -252,7 +255,7 @@ pub(super) fn phase_scanner_subscription(mut conns: Conns, gw: &Gateway, config:
     println!("--- Phase 82: Scanner Subscription (TOP_PERC_GAIN, STK.US.MAJOR) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -308,7 +311,7 @@ pub(super) fn phase_fundamental_data(mut conns: Conns, gw: &Gateway, config: &Ga
     println!("--- Phase 83: Fundamental Data (AAPL, ReportSnapshot) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: HMDS reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -368,7 +371,7 @@ pub(super) fn phase_historical_news(mut conns: Conns, gw: &Gateway, config: &Gat
     println!("--- Phase 85: Historical News (AAPL, end-to-end) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -441,7 +444,7 @@ pub(super) fn phase_historical_ticks(mut conns: Conns, gw: &Gateway, config: &Ga
     println!("--- Phase 88: Historical Ticks (SPY, TRADES) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -522,7 +525,7 @@ pub(super) fn phase_histogram_data(mut conns: Conns, gw: &Gateway, config: &Gate
     println!("--- Phase 89: Histogram Data (SPY, 1 week) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -574,7 +577,7 @@ pub(super) fn phase_historical_schedule(mut conns: Conns, gw: &Gateway, config: 
     println!("--- Phase 90: Historical Schedule (SPY) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -631,7 +634,7 @@ pub(super) fn phase_realtime_bars(mut conns: Conns, gw: &Gateway, config: &Gatew
     println!("--- Phase 91: Real-Time Bars (SPY, 5-second) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -687,7 +690,7 @@ pub(super) fn phase_news_article(mut conns: Conns, gw: &Gateway, config: &Gatewa
     println!("--- Phase 92: News Article Fetch (AAPL) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -779,7 +782,7 @@ pub(super) fn phase_fundamental_data_channel(mut conns: Conns, gw: &Gateway, con
     println!("--- Phase 93: Fundamental Data via HotLoop (AAPL) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -826,7 +829,7 @@ pub(super) fn phase_parallel_historical(mut conns: Conns, gw: &Gateway, config: 
     println!("--- Phase 94: Parallel Historical Requests (SPY: 1d/5min, 5d/1day, 1w/1h) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -845,16 +848,19 @@ pub(super) fn phase_parallel_historical(mut conns: Conns, gw: &Gateway, config: 
         req_id: 8001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt.clone(), duration: "1 d".to_string(),
         bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+        keep_up_to_date: false,
     }).unwrap();
     control_tx.send(ControlCommand::FetchHistorical {
         req_id: 8002, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt.clone(), duration: "5 d".to_string(),
         bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+        keep_up_to_date: false,
     }).unwrap();
     control_tx.send(ControlCommand::FetchHistorical {
         req_id: 8003, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt, duration: "1 W".to_string(),
         bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+        keep_up_to_date: false,
     }).unwrap();
 
     let join = run_hot_loop(hot_loop);
@@ -893,7 +899,7 @@ pub(super) fn phase_scanner_params(mut conns: Conns, gw: &Gateway, config: &Gate
     println!("--- Phase 95: Scanner Parameters + HOT_BY_VOLUME Scan ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -979,6 +985,7 @@ pub(super) fn phase_historical_ohlc_validation(conns: Conns, _gw: &Gateway, _con
         bar_size: "1 hour".into(),
         what_to_show: "TRADES".into(),
         use_rth: true,
+        keep_up_to_date: false,
     }).unwrap();
 
     let join = run_hot_loop(hot_loop);
@@ -1054,7 +1061,7 @@ pub(super) fn phase_large_historical_dataset(mut conns: Conns, gw: &Gateway, con
     println!("--- Phase 111: Large Historical Dataset (SPY, 1 year of daily bars) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -1072,6 +1079,7 @@ pub(super) fn phase_large_historical_dataset(mut conns: Conns, gw: &Gateway, con
         req_id: 11001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt, duration: "1 Y".to_string(),
         bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+        keep_up_to_date: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -1122,7 +1130,7 @@ pub(super) fn phase_dst_boundary_historical(mut conns: Conns, gw: &Gateway, conf
     println!("--- Phase 112: DST Boundary Historical Data (SPY, bars spanning March DST) ---");
 
     ccp_keepalive(&mut conns.ccp);
-    let hmds = match connect_farm(&config.host, "ushmds", &config.username, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
+    let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded) {
         Ok(c) => { println!("  HMDS reconnected"); c }
         Err(e) => { println!("  SKIP: ushmds reconnect failed: {}\n", e); return Conns { farm: conns.farm, ccp: conns.ccp, hmds: None, account_id: conns.account_id }; }
     };
@@ -1140,6 +1148,7 @@ pub(super) fn phase_dst_boundary_historical(mut conns: Conns, gw: &Gateway, conf
         req_id: 12001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: "20260314-20:00:00".to_string(), duration: "2 W".to_string(),
         bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+        keep_up_to_date: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -1197,7 +1206,7 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config:
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(
         &config.host, "ushmds",
-        &config.username, config.paper,
+        &config.username, &config.password, config.paper,
         &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
     ) {
         Ok(c) => { println!("  HMDS reconnected"); Some(c) }
@@ -1221,6 +1230,7 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config:
         req_id: 20001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: now.clone(), duration: "1 d".to_string(),
         bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+        keep_up_to_date: false,
     }).unwrap();
     control_tx.send(ControlCommand::CancelHistorical { req_id: 20001 }).unwrap();
 
@@ -1281,7 +1291,7 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(
         &config.host, "ushmds",
-        &config.username, config.paper,
+        &config.username, &config.password, config.paper,
         &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
     ) {
         Ok(c) => { println!("  HMDS reconnected"); Some(c) }
@@ -1314,10 +1324,11 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config
             req_id: 30001 + i, con_id: 756733, symbol: "SPY".to_string(),
             end_date_time: now.clone(), duration: "1 d".to_string(),
             bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
+        keep_up_to_date: false,
         }).unwrap();
     }
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
