@@ -11,7 +11,10 @@
   <a href="#rust-usage">Rust</a> &bull;
   <a href="#python-usage">Python</a> &bull;
   <a href="#notebooks">Notebooks</a> &bull;
-  <a href="#architecture">Architecture</a>
+  <a href="#architecture">Architecture</a> &bull;
+  <a href="docs/RUST_API.md">Rust API</a> &bull;
+  <a href="docs/PYTHON_API.md">Python API</a> &bull;
+  <a href="docs/COVERAGE.md">Coverage</a>
 </p>
 
 ---
