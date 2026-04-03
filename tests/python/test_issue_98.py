@@ -4,7 +4,6 @@ Account summary, portfolio positions, live P&L, and pnlSingle.
 Exercises cache coordination, account streaming, and signed value encoding.
 
 Run: pytest tests/python/test_issue_98.py -v --timeout=120
-Ref: https://github.com/deepentropy/ib-agent/issues/98
 """
 
 import os

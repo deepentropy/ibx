@@ -4,7 +4,6 @@ Comprehensive account interrogation: reqPositions, reqPnL, reqPnLSingle,
 reqAccountUpdates (90 tags), updatePortfolio, reqHistogramData.
 
 Run: pytest tests/python/test_issue_111.py -v -s
-Ref: https://github.com/deepentropy/ib-agent/issues/111
 """
 
 import os, threading, time
@@ -163,7 +162,7 @@ class TestAccountDeep:
         tag_count = len(self.wrapper.account_values)
         print(f"  Account tags: {tag_count}")
         # CCP direct wire provides 18 tags from AccountState struct.
-        # Full 90+ tags require Gateway-internal UT/UM/RL parsing (ib-agent#115).
+        # Full 90+ tags require Gateway-internal UT/UM/RL parsing (wire capture).
         assert tag_count >= 15, f"Expected 15+ tags, got {tag_count}"
 
         # Verify critical tags

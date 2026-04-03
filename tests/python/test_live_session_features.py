@@ -424,7 +424,7 @@ class TestSessionFeatures:
         assert increment == 0.01, f"Expected increment=0.01, got {increment}"
         print(f"Market rule 26: low_edge={low_edge}, increment={increment}")
 
-    # ── Order Fields (ib-agent#73) ──
+    # ── Order Fields (wire capture) ──
 
     def test_order_fields_populated_on_open_order(self):
         """Place a LMT order, req open orders, verify 9 gateway fields are populated."""

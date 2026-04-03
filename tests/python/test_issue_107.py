@@ -5,7 +5,6 @@ and condition visibility. Then places a conditional SELL with condition
 that should trigger immediately.
 
 Run: pytest tests/python/test_issue_107.py -v -s
-Ref: https://github.com/deepentropy/ib-agent/issues/107
 """
 
 import os, threading, time

@@ -7,7 +7,7 @@
 //!   4. Market state update (quote mutation)
 //!   5. Full pipeline: sign → unsign → decode → state update
 //!
-//! When a JSONL fixture file is provided (from ib-agent captures), it loads
+//! When a JSONL fixture file is provided (from wire captures), it loads
 //! real 35=P messages captured from the wire. Otherwise uses synthetic payloads.
 //!
 //! Usage:
@@ -428,7 +428,7 @@ fn main() {
     println!("    {:<45} {:>6} ns", "TOTAL (full pipeline)", full_ns);
     println!();
     println!("  Compare these numbers with the Java gateway benchmark");
-    println!("  (ib-agent issue: gateway-side replay benchmark).");
+    println!("  (compare with gateway-side replay benchmark).");
 }
 
 // ── Stage measurement ──

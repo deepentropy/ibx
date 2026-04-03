@@ -4,10 +4,9 @@ Subscribe to option market data with genericTickList for greeks,
 verify tickOptionComputation callbacks fire with IV, delta, gamma, etc.
 
 Note: reqSecDefOptParams is not yet implemented (stub). This test uses
-hardcoded ATM option conIds from the ib-agent capture.
+hardcoded ATM option conIds from wire capture.
 
 Run: pytest tests/python/test_issue_104.py -v -s
-Ref: https://github.com/deepentropy/ib-agent/issues/104
 """
 
 import os, threading, time

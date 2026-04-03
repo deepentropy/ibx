@@ -5,7 +5,6 @@ this test verifies cross-session order visibility using sequential sessions
 (Session A places order, Session B sees it via req_all_open_orders).
 
 Run: pytest tests/python/test_issue_108.py -v -s
-Ref: https://github.com/deepentropy/ib-agent/issues/108
 """
 
 import os, threading, time

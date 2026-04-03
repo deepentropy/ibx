@@ -537,13 +537,13 @@ impl FarmState {
         self.depth_subs.push((req_id, farm, is_smart_depth));
         self.depth_resub_info.push((req_id, con_id, exchange.to_string(), sec_type.to_string(), _num_rows, is_smart_depth));
 
-        // ib-agent#86: SmartDepth requires per-exchange fan-out. The server ACKs a BEST/SMART
+        // SmartDepth requires per-exchange fan-out. The server ACKs a BEST/SMART
         // subscribe but never sends data for it. Data only arrives for individual exchanges.
         // Auto-enable fan-out when exchange is SMART/BEST (aggregated routing), since
         // single-exchange depth to SMART returns nothing.
         let needs_fanout = is_smart_depth || matches!(exchange, "SMART" | "BEST" | "");
         let exchanges: &[&str] = if needs_fanout {
-            // US equity exchanges that the gateway fans out to (ib-agent#86 capture)
+            // US equity exchanges that the gateway fans out to
             &["NASDAQ", "IEX", "BATS", "ARCA", "BEX", "NYSE", "BYX", "NYSENAT", "T24X",
               "DRCTEDGE", "MEMX", "PEARL", "AMEX", "CHX", "LTSE", "PSX", "ISE", "EDGEA"]
         } else {
@@ -755,7 +755,7 @@ impl FarmState {
     }
 
     /// Parse 35=Y depth entries (NASDAQ TotalView market-maker level).
-    /// Wire format (from ib-agent#90 capture):
+    /// Wire format (from wire capture):
     ///   Header: [2B misc][2B stag_uint16_be]
     ///   Stag switch sentinel: [80 00][2B stag_uint16_be]
     ///   Snapshot entry: [C4|44][4B market_maker][1B position][field_tags...]

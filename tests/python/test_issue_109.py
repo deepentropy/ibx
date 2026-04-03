@@ -5,7 +5,6 @@ Places a GTC order, disconnects, performs 3 rapid reconnect/disconnect cycles
 recovered session.
 
 Run: pytest tests/python/test_issue_109.py -v --timeout=120
-Ref: https://github.com/deepentropy/ib-agent/issues/109
 """
 
 import os, threading, time

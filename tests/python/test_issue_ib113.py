@@ -1,10 +1,9 @@
-"""IBX Test #113 (ib-agent): 5 concurrent scanners + filtered scanner + symbol search.
+"""IBX Test #113 : 5 concurrent scanners + filtered scanner + symbol search.
 
 Tests reqScannerParameters, 5 concurrent scanner subscriptions, filtered scanner
 with price/volume constraints, and reqMatchingSymbols.
 
 Run: pytest tests/python/test_issue_ib113.py -v -s
-Ref: https://github.com/deepentropy/ib-agent/issues/113
 """
 
 import os, threading, time
@@ -84,7 +83,7 @@ class MultiScannerWrapper(EWrapper):
 
 
 class TestMultiScanner:
-    """Issue #113 (ib-agent): Scanner parameters, concurrent scanners, symbol search."""
+    """Issue #113 : Scanner parameters, concurrent scanners, symbol search."""
 
     @pytest.fixture(autouse=True)
     def setup_connection(self):

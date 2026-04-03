@@ -5,7 +5,6 @@ Note: ComboLeg population from Python is not yet implemented — this test
 verifies individual option leg market data as a fallback.
 
 Run: pytest tests/python/test_issue_105.py -v -s
-Ref: https://github.com/deepentropy/ib-agent/issues/105
 """
 
 import os, threading, time

@@ -1,9 +1,8 @@
-"""IBX Test #112 (ib-agent): News providers, historical news, article fetch, bulletins.
+"""IBX Test #112 : News providers, historical news, article fetch, bulletins.
 
 Tests reqNewsProviders, reqHistoricalNews, reqNewsArticle, and reqNewsBulletins.
 
 Run: pytest tests/python/test_issue_ib112.py -v -s
-Ref: https://github.com/deepentropy/ib-agent/issues/112
 """
 
 import os, threading, time
@@ -82,7 +81,7 @@ class NewsWrapper(EWrapper):
 
 
 class TestNews:
-    """Issue #112 (ib-agent): News providers, historical news, article fetch."""
+    """Issue #112 : News providers, historical news, article fetch."""
 
     @pytest.fixture(autouse=True)
     def setup_connection(self):

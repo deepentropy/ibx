@@ -4,7 +4,6 @@ Places 8 orders (LMT, MKT, STP, MOC) across SPY, QQQ, IWM, DIA, AAPL,
 then exercises reqGlobalCancel to cancel all at once.
 
 Run: pytest tests/python/test_issue_110.py -v -s
-Ref: https://github.com/deepentropy/ib-agent/issues/110
 """
 
 import os, threading, time

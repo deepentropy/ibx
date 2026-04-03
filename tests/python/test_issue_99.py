@@ -4,7 +4,6 @@ Parent LMT + take-profit LMT + trailing stop — OCA linked orders.
 Exercises parent-child linking via parentId, OCA grouping, and TRAIL encoding.
 
 Run: pytest tests/python/test_issue_99.py -v --timeout=120
-Ref: https://github.com/deepentropy/ib-agent/issues/99
 """
 
 import os

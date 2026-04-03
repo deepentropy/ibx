@@ -4,7 +4,6 @@ Qualifies front-month ES, subscribes to market data (triggers usfuture farm),
 requests historical bars, and attempts order placement.
 
 Run: pytest tests/python/test_issue_106.py -v -s
-Ref: https://github.com/deepentropy/ib-agent/issues/106
 """
 
 import os, threading, time

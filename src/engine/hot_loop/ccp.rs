@@ -566,7 +566,7 @@ impl CcpState {
                 ("", "", "")
             };
 
-            // ib-agent#73: derive 3 order-dependent fields from FIX tags
+            // Derive 3 order-dependent fields from FIX tags
             let oca_type: i32 = match parsed.get(&6209).map(|s| s.as_str()) {
                 Some("CancelOnFillWBlock") => 1,
                 Some("ReduceOnFillWBlock") => 2,

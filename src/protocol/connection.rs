@@ -256,7 +256,7 @@ impl Connection {
     }
 
     /// Build a message, compress, sign, and send. For farm subscribe/data messages.
-    /// Uses seq=0 (separate seq space from heartbeats per ib-agent#89).
+    /// Uses seq=0 (separate seq space from heartbeats).
     pub fn send_fixcomp(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
         let msg = fix::fix_build(fields, 0);
         let wrapped = fixcomp::fixcomp_build(&msg);
