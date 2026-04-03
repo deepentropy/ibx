@@ -14,13 +14,19 @@ impl EClient {
     #[pyo3(signature = (req_id, account, model_code=""))]
     fn req_pnl(&self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         self.core.subscribe_pnl(req_id);
-        let _ = (account, model_code);
+        let tx = self.tx()?;
+        let acct = if account.is_empty() { self.account() } else { account.to_string() };
+        tx.send(ControlCommand::SubscribePnl { req_id, account: acct })
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        let _ = model_code;
         Ok(())
     }
 
     /// Cancel P&L subscription.
     fn cancel_pnl(&self, req_id: i64) -> PyResult<()> {
         self.core.unsubscribe_pnl(req_id);
+        let tx = self.tx()?;
+        let _ = tx.send(ControlCommand::CancelPnl { req_id });
         Ok(())
     }
 
@@ -55,9 +61,9 @@ impl EClient {
     /// Request all positions.
     fn req_positions(&self, py: Python<'_>) -> PyResult<()> {
         let shared = self.shared_state()?;
-        // Wait for init burst to deliver account/position data (up to 5s).
-        for _ in 0..500 {
-            if shared.portfolio.account_data_received() { break; }
+        // Wait for CCP init burst to complete (up to 10s).
+        for _ in 0..1000 {
+            if shared.portfolio.account_download_complete() { break; }
             py.allow_threads(|| std::thread::sleep(std::time::Duration::from_millis(10)));
         }
         let positions = shared.portfolio.position_infos();

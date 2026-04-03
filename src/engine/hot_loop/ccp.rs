@@ -161,7 +161,19 @@ impl CcpState {
             "U" => {
                 if let Some(comm) = parsed.get(&6040) {
                     match comm.as_str() {
-                        "77" => self.handle_account_summary(&parsed, context, shared),
+                        "75" => {
+                            // Position + market price feed (init burst + after each fill)
+                            handle_position_feed(msg, context, shared, event_tx);
+                            shared.portfolio.set_account_download_complete();
+                        }
+                        "77" => {
+                            self.handle_account_summary(&parsed, context, shared);
+                            shared.portfolio.set_account_download_complete();
+                        }
+                        "143" => {
+                            // P&L response — parse repeating group and update AccountState
+                            handle_pnl_response(msg, context, shared);
+                        }
                         "186" => {
                             if let Some(matches) = crate::control::contracts::parse_matching_symbols_response(msg) {
                                 if !matches.is_empty() {
@@ -728,6 +740,28 @@ impl CcpState {
         shared.portfolio.set_account(context.account());
     }
 
+    /// Send P&L subscribe: 6040=142 with 6529=PLR.{N}|1={account}|
+    pub(crate) fn send_pnl_subscribe(
+        &mut self,
+        req_id: i64,
+        account: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        if let Some(conn) = ccp_conn.as_mut() {
+            let pnl_payload = format!("PLR.{}|1={}|", req_id, account);
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "142"),
+                (6529, &pnl_payload),
+            ]);
+            hb.last_ccp_sent = Instant::now();
+            log::info!("Sent P&L subscribe: req_id={} account={}", req_id, account);
+        }
+    }
+
     pub(crate) fn send_news_subscribe(
         &mut self,
         con_id: i64,
@@ -988,6 +1022,83 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
         }
     }
     shared.portfolio.set_account(context.account());
+}
+
+/// Handle 6040=143 P&L response.
+/// Repeating group: 146={count} × (6008=conId, 6064=qty, 6822=unrPnL, 6099=realPnL).
+/// Aggregates into whole-account P&L on AccountState.
+fn handle_pnl_response(msg: &[u8], context: &mut Context, shared: &SharedState) {
+    let text = match std::str::from_utf8(msg) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let mut total_unrealized: f64 = 0.0;
+    let mut total_realized: f64 = 0.0;
+    for part in text.split('\x01') {
+        if let Some(v) = part.strip_prefix("6822=") {
+            if let Ok(val) = v.parse::<f64>() {
+                total_unrealized += val;
+            }
+        } else if let Some(v) = part.strip_prefix("6099=") {
+            if let Ok(val) = v.parse::<f64>() {
+                total_realized += val;
+            }
+        }
+    }
+    let daily_pnl = total_unrealized + total_realized;
+    context.account.daily_pnl = (daily_pnl * PRICE_SCALE as f64) as Price;
+    context.account.unrealized_pnl = (total_unrealized * PRICE_SCALE as f64) as Price;
+    context.account.realized_pnl = (total_realized * PRICE_SCALE as f64) as Price;
+    shared.portfolio.set_account(context.account());
+}
+
+/// Handle 6040=75 position + market price feed.
+/// Fires at init and after each fill. Contains repeating group: 146=count × (6008=conId, 6064=qty, 6101=avgCost).
+fn handle_position_feed(
+    msg: &[u8],
+    context: &mut Context,
+    shared: &SharedState,
+    event_tx: &Option<Sender<Event>>,
+) {
+    let text = match std::str::from_utf8(msg) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    // Parse repeating group by scanning for 6008= boundaries
+    let mut con_id: i64 = 0;
+    let mut qty: i64 = 0;
+    let mut avg_cost_raw: f64 = 0.0;
+    let mut count = 0;
+    for part in text.split('\x01') {
+        if let Some(v) = part.strip_prefix("6008=") {
+            // Flush previous position if any
+            if count > 0 && con_id != 0 {
+                let avg_cost = (avg_cost_raw * PRICE_SCALE as f64) as Price;
+                shared.portfolio.set_position_info(PositionInfo { con_id, position: qty, avg_cost });
+                if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
+                    shared.portfolio.set_position(instrument, qty);
+                    emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
+                }
+            }
+            con_id = v.parse().unwrap_or(0);
+            qty = 0;
+            avg_cost_raw = 0.0;
+            count += 1;
+        } else if let Some(v) = part.strip_prefix("6064=") {
+            qty = v.parse::<f64>().unwrap_or(0.0) as i64;
+        } else if let Some(v) = part.strip_prefix("6101=") {
+            avg_cost_raw = v.parse().unwrap_or(0.0);
+        }
+    }
+    // Flush last position
+    if count > 0 && con_id != 0 {
+        let avg_cost = (avg_cost_raw * PRICE_SCALE as f64) as Price;
+        shared.portfolio.set_position_info(PositionInfo { con_id, position: qty, avg_cost });
+        if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
+            shared.portfolio.set_position(instrument, qty);
+            emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
+        }
+    }
 }
 
 /// Handle position update messages (cross-cutting, called from CCP message processing).

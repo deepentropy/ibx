@@ -168,9 +168,9 @@ pub struct PnlSingleUpdate {
 
 /// A single changed account field.
 pub struct AccountFieldUpdate {
-    pub key: &'static str,
+    pub key: String,
     pub value: String,
-    pub currency: &'static str,
+    pub currency: String,
 }
 
 /// Batch of account update results.
@@ -398,6 +398,10 @@ impl ClientCore {
         symbol: &str,
         exchange: &str,
         sec_type: &str,
+        last_trade_date: &str,
+        strike: f64,
+        right: &str,
+        multiplier: &str,
         snapshot: bool,
         generic_tick_list: &str,
     ) -> Result<InstrumentId, String> {
@@ -422,6 +426,10 @@ impl ClientCore {
             symbol: symbol.to_string(),
             exchange: exchange.to_string(),
             sec_type: sec_type.to_string(),
+            last_trade_date: last_trade_date.to_string(),
+            strike,
+            right: right.to_string(),
+            multiplier: multiplier.to_string(),
             reply_tx: Some(reply_tx),
         }).map_err(|e| format!("Engine stopped: {}", e))?;
 
@@ -862,12 +870,10 @@ impl ClientCore {
     }
 
     /// Prepare account update fields (subscription-gated, change-detected).
-    /// Updates internal last_account state.
     pub fn prepare_account_updates(&self, shared: &SharedState) -> Option<AccountUpdateBatch> {
         if !self.account_updates_subscribed.load(Ordering::Acquire) {
             return None;
         }
-        // Don't deliver until the gateway has actually sent account data.
         if !shared.portfolio.account_data_received() {
             return None;
         }
@@ -886,9 +892,9 @@ impl ClientCore {
         for (i, &key) in ACCOUNT_UPDATE_FIELDS.iter().enumerate() {
             if is_first || cur_vals[i] != prev_vals[i] {
                 fields.push(AccountFieldUpdate {
-                    key,
+                    key: key.to_string(),
                     value: format!("{:.2}", cur_vals[i] as f64 / PRICE_SCALE_F),
-                    currency: "USD",
+                    currency: "USD".to_string(),
                 });
                 delivered = true;
             }
@@ -897,17 +903,17 @@ impl ClientCore {
         // Integer fields
         if is_first || acct.day_trades_remaining != prev.day_trades_remaining {
             fields.push(AccountFieldUpdate {
-                key: "DayTradesRemaining",
+                key: "DayTradesRemaining".to_string(),
                 value: acct.day_trades_remaining.to_string(),
-                currency: "",
+                currency: String::new(),
             });
             delivered = true;
         }
         if is_first || acct.leverage != prev.leverage {
             fields.push(AccountFieldUpdate {
-                key: "Leverage-S",
+                key: "Leverage-S".to_string(),
                 value: format!("{:.4}", acct.leverage as f64 / PRICE_SCALE_F),
-                currency: "",
+                currency: String::new(),
             });
             delivered = true;
         }

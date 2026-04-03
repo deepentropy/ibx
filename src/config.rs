@@ -32,7 +32,7 @@ pub const TIMEOUT_FIX_LOGON: f64 = 10.0;
 pub const TIMEOUT_FIX_READ: f64 = 30.0;
 pub const TIMEOUT_FARM_LOGON: f64 = 5.0;
 pub const TIMEOUT_SSL_AUTH: u64 = 20;
-pub const TIMEOUT_FARM_CONNECT: u64 = 30;
+pub const TIMEOUT_FARM_CONNECT: u64 = 8;
 
 /// Protocol version.
 pub const NS_VERSION: u32 = 50;

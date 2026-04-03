@@ -14,7 +14,7 @@ pub(super) fn phase_market_order(conns: Conns) -> Conns {
         shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -118,7 +118,7 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
         qty: 1,
         price: 1_00_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
 
     let join = run_hot_loop(hot_loop);
 
@@ -208,7 +208,7 @@ pub(super) fn phase_modify_order(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -294,7 +294,7 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
         order_id: buy_id, instrument: inst_id, side: Side::Buy, qty: 1,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -375,7 +375,7 @@ pub(super) fn phase_outside_rth_stop(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitStopGtc {
         order_id, instrument: inst_id, side: Side::Sell, qty: 1, stop_price: 1_00_000_000, outside_rth: true,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -435,7 +435,7 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -520,7 +520,7 @@ pub(super) fn phase_limit_ioc(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitIoc {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -569,7 +569,7 @@ pub(super) fn phase_limit_fok(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitFok {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -675,7 +675,7 @@ pub(super) fn phase_bracket_order(conns: Conns) -> Conns {
         parent_id, tp_id, sl_id, instrument: inst_id, side: Side::Buy, qty: 1,
         entry_price: 1_00_000_000, take_profit: 2_00_000_000, stop_loss: 50_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -807,7 +807,7 @@ pub(super) fn phase_oca_group(conns: Conns) -> Conns {
         order_id: id2, instrument: inst_id, side: Side::Buy, qty: 1, price: 2_00_000_000, tif: b'1',
         attrs: OrderAttrs { oca_group: oca, outside_rth: true, ..OrderAttrs::default() },
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1133,7 +1133,7 @@ pub(super) fn phase_what_if_order(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitWhatIf {
         order_id, instrument: inst_id, side: Side::Buy, qty: 100, price: 1_00_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1182,7 +1182,7 @@ pub(super) fn phase_cash_qty_order(conns: Conns) -> Conns {
         order_id, instrument: inst_id, side: Side::Buy, qty: 100, price: 1_00_000_000, tif: b'0',
         attrs: OrderAttrs { cash_qty: 1000 * PRICE_SCALE, ..OrderAttrs::default() },
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1241,7 +1241,7 @@ pub(super) fn phase_fractional_order(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitFractional {
         order_id, instrument: inst_id, side: Side::Buy, qty: QTY_SCALE / 2, price: 1_00_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1304,7 +1304,7 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1406,7 +1406,7 @@ pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let initial_rpnl = shared.portfolio.account().realized_pnl;
@@ -1504,7 +1504,7 @@ pub(super) fn phase_cancel_reject(conns: Conns) -> Conns {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1,
         price: 1_00_000_000, outside_rth: true,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     // Wait for order ack, then cancel it twice — second cancel should produce CancelReject
@@ -1577,7 +1577,7 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
             order_id: oid, instrument: inst_id, side: Side::Buy, qty: 1, price,
         })).unwrap();
     }
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1655,7 +1655,7 @@ pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1727,7 +1727,7 @@ pub(super) fn phase_double_modify(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -1805,7 +1805,7 @@ pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1879,7 +1879,7 @@ pub(super) fn phase_global_cancel(conns: Conns) -> Conns {
             price: 1_00_000_000, outside_rth: true,
         })).unwrap();
     }
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1939,7 +1939,7 @@ pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
         shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);

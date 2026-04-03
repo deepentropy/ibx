@@ -401,7 +401,7 @@ pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
         order_id: oid3, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, outside_rth: true,
     })).unwrap();
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);

@@ -128,7 +128,7 @@ pub(super) fn ensure_ccp_alive(
 
     // Full reconnection — CCP requires TLS+SRP auth, so we must reconnect everything
     match gateway::Gateway::connect(config) {
-        Ok((new_gw, farm, ccp, hmds, _, _, _, _)) => {
+        Ok((new_gw, farm, ccp, hmds, _, _, _, _, _)) => {
             conns.farm = farm;
             conns.ccp = ccp;
             conns.hmds = hmds;
@@ -286,6 +286,7 @@ pub(super) fn run_submit_cancel_phase(
         OrderRequest::SubmitWhatIf { order_id, .. } => *order_id,
         OrderRequest::SubmitLimitFractional { order_id, .. } => *order_id,
         OrderRequest::SubmitAdjustableStop { order_id, .. } => *order_id,
+        OrderRequest::SubmitTrailingStopPctEx { order_id, .. } => *order_id,
         OrderRequest::SubmitBracket { parent_id, .. } => *parent_id,
         OrderRequest::Cancel { order_id } => *order_id,
         OrderRequest::CancelAll { .. } => 0,
@@ -293,7 +294,7 @@ pub(super) fn run_submit_cancel_phase(
     };
 
     control_tx.send(ControlCommand::Order(order_req)).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);

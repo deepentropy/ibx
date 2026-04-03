@@ -43,7 +43,7 @@ pub(super) fn phase_extra_farms(gw: &Gateway, config: &GatewayConfig) {
         let start = Instant::now();
         match ibx::gateway::connect_farm(
             &config.host, farm,
-            &config.username, config.paper,
+            &config.username, &config.password, config.paper,
             &gw.server_session_id, &gw.session_token,
             &gw.hw_info, &gw.encoded,
         ) {
@@ -148,7 +148,7 @@ pub(super) fn phase_connection_recovery(conns: Conns, _gw: &Gateway, config: &Ga
 
     // Reconnect real farm for remaining tests
     let (farm, ccp, hmds) = match Gateway::connect(config) {
-        Ok((_gw2, f, c, h, _, _, _, _)) => {
+        Ok((_gw2, f, c, h, _, _, _, _, _)) => {
             println!("  Reconnected to IB for remaining tests");
             (f, c, h)
         }
@@ -177,7 +177,7 @@ pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _co
         shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -208,7 +208,7 @@ pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _co
         conns1.farm, conns1.ccp, conns1.hmds, None,
     );
 
-    control_tx2.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx2.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join2 = run_hot_loop(hot_loop2);
 
     let deadline2 = Instant::now() + Duration::from_secs(15);
@@ -285,7 +285,7 @@ pub(super) fn phase_register_instrument_channel(conns: Conns) -> Conns {
     println!("  Instrument count after 3 registrations: {}", count);
 
     // Now subscribe to one of the registered instruments
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
 
     // Wait briefly for any events (subscription confirmation or ticks)
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -334,7 +334,7 @@ pub(super) fn phase_update_param(conns: Conns) -> Conns {
         order_id: oid, instrument: inst_id, side: Side::Buy, qty: 1,
         price: 1_00_000_000, outside_rth: true,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);

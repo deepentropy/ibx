@@ -999,6 +999,8 @@ pub struct CompletedOrder {
 pub enum FarmSlot {
     /// US stocks (regular + extended hours) — `usfarm`
     UsFarm,
+    /// US options — `usopt`
+    UsOpt,
     /// Forex (IDEALPRO) — `cashfarm`
     CashFarm,
     /// US futures (CME/GLOBEX) — `usfuture`
@@ -1012,6 +1014,7 @@ pub enum FarmSlot {
 /// Determine which farm to route a subscription to based on exchange and security type.
 pub fn farm_for_instrument(exchange: &str, sec_type: &str) -> FarmSlot {
     match sec_type {
+        "OPT" | "FOP" => FarmSlot::UsOpt,
         "FUT" | "CONTFUT" => FarmSlot::UsFuture,
         "CASH" => FarmSlot::CashFarm,
         _ => match exchange {
@@ -1030,7 +1033,11 @@ pub fn farm_for_instrument(exchange: &str, sec_type: &str) -> FarmSlot {
 pub enum ControlCommand {
     /// Subscribe to market data for a contract.
     /// `exchange` and `sec_type` determine farm routing (empty = UsFarm default).
-    Subscribe { con_id: i64, symbol: String, exchange: String, sec_type: String, reply_tx: Option<crossbeam_channel::Sender<InstrumentId>> },
+    Subscribe {
+        con_id: i64, symbol: String, exchange: String, sec_type: String,
+        last_trade_date: String, strike: f64, right: String, multiplier: String,
+        reply_tx: Option<crossbeam_channel::Sender<InstrumentId>>,
+    },
     /// Unsubscribe from market data for an instrument.
     Unsubscribe { instrument: InstrumentId },
     /// Subscribe to tick-by-tick data via historical data connection.
@@ -1041,6 +1048,10 @@ pub enum ControlCommand {
     SubscribeNews { con_id: i64, symbol: String, providers: String, reply_tx: Option<crossbeam_channel::Sender<InstrumentId>> },
     /// Unsubscribe from per-contract news ticks.
     UnsubscribeNews { instrument: InstrumentId },
+    /// Subscribe to whole-account P&L via CCP (6040=142).
+    SubscribePnl { req_id: i64, account: String },
+    /// Cancel P&L subscription.
+    CancelPnl { req_id: i64 },
     /// Update a strategy parameter.
     UpdateParam { key: String, value: String },
     /// Submit an order from external caller (bridge mode).
@@ -1555,7 +1566,7 @@ mod tests {
 
     #[test]
     fn control_command_subscribe() {
-        let cmd = ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None };
+        let cmd = ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None };
         match cmd {
             ControlCommand::Subscribe { con_id, .. } => assert_eq!(con_id, 265598),
             _ => panic!("wrong variant"),
@@ -1585,7 +1596,7 @@ mod tests {
 
     #[test]
     fn control_command_clone() {
-        let cmd = ControlCommand::Subscribe { con_id: 42, symbol: "TEST".into(), exchange: String::new(), sec_type: String::new(), reply_tx: None };
+        let cmd = ControlCommand::Subscribe { con_id: 42, symbol: "TEST".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None };
         let cmd2 = cmd.clone();
         match cmd2 {
             ControlCommand::Subscribe { con_id, .. } => assert_eq!(con_id, 42),

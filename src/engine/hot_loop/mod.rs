@@ -48,6 +48,8 @@ pub struct HotLoop {
     pub eufarm_conn: Option<Connection>,
     /// Japan stocks farm connection (optional).
     pub jfarm_conn: Option<Connection>,
+    /// US options farm connection (optional).
+    pub usopt_conn: Option<Connection>,
     /// SPSC channel receiver for control plane commands.
     control_rx: Option<Receiver<ControlCommand>>,
     /// Whether the hot loop should keep running.
@@ -68,6 +70,8 @@ pub struct HotLoop {
     farm_reconnect_attempt: u32,
     pending_ccp_reconnect: Option<Receiver<io::Result<Connection>>>,
     ccp_reconnect_attempt: u32,
+    /// Deferred secondary farm connections (installed when ready).
+    pub pending_secondary_farms: Vec<(String, crossbeam_channel::Receiver<io::Result<Connection>>)>,
 }
 
 /// Per-secondary-farm heartbeat tracking.
@@ -104,6 +108,7 @@ pub struct HeartbeatState {
     pub usfuture_hb: SecondaryFarmHb,
     pub eufarm_hb: SecondaryFarmHb,
     pub jfarm_hb: SecondaryFarmHb,
+    pub usopt_hb: SecondaryFarmHb,
 }
 
 impl HeartbeatState {
@@ -124,6 +129,7 @@ impl HeartbeatState {
             usfuture_hb: SecondaryFarmHb::new(now),
             eufarm_hb: SecondaryFarmHb::new(now),
             jfarm_hb: SecondaryFarmHb::new(now),
+            usopt_hb: SecondaryFarmHb::new(now),
         }
     }
 
@@ -139,6 +145,7 @@ impl HeartbeatState {
             crate::types::FarmSlot::UsFuture => &mut self.usfuture_hb,
             crate::types::FarmSlot::EuFarm => &mut self.eufarm_hb,
             crate::types::FarmSlot::JFarm => &mut self.jfarm_hb,
+            crate::types::FarmSlot::UsOpt => &mut self.usopt_hb,
             crate::types::FarmSlot::UsFarm => unreachable!("UsFarm uses primary heartbeat"),
         }
     }
@@ -158,6 +165,7 @@ impl HotLoop {
             usfuture_conn: None,
             eufarm_conn: None,
             jfarm_conn: None,
+            usopt_conn: None,
             control_rx: None,
             running: true,
             account_id: String::new(),
@@ -171,6 +179,7 @@ impl HotLoop {
             farm_reconnect_attempt: 0,
             pending_ccp_reconnect: None,
             ccp_reconnect_attempt: 0,
+            pending_secondary_farms: Vec::new(),
         }
     }
 
@@ -260,6 +269,11 @@ impl HotLoop {
                 &mut self.farm_conn, &mut self.context, &self.shared,
                 &self.event_tx, &mut self.hb,
             );
+            self.farm.poll_secondary_farm(
+                &mut self.usopt_conn, &crate::types::FarmSlot::UsOpt,
+                &mut self.farm_conn, &mut self.context, &self.shared,
+                &self.event_tx, &mut self.hb,
+            );
 
             // 1b. Busy-poll historical socket for tick-by-tick data
             self.hmds.poll(
@@ -293,6 +307,7 @@ impl HotLoop {
             // 5b. Poll pending reconnects (non-blocking)
             self.poll_farm_reconnect();
             self.poll_ccp_reconnect();
+            self.poll_pending_secondary_farms();
 
             // 6. Wake any waiting consumers (e.g. Python event loop)
             self.shared.notify();
@@ -321,16 +336,18 @@ impl HotLoop {
         let cmds: Vec<ControlCommand> = self.cmd_buf.drain(..).collect();
         for cmd in cmds {
             match cmd {
-                ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, reply_tx } => {
+                ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, reply_tx } => {
                     let farm = crate::types::farm_for_instrument(&exchange, &sec_type);
                     let id = self.context.market.register(con_id);
-                    self.context.market.set_symbol(id, symbol);
+                    self.context.market.set_symbol(id, symbol.clone());
                     self.shared.market.set_instrument_count(self.context.market.count());
                     if let Some(tx) = reply_tx { let _ = tx.send(id); }
                     self.farm.send_mktdata_subscribe(
-                        con_id, id, farm,
+                        con_id, &symbol, &exchange, &sec_type,
+                        &last_trade_date, strike, &right, &multiplier,
+                        id, farm,
                         &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-                        &mut self.eufarm_conn, &mut self.jfarm_conn,
+                        &mut self.eufarm_conn, &mut self.jfarm_conn, &mut self.usopt_conn,
                         &mut self.hb,
                     );
                 }
@@ -338,7 +355,7 @@ impl HotLoop {
                     self.farm.send_mktdata_unsubscribe(
                         instrument,
                         &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-                        &mut self.eufarm_conn, &mut self.jfarm_conn,
+                        &mut self.eufarm_conn, &mut self.jfarm_conn, &mut self.usopt_conn,
                         &mut self.hb,
                     );
                 }
@@ -467,7 +484,7 @@ impl HotLoop {
                     self.farm.send_depth_subscribe(
                         req_id, con_id, &exchange, &sec_type, num_rows, is_smart_depth,
                         &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-                        &mut self.eufarm_conn, &mut self.jfarm_conn,
+                        &mut self.eufarm_conn, &mut self.jfarm_conn, &mut self.usopt_conn,
                         &mut self.hb,
                     );
                 }
@@ -475,11 +492,17 @@ impl HotLoop {
                     self.farm.send_depth_unsubscribe(
                         req_id,
                         &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-                        &mut self.eufarm_conn, &mut self.jfarm_conn,
+                        &mut self.eufarm_conn, &mut self.jfarm_conn, &mut self.usopt_conn,
                         &mut self.hb,
                     );
                     // Purge any already-buffered depth updates so callers never see stale data
                     self.shared.market.purge_depth_updates(req_id);
+                }
+                ControlCommand::SubscribePnl { req_id, account } => {
+                    self.ccp.send_pnl_subscribe(req_id, &account, &mut self.ccp_conn, &mut self.hb);
+                }
+                ControlCommand::CancelPnl { req_id } => {
+                    let _ = req_id; // Server auto-cancels on disconnect; no explicit cancel message needed
                 }
                 ControlCommand::FetchNewsProviders { .. }
                 | ControlCommand::FetchSmartComponents { .. }
@@ -496,7 +519,7 @@ impl HotLoop {
                         self.farm.send_mktdata_unsubscribe(
                             instrument,
                             &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-                            &mut self.eufarm_conn, &mut self.jfarm_conn,
+                            &mut self.eufarm_conn, &mut self.jfarm_conn, &mut self.usopt_conn,
                             &mut self.hb,
                         );
                     }
@@ -641,11 +664,12 @@ impl HotLoop {
     fn check_secondary_heartbeat(&mut self, now: Instant, ts: &str) {
         use crate::types::FarmSlot;
 
-        let pairs: [(FarmSlot, bool); 4] = [
+        let pairs: [(FarmSlot, bool); 5] = [
             (FarmSlot::CashFarm, self.cashfarm_conn.is_some()),
             (FarmSlot::UsFuture, self.usfuture_conn.is_some()),
             (FarmSlot::EuFarm, self.eufarm_conn.is_some()),
             (FarmSlot::JFarm, self.jfarm_conn.is_some()),
+            (FarmSlot::UsOpt, self.usopt_conn.is_some()),
         ];
         for (slot, has_conn) in &pairs {
             if !has_conn { continue; }
@@ -663,6 +687,7 @@ impl HotLoop {
                 FarmSlot::UsFuture => self.usfuture_conn.as_mut(),
                 FarmSlot::EuFarm => self.eufarm_conn.as_mut(),
                 FarmSlot::JFarm => self.jfarm_conn.as_mut(),
+                FarmSlot::UsOpt => self.usopt_conn.as_mut(),
                 FarmSlot::UsFarm => unreachable!(),
             };
             let conn = match conn {
@@ -684,6 +709,7 @@ impl HotLoop {
                     FarmSlot::UsFuture => &mut self.usfuture_conn,
                     FarmSlot::EuFarm => &mut self.eufarm_conn,
                     FarmSlot::JFarm => &mut self.jfarm_conn,
+                    FarmSlot::UsOpt => &mut self.usopt_conn,
                     FarmSlot::UsFarm => unreachable!(),
                 };
                 self.farm.handle_secondary_disconnect(conn_opt, slot, &mut self.context, &self.shared, &self.event_tx);
@@ -694,6 +720,7 @@ impl HotLoop {
                     FarmSlot::UsFuture => self.usfuture_conn.as_mut(),
                     FarmSlot::EuFarm => self.eufarm_conn.as_mut(),
                     FarmSlot::JFarm => self.jfarm_conn.as_mut(),
+                    FarmSlot::UsOpt => self.usopt_conn.as_mut(),
                     FarmSlot::UsFarm => unreachable!(),
                 };
                 if let Some(c) = conn {
@@ -732,7 +759,7 @@ impl HotLoop {
         self.farm.reconnect(
             conn,
             &mut self.farm_conn, &mut self.cashfarm_conn, &mut self.usfuture_conn,
-            &mut self.eufarm_conn, &mut self.jfarm_conn,
+            &mut self.eufarm_conn, &mut self.jfarm_conn, &mut self.usopt_conn,
             &mut self.context, &mut self.hb,
         );
     }
@@ -867,6 +894,51 @@ impl HotLoop {
                 self.pending_ccp_reconnect = None;
             }
         }
+    }
+
+    /// Poll deferred secondary farm connection threads. Non-blocking.
+    fn poll_pending_secondary_farms(&mut self) {
+        self.pending_secondary_farms.retain(|(name, rx)| {
+            match rx.try_recv() {
+                Ok(Ok(conn)) => {
+                    log::info!("{} connected (deferred)", name);
+                    let now = std::time::Instant::now();
+                    match name.as_str() {
+                        "cashfarm" => {
+                            self.cashfarm_conn = Some(conn);
+                            self.hb.cashfarm_hb = SecondaryFarmHb::new(now);
+                        }
+                        "usfuture" => {
+                            self.usfuture_conn = Some(conn);
+                            self.hb.usfuture_hb = SecondaryFarmHb::new(now);
+                        }
+                        "eufarm" => {
+                            self.eufarm_conn = Some(conn);
+                            self.hb.eufarm_hb = SecondaryFarmHb::new(now);
+                        }
+                        "jfarm" => {
+                            self.jfarm_conn = Some(conn);
+                            self.hb.jfarm_hb = SecondaryFarmHb::new(now);
+                        }
+                        "usopt" => {
+                            self.usopt_conn = Some(conn);
+                            self.hb.usopt_hb = SecondaryFarmHb::new(now);
+                        }
+                        _ => {}
+                    }
+                    false
+                }
+                Ok(Err(e)) => {
+                    log::warn!("{} deferred connection failed (non-fatal): {}", name, e);
+                    false
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => true,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    log::warn!("{} connection thread died", name);
+                    false
+                }
+            }
+        });
     }
 
     /// Access heartbeat state for testing.
