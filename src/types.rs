@@ -34,12 +34,20 @@ pub enum Side {
 pub enum OrderStatus {
     /// Locally queued, not yet acknowledged by server.
     PendingSubmit,
-    /// Acknowledged by server (FIX 39=0 or 39=A).
+    /// Received by server, not yet accepted by exchange (FIX 39=A).
+    PreSubmitted,
+    /// Accepted and working on exchange (FIX 39=0 or 39=5).
     Submitted,
+    /// Cancel request sent, awaiting confirmation (FIX 39=6).
+    PendingCancel,
+    /// Modify request sent, awaiting confirmation (FIX 39=E).
+    PendingReplace,
     Filled,
     PartiallyFilled,
     Cancelled,
     Rejected,
+    /// Server reports order inactive (FIX 39=I).
+    Inactive,
     /// Order state is unknown due to an auth connection disconnect.
     /// Will be reconciled when reconnection completes (mass status request).
     Uncertain,

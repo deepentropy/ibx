@@ -100,12 +100,7 @@ impl EClient {
     /// Immediately delivers all archived completed orders, then calls `completed_orders_end`.
     pub fn req_completed_orders(&self, wrapper: &mut impl Wrapper) {
         for order in self.shared.orders.drain_completed_orders() {
-            let status_str = match order.status {
-                OrderStatus::Filled => "Filled",
-                OrderStatus::Cancelled => "Cancelled",
-                OrderStatus::Rejected => "Inactive",
-                _ => "Unknown",
-            };
+            let status_str = crate::client_core::order_status_str(order.status);
             if let Some(info) = self.shared.orders.get_order_info(order.order_id) {
                 let mut state = info.order_state;
                 state.status = status_str.into();

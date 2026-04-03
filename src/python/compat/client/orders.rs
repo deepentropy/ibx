@@ -244,12 +244,7 @@ impl EClient {
         if let Some(shared) = self.shared.lock().unwrap().clone() {
             let completed = shared.orders.drain_completed_orders();
             for co in &completed {
-                let status_str = match co.status {
-                    crate::types::OrderStatus::Filled => "Filled",
-                    crate::types::OrderStatus::Cancelled => "Cancelled",
-                    crate::types::OrderStatus::Rejected => "Inactive",
-                    _ => "Unknown",
-                };
+                let status_str = crate::client_core::order_status_str(co.status);
                 let rich_info = shared.orders.get_order_info(co.order_id);
                 let state = pyo3::types::PyDict::new(py);
                 state.set_item("status", status_str)?;

@@ -371,13 +371,19 @@ impl CcpState {
         }
 
         let status = match ord_status {
-            "0" | "A" | "E" | "5" => crate::types::OrderStatus::Submitted,
+            "0" | "5" => crate::types::OrderStatus::Submitted,
+            "A" => crate::types::OrderStatus::PreSubmitted,
+            "E" => crate::types::OrderStatus::PendingReplace,
+            "6" => crate::types::OrderStatus::PendingCancel,
             "1" => crate::types::OrderStatus::PartiallyFilled,
             "2" => crate::types::OrderStatus::Filled,
             "4" | "C" | "D" => crate::types::OrderStatus::Cancelled,
             "8" => crate::types::OrderStatus::Rejected,
-            "6" => return,
-            _ => return,
+            "I" => crate::types::OrderStatus::Inactive,
+            _ => {
+                log::warn!("Unknown order status 39={} for order {}", ord_status, clord_id);
+                return;
+            }
         };
 
         let prev_status = context.order(clord_id).map(|o| o.status);
@@ -502,15 +508,7 @@ impl CcpState {
                 } else { "" },
             };
 
-            let status_str = match status {
-                crate::types::OrderStatus::PendingSubmit => "PendingSubmit",
-                crate::types::OrderStatus::Submitted => "Submitted",
-                crate::types::OrderStatus::Filled => "Filled",
-                crate::types::OrderStatus::PartiallyFilled => "PreSubmitted",
-                crate::types::OrderStatus::Cancelled => "Cancelled",
-                crate::types::OrderStatus::Rejected => "Inactive",
-                crate::types::OrderStatus::Uncertain => "Unknown",
-            };
+            let status_str = crate::client_core::order_status_str(status);
 
             let resolved_con_id = if con_id != 0 {
                 con_id

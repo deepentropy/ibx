@@ -204,11 +204,15 @@ pub struct PortfolioUpdateEntry {
 pub fn order_status_str(status: OrderStatus) -> &'static str {
     match status {
         OrderStatus::PendingSubmit => "PendingSubmit",
+        OrderStatus::PreSubmitted => "PreSubmitted",
         OrderStatus::Submitted => "Submitted",
+        OrderStatus::PendingCancel => "PendingCancel",
+        OrderStatus::PendingReplace => "PendingCancel", // IB API has no PendingReplace string
         OrderStatus::Filled => "Filled",
-        OrderStatus::PartiallyFilled => "PreSubmitted",
+        OrderStatus::PartiallyFilled => "PartiallyFilled",
         OrderStatus::Cancelled => "Cancelled",
-        OrderStatus::Rejected => "Inactive",
+        OrderStatus::Rejected => "Rejected",
+        OrderStatus::Inactive => "Inactive",
         OrderStatus::Uncertain => "Unknown",
     }
 }
