@@ -44,18 +44,6 @@ Internal engine processing measured in isolation (1M iterations, no network I/O)
 
 IBX eliminates the Java Gateway entirely — no JVM, no localhost hop, no garbage collection pauses. The strategy receives ticks and sends orders in-process.
 
-### End-to-End Latency (over network)
-
-SPY on IB paper account, public internet (not colocated). Compared to the official C++ TWS API connecting through the Java Gateway on localhost.
-
-| Metric | IBX | C++ TWS API | Ratio |
-|---|---|---|---|
-| Limit submit → ack | 114.8ms | 632.9ms | **5.5x faster** |
-| Limit cancel → confirm | 125.7ms | 148.2ms | 1.2x faster |
-| **Limit full round-trip** | **240.5ms** | **781.1ms** | **3.2x faster** |
-
-> **Note:** End-to-end benchmarks were run on a paper trading account with limited sample sizes. Results are indicative, not definitive.
-
 ## Rust Usage
 
 Add to `Cargo.toml`:
