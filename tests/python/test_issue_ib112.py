@@ -29,7 +29,7 @@ class NewsWrapper(EWrapper):
         self.got_providers = threading.Event()
 
         # Historical news
-        self.historical_news = {}  # req_id -> list of (time, provider, article_id, headline)
+        self.hist_news_items = {}  # req_id -> list of (time, provider, article_id, headline)
         self.got_hist_news_end = {}
 
         # News article
@@ -56,7 +56,7 @@ class NewsWrapper(EWrapper):
 
     def historical_news(self, req_id, time_str, provider_code, article_id, headline):
         with self.lock:
-            self.historical_news.setdefault(req_id, []).append(
+            self.hist_news_items.setdefault(req_id, []).append(
                 (time_str, provider_code, article_id, headline))
 
     def historical_news_end(self, req_id, has_more):
@@ -133,7 +133,7 @@ class TestNews:
         if not got:
             pytest.skip("No historical news for AAPL")
 
-        articles = self.wrapper.historical_news.get(req_id, [])
+        articles = self.wrapper.hist_news_items.get(req_id, [])
         print(f"  AAPL historical news: {len(articles)} articles")
         for t, prov, aid, headline in articles[:5]:
             print(f"    [{prov}] {headline[:80]}")
@@ -155,7 +155,7 @@ class TestNews:
         if not got:
             pytest.skip("No historical news for SPY")
 
-        articles = self.wrapper.historical_news.get(req_id, [])
+        articles = self.wrapper.hist_news_items.get(req_id, [])
         print(f"  SPY historical news: {len(articles)} articles")
         for t, prov, aid, headline in articles[:5]:
             print(f"    [{prov}] {headline[:80]}")
@@ -176,7 +176,7 @@ class TestNews:
         if not got:
             pytest.skip("No news to fetch article from")
 
-        articles = self.wrapper.historical_news.get(req_id, [])
+        articles = self.wrapper.hist_news_items.get(req_id, [])
         if not articles:
             pytest.skip("No article IDs available")
 
