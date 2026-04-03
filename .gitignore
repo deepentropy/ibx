@@ -36,3 +36,4 @@ DEVLOG.md
 /target
 .env
 .idea/
+tests/python/__pycache__/
