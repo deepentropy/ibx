@@ -1229,6 +1229,16 @@ pub struct PositionInfo {
     pub avg_cost: Price,      // per-share avg cost * PRICE_SCALE
 }
 
+/// Per-position midnight seed from 6040=143 P&L subscription.
+/// Used for client-side daily P&L computation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MidnightSeed {
+    pub con_id: i64,
+    pub qty_midnight: i64,            // position held at midnight
+    pub money_traded: f64,            // net cash from today's fills (signed)
+    pub realized_pnl: f64,           // realized P&L since midnight
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

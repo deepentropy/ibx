@@ -9,7 +9,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::types::{
-    CompletedOrder, Fill, InstrumentId, NewsBulletin,
+    CompletedOrder, Fill, InstrumentId, MidnightSeed, NewsBulletin,
     PositionInfo, Price, Side, PRICE_SCALE,
 };
 use crossbeam_channel::Sender;
@@ -171,8 +171,8 @@ impl CcpState {
                             shared.portfolio.set_account_download_complete();
                         }
                         "143" => {
-                            // P&L response — parse repeating group and update AccountState
-                            handle_pnl_response(msg, context, shared);
+                            // P&L midnight seed — store for client-side daily P&L computation
+                            handle_pnl_response(msg, shared);
                         }
                         "186" => {
                             if let Some(matches) = crate::control::contracts::parse_matching_symbols_response(msg) {
@@ -1022,32 +1022,42 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
     shared.portfolio.set_account(context.account());
 }
 
-/// Handle 6040=143 P&L response.
-/// Repeating group: 146={count} × (6008=conId, 6064=qty, 6822=unrPnL, 6099=realPnL).
-/// Aggregates into whole-account P&L on AccountState.
-fn handle_pnl_response(msg: &[u8], context: &mut Context, shared: &SharedState) {
+/// Handle 6040=143 P&L midnight seed response.
+/// Repeating group: 146={count} × (6008=conId, 6064=qtyMidnight, 6822=moneyTraded, 6099=realizedPnl).
+/// These are midnight seeds for client-side daily P&L computation — NOT live P&L values.
+fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
     let text = match std::str::from_utf8(msg) {
         Ok(t) => t,
         Err(_) => return,
     };
-    let mut total_unrealized: f64 = 0.0;
-    let mut total_realized: f64 = 0.0;
+    let mut seeds = Vec::new();
+    let mut con_id: i64 = 0;
+    let mut qty_midnight: i64 = 0;
+    let mut money_traded: f64 = 0.0;
+    let mut realized_pnl: f64 = 0.0;
+    let mut count = 0;
     for part in text.split('\x01') {
-        if let Some(v) = part.strip_prefix("6822=") {
-            if let Ok(val) = v.parse::<f64>() {
-                total_unrealized += val;
+        if let Some(v) = part.strip_prefix("6008=") {
+            if count > 0 && con_id != 0 {
+                seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
             }
+            con_id = v.parse().unwrap_or(0);
+            qty_midnight = 0;
+            money_traded = 0.0;
+            realized_pnl = 0.0;
+            count += 1;
+        } else if let Some(v) = part.strip_prefix("6064=") {
+            qty_midnight = v.parse::<f64>().unwrap_or(0.0) as i64;
+        } else if let Some(v) = part.strip_prefix("6822=") {
+            money_traded = v.parse().unwrap_or(0.0);
         } else if let Some(v) = part.strip_prefix("6099=") {
-            if let Ok(val) = v.parse::<f64>() {
-                total_realized += val;
-            }
+            realized_pnl = v.parse().unwrap_or(0.0);
         }
     }
-    let daily_pnl = total_unrealized + total_realized;
-    context.account.daily_pnl = (daily_pnl * PRICE_SCALE as f64) as Price;
-    context.account.unrealized_pnl = (total_unrealized * PRICE_SCALE as f64) as Price;
-    context.account.realized_pnl = (total_realized * PRICE_SCALE as f64) as Price;
-    shared.portfolio.set_account(context.account());
+    if count > 0 && con_id != 0 {
+        seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
+    }
+    shared.portfolio.set_midnight_seeds(seeds);
 }
 
 /// Handle 6040=75 position + market price feed.

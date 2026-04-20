@@ -571,6 +571,8 @@ pub struct PortfolioState {
     /// Position info (conId -> PositionInfo) for reqPositions and P&L.
     position_infos: Mutex<HashMap<i64, PositionInfo>>,
     positions: [AtomicU64; MAX_INSTRUMENTS],
+    /// Midnight seeds from 6040=143 for client-side daily P&L computation.
+    midnight_seeds: Mutex<HashMap<i64, MidnightSeed>>,
 }
 
 impl PortfolioState {
@@ -581,6 +583,7 @@ impl PortfolioState {
             account_download_complete: AtomicBool::new(false),
             position_infos: Mutex::new(HashMap::new()),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
+            midnight_seeds: Mutex::new(HashMap::new()),
         }
     }
 
@@ -632,6 +635,20 @@ impl PortfolioState {
 
     #[doc(hidden)] pub fn set_position(&self, id: InstrumentId, pos: i64) {
         self.positions[id as usize].store(pos as u64, Ordering::Relaxed);
+    }
+
+    /// Store midnight seeds from 6040=143 P&L response.
+    #[doc(hidden)] pub fn set_midnight_seeds(&self, seeds: Vec<MidnightSeed>) {
+        let mut map = self.midnight_seeds.lock().unwrap();
+        map.clear();
+        for s in seeds {
+            map.insert(s.con_id, s);
+        }
+    }
+
+    /// Read midnight seeds for client-side P&L computation.
+    pub fn midnight_seeds(&self) -> Vec<MidnightSeed> {
+        self.midnight_seeds.lock().unwrap().values().copied().collect()
     }
 }
 

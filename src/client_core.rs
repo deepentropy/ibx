@@ -819,13 +819,55 @@ impl ClientCore {
     }
 
     /// Poll PnL and return update if values changed.
+    /// Computes daily P&L client-side from midnight seeds + live quotes.
+    /// Formula: dailyPnL = Σ(qtyNow × priceNow - qtyMidnight × prevClose - moneyTraded)
     pub fn poll_pnl(&self, shared: &SharedState) -> Option<PnlUpdate> {
         let req_id = *self.pnl_req_id.lock().unwrap();
         let req_id = req_id?;
 
-        let acct = shared.portfolio.account();
-        let pnl = [acct.daily_pnl, acct.unrealized_pnl, acct.realized_pnl];
-        // Single lock acquisition for both read and write.
+        let seeds = shared.portfolio.midnight_seeds();
+        if seeds.is_empty() {
+            return None;
+        }
+
+        let con_id_map = self.con_id_to_instrument.lock().unwrap();
+        let mut total_daily: f64 = 0.0;
+        let mut total_unrealized: f64 = 0.0;
+        let mut total_realized: f64 = 0.0;
+
+        for seed in &seeds {
+            total_realized += seed.realized_pnl;
+
+            let pi = shared.portfolio.position_info(seed.con_id);
+            let qty_now = pi.map(|p| p.position).unwrap_or(0);
+            let avg_cost = pi.map(|p| p.avg_cost).unwrap_or(0);
+
+            if let Some(&iid) = con_id_map.get(&seed.con_id) {
+                let q = shared.market.quote(iid);
+                let price_now = q.last;
+                let prev_close = q.close;
+
+                if price_now != 0 {
+                    // Skip overnight positions without prev close (would give wrong result)
+                    if prev_close == 0 && seed.qty_midnight != 0 {
+                        continue;
+                    }
+                    let mv_now = qty_now as f64 * price_now as f64 / PRICE_SCALE_F;
+                    let mv_midnight = seed.qty_midnight as f64 * prev_close as f64 / PRICE_SCALE_F;
+                    total_daily += mv_now - mv_midnight - seed.money_traded;
+
+                    if avg_cost != 0 {
+                        total_unrealized += qty_now as f64 * (price_now - avg_cost) as f64 / PRICE_SCALE_F;
+                    }
+                }
+            }
+        }
+
+        let pnl = [
+            (total_daily * PRICE_SCALE_F) as i64,
+            (total_unrealized * PRICE_SCALE_F) as i64,
+            (total_realized * PRICE_SCALE_F) as i64,
+        ];
         let mut last = self.last_pnl.lock().unwrap();
         if pnl == *last {
             return None;
@@ -833,9 +875,9 @@ impl ClientCore {
         *last = pnl;
         Some(PnlUpdate {
             req_id,
-            daily_pnl: acct.daily_pnl as f64 / PRICE_SCALE_F,
-            unrealized_pnl: acct.unrealized_pnl as f64 / PRICE_SCALE_F,
-            realized_pnl: acct.realized_pnl as f64 / PRICE_SCALE_F,
+            daily_pnl: total_daily,
+            unrealized_pnl: total_unrealized,
+            realized_pnl: total_realized,
         })
     }
 
