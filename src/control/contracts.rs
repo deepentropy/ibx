@@ -120,6 +120,15 @@ pub struct ContractDefinition {
     pub market_name: String,
     pub isin: String,
     pub min_size: f64,
+    /// Trading session string. Populated by merging the paired schedule reply.
+    pub trading_hours: Option<String>,
+    /// Liquid (regular-session) hours string. Same source as trading_hours.
+    pub liquid_hours: Option<String>,
+    /// IANA timezone for session times (e.g. "US/Eastern").
+    pub time_zone_id: Option<String>,
+    /// Exchange-path join key (tag 6256) used to pair secdef ↔ schedule replies.
+    /// Internal — not exposed on the public API surface.
+    pub join_key: String,
 }
 
 impl Default for ContractDefinition {
@@ -148,6 +157,10 @@ impl Default for ContractDefinition {
             market_name: String::new(),
             isin: String::new(),
             min_size: 0.0,
+            trading_hours: None,
+            liquid_hours: None,
+            time_zone_id: None,
+            join_key: String::new(),
         }
     }
 }
@@ -295,6 +308,9 @@ pub fn parse_secdef_response(data: &[u8]) -> Option<ContractDefinition> {
     }
     if let Some(v) = tags.get(&58) { // MarketName
         def.market_name = v.clone();
+    }
+    if let Some(v) = tags.get(&TAG_SCHEDULE_JOIN_KEY) {
+        def.join_key = v.clone();
     }
     // ISIN from SecurityAltID repeating group (tag 455 with source 456=4)
     // fix_parse only keeps last value per tag, so we parse sequentially
@@ -463,6 +479,12 @@ pub const TAG_SESSION_END: u32 = 6842;
 pub const TAG_TRADE_DATE: u32 = 75;
 pub const TAG_IS_TRADING_HOURS: u32 = 6843;
 pub const TAG_IS_LIQUID_HOURS: u32 = 6844;
+/// Exchange-path key shared by paired secdef and schedule replies.
+pub const TAG_SCHEDULE_JOIN_KEY: u32 = 6256;
+/// Subscribe protocol value for schedule subscription.
+pub const SUB_PROTOCOL_SCHEDULE_SUBSCRIBE: &str = "106";
+/// Subscribe protocol value for schedule reply.
+pub const SUB_PROTOCOL_SCHEDULE_REPLY: &str = "107";
 
 /// A single trading/liquid hours session.
 #[derive(Debug, Clone, PartialEq)]
@@ -522,16 +544,17 @@ pub fn parse_schedule_response(data: &[u8]) -> Option<ContractSchedule> {
     let mut is_liquid = false;
     let mut in_session = false;
 
+    // 24h venues (e.g. FOREX) emit sessions with both 6843=1 AND 6844=1 — append
+    // to both lists independently.
     for (tag, val) in &tags {
         match *tag {
             TAG_SESSION_START => {
-                // Flush previous session if any
                 if in_session {
                     let session = ScheduleSession {
                         start: start.clone(), end: end.clone(), trade_date: trade_date.clone(),
                     };
-                    if is_trading { trading_hours.push(session); }
-                    else if is_liquid { liquid_hours.push(session); }
+                    if is_trading { trading_hours.push(session.clone()); }
+                    if is_liquid { liquid_hours.push(session); }
                 }
                 start = val.clone();
                 end.clear();
@@ -547,16 +570,48 @@ pub fn parse_schedule_response(data: &[u8]) -> Option<ContractSchedule> {
             _ => {}
         }
     }
-    // Flush last session
     if in_session {
         let session = ScheduleSession {
-            start: start, end: end, trade_date: trade_date,
+            start, end, trade_date,
         };
-        if is_trading { trading_hours.push(session); }
-        else if is_liquid { liquid_hours.push(session); }
+        if is_trading { trading_hours.push(session.clone()); }
+        if is_liquid { liquid_hours.push(session); }
     }
 
     Some(ContractSchedule { timezone, trading_hours, liquid_hours })
+}
+
+/// Format a list of sessions into a semicolon-delimited string.
+///
+/// Output: `"YYYYMMDD:HHMM-YYYYMMDD:HHMM;YYYYMMDD:HHMM-YYYYMMDD:HHMM;..."`.
+/// Times are in UTC as received from the upstream wire — consumers should
+/// convert to local time using the paired timezone identifier when displaying.
+/// Returns an empty string if `sessions` is empty.
+pub fn format_sessions_string(sessions: &[ScheduleSession]) -> String {
+    let mut out = String::with_capacity(sessions.len() * 32);
+    for (i, s) in sessions.iter().enumerate() {
+        if i > 0 { out.push(';'); }
+        out.push_str(&trim_session_endpoint(&s.start));
+        out.push('-');
+        out.push_str(&trim_session_endpoint(&s.end));
+    }
+    out
+}
+
+/// Convert wire `YYYYMMDD-HH:MM:SS` to compact `YYYYMMDD:HHMM`.
+/// Returns the input unchanged if the format does not match.
+fn trim_session_endpoint(s: &str) -> String {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 14 && bytes[8] == b'-' && bytes[11] == b':' {
+        let mut out = String::with_capacity(13);
+        out.push_str(&s[..8]);
+        out.push(':');
+        out.push_str(&s[9..11]);
+        out.push_str(&s[12..14]);
+        out
+    } else {
+        s.to_string()
+    }
 }
 
 // ─── Matching symbols search ───
@@ -883,6 +938,52 @@ mod tests {
 
         assert_eq!(sched.liquid_hours[0].start, "20260311-13:30:00");
         assert_eq!(sched.liquid_hours[0].end, "20260311-20:00:00");
+    }
+
+    #[test]
+    fn parse_schedule_dual_flag_appends_to_both() {
+        // 24h venues (FOREX) emit sessions with both 6843=1 AND 6844=1.
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "U"),
+                (TAG_SUB_PROTOCOL, "107"),
+                (TAG_SCHEDULE_TIMEZONE, "US/Eastern"),
+                (TAG_SESSION_COUNT, "1"),
+                (TAG_SESSION_START, "20260427-22:15:00"),
+                (TAG_SESSION_END, "20260428-22:00:00"),
+                (TAG_TRADE_DATE, "20260427"),
+                (TAG_IS_TRADING_HOURS, "1"),
+                (TAG_IS_LIQUID_HOURS, "1"),
+            ],
+            1,
+        );
+        let sched = parse_schedule_response(&msg).unwrap();
+        assert_eq!(sched.trading_hours.len(), 1);
+        assert_eq!(sched.liquid_hours.len(), 1);
+        assert_eq!(sched.trading_hours[0].start, sched.liquid_hours[0].start);
+    }
+
+    #[test]
+    fn format_sessions_string_basic() {
+        let sessions = vec![
+            ScheduleSession {
+                start: "20260427-13:30:00".into(),
+                end: "20260427-20:00:00".into(),
+                trade_date: "20260427".into(),
+            },
+            ScheduleSession {
+                start: "20260428-13:30:00".into(),
+                end: "20260428-20:00:00".into(),
+                trade_date: "20260428".into(),
+            },
+        ];
+        let s = format_sessions_string(&sessions);
+        assert_eq!(s, "20260427:1330-20260427:2000;20260428:1330-20260428:2000");
+    }
+
+    #[test]
+    fn format_sessions_string_empty() {
+        assert_eq!(format_sessions_string(&[]), "");
     }
 
     #[test]

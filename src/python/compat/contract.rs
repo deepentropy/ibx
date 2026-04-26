@@ -1947,6 +1947,12 @@ pub struct ContractDetails {
     pub isin: String,
     #[pyo3(get, set)]
     pub min_size: f64,
+    #[pyo3(get, set)]
+    pub trading_hours: String,
+    #[pyo3(get, set)]
+    pub liquid_hours: String,
+    #[pyo3(get, set)]
+    pub time_zone_id: String,
 }
 
 #[pymethods]
@@ -1998,6 +2004,9 @@ impl ContractDetails {
             country: def.country.clone(),
             isin: def.isin.clone(),
             min_size: def.min_size,
+            trading_hours: def.trading_hours.clone().unwrap_or_default(),
+            liquid_hours: def.liquid_hours.clone().unwrap_or_default(),
+            time_zone_id: def.time_zone_id.clone().unwrap_or_default(),
         }
     }
 }

@@ -1605,6 +1605,7 @@ fn process_msgs_dispatches_scanner_data() {
     let (client, _rx, shared) = test_client();
     shared.reference.push_scanner_data(3, ScannerResult {
         con_ids: vec![265598, 756733],
+        entries: vec![],
         scan_time: "2026-03-13".into(),
     });
     let mut w = RecordingWrapper::default();

@@ -294,6 +294,7 @@ impl HotLoop {
                 &mut self.ccp_conn, &mut self.context, &self.shared,
                 &self.event_tx, &mut self.hb, &self.account_id,
             );
+            self.ccp.sweep_pending_schedule_pairs(&self.shared, &self.event_tx);
             if ccp_was_ok && self.ccp.disconnected {
                 self.spawn_ccp_reconnect();
             }

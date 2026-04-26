@@ -597,6 +597,10 @@ impl Default for BarData {
 // ── ContractDetails ──
 
 /// ibapi-compatible ContractDetails.
+///
+/// `trading_hours` / `liquid_hours` carry semicolon-delimited UTC session strings
+/// (`"YYYYMMDD:HHMM-YYYYMMDD:HHMM;..."`) when populated. Consumers should convert
+/// to local time using `time_zone_id` for display.
 #[derive(Clone, Debug, Default)]
 pub struct ContractDetails {
     pub contract: Contract,
@@ -607,6 +611,9 @@ pub struct ContractDetails {
     pub long_name: String,
     pub last_trade_date: String,
     pub multiplier: String,
+    pub trading_hours: Option<String>,
+    pub liquid_hours: Option<String>,
+    pub time_zone_id: Option<String>,
 }
 
 impl ContractDetails {
@@ -643,6 +650,9 @@ impl ContractDetails {
             long_name: def.long_name.clone(),
             last_trade_date: def.last_trade_date.clone(),
             multiplier: if def.multiplier != 1.0 { format!("{}", def.multiplier) } else { String::new() },
+            trading_hours: def.trading_hours.clone(),
+            liquid_hours: def.liquid_hours.clone(),
+            time_zone_id: def.time_zone_id.clone(),
         }
     }
 }

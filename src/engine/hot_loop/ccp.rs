@@ -19,6 +19,18 @@ use super::{HeartbeatState, emit, parse_price_tag};
 /// Convert a FIX OrderID hex string (e.g. "00cf16ed.000225ed.69ca0941.0001") to a stable i64 permId.
 /// Uses FNV-1a hash of the first 3 dot-segments (the stable prefix) so that permId
 /// remains constant across modifications (the last segment increments on each modify).
+/// Extract the value of a single FIX tag from a raw message.
+/// `prefix` should include the tag number and `=` (e.g. `b"6256="`).
+fn extract_tag_value(msg: &[u8], prefix: &[u8]) -> Option<String> {
+    use crate::protocol::fix::SOH;
+    for part in msg.split(|&b| b == SOH) {
+        if part.starts_with(prefix) {
+            return Some(String::from_utf8_lossy(&part[prefix.len()..]).into_owned());
+        }
+    }
+    None
+}
+
 fn perm_id_from_fix_order_id(s: &str) -> i64 {
     // Hash only the stable prefix: "00cf16ed.000225ed.69ca0941" (drop ".0001")
     let stable = match s.rmatch_indices('.').next() {
@@ -50,6 +62,19 @@ pub(crate) struct CcpState {
     pub(crate) ccp_sign_key: Vec<u8>,
     /// HMAC signing IV — advances only for signed messages, independent of unsigned ones.
     pub(crate) ccp_sign_iv: std::sync::Mutex<Vec<u8>>,
+    /// Secdef replies awaiting paired schedule reply (joined by tag 6256).
+    pub(crate) pending_schedule_pair: Vec<PendingSchedulePair>,
+    /// Counter for internal schedule subscribe req IDs.
+    pub(crate) next_schedule_sub_id: u32,
+}
+
+/// State for a secdef reply awaiting its paired schedule reply.
+pub(crate) struct PendingSchedulePair {
+    pub api_req_id: u32,
+    pub join_key: String,
+    pub def: crate::control::contracts::ContractDefinition,
+    pub is_last: bool,
+    pub deadline: Instant,
 }
 
 impl CcpState {
@@ -66,6 +91,8 @@ impl CcpState {
             kut_min_tick: std::collections::HashMap::new(),
             ccp_sign_key: Vec::new(),
             ccp_sign_iv: std::sync::Mutex::new(Vec::new()),
+            pending_schedule_pair: Vec::new(),
+            next_schedule_sub_id: 1,
         }
     }
 
@@ -185,6 +212,7 @@ impl CcpState {
                             }
                         }
                         "102" => self.handle_exchange_list(msg, shared),
+                        "107" => self.handle_schedule_reply(msg, shared, event_tx),
                         _ => {}
                     }
                 }
@@ -286,12 +314,27 @@ impl CcpState {
                         });
                     }
                     if let Some(&req_id) = self.pending_secdef.first() {
-                        shared.reference.push_contract_details(req_id, def.clone());
-                        emit(event_tx, Event::ContractDetails { req_id, details: def });
+                        let join_key = def.join_key.clone();
                         if is_last {
                             self.pending_secdef.remove(0);
-                            shared.reference.push_contract_details_end(req_id);
-                            emit(event_tx, Event::ContractDetailsEnd(req_id));
+                        }
+                        if join_key.is_empty() {
+                            // No join key — emit immediately without schedule data.
+                            shared.reference.push_contract_details(req_id, def.clone());
+                            emit(event_tx, Event::ContractDetails { req_id, details: def });
+                            if is_last {
+                                shared.reference.push_contract_details_end(req_id);
+                                emit(event_tx, Event::ContractDetailsEnd(req_id));
+                            }
+                        } else {
+                            self.pending_schedule_pair.push(PendingSchedulePair {
+                                api_req_id: req_id,
+                                join_key: join_key.clone(),
+                                def,
+                                is_last,
+                                deadline: Instant::now() + std::time::Duration::from_secs(3),
+                            });
+                            self.send_schedule_subscribe(&join_key, ccp_conn, hb);
                         }
                     }
                 }
@@ -736,6 +779,110 @@ impl CcpState {
             context.account.net_liquidation = (val * PRICE_SCALE as f64) as Price;
         }
         shared.portfolio.set_account(context.account());
+    }
+
+    /// Subscribe to the schedule paired with a secdef reply, joined on tag 6256.
+    /// Internal subscription (no API-client req_id exposed); reply arrives as
+    /// 35=U|6040=107 and is matched back to the secdef via 6256.
+    fn send_schedule_subscribe(
+        &mut self,
+        join_key: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        if let Some(conn) = ccp_conn.as_mut() {
+            let sub_id = self.next_schedule_sub_id;
+            self.next_schedule_sub_id += 1;
+            let sub_id_str = format!("SchedSub.{}", sub_id);
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (crate::control::contracts::TAG_SUB_PROTOCOL,
+                    crate::control::contracts::SUB_PROTOCOL_SCHEDULE_SUBSCRIBE),
+                (320, &sub_id_str),
+                (crate::control::contracts::TAG_SCHEDULE_JOIN_KEY, join_key),
+            ]);
+            hb.last_ccp_sent = Instant::now();
+        }
+    }
+
+    /// Drop pending schedule pairs past their deadline, emitting partial details.
+    pub(crate) fn sweep_pending_schedule_pairs(
+        &mut self,
+        shared: &SharedState,
+        event_tx: &Option<Sender<Event>>,
+    ) {
+        let now = Instant::now();
+        let mut emit_now: Vec<PendingSchedulePair> = Vec::new();
+        self.pending_schedule_pair.retain(|p| {
+            if now >= p.deadline {
+                let mut def = p.def.clone();
+                def.trading_hours = None;
+                def.liquid_hours = None;
+                def.time_zone_id = None;
+                emit_now.push(PendingSchedulePair {
+                    api_req_id: p.api_req_id,
+                    join_key: p.join_key.clone(),
+                    def,
+                    is_last: p.is_last,
+                    deadline: p.deadline,
+                });
+                log::warn!("Schedule pair timeout: api_req_id={} join_key={}",
+                    p.api_req_id, p.join_key);
+                false
+            } else {
+                true
+            }
+        });
+        for p in emit_now {
+            shared.reference.push_contract_details(p.api_req_id, p.def);
+            emit(event_tx, Event::ContractDetailsEnd(p.api_req_id));
+            if p.is_last {
+                shared.reference.push_contract_details_end(p.api_req_id);
+            }
+        }
+    }
+
+    /// Match a 6040=107 schedule reply to a pending secdef pair and emit merged details.
+    fn handle_schedule_reply(
+        &mut self,
+        msg: &[u8],
+        shared: &SharedState,
+        event_tx: &Option<Sender<Event>>,
+    ) {
+        // Extract 6256 from the reply to locate the matching pair.
+        let join_key = match extract_tag_value(msg, b"6256=") {
+            Some(v) => v,
+            None => return,
+        };
+        let pos = match self.pending_schedule_pair.iter().position(|p| p.join_key == join_key) {
+            Some(p) => p,
+            None => return,
+        };
+        let mut pair = self.pending_schedule_pair.swap_remove(pos);
+        if let Some(sched) = crate::control::contracts::parse_schedule_response(msg) {
+            pair.def.time_zone_id = if sched.timezone.is_empty() {
+                None
+            } else {
+                Some(sched.timezone.clone())
+            };
+            pair.def.trading_hours = Some(
+                crate::control::contracts::format_sessions_string(&sched.trading_hours)
+            );
+            pair.def.liquid_hours = Some(
+                crate::control::contracts::format_sessions_string(&sched.liquid_hours)
+            );
+        }
+        shared.reference.push_contract_details(pair.api_req_id, pair.def.clone());
+        emit(event_tx, Event::ContractDetails {
+            req_id: pair.api_req_id,
+            details: pair.def,
+        });
+        if pair.is_last {
+            shared.reference.push_contract_details_end(pair.api_req_id);
+            emit(event_tx, Event::ContractDetailsEnd(pair.api_req_id));
+        }
     }
 
     /// Send P&L subscribe: 6040=142 with 6529=PLR.{N}|1={account}|
