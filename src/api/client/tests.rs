@@ -7,7 +7,7 @@ use crate::api::wrapper::tests::RecordingWrapper;
 use crate::bridge::SharedState;
 use crate::control::historical::{HistoricalResponse, HistoricalBar, HeadTimestampResponse};
 use crate::control::contracts::{ContractDefinition, SecurityType, SymbolMatch};
-use crate::control::scanner::ScannerResult;
+use crate::control::scanner::{ScannerEntry, ScannerResult};
 use crate::control::news::NewsHeadline;
 use crate::control::histogram::HistogramEntry;
 
@@ -1606,7 +1606,10 @@ fn process_msgs_dispatches_scanner_data() {
     let (client, _rx, shared) = test_client();
     shared.reference.push_scanner_data(3, ScannerResult {
         con_ids: vec![265598, 756733],
-        entries: vec![],
+        entries: vec![
+            ScannerEntry { con_id: 265598, ..Default::default() },
+            ScannerEntry { con_id: 756733, ..Default::default() },
+        ],
         scan_time: "2026-03-13".into(),
     });
     let mut w = RecordingWrapper::default();

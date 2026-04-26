@@ -246,7 +246,9 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
         OrderStatus::Filled => "Filled",
         OrderStatus::PartiallyFilled => "PartiallyFilled",
         OrderStatus::Cancelled => "Cancelled",
-        OrderStatus::Rejected => "Rejected",
+        // ibapi has no "Rejected" status string — rejected orders surface as "Inactive"
+        // with the rejection reason carried separately on OrderState.completedStatus.
+        OrderStatus::Rejected => "Inactive",
         OrderStatus::Inactive => "Inactive",
         OrderStatus::Uncertain => "Unknown",
     }
