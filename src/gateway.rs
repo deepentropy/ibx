@@ -25,6 +25,36 @@ use crate::protocol::fixcomp;
 use crate::protocol::ns;
 use crate::types::ControlCommand;
 
+/// Parse the `PRIV_LAB_MISC_URLS` blob (FIX tag 6321) into a `{key: value}` map.
+///
+/// Wire format: pipe-delimited `k=v|k=v|…`, with `%7C` escaping a literal `|`
+/// inside keys or values. Falls back to comma as the entry separator when the
+/// payload contains no `|`. Empty input yields an empty map; entries without
+/// `=` or with an empty key are dropped.
+pub fn parse_misc_urls(s: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if s.is_empty() {
+        return out;
+    }
+    let sep = if s.contains('|') { '|' } else { ',' };
+    for entry in s.split(sep) {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = entry.split_once('=') else {
+            continue;
+        };
+        let key = k.trim().replace("%7C", "|").replace("%7c", "|");
+        let val = v.trim().replace("%7C", "|").replace("%7c", "|");
+        if key.is_empty() {
+            continue;
+        }
+        out.insert(key, val);
+    }
+    out
+}
+
 /// Compute token short hash for farm logon.
 pub fn token_short_hash(session_token: &BigUint) -> String {
     let token_bytes = session_token.to_bytes_be();
@@ -927,6 +957,7 @@ impl Gateway {
         let mut raw_family_codes = String::new();
         let mut raw_news_providers = String::new();
         let mut white_branding_id = String::new();
+        let mut raw_misc_urls = String::new();
 
         for _ in 0..5 {
             let response = fix_read(&mut tls)?;
@@ -983,6 +1014,26 @@ impl Gateway {
             }
             if let Some(v) = fields.get(&6571) {
                 if white_branding_id.is_empty() { white_branding_id = v.clone(); }
+            }
+            // Tag 6321: PRIV_LAB_MISC_URLS — try parsed fields first, then raw byte search.
+            // Mirrors the 8035 defensive scan because the value can carry `|` separators
+            // that confuse downstream parsers if a chunk is fragmented.
+            if raw_misc_urls.is_empty() {
+                if let Some(v) = fields.get(&6321) {
+                    raw_misc_urls = v.clone();
+                    log::info!("Found misc URLs from logon ACK ({} bytes)", raw_misc_urls.len());
+                } else {
+                    let marker = b"\x016321=";
+                    if let Some(pos) = response.windows(marker.len()).position(|w| w == marker) {
+                        let val_start = pos + marker.len();
+                        if let Some(end) = response[val_start..].iter().position(|&b| b == SOH) {
+                            raw_misc_urls = String::from_utf8_lossy(
+                                &response[val_start..val_start + end],
+                            ).to_string();
+                            log::info!("Found misc URLs from logon ACK byte scan ({} bytes)", raw_misc_urls.len());
+                        }
+                    }
+                }
             }
 
             // Stop once we have the logon ACK or server config message
@@ -1070,6 +1121,9 @@ impl Gateway {
             } else if part.starts_with("6571=") && white_branding_id.is_empty() {
                 white_branding_id = part[5..].to_string();
                 log::info!("Found white branding ID from init response");
+            } else if part.starts_with("6321=") && raw_misc_urls.is_empty() {
+                raw_misc_urls = part[5..].to_string();
+                log::info!("Found misc URLs from init response ({} bytes)", raw_misc_urls.len());
             }
         }
         tls.get_ref().set_read_timeout(None)?;
@@ -1151,7 +1205,7 @@ impl Gateway {
             raw_family_codes,
             raw_news_providers,
             white_branding_id,
-            misc_urls: std::collections::HashMap::new(),
+            misc_urls: parse_misc_urls(&raw_misc_urls),
             ccp_sign_key,
             ccp_sign_iv,
             pending_secondary_farms: pending_secondary,
@@ -1454,6 +1508,63 @@ mod tests {
     fn days_to_ymd_epoch() {
         let (y, m, d) = days_to_ymd(0);
         assert_eq!((y, m, d), (1970, 1, 1));
+    }
+
+    #[test]
+    fn parse_misc_urls_pipe_separated() {
+        let m = parse_misc_urls("region_dam=ny5wwwdam1.ibllc.com|region_webserver=ny5wwwgw1.ibllc.com|nossl=0");
+        assert_eq!(m.len(), 3);
+        assert_eq!(m.get("region_dam").map(String::as_str), Some("ny5wwwdam1.ibllc.com"));
+        assert_eq!(m.get("region_webserver").map(String::as_str), Some("ny5wwwgw1.ibllc.com"));
+        assert_eq!(m.get("nossl").map(String::as_str), Some("0"));
+    }
+
+    #[test]
+    fn parse_misc_urls_pct_encoded_pipe() {
+        let m = parse_misc_urls("a=1|b=2|c%7Cd=3");
+        assert_eq!(m.len(), 3);
+        assert_eq!(m.get("a").map(String::as_str), Some("1"));
+        assert_eq!(m.get("b").map(String::as_str), Some("2"));
+        assert_eq!(m.get("c|d").map(String::as_str), Some("3"));
+    }
+
+    #[test]
+    fn parse_misc_urls_pct_encoded_pipe_in_value() {
+        let m = parse_misc_urls("a=x%7Cy");
+        assert_eq!(m.get("a").map(String::as_str), Some("x|y"));
+    }
+
+    #[test]
+    fn parse_misc_urls_pct_encoded_lowercase() {
+        let m = parse_misc_urls("a=x%7cy");
+        assert_eq!(m.get("a").map(String::as_str), Some("x|y"));
+    }
+
+    #[test]
+    fn parse_misc_urls_empty_input() {
+        assert!(parse_misc_urls("").is_empty());
+    }
+
+    #[test]
+    fn parse_misc_urls_comma_fallback() {
+        let m = parse_misc_urls("a=1,b=2,c=3");
+        assert_eq!(m.len(), 3);
+        assert_eq!(m.get("b").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn parse_misc_urls_drops_malformed_entries() {
+        let m = parse_misc_urls("a=1|nokv|=val|b=2");
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.get("a").map(String::as_str), Some("1"));
+        assert_eq!(m.get("b").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn parse_misc_urls_value_with_equals() {
+        // split_once stops at first `=`, so URLs with query strings round-trip.
+        let m = parse_misc_urls("cookbook=https://x.example/path?a=1&b=2");
+        assert_eq!(m.get("cookbook").map(String::as_str), Some("https://x.example/path?a=1&b=2"));
     }
 
     #[test]
