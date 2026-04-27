@@ -256,8 +256,17 @@ pub fn parse_news_payload(raw: &[u8]) -> (Vec<NewsHeadline>, bool) {
                 // Parse pipe-delimited: headline|time|articleId|status|hasContent|providerCode|conIds...
                 let parts: Vec<&str> = value.split('|').collect();
                 if parts.len() >= 6 {
+                    let raw = parts[0];
+                    let headline = if raw.starts_with('{') {
+                        match raw.find('}') {
+                            Some(i) => raw[i + 1..].to_string(),
+                            None => raw.to_string(),
+                        }
+                    } else {
+                        raw.to_string()
+                    };
                     headlines.push(NewsHeadline {
-                        headline: parts[0].to_string(),
+                        headline,
                         time: parts[1].to_string(),
                         article_id: parts[2].to_string(),
                         provider_code: parts[5].to_string(),
@@ -447,6 +456,22 @@ mod tests {
         assert_eq!(headlines[0].provider_code, "BRFG");
         assert_eq!(headlines[1].headline, "Guidance raised");
         assert!(!has_more);
+    }
+
+    #[test]
+    fn parse_news_payload_strips_metadata_prefix() {
+        let props = b"h:0={A=1;B=2}Earnings beat|2026-01-15 10:00:00|BRFG$100|200|1|BRFG|265598\n\
+                       h:1={}Empty meta|2026-01-15 11:00:00|BRFG$101|200|1|BRFG|265598\n\
+                       h:2=Plain headline|2026-01-15 12:00:00|BRFG$102|200|1|BRFG|265598\n";
+        let zip = build_test_zip(b"ENTRY", props);
+        let mut payload = b"200\n".to_vec();
+        payload.extend_from_slice(&zip);
+
+        let (headlines, _) = parse_news_payload(&payload);
+        assert_eq!(headlines.len(), 3);
+        assert_eq!(headlines[0].headline, "Earnings beat");
+        assert_eq!(headlines[1].headline, "Empty meta");
+        assert_eq!(headlines[2].headline, "Plain headline");
     }
 
     #[test]
