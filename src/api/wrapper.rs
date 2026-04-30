@@ -347,6 +347,12 @@ pub mod tests {
         fn historical_ticks(&mut self, req_id: i64, _ticks: &HistoricalTickData, done: bool) {
             self.events.push(format!("historical_ticks:{req_id}:{done}"));
         }
+        fn historical_ticks_bid_ask(&mut self, req_id: i64, _ticks: &HistoricalTickData, done: bool) {
+            self.events.push(format!("historical_ticks_bid_ask:{req_id}:{done}"));
+        }
+        fn historical_ticks_last(&mut self, req_id: i64, _ticks: &HistoricalTickData, done: bool) {
+            self.events.push(format!("historical_ticks_last:{req_id}:{done}"));
+        }
         fn historical_schedule(
             &mut self, req_id: i64, _start: &str, _end: &str,
             tz: &str, sessions: &[(String, String, String)],

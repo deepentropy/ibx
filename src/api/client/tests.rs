@@ -1757,6 +1757,35 @@ fn process_msgs_dispatches_historical_ticks() {
     assert!(w.events.iter().any(|e| e == "historical_ticks:8:true"));
 }
 
+/// Regression: historical-tick variants must route to their variant-specific
+/// callback (iso ibapi). Was: all three flowed through historical_ticks().
+#[test]
+fn process_msgs_routes_historical_tick_variants() {
+    let (client, _rx, shared) = test_client();
+    shared.reference.push_historical_ticks(10, HistoricalTickData::Last(vec![
+        HistoricalTickLast {
+            time: "2026-01-15 09:30:00".into(), price: 150.5, size: 100,
+            exchange: "ARCA".into(), special_conditions: "".into(),
+        },
+    ]), "TRADES".into(), true);
+    shared.reference.push_historical_ticks(11, HistoricalTickData::BidAsk(vec![
+        HistoricalTickBidAsk {
+            time: "2026-01-15 09:30:01".into(), bid_price: 150.4, ask_price: 150.6,
+            bid_size: 200, ask_size: 300,
+        },
+    ]), "BID_ASK".into(), true);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+
+    assert!(w.events.iter().any(|e| e == "historical_ticks_last:10:true"),
+        "Last variant must route to historical_ticks_last; got {:?}", w.events);
+    assert!(w.events.iter().any(|e| e == "historical_ticks_bid_ask:11:true"),
+        "BidAsk variant must route to historical_ticks_bid_ask; got {:?}", w.events);
+    // Generic historical_ticks should NOT fire for Last or BidAsk.
+    assert!(!w.events.iter().any(|e| e == "historical_ticks:10:true"));
+    assert!(!w.events.iter().any(|e| e == "historical_ticks:11:true"));
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  process_msgs — real-time bars
 // ═══════════════════════════════════════════════════════════════════

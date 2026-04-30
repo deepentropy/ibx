@@ -310,9 +310,13 @@ impl EClient {
             wrapper.histogram_data(req_id as i64, &items);
         }
 
-        // Historical ticks
+        // Historical ticks — route to the variant-specific callback (iso ibapi).
         for (req_id, data, _query_id, done) in self.shared.reference.drain_historical_ticks() {
-            wrapper.historical_ticks(req_id as i64, &data, done);
+            match &data {
+                HistoricalTickData::Midpoint(_) => wrapper.historical_ticks(req_id as i64, &data, done),
+                HistoricalTickData::Last(_) => wrapper.historical_ticks_last(req_id as i64, &data, done),
+                HistoricalTickData::BidAsk(_) => wrapper.historical_ticks_bid_ask(req_id as i64, &data, done),
+            }
         }
 
         // Real-time bars
