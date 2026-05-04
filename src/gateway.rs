@@ -393,9 +393,6 @@ pub fn connect_farm(
         ));
     }
     channel.process_server_hello(&parts[2..]);
-    // Farm channels HMAC over `ciphertext` only (auth channel uses
-    // `iv || ciphertext`). See ib-agent#126.
-    channel.set_farm_mode(true);
     log::info!("{} key exchange complete", farm_id);
 
     // Encrypted logon
@@ -1358,20 +1355,13 @@ impl Gateway {
         // Secondary farms (cashfarm, usfuture, eufarm, jfarm) connect via background
         // threads so the hot loop can start immediately and service heartbeats on
         // already-connected farms without starvation.
-        // Per ib-agent#133: the SOFT token is `SHA1(strip(K_srp))`, computed
-        // client-side. Paper accounts receive the pre-hashed token via the XYZ
-        // AUTH_FINISH(771) state=5 side channel; live accounts have no side
-        // channel and must recompute. (Tag 6386 is an S3 object key, not a
-        // token source.)
-        let farm_token: BigUint = soft_token.clone()
-            .unwrap_or_else(|| {
-                let k_bytes = session_key.to_bytes_be();
-                let stripped = strip_leading_zeros(&k_bytes);
-                let soft_bytes = Sha1::digest(stripped);
-                log::info!("Farm token: derived SOFT = SHA1(strip(K)) ({} bytes)",
-                    soft_bytes.len());
-                BigUint::from_bytes_be(&soft_bytes)
-            });
+        // Per ib-agent#125/#131/#133: the SOFT token is `SHA1(strip(S))` where
+        // S is the SRP shared secret. `do_srp` returns exactly that via
+        // `srp_compute_k`, so `session_key` IS the SOFT token — no further
+        // hashing. (Tag 8483's per-channel SHA1 is added by `token_short_hash`
+        // at the build-logon site.) Tag 6386 is an S3 object key, not a token
+        // source.
+        let farm_token: BigUint = soft_token.clone().unwrap_or_else(|| session_key.clone());
         // Per ib-agent#128: read the farm names from the auth-server's
         // routing tags rather than hardcoding `usfarm`/`ushmds`. EU accounts
         // are routed to `eufarm`/`euhmds`/`secdefeu`, US to `usfarm`/`ushmds`,
