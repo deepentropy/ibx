@@ -1196,52 +1196,45 @@ impl Gateway {
         send_init(&[(35, "U"), (52, &now), (6040, "72"), (6536, &today_start), (6537, &now), (6556, "today4")])?;
         send_init(&[(35, "U"), (52, &now), (6040, "74"), (1, ""), (6544, "2")])?;
         send_init(&[(35, "U"), (52, &now), (6040, "76"), (1, ""), (6565, "1")])?;
-        send_init(&[(35, "U"), (52, &now), (6040, "6"), (6036, "1"), (6095, &account), (6529, "AR.3")])?;
         for _ in 0..92 {
             send_init(&[(35, "U"), (52, &now), (6040, "80")])?;
         }
-        // Order status request
-        ccp_seq += 1;
-        let status_req = fix_build(&[(35, "H"), (52, &now), (11, "*"), (54, "*"), (55, "*")], ccp_seq);
-        tls.write_all(&status_req)?;
         tls.flush()?;
-        log::info!("Init sequence sent ({} messages, seq now {})", 101, ccp_seq);
+        log::info!("Init sequence sent ({} messages, seq now {})", 99, ccp_seq);
 
         // Drain init responses — extract account ID + farm routing tags.
-        // The 35=A logon ACK body for live accounts is ~48 kB and arrives in
-        // bursts: per ib-agent#129 the routing tags 6145/6171/8008 sit at byte
-        // offsets ~22000-32000. The previous 3-second timeout was firing
-        // mid-burst and truncating around 29.7 kB, hiding the routing.
-        // Use a longer timeout AND tolerate one spurious idle gap before
-        // declaring the burst complete.
-        tls.get_ref().set_read_timeout(Some(Duration::from_secs(15)))?;
-        let mut init_data = Vec::new();
+        // Per ib-agent#134 read-throughput investigation (2026-05-05):
+        // the burst's bulk (~28 kB compressed) arrives in ~300 ms, after
+        // which the server emits 67-byte keep-alive trickles every ~10 s
+        // until it FINs the socket at ~140 s. The previous 15-s timeout
+        // therefore wasted 130+ s reading those trickles, which pushed our
+        // grace-window app messages past the server's deadline. Use a 1-s
+        // timeout and exit on the first idle gap so we send AR + 35=H
+        // within ~1.3 s of burst-end.
+        tls.get_ref().set_read_timeout(Some(Duration::from_secs(1)))?;
+        let mut init_data: Vec<u8> = Vec::with_capacity(65536);
         let mut tmp_buf = vec![0u8; 65536];
-        let mut idle_gaps = 0usize;
+        let read_start = std::time::Instant::now();
         loop {
             match tls.read(&mut tmp_buf) {
                 Ok(0) => break,
-                Ok(n) => {
-                    init_data.extend_from_slice(&tmp_buf[..n]);
-                    idle_gaps = 0;
-                }
+                Ok(n) => init_data.extend_from_slice(&tmp_buf[..n]),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock
                     || e.kind() == io::ErrorKind::TimedOut =>
                 {
-                    // Tolerate one timeout if we have less than the
-                    // typical-live-ACK threshold (~40 kB). This catches
-                    // mid-burst pauses without hanging when the server
-                    // genuinely has no more to send (paper accounts emit
-                    // ~30 kB so one spurious gap there is also fine).
-                    idle_gaps += 1;
-                    if idle_gaps >= 2 || init_data.len() >= 60_000 {
-                        break;
-                    }
+                    // First 1-s idle gap = burst is done. Anything past
+                    // this is the server's 10-s keep-alive trickle, which
+                    // we don't want to drain (would push grace-window
+                    // messages past the server-side deadline).
+                    break;
                 }
                 Err(e) => return Err(e),
             }
         }
-        log::info!("Init response: {} bytes (idle gaps: {})", init_data.len(), idle_gaps);
+        log::info!(
+            "Init response: {} bytes in {:?}",
+            init_data.len(), read_start.elapsed(),
+        );
 
         // The auth-server's logon ACK arrives DEFLATE-compressed inside one or
         // more `8=FIXCOMP` envelopes (per ib-agent#129). The compressed body
@@ -1330,6 +1323,94 @@ impl Gateway {
                 log::info!("Found secdef farm route in init response: {}", secdef_route);
             }
         }
+
+        // Per ib-agent#134: CCP server FINs the connection ~12s after the
+        // init-burst response if no application-level traffic arrives in the
+        // grace window — heartbeats alone do not satisfy "client alive".
+        // Send Account-Register (35=U|6040=6, account in tag 6095) followed
+        // by a wildcard OrderStatusRequest (35=H|11=*|55=*|54=*) right after
+        // the inbound burst-end, before farm logons begin. Both are sent in
+        // plain FIX over TLS (the CCP socket has no AES/HMAC envelope at
+        // this stage; encryption is set up only after `Connection::new`).
+        let post_burst_account = if account_id.is_empty() {
+            config.username.clone()
+        } else {
+            account_id.clone()
+        };
+        let post_burst_now = chrono_free_timestamp();
+        ccp_seq += 1;
+        let ar_msg = fix_build(
+            &[
+                (35, "U"),
+                (52, &post_burst_now),
+                (6040, "6"),
+                (6036, "1"),
+                (6529, "AR.1"),
+                (6095, &post_burst_account),
+            ],
+            ccp_seq,
+        );
+        tls.write_all(&ar_msg)?;
+        ccp_seq += 1;
+        let osr_msg = fix_build(
+            &[
+                (35, "H"),
+                (52, &post_burst_now),
+                (11, "*"),
+                (55, "*"),
+                (54, "*"),
+            ],
+            ccp_seq,
+        );
+        tls.write_all(&osr_msg)?;
+        ccp_seq += 1;
+        // PortfolioLoginRequest — third post-burst app message in the Java
+        // capture (tag34=104). Account goes in tag 1 here, not 6095.
+        let plr_msg = fix_build(
+            &[
+                (35, "U"),
+                (52, &post_burst_now),
+                (6040, "142"),
+                (6529, "PLR.1"),
+                (1, &post_burst_account),
+            ],
+            ccp_seq,
+        );
+        tls.write_all(&plr_msg)?;
+        ccp_seq += 1;
+        // DataRequest — Java tag34=105: `1={acc}|6712=1|6556=DR.{N}`
+        let dr_msg = fix_build(
+            &[
+                (35, "U"),
+                (52, &post_burst_now),
+                (6040, "91"),
+                (1, &post_burst_account),
+                (6712, "1"),
+                (6556, "DR.2"),
+            ],
+            ccp_seq,
+        );
+        tls.write_all(&dr_msg)?;
+        ccp_seq += 1;
+        // 6040=74 — Java tag34=106: `1={acc}|6700=Core|6544=2`
+        let core_msg = fix_build(
+            &[
+                (35, "U"),
+                (52, &post_burst_now),
+                (6040, "74"),
+                (1, &post_burst_account),
+                (6700, "Core"),
+                (6544, "2"),
+            ],
+            ccp_seq,
+        );
+        tls.write_all(&core_msg)?;
+        tls.flush()?;
+        log::info!(
+            "CCP post-burst grace messages sent (AR+H+PLR+DR+74), seq now {}",
+            ccp_seq
+        );
+
         tls.get_ref().set_read_timeout(None)?;
 
         // Auth connection (non-blocking TLS for hot loop)
