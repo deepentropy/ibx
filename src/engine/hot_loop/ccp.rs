@@ -31,6 +31,19 @@ fn extract_tag_value(msg: &[u8], prefix: &[u8]) -> Option<String> {
     None
 }
 
+fn sec_type_to_str(sec_type: crate::control::contracts::SecurityType) -> &'static str {
+    match sec_type {
+        crate::control::contracts::SecurityType::Stock => "STK",
+        crate::control::contracts::SecurityType::Option => "OPT",
+        crate::control::contracts::SecurityType::Future => "FUT",
+        crate::control::contracts::SecurityType::Forex => "CASH",
+        crate::control::contracts::SecurityType::Index => "IND",
+        crate::control::contracts::SecurityType::Bond => "BOND",
+        crate::control::contracts::SecurityType::Warrant => "WAR",
+        _ => "STK",
+    }
+}
+
 fn perm_id_from_fix_order_id(s: &str) -> i64 {
     // Hash only the stable prefix: "00cf16ed.000225ed.69ca0941" (drop ".0001")
     let stable = match s.rmatch_indices('.').next() {
@@ -70,6 +83,14 @@ pub(crate) struct CcpState {
     pub(crate) pending_schedule_pair: Vec<PendingSchedulePair>,
     /// Counter for internal schedule subscribe req IDs.
     pub(crate) next_schedule_sub_id: u32,
+    /// Fan-out state for by-symbol secdef requests. Each entry tracks the
+    /// per-exchange `35=c` requests we issued in response to the master
+    /// `35=d|320={api_req_id}|6046={list}` reply, and counts the per-exchange
+    /// `35=d` replies as they arrive. `contract_details_end` fires for
+    /// `api_req_id` once `received >= fanout_req_ids.len()`.
+    pub(crate) pending_fanout: Vec<PendingFanout>,
+    /// Counter for internal fan-out req IDs (tag 320 on per-exchange `35=c`).
+    pub(crate) next_fanout_id: u32,
 }
 
 /// State for a secdef reply awaiting its paired schedule reply.
@@ -79,6 +100,15 @@ pub(crate) struct PendingSchedulePair {
     pub def: crate::control::contracts::ContractDefinition,
     pub is_last: bool,
     pub deadline: Instant,
+}
+
+/// In-flight by-symbol fan-out: per-exchange `35=c` requests we sent after
+/// the master `35=d` reply. Each per-exchange `35=d` reply (matched by tag
+/// 320 string) is forwarded to `api_req_id` as one `contract_details`.
+pub(crate) struct PendingFanout {
+    pub api_req_id: u32,
+    pub fanout_req_ids: Vec<String>,
+    pub received: usize,
 }
 
 impl CcpState {
@@ -97,6 +127,8 @@ impl CcpState {
             ccp_sign_iv: std::sync::Mutex::new(Vec::new()),
             pending_schedule_pair: Vec::new(),
             next_schedule_sub_id: 1,
+            pending_fanout: Vec::new(),
+            next_fanout_id: 1,
         }
     }
 
@@ -292,23 +324,54 @@ impl CcpState {
             "UT" | "UM" | "RL" => handle_account_update(msg, context, shared),
             "UP" => handle_position_update(&parsed, context, shared, event_tx),
             "d" => {
+                let response_req_id = crate::control::contracts::secdef_response_req_id(msg);
+                let fanout_idx = response_req_id.as_ref().and_then(|rid| {
+                    self.pending_fanout.iter().position(|p| {
+                        p.fanout_req_ids.iter().any(|id| id == rid)
+                    })
+                });
+                if let Some(idx) = fanout_idx {
+                    if let Some(def) = crate::control::contracts::parse_secdef_response(msg) {
+                        let api_req_id = self.pending_fanout[idx].api_req_id;
+                        if def.con_id != 0 {
+                            let sec_type_str = sec_type_to_str(def.sec_type);
+                            shared.reference.cache_contract(def.con_id as i64, api::Contract {
+                                con_id: def.con_id as i64,
+                                symbol: def.symbol.clone(),
+                                sec_type: sec_type_str.to_string(),
+                                exchange: def.exchange.clone(),
+                                currency: def.currency.clone(),
+                                local_symbol: def.local_symbol.clone(),
+                                primary_exchange: def.primary_exchange.clone(),
+                                trading_class: def.trading_class.clone(),
+                                ..Default::default()
+                            });
+                        }
+                        shared.reference.push_contract_details(api_req_id, def.clone());
+                        emit(event_tx, Event::ContractDetails { req_id: api_req_id, details: def });
+                        self.pending_fanout[idx].received += 1;
+                        if self.pending_fanout[idx].received >= self.pending_fanout[idx].fanout_req_ids.len() {
+                            shared.reference.push_contract_details_end(api_req_id);
+                            emit(event_tx, Event::ContractDetailsEnd(api_req_id));
+                            self.pending_fanout.swap_remove(idx);
+                        }
+                    }
+                    let rules = crate::control::contracts::parse_market_rules(msg);
+                    if !rules.is_empty() {
+                        shared.reference.push_market_rules(rules);
+                    }
+                    return;
+                }
+
                 if let Some(def) = crate::control::contracts::parse_secdef_response(msg) {
-                    let is_last = crate::control::contracts::secdef_response_is_last(msg);
+                    let is_last_wire = crate::control::contracts::secdef_response_is_last(msg);
                     // Override: single-shot (known-conId) requests get one reply
                     // with no 323=5/6 terminator. Treat that first reply as last.
                     let single_shot = self.pending_secdef.first().map(|(_, s)| *s).unwrap_or(false);
-                    let is_last = is_last || single_shot;
+                    let is_by_symbol = self.pending_secdef.first().map(|(_, s)| !*s).unwrap_or(false);
+                    let is_last = is_last_wire || single_shot;
                     if def.con_id != 0 {
-                        let sec_type_str = match def.sec_type {
-                            crate::control::contracts::SecurityType::Stock => "STK",
-                            crate::control::contracts::SecurityType::Option => "OPT",
-                            crate::control::contracts::SecurityType::Future => "FUT",
-                            crate::control::contracts::SecurityType::Forex => "CASH",
-                            crate::control::contracts::SecurityType::Index => "IND",
-                            crate::control::contracts::SecurityType::Bond => "BOND",
-                            crate::control::contracts::SecurityType::Warrant => "WAR",
-                            _ => "STK",
-                        };
+                        let sec_type_str = sec_type_to_str(def.sec_type);
                         shared.reference.cache_contract(def.con_id as i64, api::Contract {
                             con_id: def.con_id as i64,
                             symbol: def.symbol.clone(),
@@ -321,11 +384,25 @@ impl CcpState {
                             ..Default::default()
                         });
                     }
+                    // Fan-out detection: by-symbol master reply carries the full
+                    // exchange list in tag 6046. Drop SMART/BEST and dispatch
+                    // one per-exchange `35=c` per remaining entry. The per-
+                    // exchange replies arrive on new req_ids and route through
+                    // the `pending_fanout` branch above.
+                    let fanout_exchanges: Vec<String> = if is_by_symbol && !is_last_wire {
+                        def.valid_exchanges.iter()
+                            .filter(|e| !matches!(e.as_str(), "" | "SMART" | "BEST"))
+                            .cloned()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     if let Some(&(req_id, _)) = self.pending_secdef.first() {
                         let join_key = def.join_key.clone();
                         if is_last {
                             self.pending_secdef.remove(0);
                         }
+                        let con_id = def.con_id as i64;
                         if join_key.is_empty() {
                             // No join key — emit immediately without schedule data.
                             shared.reference.push_contract_details(req_id, def.clone());
@@ -343,6 +420,34 @@ impl CcpState {
                                 deadline: Instant::now() + std::time::Duration::from_secs(3),
                             });
                             self.send_schedule_subscribe(&join_key, ccp_conn, hb);
+                        }
+                        // Dispatch fan-out (or fire end immediately if the
+                        // symbol resolves to a single exchange and there's
+                        // nothing to fan out to).
+                        if is_by_symbol && !is_last_wire {
+                            self.pending_secdef.retain(|(rid, ss)| !(*rid == req_id && !*ss));
+                            if fanout_exchanges.is_empty() || con_id == 0 {
+                                shared.reference.push_contract_details_end(req_id);
+                                emit(event_tx, Event::ContractDetailsEnd(req_id));
+                            } else {
+                                let mut fanout_req_ids = Vec::with_capacity(fanout_exchanges.len());
+                                for exch in &fanout_exchanges {
+                                    let fid = format!("ibxfan-{}-{}", req_id, self.next_fanout_id);
+                                    self.next_fanout_id = self.next_fanout_id.wrapping_add(1);
+                                    let fix_exch = if exch == "SMART" { "BEST" } else { exch.as_str() };
+                                    self.send_fanout_secdef_request(&fid, con_id, fix_exch, ccp_conn, hb);
+                                    fanout_req_ids.push(fid);
+                                }
+                                log::info!(
+                                    "Secdef by-symbol fan-out: api_req_id={} con_id={} exchanges={}",
+                                    req_id, con_id, fanout_req_ids.len(),
+                                );
+                                self.pending_fanout.push(PendingFanout {
+                                    api_req_id: req_id,
+                                    fanout_req_ids,
+                                    received: 0,
+                                });
+                            }
                         }
                     }
                 }
@@ -1013,8 +1118,36 @@ impl CcpState {
             log::info!("Sent secdef-by-symbol: req_id={} symbol={} sec_type={}", req_id, symbol, sec_type);
             hb.last_ccp_sent = Instant::now();
         }
-        // By-symbol lookup may return multiple records; rely on 323=5/6 terminator.
+        // By-symbol lookup: master reply carries `6046={exch_list}`. The
+        // server never emits a 323=5/6 terminator; completion is detected
+        // by counting per-exchange fan-out replies (see `pending_fanout`).
         self.pending_secdef.push((req_id, false));
+    }
+
+    /// Send a per-exchange fan-out request after a by-symbol master reply.
+    /// Wire: `35=c|320={fanout_id}|321=2|146=1|6008={conid}|6004={exch}|`
+    pub(crate) fn send_fanout_secdef_request(
+        &mut self,
+        fanout_req_id: &str,
+        con_id: i64,
+        exchange: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        if let Some(conn) = ccp_conn.as_mut() {
+            let con_id_str = con_id.to_string();
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "c"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (crate::control::contracts::TAG_SECURITY_REQ_ID, fanout_req_id),
+                (crate::control::contracts::TAG_SECURITY_REQ_TYPE, "2"),
+                (146, "1"),
+                (crate::control::contracts::TAG_IB_CON_ID, &con_id_str),
+                (6004, exchange),
+            ]);
+            hb.last_ccp_sent = Instant::now();
+        }
     }
 
     pub(crate) fn send_matching_symbols_request(&mut self, req_id: u32, pattern: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
