@@ -9,6 +9,7 @@ use crossbeam_channel::{Sender, bounded};
 use native_tls::TlsConnector;
 use num_bigint::BigUint;
 use sha1::{Digest, Sha1};
+use zeroize::Zeroizing;
 
 use std::net::ToSocketAddrs;
 
@@ -309,7 +310,8 @@ fn try_frame_farm_msg(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
 pub struct ReconnectAuth {
     pub host: String,
     pub username: String,
-    pub password: String,
+    /// Wrapped in `Zeroizing` so the plaintext is wiped from memory on drop.
+    pub password: Zeroizing<String>,
     pub paper: bool,
     pub session_key: BigUint,
     pub session_token: BigUint,
@@ -514,7 +516,9 @@ pub fn connect_farm(
 
 /// Reconnect to the CCP (order/auth) server using cached session credentials.
 /// Performs TLS + DH + CONNECT_REQUEST, then attempts SOFT_TOKEN auth with cached K.
-/// Falls back to error if server demands full SRP (requires password we don't store).
+/// If the server signals at AUTH_START that it requires full SRP, transparently
+/// falls back to a fresh SRP handshake using the cached `username`/`password`
+/// in `ReconnectAuth` (the same path used by `Gateway::connect`).
 pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
     let token_hash = token_short_hash(&auth.session_token);
     reconnect_ccp_attempt(auth, &token_hash, &auth.host, 0)
@@ -621,19 +625,11 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
             }
         }
     } else {
-        // SRP probe fallback
-        let msg1 = crate::protocol::xyz::xyz_build_srp_v20(1, &[]);
-        tls.write_all(&crate::protocol::xyz::xyz_wrap(&msg1))?;
-        let resp = session::recv_msg(&mut tls)?;
-        match resp {
-            session::RecvMsg::Xyz { state, .. } if state == 2 => {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "CCP reconnect: server requires full SRP — password not available",
-                ));
-            }
-            _ => {}
-        }
+        // Server requires full SRP (auth_mode != 2). Re-run the SRP handshake
+        // with the credentials cached on ReconnectAuth — the same path
+        // Gateway::connect uses on first login.
+        log::info!("CCP reconnect: server requires SRP, running handshake with cached credentials");
+        do_srp(&mut tls, &auth.username, &auth.password)?;
     }
 
     // Post-auth: wait for NS_CONNECT_RESPONSE → NEWCOMMPORTTYPE → NS_FIX_START
@@ -780,7 +776,8 @@ fn do_ccp_soft_token<S: Read + Write>(stream: &mut S, session_key: &BigUint) -> 
 /// Configuration for connecting to IB.
 pub struct GatewayConfig {
     pub username: String,
-    pub password: String,
+    /// Wrapped in `Zeroizing` so the plaintext is wiped from memory on drop.
+    pub password: Zeroizing<String>,
     pub host: String,
     pub paper: bool,
     /// Accept invalid TLS certificates during auth. Default: `false` (secure).
@@ -1654,7 +1651,7 @@ impl Gateway {
         let reconnect_auth = ReconnectAuth {
             host: String::new(), // Filled by caller (Python EClient or Rust API)
             username: String::new(), // Filled by caller
-            password: String::new(), // Filled by caller
+            password: Zeroizing::new(String::new()), // Filled by caller
             paper: false, // Filled by caller
             session_key: self.session_token.clone(),
             session_token: self.session_token.clone(),
@@ -2055,7 +2052,7 @@ mod tests {
     fn gateway_config_fields() {
         let config = GatewayConfig {
             username: "user".to_string(),
-            password: "pass".to_string(),
+            password: Zeroizing::new("pass".to_string()),
             host: "cdc1.ibllc.com".to_string(),
             paper: true,
             accept_invalid_certs: false,

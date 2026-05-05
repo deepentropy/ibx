@@ -152,7 +152,7 @@ fn main() {
 
     let config = GatewayConfig {
         username,
-        password,
+        password: zeroize::Zeroizing::new(password),
         host,
         paper: true,
         accept_invalid_certs: false,

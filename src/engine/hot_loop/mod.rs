@@ -776,7 +776,13 @@ impl HotLoop {
     }
 
     /// Update caller-specific fields on the reconnect auth (host, username, password, paper).
-    pub fn update_reconnect_auth(&mut self, host: String, username: String, password: String, paper: bool) {
+    pub fn update_reconnect_auth(
+        &mut self,
+        host: String,
+        username: String,
+        password: zeroize::Zeroizing<String>,
+        paper: bool,
+    ) {
         if let Some(auth) = self.reconnect_auth.as_mut() {
             auth.host = host;
             auth.username = username;

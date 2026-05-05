@@ -113,7 +113,7 @@ impl EClient {
 
         let config = GatewayConfig {
             username,
-            password,
+            password: zeroize::Zeroizing::new(password),
             host,
             paper,
             accept_invalid_certs: false,

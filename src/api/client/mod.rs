@@ -107,7 +107,7 @@ impl EClient {
     pub fn connect(config: &EClientConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let gw_config = GatewayConfig {
             username: config.username.clone(),
-            password: config.password.clone(),
+            password: zeroize::Zeroizing::new(config.password.clone()),
             host: config.host.clone(),
             paper: config.paper,
             accept_invalid_certs: false,

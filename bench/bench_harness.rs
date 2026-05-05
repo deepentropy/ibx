@@ -77,7 +77,7 @@ impl BenchSession {
     pub fn connect(config: &BenchConfig) -> Self {
         let gw_config = GatewayConfig {
             username: config.username.clone(),
-            password: config.password.clone(),
+            password: zeroize::Zeroizing::new(config.password.clone()),
             host: config.host.clone(),
             paper: config.paper,
             accept_invalid_certs: false,

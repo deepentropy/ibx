@@ -44,6 +44,9 @@ rand = "0.9"
 # TLS
 native-tls = "0.2"
 
+# Secure-memory wrappers (zeroize plaintext credentials on drop)
+zeroize = "1"
+
 # Control plane
 tokio = { version = "1", features = ["full"] }
 crossbeam-channel = "0.5"
