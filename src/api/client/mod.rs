@@ -183,6 +183,19 @@ impl EClient {
         self.core.instrument_to_req.lock().unwrap().insert(instrument, req_id);
     }
 
+    /// Pre-populate the order tracker (for testing the dispatcher path
+    /// without going through the engine's place-order flow).
+    #[doc(hidden)]
+    pub fn track_order_for_test(
+        &self,
+        order_id: u64,
+        contract: ApiContract,
+        order: ApiOrder,
+        instrument: InstrumentId,
+    ) {
+        self.core.track_order(order_id, contract, order, instrument);
+    }
+
     /// Pre-seed a con_id → InstrumentId mapping (for testing without a live engine).
     #[doc(hidden)]
     pub fn seed_instrument(&self, con_id: i64, instrument: InstrumentId) {

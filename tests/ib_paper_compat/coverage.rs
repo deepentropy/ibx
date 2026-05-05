@@ -59,6 +59,18 @@ const KNOWN_CONTROL_COMMAND_GAPS: &[(&str, &str)] = &[
         "FetchUserInfo",
         "Gateway-local response path, no CCP round-trip in hot loop yet",
     ),
+    (
+        "SubscribePnl",
+        "P&L subscribe path covered by scenarios.rs unit tests, not in ib_paper_compat suite yet",
+    ),
+    (
+        "CancelPnl",
+        "P&L cancel path covered by scenarios.rs unit tests, not in ib_paper_compat suite yet",
+    ),
+    (
+        "FetchMktDepthExchanges",
+        "Gateway-local response path, no CCP round-trip in hot loop yet",
+    ),
 ];
 
 const KNOWN_RUST_API_GAPS: &[(&str, &str)] = &[

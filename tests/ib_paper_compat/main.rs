@@ -131,6 +131,7 @@ fn compat_suite() {
         match ibx::gateway::connect_farm(
             &config.host, "usfarm", &config.username, &config.password, config.paper,
             &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
+        18,
         ) {
             Ok(c) => { conns.farm = c; println!("  farm reconnected"); }
             Err(e) => { println!("  farm reconnect failed (may already be fresh): {}", e); }
@@ -138,6 +139,7 @@ fn compat_suite() {
         match ibx::gateway::connect_farm(
             &config.host, "ushmds", &config.username, &config.password, config.paper,
             &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded,
+        17,
         ) {
             Ok(c) => { conns.hmds = Some(c); println!("  hmds reconnected"); }
             Err(e) => { println!("  hmds reconnect failed (may already be fresh): {}", e); }

@@ -281,7 +281,8 @@ fn zero_price_quote_dispatches_correctly() {
     client.map_req_instrument(1, 0);
 
     let q = Quote { bid: 0, ask: 0, last: 0, bid_size: 0, ask_size: 0,
-        last_size: 0, high: 0, low: 0, volume: 0, close: 0, open: 0, timestamp_ns: 0 };
+        last_size: 0, high: 0, low: 0, volume: 0, close: 0, open: 0, timestamp_ns: 0,
+        bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0 };
     shared.market.push_quote(0, &q);
 
     let mut w = RecordingWrapper::default();
@@ -300,6 +301,7 @@ fn crossed_market_quote_dispatches() {
         bid: 151 * PRICE_SCALE, ask: 150 * PRICE_SCALE,
         last: 0, bid_size: 0, ask_size: 0, last_size: 0,
         high: 0, low: 0, volume: 0, close: 0, open: 0, timestamp_ns: 0,
+        bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0,
     };
     shared.market.push_quote(0, &q);
 
@@ -320,6 +322,7 @@ fn negative_price_quote_dispatches() {
         bid: -5 * PRICE_SCALE, ask: -4 * PRICE_SCALE,
         last: 0, bid_size: 0, ask_size: 0, last_size: 0,
         high: 0, low: 0, volume: 0, close: 0, open: 0, timestamp_ns: 0,
+        bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0,
     };
     shared.market.push_quote(0, &q);
 
@@ -354,6 +357,7 @@ fn empty_scanner_results() {
     let (client, _rx, shared) = test_client();
     shared.reference.push_scanner_data(3, ScannerResult {
         con_ids: vec![],
+        entries: vec![],
         scan_time: "2026-03-13".into(),
     });
     let mut w = RecordingWrapper::default();

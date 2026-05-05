@@ -12,7 +12,7 @@ use ibx::gateway::{connect_farm, reconnect_ccp, Gateway, GatewayConfig, Reconnec
 fn config() -> GatewayConfig {
     GatewayConfig {
         username: std::env::var("IB_USERNAME").expect("IB_USERNAME"),
-        password: std::env::var("IB_PASSWORD").expect("IB_PASSWORD"),
+        password: zeroize::Zeroizing::new(std::env::var("IB_PASSWORD").expect("IB_PASSWORD")),
         host: std::env::var("IB_HOST").unwrap_or_else(|_| "cdc1.ibllc.com".to_string()),
         paper: true,
         accept_invalid_certs: false,
@@ -27,7 +27,7 @@ fn farm_reconnect_with_cached_credentials() {
 
     // Phase 1: Full auth
     let t0 = Instant::now();
-    let (gw, farm_conn, _ccp_conn, _hmds, _cash, _usfut, _eu, _j) =
+    let (gw, farm_conn, _ccp_conn, _hmds, _cash, _usfut, _eu, _j, _usopt) =
         Gateway::connect(&cfg).expect("Initial connect failed");
     let full_auth_ms = t0.elapsed().as_millis();
 
@@ -46,8 +46,8 @@ fn farm_reconnect_with_cached_credentials() {
     let t1 = Instant::now();
     let new_farm = connect_farm(
         &cfg.host, "usfarm",
-        &cfg.username, cfg.paper,
-        &server_session_id, &session_key, &hw_info, &encoded,
+        &cfg.username, &cfg.password, cfg.paper,
+        &server_session_id, &session_key, &hw_info, &encoded, 18,
     ).expect("Farm reconnect with cached credentials FAILED");
     let reconnect_ms = t1.elapsed().as_millis();
 
@@ -70,7 +70,7 @@ fn hotloop_auto_reconnect_on_farm_disconnect() {
         shared.clone(), Some(event_tx),
         farm_conn, ccp_conn, hmds, cash, usfut, eu, j, usopt, None,
     );
-    hot_loop.update_reconnect_auth(cfg.host.clone(), cfg.username.clone(), cfg.paper);
+    hot_loop.update_reconnect_auth(cfg.host.clone(), cfg.username.clone(), cfg.password.clone(), cfg.paper);
     println!("Reconnect auth set: host={}, user={}, paper={}", cfg.host, cfg.username, cfg.paper);
 
     assert!(!hot_loop.is_farm_disconnected());
@@ -114,13 +114,14 @@ fn ccp_reconnect_with_cached_credentials() {
     let cfg = config();
 
     let t0 = Instant::now();
-    let (gw, _farm_conn, ccp_conn, _hmds, _cash, _usfut, _eu, _j) =
+    let (gw, _farm_conn, ccp_conn, _hmds, _cash, _usfut, _eu, _j, _usopt) =
         Gateway::connect(&cfg).expect("Initial connect failed");
     let full_auth_ms = t0.elapsed().as_millis();
 
     let auth = ReconnectAuth {
         host: cfg.host.clone(),
         username: cfg.username.clone(),
+        password: cfg.password.clone(),
         paper: cfg.paper,
         session_key: gw.session_token.clone(),
         session_token: gw.session_token.clone(),

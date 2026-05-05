@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 fn config() -> GatewayConfig {
     GatewayConfig {
         username: std::env::var("IB_USERNAME").expect("IB_USERNAME"),
-        password: std::env::var("IB_PASSWORD").expect("IB_PASSWORD"),
+        password: zeroize::Zeroizing::new(std::env::var("IB_PASSWORD").expect("IB_PASSWORD")),
         host: std::env::var("IB_HOST").unwrap_or_else(|_| "cdc1.ibllc.com".to_string()),
         paper: true,
         accept_invalid_certs: false,
@@ -19,7 +19,7 @@ fn config() -> GatewayConfig {
 #[ignore]
 fn raw_farm_subscribe_test() {
     let cfg = config();
-    let (_gw, mut farm, _ccp, _hmds, _cash, _usfut, _eu, _j) =
+    let (_gw, mut farm, _ccp, _hmds, _cash, _usfut, _eu, _j, _usopt) =
         Gateway::connect(&cfg).expect("Gateway connect failed");
 
     eprintln!("Farm connected, seq={}", farm.seq);

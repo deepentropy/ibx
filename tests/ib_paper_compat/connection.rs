@@ -41,11 +41,12 @@ pub(super) fn phase_extra_farms(gw: &Gateway, config: &GatewayConfig) {
 
     for farm in &farms {
         let start = Instant::now();
+        let slot: u32 = if *farm == "ushmds" { 17 } else { 18 };
         match ibx::gateway::connect_farm(
             &config.host, farm,
             &config.username, &config.password, config.paper,
             &gw.server_session_id, &gw.session_token,
-            &gw.hw_info, &gw.encoded,
+            &gw.hw_info, &gw.encoded, slot,
         ) {
             Ok(_conn) => {
                 connected += 1;
@@ -177,7 +178,7 @@ pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _co
         shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -208,7 +209,7 @@ pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _co
         conns1.farm, conns1.ccp, conns1.hmds, None,
     );
 
-    control_tx2.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
+    control_tx2.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join2 = run_hot_loop(hot_loop2);
 
     let deadline2 = Instant::now() + Duration::from_secs(15);
@@ -239,10 +240,12 @@ pub(super) fn phase_auth_wrong_password(config: &GatewayConfig) {
 
     let bad_config = GatewayConfig {
         username: config.username.clone(),
-        password: "definitely_wrong_password_12345".to_string(),
+        password: zeroize::Zeroizing::new("definitely_wrong_password_12345".to_string()),
         host: config.host.clone(),
         paper: config.paper,
         accept_invalid_certs: false,
+        ib_key_timeout_secs: ibx::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
+        ib_key_token_sub_type: ibx::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
     };
 
     let start = Instant::now();
@@ -285,7 +288,7 @@ pub(super) fn phase_register_instrument_channel(conns: Conns) -> Conns {
     println!("  Instrument count after 3 registrations: {}", count);
 
     // Now subscribe to one of the registered instruments
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
 
     // Wait briefly for any events (subscription confirmation or ticks)
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -334,7 +337,7 @@ pub(super) fn phase_update_param(conns: Conns) -> Conns {
         order_id: oid, instrument: inst_id, side: Side::Buy, qty: 1,
         price: 1_00_000_000, outside_rth: true,
     })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
