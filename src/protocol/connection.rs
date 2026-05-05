@@ -74,9 +74,14 @@ pub struct Connection {
 
 impl Connection {
     /// Create a new connection from an already-established TLS stream.
-    /// Sets the underlying TCP stream to non-blocking mode.
+    ///
+    /// Uses a blocking socket with a 1ms read timeout — mirrors `new_raw`.
+    /// Non-blocking writes can return `WouldBlock` after a partial send,
+    /// which poisons the seq/sign_iv chain that already advanced for the
+    /// not-yet-on-the-wire message. Blocking writes either commit fully
+    /// or surface a hard error, which the hot-loop reconnect path handles.
     pub fn new(stream: TlsStream<TcpStream>) -> io::Result<Self> {
-        stream.get_ref().set_nonblocking(true)?;
+        stream.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(1)))?;
         Ok(Self {
             stream: Stream::Tls(stream),
             buf: Vec::with_capacity(RECV_BUF_SIZE),
@@ -241,33 +246,43 @@ impl Connection {
     }
 
     /// Build a FIX message, sign it, and send it. Increments seq and chains sign IV.
+    ///
+    /// State (seq, sign_iv) is committed only after `write_all` returns Ok,
+    /// so a write error leaves the connection retryable rather than poisoned.
     pub fn send_fix(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
-        self.seq += 1;
-        let msg = fix::fix_build(fields, self.seq);
-        let to_send = if self.sign_key.is_empty() {
-            msg
+        let next_seq = self.seq + 1;
+        let msg = fix::fix_build(fields, next_seq);
+        let (to_send, next_iv) = if self.sign_key.is_empty() {
+            (msg, None)
         } else {
-            let (signed, new_iv) = fix::fix_sign(&msg, &self.sign_key, &self.sign_iv);
-            self.sign_iv = new_iv;
-            signed
+            let (signed, iv) = fix::fix_sign(&msg, &self.sign_key, &self.sign_iv);
+            (signed, Some(iv))
         };
         self.stream.write_all(&to_send)?;
+        self.seq = next_seq;
+        if let Some(iv) = next_iv {
+            self.sign_iv = iv;
+        }
         Ok(())
     }
 
     /// Build a message, compress, sign, and send. For farm subscribe/data messages.
     /// Uses seq=0 (separate seq space from heartbeats).
+    ///
+    /// State (sign_iv) is committed only after `write_all` returns Ok.
     pub fn send_fixcomp(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
         let msg = fix::fix_build(fields, 0);
         let wrapped = fixcomp::fixcomp_build(&msg);
-        let to_send = if self.sign_key.is_empty() {
-            wrapped
+        let (to_send, next_iv) = if self.sign_key.is_empty() {
+            (wrapped, None)
         } else {
-            let (signed, new_iv) = fix::fix_sign(&wrapped, &self.sign_key, &self.sign_iv);
-            self.sign_iv = new_iv;
-            signed
+            let (signed, iv) = fix::fix_sign(&wrapped, &self.sign_key, &self.sign_iv);
+            (signed, Some(iv))
         };
         self.stream.write_all(&to_send)?;
+        if let Some(iv) = next_iv {
+            self.sign_iv = iv;
+        }
         Ok(())
     }
 
