@@ -31,6 +31,10 @@ pub(crate) struct HmdsState {
     pub(crate) rtbar_subs: Vec<(String, u32, Option<u32>, f64)>,
     /// req_ids that should keep streaming after initial batch (keepUpToDate=True).
     pub(crate) keep_up_to_date_reqs: std::collections::HashSet<u32>,
+    /// Scanner results parked for contract-detail enrichment before dispatch.
+    /// Drained by the engine top-level after each hmds.poll, then handed to
+    /// `CcpState::start_scanner_enrichment`.
+    pub(crate) cold_scanner_results: Vec<(u32, crate::control::scanner::ScannerResult)>,
 }
 
 impl HmdsState {
@@ -54,6 +58,7 @@ impl HmdsState {
             pending_ticks: Vec::new(),
             rtbar_subs: Vec::new(),
             keep_up_to_date_reqs: std::collections::HashSet::new(),
+            cold_scanner_results: Vec::new(),
         }
     }
 
@@ -226,7 +231,18 @@ impl HmdsState {
                                 if let Some(result) = crate::control::scanner::parse_scanner_response(xml) {
                                     if let Some((_, req_id)) = self.pending_scanner.first() {
                                         let req_id = *req_id;
-                                        shared.reference.push_scanner_data(req_id, result);
+                                        // ScanResponse only carries con_ids; contract metadata must be
+                                        // resolved via 35=c on CCP. Park results with cache-miss con_ids
+                                        // for the engine to enrich before dispatch (see ibx#156, ib-agent#142).
+                                        let any_cold = result.entries.iter().any(|e| {
+                                            e.con_id != 0
+                                                && shared.reference.get_contract(e.con_id as i64).is_none()
+                                        });
+                                        if any_cold {
+                                            self.cold_scanner_results.push((req_id, result));
+                                        } else {
+                                            shared.reference.push_scanner_data(req_id, result);
+                                        }
                                     }
                                 }
                             }

@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::bridge::{Event, RichOrderInfo, SharedState};
 use crate::api::types as api;
@@ -95,6 +95,19 @@ pub(crate) struct CcpState {
     pub(crate) next_internal_secdef_id: u32,
     /// conIds we've already auto-fetched secdef for, keyed by con_id (dedup).
     pub(crate) auto_fetched_conids: HashSet<i64>,
+    /// Scanner results awaiting per-conId contract-detail enrichment.
+    /// Each entry parks a parsed `<ScanResponse>` until every cache-miss
+    /// con_id has been resolved via the same 35=d path that user-initiated
+    /// `reqContractDetails` uses. See ibx#156, ib-agent#142.
+    pub(crate) pending_scanner_enrichment: Vec<PendingScannerEnrichment>,
+}
+
+/// Scanner result parked for contract-detail fan-out.
+pub(crate) struct PendingScannerEnrichment {
+    pub api_req_id: u32,
+    pub result: crate::control::scanner::ScannerResult,
+    pub awaiting: HashSet<i64>,
+    pub deadline: Instant,
 }
 
 /// State for a secdef reply awaiting its paired schedule reply.
@@ -135,6 +148,7 @@ impl CcpState {
             next_fanout_id: 1,
             next_internal_secdef_id: 0xF000_0000,
             auto_fetched_conids: HashSet::new(),
+            pending_scanner_enrichment: Vec::new(),
         }
     }
 
@@ -352,6 +366,7 @@ impl CcpState {
                                 trading_class: def.trading_class.clone(),
                                 ..Default::default()
                             });
+                            self.try_release_scanner_enrichments(def.con_id as i64, shared);
                         }
                         shared.reference.push_contract_details(api_req_id, def.clone());
                         emit(event_tx, Event::ContractDetails { req_id: api_req_id, details: def });
@@ -389,6 +404,7 @@ impl CcpState {
                             trading_class: def.trading_class.clone(),
                             ..Default::default()
                         });
+                        self.try_release_scanner_enrichments(def.con_id as i64, shared);
                     }
                     // Fan-out detection: by-symbol master reply carries the full
                     // exchange list in tag 6046. Drop SMART/BEST and dispatch
@@ -1439,6 +1455,89 @@ impl CcpState {
         self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
         self.auto_fetched_conids.insert(con_id);
         self.send_secdef_request(req_id, con_id, ccp_conn, hb);
+    }
+
+    /// Park a scanner result and dispatch concurrent secdef requests for every cache-miss
+    /// con_id. Once all replies arrive (via `try_release_scanner_enrichments`) the result
+    /// is pushed to the dispatch queue with the now-warm cache. Mirrors what the gateway
+    /// does internally for binary-API scanner clients.
+    pub(crate) fn start_scanner_enrichment(
+        &mut self,
+        api_req_id: u32,
+        result: crate::control::scanner::ScannerResult,
+        ccp_conn: &mut Option<Connection>,
+        shared: &SharedState,
+        hb: &mut HeartbeatState,
+    ) {
+        let mut awaiting: HashSet<i64> = HashSet::new();
+        for entry in &result.entries {
+            let con_id = entry.con_id as i64;
+            if con_id == 0 { continue; }
+            if shared.reference.get_contract(con_id).is_some() { continue; }
+            awaiting.insert(con_id);
+        }
+        if awaiting.is_empty() {
+            shared.reference.push_scanner_data(api_req_id, result);
+            return;
+        }
+        // Issue one secdef request per cold con_id. If another flow has already
+        // requested the same con_id (auto_fetched_conids contains it) we skip
+        // the send but still wait — its reply will populate the cache and
+        // release this entry via try_release_scanner_enrichments.
+        for &con_id in &awaiting {
+            if !self.auto_fetched_conids.contains(&con_id) {
+                let req_id = self.next_internal_secdef_id;
+                self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
+                self.auto_fetched_conids.insert(con_id);
+                self.send_secdef_request(req_id, con_id, ccp_conn, hb);
+            }
+        }
+        self.pending_scanner_enrichment.push(PendingScannerEnrichment {
+            api_req_id,
+            result,
+            awaiting,
+            deadline: Instant::now() + Duration::from_secs(5),
+        });
+    }
+
+    /// Called from the 35=d reply path after the contract cache has been
+    /// populated for `con_id`. Removes `con_id` from any pending scanner
+    /// enrichment's awaiting set; entries whose set becomes empty are
+    /// dispatched to the scanner_data queue.
+    pub(crate) fn try_release_scanner_enrichments(&mut self, con_id: i64, shared: &SharedState) {
+        if self.pending_scanner_enrichment.is_empty() { return; }
+        let mut idx = 0;
+        while idx < self.pending_scanner_enrichment.len() {
+            self.pending_scanner_enrichment[idx].awaiting.remove(&con_id);
+            if self.pending_scanner_enrichment[idx].awaiting.is_empty() {
+                let pe = self.pending_scanner_enrichment.swap_remove(idx);
+                shared.reference.push_scanner_data(pe.api_req_id, pe.result);
+            } else {
+                idx += 1;
+            }
+        }
+    }
+
+    /// Flush scanner enrichments past their deadline, dispatching whatever
+    /// entries we have (some may still have blank fields if the secdef reply
+    /// never arrived). Prevents indefinite hangs on a missing reply.
+    pub(crate) fn sweep_scanner_enrichments(&mut self, shared: &SharedState) {
+        if self.pending_scanner_enrichment.is_empty() { return; }
+        let now = Instant::now();
+        let mut idx = 0;
+        while idx < self.pending_scanner_enrichment.len() {
+            if self.pending_scanner_enrichment[idx].deadline <= now {
+                let pe = self.pending_scanner_enrichment.swap_remove(idx);
+                log::warn!(
+                    "scanner enrichment timeout: req_id={} missing={} con_ids; dispatching partial",
+                    pe.api_req_id,
+                    pe.awaiting.len(),
+                );
+                shared.reference.push_scanner_data(pe.api_req_id, pe.result);
+            } else {
+                idx += 1;
+            }
+        }
     }
 }
 

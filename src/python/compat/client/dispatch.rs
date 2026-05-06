@@ -403,6 +403,9 @@ impl EClient {
                     cd.contract.sec_type = ac.sec_type;
                     cd.contract.exchange = ac.exchange;
                     cd.contract.currency = ac.currency;
+                    cd.contract.local_symbol = ac.local_symbol;
+                    cd.contract.primary_exchange = ac.primary_exchange;
+                    cd.contract.trading_class = ac.trading_class;
                 }
                 let cd_py = Py::new(py, cd)?.into_any();
                 call_wrapper!(self.wrapper, py, "scanner_data", (req_id as i64, rank as i32, &cd_py, "", "", "", ""));

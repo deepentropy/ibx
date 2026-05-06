@@ -281,6 +281,15 @@ impl HotLoop {
                 &self.event_tx, &mut self.hb,
             );
 
+            // 1c. Hand off any scanner results with cache-miss con_ids to CCP for
+            //     contract-detail fan-out (ibx#156). Mirrors what the gateway does
+            //     internally for binary-API scanner clients — see ib-agent#142.
+            for (req_id, result) in self.hmds.cold_scanner_results.drain(..).collect::<Vec<_>>() {
+                self.ccp.start_scanner_enrichment(
+                    req_id, result, &mut self.ccp_conn, &self.shared, &mut self.hb,
+                );
+            }
+
             // 2. Drain pending orders → build → sign → send to auth
             //    Skip if CCP is disconnected — orders stay in buffer for retry after reconnect.
             order_builder::drain_and_send_orders(
@@ -295,6 +304,7 @@ impl HotLoop {
                 &self.event_tx, &mut self.hb, &self.account_id,
             );
             self.ccp.sweep_pending_schedule_pairs(&self.shared, &self.event_tx);
+            self.ccp.sweep_scanner_enrichments(&self.shared);
             if ccp_was_ok && self.ccp.disconnected {
                 self.spawn_ccp_reconnect();
             }

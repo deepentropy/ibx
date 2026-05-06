@@ -270,7 +270,11 @@ impl EClient {
             wrapper.scanner_parameters(&xml);
         }
 
-        // Scanner data
+        // Scanner data. Cache is populated by the engine before dispatch
+        // (see `CcpState::start_scanner_enrichment`), so cold con_ids that
+        // arrived in `<ScanResponse>` have already been resolved via 35=d.
+        // The Some-arm fills the rich fields; the fallback covers deadline-
+        // flushed partials where a secdef reply never arrived.
         for (req_id, result) in self.shared.reference.drain_scanner_data() {
             for (rank, entry) in result.entries.iter().enumerate() {
                 let mut contract = Contract { con_id: entry.con_id as i64, ..Default::default() };
@@ -279,6 +283,9 @@ impl EClient {
                     contract.sec_type = ac.sec_type;
                     contract.exchange = ac.exchange;
                     contract.currency = ac.currency;
+                    contract.local_symbol = ac.local_symbol;
+                    contract.primary_exchange = ac.primary_exchange;
+                    contract.trading_class = ac.trading_class;
                 }
                 let details = ContractDetails { contract, ..Default::default() };
                 wrapper.scanner_data(req_id as i64, rank as i32, &details, "", "", "", "");
