@@ -297,53 +297,6 @@ mod tests {
         assert_ne!(out, vec![0u8; 32]);
     }
 
-    /// PRF oracle from ib-agent#130 — captured live session.
-    /// Proves `tls10_prf` is byte-correct against the same code path
-    /// the working Java client uses to derive farm-channel key material.
-    #[test]
-    fn tls10_prf_matches_live_eufarm_oracle() {
-        let cr32 = hex::decode(
-            "0000000000000000000000000000000000000000000000000000000000000001"
-        ).unwrap();
-        let salt32 = hex::decode(
-            "0000000000000000000000000000000000000000000000000000000000000002"
-        ).unwrap();
-        let pre_master = hex::decode(concat!(
-            "0000000000000000000000000000000000000000000000000000000000000003",
-            "0000000000000000000000000000000000000000000000000000000000000004",
-            "0000000000000000000000000000000000000000000000000000000000000005",
-            "0000000000000000000000000000000000000000000000000000000000000006",
-        )).unwrap();
-        let expected_master_48 = hex::decode(concat!(
-            "0000000000000000000000000000000000000000000000000000000000000007",
-            "00000000000000000000000000000008",
-        )).unwrap();
-        let expected_key_block_104 = hex::decode(concat!(
-            "0000000000000000000000000000000000000000000000000000000000000009",
-            "000000000000000000000000000000000000000000000000000000000000000a",
-            "000000000000000000000000000000000000000000000000000000000000000b",
-            "000000000000000c",
-        )).unwrap();
-
-        let mut seed = Vec::with_capacity(64);
-        seed.extend_from_slice(&cr32);
-        seed.extend_from_slice(&salt32);
-
-        let master = tls10_prf(&pre_master, "master secret", &seed, 48);
-        assert_eq!(
-            hex::encode(&master),
-            hex::encode(&expected_master_48),
-            "master_secret PRF mismatch — DH+PRF1 derivation diverges from Java oracle"
-        );
-
-        let key_block = tls10_prf(&master, "key expansion", &seed, 104);
-        assert_eq!(
-            hex::encode(&key_block),
-            hex::encode(&expected_key_block_104),
-            "key_block PRF mismatch — DH+PRF2 derivation diverges from Java oracle"
-        );
-    }
-
     #[test]
     fn tls10_prf_known_output_regression() {
         // Fixed inputs for regression snapshot

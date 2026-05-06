@@ -459,6 +459,7 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
         wrapper.position(&account_id, &c, pi.position as f64, avg_cost);
     }
 
+    let gt_account = account_id.clone();
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if !terminal {
@@ -483,12 +484,12 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
         println!("    contract.localSym   = '{}' (GT: 'SPY')", c.local_symbol);
         println!("    contract.tradClass  = '{}' (GT: 'SPY')", c.trading_class);
 
-        // Order fields (GT: action=BUY, totalQuantity=1, orderType=LMT, tif=GTC, account=DU0000000)
+        // Order fields (GT: action=BUY, totalQuantity=1, orderType=LMT, tif=GTC)
         println!("    order.action        = '{}' (GT: 'BUY')", o.action);
         println!("    order.totalQuantity = {} (GT: 1.0)", o.total_quantity);
         println!("    order.orderType     = '{}' (GT: 'LMT')", o.order_type);
         println!("    order.tif           = '{}' (GT: 'GTC')", o.tif);
-        println!("    order.account       = '{}' (GT: 'DU0000000')", o.account);
+        println!("    order.account       = '{}' (GT: '{}')", o.account, gt_account);
 
         // OrderState fields (GT: status=Cancelled)
         println!("    orderState.status   = '{}' (GT: 'Cancelled')", s.status);
@@ -700,6 +701,7 @@ pub(super) fn phase_enriched_positions(conns: Conns) -> Conns {
         wrapper.position(&account_id, &c, pi.position as f64, avg_cost);
     }
 
+    let gt_account = account_id.clone();
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if !got_pos && wrapper.positions.is_empty() {
@@ -711,7 +713,7 @@ pub(super) fn phase_enriched_positions(conns: Conns) -> Conns {
     let mut pass = true;
     if let Some((acct, c, pos, avg_cost)) = wrapper.positions.iter().find(|(_, c, _, _)| c.con_id == 756733) {
         println!("  position callback received:");
-        println!("    account             = '{}' (GT: 'DU0000000')", acct);
+        println!("    account             = '{}' (GT: '{}')", acct, gt_account);
         println!("    contract.conId      = {} (GT: 756733)", c.con_id);
         println!("    contract.symbol     = '{}' (GT: 'SPY')", c.symbol);
         println!("    contract.secType    = '{}' (GT: 'STK')", c.sec_type);

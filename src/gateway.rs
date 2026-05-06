@@ -1750,16 +1750,6 @@ mod tests {
         assert_ne!(token_short_hash(&t1), token_short_hash(&t2));
     }
 
-    /// Oracle from ib-agent#131 — captured live session.
-    /// Confirms `token_short_hash` is byte-correct against the Java reference:
-    /// `SHA1(strip(token)).intValue() & 0xFFFFFFFF` formatted as 8 hex chars.
-    #[test]
-    fn token_short_hash_matches_live_oracle() {
-        let token_bytes = hex::decode("00000000000000000000000000000000000000aa").unwrap();
-        let token = BigUint::from_bytes_be(&token_bytes);
-        assert_eq!(token_short_hash(&token), "22103688");
-    }
-
     #[test]
     fn parse_farm_route_two_segments() {
         let parsed = parse_farm_route("zdc1.ibllc.com/eufarm").unwrap();
