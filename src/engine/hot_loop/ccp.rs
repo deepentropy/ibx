@@ -91,6 +91,10 @@ pub(crate) struct CcpState {
     pub(crate) pending_fanout: Vec<PendingFanout>,
     /// Counter for internal fan-out req IDs (tag 320 on per-exchange `35=c`).
     pub(crate) next_fanout_id: u32,
+    /// Counter for internal secdef req IDs (auto-fetch on cold-cache positions).
+    pub(crate) next_internal_secdef_id: u32,
+    /// conIds we've already auto-fetched secdef for, keyed by con_id (dedup).
+    pub(crate) auto_fetched_conids: HashSet<i64>,
 }
 
 /// State for a secdef reply awaiting its paired schedule reply.
@@ -129,6 +133,8 @@ impl CcpState {
             next_schedule_sub_id: 1,
             pending_fanout: Vec::new(),
             next_fanout_id: 1,
+            next_internal_secdef_id: 0xF000_0000,
+            auto_fetched_conids: HashSet::new(),
         }
     }
 
@@ -226,7 +232,7 @@ impl CcpState {
                     match comm.as_str() {
                         "75" => {
                             // Position + market price feed (init burst + after each fill)
-                            handle_position_feed(msg, context, shared, event_tx);
+                            self.handle_position_feed(msg, ccp_conn, context, shared, event_tx, hb);
                             shared.portfolio.set_account_download_complete();
                         }
                         "77" => {
@@ -1356,12 +1362,19 @@ fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
 
 /// Handle 6040=75 position + market price feed.
 /// Fires at init and after each fill. Contains repeating group: 146=count × (6008=conId, 6064=qty, 6101=avgCost).
-fn handle_position_feed(
-    msg: &[u8],
-    context: &mut Context,
-    shared: &SharedState,
-    event_tx: &Option<Sender<Event>>,
-) {
+/// The wire only carries conId/qty/avgCost — no symbol/secType. For any held conId not yet in the
+/// reference cache, we issue an internal secdef request so the wrapper-facing Contract is populated
+/// by the time `req_positions` is called (#154).
+impl CcpState {
+    pub(crate) fn handle_position_feed(
+        &mut self,
+        msg: &[u8],
+        ccp_conn: &mut Option<Connection>,
+        context: &mut Context,
+        shared: &SharedState,
+        event_tx: &Option<Sender<Event>>,
+        hb: &mut HeartbeatState,
+    ) {
     let text = match std::str::from_utf8(msg) {
         Ok(t) => t,
         Err(_) => return,
@@ -1383,6 +1396,7 @@ fn handle_position_feed(
                     shared.portfolio.set_position(instrument, qty);
                     emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
                 }
+                self.auto_fetch_secdef_if_cold(con_id, ccp_conn, shared, hb);
             }
             con_id = v.parse().unwrap_or(0);
             qty = 0;
@@ -1404,6 +1418,27 @@ fn handle_position_feed(
             shared.portfolio.set_position(instrument, qty);
             emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
         }
+        self.auto_fetch_secdef_if_cold(con_id, ccp_conn, shared, hb);
+    }
+    }
+
+    /// Issue an internal secdef request for `con_id` if the reference cache is cold and we
+    /// haven't already auto-fetched it this session. The reply path populates the cache via
+    /// the existing 35=d handler; we don't track the response.
+    fn auto_fetch_secdef_if_cold(
+        &mut self,
+        con_id: i64,
+        ccp_conn: &mut Option<Connection>,
+        shared: &SharedState,
+        hb: &mut HeartbeatState,
+    ) {
+        if con_id == 0 { return; }
+        if self.auto_fetched_conids.contains(&con_id) { return; }
+        if shared.reference.get_contract(con_id).is_some() { return; }
+        let req_id = self.next_internal_secdef_id;
+        self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
+        self.auto_fetched_conids.insert(con_id);
+        self.send_secdef_request(req_id, con_id, ccp_conn, hb);
     }
 }
 
