@@ -1,4 +1,4 @@
-# Python API Reference (v0.4.4)
+# Python API Reference (v0.5.0)
 
 *Auto-generated from source — do not edit.*
 
@@ -33,7 +33,7 @@ def new(wrapper))
 Connect to IB and start the engine.
 
 ```python
-def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None))
+def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None))
 ```
 
 | Parameter | Type | Description |
@@ -45,6 +45,8 @@ def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".
 | `password` | `str` | Account password. |
 | `paper` | `bool` | If `true`, connect to paper trading. |
 | `core_id` | `usize or None` | CPU core affinity for the hot loop thread. |
+| `ib_key_timeout_secs` | `int or None` |  |
+| `ib_key_token_sub_type` | `str or None` |  |
 
 ---
 
@@ -1450,13 +1452,13 @@ End of execution details list.
 
 ---
 
-#### `commission_report`
+#### `commission_and_fees_report`
 
-Commission report for an execution.
+Commission and fees report for an execution.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `commission_report` | `PyObject` |  |
+| `commission_and_fees_report` | `PyObject` |  |
 
 ---
 

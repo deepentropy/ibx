@@ -3,8 +3,8 @@
 
 Parses pub fn signatures, doc comments, and parameter types from
 src/api/client/*.rs, Wrapper trait, and Python pymethods.
-Outputs docs/RUST_API.md and docs/PYTHON_API.md with per-method
-signature blocks and parameter tables.
+Outputs the per-method signature blocks and parameter tables that
+the mdBook chapters in docs/book/ include via {{#include}}.
 
 Usage: py scripts/gen_api_docs.py
 """
@@ -18,7 +18,10 @@ RUST_CLIENT = ROOT / "src" / "api" / "client"
 RUST_WRAPPER = ROOT / "src" / "api" / "wrapper.rs"
 PY_CLIENT = ROOT / "src" / "python" / "compat" / "client"
 PY_WRAPPER = ROOT / "src" / "python" / "compat" / "wrapper.rs"
-DOCS = ROOT / "docs"
+BOOK_SRC = ROOT / "docs" / "book" / "src"
+RUST_REF = BOOK_SRC / "api" / "rust-reference.md"
+PYTHON_REF = BOOK_SRC / "api" / "python-reference.md"
+COVERAGE_REF = BOOK_SRC / "reference" / "coverage-data.md"
 
 FILE_ORDER = ["mod", "account", "orders", "market_data", "reference", "stubs"]
 SECTION_NAMES = {
@@ -1080,17 +1083,18 @@ def generate_coverage_md(ver: str) -> str:
 
 
 def main():
-    DOCS.mkdir(exist_ok=True)
+    for target in (RUST_REF, PYTHON_REF, COVERAGE_REF):
+        target.parent.mkdir(parents=True, exist_ok=True)
     ver = version()
     rust, rc = generate_rust_md(ver)
     py, pc = generate_python_md(ver)
     cov = generate_coverage_md(ver)
-    (DOCS / "RUST_API.md").write_text(rust, encoding="utf-8")
-    (DOCS / "PYTHON_API.md").write_text(py, encoding="utf-8")
-    (DOCS / "COVERAGE.md").write_text(cov, encoding="utf-8")
-    print(f"docs/RUST_API.md  — {rc} methods")
-    print(f"docs/PYTHON_API.md — {pc} methods")
-    print(f"docs/COVERAGE.md  — {len(IBAPI_ECLIENT)} EClient + {len(IBAPI_EWRAPPER)} EWrapper")
+    RUST_REF.write_text(rust, encoding="utf-8")
+    PYTHON_REF.write_text(py, encoding="utf-8")
+    COVERAGE_REF.write_text(cov, encoding="utf-8")
+    print(f"{RUST_REF.relative_to(ROOT)}  — {rc} methods")
+    print(f"{PYTHON_REF.relative_to(ROOT)} — {pc} methods")
+    print(f"{COVERAGE_REF.relative_to(ROOT)}  — {len(IBAPI_ECLIENT)} EClient + {len(IBAPI_EWRAPPER)} EWrapper")
 
 
 if __name__ == "__main__":

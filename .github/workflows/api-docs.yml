@@ -29,7 +29,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/RUST_API.md docs/PYTHON_API.md docs/COVERAGE.md
+          git add docs/book/src/api/rust-reference.md \
+                  docs/book/src/api/python-reference.md \
+                  docs/book/src/reference/coverage-data.md
           git diff --cached --quiet && echo "No changes" && exit 0
           BRANCH="docs/api-${{ github.event.release.tag_name }}"
           git checkout -b "$BRANCH"

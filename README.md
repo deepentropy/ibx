@@ -7,15 +7,20 @@
 </p>
 
 <p align="center">
+  <a href="https://deepentropy.github.io/ibx/"><strong>Documentation</strong></a> &bull;
   <a href="#benchmarks">Benchmarks</a> &bull;
   <a href="#rust-usage">Rust</a> &bull;
   <a href="#python-usage">Python</a> &bull;
   <a href="#notebooks">Notebooks</a> &bull;
   <a href="#architecture">Architecture</a> &bull;
-  <a href="docs/RUST_API.md">Rust API</a> &bull;
-  <a href="docs/PYTHON_API.md">Python API</a> &bull;
-  <a href="docs/COVERAGE.md">Coverage</a>
+  <a href="https://deepentropy.github.io/ibx/api/rust.html">Rust API</a> &bull;
+  <a href="https://deepentropy.github.io/ibx/api/python.html">Python API</a> &bull;
+  <a href="https://deepentropy.github.io/ibx/reference/coverage.html">Coverage</a>
 </p>
+
+---
+
+📖 **Full documentation, recipes, and API reference:** [deepentropy.github.io/ibx](https://deepentropy.github.io/ibx/)
 
 ---
 

@@ -1,4 +1,4 @@
-# Rust API Reference (v0.4.4)
+# Rust API Reference (v0.5.0)
 
 *Auto-generated from source — do not edit.*
 
@@ -63,6 +63,23 @@ pub fn map_req_instrument(&self, req_id: i64, instrument: InstrumentId)
 
 ---
 
+#### `track_order_for_test`
+
+Pre-populate the order tracker (for testing the dispatcher path without going through the engine's place-order flow).
+
+```rust
+pub fn track_order_for_test( &self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId, )
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `order_id` | `u64` | Order identifier. Must be unique per session. |
+| `contract` | `ApiContract` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `order` | `ApiOrder` | Order parameters (action, quantity, type, price, TIF, etc.). |
+| `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
+
+---
+
 #### `seed_instrument`
 
 Pre-seed a con_id → InstrumentId mapping (for testing without a live engine).
@@ -97,6 +114,58 @@ Disconnect from IB.  Sends `Shutdown` to the hot loop, waits for the background 
 ```rust
 pub fn disconnect(&self)
 ```
+
+---
+
+#### `ccp_session_id`
+
+Session ID surfaced to webapp REST clients as `x-ccp-session-id`.
+
+```rust
+pub fn ccp_session_id(&self) -> String
+```
+
+**Returns:** `String`
+
+---
+
+#### `misc_url`
+
+Logical-name → host URL lookup from the gateway logon MiscUrls push (e.g. `region_dam`). Returns `None` when the gateway did not push this key.
+
+```rust
+pub fn misc_url(&self, key: &str) -> Option<String>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `key` | `&str` | Account value key (e.g. `"NetLiquidation"`, `"BuyingPower"`). |
+
+**Returns:** `Option<String>`
+
+---
+
+#### `session_token_bytes`
+
+Canonical big-endian session-token bytes (leading zeros stripped) captured at connect. Round-trips through `BigUint::from_bytes_be` to the SRP shared secret K and is the second SHA-1 input for SSO `Authenticate-TWS` bodies.
+
+```rust
+pub fn session_token_bytes(&self) -> &[u8]
+```
+
+**Returns:** `&[u8]`
+
+---
+
+#### `token_type`
+
+`stoken_type` discriminator captured at connect (`"st"`, `"tst"`, `"zenith"`, or empty for the SRP-only path). Sent verbatim in SSO authenticator bodies.
+
+```rust
+pub fn token_type(&self) -> &str
+```
+
+**Returns:** `&str`
 
 ---
 
@@ -454,7 +523,7 @@ pub fn req_auto_open_orders(&self, _b_auto_bind: bool)
 
 #### `req_executions`
 
-Request execution reports. Replays stored executions (optionally filtered), firing `exec_details` + `commission_report` for each, then `exec_details_end`.
+Request execution reports. Replays stored executions (optionally filtered), firing `exec_details` + `commission_and_fees_report` for each, then `exec_details_end`.
 
 ```rust
 pub fn req_executions(&self, req_id: i64, filter: &ExecutionFilter, wrapper: &mut impl Wrapper)
@@ -492,7 +561,7 @@ pub fn parse_algo_params(strategy: &str, params: &[TagValue]) -> Result<AlgoPara
 Subscribe to market data. When `snapshot` is true, delivers the first available quote then calls `tick_snapshot_end` and auto-cancels the subscription.
 
 ```rust
-pub fn req_mkt_data( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool, ) -> Result<(), String>
+pub fn req_mkt_data( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool, ) -> Result<(), String>
 ```
 
 | Parameter | Type | Description |
@@ -502,6 +571,27 @@ pub fn req_mkt_data( &self, req_id: i64, contract: &Contract, generic_tick_list:
 | `generic_tick_list` | `&str` | Comma-separated generic tick IDs (e.g. `"233"` for RT volume). |
 | `snapshot` | `bool` | If `true`, delivers one quote then auto-cancels. |
 | `regulatory_snapshot` | `bool` | If `true`, request a regulatory snapshot (additional fees may apply). |
+
+**Returns:** `Result<(), String>`
+
+---
+
+#### `req_mkt_data_ex`
+
+Like [`req_mkt_data`], but encodes the market-data mode per-request via FIX field 9887, allowing parallel realtime + frozen subscriptions for the same contract: | `mode_9887` | mode             | wire shape | |-------------|------------------|---| | `0`         | REALTIME         | `264=442` (BID_ASK) + `264=443` (LAST), no 9887 | | `1`         | DELAYED          | `264=1` (TOP) + `9887=1` | | `2`         | FROZEN           | `264=1` (TOP) + `9887=2` | | `3`         | DELAYED_FROZEN   | `264=1` (TOP) + `9887=3` | The frozen sub keeps thinly-traded names streaming after-hours when the realtime feed is silent. Issue 3-4 parallel calls per contract with different modes and pick whichever feed has data.
+
+```rust
+pub fn req_mkt_data_ex( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool, mode_9887: i32, ) -> Result<(), String>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `contract` | `&Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `generic_tick_list` | `&str` | Comma-separated generic tick IDs (e.g. `"233"` for RT volume). |
+| `snapshot` | `bool` | If `true`, delivers one quote then auto-cancels. |
+| `regulatory_snapshot` | `bool` | If `true`, request a regulatory snapshot (additional fees may apply). |
+| `mode_9887` | `i32` |  |
 
 **Returns:** `Result<(), String>`
 
@@ -1459,13 +1549,13 @@ End of execution details list.
 
 ---
 
-#### `commission_report`
+#### `commission_and_fees_report`
 
-Commission report for an execution.
+Commission and fees report for an execution.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `report` | `&CommissionReport` | Commission report (exec_id, commission, currency, realized P&L). |
+| `report` | `&CommissionAndFeesReport` | Commission report (exec_id, commission, currency, realized P&L). |
 
 ---
 
@@ -1840,6 +1930,89 @@ Historical tick data (Last, BidAsk, or Midpoint).
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 | `ticks` | `&HistoricalTickData` | Historical tick data. |
 | `done` | `bool` | If `true`, all ticks have been delivered. |
+
+---
+
+#### `historical_ticks_bid_ask`
+
+Historical bid/ask ticks.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `ticks` | `&HistoricalTickData` | Historical tick data. |
+| `done` | `bool` | If `true`, all ticks have been delivered. |
+
+---
+
+#### `historical_ticks_last`
+
+Historical last-trade ticks.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `ticks` | `&HistoricalTickData` | Historical tick data. |
+| `done` | `bool` | If `true`, all ticks have been delivered. |
+
+---
+
+#### `tick_option_computation`
+
+Option implied vol / greeks computation.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `tick_type` | `i32` | Tick type ID or tick-by-tick type string. |
+| `tick_attrib` | `i32` |  |
+| `implied_vol` | `f64` | Implied volatility. |
+| `delta` | `f64` | Option delta. |
+| `opt_price` | `f64` | Option theoretical price. |
+| `pv_dividend` | `f64` | Present value of dividends. |
+| `gamma` | `f64` | Option gamma. |
+| `vega` | `f64` | Option vega. |
+| `theta` | `f64` | Option theta. |
+| `und_price` | `f64` | Underlying price. |
+
+---
+
+#### `security_definition_option_parameter`
+
+Option chain parameters (strikes, expirations).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `exchange` | `&str` | Exchange name. |
+| `underlying_con_id` | `i64` | Underlying contract ID. |
+| `trading_class` | `&str` | Trading class. |
+| `multiplier` | `&str` | Contract multiplier. |
+| `expirations` | `&[String]` | Available expiration dates. |
+| `strikes` | `&[f64]` | Available strike prices. |
+
+---
+
+#### `security_definition_option_parameter_end`
+
+End of option chain parameters.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+---
+
+#### `delta_neutral_validation`
+
+Delta-neutral validation response.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `con_id` | `i64` | Contract ID. Unique per instrument. |
+| `delta` | `f64` | Option delta. |
+| `price` | `f64` | Tick price. |
 
 ---
 

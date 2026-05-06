@@ -1,4 +1,4 @@
-# API Coverage Matrix (v0.4.4)
+# API Coverage Matrix (v0.5.0)
 
 *Auto-generated from source — do not edit.*
 
@@ -13,7 +13,7 @@ Canonical IB API methods vs ibx implementation status.
 | | IB API | Rust | Python |
 |---|:---:|:---:|:---:|
 | **EClient methods** | 77 | 63 impl, 8 stub | 63 impl, 14 stub |
-| **EWrapper callbacks** | 81 | 63 impl, 0 stub | 70 impl, 11 stub |
+| **EWrapper callbacks** | 81 | 66 impl, 3 stub | 70 impl, 11 stub |
 
 ## EClient Methods
 
@@ -120,7 +120,7 @@ Canonical IB API methods vs ibx implementation status.
 |  | `order_bound` | - | STUB |
 | Executions | `exec_details` | Y | Y |
 |  | `exec_details_end` | Y | Y |
-|  | `commission_report` | Y | Y |
+|  | `commission_and_fees_report` | Y | Y |
 | Account | `update_account_value` | Y | Y |
 |  | `update_portfolio` | Y | Y |
 |  | `update_account_time` | Y | Y |
@@ -144,8 +144,8 @@ Canonical IB API methods vs ibx implementation status.
 |  | `historical_data_update` | Y | Y |
 |  | `head_timestamp` | Y | Y |
 |  | `historical_ticks` | Y | Y |
-|  | `historical_ticks_bid_ask` | - | Y |
-|  | `historical_ticks_last` | - | Y |
+|  | `historical_ticks_bid_ask` | Y | Y |
+|  | `historical_ticks_last` | Y | Y |
 |  | `histogram_data` | Y | Y |
 |  | `historical_schedule` | Y | Y |
 | Market Depth | `update_mkt_depth` | Y | Y |
@@ -168,9 +168,9 @@ Canonical IB API methods vs ibx implementation status.
 | Market Rules | `market_rule` | Y | Y |
 | Completed Orders | `completed_order` | Y | Y |
 |  | `completed_orders_end` | Y | Y |
-| Options | `tick_option_computation` | - | Y |
-|  | `security_definition_option_parameter` | - | STUB |
-|  | `security_definition_option_parameter_end` | - | STUB |
+| Options | `tick_option_computation` | Y | Y |
+|  | `security_definition_option_parameter` | STUB | STUB |
+|  | `security_definition_option_parameter_end` | STUB | STUB |
 | Reference | `smart_components` | Y | Y |
 |  | `soft_dollar_tiers` | Y | Y |
 |  | `family_codes` | Y | Y |
@@ -179,6 +179,6 @@ Canonical IB API methods vs ibx implementation status.
 |  | `replace_fa_end` | - | STUB |
 | Display Groups | `display_group_list` | - | STUB |
 |  | `display_group_updated` | - | STUB |
-| Other | `delta_neutral_validation` | - | STUB |
+| Other | `delta_neutral_validation` | STUB | STUB |
 | WSH | `wsh_meta_data` | - | STUB |
 |  | `wsh_event_data` | - | STUB |
