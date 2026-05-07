@@ -499,6 +499,15 @@ impl CcpState {
             base.parse::<u64>().ok()
         }).unwrap_or(0);
 
+        // Drop the gateway's echo of the mass-order-status wildcard request
+        // (ClOrdID="*"/"0"/absent → parses to 0). Real orders are assigned
+        // monotonic IDs via next_order_id and never collide with 0.
+        if clord_id == 0 {
+            log::debug!("ExecReport: dropping sentinel record (ClOrdID=0/*) sym={:?} status={:?}",
+                parsed.get(&55), parsed.get(&39));
+            return;
+        }
+
         // What-If response
         if parsed.get(&6091).map(|s| s.as_str()) == Some("1") {
             let init_margin_after = parsed.get(&6092).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
