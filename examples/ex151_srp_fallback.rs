@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("== Connecting to paper {} ...", host);
     let t0 = Instant::now();
-    let (gw, _farm, ccp, _hmds, _cash, _usfut, _eu, _j, _usopt) = Gateway::connect(&cfg)?;
+    let (gw, _farm, ccp, _hmds) = Gateway::connect(&cfg)?;
     println!(
         "== Connected in {:.1}s account={} session_id={}",
         t0.elapsed().as_secs_f64(),

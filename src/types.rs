@@ -1011,40 +1011,6 @@ pub struct CompletedOrder {
     pub timestamp_ns: u64,
 }
 
-/// Which farm connection to route a market data subscription to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FarmSlot {
-    /// US stocks (regular + extended hours) — `usfarm`
-    UsFarm,
-    /// US options — `usopt`
-    UsOpt,
-    /// Forex (IDEALPRO) — `cashfarm`
-    CashFarm,
-    /// US futures (CME/GLOBEX) — `usfuture`
-    UsFuture,
-    /// European stocks — `eufarm`
-    EuFarm,
-    /// Japan stocks — `jfarm`
-    JFarm,
-}
-
-/// Determine which farm to route a subscription to based on exchange and security type.
-pub fn farm_for_instrument(exchange: &str, sec_type: &str) -> FarmSlot {
-    match sec_type {
-        "OPT" | "FOP" => FarmSlot::UsOpt,
-        "FUT" | "CONTFUT" => FarmSlot::UsFuture,
-        "CASH" => FarmSlot::CashFarm,
-        _ => match exchange {
-            "IDEALPRO" => FarmSlot::CashFarm,
-            "CME" | "GLOBEX" | "NYMEX" | "COMEX" | "ECBOT" | "CBOT" => FarmSlot::UsFuture,
-            "AEB" | "BVME" | "DTB" | "IBIS" | "ICEEU" | "LSEETF" | "MOEX" | "SBF" | "SEHK"
-            | "SFB" | "SNFE" | "VSE" | "VIRTX" | "EBS" | "BATEEN" | "FWB" | "IBIS2" => FarmSlot::EuFarm,
-            "TSEJ" | "JPX" | "OSE" => FarmSlot::JFarm,
-            _ => FarmSlot::UsFarm,
-        }
-    }
-}
-
 /// Commands sent from the control plane to the hot loop via SPSC channel.
 #[derive(Debug, Clone)]
 pub enum ControlCommand {

@@ -115,7 +115,7 @@ impl EClient {
             ib_key_token_sub_type: crate::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
         };
 
-        let (gw, farm_conn, ccp_conn, hmds_conn, cashfarm, usfuture, eufarm, jfarm, usopt) = Gateway::connect(&gw_config)?;
+        let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&gw_config)?;
         let account_id = gw.account_id.clone();
         let session_token_bytes = crate::auth::crypto::strip_leading_zeros(
             &gw.session_token.to_bytes_be(),
@@ -125,8 +125,7 @@ impl EClient {
         gw.populate_init_data(&shared);
 
         let (mut hot_loop, control_tx) = gw.into_hot_loop_with_farms(
-            shared.clone(), None, farm_conn, ccp_conn, hmds_conn,
-            cashfarm, usfuture, eufarm, jfarm, usopt, config.core_id,
+            shared.clone(), None, farm_conn, ccp_conn, hmds_conn, config.core_id,
         );
 
         let handle = thread::Builder::new()

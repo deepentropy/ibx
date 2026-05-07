@@ -133,7 +133,7 @@ pub(super) fn ensure_ccp_alive(
 
     // Full reconnection — CCP requires TLS+SRP auth, so we must reconnect everything
     match gateway::Gateway::connect(config) {
-        Ok((new_gw, farm, ccp, hmds, _, _, _, _, _)) => {
+        Ok((new_gw, farm, ccp, hmds)) => {
             conns.farm = farm;
             conns.ccp = ccp;
             conns.hmds = hmds;

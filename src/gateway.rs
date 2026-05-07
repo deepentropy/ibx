@@ -367,8 +367,6 @@ pub struct Gateway {
     pub ccp_sign_key: Vec<u8>,
     /// CCP HMAC initial IV (kb[48..64]) for selective signing.
     pub ccp_sign_iv: Vec<u8>,
-    /// Deferred secondary farm connection receivers (installed by hot loop).
-    pub pending_secondary_farms: Vec<(String, crossbeam_channel::Receiver<io::Result<Connection>>)>,
 }
 
 /// Connect to a data farm: key exchange → encrypted logon → token auth → routing → Connection.
@@ -817,7 +815,7 @@ pub struct GatewayConfig {
 impl Gateway {
     /// Connect to IB: auth + logon + data farm connections.
     /// Returns Gateway + farm Connection + auth Connection + optional historical data Connection.
-    pub fn connect(config: &GatewayConfig) -> io::Result<(Self, Connection, Connection, Option<Connection>, Option<Connection>, Option<Connection>, Option<Connection>, Option<Connection>, Option<Connection>)> {
+    pub fn connect(config: &GatewayConfig) -> io::Result<(Self, Connection, Connection, Option<Connection>)> {
         Self::connect_to_host(config, &config.host, 0)
     }
 
@@ -826,7 +824,7 @@ impl Gateway {
         config: &GatewayConfig,
         host: &str,
         redirect_depth: u32,
-    ) -> io::Result<(Self, Connection, Connection, Option<Connection>, Option<Connection>, Option<Connection>, Option<Connection>, Option<Connection>, Option<Connection>)> {
+    ) -> io::Result<(Self, Connection, Connection, Option<Connection>)> {
         if redirect_depth > 3 {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -1457,16 +1455,14 @@ impl Gateway {
         ccp_conn.seed_buffer(&init_data);
 
         // --- Phase 3: Data farm connections ---
-        // Critical farms (usfarm, ushmds) connect synchronously.
-        // Secondary farms (cashfarm, usfuture, eufarm, jfarm) connect via background
-        // threads so the hot loop can start immediately and service heartbeats on
-        // already-connected farms without starvation.
-        // Per ib-agent#125/#131/#133: the SOFT token is `SHA1(strip(S))` where
-        // S is the SRP shared secret. `do_srp` returns exactly that via
-        // `srp_compute_k`, so `session_key` IS the SOFT token — no further
-        // hashing. (Tag 8483's per-channel SHA1 is added by `token_short_hash`
-        // at the build-logon site.) Tag 6386 is an S3 object key, not a token
-        // source.
+        // Per ib-agent#143/#144/#145: the official Gateway opens exactly 3 authed TCP
+        // sessions per login — MARKET_DATA (tag 6145), HISTORICAL_DATA (tag 6171), and
+        // SECDEFARM (tag 8008, UI/telemetry only — not used by ibx). Per ib-agent#125/
+        // #131/#133: the SOFT token is `SHA1(strip(S))` where S is the SRP shared
+        // secret. `do_srp` returns exactly that via `srp_compute_k`, so `session_key`
+        // IS the SOFT token — no further hashing. (Tag 8483's per-channel SHA1 is
+        // added by `token_short_hash` at the build-logon site.) Tag 6386 is an S3
+        // object key, not a token source.
         let farm_token: BigUint = soft_token.clone().unwrap_or_else(|| session_key.clone());
         // Per ib-agent#128: read the farm names from the auth-server's
         // routing tags rather than hardcoding `usfarm`/`ushmds`. EU accounts
@@ -1498,29 +1494,6 @@ impl Gateway {
             Err(e) => { log::warn!("Historical data farm connection failed (non-fatal): {}", e); None }
         };
 
-        // Spawn deferred connection threads for secondary farms.
-        let mut pending_secondary = Vec::new();
-        for farm_id in ["cashfarm", "usfuture", "eufarm", "jfarm", "usopt"] {
-            let (tx, rx) = crossbeam_channel::bounded(1);
-            let h = host.to_string();
-            let u = config.username.clone();
-            let p = config.password.clone();
-            let paper = config.paper;
-            let ssid = server_session_id.clone();
-            let skey = farm_token.clone();
-            let hw = hw_info.clone();
-            let enc = encoded.clone();
-            let farm = farm_id.to_string();
-            if let Err(e) = std::thread::Builder::new()
-                .name(format!("{}-connect", farm_id))
-                .spawn(move || {
-                    let _ = tx.send(connect_farm(&h, &farm, &u, &p, paper, &ssid, &skey, &hw, &enc, 18));
-                }) {
-                log::warn!("{} connection thread spawn failed: {}", farm_id, e);
-            }
-            pending_secondary.push((farm_id.to_string(), rx));
-        }
-
         let gw = Gateway {
             account_id: if account_id.is_empty() { config.username.clone() } else { account_id },
             session_token: session_key,
@@ -1536,9 +1509,8 @@ impl Gateway {
             misc_urls: parse_misc_urls(&raw_misc_urls),
             ccp_sign_key,
             ccp_sign_iv,
-            pending_secondary_farms: pending_secondary,
         };
-        Ok((gw, farm_conn, ccp_conn, hmds_conn, None, None, None, None, None))
+        Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
 
     /// Populate shared state with gateway-local init data parsed from CCP logon.
@@ -1657,22 +1629,17 @@ impl Gateway {
         hmds_conn: Option<Connection>,
         core_id: Option<usize>,
     ) -> (HotLoop, Sender<ControlCommand>) {
-        self.into_hot_loop_with_farms(shared, event_tx, farm_conn, ccp_conn, hmds_conn, None, None, None, None, None, core_id)
+        self.into_hot_loop_with_farms(shared, event_tx, farm_conn, ccp_conn, hmds_conn, core_id)
     }
 
-    /// Create the control channel and build a HotLoop with all farm connections.
+    /// Create the control channel and build a HotLoop with farm connections.
     pub fn into_hot_loop_with_farms(
-        mut self,
+        self,
         shared: Arc<SharedState>,
         event_tx: Option<Sender<Event>>,
         farm_conn: Connection,
         ccp_conn: Connection,
         hmds_conn: Option<Connection>,
-        cashfarm_conn: Option<Connection>,
-        usfuture_conn: Option<Connection>,
-        eufarm_conn: Option<Connection>,
-        jfarm_conn: Option<Connection>,
-        usopt_conn: Option<Connection>,
         core_id: Option<usize>,
     ) -> (HotLoop, Sender<ControlCommand>) {
         let (tx, rx) = bounded(64);
@@ -1702,12 +1669,6 @@ impl Gateway {
         hot_loop.ccp.ccp_sign_key = self.ccp_sign_key.clone();
         hot_loop.ccp.ccp_sign_iv = std::sync::Mutex::new(self.ccp_sign_iv.clone());
         hot_loop.hmds_conn = hmds_conn;
-        hot_loop.cashfarm_conn = cashfarm_conn;
-        hot_loop.usfuture_conn = usfuture_conn;
-        hot_loop.eufarm_conn = eufarm_conn;
-        hot_loop.jfarm_conn = jfarm_conn;
-        hot_loop.usopt_conn = usopt_conn;
-        hot_loop.pending_secondary_farms = std::mem::take(&mut self.pending_secondary_farms);
         (hot_loop, tx)
     }
 }

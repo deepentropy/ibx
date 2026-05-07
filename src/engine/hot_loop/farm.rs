@@ -7,7 +7,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{FarmSlot, InstrumentId};
+use crate::types::InstrumentId;
 use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, fast_extract_msg_type, find_body_after_tag};
@@ -15,9 +15,9 @@ use super::{HeartbeatState, emit, fast_extract_msg_type, find_body_after_tag};
 pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
-    pub(crate) instrument_md_reqs: Vec<(InstrumentId, FarmSlot, Vec<u32>)>,
-    /// Active depth subscriptions: (req_id, farm_slot, is_smart_depth).
-    pub(crate) depth_subs: Vec<(u32, FarmSlot, bool)>,
+    pub(crate) instrument_md_reqs: Vec<(InstrumentId, Vec<u32>)>,
+    /// Active depth subscriptions: (req_id, is_smart_depth).
+    pub(crate) depth_subs: Vec<(u32, bool)>,
     /// Maps server_tag → (depth_req_id, is_smart_depth, min_tick) for active depth subscriptions.
     pub(crate) depth_tag_to_req: Vec<(u32, u32, bool, f64)>,
     /// SmartDepth fan-out: maps internal sub_req → user's original req_id.
@@ -107,85 +107,6 @@ impl FarmState {
         }
         msgs.clear();
         self.farm_msg_buf = msgs;
-    }
-
-    pub(crate) fn poll_secondary_farm(
-        &mut self,
-        secondary_conn: &mut Option<Connection>,
-        slot: &FarmSlot,
-        _farm_conn: &mut Option<Connection>,
-        context: &mut Context,
-        shared: &SharedState,
-        event_tx: &Option<Sender<Event>>,
-        hb: &mut HeartbeatState,
-    ) {
-        let conn = match secondary_conn.as_mut() {
-            Some(c) => c,
-            None => return,
-        };
-        match conn.try_recv() {
-            Ok(0) => return,
-            Err(e) => {
-                log::error!("{:?} connection lost: {}", slot, e);
-                self.handle_secondary_disconnect(secondary_conn, slot, context, shared, event_tx);
-                return;
-            }
-            Ok(_) => {
-                let shb = hb.secondary_hb_mut(slot);
-                shb.last_recv = Instant::now();
-                shb.pending_test = None;
-            }
-        }
-        let frames = conn.extract_frames();
-        let mut msgs = Vec::new();
-        for frame in &frames {
-            match frame {
-                Frame::FixComp(raw) => {
-                    let (unsigned, _) = conn.unsign(raw);
-                    msgs.extend(fixcomp::fixcomp_decompress(&unsigned));
-                }
-                Frame::Binary(raw) => {
-                    let (unsigned, _) = conn.unsign(raw);
-                    msgs.push(unsigned);
-                }
-                Frame::Fix(raw) => {
-                    let (unsigned, _) = conn.unsign(raw);
-                    msgs.push(unsigned);
-                }
-            }
-        }
-        for msg in &msgs {
-            self.process_farm_message(msg, secondary_conn, context, shared, event_tx, hb);
-        }
-    }
-
-    /// Handle disconnect of a secondary farm: drop connection, clear subscriptions for that slot.
-    pub(crate) fn handle_secondary_disconnect(
-        &mut self,
-        secondary_conn: &mut Option<Connection>,
-        slot: &FarmSlot,
-        _context: &mut Context,
-        _shared: &SharedState,
-        _event_tx: &Option<Sender<Event>>,
-    ) {
-        *secondary_conn = None;
-        // Collect req IDs and instrument IDs for the disconnected farm slot
-        let mut stale_req_ids = Vec::new();
-        let mut affected_count = 0usize;
-        self.instrument_md_reqs.retain(|(_, farm, reqs)| {
-            if farm == slot {
-                stale_req_ids.extend(reqs.iter().copied());
-                affected_count += 1;
-                false
-            } else {
-                true
-            }
-        });
-        self.md_req_to_instrument.retain(|(rid, _)| !stale_req_ids.contains(rid));
-        if affected_count > 0 {
-            log::warn!("{:?} disconnected, cleared {} instrument subscriptions", slot, affected_count);
-            // Don't emit Event::Disconnected — secondary farm drops are not session-level failures.
-        }
     }
 
     pub(crate) fn process_farm_message(
@@ -326,7 +247,7 @@ impl FarmState {
         // Depth ack: always map the server_tag if this req_id is a depth subscription,
         // even when depth_levels=0 (book empty now but updates may arrive later).
         let depth_levels: i32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-        if let Some((_, _, is_smart)) = self.depth_subs.iter().find(|(id, _, _)| *id == req_id) {
+        if let Some((_, is_smart)) = self.depth_subs.iter().find(|(id, _)| *id == req_id) {
             let is_smart = *is_smart;
             // For SmartDepth fan-out, map back to the user's original req_id
             let user_req = self.depth_fanout_map.iter()
@@ -386,14 +307,8 @@ impl FarmState {
         right: &str,
         multiplier: &str,
         instrument: InstrumentId,
-        farm: FarmSlot,
         mode_9887: i32,
         farm_conn: &mut Option<Connection>,
-        cashfarm_conn: &mut Option<Connection>,
-        usfuture_conn: &mut Option<Connection>,
-        eufarm_conn: &mut Option<Connection>,
-        jfarm_conn: &mut Option<Connection>,
-        usopt_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
         // Realtime fans out into BID_ASK + LAST; frozen/delayed/delayed-frozen
@@ -412,21 +327,21 @@ impl FarmState {
             self.md_req_to_instrument.push((last_id, instrument));
         }
 
-        match self.instrument_md_reqs.iter_mut().find(|(id, _, _)| *id == instrument) {
-            Some((_, _, reqs)) => {
+        match self.instrument_md_reqs.iter_mut().find(|(id, _)| *id == instrument) {
+            Some((_, reqs)) => {
                 reqs.push(bid_ask_id);
                 if realtime { reqs.push(last_id); }
             }
             None => {
                 let reqs = if realtime { vec![bid_ask_id, last_id] } else { vec![bid_ask_id] };
-                self.instrument_md_reqs.push((instrument, farm, reqs));
+                self.instrument_md_reqs.push((instrument, reqs));
             }
         }
         if self.md_resub_info.iter().all(|(id, ..)| *id != instrument) {
             self.md_resub_info.push((instrument, symbol.to_string(), exchange.to_string(), sec_type.to_string(), last_trade_date.to_string(), strike, right.to_string(), multiplier.to_string(), mode_9887));
         }
 
-        if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn) {
+        if let Some(conn) = farm_conn.as_mut() {
             let bid_ask_str = bid_ask_id.to_string();
             let last_str = last_id.to_string();
             let con_id_str = (con_id as u32).to_string();
@@ -506,11 +421,11 @@ impl FarmState {
                 let _ = conn.send_fixcomp(&tags);
             }
             if realtime {
-                log::info!("Sent 35=V subscribe: con_id={} sec_type={} farm={:?} ids={},{} seq={}",
-                    con_id, sec_type, farm, bid_ask_id, last_id, conn.seq);
+                log::info!("Sent 35=V subscribe: con_id={} sec_type={} ids={},{} seq={}",
+                    con_id, sec_type, bid_ask_id, last_id, conn.seq);
             } else {
-                log::info!("Sent 35=V subscribe (9887={}): con_id={} sec_type={} farm={:?} id={} seq={}",
-                    mode_9887, con_id, sec_type, farm, bid_ask_id, conn.seq);
+                log::info!("Sent 35=V subscribe (9887={}): con_id={} sec_type={} id={} seq={}",
+                    mode_9887, con_id, sec_type, bid_ask_id, conn.seq);
             }
             hb.last_farm_sent = Instant::now();
         }
@@ -520,25 +435,20 @@ impl FarmState {
         &mut self,
         instrument: InstrumentId,
         farm_conn: &mut Option<Connection>,
-        cashfarm_conn: &mut Option<Connection>,
-        usfuture_conn: &mut Option<Connection>,
-        eufarm_conn: &mut Option<Connection>,
-        jfarm_conn: &mut Option<Connection>,
-        usopt_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        let (farm, reqs) = match self.instrument_md_reqs.iter()
-            .position(|(id, _, _)| *id == instrument)
+        let reqs = match self.instrument_md_reqs.iter()
+            .position(|(id, _)| *id == instrument)
         {
             Some(idx) => {
-                let (_, farm, reqs) = self.instrument_md_reqs.remove(idx);
-                (farm, reqs)
+                let (_, reqs) = self.instrument_md_reqs.remove(idx);
+                reqs
             }
             None => return,
         };
         self.md_resub_info.retain(|(id, ..)| *id != instrument);
 
-        let conn = match farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn) {
+        let conn = match farm_conn.as_mut() {
             Some(c) => c,
             None => return,
         };
@@ -563,19 +473,13 @@ impl FarmState {
         _num_rows: i32,
         is_smart_depth: bool,
         farm_conn: &mut Option<Connection>,
-        cashfarm_conn: &mut Option<Connection>,
-        usfuture_conn: &mut Option<Connection>,
-        eufarm_conn: &mut Option<Connection>,
-        jfarm_conn: &mut Option<Connection>,
-        usopt_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        let farm = crate::types::farm_for_instrument(exchange, sec_type);
         let fix_sec_type = match sec_type {
             "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND",
             "CASH" => "CASH", other => other,
         };
-        self.depth_subs.push((req_id, farm, is_smart_depth));
+        self.depth_subs.push((req_id, is_smart_depth));
         self.depth_resub_info.push((req_id, con_id, exchange.to_string(), sec_type.to_string(), _num_rows, is_smart_depth));
 
         // SmartDepth requires per-exchange fan-out. The server ACKs a BEST/SMART
@@ -593,7 +497,7 @@ impl FarmState {
             &SINGLE
         };
 
-        if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn) {
+        if let Some(conn) = farm_conn.as_mut() {
             let con_id_str = (con_id as u32).to_string();
 
             if !exchanges.is_empty() {
@@ -602,7 +506,7 @@ impl FarmState {
                 for exch in exchanges {
                     let sub_req = self.next_md_req_id;
                     self.next_md_req_id += 1;
-                    self.depth_subs.push((sub_req, farm, true));
+                    self.depth_subs.push((sub_req, true));
                     self.depth_fanout_map.push((sub_req, req_id));
                     let sub_req_str = sub_req.to_string();
                     self.send_depth_one(conn, &sub_req_str, &con_id_str, exch, fix_sec_type);
@@ -626,20 +530,16 @@ impl FarmState {
         &mut self,
         req_id: u32,
         farm_conn: &mut Option<Connection>,
-        cashfarm_conn: &mut Option<Connection>,
-        usfuture_conn: &mut Option<Connection>,
-        eufarm_conn: &mut Option<Connection>,
-        jfarm_conn: &mut Option<Connection>,
-        usopt_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        let farm = match self.depth_subs.iter().position(|(id, _, _)| *id == req_id) {
+        let found = match self.depth_subs.iter().position(|(id, _)| *id == req_id) {
             Some(idx) => {
-                let (_, f, _) = self.depth_subs.remove(idx);
-                f
+                self.depth_subs.remove(idx);
+                true
             }
-            None => return,
+            None => false,
         };
+        if !found { return; }
 
         // Remove reconnect params
         self.depth_resub_info.retain(|(id, _, _, _, _, _)| *id != req_id);
@@ -651,13 +551,13 @@ impl FarmState {
             .collect();
 
         // Remove fan-out entries from depth_subs and depth_fanout_map
-        self.depth_subs.retain(|(id, _, _)| !fanout_reqs.contains(id));
+        self.depth_subs.retain(|(id, _)| !fanout_reqs.contains(id));
         self.depth_fanout_map.retain(|(_, user)| *user != req_id);
 
         // Clear server_tag mappings for this req_id
         self.depth_tag_to_req.retain(|(_, rid, _, _)| *rid != req_id);
 
-        if let Some(conn) = farm_conn_for_slot(farm, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn) {
+        if let Some(conn) = farm_conn.as_mut() {
             // Send unsub for each fan-out sub_req (SmartDepth per-exchange)
             for sub_req in &fanout_reqs {
                 let sub_req_str = sub_req.to_string();
@@ -979,11 +879,6 @@ impl FarmState {
         &mut self,
         conn: Connection,
         farm_conn: &mut Option<Connection>,
-        cashfarm_conn: &mut Option<Connection>,
-        usfuture_conn: &mut Option<Connection>,
-        eufarm_conn: &mut Option<Connection>,
-        jfarm_conn: &mut Option<Connection>,
-        usopt_conn: &mut Option<Connection>,
         context: &mut Context,
         hb: &mut HeartbeatState,
     ) {
@@ -993,23 +888,23 @@ impl FarmState {
         hb.last_farm_recv = Instant::now();
         hb.pending_farm_test = None;
 
-        // Preserve original farm slots and option fields for re-subscription
-        let active: Vec<(InstrumentId, FarmSlot, i64, String, String, String, String, f64, String, String, i32)> = self.instrument_md_reqs.iter()
-            .filter_map(|(id, slot, _)| {
+        // Snapshot active subscriptions and re-issue them on the new connection.
+        let active: Vec<(InstrumentId, i64, String, String, String, String, f64, String, String, i32)> = self.instrument_md_reqs.iter()
+            .filter_map(|(id, _)| {
                 context.market.con_id(*id).map(|con_id| {
                     let (sym, exch, st, ltd, strike, right, mult, mode) = self.md_resub_info.iter()
                         .find(|(iid, ..)| *iid == *id)
                         .map(|(_, s, e, st, l, k, r, m, mode)| (s.clone(), e.clone(), st.clone(), l.clone(), *k, r.clone(), m.clone(), *mode))
                         .unwrap_or_default();
-                    (*id, *slot, con_id, sym, exch, st, ltd, strike, right, mult, mode)
+                    (*id, con_id, sym, exch, st, ltd, strike, right, mult, mode)
                 })
             })
             .collect();
         self.md_req_to_instrument.clear();
         self.instrument_md_reqs.clear();
         let old_resub = std::mem::take(&mut self.md_resub_info);
-        for (instrument, farm, con_id, sym, exch, st, ltd, strike, right, mult, mode) in active {
-            self.send_mktdata_subscribe(con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, farm, mode, farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn, hb);
+        for (instrument, con_id, sym, exch, st, ltd, strike, right, mult, mode) in active {
+            self.send_mktdata_subscribe(con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, mode, farm_conn, hb);
         }
         drop(old_resub);
 
@@ -1019,7 +914,7 @@ impl FarmState {
         for (req_id, con_id, exchange, sec_type, num_rows, is_smart_depth) in depth_params {
             self.send_depth_subscribe(
                 req_id, con_id, &exchange, &sec_type, num_rows, is_smart_depth,
-                farm_conn, cashfarm_conn, usfuture_conn, eufarm_conn, jfarm_conn, usopt_conn, hb,
+                farm_conn, hb,
             );
         }
 
@@ -1095,56 +990,3 @@ impl FarmState {
     }
 }
 
-pub(crate) fn farm_conn_for_slot<'a>(
-    slot: FarmSlot,
-    farm_conn: &'a mut Option<Connection>,
-    cashfarm_conn: &'a mut Option<Connection>,
-    usfuture_conn: &'a mut Option<Connection>,
-    eufarm_conn: &'a mut Option<Connection>,
-    jfarm_conn: &'a mut Option<Connection>,
-    usopt_conn: &'a mut Option<Connection>,
-) -> Option<&'a mut Connection> {
-    match slot {
-        FarmSlot::UsFarm => farm_conn.as_mut(),
-        FarmSlot::UsOpt => {
-            if usopt_conn.is_some() {
-                usopt_conn.as_mut()
-            } else {
-                log::warn!("UsOpt unavailable, falling back to UsFarm");
-                farm_conn.as_mut()
-            }
-        }
-        FarmSlot::CashFarm => {
-            if cashfarm_conn.is_some() {
-                cashfarm_conn.as_mut()
-            } else {
-                log::warn!("CashFarm unavailable, falling back to UsFarm");
-                farm_conn.as_mut()
-            }
-        }
-        FarmSlot::UsFuture => {
-            if usfuture_conn.is_some() {
-                usfuture_conn.as_mut()
-            } else {
-                log::warn!("UsFuture unavailable, falling back to UsFarm");
-                farm_conn.as_mut()
-            }
-        }
-        FarmSlot::EuFarm => {
-            if eufarm_conn.is_some() {
-                eufarm_conn.as_mut()
-            } else {
-                log::warn!("EuFarm unavailable, falling back to UsFarm");
-                farm_conn.as_mut()
-            }
-        }
-        FarmSlot::JFarm => {
-            if jfarm_conn.is_some() {
-                jfarm_conn.as_mut()
-            } else {
-                log::warn!("JFarm unavailable, falling back to UsFarm");
-                farm_conn.as_mut()
-            }
-        }
-    }
-}

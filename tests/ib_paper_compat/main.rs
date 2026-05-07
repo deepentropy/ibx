@@ -43,7 +43,7 @@ fn compat_suite() {
     let suite_start = Instant::now();
 
     let start = Instant::now();
-    let (mut gw, farm_conn, ccp_conn, hmds_conn, _cashfarm, _usfuture, _eufarm, _jfarm, _usopt) = Gateway::connect(&config)
+    let (mut gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
         .expect("Gateway::connect() failed");
     let connect_time = start.elapsed();
 

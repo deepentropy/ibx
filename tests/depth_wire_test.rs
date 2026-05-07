@@ -19,7 +19,7 @@ fn config() -> GatewayConfig {
 #[ignore]
 fn raw_farm_subscribe_test() {
     let cfg = config();
-    let (_gw, mut farm, _ccp, _hmds, _cash, _usfut, _eu, _j, _usopt) =
+    let (_gw, mut farm, _ccp, _hmds) =
         Gateway::connect(&cfg).expect("Gateway connect failed");
 
     eprintln!("Farm connected, seq={}", farm.seq);
