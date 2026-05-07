@@ -865,32 +865,52 @@ impl CcpState {
         shared: &SharedState,
         event_tx: &Option<Sender<Event>>,
     ) {
-        let orig_clord = parsed.get(&41).and_then(|s| s.parse::<u64>().ok());
+        // Match handle_exec_report's tag-11 parsing: strip the gateway's
+        // "C" prefix and any ".0/.1/.2" modify-chain suffix.
+        let orig_clord = parsed.get(&41).and_then(|s| {
+            let stripped = s.strip_prefix('C').unwrap_or(s);
+            let base = stripped.split('.').next().unwrap_or(stripped);
+            base.parse::<u64>().ok()
+        });
         let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("Cancel rejected");
         let reject_type: u8 = parsed.get(&434).and_then(|s| s.parse().ok()).unwrap_or(1);
         let reason_code: i32 = parsed.get(&102).and_then(|s| s.parse().ok()).unwrap_or(-1);
         log::warn!("CancelReject: origClOrd={:?} type={} code={} reason={}",
             orig_clord, reject_type, reason_code, reason);
 
-        if let Some(oid) = orig_clord {
-            if let Some(order) = context.order(oid).copied() {
-                let restore_status = if order.filled > 0 {
-                    crate::types::OrderStatus::PartiallyFilled
-                } else {
-                    crate::types::OrderStatus::Submitted
-                };
-                context.update_order_status(oid, restore_status);
-                let reject = crate::types::CancelReject {
-                    order_id: oid,
-                    instrument: order.instrument,
-                    reject_type,
-                    reason_code,
-                    timestamp_ns: context.now_ns(),
-                };
-                shared.orders.push_cancel_reject(reject);
-                emit(event_tx, Event::CancelReject(reject));
-            }
+        let Some(oid) = orig_clord else { return };
+
+        // Update local context only if we tracked the order in this session.
+        let instrument = if let Some(order) = context.order(oid).copied() {
+            let restore_status = if order.filled > 0 {
+                crate::types::OrderStatus::PartiallyFilled
+            } else {
+                crate::types::OrderStatus::Submitted
+            };
+            context.update_order_status(oid, restore_status);
+            order.instrument
+        } else {
+            0
+        };
+
+        // FIX CxlRejReason 1 = UnknownOrder. The gateway is telling us the
+        // order it just listed in the mass-status burst doesn't exist on its
+        // side — drop the stale cache entry so subsequent req_open_orders
+        // stops returning it. Other reasons (TooLate, OrderInProcess, ...)
+        // leave the cache alone; a follow-up exec report will reconcile.
+        if reason_code == 1 {
+            shared.orders.remove_order_info(oid);
         }
+
+        let reject = crate::types::CancelReject {
+            order_id: oid,
+            instrument,
+            reject_type,
+            reason_code,
+            timestamp_ns: context.now_ns(),
+        };
+        shared.orders.push_cancel_reject(reject);
+        emit(event_tx, Event::CancelReject(reject));
     }
 
     fn handle_news_bulletin(&mut self, parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
