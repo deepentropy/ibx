@@ -160,6 +160,12 @@ impl EClient {
 
         let _ = (port, client_id); // unused but kept for ibapi signature compat
 
+        // Fire initial callbacks synchronously, matching official Python ibapi
+        // where connect_ack signals "socket ready" before run() is called.
+        self.wrapper.call_method0(py, "connect_ack")?;
+        self.wrapper.call_method1(py, "managed_accounts", (self.account().as_str(),))?;
+        self.wrapper.call_method1(py, "next_valid_id", (start_id as i64,))?;
+
         Ok(())
     }
 
@@ -191,12 +197,6 @@ impl EClient {
         if !self.connected.load(Ordering::Acquire) {
             return Err(PyRuntimeError::new_err("Not connected. Call connect() first."));
         }
-
-        // Fire initial callbacks
-        let next_id = self.next_order_id.load(Ordering::Relaxed) as i64;
-        self.wrapper.call_method1(py, "next_valid_id", (next_id,))?;
-        self.wrapper.call_method1(py, "managed_accounts", (self.account().as_str(),))?;
-        self.wrapper.call_method0(py, "connect_ack")?;
 
         // Event loop — wake immediately on data, or check signals every 1ms.
         while self.connected.load(Ordering::Relaxed) {
