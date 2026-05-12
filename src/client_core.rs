@@ -315,6 +315,8 @@ pub struct ClientCore {
     pub pnl_req_id: Mutex<Option<i64>>,
     pub pnl_single_reqs: Mutex<HashMap<i64, i64>>, // req_id → con_id
     pub last_pnl: Mutex<[i64; 3]>, // [daily, unrealized, realized]
+    // Per-req_id change detection for pnl_single: [pos, daily, unrealized, realized, value] scaled.
+    pub last_pnl_single: Mutex<HashMap<i64, [i64; 5]>>,
 
     // Account summary subscription state (req_id, tags)
     pub account_summary_req: Mutex<Option<(i64, Vec<String>)>>,
@@ -360,6 +362,7 @@ impl ClientCore {
             pnl_req_id: Mutex::new(None),
             pnl_single_reqs: Mutex::new(HashMap::new()),
             last_pnl: Mutex::new([0; 3]),
+            last_pnl_single: Mutex::new(HashMap::new()),
             account_summary_req: Mutex::new(None),
             bulletin_subscribed: AtomicBool::new(false),
             account_updates_subscribed: AtomicBool::new(false),
@@ -386,6 +389,7 @@ impl ClientCore {
         *self.pnl_req_id.lock().unwrap() = None;
         self.pnl_single_reqs.lock().unwrap().clear();
         *self.last_pnl.lock().unwrap() = [0; 3];
+        self.last_pnl_single.lock().unwrap().clear();
         *self.account_summary_req.lock().unwrap() = None;
         self.bulletin_subscribed.store(false, Ordering::Relaxed);
         self.account_updates_subscribed.store(false, Ordering::Relaxed);
@@ -597,6 +601,7 @@ impl ClientCore {
 
     pub fn unsubscribe_pnl_single(&self, req_id: i64) {
         self.pnl_single_reqs.lock().unwrap().remove(&req_id);
+        self.last_pnl_single.lock().unwrap().remove(&req_id);
     }
 
     // ── Account summary subscription management ──
@@ -971,36 +976,76 @@ impl ClientCore {
         })
     }
 
-    /// Poll per-position PnL and return updates.
+    /// Poll per-position PnL and return updates whose values changed.
+    /// Routes the quote lookup by con_id (not first-non-zero across all subscriptions),
+    /// computes daily/realized from the matching midnight seed, and synthesizes
+    /// money_traded = qty_now × avg_cost for intraday-opened positions.
     pub fn poll_pnl_single(&self, shared: &SharedState) -> Vec<PnlSingleUpdate> {
         let reqs: Vec<(i64, i64)> = self.pnl_single_reqs.lock().unwrap()
             .iter().map(|(&r, &c)| (r, c)).collect();
+        if reqs.is_empty() {
+            return Vec::new();
+        }
 
+        let seeds: HashMap<i64, MidnightSeed> = shared.portfolio.midnight_seeds()
+            .into_iter().map(|s| (s.con_id, s)).collect();
+        let con_id_map = self.con_id_to_instrument.lock().unwrap();
+        let mut last_cache = self.last_pnl_single.lock().unwrap();
         let mut results = Vec::new();
+
         for (req_id, con_id) in reqs {
-            if let Some(pi) = shared.portfolio.position_info(con_id) {
-                let pos = pi.position as f64;
-                let last_price = {
-                    let imap = self.instrument_to_req.lock().unwrap();
-                    imap.keys()
-                        .find_map(|&iid| {
-                            let q = shared.market.quote(iid);
-                            if q.last != 0 { Some(q.last) } else { None }
-                        })
-                        .unwrap_or(0)
-                };
-                let (unrealized, value) = if last_price != 0 && pi.avg_cost != 0 {
-                    let u = (last_price - pi.avg_cost) * pi.position;
-                    let v = last_price * pi.position;
-                    (u as f64 / PRICE_SCALE_F, v as f64 / PRICE_SCALE_F)
-                } else {
-                    (0.0, pi.avg_cost as f64 / PRICE_SCALE_F * pos)
-                };
-                results.push(PnlSingleUpdate {
-                    req_id, pos, daily_pnl: 0.0, unrealized_pnl: unrealized,
-                    realized_pnl: 0.0, value,
-                });
+            let Some(pi) = shared.portfolio.position_info(con_id) else { continue; };
+            let qty_now = pi.position;
+            let avg_cost = pi.avg_cost;
+
+            let Some(&iid) = con_id_map.get(&con_id) else { continue; };
+            let q = shared.market.quote(iid);
+            let price_now = q.last;
+            if price_now == 0 {
+                continue;
             }
+
+            let seed = seeds.get(&con_id);
+            let qty_midnight = seed.map(|s| s.qty_midnight).unwrap_or(0);
+            let prev_close = q.close;
+            if prev_close == 0 && qty_midnight != 0 {
+                continue;
+            }
+
+            let money_traded = match seed {
+                Some(s) => s.money_traded,
+                None => qty_now as f64 * avg_cost as f64 / PRICE_SCALE_F,
+            };
+
+            let mv_now = qty_now as f64 * price_now as f64 / PRICE_SCALE_F;
+            let mv_midnight = qty_midnight as f64 * prev_close as f64 / PRICE_SCALE_F;
+            let daily = mv_now - mv_midnight - money_traded;
+            let unrealized = if avg_cost != 0 {
+                qty_now as f64 * (price_now - avg_cost) as f64 / PRICE_SCALE_F
+            } else { 0.0 };
+            let realized = seed.map(|s| s.realized_pnl).unwrap_or(0.0);
+            let value = mv_now;
+
+            let snapshot: [i64; 5] = [
+                qty_now,
+                (daily * PRICE_SCALE_F) as i64,
+                (unrealized * PRICE_SCALE_F) as i64,
+                (realized * PRICE_SCALE_F) as i64,
+                (value * PRICE_SCALE_F) as i64,
+            ];
+            if last_cache.get(&req_id) == Some(&snapshot) {
+                continue;
+            }
+            last_cache.insert(req_id, snapshot);
+
+            results.push(PnlSingleUpdate {
+                req_id,
+                pos: qty_now as f64,
+                daily_pnl: daily,
+                unrealized_pnl: unrealized,
+                realized_pnl: realized,
+                value,
+            });
         }
         results
     }
@@ -1458,5 +1503,99 @@ mod tests {
         assert!(core.poll_pnl(&shared).is_some());
         // Same inputs → no callback.
         assert!(core.poll_pnl(&shared).is_none());
+    }
+
+    // ── poll_pnl_single regression tests (#168) ──
+
+    #[test]
+    fn poll_pnl_single_routes_quote_by_con_id() {
+        // #168 (bug 3): two subscribed instruments, different prices — each req_id
+        // must see the price of its own con_id, not the first non-zero quote.
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+
+        seed_pnl_position(&core, &shared, 111, 0, 1, 100.0, 105.0, 0.0);  // SPY
+        seed_pnl_position(&core, &shared, 222, 1, 1, 200.0, 210.0, 0.0);  // QQQ
+
+        core.subscribe_pnl_single(50, 111);
+        core.subscribe_pnl_single(51, 222);
+
+        let updates = core.poll_pnl_single(&shared);
+        assert_eq!(updates.len(), 2);
+
+        let spy = updates.iter().find(|u| u.req_id == 50).expect("SPY update");
+        let qqq = updates.iter().find(|u| u.req_id == 51).expect("QQQ update");
+        // Unrealized = qty × (last - avg_cost). SPY: 1×(105-100)=5; QQQ: 1×(210-200)=10.
+        assert!((spy.unrealized_pnl - 5.0).abs() < 1e-6);
+        assert!((qqq.unrealized_pnl - 10.0).abs() < 1e-6);
+        // Value = qty × last. SPY: 105; QQQ: 210.
+        assert!((spy.value - 105.0).abs() < 1e-6);
+        assert!((qqq.value - 210.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn poll_pnl_single_intraday_opened_position() {
+        // #168 (bug 1): daily_pnl must be computed, not hardcoded 0.
+        // No seed → money_traded synthesized, daily collapses to unrealized.
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        seed_pnl_position(&core, &shared, 756733, 0, 1, 735.00, 735.07, 0.0);
+        core.subscribe_pnl_single(42, 756733);
+
+        let updates = core.poll_pnl_single(&shared);
+        assert_eq!(updates.len(), 1);
+        let u = &updates[0];
+        assert_eq!(u.req_id, 42);
+        assert!((u.daily_pnl - 0.07).abs() < 1e-6, "daily={}", u.daily_pnl);
+        assert!((u.unrealized_pnl - 0.07).abs() < 1e-6);
+        assert!((u.realized_pnl - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn poll_pnl_single_overnight_position_with_seed() {
+        // #168 (bug 2): realized_pnl must come from the seed, not hardcoded 0.
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        seed_pnl_position(&core, &shared, 756733, 0, 10, 700.00, 735.00, 730.00);
+        shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
+            con_id: 756733,
+            qty_midnight: 10,
+            money_traded: 0.0,
+            realized_pnl: 12.34,
+        }]);
+        core.subscribe_pnl_single(99, 756733);
+
+        let updates = core.poll_pnl_single(&shared);
+        assert_eq!(updates.len(), 1);
+        let u = &updates[0];
+        // daily = 10×735 − 10×730 − 0 = 50
+        assert!((u.daily_pnl - 50.0).abs() < 1e-6);
+        // unrealized = 10 × (735 − 700) = 350
+        assert!((u.unrealized_pnl - 350.0).abs() < 1e-6);
+        assert!((u.realized_pnl - 12.34).abs() < 1e-6);
+    }
+
+    #[test]
+    fn poll_pnl_single_change_detection_suppresses_duplicate() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        seed_pnl_position(&core, &shared, 1, 0, 1, 100.0, 101.0, 0.0);
+        core.subscribe_pnl_single(7, 1);
+        assert_eq!(core.poll_pnl_single(&shared).len(), 1);
+        // Same inputs → no emit.
+        assert!(core.poll_pnl_single(&shared).is_empty());
+    }
+
+    #[test]
+    fn poll_pnl_single_unsubscribe_clears_cache() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        seed_pnl_position(&core, &shared, 1, 0, 1, 100.0, 101.0, 0.0);
+        core.subscribe_pnl_single(7, 1);
+        let _ = core.poll_pnl_single(&shared);
+        core.unsubscribe_pnl_single(7);
+        // Re-subscribing with same req_id must re-emit (cache cleared on unsubscribe).
+        core.subscribe_pnl_single(7, 1);
+        assert_eq!(core.poll_pnl_single(&shared).len(), 1);
     }
 }
