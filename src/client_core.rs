@@ -895,12 +895,20 @@ impl ClientCore {
     /// Poll PnL and return update if values changed.
     /// Computes daily P&L client-side from midnight seeds + live quotes.
     /// Formula: dailyPnL = Σ(qtyNow × priceNow - qtyMidnight × prevClose - moneyTraded)
+    /// For positions opened intraday (no seed), synthesizes
+    /// moneyTraded = qtyNow × avgCost so the formula collapses to unrealized P&L.
     pub fn poll_pnl(&self, shared: &SharedState) -> Option<PnlUpdate> {
-        let req_id = *self.pnl_req_id.lock().unwrap();
-        let req_id = req_id?;
+        let req_id = (*self.pnl_req_id.lock().unwrap())?;
 
-        let seeds = shared.portfolio.midnight_seeds();
-        if seeds.is_empty() {
+        let seeds: HashMap<i64, MidnightSeed> = shared.portfolio.midnight_seeds()
+            .into_iter().map(|s| (s.con_id, s)).collect();
+        let positions = shared.portfolio.position_infos();
+
+        let mut con_ids: HashSet<i64> = seeds.keys().copied().collect();
+        for pi in &positions {
+            con_ids.insert(pi.con_id);
+        }
+        if con_ids.is_empty() {
             return None;
         }
 
@@ -909,31 +917,39 @@ impl ClientCore {
         let mut total_unrealized: f64 = 0.0;
         let mut total_realized: f64 = 0.0;
 
-        for seed in &seeds {
-            total_realized += seed.realized_pnl;
-
-            let pi = shared.portfolio.position_info(seed.con_id);
+        for con_id in con_ids {
+            let seed = seeds.get(&con_id);
+            let pi = shared.portfolio.position_info(con_id);
             let qty_now = pi.as_ref().map(|p| p.position).unwrap_or(0);
             let avg_cost = pi.as_ref().map(|p| p.avg_cost).unwrap_or(0);
+            let qty_midnight = seed.map(|s| s.qty_midnight).unwrap_or(0);
 
-            if let Some(&iid) = con_id_map.get(&seed.con_id) {
-                let q = shared.market.quote(iid);
-                let price_now = q.last;
-                let prev_close = q.close;
+            total_realized += seed.map(|s| s.realized_pnl).unwrap_or(0.0);
 
-                if price_now != 0 {
-                    // Skip overnight positions without prev close (would give wrong result)
-                    if prev_close == 0 && seed.qty_midnight != 0 {
-                        continue;
-                    }
-                    let mv_now = qty_now as f64 * price_now as f64 / PRICE_SCALE_F;
-                    let mv_midnight = seed.qty_midnight as f64 * prev_close as f64 / PRICE_SCALE_F;
-                    total_daily += mv_now - mv_midnight - seed.money_traded;
+            let Some(&iid) = con_id_map.get(&con_id) else { continue; };
+            let q = shared.market.quote(iid);
+            let price_now = q.last;
+            let prev_close = q.close;
 
-                    if avg_cost != 0 {
-                        total_unrealized += qty_now as f64 * (price_now - avg_cost) as f64 / PRICE_SCALE_F;
-                    }
-                }
+            if price_now == 0 {
+                continue;
+            }
+            // Skip overnight positions without prev close (would give wrong result)
+            if prev_close == 0 && qty_midnight != 0 {
+                continue;
+            }
+
+            let money_traded = match seed {
+                Some(s) => s.money_traded,
+                None => qty_now as f64 * avg_cost as f64 / PRICE_SCALE_F,
+            };
+
+            let mv_now = qty_now as f64 * price_now as f64 / PRICE_SCALE_F;
+            let mv_midnight = qty_midnight as f64 * prev_close as f64 / PRICE_SCALE_F;
+            total_daily += mv_now - mv_midnight - money_traded;
+
+            if avg_cost != 0 {
+                total_unrealized += qty_now as f64 * (price_now - avg_cost) as f64 / PRICE_SCALE_F;
             }
         }
 
@@ -1353,5 +1369,94 @@ mod tests {
         let s = shared_with_components(vec![(0, "Q")]);
         // bit 5 set, no component at bit 5 — skipped
         assert_eq!(render_exchange_mask(0b100000, &s), "");
+    }
+
+    // ── poll_pnl regression tests (#166) ──
+
+    fn seed_pnl_position(
+        core: &ClientCore,
+        shared: &SharedState,
+        con_id: i64,
+        iid: InstrumentId,
+        position: i64,
+        avg_cost_dollars: f64,
+        last_dollars: f64,
+        close_dollars: f64,
+    ) {
+        core.con_id_to_instrument.lock().unwrap().insert(con_id, iid);
+        core.instrument_to_req.lock().unwrap().insert(iid, 1);
+        shared.portfolio.set_position_info(PositionInfo {
+            con_id,
+            position,
+            avg_cost: (avg_cost_dollars * PRICE_SCALE_F) as i64,
+            symbol: format!("SYM{con_id}"),
+            sec_type: "STK".into(),
+            currency: "USD".into(),
+            multiplier: String::new(),
+        });
+        let mut q = Quote::default();
+        q.last = (last_dollars * PRICE_SCALE_F) as i64;
+        q.close = (close_dollars * PRICE_SCALE_F) as i64;
+        shared.market.push_quote(iid, &q);
+    }
+
+    #[test]
+    fn poll_pnl_no_subscription_returns_none() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        assert!(core.poll_pnl(&shared).is_none());
+    }
+
+    #[test]
+    fn poll_pnl_intraday_opened_position_fires_callback() {
+        // #166: flat-at-midnight account opens an intraday position.
+        // Before fix: poll_pnl early-returned on empty seeds → no callback.
+        // After fix: position iterated, money_traded synthesized, daily P&L = unrealized.
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.subscribe_pnl(42);
+
+        // 1 share bought at $735.00, now $735.07. No midnight seed (flat at midnight).
+        seed_pnl_position(&core, &shared, 756733, 0, 1, 735.00, 735.07, 0.0);
+
+        let update = core.poll_pnl(&shared).expect("callback must fire");
+        assert_eq!(update.req_id, 42);
+        assert!((update.daily_pnl - 0.07).abs() < 1e-6, "daily={}", update.daily_pnl);
+        assert!((update.unrealized_pnl - 0.07).abs() < 1e-6);
+        assert!((update.realized_pnl - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn poll_pnl_overnight_position_with_seed_unchanged() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.subscribe_pnl(99);
+
+        // Held 10 SPY through midnight: qty_midnight=10, prev_close=$730, avg_cost=$700.
+        // No fills today (money_traded=0). Current price $735.
+        seed_pnl_position(&core, &shared, 756733, 0, 10, 700.00, 735.00, 730.00);
+        shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
+            con_id: 756733,
+            qty_midnight: 10,
+            money_traded: 0.0,
+            realized_pnl: 0.0,
+        }]);
+
+        let update = core.poll_pnl(&shared).expect("callback must fire");
+        // daily = 10×735 - 10×730 - 0 = 50
+        assert!((update.daily_pnl - 50.0).abs() < 1e-6, "daily={}", update.daily_pnl);
+        // unrealized = 10 × (735 - 700) = 350
+        assert!((update.unrealized_pnl - 350.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn poll_pnl_change_detection_suppresses_duplicate() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.subscribe_pnl(7);
+        seed_pnl_position(&core, &shared, 1, 0, 1, 100.0, 101.0, 0.0);
+        assert!(core.poll_pnl(&shared).is_some());
+        // Same inputs → no callback.
+        assert!(core.poll_pnl(&shared).is_none());
     }
 }
