@@ -11,7 +11,7 @@ use crate::api::types::{
 use crate::client_core::ClientCore;
 use crate::types::*;
 use super::EClient;
-use super::super::contract::{Contract, Order, CommissionAndFeesReport};
+use super::super::contract::{Contract, Order, CommissionAndFeesReport, Execution};
 
 #[pymethods]
 impl EClient {
@@ -195,30 +195,32 @@ impl EClient {
                 ..Default::default()
             })?.into_any();
 
-            let exec_obj = pyo3::types::PyDict::new(py);
-            exec_obj.set_item("execId", se.execution.exec_id.as_str())?;
-            exec_obj.set_item("time", se.execution.time.as_str())?;
-            exec_obj.set_item("acctNumber", se.execution.acct_number.as_str())?;
-            exec_obj.set_item("exchange", se.execution.exchange.as_str())?;
-            exec_obj.set_item("side", se.execution.side.as_str())?;
-            exec_obj.set_item("shares", se.execution.shares)?;
-            exec_obj.set_item("price", se.execution.price)?;
-            exec_obj.set_item("permId", se.execution.perm_id)?;
-            exec_obj.set_item("clientId", se.execution.client_id)?;
-            exec_obj.set_item("orderId", se.execution.order_id)?;
-            exec_obj.set_item("liquidation", se.execution.liquidation as i64)?;
-            exec_obj.set_item("cumQty", se.execution.cum_qty)?;
-            exec_obj.set_item("avgPrice", se.execution.avg_price)?;
-            exec_obj.set_item("orderRef", "")?;
-            exec_obj.set_item("evRule", se.execution.ev_rule.as_str())?;
-            exec_obj.set_item("evMultiplier", se.execution.ev_multiplier)?;
-            exec_obj.set_item("modelCode", se.execution.model_code.as_str())?;
-            exec_obj.set_item("lastLiquidity", se.execution.last_liquidity as i64)?;
-            exec_obj.set_item("pendingPriceRevision", se.execution.pending_price_revision)?;
+            let exec_obj = Execution {
+                exec_id: se.execution.exec_id.clone(),
+                time: se.execution.time.clone(),
+                acct_number: se.execution.acct_number.clone(),
+                exchange: se.execution.exchange.clone(),
+                side: se.execution.side.clone(),
+                shares: se.execution.shares,
+                price: se.execution.price,
+                perm_id: se.execution.perm_id,
+                client_id: se.execution.client_id,
+                order_id: se.execution.order_id,
+                liquidation: se.execution.liquidation,
+                cum_qty: se.execution.cum_qty,
+                avg_price: se.execution.avg_price,
+                order_ref: String::new(),
+                ev_rule: se.execution.ev_rule.clone(),
+                ev_multiplier: se.execution.ev_multiplier,
+                model_code: se.execution.model_code.clone(),
+                last_liquidity: se.execution.last_liquidity,
+                pending_price_revision: se.execution.pending_price_revision,
+            };
+            let exec_py = Py::new(py, exec_obj)?.into_any();
 
             self.wrapper.call_method(
                 py, "exec_details",
-                (req_id, &c_py, exec_obj.as_any()),
+                (req_id, &c_py, &exec_py),
                 None,
             )?;
 

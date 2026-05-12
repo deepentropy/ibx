@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 
 use super::EClient;
-use super::super::contract::Contract;
+use super::super::contract::{Contract, NewsProviderPy, SmartComponentPy, SoftDollarTierPy};
 
 #[pymethods]
 impl EClient {
@@ -132,14 +132,16 @@ impl EClient {
         let _ = bbo_exchange;
         let shared = self.shared_state()?;
         let sc = shared.reference.smart_components();
-        let components = pyo3::types::PyList::new(py, sc.iter().map(|c| {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("bitNumber", c.bit_number).unwrap();
-            dict.set_item("exchange", &c.exchange).unwrap();
-            dict.set_item("exchangeLetter", &c.exchange_letter).unwrap();
-            dict
-        }))?;
-        self.wrapper.call_method1(py, "smart_components", (req_id, components.as_any()))?;
+        let map = pyo3::types::PyDict::new(py);
+        for c in sc.iter() {
+            let obj = SmartComponentPy {
+                bit_number: c.bit_number,
+                exchange: c.exchange.clone(),
+                exchange_letter: c.exchange_letter.clone(),
+            };
+            map.set_item(c.bit_number, Py::new(py, obj)?)?;
+        }
+        self.wrapper.call_method1(py, "smart_components", (req_id, map.as_any()))?;
         Ok(())
     }
 
@@ -148,12 +150,12 @@ impl EClient {
     fn req_news_providers(&self, py: Python<'_>) -> PyResult<()> {
         let shared = self.shared_state()?;
         let np = shared.reference.news_providers();
-        let py_list = pyo3::types::PyList::new(py, np.iter().map(|p| {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("code", &p.code).unwrap();
-            dict.set_item("name", &p.name).unwrap();
-            dict
-        }))?;
+        let mut providers: Vec<Py<NewsProviderPy>> = Vec::with_capacity(np.len());
+        for p in np.iter() {
+            let obj = NewsProviderPy { code: p.code.clone(), name: p.name.clone() };
+            providers.push(Py::new(py, obj)?);
+        }
+        let py_list = pyo3::types::PyList::new(py, providers)?;
         self.wrapper.call_method1(py, "news_providers", (py_list.as_any(),))?;
         Ok(())
     }
@@ -163,13 +165,16 @@ impl EClient {
     fn req_soft_dollar_tiers(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         let shared = self.shared_state()?;
         let tiers = shared.reference.soft_dollar_tiers();
-        let py_list = pyo3::types::PyList::new(py, tiers.iter().map(|t| {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("name", &t.name).unwrap();
-            dict.set_item("val", &t.val).unwrap();
-            dict.set_item("displayName", &t.display_name).unwrap();
-            dict
-        }))?;
+        let mut objs: Vec<Py<SoftDollarTierPy>> = Vec::with_capacity(tiers.len());
+        for t in tiers.iter() {
+            let obj = SoftDollarTierPy {
+                name: t.name.clone(),
+                val: t.val.clone(),
+                display_name: t.display_name.clone(),
+            };
+            objs.push(Py::new(py, obj)?);
+        }
+        let py_list = pyo3::types::PyList::new(py, objs)?;
         self.wrapper.call_method1(py, "soft_dollar_tiers", (req_id, py_list.as_any()))?;
         Ok(())
     }

@@ -2,7 +2,6 @@
 
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::types::PyDict;
 
 use crate::types::*;
 use super::super::types::PRICE_SCALE_F;
@@ -1401,11 +1400,12 @@ impl Order {
     fn get_smart_combo_routing_params_alias(&self) -> Vec<TagValue> { self.smart_combo_routing_params.clone() }
     #[getter(softDollarTier)]
     fn get_soft_dollar_tier(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let dict = PyDict::new(py);
-        dict.set_item("name", &self.soft_dollar_tier_name)?;
-        dict.set_item("val", &self.soft_dollar_tier_val)?;
-        dict.set_item("displayName", &self.soft_dollar_tier_display_name)?;
-        Ok(dict.into())
+        let tier = SoftDollarTierPy {
+            name: self.soft_dollar_tier_name.clone(),
+            val: self.soft_dollar_tier_val.clone(),
+            display_name: self.soft_dollar_tier_display_name.clone(),
+        };
+        Ok(Py::new(py, tier)?.into_any().into())
     }
     #[getter(startingPrice)]
     fn get_starting_price_alias(&self) -> f64 { self.starting_price }
@@ -2066,6 +2066,120 @@ impl ContractDetails {
     }
 }
 
+// ── Execution ──
+
+/// ibapi-compatible Execution class (used in exec_details callback).
+#[pyclass]
+#[derive(Clone, Debug, Default)]
+pub struct Execution {
+    #[pyo3(get, set)]
+    pub exec_id: String,
+    #[pyo3(get, set)]
+    pub time: String,
+    #[pyo3(get, set)]
+    pub acct_number: String,
+    #[pyo3(get, set)]
+    pub exchange: String,
+    #[pyo3(get, set)]
+    pub side: String,
+    #[pyo3(get, set)]
+    pub shares: f64,
+    #[pyo3(get, set)]
+    pub price: f64,
+    #[pyo3(get, set)]
+    pub perm_id: i64,
+    #[pyo3(get, set)]
+    pub client_id: i64,
+    #[pyo3(get, set)]
+    pub order_id: i64,
+    #[pyo3(get, set)]
+    pub liquidation: i32,
+    #[pyo3(get, set)]
+    pub cum_qty: f64,
+    #[pyo3(get, set)]
+    pub avg_price: f64,
+    #[pyo3(get, set)]
+    pub order_ref: String,
+    #[pyo3(get, set)]
+    pub ev_rule: String,
+    #[pyo3(get, set)]
+    pub ev_multiplier: f64,
+    #[pyo3(get, set)]
+    pub model_code: String,
+    #[pyo3(get, set)]
+    pub last_liquidity: i32,
+    #[pyo3(get, set)]
+    pub pending_price_revision: bool,
+}
+
+#[pymethods]
+impl Execution {
+    #[new]
+    #[pyo3(signature = ())]
+    fn new() -> Self { Self::default() }
+}
+
+// ── SmartComponent ──
+
+/// ibapi-compatible SmartComponent class.
+#[pyclass(name = "SmartComponent")]
+#[derive(Clone, Debug, Default)]
+pub struct SmartComponentPy {
+    #[pyo3(get, set)]
+    pub bit_number: i32,
+    #[pyo3(get, set)]
+    pub exchange: String,
+    #[pyo3(get, set)]
+    pub exchange_letter: String,
+}
+
+#[pymethods]
+impl SmartComponentPy {
+    #[new]
+    #[pyo3(signature = ())]
+    fn new() -> Self { Self::default() }
+}
+
+// ── NewsProvider ──
+
+/// ibapi-compatible NewsProvider class.
+#[pyclass(name = "NewsProvider")]
+#[derive(Clone, Debug, Default)]
+pub struct NewsProviderPy {
+    #[pyo3(get, set)]
+    pub code: String,
+    #[pyo3(get, set)]
+    pub name: String,
+}
+
+#[pymethods]
+impl NewsProviderPy {
+    #[new]
+    #[pyo3(signature = ())]
+    fn new() -> Self { Self::default() }
+}
+
+// ── SoftDollarTier ──
+
+/// ibapi-compatible SoftDollarTier class.
+#[pyclass(name = "SoftDollarTier")]
+#[derive(Clone, Debug, Default)]
+pub struct SoftDollarTierPy {
+    #[pyo3(get, set)]
+    pub name: String,
+    #[pyo3(get, set)]
+    pub val: String,
+    #[pyo3(get, set)]
+    pub display_name: String,
+}
+
+#[pymethods]
+impl SoftDollarTierPy {
+    #[new]
+    #[pyo3(signature = ())]
+    fn new() -> Self { Self::default() }
+}
+
 // ── CommissionAndFeesReport ──
 
 /// ibapi-compatible CommissionAndFeesReport class.
@@ -2173,6 +2287,10 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ContractDetails>()?;
     m.add_class::<ContractDescription>()?;
     m.add_class::<CommissionAndFeesReport>()?;
+    m.add_class::<Execution>()?;
+    m.add_class::<SmartComponentPy>()?;
+    m.add_class::<NewsProviderPy>()?;
+    m.add_class::<SoftDollarTierPy>()?;
     m.add_class::<DepthMktDataDescriptionPy>()?;
     Ok(())
 }

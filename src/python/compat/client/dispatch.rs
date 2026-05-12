@@ -14,7 +14,7 @@ use crate::api::types::{
     CommissionAndFeesReport as ApiCommissionAndFeesReport,
 };
 use super::EClient;
-use super::super::contract::{Contract, ContractDescription, ContractDetails, BarData, CommissionAndFeesReport, DepthMktDataDescriptionPy, Order, OrderState};
+use super::super::contract::{Contract, ContractDescription, ContractDetails, BarData, CommissionAndFeesReport, DepthMktDataDescriptionPy, Execution, Order, OrderState};
 use super::super::tick_types::*;
 use super::super::super::types::PRICE_SCALE_F;
 
@@ -118,23 +118,26 @@ impl EClient {
 
             let acct_name = self.account();
             let c_py = Py::new(py, exec_contract)?.into_any();
-            let exec_dict = pyo3::types::PyDict::new(py);
-            exec_dict.set_item("execId", exec_id.as_str())?;
-            exec_dict.set_item("time", now_str.as_str())?;
-            exec_dict.set_item("acctNumber", acct_name.as_str())?;
-            exec_dict.set_item("exchange", exec_exchange.as_str())?;
-            exec_dict.set_item("side", side_str)?;
-            exec_dict.set_item("price", price)?;
-            exec_dict.set_item("shares", fill.qty as f64)?;
-            exec_dict.set_item("orderId", fill.order_id as i64)?;
-            exec_dict.set_item("cumQty", cum_qty)?;
-            exec_dict.set_item("avgPrice", avg_price)?;
-            exec_dict.set_item("permId", perm_id)?;
-            exec_dict.set_item("clientId", 0i64)?;
-            exec_dict.set_item("liquidation", 0i64)?;
-            exec_dict.set_item("lastLiquidity", 0i64)?;
-            exec_dict.set_item("pendingPriceRevision", false)?;
-            call_wrapper!(self.wrapper, py, "exec_details", (req_id, &c_py, exec_dict.as_any()));
+            let exec_obj = Execution {
+                exec_id: exec_id.clone(),
+                time: now_str.clone(),
+                acct_number: acct_name,
+                exchange: exec_exchange.clone(),
+                side: side_str.to_string(),
+                shares: fill.qty as f64,
+                price,
+                perm_id,
+                client_id: 0,
+                order_id: fill.order_id as i64,
+                liquidation: 0,
+                cum_qty,
+                avg_price,
+                last_liquidity: 0,
+                pending_price_revision: false,
+                ..Default::default()
+            };
+            let exec_py = Py::new(py, exec_obj)?.into_any();
+            call_wrapper!(self.wrapper, py, "exec_details", (req_id, &c_py, &exec_py));
 
             // Update open order tracking
             self.core.update_order_fill(fill.order_id, status, fill.qty as f64, fill.remaining as f64);

@@ -503,8 +503,8 @@ class TestFillDispatch:
         exec_events = [e for e in w.events if e[0] == "exec_details"]
         assert len(exec_events) == 1
         execution = exec_events[0][3]
-        assert execution["side"] == "SELL"
-        assert abs(execution["price"] - 200.0) < 0.01
+        assert execution.side == "SELL"
+        assert abs(execution.price - 200.0) < 0.01
 
     def test_short_sell(self):
         w, c = make_test_client()
@@ -514,7 +514,7 @@ class TestFillDispatch:
         c._test_dispatch_once()
 
         exec_events = [e for e in w.events if e[0] == "exec_details"]
-        assert exec_events[0][3]["side"] == "SSHORT"
+        assert exec_events[0][3].side == "SSHORT"
 
     def test_exec_details_has_required_keys(self):
         w, c = make_test_client()
@@ -525,11 +525,11 @@ class TestFillDispatch:
 
         exec_events = [e for e in w.events if e[0] == "exec_details"]
         execution = exec_events[0][3]
-        assert "execId" in execution
-        assert "side" in execution
-        assert "price" in execution
-        assert "shares" in execution
-        assert "time" in execution
+        assert hasattr(execution, "exec_id")
+        assert hasattr(execution, "side")
+        assert hasattr(execution, "price")
+        assert hasattr(execution, "shares")
+        assert hasattr(execution, "time")
 
 
 class TestOrderUpdateDispatch:
@@ -1023,7 +1023,7 @@ class TestScenarios:
 
         execs = [e for e in w.events if e[0] == "exec_details"]
         assert len(execs) == 1
-        assert execs[0][3]["side"] == "BUY"
+        assert execs[0][3].side == "BUY"
 
     def test_partial_fill_then_cancel(self):
         """Partial fill → cancel → verify statuses."""
