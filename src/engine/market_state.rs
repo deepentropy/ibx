@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use crate::types::{InstrumentId, Price, Qty, Quote, PRICE_SCALE, MAX_INSTRUMENTS};
 
-/// Max server_tag value for flat lookup array. Server tags are small integers from IB.
-const MAX_SERVER_TAG: usize = 1024;
+/// Max server_tag value for flat lookup array. Gateway sessions assign tags
+/// monotonically and can climb well past 1024 for long-running paper accounts
+/// or thin-volume / sub-penny names (which seem to consume blocks of tags).
+/// 65536 covers a busy day on a single session at ~256 KB heap; tags that
+/// exceed this are logged and dropped.
+const MAX_SERVER_TAG: usize = 65536;
 
 /// Sentinel value for empty server_tag slots.
 const NO_INSTRUMENT: u32 = u32::MAX;
@@ -58,6 +62,11 @@ impl MarketState {
     pub fn register_server_tag(&mut self, server_tag: u32, instrument: InstrumentId) {
         if (server_tag as usize) < MAX_SERVER_TAG {
             self.server_tag_table[server_tag as usize] = instrument;
+        } else {
+            log::warn!(
+                "server_tag {} exceeds MAX_SERVER_TAG ({}); ticks for instrument {} will be dropped",
+                server_tag, MAX_SERVER_TAG, instrument,
+            );
         }
     }
 
