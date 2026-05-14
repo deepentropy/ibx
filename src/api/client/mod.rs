@@ -113,6 +113,7 @@ impl EClient {
             accept_invalid_certs: false,
             ib_key_timeout_secs: crate::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
             ib_key_token_sub_type: crate::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
+            code_provider: None,
         };
 
         let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&gw_config)?;

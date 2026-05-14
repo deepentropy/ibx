@@ -121,6 +121,7 @@ impl EClient {
                 .unwrap_or(crate::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS),
             ib_key_token_sub_type: ib_key_token_sub_type
                 .unwrap_or_else(|| crate::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into()),
+            code_provider: None,
         };
 
         let result = py.allow_threads(|| Gateway::connect(&config));

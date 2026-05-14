@@ -852,6 +852,13 @@ pub struct GatewayConfig {
     /// the live value via ib-agent's `SWCR_TOKEN_SUBTYPE` hook if the default
     /// doesn't trigger the IBKey push for your account.
     pub ib_key_token_sub_type: String,
+    /// If set, the IBKey gate uses the **Challenge/Response** path instead
+    /// of waiting for a mobile push approval. After the server delivers
+    /// state=2, the callback is invoked once with the challenge details
+    /// and the returned 8-character code is submitted as state=3. See
+    /// [`session::CodeProvider`] for the contract; `None` leaves behavior
+    /// unchanged (push approval).
+    pub code_provider: Option<session::CodeProvider>,
 }
 
 impl Gateway {
@@ -983,7 +990,12 @@ impl Gateway {
         if !config.paper {
             let deadline = std::time::Instant::now()
                 + std::time::Duration::from_secs(config.ib_key_timeout_secs);
-            match session::do_ib_key_2fa(&mut tls, &config.ib_key_token_sub_type, deadline)? {
+            match session::do_ib_key_2fa(
+                &mut tls,
+                &config.ib_key_token_sub_type,
+                deadline,
+                config.code_provider.as_ref(),
+            )? {
                 session::IbKeyOutcome::Skipped => {
                     log::info!("2FA gate: skipped (no second factor)");
                 }
@@ -2085,6 +2097,7 @@ mod tests {
             accept_invalid_certs: false,
             ib_key_timeout_secs: session::IB_KEY_DEFAULT_TIMEOUT_SECS,
             ib_key_token_sub_type: session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
+            code_provider: None,
         };
         assert_eq!(config.username, "user");
         assert!(config.paper);

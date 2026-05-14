@@ -148,6 +148,39 @@ pub fn xyz_build_swcr_token_init(token_sub_type: &str) -> Vec<u8> {
     buf
 }
 
+/// Build the Challenge/Response code submission (state=3).
+///
+/// Sent after the server's state=2 challenge when the user has chosen the
+/// 8-character response-code variant in the IBKey dialog (as opposed to
+/// tapping Approve on the push notification). The literal ASCII code goes
+/// in the `M.z` slot — no transformation client-side. Layout per
+/// ib-agent#149:
+///
+/// ```text
+/// Header (5 slots, 20 B):
+///   version (=20), msg_id (=775), literal 1, state (=3), str_len (=0)
+/// Body (3 length-prefixed strings):
+///   M.x  = ""        (username slot, empty in submission)
+///   M.z  = code      (8 ASCII chars, no padding when len % 4 == 0)
+///   M.A  = ""        (challenge-response slot, empty for IBKey C/R)
+/// ```
+///
+/// Note: state=3 carries 3 body strings, not 4 — the `M.D` token sub-type
+/// field present at state=1 is omitted here (verified against the 40-byte
+/// capture in ib-agent#149).
+pub fn xyz_build_swcr_token_code_submission(code: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&20u32.to_be_bytes());             // version
+    buf.extend_from_slice(&XYZ_MSG_SWCR_TOKEN.to_be_bytes());// msg_id 775
+    buf.extend_from_slice(&1u32.to_be_bytes());              // hardcoded 1
+    buf.extend_from_slice(&3u32.to_be_bytes());              // state = 3
+    buf.extend_from_slice(&0u32.to_be_bytes());              // str_len = 0
+    xyz_write_string(&mut buf, "");                          // M.x
+    xyz_write_string(&mut buf, code);                        // M.z = code
+    xyz_write_string(&mut buf, "");                          // M.A
+    buf
+}
+
 /// Parsed payload from an `XYZ_MSG_SWCR_TOKEN` state=2 reply.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SwcrTokenChallenge {
@@ -289,6 +322,41 @@ mod tests {
         assert_eq!(expected.len(), 40, "canonical inner payload is 40 bytes");
         let got = xyz_build_swcr_token_init("2a");
         assert_eq!(got, expected, "byte-for-byte match required");
+    }
+
+    #[test]
+    fn swcr_token_code_submission_matches_canonical_bytes() {
+        // Reference: deepentropy/ib-agent#149. The literal 40-byte inner XYZ
+        // payload one successful Challenge/Response login put on the wire,
+        // with code="02226534".
+        let expected: Vec<u8> = vec![
+            // 5-slot header
+            0x00, 0x00, 0x00, 0x14, // version = 20
+            0x00, 0x00, 0x03, 0x07, // msg_id = 775
+            0x00, 0x00, 0x00, 0x01, // hardcoded 1
+            0x00, 0x00, 0x00, 0x03, // state = 3
+            0x00, 0x00, 0x00, 0x00, // str_len = 0
+            // 3 string fields: x="", z=code, A=""
+            0x00, 0x00, 0x00, 0x00, // M.x.length = 0
+            0x00, 0x00, 0x00, 0x08, // M.z.length = 8
+            0x30, 0x32, 0x32, 0x32, 0x36, 0x35, 0x33, 0x34, // "02226534"
+            0x00, 0x00, 0x00, 0x00, // M.A.length = 0
+        ];
+        assert_eq!(expected.len(), 40, "canonical state=3 payload is 40 bytes");
+        let got = xyz_build_swcr_token_code_submission("02226534");
+        assert_eq!(got, expected, "byte-for-byte match required");
+    }
+
+    #[test]
+    fn swcr_token_code_submission_state_and_msg_id_parse() {
+        let payload = xyz_build_swcr_token_code_submission("02226534");
+        let (msg_id, _, state, fields) = xyz_parse_response(&payload).unwrap();
+        assert_eq!(msg_id, XYZ_MSG_SWCR_TOKEN);
+        assert_eq!(state, 3);
+        // The parser reads the 5th header slot (str_len=0) as fields[0], then
+        // M.x="" at fields[1], M.z=code at fields[2], M.A="" at fields[3].
+        assert!(fields.iter().any(|f| f == "02226534"),
+            "code must appear in parsed fields; got {:?}", fields);
     }
 
     #[test]

@@ -570,6 +570,32 @@ fn ib_key_err(kind: io::ErrorKind, msg: impl Into<String>) -> io::Error {
     io::Error::new(kind, msg.into())
 }
 
+/// Challenge details surfaced to a [`CodeProvider`] callback.
+///
+/// Populated from the server's `XYZ 775` state=2 reply: the per-session
+/// display id the user sees next to the 8-char code in the IBKey app, and
+/// the `clientam.com/ibkr/ibkey/seamless?S=…` URL also used by the web
+/// fallback. Either may be empty if the server omitted it in this run.
+#[derive(Debug, Clone, Default)]
+pub struct IbKeyChallenge {
+    pub display_id: String,
+    pub avth_url: String,
+}
+
+/// 8-character Challenge/Response code provider callback.
+///
+/// If supplied (via `GatewayConfig::code_provider`), the C/R variant of the
+/// IBKey gate is used instead of waiting for a mobile push approval: after
+/// the server delivers state=2, this callback is invoked once with the
+/// parsed challenge and the returned 8-character code is submitted as
+/// `XYZ 775` state=3. Per ib-agent#149, the server has no retry loop — one
+/// wrong code returns state=4 FAILED and the socket is torn down. The
+/// callback should pull the code from a deterministic source (stdin,
+/// secrets vault, etc.) or return an `io::Error` to abort the login.
+pub type CodeProvider = std::sync::Arc<
+    dyn Fn(IbKeyChallenge) -> io::Result<String> + Send + Sync,
+>;
+
 /// Compact hex dump for diagnostic logging.
 fn hex_dump(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
@@ -610,6 +636,7 @@ pub fn do_ib_key_2fa<S: Read + Write>(
     stream: &mut S,
     token_sub_type: &str,
     deadline: std::time::Instant,
+    code_provider: Option<&CodeProvider>,
 ) -> io::Result<IbKeyOutcome> {
     use std::time::Instant;
 
@@ -629,6 +656,7 @@ pub fn do_ib_key_2fa<S: Read + Write>(
     let mut session_id = String::new();
     let mut announced_wait = false;
     let mut saw_challenge = false;
+    let mut code_submitted = false;
 
     loop {
         if Instant::now() >= deadline {
@@ -677,8 +705,44 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                     );
                     announced_wait = true;
                 }
+                // Challenge/Response branch: if a code_provider is configured,
+                // pull the 8-char code from the callback and submit state=3
+                // instead of waiting for a phone tap. Guarded so a repeated
+                // state=2 (server retransmission) doesn't double-submit.
+                if !code_submitted {
+                    if let Some(provider) = code_provider {
+                        let challenge_info = IbKeyChallenge {
+                            display_id: session_id.clone(),
+                            avth_url: approval_url.clone(),
+                        };
+                        let code = provider(challenge_info)?;
+                        let submission = xyz::xyz_build_swcr_token_code_submission(&code);
+                        let framed = xyz::xyz_wrap(&submission);
+                        stream.write_all(&framed)?;
+                        log::info!(
+                            "2FA gate: submitted SWCR_TOKEN state=3 code (len={}, {} bytes framed)",
+                            code.len(), framed.len(),
+                        );
+                        code_submitted = true;
+                    }
+                }
             }
-            RecvMsg::Xyz { msg_id, state, fields, .. } if msg_id == xyz::XYZ_MSG_TOKEN_AUTH && state == 5 => {
+            RecvMsg::Xyz { msg_id, state, fields, .. } if msg_id == xyz::XYZ_MSG_SWCR_TOKEN && state == 4 => {
+                // Challenge/Response result. Server responds PASSED → falls
+                // through to AUTH_FINISH (state=3); FAILED → server skips
+                // AUTH_FINISH and tears the socket down (no retry loop —
+                // ib-agent#149).
+                let result = fields.iter().rev().find(|s| !s.is_empty()).cloned().unwrap_or_default();
+                if result.eq_ignore_ascii_case("PASSED") {
+                    log::info!("2FA gate: C/R code accepted (state=4 PASSED)");
+                } else {
+                    return Err(ib_key_err(
+                        io::ErrorKind::PermissionDenied,
+                        format!("2FA gate: C/R code rejected (state=4 {})", result),
+                    ));
+                }
+            }
+            RecvMsg::Xyz { msg_id, state, fields, .. } if msg_id == xyz::XYZ_MSG_TOKEN_AUTH && (state == 3 || state == 5) => {
                 // Look for "PASSED" sentinel and the SOFT token (long hex string).
                 let mut passed = false;
                 let mut soft_token_hex = String::new();
@@ -1337,7 +1401,7 @@ mod tests {
         // no SWCR_TOKEN(state=2) preceded it, so this is the no-2FA fast path.
         let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 5, "user", &["PASSED"]);
         let mut stream = ScriptedStream::new(frame_xyz(&auth_finish));
-        let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline()).unwrap();
+        let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None).unwrap();
         assert_eq!(outcome, IbKeyOutcome::Skipped);
 
         // Verify we sent the SWCR_TOKEN init carrying the tokenSubType.
@@ -1365,7 +1429,7 @@ mod tests {
         incoming.extend_from_slice(&frame_xyz(&auth_finish));
         let mut stream = ScriptedStream::new(incoming);
 
-        let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline()).unwrap();
+        let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None).unwrap();
         match outcome {
             IbKeyOutcome::Approved { approval_url, session_id, soft_token_hex } => {
                 assert_eq!(approval_url, "https://www.example.com/seamless?S=YWJjZA==");
@@ -1393,7 +1457,7 @@ mod tests {
         incoming.extend_from_slice(&frame_xyz(&auth_finish));
         let mut stream = ScriptedStream::new(incoming);
 
-        let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline()).unwrap();
+        let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None).unwrap();
         assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
 
         // The captured write stream contains: SWCR_TOKEN init, then HEART_BEAT.
@@ -1428,7 +1492,7 @@ mod tests {
             "https://x.example/u",
         ]);
         let mut stream = ScriptedStream::new(frame_xyz(&challenge));
-        let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline()).unwrap_err();
+        let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
         assert!(err.to_string().contains("18 min server-side deadline"),
             "expected the long-deadline message; got {}", err);
@@ -1441,7 +1505,7 @@ mod tests {
         // the 18 min deadline (which would mislead users into "approve faster"
         // when the real fix is "your account doesn't use IBKey").
         let mut stream = ScriptedStream::new(Vec::new());
-        let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline()).unwrap_err();
+        let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
         let msg = err.to_string();
         assert!(msg.contains("before issuing a challenge"),
@@ -1455,8 +1519,112 @@ mod tests {
         // Server replies AUTH_FINISH state=5 but payload says FAILED — denial.
         let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 5, "user", &["FAILED"]);
         let mut stream = ScriptedStream::new(frame_xyz(&auth_finish));
-        let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline()).unwrap_err();
+        let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(err.to_string().contains("rejected"));
+    }
+
+    // ── do_ib_key_2fa — Challenge/Response (ib-agent#149) ───────────────
+
+    #[test]
+    fn ib_key_2fa_cr_submits_code_then_passes_on_auth_finish_state_3() {
+        // Replay of ib-agent#149 run A (success path). Captured fixtures:
+        //   state=2: sessionId="399 830", challenge=10a447bc…0c9dc714 (20B / 40 hex),
+        //            AVTH_URL=clientam.com/ibkr/ibkey/seamless?S=…
+        //   user types "02226534" from the IBKey app
+        //   state=4 PASSED  → AUTH_FINISH(771) state=3 PASSED  (note: push uses state=5)
+        const RUN_A_CHALLENGE_HEX: &str = "10a447bc4f269b5161a6133b0265cf590c9dc714";
+        const RUN_A_SESSION_ID: &str = "399 830";
+        const RUN_A_AVTH_URL: &str =
+            "https://www.clientam.com/ibkr/ibkey/seamless?S=eyJBVlRIX1VSTCI6Imh0dHBzOi8vemRjMS5pYmxsYy5jb206NDAwMS9zYS94RUI1c3hUVDcvSGpuTTlFQksifQ==";
+        const RUN_A_CODE: &str = "02226534";
+
+        let challenge = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 2, "johnbegood", &[
+            RUN_A_CHALLENGE_HEX,
+            RUN_A_SESSION_ID,
+            RUN_A_AVTH_URL,
+        ]);
+        let state4_passed = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "johnbegood", &["PASSED"]);
+        let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 3, "johnbegood", &["PASSED"]);
+        let mut incoming = frame_xyz(&challenge);
+        incoming.extend_from_slice(&frame_xyz(&state4_passed));
+        incoming.extend_from_slice(&frame_xyz(&auth_finish));
+        let mut stream = ScriptedStream::new(incoming);
+
+        let seen_challenge = std::sync::Arc::new(std::sync::Mutex::new(IbKeyChallenge::default()));
+        let seen_clone = seen_challenge.clone();
+        let provider: CodeProvider = std::sync::Arc::new(move |c: IbKeyChallenge| {
+            *seen_clone.lock().unwrap() = c;
+            Ok(RUN_A_CODE.to_string())
+        });
+
+        let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider)).unwrap();
+        match outcome {
+            IbKeyOutcome::Approved { approval_url, session_id, .. } => {
+                assert_eq!(session_id, RUN_A_SESSION_ID);
+                assert_eq!(approval_url, RUN_A_AVTH_URL);
+            }
+            other => panic!("expected Approved, got {:?}", other),
+        }
+
+        // Provider must have received the parsed display_id + avth_url.
+        let seen = seen_challenge.lock().unwrap().clone();
+        assert_eq!(seen.display_id, RUN_A_SESSION_ID);
+        assert_eq!(seen.avth_url, RUN_A_AVTH_URL);
+
+        // Walk written frames: 1st = SWCR_TOKEN state=1 init, 2nd = state=3 submission.
+        // The 2nd frame must be byte-for-byte the 40-byte capture from run A.
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        let mut offset = 0;
+        while offset + 8 <= stream.written.len() {
+            let len = u32::from_be_bytes(
+                stream.written[offset + 4..offset + 8].try_into().unwrap(),
+            ) as usize;
+            frames.push(stream.written[offset + 8..offset + 8 + len].to_vec());
+            offset += 8 + len;
+        }
+        assert!(frames.len() >= 2, "expected at least 2 frames (init + submission); got {}", frames.len());
+        let expected_state3 = xyz::xyz_build_swcr_token_code_submission(RUN_A_CODE);
+        assert_eq!(frames[1], expected_state3,
+            "state=3 submission must byte-match the ib-agent#149 run-A capture");
+    }
+
+    #[test]
+    fn ib_key_2fa_cr_code_rejected_on_state_4_failed() {
+        // Server: state=2 → state=4 FAILED. Server tears the socket down after
+        // (no AUTH_FINISH on the wire). Client must surface PermissionDenied
+        // immediately on FAILED, without waiting for further frames.
+        let challenge = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 2, "user", &[
+            "e7429fde5b4c26f81fff956be6749908a8653558e7429fde5b4c26f81fff956b",
+            "399 830",
+            "https://x.example/u",
+        ]);
+        let state4_failed = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "user", &["FAILED"]);
+        let mut incoming = frame_xyz(&challenge);
+        incoming.extend_from_slice(&frame_xyz(&state4_failed));
+        let mut stream = ScriptedStream::new(incoming);
+
+        let provider: CodeProvider = std::sync::Arc::new(|_| Ok("99999999".to_string()));
+        let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("C/R code rejected"),
+            "expected C/R rejection message; got {}", err);
+    }
+
+    #[test]
+    fn ib_key_2fa_cr_provider_error_aborts_login() {
+        // Provider returns an error (e.g. user cancelled): the function must
+        // propagate it without sending state=3.
+        let challenge = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 2, "user", &[
+            "e7429fde5b4c26f81fff956be6749908a8653558e7429fde5b4c26f81fff956b",
+            "399 830",
+            "https://x.example/u",
+        ]);
+        let mut stream = ScriptedStream::new(frame_xyz(&challenge));
+        let provider: CodeProvider = std::sync::Arc::new(|_| {
+            Err(io::Error::new(io::ErrorKind::Interrupted, "user cancelled"))
+        });
+        let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
     }
 }
