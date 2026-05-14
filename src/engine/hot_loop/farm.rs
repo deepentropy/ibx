@@ -87,14 +87,25 @@ impl FarmState {
                     Frame::FixComp(raw) => {
                         let (unsigned, _valid) = conn.unsign(raw);
                         let inner = fixcomp::fixcomp_decompress(&unsigned);
+                        if log::log_enabled!(log::Level::Trace) {
+                            for m in &inner {
+                                log::trace!("WIRE< farm/comp {}", fix::fmt_pipe(m));
+                            }
+                        }
                         self.farm_msg_buf.extend(inner);
                     }
                     Frame::Binary(raw) => {
                         let (unsigned, _valid) = conn.unsign(raw);
+                        if log::log_enabled!(log::Level::Trace) {
+                            log::trace!("WIRE< farm/bin {}", fix::fmt_pipe(&unsigned));
+                        }
                         self.farm_msg_buf.push(unsigned);
                     }
                     Frame::Fix(raw) => {
                         let (unsigned, _valid) = conn.unsign(raw);
+                        if log::log_enabled!(log::Level::Trace) {
+                            log::trace!("WIRE< farm/fix {}", fix::fmt_pipe(&unsigned));
+                        }
                         self.farm_msg_buf.push(unsigned);
                     }
                 }

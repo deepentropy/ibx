@@ -184,14 +184,26 @@ impl CcpState {
                     match frame {
                         Frame::FixComp(raw) => {
                             let (unsigned, _) = conn.unsign(&raw);
-                            msgs.extend(fixcomp::fixcomp_decompress(&unsigned));
+                            let inner = fixcomp::fixcomp_decompress(&unsigned);
+                            if log::log_enabled!(log::Level::Trace) {
+                                for m in &inner {
+                                    log::trace!("WIRE< ccp/comp {}", fix::fmt_pipe(m));
+                                }
+                            }
+                            msgs.extend(inner);
                         }
                         Frame::Fix(raw) => {
                             let (unsigned, _) = conn.unsign(&raw);
+                            if log::log_enabled!(log::Level::Trace) {
+                                log::trace!("WIRE< ccp/fix {}", fix::fmt_pipe(&unsigned));
+                            }
                             msgs.push(unsigned);
                         }
                         Frame::Binary(raw) => {
                             let (unsigned, _) = conn.unsign(&raw);
+                            if log::log_enabled!(log::Level::Trace) {
+                                log::trace!("WIRE< ccp/bin {}", fix::fmt_pipe(&unsigned));
+                            }
                             msgs.push(unsigned);
                         }
                     }
@@ -529,6 +541,16 @@ impl CcpState {
             log::debug!("ExecReport: dropping sentinel record (ClOrdID=0/*) sym={:?} status={:?}",
                 parsed.get(&55), parsed.get(&39));
             return;
+        }
+
+        // Record the ClOrdID exactly as the server reports it so subsequent
+        // cancel/modify can echo back the same string. Skip cancel-ack frames
+        // (tag 11 starts with 'C' there) — those carry the cancel request's
+        // own id, not the original order's. See ibx#179.
+        if let Some(raw_clord) = parsed.get(&11) {
+            if !raw_clord.starts_with('C') && raw_clord != "*" {
+                context.last_clord.insert(clord_id, raw_clord.clone());
+            }
         }
 
         // What-If response

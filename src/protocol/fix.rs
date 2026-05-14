@@ -54,6 +54,21 @@ pub const MSG_ORDER_CANCEL: &str = "F";
 pub const MSG_ORDER_REPLACE: &str = "G";
 pub const MSG_MARKET_DATA_REQ: &str = "V";
 
+/// Render a FIX byte buffer with SOH (0x01) shown as `|` and any other
+/// non-printable bytes escaped as `\xNN`. For trace-level wire diagnostics
+/// (ibx#179 capture); not used on hot paths.
+pub fn fmt_pipe(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() + 8);
+    for &b in bytes {
+        match b {
+            SOH => s.push('|'),
+            0x20..=0x7e => s.push(b as char),
+            _ => s.push_str(&format!("\\x{:02x}", b)),
+        }
+    }
+    s
+}
+
 /// Sum of all bytes mod 256, zero-padded to 3 digits.
 pub fn fix_checksum(data: &[u8]) -> String {
     let sum: u32 = data.iter().map(|&b| b as u32).sum();

@@ -94,14 +94,25 @@ impl HmdsState {
                         Frame::FixComp(raw) => {
                             let (unsigned, _valid) = conn.unsign(raw);
                             let inner = fixcomp::fixcomp_decompress(&unsigned);
+                            if log::log_enabled!(log::Level::Trace) {
+                                for m in &inner {
+                                    log::trace!("WIRE< hmds/comp {}", crate::protocol::fix::fmt_pipe(m));
+                                }
+                            }
                             msgs.extend(inner);
                         }
                         Frame::Binary(raw) => {
                             let (unsigned, _valid) = conn.unsign(raw);
+                            if log::log_enabled!(log::Level::Trace) {
+                                log::trace!("WIRE< hmds/bin {}", crate::protocol::fix::fmt_pipe(&unsigned));
+                            }
                             msgs.push(unsigned);
                         }
                         Frame::Fix(raw) => {
                             let (unsigned, _valid) = conn.unsign(raw);
+                            if log::log_enabled!(log::Level::Trace) {
+                                log::trace!("WIRE< hmds/fix {}", crate::protocol::fix::fmt_pipe(&unsigned));
+                            }
                             msgs.push(unsigned);
                         }
                     }

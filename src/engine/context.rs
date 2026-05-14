@@ -43,6 +43,10 @@ pub struct Context {
     next_order_id: OrderId,
     /// ClOrdID version counter per order for modify chaining (orderId.0 → .1 → .2).
     pub(crate) modify_versions: HashMap<OrderId, u32>,
+    /// Last ClOrdID the server reported (or we emitted) for each order, exactly as
+    /// it appeared on the wire. Used as the OrigClOrdID on cancel/modify so that
+    /// legacy orders recorded without a `.{ver}` suffix still match — see ibx#179.
+    pub(crate) last_clord: HashMap<OrderId, String>,
     /// Timestamp when the last farm socket recv returned data (for decode latency measurement).
     pub(crate) recv_at: Instant,
     /// Total hot loop iterations since start.
@@ -57,6 +61,7 @@ impl Context {
             open_orders: HashMap::with_capacity(128),
             pending_orders: OrderBuffer::new(),
             modify_versions: HashMap::new(),
+            last_clord: HashMap::new(),
             account: AccountState::default(),
             clock: Clock::new(),
             next_order_id: {

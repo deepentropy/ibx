@@ -1440,10 +1440,18 @@ pub(crate) fn drain_and_send_orders(
                 conn.send_fix(&fields)
             }
             OrderRequest::Cancel { order_id } => {
-                // Tag 41 must reference the latest versioned ClOrdID
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
+                // OrigClOrdID must match exactly what the server has on record.
+                // Prefer the string we last observed on the wire (see ibx#179 —
+                // legacy orders recorded without a `.{ver}` suffix won't match
+                // a computed `{id}.0`). Fall back to the versioned scheme when
+                // we have no observation yet (fresh-order place→immediate-cancel
+                // before the ack round-trip).
+                let orig_clord = context.last_clord.get(&order_id).cloned()
+                    .unwrap_or_else(|| {
+                        let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
+                        format!("{}.{}", order_id, ver)
+                    });
                 let clord_str = format!("C{}", order_id);
-                let orig_clord = format!("{}.{}", order_id, ver);
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
                     (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
@@ -1460,9 +1468,12 @@ pub(crate) fn drain_and_send_orders(
                     .collect();
                 let mut last_result = Ok(());
                 for oid in open_ids {
-                    let ver = *context.modify_versions.get(&oid).unwrap_or(&0);
+                    let orig_clord = context.last_clord.get(&oid).cloned()
+                        .unwrap_or_else(|| {
+                            let ver = *context.modify_versions.get(&oid).unwrap_or(&0);
+                            format!("{}.{}", oid, ver)
+                        });
                     let clord_str = format!("C{}", oid);
-                    let orig_clord = format!("{}.{}", oid, ver);
                     let now = chrono_free_timestamp();
                     last_result = conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
@@ -1487,7 +1498,14 @@ pub(crate) fn drain_and_send_orders(
                 let new_ver = prev_ver + 1;
                 context.modify_versions.insert(order_id, new_ver);
                 let clord_str = format!("{}.{}", order_id, new_ver);
-                let orig_clord = format!("{}.{}", order_id, prev_ver);
+                // OrigClOrdID matches whatever the server last recorded for
+                // this order (which may pre-date the versioned scheme — ibx#179).
+                let orig_clord = context.last_clord.get(&order_id).cloned()
+                    .unwrap_or_else(|| format!("{}.{}", order_id, prev_ver));
+                // Pre-seed `last_clord` with what we're about to emit so a
+                // subsequent cancel before the modify-ack still references the
+                // right version.
+                context.last_clord.insert(order_id, clord_str.clone());
 
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price(price);

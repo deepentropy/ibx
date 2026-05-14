@@ -252,6 +252,9 @@ impl Connection {
     pub fn send_fix(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
         let next_seq = self.seq + 1;
         let msg = fix::fix_build(fields, next_seq);
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!("WIRE> seq={} {}", next_seq, fix::fmt_pipe(&msg));
+        }
         let (to_send, next_iv) = if self.sign_key.is_empty() {
             (msg, None)
         } else {
@@ -272,6 +275,9 @@ impl Connection {
     /// State (sign_iv) is committed only after `write_all` returns Ok.
     pub fn send_fixcomp(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
         let msg = fix::fix_build(fields, 0);
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!("WIRE> comp {}", fix::fmt_pipe(&msg));
+        }
         let wrapped = fixcomp::fixcomp_build(&msg);
         let (to_send, next_iv) = if self.sign_key.is_empty() {
             (wrapped, None)
