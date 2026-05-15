@@ -182,6 +182,23 @@ impl Connection {
 
             match (fix_pos, o_pos) {
                 (None, None) => {
+                    // ibx#183 follow-up: log the first 64 bytes of any payload
+                    // we're about to discard. The reporter pinned a 1314-byte
+                    // post-eoq=false historical chunk that lands here with no
+                    // recognized header — we need to see its actual prefix.
+                    let head_n = self.buf.len().min(64);
+                    let head_hex: String = self.buf[..head_n]
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
+                    let head_ascii: String = self.buf[..head_n]
+                        .iter()
+                        .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+                        .collect();
+                    log::warn!(
+                        "extract_frames: dropping {}B (no header). first {}B hex={} ascii={:?}",
+                        self.buf.len(), head_n, head_hex, head_ascii,
+                    );
                     self.buf.clear();
                     break;
                 }
