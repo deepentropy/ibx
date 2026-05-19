@@ -51,6 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         server_session_id: gw.server_session_id.clone(),
         hw_info: gw.hw_info.clone(),
         encoded: gw.encoded.clone(),
+        hmds_host: gw.hmds_host.clone(),
+        hmds_farm: gw.hmds_farm.clone(),
     };
 
     drop(ccp);

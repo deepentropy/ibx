@@ -60,7 +60,19 @@ pub struct HotLoop {
     farm_reconnect_attempt: u32,
     pending_ccp_reconnect: Option<Receiver<io::Result<Connection>>>,
     ccp_reconnect_attempt: u32,
+    /// HMDS reconnect state (ibx#187). Drives a background reconnect loop with
+    /// exponential backoff when the historical-data farm is down — initial
+    /// connect failed, or a future runtime disconnect detector trips it.
+    pending_hmds_reconnect: Option<Receiver<io::Result<Connection>>>,
+    hmds_reconnect_attempt: u32,
+    /// Earliest instant the next HMDS reconnect attempt may spawn. `None` once
+    /// retries are exhausted or HMDS is healthy.
+    hmds_next_attempt_at: Option<Instant>,
 }
+
+/// Maximum HMDS reconnect attempts before giving up (ibx#187).
+/// Total wait at cap: 3+6+12+24+48 = 93s before final attempt fires.
+const HMDS_MAX_RECONNECT_ATTEMPTS: u32 = 6;
 
 /// Tracks last send/recv times and pending test requests for heartbeat management.
 pub struct HeartbeatState {
@@ -126,6 +138,9 @@ impl HotLoop {
             farm_reconnect_attempt: 0,
             pending_ccp_reconnect: None,
             ccp_reconnect_attempt: 0,
+            pending_hmds_reconnect: None,
+            hmds_reconnect_attempt: 0,
+            hmds_next_attempt_at: None,
         }
     }
 
@@ -259,10 +274,16 @@ impl HotLoop {
             // 5b. Poll pending reconnects (non-blocking)
             self.poll_farm_reconnect();
             self.poll_ccp_reconnect();
+            self.poll_hmds_reconnect();
+            self.maybe_spawn_hmds_reconnect();
 
             // 6. Wake any waiting consumers (e.g. Python event loop)
             self.shared.notify();
         }
+    }
+
+    fn emit_hmds_unavailable(&self, req_id: u32, from_historical: bool) {
+        push_hmds_unavailable(&self.shared, req_id, from_historical);
     }
 
     fn poll_control_commands(&mut self) {
@@ -343,7 +364,11 @@ impl HotLoop {
                     if let Some(tx) = reply_tx { let _ = tx.send(id); }
                 }
                 ControlCommand::FetchHistorical { req_id, con_id, symbol, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date } => {
-                    if keep_up_to_date {
+                    // keepUpToDate sends via CCP but bars/end arrive on HMDS — both
+                    // paths require an authed HMDS socket to deliver a completion.
+                    if self.hmds_conn.is_none() {
+                        self.emit_hmds_unavailable(req_id, true);
+                    } else if keep_up_to_date {
                         self.hmds.send_historical_request_via_ccp(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, &symbol, &mut self.ccp_conn, &mut self.hb, &self.ccp.ccp_sign_key, &self.ccp.ccp_sign_iv);
                         self.hmds.keep_up_to_date_reqs.insert(req_id);
                     } else {
@@ -358,7 +383,11 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchHeadTimestamp { req_id, con_id, what_to_show, use_rth } => {
-                    self.hmds.send_head_timestamp_request(req_id, con_id, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                    if self.hmds_conn.is_none() {
+                        self.emit_hmds_unavailable(req_id, false);
+                    } else {
+                        self.hmds.send_head_timestamp_request(req_id, con_id, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                    }
                 }
                 ControlCommand::FetchContractDetails { req_id, con_id, symbol, sec_type, exchange, currency } => {
                     if con_id > 0 {
@@ -382,7 +411,11 @@ impl HotLoop {
                     self.hmds.send_scanner_params_request(&mut self.hmds_conn, &mut self.hb);
                 }
                 ControlCommand::SubscribeScanner { req_id, instrument, location_code, scan_code, max_items } => {
-                    self.hmds.send_scanner_subscribe(req_id, &instrument, &location_code, &scan_code, max_items, &mut self.hmds_conn, &mut self.hb);
+                    if self.hmds_conn.is_none() {
+                        self.emit_hmds_unavailable(req_id, false);
+                    } else {
+                        self.hmds.send_scanner_subscribe(req_id, &instrument, &location_code, &scan_code, max_items, &mut self.hmds_conn, &mut self.hb);
+                    }
                 }
                 ControlCommand::CancelScanner { req_id } => {
                     if let Some(pos) = self.hmds.pending_scanner.iter().position(|(_, rid)| *rid == req_id) {
@@ -391,13 +424,25 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchHistoricalNews { req_id, con_id, provider_codes, start_time, end_time, max_results } => {
-                    self.hmds.send_historical_news_request(req_id, con_id, &provider_codes, &start_time, &end_time, max_results, &mut self.hmds_conn, &mut self.hb);
+                    if self.hmds_conn.is_none() {
+                        self.emit_hmds_unavailable(req_id, false);
+                    } else {
+                        self.hmds.send_historical_news_request(req_id, con_id, &provider_codes, &start_time, &end_time, max_results, &mut self.hmds_conn, &mut self.hb);
+                    }
                 }
                 ControlCommand::FetchNewsArticle { req_id, provider_code, article_id } => {
-                    self.hmds.send_news_article_request(req_id, &provider_code, &article_id, &mut self.hmds_conn, &mut self.hb);
+                    if self.hmds_conn.is_none() {
+                        self.emit_hmds_unavailable(req_id, false);
+                    } else {
+                        self.hmds.send_news_article_request(req_id, &provider_code, &article_id, &mut self.hmds_conn, &mut self.hb);
+                    }
                 }
                 ControlCommand::FetchFundamentalData { req_id, con_id, report_type } => {
-                    self.hmds.send_fundamental_data_request(req_id, con_id, &report_type, &mut self.hmds_conn, &mut self.hb);
+                    if self.hmds_conn.is_none() {
+                        self.emit_hmds_unavailable(req_id, false);
+                    } else {
+                        self.hmds.send_fundamental_data_request(req_id, con_id, &report_type, &mut self.hmds_conn, &mut self.hb);
+                    }
                 }
                 ControlCommand::CancelFundamentalData { req_id } => {
                     if let Some(pos) = self.hmds.pending_fundamental.iter().position(|(_, rid)| *rid == req_id) {
@@ -405,7 +450,11 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchHistogramData { req_id, con_id, use_rth, period } => {
-                    self.hmds.send_histogram_request(req_id, con_id, use_rth, &period, &mut self.hmds_conn, &mut self.hb);
+                    if self.hmds_conn.is_none() {
+                        self.emit_hmds_unavailable(req_id, false);
+                    } else {
+                        self.hmds.send_histogram_request(req_id, con_id, use_rth, &period, &mut self.hmds_conn, &mut self.hb);
+                    }
                 }
                 ControlCommand::CancelHistogramData { req_id } => {
                     if let Some(pos) = self.hmds.pending_histogram.iter().position(|(_, rid)| *rid == req_id) {
@@ -413,10 +462,18 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchHistoricalTicks { req_id, con_id, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth } => {
-                    self.hmds.send_historical_ticks_request(req_id, con_id, &start_date_time, &end_date_time, number_of_ticks, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                    if self.hmds_conn.is_none() {
+                        self.emit_hmds_unavailable(req_id, false);
+                    } else {
+                        self.hmds.send_historical_ticks_request(req_id, con_id, &start_date_time, &end_date_time, number_of_ticks, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                    }
                 }
                 ControlCommand::SubscribeRealTimeBar { req_id, con_id, symbol, what_to_show, use_rth } => {
-                    self.hmds.send_realtime_bar_subscribe(req_id, con_id, &symbol, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                    if self.hmds_conn.is_none() {
+                        self.emit_hmds_unavailable(req_id, false);
+                    } else {
+                        self.hmds.send_realtime_bar_subscribe(req_id, con_id, &symbol, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                    }
                 }
                 ControlCommand::CancelRealTimeBar { req_id } => {
                     if let Some(pos) = self.hmds.rtbar_subs.iter().position(|(_, rid, _, _)| *rid == req_id) {
@@ -426,7 +483,11 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchHistoricalSchedule { req_id, con_id, end_date_time, duration, use_rth } => {
-                    self.hmds.send_schedule_request(req_id, con_id, &end_date_time, &duration, use_rth, &mut self.hmds_conn, &mut self.hb);
+                    if self.hmds_conn.is_none() {
+                        self.emit_hmds_unavailable(req_id, false);
+                    } else {
+                        self.hmds.send_schedule_request(req_id, con_id, &end_date_time, &duration, use_rth, &mut self.hmds_conn, &mut self.hb);
+                    }
                 }
                 ControlCommand::SubscribeDepth { req_id, con_id, exchange, sec_type, num_rows, is_smart_depth } => {
                     self.farm.send_depth_subscribe(
@@ -767,6 +828,91 @@ impl HotLoop {
         }
     }
 
+    /// If HMDS is down and a backoff window has elapsed, spawn the next attempt.
+    /// Auto-schedules the first attempt when the engine starts with no HMDS
+    /// connection — covers the ibx#187 case where initial soft-token returned
+    /// FAILED and the gateway dropped the socket.
+    fn maybe_spawn_hmds_reconnect(&mut self) {
+        if self.hmds_conn.is_some() { return; }
+        if self.pending_hmds_reconnect.is_some() { return; }
+        let auth = match self.reconnect_auth.as_ref() {
+            Some(a) if !a.host.is_empty() && !a.hmds_host.is_empty() => a,
+            _ => return,
+        };
+        if self.hmds_reconnect_attempt >= HMDS_MAX_RECONNECT_ATTEMPTS {
+            return;
+        }
+        // Schedule the first attempt if not already scheduled.
+        if self.hmds_next_attempt_at.is_none() {
+            self.hmds_next_attempt_at = Some(Instant::now() + hmds_reconnect_backoff(self.hmds_reconnect_attempt + 1));
+            return;
+        }
+        let due = self.hmds_next_attempt_at.unwrap();
+        if Instant::now() < due { return; }
+        let auth = auth.clone();
+        self.hmds_reconnect_attempt += 1;
+        let attempt = self.hmds_reconnect_attempt;
+        log::info!(
+            "HMDS reconnect attempt {} starting (host={}/{})",
+            attempt, auth.hmds_host, auth.hmds_farm,
+        );
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::Builder::new()
+            .name(format!("hmds-reconnect-{}", attempt))
+            .spawn(move || {
+                let result = connect_farm(
+                    &auth.hmds_host, &auth.hmds_farm,
+                    &auth.username, &auth.password, auth.paper,
+                    &auth.server_session_id, &auth.session_key,
+                    &auth.hw_info, &auth.encoded, 17,
+                );
+                let _ = tx.send(result);
+            })
+            .ok();
+        self.pending_hmds_reconnect = Some(rx);
+    }
+
+    /// Poll for a completed HMDS reconnect. Non-blocking.
+    fn poll_hmds_reconnect(&mut self) {
+        let rx = match self.pending_hmds_reconnect.as_ref() {
+            Some(rx) => rx,
+            None => return,
+        };
+        match rx.try_recv() {
+            Ok(Ok(conn)) => {
+                log::info!("HMDS reconnect succeeded (attempt {})", self.hmds_reconnect_attempt);
+                self.hmds_conn = Some(conn);
+                self.hmds.disconnected = false;
+                self.hb.last_hmds_recv = Instant::now();
+                self.hb.last_hmds_sent = Instant::now();
+                self.hmds_reconnect_attempt = 0;
+                self.hmds_next_attempt_at = None;
+                self.pending_hmds_reconnect = None;
+            }
+            Ok(Err(e)) => {
+                log::warn!(
+                    "HMDS reconnect failed (attempt {}/{}): {}",
+                    self.hmds_reconnect_attempt, HMDS_MAX_RECONNECT_ATTEMPTS, e,
+                );
+                self.pending_hmds_reconnect = None;
+                if self.hmds_reconnect_attempt >= HMDS_MAX_RECONNECT_ATTEMPTS {
+                    log::error!(
+                        "HMDS reconnect exhausted {} attempts — historical data unavailable for this session",
+                        HMDS_MAX_RECONNECT_ATTEMPTS,
+                    );
+                    self.hmds_next_attempt_at = None;
+                } else {
+                    self.hmds_next_attempt_at = Some(Instant::now() + hmds_reconnect_backoff(self.hmds_reconnect_attempt + 1));
+                }
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                log::error!("HMDS reconnect thread dropped without result");
+                self.pending_hmds_reconnect = None;
+            }
+        }
+    }
+
     /// Access heartbeat state for testing.
     pub fn heartbeat_state(&self) -> &HeartbeatState {
         &self.hb
@@ -925,6 +1071,43 @@ pub(crate) fn format_uint(val: u64) -> StackStr {
 pub(crate) fn emit(event_tx: &Option<Sender<Event>>, event: Event) {
     if let Some(tx) = event_tx {
         let _ = tx.try_send(event);
+    }
+}
+
+/// Backoff schedule for HMDS reconnect attempts (ibx#187, ib-agent#153).
+/// `min(64, 3 * 2^(attempt-1))` seconds — approximates the captured cadence
+/// of 3.2 / 11.4 / 18.5 / 42.7 / 63.7 s the official client uses.
+#[inline]
+pub(crate) fn hmds_reconnect_backoff(attempt: u32) -> std::time::Duration {
+    let n = attempt.saturating_sub(1).min(31);
+    let secs = (3u64.saturating_mul(1u64 << n)).min(64);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Surface an "HMDS unavailable" error for `req_id` when the historical-data
+/// socket isn't connected. Mirrors the QueryError surface (ibx#186): code 162
+/// via `push_historical_error` for the consumer's `error()` callback, plus —
+/// for historical-bar requests only — a terminal empty-bars response so
+/// `historical_data_end` fires. Without this, requests issued while HMDS is
+/// down hang silently (ibx#187).
+pub(crate) fn push_hmds_unavailable(shared: &SharedState, req_id: u32, from_historical: bool) {
+    const HMDS_ERROR_CODE: i32 = 162;
+    const ERROR_MSG: &str = "Historical data service connection is not available";
+    shared.reference.push_historical_error(
+        req_id,
+        HMDS_ERROR_CODE,
+        ERROR_MSG.to_string(),
+    );
+    if from_historical {
+        shared.reference.push_historical_data(
+            req_id,
+            crate::control::historical::HistoricalResponse {
+                query_id: String::new(),
+                timezone: String::new(),
+                is_complete: true,
+                bars: Vec::new(),
+            },
+        );
     }
 }
 
@@ -1210,5 +1393,57 @@ mod tests {
 
         engine.run();
         assert!(!engine.is_running());
+    }
+
+    #[test]
+    fn push_hmds_unavailable_historical_emits_error_and_terminal_sentinel() {
+        let shared = SharedState::new();
+        push_hmds_unavailable(&shared, 7, true);
+
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, 7);
+        assert_eq!(errors[0].1, 162);
+        assert!(errors[0].2.contains("not available"));
+
+        let hist = shared.reference.drain_historical_data();
+        assert_eq!(hist.len(), 1, "terminal sentinel required so historical_data_end fires");
+        assert_eq!(hist[0].0, 7);
+        assert!(hist[0].1.is_complete);
+        assert!(hist[0].1.bars.is_empty());
+    }
+
+    #[test]
+    fn hmds_reconnect_backoff_matches_captured_cadence() {
+        use std::time::Duration;
+        // Captured cadence (ib-agent#153): 3.2 / 11.4 / 18.5 / 42.7 / 63.7 s.
+        // Our schedule: 3 / 6 / 12 / 24 / 48 / 64 s — captures the doubling
+        // shape and caps at the 64 s ceiling.
+        assert_eq!(hmds_reconnect_backoff(1), Duration::from_secs(3));
+        assert_eq!(hmds_reconnect_backoff(2), Duration::from_secs(6));
+        assert_eq!(hmds_reconnect_backoff(3), Duration::from_secs(12));
+        assert_eq!(hmds_reconnect_backoff(4), Duration::from_secs(24));
+        assert_eq!(hmds_reconnect_backoff(5), Duration::from_secs(48));
+        assert_eq!(hmds_reconnect_backoff(6), Duration::from_secs(64));
+        // Cap holds for any further attempts.
+        assert_eq!(hmds_reconnect_backoff(7), Duration::from_secs(64));
+        assert_eq!(hmds_reconnect_backoff(100), Duration::from_secs(64));
+        // Saturating math survives degenerate inputs.
+        assert_eq!(hmds_reconnect_backoff(0), Duration::from_secs(3));
+        assert_eq!(hmds_reconnect_backoff(u32::MAX), Duration::from_secs(64));
+    }
+
+    #[test]
+    fn push_hmds_unavailable_non_historical_emits_error_without_sentinel() {
+        let shared = SharedState::new();
+        push_hmds_unavailable(&shared, 42, false);
+
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, 42);
+        assert_eq!(errors[0].1, 162);
+        // Head-ts / histogram / ticks / schedule / scanner / news / fundamental:
+        // no bar-stream consumer waiting for historical_data_end.
+        assert!(shared.reference.drain_historical_data().is_empty());
     }
 }

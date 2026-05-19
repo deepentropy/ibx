@@ -287,7 +287,13 @@ pub fn farm_logon_exchange(
                     read_iv = iv.to_vec();
                 }
 
-                // Check for auth challenge → respond with token, fall back to SRP if rejected
+                // Check for auth challenge → respond with token, fall back to SRP if rejected.
+                // Outcome asymmetry (ib-agent#153, ibx#187):
+                //   PASSED  — token accepted, continue
+                //   UNKNOWN — server cache miss, recover via SRP on this socket
+                //   FAILED  — `do_soft_token` returns Err; the OUTER reconnect loop
+                //             must drop this socket and retry from scratch with a
+                //             fresh soft-token (NOT SRP — captured behavior).
                 if decrypted.windows(5).any(|w| w == b"35=S\x01") {
                     match do_soft_token(stream, session_token)? {
                         session::SoftTokenOutcome::Passed => {}
@@ -367,6 +373,10 @@ pub struct ReconnectAuth {
     pub server_session_id: String,
     pub hw_info: String,
     pub encoded: String,
+    /// Historical-data farm routing parsed from the auth-server response.
+    /// Used by HMDS reconnect (ibx#187) — empty when no HMDS route was parsed.
+    pub hmds_host: String,
+    pub hmds_farm: String,
 }
 
 /// Full gateway connection.
@@ -398,6 +408,10 @@ pub struct Gateway {
     pub ccp_sign_key: Vec<u8>,
     /// CCP HMAC initial IV (kb[48..64]) for selective signing.
     pub ccp_sign_iv: Vec<u8>,
+    /// Historical-data farm routing parsed from the auth-server response,
+    /// retained for HMDS reconnect (ibx#187).
+    pub hmds_host: String,
+    pub hmds_farm: String,
 }
 
 /// Connect to a data farm: key exchange → encrypted logon → token auth → routing → Connection.
@@ -1530,6 +1544,11 @@ impl Gateway {
         log::info!("Farm routing: trading={}/{}, mktdata={}/{}",
             trading_host, trading_farm, mktdata_host, mktdata_farm);
 
+        // Retain HMDS routing for the reconnect loop (ibx#187) — the values
+        // below are moved into the thread::scope closures.
+        let hmds_host_for_gw = mktdata_host.clone();
+        let hmds_farm_for_gw = mktdata_farm.clone();
+
         // Parallel farm logons: validated against paper and live (each farm
         // logon is ~6 s sequentially; running them in parallel halves the
         // farm-logon phase). Both servers accept concurrent logons with the
@@ -1575,6 +1594,8 @@ impl Gateway {
             misc_urls: parse_misc_urls(&raw_misc_urls),
             ccp_sign_key,
             ccp_sign_iv,
+            hmds_host: hmds_host_for_gw,
+            hmds_farm: hmds_farm_for_gw,
         };
         Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
@@ -1719,6 +1740,8 @@ impl Gateway {
             server_session_id: self.server_session_id.clone(),
             hw_info: self.hw_info.clone(),
             encoded: self.encoded.clone(),
+            hmds_host: self.hmds_host.clone(),
+            hmds_farm: self.hmds_farm.clone(),
         };
         if let Some(tx) = event_tx.as_ref() {
             let _ = tx.send(Event::GatewayLogon {

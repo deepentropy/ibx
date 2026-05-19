@@ -129,6 +129,8 @@ fn ccp_reconnect_with_cached_credentials() {
         server_session_id: gw.server_session_id.clone(),
         hw_info: gw.hw_info.clone(),
         encoded: gw.encoded.clone(),
+        hmds_host: gw.hmds_host.clone(),
+        hmds_farm: gw.hmds_farm.clone(),
     };
 
     println!("Full auth: {}ms | session_id={}", full_auth_ms, auth.server_session_id);
