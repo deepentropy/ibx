@@ -218,25 +218,25 @@ Jupyter notebooks adapted from [ib_async's examples](https://ib-api-reloaded.git
 ## Architecture
 
 ```
-    ┌─────────────────────────────────────────────┐
+    ┌──────────────────────────────────────────────┐
     │           Your Code (Rust / Python)          │
     │  process_msgs() → Wrapper callbacks          │
     │  client.quote(id) → SeqLock read             │
     │  client.place_order(id,c,o) → control chan   │
     └─────────┬──────────────────────┬─────────────┘
               │ events (crossbeam)   │ commands
-    ┌─────────▼──────────────────────▼─────────────┐
-    │              IBX Engine (pinned thread)       │
-    │  ┌────────────────────────────────────────┐  │
-    │  │   Protocol Stack                       │  │
+    ┌─────────▼──────────────────────▼─────────────────┐
+    │              IBX Engine (pinned thread)          │
+    │  ┌────────────────────────────────────────────┐  │
+    │  │   Protocol Stack                           │  │
     │  │   Encryption → Auth → Compression → Decode │  │
-    │  └────────────┬───────────────┬───────────┘  │
-    └───────────────┼───────────────┼──────────────┘
-               ┌────▼───┐     ┌────▼───┐
-               │ market │     │  auth  │
-               │  data  │     │ orders │
-               │  feed  │     │ control│
-               └────┬───┘     └────┬───┘
+    │  └────────────┬───────────────┬───────────────┘  │
+    └───────────────┼───────────────┼──────────────────┘
+               ┌────▼───┐     ┌─────▼────┐
+               │ market │     │   auth   │
+               │  data  │     │  orders  │
+               │  feed  │     │  control │
+               └────┬───┘     └────┬─────┘
                     │              │
               ──────▼──────────────▼──────
                      IB Servers
