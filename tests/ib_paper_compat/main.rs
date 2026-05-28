@@ -563,3 +563,123 @@ fn cross_session_recovery_phase_live() {
     println!("  Session B: cancel confirmed in {}ms", cancel_ms);
     println!("\n  PASS — cross-session cancel works (ibx#191 PR A validated)\n");
 }
+
+/// ibx#191 PR B focused live entry — validates `EClient::cancel_order_by_perm_id`.
+/// Places a resting LMT GTC, captures the broker-assigned `permId` from
+/// `order_status`-flavored OrderUpdate events, then cancels by permId (not by
+/// local orderId) and asserts Cancelled.
+/// Run: cargo test --test ib_paper_compat cancel_by_perm_id_phase_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn cancel_by_perm_id_phase_live() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== ibx#191 PR B: cancel_order_by_perm_id ===\n");
+    let (gw, farm, ccp, hmds) = Gateway::connect(&config)
+        .expect("Gateway::connect failed");
+    let account_id = gw.account_id.clone();
+    drop(gw);
+
+    let order_id = common::next_order_id();
+    println!("  orderId = {}", order_id);
+
+    let shared = std::sync::Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(),
+        farm, ccp, hmds, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+        order_id, instrument: inst_id, side: Side::Buy, qty: 1,
+        price: 1_00_000_000, outside_rth: true,
+    })).expect("send order failed");
+
+    let join = run_hot_loop(hot_loop);
+
+    // Wait for OrderUpdate(Submitted/PreSubmitted) to capture permId.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut perm_id: i64 = 0;
+    let mut rejected = false;
+    while Instant::now() < deadline && perm_id == 0 && !rejected {
+        if let Ok(Event::OrderUpdate(u)) = event_rx.recv_timeout(Duration::from_millis(100)) {
+            match u.status {
+                OrderStatus::Submitted | OrderStatus::PreSubmitted => {
+                    if u.perm_id != 0 {
+                        perm_id = u.perm_id;
+                    }
+                }
+                OrderStatus::Rejected => rejected = true,
+                _ => {}
+            }
+        }
+    }
+
+    if rejected {
+        let _ = control_tx.send(ControlCommand::Shutdown);
+        let _ = join.join();
+        panic!("order rejected — cleanup orderId={} via GUI", order_id);
+    }
+    assert!(perm_id != 0,
+        "permId never surfaced via OrderUpdate within 30s — cleanup orderId={} via GUI",
+        order_id);
+    println!("  Captured permId={} for orderId={}", perm_id, order_id);
+
+    // Look up the local orderId by permId (mirrors EClient::cancel_order_by_perm_id).
+    // collect_open_orders merges shared.orders.order_cache (populated by 35=8 ack)
+    // with ClientCore.open_orders.
+    let core = ibx::client_core::ClientCore::new();
+    let found = core.collect_open_orders(&shared)
+        .into_iter()
+        .find(|(_, t)| t.order.perm_id == perm_id);
+    let resolved_order_id = match found {
+        Some((oid, _)) => oid,
+        None => {
+            let _ = control_tx.send(ControlCommand::Shutdown);
+            let _ = join.join();
+            panic!("permId {} not found in open orders cache — cleanup orderId={} via GUI",
+                perm_id, order_id);
+        }
+    };
+    assert_eq!(resolved_order_id, order_id,
+        "permId→orderId lookup resolved to {} but expected {}", resolved_order_id, order_id);
+    println!("  Resolved permId={} → orderId={}", perm_id, resolved_order_id);
+
+    println!("  Sending Cancel(orderId={}) via permId-resolved path", resolved_order_id);
+    let cancel_sent = Instant::now();
+    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: resolved_order_id }))
+        .expect("send cancel failed");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut cancelled = false;
+    let mut cancel_rejected = false;
+    while Instant::now() < deadline && !cancelled && !cancel_rejected {
+        if let Ok(Event::OrderUpdate(u)) = event_rx.recv_timeout(Duration::from_millis(100)) {
+            match u.status {
+                OrderStatus::Cancelled => cancelled = true,
+                OrderStatus::Rejected => cancel_rejected = true,
+                _ => {}
+            }
+        }
+    }
+    let cancel_ms = cancel_sent.elapsed().as_millis();
+
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let _ = join.join();
+
+    if cancel_rejected {
+        panic!("cancel rejected — cleanup orderId={} via GUI", order_id);
+    }
+    assert!(cancelled,
+        "cancel not confirmed within 30s — cleanup orderId={} via GUI",
+        order_id);
+
+    println!("  Cancel confirmed in {}ms", cancel_ms);
+    println!("\n  PASS — cancel_order_by_perm_id works (ibx#191 PR B validated)\n");
+}
