@@ -430,3 +430,136 @@ fn query_error_phase_live() {
     let conns = ensure_ccp_alive(conns, &mut gw, &config);
     let _ = connection::phase_graceful_shutdown(conns);
 }
+
+/// ibx#191 PR A focused live entry — validates that after a full disconnect,
+/// a fresh `Gateway::connect` receives the CCP recovery push (35=8 with
+/// 150=0/39=0 per ib-agent#155) and that a subsequent
+/// `cancel_order(<prior_session_orderId>)` succeeds.
+///
+/// Two `Gateway::connect` calls in one process. Paper account skips the IBKey
+/// gate so this runs unattended. IB throttles back-to-back logins within ~60s,
+/// so the test waits 90s between sessions. Run:
+///   cargo test --test ib_paper_compat cross_session_recovery_phase_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn cross_session_recovery_phase_live() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+
+    println!("=== ibx#191 PR A: cross-session recovery test ===\n");
+
+    // ─── Session A: place resting GTC LMT BUY 1 SPY @ $1 (far below market) ───
+    println!("Session A: connecting + placing resting LMT GTC BUY 1 SPY @ $1");
+    let (gw_a, farm_a, ccp_a, hmds_a) = Gateway::connect(&config)
+        .expect("Session A: Gateway::connect failed");
+    let account_id = gw_a.account_id.clone();
+    drop(gw_a); // gateway state not needed after sockets are out
+
+    let order_id = common::next_order_id();
+    println!("  orderId = {}", order_id);
+
+    let session_a_acked = {
+        let shared = std::sync::Arc::new(SharedState::new());
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (mut hot_loop, control_tx) = HotLoop::with_connections(
+            shared, Some(event_tx), account_id.clone(),
+            farm_a, ccp_a, hmds_a, None,
+        );
+        let inst_id = hot_loop.context_mut().register_instrument(756733);
+        hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+        control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
+            order_id, instrument: inst_id, side: Side::Buy, qty: 1,
+            price: 1_00_000_000, outside_rth: true,
+        })).expect("Session A: send order failed");
+
+        let join = run_hot_loop(hot_loop);
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut acked = false;
+        let mut rejected = false;
+        while Instant::now() < deadline && !acked && !rejected {
+            if let Ok(Event::OrderUpdate(u)) = event_rx.recv_timeout(Duration::from_millis(100)) {
+                match u.status {
+                    OrderStatus::Submitted | OrderStatus::PreSubmitted => acked = true,
+                    OrderStatus::Rejected => rejected = true,
+                    _ => {}
+                }
+            }
+        }
+
+        let _ = control_tx.send(ControlCommand::Shutdown);
+        let _ = join.join();
+
+        if rejected {
+            panic!("Session A: order rejected — cleanup not possible automatically (check TWS for orderId={})", order_id);
+        }
+        acked
+    };
+    // Conns A dropped → TCP sockets close → CCP session ends.
+    assert!(session_a_acked, "Session A: LMT order never acked within 30s");
+    println!("  Session A: orderId={} acked + sockets closed", order_id);
+
+    // IB throttles back-to-back Gateway::connect calls ("Never received data
+    // start after auth" if too soon). Wait ~90s before attempting Session B.
+    let wait_secs = 90u64;
+    println!("  Waiting {}s before Session B to clear IB auth throttle...\n", wait_secs);
+    std::thread::sleep(Duration::from_secs(wait_secs));
+
+    // ─── Session B: fresh connect → expect 35=8 recovery push → cancel orderId ───
+    println!("Session B: fresh Gateway::connect → expect recovery push for orderId={}", order_id);
+    let (gw_b, farm_b, ccp_b, hmds_b) = Gateway::connect(&config)
+        .expect("Session B: Gateway::connect failed");
+    assert_eq!(account_id, gw_b.account_id, "Account ID changed between sessions");
+    drop(gw_b);
+
+    let shared = std::sync::Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared, Some(event_tx), account_id.clone(),
+        farm_b, ccp_b, hmds_b, None,
+    );
+    let inst_id = hot_loop.context_mut().register_instrument(756733);
+    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
+
+    let join = run_hot_loop(hot_loop);
+
+    // CCP delivers the recovery push <1s after session establishment per ib-agent#155.
+    // Sleep a few seconds so handle_exec_report has time to populate last_clord.
+    std::thread::sleep(Duration::from_secs(3));
+
+    println!("  Session B: sending Cancel(orderId={})", order_id);
+    let cancel_sent = Instant::now();
+    control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id }))
+        .expect("Session B: send cancel failed");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut cancelled = false;
+    let mut cancel_rejected = false;
+    while Instant::now() < deadline && !cancelled && !cancel_rejected {
+        if let Ok(Event::OrderUpdate(u)) = event_rx.recv_timeout(Duration::from_millis(100)) {
+            match u.status {
+                OrderStatus::Cancelled => cancelled = true,
+                OrderStatus::Rejected => cancel_rejected = true,
+                _ => {}
+            }
+        }
+    }
+    let cancel_ms = cancel_sent.elapsed().as_millis();
+
+    let _ = control_tx.send(ControlCommand::Shutdown);
+    let _ = join.join();
+
+    if cancel_rejected {
+        panic!("Session B: cancel rejected — recovery push did not populate last_clord for orderId={}", order_id);
+    }
+    assert!(cancelled,
+        "Session B: cancel not confirmed within 30s — recovery push likely not parsed correctly. Cleanup orderId={} via GUI.",
+        order_id);
+
+    println!("  Session B: cancel confirmed in {}ms", cancel_ms);
+    println!("\n  PASS — cross-session cancel works (ibx#191 PR A validated)\n");
+}

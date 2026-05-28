@@ -536,16 +536,83 @@ impl CcpState {
         event_tx: &Option<Sender<Event>>,
         account_id: &str,
     ) {
-        let clord_id = parsed.get(&11).and_then(|s| {
-            let stripped = s.strip_prefix('C').unwrap_or(s);
-            // Strip versioned suffix (.0, .1, .2) from modify-chained ClOrdIDs
-            let base = stripped.split('.').next().unwrap_or(stripped);
-            base.parse::<u64>().ok()
-        }).unwrap_or(0);
+        // CCP recovery push format A (ib-agent#155, captured against live):
+        // 35=8 with 150=0/39=0, tag 11 carries `<permId>.0`, the originating
+        // orderId is in tag 6121. For these, prefer 6121 as the local key so
+        // cancel_order(<prior-session orderId>) finds the right ClOrdID.
+        // Format B (paper account, observed live): tag 11 carries the
+        // originating orderId directly with `.0` suffix, tags 6119/6121
+        // absent — the existing tag-11 split below already gives the right
+        // value. The unwrap_or_else fallback handles both.
+        let recovery_origin_order_id: Option<u64> = if parsed.get(&150).map(|s| s.as_str()) == Some("0")
+            && parsed.get(&39).map(|s| s.as_str()) == Some("0")
+            && parsed.contains_key(&6121)
+        {
+            parsed.get(&6121).and_then(|s| s.parse::<u64>().ok())
+        } else {
+            None
+        };
 
-        // Drop the gateway's echo of the mass-order-status wildcard request
-        // (ClOrdID="*"/"0"/absent → parses to 0). Real orders are assigned
-        // monotonic IDs via next_order_id and never collide with 0.
+        let clord_id = recovery_origin_order_id.unwrap_or_else(|| {
+            parsed.get(&11).and_then(|s| {
+                let stripped = s.strip_prefix('C').unwrap_or(s);
+                // Strip versioned suffix (.0, .1, .2) from modify-chained ClOrdIDs
+                let base = stripped.split('.').next().unwrap_or(stripped);
+                base.parse::<u64>().ok()
+            }).unwrap_or(0)
+        });
+
+        // Recovery insert: a 35=8 with status New/New (150=0/39=0) for an order
+        // that is NOT in this session's context is a cross-session recovery entry
+        // pushed by CCP on session establishment. Insert into context.open_orders
+        // so subsequent cancel/modify ACKs at ~line 668 can match via
+        // context.order(clord_id) and emit OrderUpdate events to the user. ibx#191.
+        let is_new_ack = parsed.get(&150).map(|s| s.as_str()) == Some("0")
+            && parsed.get(&39).map(|s| s.as_str()) == Some("0");
+        if is_new_ack && context.order(clord_id).is_none() {
+            let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let side = match parsed.get(&54).map(|s| s.as_str()) {
+                Some("1") => Side::Buy,
+                Some("5") => Side::ShortSell,
+                _ => Side::Sell,
+            };
+            let qty: u32 = parsed.get(&38).and_then(|s| s.parse::<f64>().ok()).map(|q| q as u32).unwrap_or(0);
+            let limit_price_i64: i64 = parsed.get(&44)
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|p| (p * PRICE_SCALE as f64) as i64)
+                .unwrap_or(0);
+            let stop_price_i64: i64 = parsed.get(&99)
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|p| (p * PRICE_SCALE as f64) as i64)
+                .unwrap_or(0);
+            let ord_type_byte: u8 = parsed.get(&40).and_then(|s| s.bytes().next()).unwrap_or(b'2');
+            let tif_byte: u8 = parsed.get(&59).and_then(|s| s.bytes().next()).unwrap_or(b'1');
+            if con_id != 0 && qty > 0 {
+                let instrument = context.register_instrument(con_id);
+                if let Some(sym) = parsed.get(&55) {
+                    context.set_symbol(instrument, sym.clone());
+                }
+                context.insert_order(crate::types::Order {
+                    order_id: clord_id,
+                    instrument,
+                    side,
+                    price: limit_price_i64,
+                    qty,
+                    filled: 0,
+                    status: crate::types::OrderStatus::Submitted,
+                    ord_type: ord_type_byte,
+                    tif: tif_byte,
+                    stop_price: stop_price_i64,
+                });
+                log::info!("CCP recovery: inserted orderId={} sym={:?} side={:?} qty={} px={}",
+                    clord_id, parsed.get(&55), side, qty,
+                    limit_price_i64 as f64 / PRICE_SCALE as f64);
+            }
+        }
+
+        // Drop the sentinel/end-of-stream record (ClOrdID="*"/"0"/absent → parses
+        // to 0). Real orders are assigned monotonic IDs via next_order_id and
+        // never collide with 0. The recovery-push terminator (11='*') lands here.
         if clord_id == 0 {
             log::debug!("ExecReport: dropping sentinel record (ClOrdID=0/*) sym={:?} status={:?}",
                 parsed.get(&55), parsed.get(&39));
@@ -1361,21 +1428,11 @@ impl CcpState {
                 (6040, "6"), (6036, "1"), (6095, account_id), (6529, "AR.3"),
             ]);
 
-            // Mass order status request.
-            let result = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "H"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (11, "*"),
-                (54, "*"),
-                (55, "*"),
-            ]);
-            match result {
-                Ok(()) => {
-                    hb.last_ccp_sent = Instant::now();
-                    log::info!("CCP reconnected, sent account/position re-subscribe + order mass status request");
-                }
-                Err(e) => log::error!("CCP reconnected but mass status request failed: {}", e),
-            }
+            // Resting open orders are pushed unsolicited by CCP as 35=8 with
+            // 150=0/39=0 carrying originating clientId (6119) and orderId (6121),
+            // terminated by 11='*' sentinel. See ib-agent#155, ibx#191.
+            hb.last_ccp_sent = Instant::now();
+            log::info!("CCP reconnected, sent account/position re-subscribe");
         }
     }
 }
