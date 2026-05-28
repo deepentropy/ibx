@@ -54,6 +54,28 @@ impl EClient {
         }))
     }
 
+    /// Cancel an order identified by `permId` — stable across sessions.
+    ///
+    /// `permId` is the broker-assigned identifier returned in `order_status`
+    /// callbacks and surfaced in account tools. Useful for cancelling an order
+    /// placed in a prior session, where the local `order_id` is not retained.
+    ///
+    /// Per ib-agent#154 the CCP cancel frame is orderId-only, so ibx looks up
+    /// the local `order_id` from `permId` in the open-order cache (populated by
+    /// `place_order` callbacks or by the CCP session-recovery push hydrated in
+    /// `handle_exec_report`). Fails if `perm_id` is not currently tracked.
+    pub fn cancel_order_by_perm_id(&self, perm_id: i64) -> Result<(), String> {
+        if perm_id == 0 {
+            return Err("cancel_order_by_perm_id: perm_id must be non-zero".into());
+        }
+        let order_id = self.core.collect_open_orders(&self.shared)
+            .into_iter()
+            .find(|(_, tracked)| tracked.order.perm_id == perm_id)
+            .map(|(oid, _)| oid)
+            .ok_or_else(|| format!("cancel_order_by_perm_id: permId {} not found in open orders", perm_id))?;
+        self.cancel_order(order_id as i64, "")
+    }
+
     /// Cancel all orders. Matches `reqGlobalCancel` in C++.
     pub fn req_global_cancel(&self) -> Result<(), String> {
         // Use global instrument count (not just locally-tracked ones)
