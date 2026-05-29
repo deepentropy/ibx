@@ -522,6 +522,11 @@ pub(crate) fn drain_and_send_orders(
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let pct_str = trail_pct.to_string(); // basis points: 100 = 1%
+                // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
+                // percent in decimal form (1.00 for 1%), alongside 6268 in basis
+                // points and 18=a (ExecInst=TrailingStop). Without 99/211/18 the
+                // gateway rejects with "Invalid value in field # 18".
+                let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 conn.send_fix(&[
@@ -534,6 +539,9 @@ pub(crate) fn drain_and_send_orders(
                     (54, side_str),
                     (38, &qty_str),
                     (40, "P"),              // OrdType = Trailing Stop
+                    (99, &pct_decimal),     // StopPx = percent as decimal
+                    (211, &pct_decimal),    // PegOffset = percent as decimal (mirror of 99)
+                    (18, "a"),              // ExecInst = TrailingStop
                     (6268, &pct_str),       // TrailingPercent (basis points)
                     (59, "0"),              // TIF = DAY
                     (60, &now),
@@ -552,6 +560,11 @@ pub(crate) fn drain_and_send_orders(
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let pct_str = trail_pct.to_string();
+                // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
+                // percent in decimal form (1.00 for 1%), alongside 6268 in basis
+                // points and 18=a (ExecInst=TrailingStop). Without 99/211/18 the
+                // gateway rejects with "Invalid value in field # 18".
+                let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
                 let symbol = context.market.symbol(instrument).to_string();
                 let now = chrono_free_timestamp();
                 let tif_byte = [tif];
@@ -576,6 +589,9 @@ pub(crate) fn drain_and_send_orders(
                     (54, side_str),
                     (38, &qty_str),
                     (40, "P"),              // OrdType = Trailing Stop
+                    (99, &pct_decimal),     // StopPx = percent as decimal
+                    (211, &pct_decimal),    // PegOffset = percent as decimal (mirror of 99)
+                    (18, "a"),              // ExecInst = TrailingStop
                     (6268, &pct_str),       // TrailingPercent (basis points)
                     (59, tif_str),
                     (60, &now),
