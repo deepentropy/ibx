@@ -1034,14 +1034,27 @@ impl Gateway {
             }
         }
 
-        // Receive post-auth messages (encrypted via 534).
-        // Per-iteration read timeout: a stalled server would otherwise wedge
-        // the connect path indefinitely (no timeout on the TCP socket).
+        // Receive post-auth messages (encrypted via 534) and wait for the
+        // data-farm start (NS_FIX_START). A transient stall here must not be
+        // fatal: a single read timeout used to `break` and bubble a hard error
+        // even though the data start was still pending, and keepalive chatter
+        // could exhaust a fixed iteration budget before it arrived (ibx#196).
+        // Retry within an overall deadline and ignore intervening messages,
+        // mirroring the CCP-reconnect path.
         tls.get_ref().set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)))?;
+        let fix_deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs_f64(TIMEOUT_FIX_LOGON * 2.0);
         let mut fix_ready = false;
-        for _ in 0..10 {
+        while std::time::Instant::now() < fix_deadline {
             let (payload, _) = match ns::ns_recv(&mut tls) {
                 Ok(r) => r,
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    log::warn!("Post-auth recv timeout, retrying until deadline: {}", e);
+                    continue;
+                }
                 Err(e) => {
                     log::warn!("Post-auth recv error: {}", e);
                     break;
@@ -1096,8 +1109,11 @@ impl Gateway {
             }
         }
         if !fix_ready {
+            // TimedOut (not Other) so callers can distinguish a transient
+            // post-auth handshake miss — which is retryable — from a genuine
+            // auth failure (ibx#196).
             return Err(io::Error::new(
-                io::ErrorKind::Other,
+                io::ErrorKind::TimedOut,
                 "Never received data start after auth",
             ));
         }
