@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::bridge::{Event, RichOrderInfo, SharedState};
@@ -15,6 +15,11 @@ use crate::types::{
 use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, parse_price_tag};
+
+/// Number of most-recent ExecIDs retained for fill deduplication. Bounds the
+/// memory of `seen_exec_ids` while staying large enough that a server replay
+/// after a reconnect burst still hits the window.
+const EXEC_ID_WINDOW: usize = 1024;
 
 /// Convert a FIX OrderID hex string (e.g. "00cf16ed.000225ed.69ca0941.0001") to a stable i64 permId.
 /// Uses FNV-1a hash of the first 3 dot-segments (the stable prefix) so that permId
@@ -60,6 +65,11 @@ fn perm_id_from_fix_order_id(s: &str) -> i64 {
 
 pub(crate) struct CcpState {
     pub(crate) seen_exec_ids: HashSet<String>,
+    /// Insertion order for `seen_exec_ids`, oldest at the front. Used to evict
+    /// one entry at a time once the dedup window is full, instead of clearing
+    /// the whole set — a wholesale clear would let a post-reconnect server
+    /// replay of a recently-seen ExecID double-count a fill (ibx#198).
+    pub(crate) exec_id_order: VecDeque<String>,
     pub(crate) bulletin_next_id: i32,
     pub(crate) news_subscriptions: Vec<(InstrumentId, u32)>,
     pub(crate) disconnected: bool,
@@ -132,6 +142,7 @@ impl CcpState {
     pub(crate) fn new() -> Self {
         Self {
             seen_exec_ids: HashSet::with_capacity(256),
+            exec_id_order: VecDeque::with_capacity(256),
             bulletin_next_id: 0,
             news_subscriptions: Vec::new(),
             disconnected: false,
@@ -150,6 +161,28 @@ impl CcpState {
             auto_fetched_conids: HashSet::new(),
             pending_scanner_enrichment: Vec::new(),
         }
+    }
+
+    /// Record `exec_id` in the fill-dedup window. Returns `true` if it is new
+    /// (the fill should be processed) and `false` if it was already seen (a
+    /// duplicate to skip).
+    ///
+    /// Backed by a bounded rolling window: once `EXEC_ID_WINDOW` IDs are held,
+    /// the oldest is evicted one at a time. This replaces a previous wholesale
+    /// `clear()` that dropped the entire history at the cap, which let a
+    /// post-reconnect server replay of a recently-seen ExecID double-count the
+    /// fill and corrupt the position (ibx#198).
+    pub(crate) fn record_exec_id(&mut self, exec_id: &str) -> bool {
+        if !self.seen_exec_ids.insert(exec_id.to_string()) {
+            return false;
+        }
+        self.exec_id_order.push_back(exec_id.to_string());
+        while self.exec_id_order.len() > EXEC_ID_WINDOW {
+            if let Some(old) = self.exec_id_order.pop_front() {
+                self.seen_exec_ids.remove(&old);
+            }
+        }
+        true
     }
 
     pub(crate) fn poll_executions(
@@ -700,12 +733,9 @@ impl CcpState {
 
         let mut had_fill = false;
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
-            if !exec_id.is_empty() && !self.seen_exec_ids.insert(exec_id.to_string()) {
+            if !exec_id.is_empty() && !self.record_exec_id(exec_id) {
                 log::warn!("Duplicate ExecID={} — skipping fill", exec_id);
                 return;
-            }
-            if self.seen_exec_ids.len() > 1024 {
-                self.seen_exec_ids.clear();
             }
             if let Some(order) = context.order(clord_id).copied() {
                 context.update_order_filled(clord_id, last_shares as u32);
@@ -1720,5 +1750,52 @@ pub(crate) fn handle_position_update(
         }
         shared.portfolio.set_position(instrument, position);
         emit(event_tx, Event::PositionUpdate { instrument, con_id, position, avg_cost });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression for ibx#198: the fill-dedup set must NOT be wiped wholesale
+    // when it reaches its cap. A recently-seen ExecID has to stay deduplicated
+    // so a post-reconnect server replay can't double-count the fill.
+    #[test]
+    fn record_exec_id_dedupes_within_window() {
+        let mut ccp = CcpState::new();
+        assert!(ccp.record_exec_id("exec-A"), "first sighting is new");
+        assert!(!ccp.record_exec_id("exec-A"), "immediate replay is a duplicate");
+    }
+
+    #[test]
+    fn record_exec_id_evicts_oldest_not_whole_set() {
+        let mut ccp = CcpState::new();
+        // The very first ExecID — the one a reconnect is most likely to replay.
+        assert!(ccp.record_exec_id("exec-first"));
+        // Push the window exactly to its cap. Together with "exec-first" this is
+        // EXEC_ID_WINDOW + 1 inserts, which evicts exactly one entry: the oldest
+        // ("exec-first"). Every other recent ID must remain deduplicated.
+        for i in 0..EXEC_ID_WINDOW {
+            assert!(ccp.record_exec_id(&format!("exec-{i}")));
+        }
+        assert_eq!(ccp.seen_exec_ids.len(), EXEC_ID_WINDOW);
+        // Oldest was evicted, so a replay now reads as new (unavoidable past the
+        // window) — but the most recent IDs are still caught as duplicates.
+        assert!(!ccp.record_exec_id("exec-0"), "recent ID still deduped");
+        assert!(!ccp.record_exec_id(&format!("exec-{}", EXEC_ID_WINDOW - 1)),
+            "newest ID still deduped");
+    }
+
+    // A wholesale clear() would have made "exec-first" re-insertable as new
+    // after just one extra fill past the cap; assert the rolling window keeps
+    // the bound without that cliff.
+    #[test]
+    fn record_exec_id_window_is_bounded() {
+        let mut ccp = CcpState::new();
+        for i in 0..(EXEC_ID_WINDOW * 3) {
+            ccp.record_exec_id(&format!("exec-{i}"));
+        }
+        assert_eq!(ccp.seen_exec_ids.len(), EXEC_ID_WINDOW);
+        assert_eq!(ccp.exec_id_order.len(), EXEC_ID_WINDOW);
     }
 }

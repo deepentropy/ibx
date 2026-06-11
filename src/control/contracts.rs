@@ -30,7 +30,6 @@ pub const TAG_IB_VALID_EXCHANGES: u32 = 6046;
 pub const TAG_IB_TRADING_CLASS: u32 = 6058;
 pub const TAG_IB_SOURCE: u32 = 6088;
 pub const TAG_IB_PRIMARY_EXCHANGE: u32 = 6470;
-pub const TAG_IB_MIN_TICK: u32 = 6019;
 pub const TAG_IB_ORDER_TYPES: u32 = 6431;
 pub const TAG_IB_MARKET_RULE_ID: u32 = 6031;
 pub const TAG_IB_STOCK_TYPE: u32 = 8077;
@@ -268,8 +267,21 @@ pub fn parse_secdef_response(data: &[u8]) -> Option<ContractDefinition> {
     if let Some(v) = tags.get(&TAG_LONG_NAME) {
         def.long_name = v.clone();
     }
-    if let Some(v) = tags.get(&TAG_IB_MIN_TICK) {
-        def.min_tick = v.parse().unwrap_or(0.01);
+    // Tag 6019 is the market-rule-block start sentinel (value "1"), NOT the
+    // literal tick increment — see TAG_MARKET_RULE_START. When the secdef
+    // carries an inline price-increment block, fix_parse keeps that sentinel,
+    // so reading 6019 as min_tick yields 1.0. Derive min_tick from the parsed
+    // increments instead: the smallest increment is the contract's minimum
+    // tick (iso ContractDetails.minTick). Absent a rule block, the default
+    // (0.01) stands.
+    if let Some(min_increment) = parse_market_rules(data)
+        .iter()
+        .flat_map(|rule| rule.price_increments.iter())
+        .map(|inc| inc.increment)
+        .filter(|inc| *inc > 0.0)
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        def.min_tick = min_increment;
     }
     if let Some(v) = tags.get(&TAG_MULTIPLIER) {
         def.multiplier = v.parse().unwrap_or(1.0);
@@ -792,9 +804,15 @@ mod tests {
                 (TAG_SECURITY_EXCHANGE, "NASDAQ"),
                 (TAG_CURRENCY, "USD"),
                 (TAG_LONG_NAME, "APPLE INC"),
-                (TAG_IB_MIN_TICK, "0.01"),
                 (TAG_IB_VALID_EXCHANGES, "BEST,NYSE,ARCA"),
                 (TAG_IB_PRIMARY_EXCHANGE, "NASDAQ"),
+                // Inline price-increment block: min_tick is derived from the
+                // smallest increment, not the 6019 rule-start sentinel.
+                (TAG_MARKET_RULE_START, "1"),
+                (TAG_MARKET_RULE_ID, "26"),
+                (TAG_LOW_EDGE, "0"),
+                (TAG_INCREMENT, "0.01"),
+                (TAG_MARKET_RULE_END, "1"),
             ],
             1,
         );
@@ -814,6 +832,51 @@ mod tests {
     fn parse_rejects_non_secdef() {
         let msg = fix::fix_build(&[(TAG_MSG_TYPE, "A")], 1);
         assert!(super::parse_secdef_response(&msg).is_none());
+    }
+
+    // Regression for ibx#197: a US equity secdef carries an inline price-
+    // increment block whose start sentinel is `6019=1`. Tag 6019 must NOT be
+    // read as min_tick (it would yield 1.0) — min_tick is the smallest parsed
+    // increment.
+    #[test]
+    fn secdef_min_tick_from_price_increments_not_rule_sentinel() {
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "d"),
+                (TAG_IB_CON_ID, "4726868"),
+                (TAG_SYMBOL, "AXTI"),
+                (TAG_SECURITY_TYPE, "CS"),
+                (TAG_CURRENCY, "USD"),
+                // Inline market-rule block (6019="1" is the start sentinel).
+                (TAG_MARKET_RULE_START, "1"),
+                (TAG_MARKET_RULE_ID, "26"),
+                (TAG_LOW_EDGE, "0"),
+                (TAG_INCREMENT, "0.0001"),
+                (TAG_LOW_EDGE, "1"),
+                (TAG_INCREMENT, "0.01"),
+                (TAG_MARKET_RULE_END, "1"),
+            ],
+            1,
+        );
+        let def = super::parse_secdef_response(&msg).unwrap();
+        // Smallest increment across bands, not the "1" rule sentinel.
+        assert_eq!(def.min_tick, 0.0001);
+    }
+
+    // Absent any inline rule block, min_tick keeps its default.
+    #[test]
+    fn secdef_min_tick_defaults_without_rule_block() {
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "d"),
+                (TAG_IB_CON_ID, "265598"),
+                (TAG_SYMBOL, "AAPL"),
+                (TAG_SECURITY_TYPE, "CS"),
+            ],
+            1,
+        );
+        let def = super::parse_secdef_response(&msg).unwrap();
+        assert_eq!(def.min_tick, 0.01);
     }
 
     #[test]
@@ -1007,7 +1070,6 @@ mod tests {
                 (TAG_IB_CON_ID, "756733"),
                 (TAG_SYMBOL, "SPY"),
                 (TAG_SECURITY_TYPE, "CS"),
-                (TAG_IB_MIN_TICK, "0.01"),
                 (TAG_IB_MARKET_RULE_ID, "4563"),
             ],
             1,

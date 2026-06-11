@@ -372,7 +372,7 @@ pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -
     };
 
     // Generate client keys: a (private), A = g^a mod N
-    let mut a_bytes = [0u8; 4];
+    let mut a_bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut a_bytes);
     let a_priv = BigUint::from_bytes_be(&a_bytes);
     let a_pub = g.modpow(&a_priv, &n);

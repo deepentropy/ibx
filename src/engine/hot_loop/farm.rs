@@ -206,7 +206,7 @@ impl FarmState {
 
         let mut ticks = std::mem::take(&mut self.tick_buf);
         tick_decoder::decode_ticks_35p_into(body, &mut ticks);
-        let mut notified: u32 = 0;
+        let mut notified = [0u64; crate::types::MAX_INSTRUMENTS / 64];
 
         // Phase 1: Apply all ticks to internal quotes before publishing.
         for tick in &ticks {
@@ -237,16 +237,18 @@ impl FarmState {
                 _ => {}
             }
 
-            notified |= 1u32 << instrument;
+            notified[(instrument >> 6) as usize] |= 1u64 << (instrument & 63);
         }
 
         // Phase 2: Publish complete quotes after all ticks in the batch are applied.
-        let mut remaining = notified;
-        while remaining != 0 {
-            let instrument = remaining.trailing_zeros();
-            remaining &= remaining - 1;
-            shared.market.push_quote(instrument, context.quote(instrument));
-            emit(event_tx, Event::Tick(instrument));
+        for (word_idx, &word) in notified.iter().enumerate() {
+            let mut remaining = word;
+            while remaining != 0 {
+                let instrument = (word_idx as u32) * 64 + remaining.trailing_zeros();
+                remaining &= remaining - 1;
+                shared.market.push_quote(instrument, context.quote(instrument));
+                emit(event_tx, Event::Tick(instrument));
+            }
         }
         self.tick_buf = ticks;
     }

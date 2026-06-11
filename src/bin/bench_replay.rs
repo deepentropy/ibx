@@ -140,7 +140,7 @@ fn main() {
     // ── Stage 2: FIXCOMP decompress ──
     println!("── Stage 2: FIXCOMP Decompress ──");
     bench("decompress (1 inner msg)", ITERATIONS, || {
-        let _ = fixcomp_decompress(&fixcomp_msg);
+        let _ = fixcomp_decompress(&fixcomp_msg).unwrap();
     });
     {
         // Multi-message FIXCOMP (3 inner messages)
@@ -151,7 +151,7 @@ fn main() {
         combined.extend_from_slice(&inner3);
         let multi_comp = fixcomp_build(&combined);
         bench("decompress (3 inner msgs)", ITERATIONS, || {
-            let _ = fixcomp_decompress(&multi_comp);
+            let _ = fixcomp_decompress(&multi_comp).unwrap();
         });
     }
     println!();
@@ -252,7 +252,7 @@ fn main() {
             // 1. HMAC unsign the FIXCOMP wrapper
             let (unsigned, _new_iv, _valid) = fix_unsign(&signed_fixcomp, &MAC_KEY, &INIT_IV);
             // 2. Decompress
-            let inner_msgs = fixcomp_decompress(&unsigned);
+            let inner_msgs = fixcomp_decompress(&unsigned).unwrap();
             // 3. Process each inner message
             for inner in &inner_msgs {
                 if let Some(body) = find_body_after_tag(inner, b"35=P\x01") {

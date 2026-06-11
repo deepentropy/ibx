@@ -538,7 +538,7 @@ pub(super) fn phase_forex_market_data(conns: Conns) -> Conns {
             let messages = match frame {
                 Frame::FixComp(raw) => {
                     let (unsigned, _) = ccp.unsign(&raw);
-                    fixcomp::fixcomp_decompress(&unsigned)
+                    fixcomp::fixcomp_decompress(&unsigned).unwrap_or_default()
                 }
                 Frame::Fix(raw) => vec![raw],
                 _ => continue,

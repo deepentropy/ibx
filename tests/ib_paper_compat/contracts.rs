@@ -136,7 +136,7 @@ pub(super) fn phase_trading_hours(conns: &mut Conns) {
         }
         for frame in conns.ccp.extract_frames() {
             let messages = match frame {
-                Frame::FixComp(raw) => { let (u, _) = conns.ccp.unsign(&raw); fixcomp::fixcomp_decompress(&u) }
+                Frame::FixComp(raw) => { let (u, _) = conns.ccp.unsign(&raw); fixcomp::fixcomp_decompress(&u).unwrap_or_default() }
                 Frame::Fix(raw) => vec![raw],
                 _ => continue,
             };

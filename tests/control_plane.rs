@@ -37,8 +37,14 @@ fn contract_request_response_roundtrip() {
             (TAG_IB_PRIMARY_EXCHANGE, "NASDAQ"),
             (TAG_CURRENCY, "USD"),
             (TAG_LONG_NAME, "APPLE INC"),
-            (TAG_IB_MIN_TICK, "0.01"),
             (TAG_IB_VALID_EXCHANGES, "BEST,NYSE,ARCA,BATS"),
+            // Inline price-increment block (6019="1" is the rule-start
+            // sentinel); min_tick is derived from the smallest increment.
+            (TAG_MARKET_RULE_START, "1"),
+            (TAG_MARKET_RULE_ID, "26"),
+            (TAG_LOW_EDGE, "0"),
+            (TAG_INCREMENT, "0.01"),
+            (TAG_MARKET_RULE_END, "1"),
         ],
         11,
     );
@@ -507,7 +513,7 @@ fn fixcomp_wraps_secdef_response() {
     assert!(compressed.starts_with(b"8=FIXCOMP"));
 
     // Decompress and parse
-    let messages = fixcomp::fixcomp_decompress(&compressed);
+    let messages = fixcomp::fixcomp_decompress(&compressed).unwrap();
     assert_eq!(messages.len(), 1);
 
     let def = parse_secdef_response(&messages[0]).unwrap();
