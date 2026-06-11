@@ -143,8 +143,17 @@ pub(crate) fn drain_and_send_orders(
                 let now = chrono_free_timestamp();
                 let display_str = format_uint(attrs.display_size as u64);
                 let min_qty_str = format_uint(attrs.min_qty as u64);
-                let gat_str = if attrs.good_after > 0 { unix_to_ib_datetime(attrs.good_after) } else { String::new() };
-                let gtd_str = if attrs.good_till > 0 { unix_to_ib_datetime(attrs.good_till) } else { String::new() };
+                // 126 (ExpireTime) / 168 (EffectiveTime) are FIX UTCTimestamps:
+                // "YYYYMMDD-HH:MM:SS" — the gateway rejects the space-separated
+                // form with "Invalid value in field # 126" (and then, treating
+                // 126 as absent, demands 432).
+                let gat_str = if attrs.good_after > 0 { unix_to_ib_datetime(attrs.good_after).replace(' ', "-") } else { String::new() };
+                let gtd_str = if attrs.good_till > 0 { unix_to_ib_datetime(attrs.good_till).replace(' ', "-") } else { String::new() };
+                // GTD wire encoding (verified against the paper gateway):
+                // time-precise GTD → 126 alone; date-only GTD (midnight UTC)
+                // → 432 ("YYYYMMDD") alone. Sending both gets the order
+                // rejected with "Invalid value in field # 432".
+                let gtd_date_str = if attrs.good_till > 0 && attrs.good_till % 86400 == 0 { gtd_str[..8].to_string() } else { String::new() };
                 let oca_str = if !attrs.oca_group_str.is_empty() {
                     attrs.oca_group_str.clone()
                 } else if attrs.oca_group > 0 {
@@ -190,7 +199,11 @@ pub(crate) fn drain_and_send_orders(
                     fields.push((168, &gat_str));
                 }
                 if attrs.good_till > 0 {
-                    fields.push((126, &gtd_str));
+                    if !gtd_date_str.is_empty() {
+                        fields.push((432, &gtd_date_str));
+                    } else {
+                        fields.push((126, &gtd_str));
+                    }
                 }
                 if !oca_str.is_empty() {
                     fields.push((583, &oca_str));
