@@ -108,6 +108,47 @@ pub fn unix_to_ib_datetime(secs: i64) -> String {
     )
 }
 
+/// Convert (year, month, day) to days since Unix epoch. Inverse of `days_to_ymd`.
+pub fn ymd_to_days(y: u64, m: u64, d: u64) -> u64 {
+    // Algorithm from Howard Hinnant (days_from_civil)
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Parse an ibapi-style datetime string to unix seconds, treated as UTC.
+/// Accepts "YYYYMMDD HH:MM:SS", "YYYYMMDD-HH:MM:SS", or bare "YYYYMMDD".
+/// Anything after the seconds field (e.g. a timezone suffix) is ignored.
+/// Returns 0 for empty or unparseable input.
+pub fn ib_datetime_to_unix(s: &str) -> i64 {
+    let s = s.trim();
+    if s.len() < 8 || !s.is_char_boundary(8) {
+        return 0;
+    }
+    let (date, rest) = s.split_at(8);
+    let y = match date[0..4].parse::<u64>() { Ok(v) => v, Err(_) => return 0 };
+    let m = match date[4..6].parse::<u64>() { Ok(v) => v, Err(_) => return 0 };
+    let d = match date[6..8].parse::<u64>() { Ok(v) => v, Err(_) => return 0 };
+    if y < 1970 || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return 0;
+    }
+    let mut secs = (ymd_to_days(y, m, d) * 86400) as i64;
+    let time = rest.trim_start_matches(|c| c == ' ' || c == '-');
+    if time.len() >= 8 && time.is_char_boundary(8) {
+        let hh = time[0..2].parse::<i64>().unwrap_or(0);
+        let mm = time[3..5].parse::<i64>().unwrap_or(0);
+        let ss = time[6..8].parse::<i64>().unwrap_or(0);
+        if (0..24).contains(&hh) && (0..60).contains(&mm) && (0..60).contains(&ss) {
+            secs += hh * 3600 + mm * 60 + ss;
+        }
+    }
+    secs
+}
+
 /// Convert days since Unix epoch to (year, month, day).
 pub fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     // Algorithm from Howard Hinnant
@@ -122,4 +163,49 @@ pub fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod gtd_datetime_tests {
+    use super::*;
+
+    #[test]
+    fn round_trips_with_unix_to_ib_datetime() {
+        for secs in [0i64, 86399, 1781199865, 4102444800] {
+            let s = unix_to_ib_datetime(secs);
+            assert_eq!(ib_datetime_to_unix(&s), secs, "round-trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn accepts_dash_and_space_separators() {
+        assert_eq!(
+            ib_datetime_to_unix("20260611-17:44:25"),
+            ib_datetime_to_unix("20260611 17:44:25"),
+        );
+        assert!(ib_datetime_to_unix("20260611-17:44:25") > 0);
+    }
+
+    #[test]
+    fn bare_date_is_midnight_utc() {
+        let secs = ib_datetime_to_unix("20260611");
+        assert_eq!(secs % 86400, 0);
+        assert_eq!(unix_to_ib_datetime(secs), "20260611 00:00:00");
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(ib_datetime_to_unix(""), 0);
+        assert_eq!(ib_datetime_to_unix("tomorrow"), 0);
+        assert_eq!(ib_datetime_to_unix("2026061"), 0);
+        assert_eq!(ib_datetime_to_unix("20261311"), 0);
+    }
+
+    #[test]
+    fn ignores_timezone_suffix() {
+        assert_eq!(
+            ib_datetime_to_unix("20260611 17:44:25 UTC"),
+            ib_datetime_to_unix("20260611 17:44:25"),
+        );
+    }
 }

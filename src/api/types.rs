@@ -413,8 +413,8 @@ impl Order {
             min_qty: self.min_qty.max(0) as u32,
             hidden: self.hidden,
             outside_rth: self.outside_rth,
-            good_after: 0,
-            good_till: 0,
+            good_after: crate::config::ib_datetime_to_unix(&self.good_after_time),
+            good_till: crate::config::ib_datetime_to_unix(&self.good_till_date),
             oca_group: self.oca_group.parse().unwrap_or(0),
             oca_group_str: if self.oca_group.parse::<u64>().is_err() && !self.oca_group.is_empty() {
                 self.oca_group.clone()
