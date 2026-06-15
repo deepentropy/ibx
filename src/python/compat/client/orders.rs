@@ -22,6 +22,8 @@ impl EClient {
         api_order.conditions = order.convert_conditions(py);
         ClientCore::validate_order(&api_order)
             .map_err(|e| PyRuntimeError::new_err(e))?;
+        ClientCore::validate_order_contract(&contract.sec_type)
+            .map_err(|e| PyRuntimeError::new_err(e))?;
 
         let tx = self.tx()?;
 

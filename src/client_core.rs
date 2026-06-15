@@ -1225,6 +1225,31 @@ impl ClientCore {
         Ok(())
     }
 
+    /// Reject orders whose contract is not a common stock.
+    ///
+    /// The outbound order encoding in `engine::hot_loop::order_builder` only
+    /// supports common stock, and the instrument registry drops
+    /// `sec_type`/`exchange`. A non-STK contract (OPT/FUT/BAG/…) would
+    /// therefore be sent as a stock order on the underlying symbol with no
+    /// error surfaced. Until non-STK encoding lands, reject those contracts
+    /// up front.
+    ///
+    /// An empty `sec_type` is treated as STK (the engine default), so existing
+    /// stock callers that omit the field are unaffected.
+    /// See: https://github.com/deepentropy/ibx/issues/202
+    pub fn validate_order_contract(sec_type: &str) -> Result<(), String> {
+        if sec_type.is_empty() || sec_type.eq_ignore_ascii_case("STK") {
+            return Ok(());
+        }
+        Err(format!(
+            "Unsupported contract sec_type '{}': only STK orders are supported. \
+             Non-STK contracts (OPT/FUT/BAG/…) are not yet wire-encoded and would \
+             otherwise be silently sent as a stock order on the underlying symbol. \
+             See https://github.com/deepentropy/ibx/issues/202",
+            sec_type
+        ))
+    }
+
     /// Build an `OrderRequest` from an API `Order`, handling all order types.
     /// This is the shared order-type match block used by both Rust and Python.
     pub fn build_order_request(
