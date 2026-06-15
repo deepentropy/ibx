@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::bridge::SharedState;
-use crate::config::{chrono_free_timestamp, unix_to_ib_datetime};
+use crate::config::{chrono_free_timestamp, unix_to_ib_datetime, unix_to_ib_utc_dash};
 use crate::engine::context::Context;
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
@@ -144,7 +144,8 @@ pub(crate) fn drain_and_send_orders(
                 let display_str = format_uint(attrs.display_size as u64);
                 let min_qty_str = format_uint(attrs.min_qty as u64);
                 let gat_str = if attrs.good_after > 0 { unix_to_ib_datetime(attrs.good_after) } else { String::new() };
-                let gtd_str = if attrs.good_till > 0 { unix_to_ib_datetime(attrs.good_till) } else { String::new() };
+                let gtd_time_str = if attrs.good_till > 0 { unix_to_ib_utc_dash(attrs.good_till) } else { String::new() };
+                let gtd_date_str = if attrs.good_till_date_ymd > 0 { format!("{:08}", attrs.good_till_date_ymd) } else { String::new() };
                 let oca_str = if !attrs.oca_group_str.is_empty() {
                     attrs.oca_group_str.clone()
                 } else if attrs.oca_group > 0 {
@@ -189,8 +190,12 @@ pub(crate) fn drain_and_send_orders(
                 if attrs.good_after > 0 {
                     fields.push((168, &gat_str));
                 }
-                if attrs.good_till > 0 {
-                    fields.push((126, &gtd_str));
+                // GTD expiry: date-only -> tag 432; time-precise -> tag 126 (UTC).
+                // Mutually exclusive — never both (gateway rejects both together).
+                if attrs.good_till_date_ymd > 0 {
+                    fields.push((432, &gtd_date_str));
+                } else if attrs.good_till > 0 {
+                    fields.push((126, &gtd_time_str));
                 }
                 if !oca_str.is_empty() {
                     fields.push((583, &oca_str));
@@ -579,6 +584,8 @@ pub(crate) fn drain_and_send_orders(
                 let parent_str = if attrs.parent_id > 0 {
                     format!("{}.0", attrs.parent_id)
                 } else { String::new() };
+                let gtd_time_str = if attrs.good_till > 0 { unix_to_ib_utc_dash(attrs.good_till) } else { String::new() };
+                let gtd_date_str = if attrs.good_till_date_ymd > 0 { format!("{:08}", attrs.good_till_date_ymd) } else { String::new() };
                 let mut fields: Vec<(u32, &str)> = vec![
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
@@ -602,6 +609,13 @@ pub(crate) fn drain_and_send_orders(
                 ];
                 if attrs.outside_rth {
                     fields.push((6433, "1"));
+                }
+                // GTD expiry: date-only -> tag 432; time-precise -> tag 126 (UTC).
+                // Mutually exclusive — never both (gateway rejects both together).
+                if attrs.good_till_date_ymd > 0 {
+                    fields.push((432, &gtd_date_str));
+                } else if attrs.good_till > 0 {
+                    fields.push((126, &gtd_time_str));
                 }
                 if !oca_str.is_empty() {
                     fields.push((583, &oca_str));

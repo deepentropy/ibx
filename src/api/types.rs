@@ -408,13 +408,30 @@ impl Order {
 
     /// Build OrderAttrs from Order fields.
     pub fn attrs(&self) -> OrderAttrs {
+        // Parse the good-till expiry string into either a UTC instant (tag 126)
+        // or a calendar date (tag 432). On a parse error, log and drop the
+        // expiry — the order then surfaces a visible gateway rejection rather
+        // than silently carrying a wrong expiry.
+        let (good_till, good_till_date_ymd) =
+            match crate::config::parse_ib_expiry(&self.good_till_date) {
+                Ok(None) => (0, 0),
+                Ok(Some(crate::config::IbExpiry::Instant(secs))) => (secs, 0),
+                Ok(Some(crate::config::IbExpiry::DateOnly(ymd))) => (0, ymd),
+                Err(e) => {
+                    log::warn!("dropping good_till_date: {}", e);
+                    (0, 0)
+                }
+            };
         OrderAttrs {
             display_size: self.display_size.max(0) as u32,
             min_qty: self.min_qty.max(0) as u32,
             hidden: self.hidden,
             outside_rth: self.outside_rth,
+            // good_after_time (tag 168) wire format is not yet captured against
+            // the gateway; left unset until verified (see ibx#199 / ib-agent).
             good_after: 0,
-            good_till: 0,
+            good_till,
+            good_till_date_ymd,
             oca_group: self.oca_group.parse().unwrap_or(0),
             oca_group_str: if self.oca_group.parse::<u64>().is_err() && !self.oca_group.is_empty() {
                 self.oca_group.clone()

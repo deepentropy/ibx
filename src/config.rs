@@ -108,6 +108,106 @@ pub fn unix_to_ib_datetime(secs: i64) -> String {
     )
 }
 
+/// Format unix timestamp (UTC seconds) to "YYYYMMDD-HH:MM:SS" — the dash-joined
+/// form the gateway requires for a time-precise good-till expiry (tag 126).
+/// Distinct from `unix_to_ib_datetime` (space-joined) which other callers use.
+pub fn unix_to_ib_utc_dash(secs: i64) -> String {
+    let secs = secs.max(0) as u64;
+    let days = secs / 86400;
+    let t = secs % 86400;
+    let (year, month, day) = days_to_ymd(days);
+    format!(
+        "{:04}{:02}{:02}-{:02}:{:02}:{:02}",
+        year, month, day, t / 3600, (t % 3600) / 60, t % 60
+    )
+}
+
+/// A parsed good-till expiry: either a calendar date (no time) or a precise
+/// instant in UTC. The two are mutually exclusive on the wire — date-only is
+/// emitted as tag 432, time-precise as tag 126 (UTC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IbExpiry {
+    /// Date with no time component. Packed `YYYYMMDD` (e.g. 20260620).
+    DateOnly(u32),
+    /// Precise instant, unix seconds (UTC).
+    Instant(i64),
+}
+
+/// Parse a user-supplied `good_till_date` / `good_after_time` string into an
+/// `IbExpiry`. Returns `Ok(None)` for an empty string.
+///
+/// Accepted input forms (the same the official API accepts):
+///   - `YYYYMMDD`                          → date-only
+///   - `YYYYMMDD HH:MM:SS`                 → time, no timezone
+///   - `YYYYMMDD-HH:MM:SS`                 → time, no timezone (dash separator)
+///   - `YYYYMMDD HH:MM:SS <IANA zone>`     → time in a named zone (e.g. `US/Eastern`)
+///
+/// A named timezone is converted to UTC with DST applied (matching what the
+/// gateway does). A time with no timezone is interpreted as UTC and logged —
+/// the gateway's implied-timezone behavior is deprecated, so callers should
+/// pass an explicit zone or UTC.
+pub fn parse_ib_expiry(input: &str) -> Result<Option<IbExpiry>, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    if s.len() < 8 || !s.as_bytes()[..8].iter().all(|b| b.is_ascii_digit()) {
+        return Err(format!("expiry '{}': must start with YYYYMMDD", input));
+    }
+    let ymd: u32 = s[..8].parse().unwrap(); // 8 ascii digits — infallible
+    let year: i16 = s[0..4].parse().unwrap();
+    let month: i8 = s[4..6].parse().unwrap();
+    let day: i8 = s[6..8].parse().unwrap();
+
+    // Validate the date regardless of whether a time follows.
+    let date = jiff::civil::Date::new(year, month, day)
+        .map_err(|e| format!("expiry '{}': {}", input, e))?;
+
+    // Strip the date, then an optional `-` or whitespace separator before the time.
+    let rest = s[8..].strip_prefix('-').unwrap_or(&s[8..]).trim();
+    if rest.is_empty() {
+        return Ok(Some(IbExpiry::DateOnly(ymd)));
+    }
+
+    // Split the time token from an optional trailing timezone token.
+    let mut it = rest.splitn(2, char::is_whitespace);
+    let time_str = it.next().unwrap();
+    let tz = it.next().map(str::trim).filter(|t| !t.is_empty());
+
+    let tp: Vec<&str> = time_str.split(':').collect();
+    if tp.len() != 3 {
+        return Err(format!("expiry '{}': time must be HH:MM:SS", input));
+    }
+    let parse_u = |p: &str, what: &str| -> Result<i8, String> {
+        p.parse::<i8>()
+            .map_err(|_| format!("expiry '{}': invalid {}", input, what))
+    };
+    let (h, mi, sec) = (
+        parse_u(tp[0], "hour")?,
+        parse_u(tp[1], "minute")?,
+        parse_u(tp[2], "second")?,
+    );
+    let time =
+        jiff::civil::Time::new(h, mi, sec, 0).map_err(|e| format!("expiry '{}': {}", input, e))?;
+    let dt = date.to_datetime(time);
+
+    let zone = match tz {
+        Some(z) => z,
+        None => {
+            log::warn!(
+                "good-till expiry '{}' has a time but no timezone; interpreting as UTC. \
+                 Pass an explicit zone (e.g. 'US/Eastern') or UTC.",
+                input
+            );
+            "UTC"
+        }
+    };
+    let zoned = dt
+        .in_tz(zone)
+        .map_err(|e| format!("expiry '{}': unknown timezone '{}': {}", input, zone, e))?;
+    Ok(Some(IbExpiry::Instant(zoned.timestamp().as_second())))
+}
+
 /// Convert days since Unix epoch to (year, month, day).
 pub fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     // Algorithm from Howard Hinnant
@@ -122,4 +222,64 @@ pub fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+
+    fn instant(s: &str) -> i64 {
+        match parse_ib_expiry(s).unwrap().unwrap() {
+            IbExpiry::Instant(secs) => secs,
+            other => panic!("expected Instant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn empty_is_none() {
+        assert_eq!(parse_ib_expiry("").unwrap(), None);
+        assert_eq!(parse_ib_expiry("   ").unwrap(), None);
+    }
+
+    #[test]
+    fn date_only() {
+        assert_eq!(
+            parse_ib_expiry("20260620").unwrap(),
+            Some(IbExpiry::DateOnly(20260620))
+        );
+    }
+
+    #[test]
+    fn named_zone_converts_with_dst() {
+        // June -> US/Eastern is EDT (UTC-4): 18:00 local == 22:00 UTC.
+        // Matches the gateway capture (ib-agent#158).
+        let eastern = instant("20260620 18:00:00 US/Eastern");
+        let utc = instant("20260620 22:00:00 UTC");
+        assert_eq!(eastern, utc, "EDT 18:00 must equal 22:00 UTC");
+    }
+
+    #[test]
+    fn no_timezone_is_utc() {
+        // Both separators accepted; absent zone treated as UTC.
+        let dash = instant("20260620-18:00:00");
+        let space = instant("20260620 18:00:00");
+        let utc = instant("20260620 18:00:00 UTC");
+        assert_eq!(dash, space);
+        assert_eq!(dash, utc);
+    }
+
+    #[test]
+    fn instant_round_trips_to_wire() {
+        // parse -> seconds -> tag 126 wire string must be the dash UTC form.
+        let secs = instant("20260620 18:00:00 US/Eastern");
+        assert_eq!(unix_to_ib_utc_dash(secs), "20260620-22:00:00");
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(parse_ib_expiry("2026").is_err());
+        assert!(parse_ib_expiry("20260620 18:00").is_err()); // needs seconds
+        assert!(parse_ib_expiry("20261320").is_err()); // month 13
+        assert!(parse_ib_expiry("20260620 18:00:00 Mars/Olympus").is_err());
+    }
 }
