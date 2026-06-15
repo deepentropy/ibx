@@ -427,6 +427,22 @@ pub fn cancel_order(&self, order_id: i64, _manual_order_cancel_time: &str) -> Re
 
 ---
 
+#### `cancel_order_by_perm_id`
+
+Cancel an order identified by `permId` — stable across sessions. `permId` is the broker-assigned identifier returned in `order_status` callbacks and surfaced in account tools. Useful for cancelling an order placed in a prior session, where the local `order_id` is not retained. Per ib-agent#154 the CCP cancel frame is orderId-only, so ibx looks up the local `order_id` from `permId` in the open-order cache (populated by `place_order` callbacks or by the CCP session-recovery push hydrated in `handle_exec_report`). Fails if `perm_id` is not currently tracked.
+
+```rust
+pub fn cancel_order_by_perm_id(&self, perm_id: i64) -> Result<(), String>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `perm_id` | `i64` | Permanent order ID assigned by the server. |
+
+**Returns:** `Result<(), String>`
+
+---
+
 #### `req_global_cancel`
 
 Cancel all orders.

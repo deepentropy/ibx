@@ -1007,6 +1007,25 @@ impl Gateway {
         if !config.paper {
             let deadline = std::time::Instant::now()
                 + std::time::Duration::from_secs(config.ib_key_timeout_secs);
+            // Live logins enter a human-approval window here: connect() blocks
+            // until the second factor is approved (mobile push) or this deadline
+            // fires. Announce it up front so a stalled connect() reads as
+            // "waiting for approval" rather than a hang (ibx#203 / ibx#207).
+            // Accounts with no second factor fall straight through (Skipped).
+            if config.code_provider.is_none() {
+                log::info!(
+                    "Live login for {}: waiting for second-factor approval (mobile push); \
+                     connect() blocks up to {}s. Use paper=true, a lower ib_key_timeout_secs, \
+                     or a code_provider to avoid this.",
+                    config.username, config.ib_key_timeout_secs,
+                );
+            } else {
+                log::info!(
+                    "Live login for {}: second-factor via code_provider (Challenge/Response); \
+                     connect() blocks up to {}s awaiting the challenge.",
+                    config.username, config.ib_key_timeout_secs,
+                );
+            }
             match session::do_ib_key_2fa(
                 &mut tls,
                 &config.ib_key_token_sub_type,

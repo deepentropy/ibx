@@ -24,13 +24,13 @@ def new(wrapper))
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `wrapper` | `PyObject` | Wrapper callback receiver for synchronous delivery. |
+| `wrapper` | `Py<PyAny>` | Wrapper callback receiver for synchronous delivery. |
 
 ---
 
 #### `connect`
 
-Connect to IB and start the engine.
+Connect to IB and start the engine.  Live logins (``paper=False``) enter a second-factor approval window and **block** until the factor is approved (mobile push) or the deadline fires (``ib_key_timeout_secs``, default ~18 min). This is a human approval gate, not a hang. To bound or avoid it: use ``paper=True``, pass a smaller ``ib_key_timeout_secs``, or run ``connect()`` on a worker thread with your own timeout. Paper logins skip the gate entirely. Set ``RUST_LOG=info`` to see a log line when the wait begins.  Multiple ``EClient`` instances can run concurrently in one process; each owns its own state, sockets, and engine thread, and ``connect()`` does not serialize across instances. If you pin engines via ``core_id``, give each a distinct value. See ibx#203 / ibx#207.
 
 ```python
 def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None))
@@ -43,10 +43,10 @@ def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".
 | `client_id` | `int` | Client ID (unused — single-client engine). |
 | `username` | `str` | Account username. |
 | `password` | `str` | Account password. |
-| `paper` | `bool` | If `true`, connect to paper trading. |
-| `core_id` | `usize or None` | CPU core affinity for the hot loop thread. |
-| `ib_key_timeout_secs` | `int or None` |  |
-| `ib_key_token_sub_type` | `str or None` |  |
+| `paper` | `bool` | If `true`, connect to paper trading. If `false`, connect blocks on the live second-factor approval window (see method note). |
+| `core_id` | `usize or None` | CPU core affinity for the hot loop thread. Use a distinct value per engine when running several in one process. |
+| `ib_key_timeout_secs` | `int or None` | Live second-factor approval timeout in seconds (default ~18 min). Lower it to fail fast on unattended live logins; ignored for paper. |
+| `ib_key_token_sub_type` | `str or None` | Account-specific second-factor token sub-type (default `"2a"`); ignored for paper. |
 
 ---
 
@@ -411,7 +411,7 @@ def req_executions(req_id, exec_filter=None))
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `exec_filter` | `PyObject or None` |  |
+| `exec_filter` | `Py<PyAny> or None` |  |
 
 ---
 
@@ -740,7 +740,7 @@ def req_scanner_subscription(req_id, subscription, scanner_subscription_options=
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `subscription` | `PyObject` | Scanner subscription parameters. |
+| `subscription` | `Py<PyAny>` | Scanner subscription parameters. |
 | `scanner_subscription_options` | `list` |  |
 
 ---
@@ -1249,7 +1249,7 @@ def req_wsh_event_data(req_id, wsh_event_data=None))
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `wsh_event_data` | `PyObject or None` |  |
+| `wsh_event_data` | `Py<PyAny> or None` |  |
 
 ---
 
@@ -1330,7 +1330,7 @@ Price tick update (bid, ask, last, etc.).
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `tick_type` | `int` | Tick type ID or tick-by-tick type string. |
 | `price` | `float` | Tick price. |
-| `attrib` | `PyObject` | Tick attributes. |
+| `attrib` | `Py<PyAny>` | Tick attributes. |
 
 ---
 
@@ -1418,9 +1418,9 @@ Open order details (contract, order, state).
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `order_id` | `int` | Order identifier. Must be unique per session. |
-| `contract` | `PyObject` | Contract specification (symbol, secType, exchange, currency, etc.). |
-| `order` | `PyObject` | Order parameters (action, quantity, type, price, TIF, etc.). |
-| `order_state` | `PyObject` | Order state (status, margin, commission info). |
+| `contract` | `Py<PyAny>` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `order` | `Py<PyAny>` | Order parameters (action, quantity, type, price, TIF, etc.). |
+| `order_state` | `Py<PyAny>` | Order state (status, margin, commission info). |
 
 ---
 
@@ -1437,8 +1437,8 @@ Execution fill details.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `contract` | `PyObject` | Contract specification (symbol, secType, exchange, currency, etc.). |
-| `execution` | `PyObject` | Execution details (exec_id, time, price, shares, etc.). |
+| `contract` | `Py<PyAny>` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `execution` | `Py<PyAny>` | Execution details (exec_id, time, price, shares, etc.). |
 
 ---
 
@@ -1458,7 +1458,7 @@ Commission and fees report for an execution.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `commission_and_fees_report` | `PyObject` |  |
+| `commission_and_fees_report` | `Py<PyAny>` |  |
 
 ---
 
@@ -1481,7 +1481,7 @@ Portfolio position update.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `contract` | `PyObject` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `contract` | `Py<PyAny>` | Contract specification (symbol, secType, exchange, currency, etc.). |
 | `position` | `float` | Book position (row index) or position size. |
 | `market_price` | `float` | Current market price. |
 | `market_value` | `float` | Current market value of position. |
@@ -1543,7 +1543,7 @@ Position entry (account, contract, size, avg cost).
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `account` | `str` | Account ID. |
-| `contract` | `PyObject` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `contract` | `Py<PyAny>` | Contract specification (symbol, secType, exchange, currency, etc.). |
 | `pos` | `float` | Position size (decimal shares). |
 | `avg_cost` | `float` | Average cost per share. |
 
@@ -1590,7 +1590,7 @@ Historical OHLCV bar.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `bar` | `PyObject` | Bar data (date, open, high, low, close, volume, wap, bar_count). |
+| `bar` | `Py<PyAny>` | Bar data (date, open, high, low, close, volume, wap, bar_count). |
 
 ---
 
@@ -1613,7 +1613,7 @@ Real-time bar update (keep_up_to_date=true).
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `bar` | `PyObject` | Bar data (date, open, high, low, close, volume, wap, bar_count). |
+| `bar` | `Py<PyAny>` | Bar data (date, open, high, low, close, volume, wap, bar_count). |
 
 ---
 
@@ -1635,7 +1635,7 @@ Contract definition details.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `contract_details` | `PyObject` |  |
+| `contract_details` | `Py<PyAny>` |  |
 
 ---
 
@@ -1656,7 +1656,7 @@ Matching symbol search results.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `contract_descriptions` | `PyObject` |  |
+| `contract_descriptions` | `Py<PyAny>` |  |
 
 ---
 
@@ -1671,7 +1671,7 @@ Tick-by-tick last trade.
 | `time` | `int` | Tick timestamp (Unix seconds). |
 | `price` | `float` | Tick price. |
 | `size` | `float` | Tick size. |
-| `tick_attrib_last` | `PyObject` |  |
+| `tick_attrib_last` | `Py<PyAny>` |  |
 | `exchange` | `str` | Exchange name. |
 | `special_conditions` | `str` | Special trade conditions. |
 
@@ -1689,7 +1689,7 @@ Tick-by-tick bid/ask quote.
 | `ask_price` | `float` | Ask price. |
 | `bid_size` | `float` | Bid size. |
 | `ask_size` | `float` | Ask size. |
-| `tick_attrib_bid_ask` | `PyObject` |  |
+| `tick_attrib_bid_ask` | `Py<PyAny>` |  |
 
 ---
 
@@ -1713,7 +1713,7 @@ Scanner result entry (rank, contract, distance).
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `rank` | `int` | Scanner result rank (0-based). |
-| `contract_details` | `PyObject` |  |
+| `contract_details` | `Py<PyAny>` |  |
 | `distance` | `str` | Scanner distance metric. |
 | `benchmark` | `str` | Scanner benchmark. |
 | `projection` | `str` | Scanner projection. |
@@ -1747,7 +1747,7 @@ Available news providers list.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `news_providers` | `PyObject` |  |
+| `news_providers` | `Py<PyAny>` |  |
 
 ---
 
@@ -1841,7 +1841,7 @@ Available exchanges for market depth.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `depth_mkt_data_descriptions` | `PyObject` |  |
+| `depth_mkt_data_descriptions` | `Py<PyAny>` |  |
 
 ---
 
@@ -1870,7 +1870,7 @@ Historical tick data (Last, BidAsk, or Midpoint).
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `ticks` | `PyObject` | Historical tick data. |
+| `ticks` | `Py<PyAny>` | Historical tick data. |
 | `done` | `bool` | If `true`, all ticks have been delivered. |
 
 ---
@@ -1882,7 +1882,7 @@ Historical bid/ask ticks.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `ticks` | `PyObject` | Historical tick data. |
+| `ticks` | `Py<PyAny>` | Historical tick data. |
 | `done` | `bool` | If `true`, all ticks have been delivered. |
 
 ---
@@ -1894,7 +1894,7 @@ Historical last-trade ticks.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `ticks` | `PyObject` | Historical tick data. |
+| `ticks` | `Py<PyAny>` | Historical tick data. |
 | `done` | `bool` | If `true`, all ticks have been delivered. |
 
 ---
@@ -1930,8 +1930,8 @@ Option chain parameters (strikes, expirations).
 | `underlying_con_id` | `int` | Underlying contract ID. |
 | `trading_class` | `str` | Trading class. |
 | `multiplier` | `str` | Contract multiplier. |
-| `expirations` | `PyObject` | Available expiration dates. |
-| `strikes` | `PyObject` | Available strike prices. |
+| `expirations` | `Py<PyAny>` | Available expiration dates. |
+| `strikes` | `Py<PyAny>` | Available strike prices. |
 
 ---
 
@@ -2000,7 +2000,7 @@ Multi-account position entry.
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `account` | `str` | Account ID. |
 | `model_code` | `str` | Model portfolio code (empty for default). |
-| `contract` | `PyObject` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `contract` | `Py<PyAny>` | Contract specification (symbol, secType, exchange, currency, etc.). |
 | `pos` | `float` | Position size (decimal shares). |
 | `avg_cost` | `float` | Average cost per share. |
 
@@ -2070,7 +2070,7 @@ Market rule: price increment schedule.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `market_rule_id` | `int` | Market rule ID. |
-| `price_increments` | `PyObject` | Price increment rules `[{low_edge, increment}]`. |
+| `price_increments` | `Py<PyAny>` | Price increment rules `[{low_edge, increment}]`. |
 
 ---
 
@@ -2081,7 +2081,7 @@ SMART routing component exchanges.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `smart_component_map` | `PyObject` |  |
+| `smart_component_map` | `Py<PyAny>` |  |
 
 ---
 
@@ -2092,7 +2092,7 @@ Soft dollar tier list.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `tiers` | `PyObject` | Soft dollar tier list. |
+| `tiers` | `Py<PyAny>` | Soft dollar tier list. |
 
 ---
 
@@ -2102,7 +2102,7 @@ Family codes linking related accounts.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `family_codes` | `PyObject` |  |
+| `family_codes` | `Py<PyAny>` |  |
 
 ---
 
@@ -2113,7 +2113,7 @@ Price distribution histogram.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `items` | `PyObject` | Histogram entries `[(price, count)]`. |
+| `items` | `Py<PyAny>` | Histogram entries `[(price, count)]`. |
 
 ---
 
@@ -2156,9 +2156,9 @@ Completed (filled/cancelled) order details.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `contract` | `PyObject` | Contract specification (symbol, secType, exchange, currency, etc.). |
-| `order` | `PyObject` | Order parameters (action, quantity, type, price, TIF, etc.). |
-| `order_state` | `PyObject` | Order state (status, margin, commission info). |
+| `contract` | `Py<PyAny>` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `order` | `Py<PyAny>` | Order parameters (action, quantity, type, price, TIF, etc.). |
+| `order_state` | `Py<PyAny>` | Order state (status, margin, commission info). |
 
 ---
 
@@ -2200,7 +2200,7 @@ Bond contract details.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `contract_details` | `PyObject` |  |
+| `contract_details` | `Py<PyAny>` |  |
 
 ---
 
@@ -2211,7 +2211,7 @@ Delta-neutral validation response.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `delta_neutral_contract` | `PyObject` |  |
+| `delta_neutral_contract` | `Py<PyAny>` |  |
 
 ---
 
@@ -2225,6 +2225,6 @@ Historical trading schedule (exchange hours).
 | `start_date_time` | `str` | Start date/time for tick query. |
 | `end_date_time` | `str` | End date/time in `"YYYYMMDD HH:MM:SS"` format, or empty for now. |
 | `time_zone` | `str` | Timezone string (e.g. `"US/Eastern"`). |
-| `sessions` | `PyObject` | Trading sessions `[(ref_date, open, close)]`. |
+| `sessions` | `Py<PyAny>` | Trading sessions `[(ref_date, open, close)]`. |
 
 ---

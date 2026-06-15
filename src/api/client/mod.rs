@@ -64,11 +64,36 @@ pub type TagValue = ApiTagValue;
 pub use orders::parse_algo_params;
 
 /// Configuration for connecting to IB via EClient.
+///
+/// # Live logins block on second-factor approval
+///
+/// With `paper: false`, [`connect()`](EClient::connect) enters a second-factor
+/// approval window and **blocks** until the factor is approved (mobile push) or
+/// the server-side deadline fires (~18 min). This is expected — it is a human
+/// approval gate, not a hang. Bound or avoid it by using `paper: true`, lowering
+/// the timeout (via [`GatewayConfig::ib_key_timeout_secs`] when building through
+/// the lower-level API), or supplying a `code_provider`. Paper logins skip the
+/// gate entirely. An `info`-level log line is emitted when the wait begins
+/// (`RUST_LOG=info`). See ibx#203 / ibx#207.
+///
+/// # Multiple engines per process
+///
+/// Multiple `EClient` instances can run concurrently in one process. Each owns
+/// its own state, sockets, and `ib-engine-hotloop` thread; nothing is shared
+/// between them, and `connect()` does not serialize across instances. If you
+/// pin engines with `core_id`, give each a **distinct** value — pinning two hot
+/// loops to the same core makes them busy-poll the same CPU and starve each
+/// other (degraded throughput, not a hang). With `core_id: None` (the default)
+/// no pinning happens and there is no conflict.
 pub struct EClientConfig {
     pub username: String,
     pub password: String,
     pub host: String,
+    /// `false` enters the live second-factor approval gate on connect (blocking).
+    /// `true` skips it. See the type-level docs.
     pub paper: bool,
+    /// CPU core to pin this engine's hot loop to. `None` = no pinning. When
+    /// running multiple engines, use a **distinct** core per engine.
     pub core_id: Option<usize>,
 }
 
