@@ -9,7 +9,7 @@ use super::super::types::PRICE_SCALE_F;
 // ── Contract ──
 
 /// ibapi-compatible Contract class.
-#[pyclass]
+#[pyclass(from_py_object)]
 pub struct Contract {
     #[pyo3(get, set)]
     pub con_id: i64,
@@ -50,9 +50,9 @@ pub struct Contract {
     #[pyo3(get, set)]
     pub combo_legs_descrip: String,
     #[pyo3(get, set)]
-    pub combo_legs: Vec<PyObject>,
+    pub combo_legs: Vec<Py<PyAny>>,
     #[pyo3(get, set)]
-    pub delta_neutral_contract: Option<PyObject>,
+    pub delta_neutral_contract: Option<Py<PyAny>>,
 }
 
 impl Clone for Contract {
@@ -201,15 +201,15 @@ impl Contract {
     #[setter(comboLegsDescrip)]
     fn set_combo_legs_descrip_alias(&mut self, v: String) { self.combo_legs_descrip = v; }
     #[getter(comboLegs)]
-    fn get_combo_legs_alias(&self) -> Vec<PyObject> { Vec::new() }
+    fn get_combo_legs_alias(&self) -> Vec<Py<PyAny>> { Vec::new() }
     #[getter(deltaNeutralContract)]
-    fn get_delta_neutral_alias(&self) -> Option<PyObject> { None }
+    fn get_delta_neutral_alias(&self) -> Option<Py<PyAny>> { None }
 }
 
 // ── Order ──
 
 /// ibapi-compatible Order class.
-#[pyclass]
+#[pyclass(from_py_object)]
 pub struct Order {
     // ── Original fields ──
     #[pyo3(get, set)]
@@ -271,7 +271,7 @@ pub struct Order {
     #[pyo3(get, set)]
     pub adjusted_stop_limit_price: f64,
     #[pyo3(get, set)]
-    pub conditions: Vec<PyObject>,
+    pub conditions: Vec<Py<PyAny>>,
     #[pyo3(get, set)]
     pub conditions_ignore_rth: bool,
     #[pyo3(get, set)]
@@ -411,9 +411,9 @@ pub struct Order {
     #[pyo3(get, set)]
     pub opt_out_smart_routing: bool,
     #[pyo3(get, set)]
-    pub order_combo_legs: Vec<PyObject>,
+    pub order_combo_legs: Vec<Py<PyAny>>,
     #[pyo3(get, set)]
-    pub order_misc_options: Vec<PyObject>,
+    pub order_misc_options: Vec<Py<PyAny>>,
     #[pyo3(get, set)]
     pub order_ref: String,
     #[pyo3(get, set)]
@@ -1241,9 +1241,9 @@ impl Order {
     #[setter(optOutSmartRouting)]
     fn set_opt_out_smart_routing_alias(&mut self, v: bool) { self.opt_out_smart_routing = v; }
     #[getter(orderComboLegs)]
-    fn get_order_combo_legs_alias(&self) -> Vec<PyObject> { Vec::new() }
+    fn get_order_combo_legs_alias(&self) -> Vec<Py<PyAny>> { Vec::new() }
     #[getter(orderMiscOptions)]
-    fn get_order_misc_options_alias(&self) -> Vec<PyObject> { Vec::new() }
+    fn get_order_misc_options_alias(&self) -> Vec<Py<PyAny>> { Vec::new() }
     #[getter(orderRef)]
     fn get_order_ref_alias(&self) -> String { self.order_ref.clone() }
     #[setter(orderRef)]
@@ -1399,7 +1399,7 @@ impl Order {
     #[getter(smartComboRoutingParams)]
     fn get_smart_combo_routing_params_alias(&self) -> Vec<TagValue> { self.smart_combo_routing_params.clone() }
     #[getter(softDollarTier)]
-    fn get_soft_dollar_tier(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn get_soft_dollar_tier(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let tier = SoftDollarTierPy {
             name: self.soft_dollar_tier_name.clone(),
             val: self.soft_dollar_tier_val.clone(),
@@ -1516,16 +1516,16 @@ impl Contract {
 }
 
 impl Order {
-    /// Convert PyObject conditions to internal OrderCondition list.
+    /// Convert Py<PyAny> conditions to internal OrderCondition list.
     pub fn convert_conditions(&self, py: Python<'_>) -> Vec<OrderCondition> {
         self.conditions.iter().filter_map(|obj| {
             let any = obj.bind(py);
-            if let Ok(c) = any.downcast::<PriceCondition>() { return Some(c.borrow().to_internal()); }
-            if let Ok(c) = any.downcast::<TimeCondition>() { return Some(c.borrow().to_internal()); }
-            if let Ok(c) = any.downcast::<MarginCondition>() { return Some(c.borrow().to_internal()); }
-            if let Ok(c) = any.downcast::<ExecutionCondition>() { return Some(c.borrow().to_internal()); }
-            if let Ok(c) = any.downcast::<VolumeCondition>() { return Some(c.borrow().to_internal()); }
-            if let Ok(c) = any.downcast::<PercentChangeCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<PriceCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<TimeCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<MarginCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<ExecutionCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<VolumeCondition>() { return Some(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<PercentChangeCondition>() { return Some(c.borrow().to_internal()); }
             log::warn!("Unknown order condition type, skipping");
             None
         }).collect()
@@ -1587,7 +1587,7 @@ impl Order {
 // ── TagValue ──
 
 /// ibapi-compatible TagValue for algo parameters.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct TagValue {
     #[pyo3(get, set)]
@@ -1612,7 +1612,7 @@ impl TagValue {
 
 /// ibapi-compatible OrderAllocation class.
 /// Decimal fields are carried as strings to preserve precision.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Default)]
 pub struct OrderAllocation {
     #[pyo3(get, set)] pub account: String,
@@ -1638,7 +1638,7 @@ impl OrderAllocation {
 // ── OrderState (for what-if responses) ──
 
 /// ibapi-compatible OrderState class (used in openOrder callback).
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Default)]
 pub struct OrderState {
     #[pyo3(get, set)]
@@ -1707,7 +1707,7 @@ impl OrderState {
 // ── Order Conditions ──
 
 /// Price condition: trigger when an instrument's price crosses a threshold.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PriceCondition {
     #[pyo3(get, set)]
@@ -1749,7 +1749,7 @@ impl PriceCondition {
 }
 
 /// Time condition: trigger at a specific time.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct TimeCondition {
     #[pyo3(get, set)]
@@ -1779,7 +1779,7 @@ impl TimeCondition {
 }
 
 /// Margin condition: trigger based on margin cushion percentage.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct MarginCondition {
     #[pyo3(get, set)]
@@ -1808,7 +1808,7 @@ impl MarginCondition {
 }
 
 /// Execution condition: trigger on trade execution.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct ExecutionCondition {
     #[pyo3(get, set)]
@@ -1843,7 +1843,7 @@ impl ExecutionCondition {
 }
 
 /// Volume condition: trigger when volume exceeds a threshold.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct VolumeCondition {
     #[pyo3(get, set)]
@@ -1882,7 +1882,7 @@ impl VolumeCondition {
 }
 
 /// Percentage change condition: trigger on % change from close.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PercentChangeCondition {
     #[pyo3(get, set)]
@@ -1923,7 +1923,7 @@ impl PercentChangeCondition {
 // ── BarData ──
 
 /// ibapi-compatible BarData class for historical data callbacks.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct BarData {
     #[pyo3(get, set)]
@@ -1961,7 +1961,7 @@ impl BarData {
 // ── ContractDetails ──
 
 /// ibapi-compatible ContractDetails class.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Default)]
 pub struct ContractDetails {
     #[pyo3(get, set)]
@@ -2069,7 +2069,7 @@ impl ContractDetails {
 // ── Execution ──
 
 /// ibapi-compatible Execution class (used in exec_details callback).
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Default)]
 pub struct Execution {
     #[pyo3(get, set)]
@@ -2122,7 +2122,7 @@ impl Execution {
 // ── SmartComponent ──
 
 /// ibapi-compatible SmartComponent class.
-#[pyclass(name = "SmartComponent")]
+#[pyclass(from_py_object, name = "SmartComponent")]
 #[derive(Clone, Debug, Default)]
 pub struct SmartComponentPy {
     #[pyo3(get, set)]
@@ -2143,7 +2143,7 @@ impl SmartComponentPy {
 // ── NewsProvider ──
 
 /// ibapi-compatible NewsProvider class.
-#[pyclass(name = "NewsProvider")]
+#[pyclass(from_py_object, name = "NewsProvider")]
 #[derive(Clone, Debug, Default)]
 pub struct NewsProviderPy {
     #[pyo3(get, set)]
@@ -2162,7 +2162,7 @@ impl NewsProviderPy {
 // ── SoftDollarTier ──
 
 /// ibapi-compatible SoftDollarTier class.
-#[pyclass(name = "SoftDollarTier")]
+#[pyclass(from_py_object, name = "SoftDollarTier")]
 #[derive(Clone, Debug, Default)]
 pub struct SoftDollarTierPy {
     #[pyo3(get, set)]
@@ -2183,7 +2183,7 @@ impl SoftDollarTierPy {
 // ── CommissionAndFeesReport ──
 
 /// ibapi-compatible CommissionAndFeesReport class.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Default)]
 pub struct CommissionAndFeesReport {
     #[pyo3(get, set)]
@@ -2210,7 +2210,7 @@ impl CommissionAndFeesReport {
 // ── ContractDescription ──
 
 /// ibapi-compatible ContractDescription class for symbol search results.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone)]
 pub struct ContractDescription {
     #[pyo3(get, set)]
@@ -2241,7 +2241,7 @@ impl ContractDescription {
     }
 }
 
-#[pyclass(name = "DepthMktDataDescription")]
+#[pyclass(from_py_object, name = "DepthMktDataDescription")]
 #[derive(Debug, Clone)]
 pub struct DepthMktDataDescriptionPy {
     #[pyo3(get, set)]

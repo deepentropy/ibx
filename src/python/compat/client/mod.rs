@@ -43,7 +43,7 @@ use super::contract::{Contract, Order};
 #[pyclass(frozen, subclass)]
 pub struct EClient {
     /// Reference to the EWrapper (which is typically `self` in the `App(EWrapper, EClient)` pattern).
-    pub(crate) wrapper: PyObject,
+    pub(crate) wrapper: Py<PyAny>,
     /// Set by connect(), cleared by disconnect().
     pub(crate) shared: Mutex<Option<Arc<SharedState>>>,
     /// Set by connect(), cleared by disconnect().
@@ -77,7 +77,7 @@ impl Drop for EClient {
 impl EClient {
     #[new]
     #[pyo3(signature = (wrapper))]
-    fn new(wrapper: PyObject) -> Self {
+    fn new(wrapper: Py<PyAny>) -> Self {
         Self {
             wrapper,
             shared: Mutex::new(None),
@@ -124,7 +124,7 @@ impl EClient {
             code_provider: None,
         };
 
-        let result = py.allow_threads(|| Gateway::connect(&config));
+        let result = py.detach(|| Gateway::connect(&config));
         let (gw, farm_conn, ccp_conn, hmds_conn) = result
             .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
 
@@ -213,7 +213,7 @@ impl EClient {
             // Wait for hot loop notification instead of fixed sleep.
             // Releases GIL while waiting; wakes immediately when data arrives.
             let shared_ref = shared.clone();
-            py.allow_threads(move || {
+            py.detach(move || {
                 shared_ref.wait_for_data(std::time::Duration::from_millis(1));
             });
         }

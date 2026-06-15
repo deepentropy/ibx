@@ -22,7 +22,7 @@ impl EClient {
         use_rth: i32,
         format_date: i32,
         keep_up_to_date: bool,
-        chart_options: Vec<PyObject>,
+        chart_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let tx = self.tx()?;
         let _ = (format_date, chart_options);
@@ -124,12 +124,12 @@ impl EClient {
     fn req_scanner_subscription(
         &self,
         req_id: i64,
-        subscription: PyObject,
-        scanner_subscription_options: Vec<PyObject>,
+        subscription: Py<PyAny>,
+        scanner_subscription_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let _ = scanner_subscription_options;
         let tx = self.tx()?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let instrument = subscription.getattr(py, "instrument")
                 .and_then(|v| v.extract::<String>(py)).unwrap_or_else(|_| "STK".to_string());
             let location_code = subscription.getattr(py, "locationCode")
@@ -167,7 +167,7 @@ impl EClient {
         req_id: i64,
         provider_code: &str,
         article_id: &str,
-        news_article_options: Vec<PyObject>,
+        news_article_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let _ = news_article_options;
         let tx = self.tx()?;
@@ -189,7 +189,7 @@ impl EClient {
         start_date_time: &str,
         end_date_time: &str,
         total_results: i32,
-        historical_news_options: Vec<PyObject>,
+        historical_news_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let _ = historical_news_options;
         let tx = self.tx()?;
@@ -211,7 +211,7 @@ impl EClient {
         req_id: i64,
         contract: &Contract,
         report_type: &str,
-        fundamental_data_options: Vec<PyObject>,
+        fundamental_data_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let _ = fundamental_data_options;
         let tx = self.tx()?;
@@ -243,7 +243,7 @@ impl EClient {
         what_to_show: &str,
         use_rth: i32,
         ignore_size: bool,
-        misc_options: Vec<PyObject>,
+        misc_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let tx = self.tx()?;
         let _ = (ignore_size, misc_options);

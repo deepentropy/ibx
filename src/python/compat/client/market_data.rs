@@ -24,7 +24,7 @@ impl EClient {
         generic_tick_list: &str,
         snapshot: bool,
         regulatory_snapshot: bool,
-        mkt_data_options: Vec<PyObject>,
+        mkt_data_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let tx = self.tx()?;
         let shared = self.shared_state()?;
@@ -122,7 +122,7 @@ impl EClient {
         contract: &Contract,
         num_rows: i32,
         is_smart_depth: bool,
-        mkt_depth_options: Vec<PyObject>,
+        mkt_depth_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let _ = mkt_depth_options;
         let exchange = if contract.exchange.is_empty() { "SMART".to_string() } else { contract.exchange.clone() };
@@ -158,7 +158,7 @@ impl EClient {
         bar_size: i32,
         what_to_show: &str,
         use_rth: i32,
-        real_time_bars_options: Vec<PyObject>,
+        real_time_bars_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let tx = self.tx()?;
         let _ = (bar_size, real_time_bars_options);
@@ -185,7 +185,7 @@ impl EClient {
     /// Zero-copy SeqLock quote read by req_id.
     /// Returns a dict with bid, ask, last, bid_size, ask_size, last_size, volume,
     /// high, low, open, close, or None if the req_id is not mapped.
-    fn quote(&self, req_id: i64) -> PyResult<Option<PyObject>> {
+    fn quote(&self, req_id: i64) -> PyResult<Option<Py<PyAny>>> {
         let shared = self.shared_state()?;
         let map = self.core.req_to_instrument.lock().unwrap();
         let iid = match map.get(&req_id) {
@@ -194,7 +194,7 @@ impl EClient {
         };
         drop(map);
         let q = shared.market.quote(iid);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let ps = super::super::super::types::PRICE_SCALE_F;
             let qs = crate::types::QTY_SCALE as f64;
             let dict = pyo3::types::PyDict::new(py);
@@ -216,13 +216,13 @@ impl EClient {
     /// Zero-copy SeqLock quote read by InstrumentId.
     /// Returns a dict with bid, ask, last, bid_size, ask_size, last_size, volume,
     /// high, low, open, close, or None if not connected.
-    fn quote_by_instrument(&self, instrument: u32) -> PyResult<Option<PyObject>> {
+    fn quote_by_instrument(&self, instrument: u32) -> PyResult<Option<Py<PyAny>>> {
         let shared = match self.shared.lock().unwrap().clone() {
             Some(s) => s,
             None => return Ok(None),
         };
         let q = shared.market.quote(instrument);
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let ps = super::super::super::types::PRICE_SCALE_F;
             let qs = crate::types::QTY_SCALE as f64;
             let dict = pyo3::types::PyDict::new(py);

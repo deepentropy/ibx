@@ -64,7 +64,7 @@ impl EClient {
         // Wait for CCP init burst to complete (up to 10s).
         for _ in 0..1000 {
             if shared.portfolio.account_download_complete() { break; }
-            py.allow_threads(|| std::thread::sleep(std::time::Duration::from_millis(10)));
+            py.detach(|| std::thread::sleep(std::time::Duration::from_millis(10)));
         }
         let positions = shared.portfolio.position_infos();
         for pi in &positions {
@@ -159,7 +159,7 @@ impl EClient {
         let shared = self.shared_state()?;
         for _ in 0..500 {
             if shared.portfolio.account_data_received() { break; }
-            py.allow_threads(|| std::thread::sleep(std::time::Duration::from_millis(10)));
+            py.detach(|| std::thread::sleep(std::time::Duration::from_millis(10)));
         }
         let positions = shared.portfolio.position_infos();
         for pi in &positions {
@@ -184,13 +184,13 @@ impl EClient {
     }
 
     /// Read account state snapshot. Returns a dict with all account values.
-    fn account_snapshot(&self) -> PyResult<Option<PyObject>> {
+    fn account_snapshot(&self) -> PyResult<Option<Py<PyAny>>> {
         let shared = match self.shared.lock().unwrap().clone() {
             Some(s) => s,
             None => return Ok(None),
         };
         let acct = shared.portfolio.account();
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let ps = PRICE_SCALE_F;
             let dict = pyo3::types::PyDict::new(py);
             dict.set_item("net_liquidation", acct.net_liquidation as f64 / ps)?;

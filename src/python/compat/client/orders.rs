@@ -163,7 +163,7 @@ impl EClient {
 
     /// Request execution reports.
     #[pyo3(signature = (req_id, exec_filter=None))]
-    fn req_executions(&self, py: Python<'_>, req_id: i64, exec_filter: Option<PyObject>) -> PyResult<()> {
+    fn req_executions(&self, py: Python<'_>, req_id: i64, exec_filter: Option<Py<PyAny>>) -> PyResult<()> {
         let filter = if let Some(ref fobj) = exec_filter {
             let get = |attr: &str| -> String {
                 fobj.getattr(py, pyo3::types::PyString::new(py, attr))

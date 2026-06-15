@@ -22,7 +22,7 @@ pub const TICK_HALTED: i32 = 49;
 pub const TICK_LAST_EXCHANGE: i32 = 84;
 
 /// ibapi-compatible TickAttrib for tickPrice callbacks.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Default)]
 pub struct TickAttrib {
     #[pyo3(get, set)]
@@ -48,7 +48,7 @@ impl TickAttrib {
 }
 
 /// ibapi-compatible TickAttribLast for tick-by-tick last/allLast callbacks.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Default)]
 pub struct TickAttribLast {
     #[pyo3(get, set)]
@@ -71,7 +71,7 @@ impl TickAttribLast {
 }
 
 /// ibapi-compatible TickAttribBidAsk for tick-by-tick bid/ask callbacks.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Default)]
 pub struct TickAttribBidAsk {
     #[pyo3(get, set)]

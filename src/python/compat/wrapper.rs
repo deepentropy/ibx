@@ -33,7 +33,7 @@ impl EWrapper {
 
     // ── Market Data ──
 
-    fn tick_price(&self, _req_id: i64, _tick_type: i32, _price: f64, _attrib: PyObject) {}
+    fn tick_price(&self, _req_id: i64, _tick_type: i32, _price: f64, _attrib: Py<PyAny>) {}
 
     fn tick_size(&self, _req_id: i64, _tick_type: i32, _size: f64) {}
 
@@ -53,22 +53,22 @@ impl EWrapper {
         _last_fill_price: f64, _client_id: i64, _why_held: &str, _mkt_cap_price: f64,
     ) {}
 
-    fn open_order(&self, _order_id: i64, _contract: PyObject, _order: PyObject, _order_state: PyObject) {}
+    fn open_order(&self, _order_id: i64, _contract: Py<PyAny>, _order: Py<PyAny>, _order_state: Py<PyAny>) {}
 
     fn open_order_end(&self) {}
 
-    fn exec_details(&self, _req_id: i64, _contract: PyObject, _execution: PyObject) {}
+    fn exec_details(&self, _req_id: i64, _contract: Py<PyAny>, _execution: Py<PyAny>) {}
 
     fn exec_details_end(&self, _req_id: i64) {}
 
-    fn commission_and_fees_report(&self, _commission_and_fees_report: PyObject) {}
+    fn commission_and_fees_report(&self, _commission_and_fees_report: Py<PyAny>) {}
 
     // ── Account ──
 
     fn update_account_value(&self, _key: &str, _value: &str, _currency: &str, _account_name: &str) {}
 
     fn update_portfolio(
-        &self, _contract: PyObject, _position: f64, _market_price: f64,
+        &self, _contract: Py<PyAny>, _position: f64, _market_price: f64,
         _market_value: f64, _average_cost: f64, _unrealized_pnl: f64,
         _realized_pnl: f64, _account_name: &str,
     ) {}
@@ -81,7 +81,7 @@ impl EWrapper {
 
     fn account_summary_end(&self, _req_id: i64) {}
 
-    fn position(&self, _account: &str, _contract: PyObject, _pos: f64, _avg_cost: f64) {}
+    fn position(&self, _account: &str, _contract: Py<PyAny>, _pos: f64, _avg_cost: f64) {}
 
     fn position_end(&self) {}
 
@@ -94,32 +94,32 @@ impl EWrapper {
 
     // ── Historical Data ──
 
-    fn historical_data(&self, _req_id: i64, _bar: PyObject) {}
+    fn historical_data(&self, _req_id: i64, _bar: Py<PyAny>) {}
 
     fn historical_data_end(&self, _req_id: i64, _start: &str, _end: &str) {}
 
-    fn historical_data_update(&self, _req_id: i64, _bar: PyObject) {}
+    fn historical_data_update(&self, _req_id: i64, _bar: Py<PyAny>) {}
 
     fn head_timestamp(&self, _req_id: i64, _head_timestamp: &str) {}
 
     // ── Contract Details ──
 
-    fn contract_details(&self, _req_id: i64, _contract_details: PyObject) {}
+    fn contract_details(&self, _req_id: i64, _contract_details: Py<PyAny>) {}
 
     fn contract_details_end(&self, _req_id: i64) {}
 
-    fn symbol_samples(&self, _req_id: i64, _contract_descriptions: PyObject) {}
+    fn symbol_samples(&self, _req_id: i64, _contract_descriptions: Py<PyAny>) {}
 
     // ── Tick-by-Tick ──
 
     fn tick_by_tick_all_last(
         &self, _req_id: i64, _tick_type: i32, _time: i64, _price: f64,
-        _size: f64, _tick_attrib_last: PyObject, _exchange: &str, _special_conditions: &str,
+        _size: f64, _tick_attrib_last: Py<PyAny>, _exchange: &str, _special_conditions: &str,
     ) {}
 
     fn tick_by_tick_bid_ask(
         &self, _req_id: i64, _time: i64, _bid_price: f64, _ask_price: f64,
-        _bid_size: f64, _ask_size: f64, _tick_attrib_bid_ask: PyObject,
+        _bid_size: f64, _ask_size: f64, _tick_attrib_bid_ask: Py<PyAny>,
     ) {}
 
     fn tick_by_tick_mid_point(&self, _req_id: i64, _time: i64, _mid_point: f64) {}
@@ -127,7 +127,7 @@ impl EWrapper {
     // ── Scanner ──
 
     fn scanner_data(
-        &self, _req_id: i64, _rank: i32, _contract_details: PyObject,
+        &self, _req_id: i64, _rank: i32, _contract_details: Py<PyAny>,
         _distance: &str, _benchmark: &str, _projection: &str, _legs_str: &str,
     ) {}
 
@@ -137,7 +137,7 @@ impl EWrapper {
 
     // ── News ──
 
-    fn news_providers(&self, _news_providers: PyObject) {}
+    fn news_providers(&self, _news_providers: Py<PyAny>) {}
 
     fn news_article(&self, _req_id: i64, _article_type: i32, _article_text: &str) {}
 
@@ -167,7 +167,7 @@ impl EWrapper {
 
     // ── Market Depth (additional) ──
 
-    fn mkt_depth_exchanges(&self, _depth_mkt_data_descriptions: PyObject) {}
+    fn mkt_depth_exchanges(&self, _depth_mkt_data_descriptions: Py<PyAny>) {}
 
     // ── Real-Time Bars ──
 
@@ -178,11 +178,11 @@ impl EWrapper {
 
     // ── Historical Ticks ──
 
-    fn historical_ticks(&self, _req_id: i64, _ticks: PyObject, _done: bool) {}
+    fn historical_ticks(&self, _req_id: i64, _ticks: Py<PyAny>, _done: bool) {}
 
-    fn historical_ticks_bid_ask(&self, _req_id: i64, _ticks: PyObject, _done: bool) {}
+    fn historical_ticks_bid_ask(&self, _req_id: i64, _ticks: Py<PyAny>, _done: bool) {}
 
-    fn historical_ticks_last(&self, _req_id: i64, _ticks: PyObject, _done: bool) {}
+    fn historical_ticks_last(&self, _req_id: i64, _ticks: Py<PyAny>, _done: bool) {}
 
     // ── Options ──
 
@@ -194,7 +194,7 @@ impl EWrapper {
 
     fn security_definition_option_parameter(
         &self, _req_id: i64, _exchange: &str, _underlying_con_id: i64,
-        _trading_class: &str, _multiplier: &str, _expirations: PyObject, _strikes: PyObject,
+        _trading_class: &str, _multiplier: &str, _expirations: Py<PyAny>, _strikes: Py<PyAny>,
     ) {}
 
     fn security_definition_option_parameter_end(&self, _req_id: i64) {}
@@ -215,7 +215,7 @@ impl EWrapper {
 
     // ── Multi-Account / Multi-Model ──
 
-    fn position_multi(&self, _req_id: i64, _account: &str, _model_code: &str, _contract: PyObject, _pos: f64, _avg_cost: f64) {}
+    fn position_multi(&self, _req_id: i64, _account: &str, _model_code: &str, _contract: Py<PyAny>, _pos: f64, _avg_cost: f64) {}
 
     fn position_multi_end(&self, _req_id: i64) {}
 
@@ -231,23 +231,23 @@ impl EWrapper {
 
     // ── Tier 3: Market Rules ──
 
-    fn market_rule(&self, _market_rule_id: i64, _price_increments: PyObject) {}
+    fn market_rule(&self, _market_rule_id: i64, _price_increments: Py<PyAny>) {}
 
     // ── Tier 3: Smart Components ──
 
-    fn smart_components(&self, _req_id: i64, _smart_component_map: PyObject) {}
+    fn smart_components(&self, _req_id: i64, _smart_component_map: Py<PyAny>) {}
 
     // ── Tier 3: Soft Dollar Tiers ──
 
-    fn soft_dollar_tiers(&self, _req_id: i64, _tiers: PyObject) {}
+    fn soft_dollar_tiers(&self, _req_id: i64, _tiers: Py<PyAny>) {}
 
     // ── Tier 3: Family Codes ──
 
-    fn family_codes(&self, _family_codes: PyObject) {}
+    fn family_codes(&self, _family_codes: Py<PyAny>) {}
 
     // ── Tier 3: Histogram Data ──
 
-    fn histogram_data(&self, _req_id: i64, _items: PyObject) {}
+    fn histogram_data(&self, _req_id: i64, _items: Py<PyAny>) {}
 
     // ── Tier 3: User Info ──
 
@@ -261,7 +261,7 @@ impl EWrapper {
 
     // ── Tier 3: Completed Orders ──
 
-    fn completed_order(&self, _contract: PyObject, _order: PyObject, _order_state: PyObject) {}
+    fn completed_order(&self, _contract: Py<PyAny>, _order: Py<PyAny>, _order_state: Py<PyAny>) {}
 
     fn completed_orders_end(&self) {}
 
@@ -275,15 +275,15 @@ impl EWrapper {
 
     // ── Tier 3: Bond Contract Details ──
 
-    fn bond_contract_details(&self, _req_id: i64, _contract_details: PyObject) {}
+    fn bond_contract_details(&self, _req_id: i64, _contract_details: Py<PyAny>) {}
 
     // ── Tier 3: Delta Neutral Validation ──
 
-    fn delta_neutral_validation(&self, _req_id: i64, _delta_neutral_contract: PyObject) {}
+    fn delta_neutral_validation(&self, _req_id: i64, _delta_neutral_contract: Py<PyAny>) {}
 
     // ── Tier 3: Historical Schedule ──
 
-    fn historical_schedule(&self, _req_id: i64, _start_date_time: &str, _end_date_time: &str, _time_zone: &str, _sessions: PyObject) {}
+    fn historical_schedule(&self, _req_id: i64, _start_date_time: &str, _end_date_time: &str, _time_zone: &str, _sessions: Py<PyAny>) {}
 }
 
 /// Register EWrapper on the module.

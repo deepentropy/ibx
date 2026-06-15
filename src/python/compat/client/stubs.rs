@@ -12,7 +12,7 @@ impl EClient {
     #[pyo3(signature = (req_id, contract, option_price, under_price, implied_vol_options=Vec::new()))]
     fn calculate_implied_volatility(
         &self, req_id: i64, contract: &Contract, option_price: f64,
-        under_price: f64, implied_vol_options: Vec<PyObject>,
+        under_price: f64, implied_vol_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let _ = (req_id, contract, option_price, under_price, implied_vol_options);
         log::warn!("calculate_implied_volatility: not yet implemented in engine");
@@ -22,7 +22,7 @@ impl EClient {
     #[pyo3(signature = (req_id, contract, volatility, under_price, opt_prc_options=Vec::new()))]
     fn calculate_option_price(
         &self, req_id: i64, contract: &Contract, volatility: f64,
-        under_price: f64, opt_prc_options: Vec<PyObject>,
+        under_price: f64, opt_prc_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let _ = (req_id, contract, volatility, under_price, opt_prc_options);
         log::warn!("calculate_option_price: not yet implemented in engine");
@@ -228,7 +228,7 @@ impl EClient {
     }
 
     #[pyo3(signature = (req_id, wsh_event_data=None))]
-    fn req_wsh_event_data(&self, req_id: i64, wsh_event_data: Option<PyObject>) -> PyResult<()> {
+    fn req_wsh_event_data(&self, req_id: i64, wsh_event_data: Option<Py<PyAny>>) -> PyResult<()> {
         let _ = (req_id, wsh_event_data);
         log::warn!("req_wsh_event_data: not yet implemented — needs FIX capture");
         Ok(())

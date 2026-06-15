@@ -60,7 +60,7 @@ env_logger = "0.11"
 mac_address = "1"
 
 # Python bindings (optional)
-pyo3 = { version = "0.26", features = ["extension-module", "multiple-pymethods"], optional = true }
+pyo3 = { version = "0.29", features = ["extension-module", "multiple-pymethods"], optional = true }
 
 [dev-dependencies]
 serde_json = "1"
