@@ -662,10 +662,21 @@ impl CcpState {
             }
         }
 
-        // What-If response
+        // What-If response: tag 6091=1 with margin data (tag 6092+).
+        // The gateway emits a not-ready ack frame whose margin fields carry the
+        // literal string "n/a" (parse fails), then a data frame with numbers.
+        // Discriminate on parse-success, NOT positivity: a margin-reducing
+        // preview (closing a position, cash-account sell) legitimately resolves
+        // to init_margin_after == 0, and the gateway sends that as a numeric "0"
+        // which must be delivered. Guarding on `> 0.0` silently dropped those
+        // and left the caller's pending what-if to time out (ibx#205).
+        // The not-ready ack is not always emitted — close/reject previews send a
+        // single data frame — so accept the first frame whose 6092 parses, with
+        // no assumption that an ack precedes it. Mirrors the gateway's own
+        // real-frame test (a field is "set" when it parses). Captured byte-level
+        // in ib-agent#160; 6094 is a present-and-numeric fallback if ever needed.
         if parsed.get(&6091).map(|s| s.as_str()) == Some("1") {
-            let init_margin_after = parsed.get(&6092).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            if init_margin_after > 0.0 {
+            if parsed.get(&6092).and_then(|s| s.parse::<f64>().ok()).is_some() {
                 if let Some(order) = context.order(clord_id).copied() {
                     let response = crate::types::WhatIfResponse {
                         order_id: clord_id,
@@ -1797,5 +1808,62 @@ mod tests {
         }
         assert_eq!(ccp.seen_exec_ids.len(), EXEC_ID_WINDOW);
         assert_eq!(ccp.exec_id_order.len(), EXEC_ID_WINDOW);
+    }
+
+    // Build a what-if (6091=1) ExecReport map for order 42 with the given
+    // post-trade init-margin literal exactly as the gateway puts it on the wire.
+    fn what_if_frame(init_margin_after: &str) -> std::collections::HashMap<u32, String> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(11u32, "42".to_string()); // ClOrdID
+        m.insert(6091u32, "1".to_string()); // what-if marker
+        m.insert(6826u32, "976.07".to_string()); // init_margin_before
+        m.insert(6092u32, init_margin_after.to_string()); // init_margin_after
+        m
+    }
+
+    fn what_if_test_state() -> (CcpState, Context, SharedState) {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order {
+            order_id: 42,
+            instrument,
+            side: Side::Buy,
+            price: 0,
+            qty: 100,
+            filled: 0,
+            status: crate::types::OrderStatus::Submitted,
+            ord_type: b'2',
+            tif: b'0',
+            stop_price: 0,
+        });
+        (CcpState::new(), context, SharedState::new())
+    }
+
+    // ibx#205: a margin-reducing preview (close, cash-account sell) resolves to a
+    // post-trade init margin of exactly 0, which the gateway sends as numeric "0"
+    // (ib-agent#160). The old `> 0.0` guard dropped it and the caller timed out.
+    #[test]
+    fn what_if_zero_init_margin_is_delivered() {
+        let (mut ccp, mut context, shared) = what_if_test_state();
+        let frame = what_if_frame("0");
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        let responses = shared.orders.drain_what_if_responses();
+        assert_eq!(responses.len(), 1, "zero-margin preview must be delivered");
+        assert_eq!(responses[0].init_margin_after, 0);
+        // The completed preview consumes the pending order.
+        assert!(context.order(42).is_none());
+    }
+
+    // The not-ready ack carries the literal "n/a" in the margin fields; it must
+    // be skipped (parse fails) so only the real data frame surfaces.
+    #[test]
+    fn what_if_not_ready_ack_is_skipped() {
+        let (mut ccp, mut context, shared) = what_if_test_state();
+        let frame = what_if_frame("n/a");
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_what_if_responses().is_empty(),
+            "n/a ack must not surface as a response");
+        // The order stays pending for the subsequent data frame.
+        assert!(context.order(42).is_some());
     }
 }
