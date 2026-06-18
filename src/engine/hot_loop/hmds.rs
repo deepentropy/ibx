@@ -134,6 +134,9 @@ impl HmdsState {
                             }
                             msgs.push(unsigned);
                         }
+                        Frame::Control(_) => {
+                            // 8=1 / 8=X control state — not consumed on the data path (ibx#185).
+                        }
                     }
                 }
                 msgs

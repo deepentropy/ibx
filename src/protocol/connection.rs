@@ -23,6 +23,11 @@ pub enum Frame {
     FixComp(Vec<u8>),
     /// 8=O binary protocol message (length-delimited).
     Binary(Vec<u8>),
+    /// 8=1 / 8=X control message (token-auth / encrypted control state).
+    /// Same length-prefixed framing as 8=O; not consumed downstream, but
+    /// extracted explicitly so it cannot clobber FIXCOMP frames queued behind
+    /// it in the same recv slice (ibx#185).
+    Control(Vec<u8>),
 }
 
 /// Stream wrapper supporting both TLS and raw TCP.
@@ -176,12 +181,24 @@ impl Connection {
                 }
             }
 
-            // Find earliest message start
+            // Find earliest message start among all recognized headers.
+            // 8=1 (token-auth state) and 8=X (encrypted control) share the
+            // length-prefixed, trailer-free framing of 8=O. Recognizing them
+            // here keeps them out of the buf.clear() arm below, which would
+            // otherwise wipe any FIXCOMP frame queued behind them in the same
+            // recv slice (ibx#185).
             let fix_pos = find_subsequence(&self.buf, b"8=FIX.");
             let o_pos = find_subsequence(&self.buf, b"8=O\x01");
+            let one_pos = find_subsequence(&self.buf, b"8=1\x01");
+            let x_pos = find_subsequence(&self.buf, b"8=X\x01");
 
-            match (fix_pos, o_pos) {
-                (None, None) => {
+            let earliest = [fix_pos, o_pos, one_pos, x_pos]
+                .into_iter()
+                .flatten()
+                .min();
+            let earliest = match earliest {
+                Some(e) => e,
+                None => {
                     // ibx#183 follow-up: dump the FULL payload (hex + ascii) of
                     // anything we're about to discard. We need the whole frame
                     // for upstream analysis (ib-agent#152 sister fixture), not
@@ -202,16 +219,9 @@ impl Connection {
                     self.buf.clear();
                     break;
                 }
-                _ => {}
-            }
+            };
 
             // Skip garbage before earliest message
-            let earliest = match (fix_pos, o_pos) {
-                (Some(f), Some(o)) => f.min(o),
-                (Some(f), None) => f,
-                (None, Some(o)) => o,
-                (None, None) => unreachable!(),
-            };
             if earliest > 0 {
                 self.buf.drain(..earliest);
                 continue;
@@ -223,6 +233,20 @@ impl Connection {
                     if self.buf.len() >= total {
                         let msg: Vec<u8> = self.buf.drain(..total).collect();
                         frames.push(Frame::Binary(msg));
+                        continue;
+                    }
+                }
+                break; // incomplete
+            }
+
+            // 8=1 / 8=X control protocol: same length-delimited framing as 8=O
+            // (body length in tag 9, no checksum trailer). Extracted as Control
+            // frames and ignored downstream (ibx#185).
+            if self.buf.starts_with(b"8=1\x01") || self.buf.starts_with(b"8=X\x01") {
+                if let Some(total) = binary_msg_length(&self.buf) {
+                    if self.buf.len() >= total {
+                        let msg: Vec<u8> = self.buf.drain(..total).collect();
+                        frames.push(Frame::Control(msg));
                         continue;
                     }
                 }
@@ -326,9 +350,11 @@ impl Connection {
     }
 }
 
-/// Compute total length of a `8=O\x01 9=<body_len>\x01 ...` message.
+/// Compute total length of a length-prefixed, trailer-free message whose
+/// tag-8 header is 4 bytes: `8=O\x01`, `8=1\x01`, or `8=X\x01`, each followed
+/// by `9=<body_len>\x01 ...`.
 fn binary_msg_length(data: &[u8]) -> Option<usize> {
-    // 8=O\x01 → 4 bytes, then find 9=
+    // 4-byte tag-8 header ("8=O\x01" / "8=1\x01" / "8=X\x01"), then find 9=
     let after_8 = 4; // "8=O\x01"
     let tag9_pos = find_subsequence(&data[after_8..], b"9=").map(|p| after_8 + p)?;
     let soh_pos = data[tag9_pos..].iter().position(|&b| b == SOH).map(|p| tag9_pos + p)?;
@@ -540,6 +566,80 @@ mod tests {
             Frame::Binary(data) => assert_eq!(data, &msg),
             other => panic!("expected Frame::Binary, got {:?}", other),
         }
+    }
+
+    /// Build a length-prefixed, trailer-free control frame (`8=1` / `8=X`).
+    fn build_control_frame(tag8: &str, body: &[u8]) -> Vec<u8> {
+        let header = format!("8={}\x019={}\x01", tag8, body.len());
+        let mut msg = header.into_bytes();
+        msg.extend_from_slice(body);
+        msg
+    }
+
+    #[test]
+    fn frame_extraction_control_8_1() {
+        // 8=1 token-auth state message (35=X family). Mirrors ib-agent#152 slice 2.
+        let msg = build_control_frame("1", b"35=X\x011137=ABCDEF\x01");
+        let mut conn = test_connection_with_buf(msg.clone());
+        let frames = conn.extract_frames();
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            Frame::Control(data) => assert_eq!(data, &msg),
+            other => panic!("expected Frame::Control, got {:?}", other),
+        }
+        assert_eq!(conn.buffered(), 0, "no bytes should be left buffered");
+    }
+
+    #[test]
+    fn frame_extraction_control_8_x() {
+        // 8=X encrypted control / auth state-machine message.
+        let msg = build_control_frame("X", b"35=X\x01encctl\x01");
+        let mut conn = test_connection_with_buf(msg.clone());
+        let frames = conn.extract_frames();
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            Frame::Control(data) => assert_eq!(data, &msg),
+            other => panic!("expected Frame::Control, got {:?}", other),
+        }
+        assert_eq!(conn.buffered(), 0);
+    }
+
+    #[test]
+    fn frame_extraction_control_then_fixcomp_zero_loss() {
+        // ibx#185 acceptance: an 8=1 control frame ahead of a FIXCOMP frame in
+        // the same buffer must NOT trigger buf.clear() — the FIXCOMP queued
+        // behind it has to survive byte-for-byte.
+        let control = build_control_frame("1", b"35=X\x019=0045\x01PASSED\x01");
+        let inner = fix_build(&[(35, "0")], 1);
+        let comp = fixcomp_build(&inner);
+
+        let mut buf = control.clone();
+        buf.extend_from_slice(&comp);
+        let mut conn = test_connection_with_buf(buf);
+
+        let frames = conn.extract_frames();
+        assert_eq!(frames.len(), 2, "control + fixcomp should both extract");
+        match &frames[0] {
+            Frame::Control(data) => assert_eq!(data, &control),
+            other => panic!("expected Frame::Control first, got {:?}", other),
+        }
+        match &frames[1] {
+            Frame::FixComp(data) => assert_eq!(data, &comp),
+            other => panic!("expected Frame::FixComp second, got {:?}", other),
+        }
+        assert_eq!(conn.buffered(), 0);
+    }
+
+    #[test]
+    fn frame_extraction_incomplete_control() {
+        // A partial 8=1 frame must wait for more bytes, not drop the buffer.
+        let msg = build_control_frame("1", b"35=X\x01partialbodythatislong\x01");
+        let half = msg.len() / 2;
+        let buf = msg[..half].to_vec();
+        let mut conn = test_connection_with_buf(buf);
+        let frames = conn.extract_frames();
+        assert!(frames.is_empty(), "incomplete control frame should not produce a frame");
+        assert!(conn.buffered() > 0, "partial frame must stay buffered, not be cleared");
     }
 
     #[test]

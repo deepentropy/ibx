@@ -117,6 +117,9 @@ impl FarmState {
                         }
                         self.farm_msg_buf.push(unsigned);
                     }
+                    Frame::Control(_) => {
+                        // 8=1 / 8=X control state — not consumed on the farm path (ibx#185).
+                    }
                 }
             }
         }

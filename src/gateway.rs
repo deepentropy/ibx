@@ -580,6 +580,10 @@ pub fn connect_farm(
                 let (_unsigned, _valid) = conn.unsign(raw);
                 log::info!("{} routing 8=O: {} bytes", farm_id, raw.len());
             }
+            crate::protocol::connection::Frame::Control(raw) => {
+                // 8=1 / 8=X control state — extracted, not routed (ibx#185).
+                log::debug!("{} ignoring control frame: {} bytes", farm_id, raw.len());
+            }
         }
     }
     if !frames.is_empty() {
