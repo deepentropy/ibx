@@ -24,13 +24,14 @@ impl Wrapper for ProbeWrapper {
         let mut s = self.state.lock().unwrap();
         s.details_count += 1;
         println!(
-            "[contract_details] req_id={} symbol={} conid={} exch={} primary={} currency={}",
+            "[contract_details] req_id={} symbol={} conid={} exch={} primary={} currency={} min_tick={}",
             req_id,
             details.contract.symbol,
             details.contract.con_id,
             details.contract.exchange,
             details.contract.primary_exchange,
             details.contract.currency,
+            details.min_tick,
         );
     }
     fn contract_details_end(&mut self, req_id: i64) {
