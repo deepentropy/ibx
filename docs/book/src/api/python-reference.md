@@ -1,4 +1,4 @@
-# Python API Reference (v0.5.1)
+# Python API Reference (v0.6.1)
 
 *Auto-generated from source — do not edit.*
 
@@ -510,9 +510,29 @@ def cancel_tick_by_tick_data(req_id)
 
 ---
 
+#### `req_ping`
+
+Request an auth-connection round-trip time sample (ibx#158): sends a lightweight liveness probe with no side effects on subscriptions, contract caches, or pacing budgets. Poll `last_rtt_ms()` after a moment for the result.
+
+```python
+def req_ping()
+```
+
+---
+
+#### `last_rtt_ms`
+
+Last measured auth-connection round-trip time in milliseconds, or None if never measured (ibx#158). A gauge, not a benchmark — see `req_ping`. Also sampled automatically by the engine's own liveness probes.
+
+```python
+def last_rtt_ms()
+```
+
+---
+
 #### `req_market_data_type`
 
-Set market data type (1=live, 2=frozen, 3=delayed, 4=delayed-frozen).
+NOT supported end to end (ibx#234): the requested type (1=live, 2=frozen, 3=delayed, 4=delayed-frozen) is stored locally but never sent to the gateway, so subscriptions always deliver realtime data and delayed tick variants never arrive. Requesting a non-realtime type logs a warning, and the `market_data_type` callback reports the DELIVERED type (realtime) rather than echoing the request.
 
 ```python
 def req_market_data_type(market_data_type)

@@ -1,4 +1,4 @@
-# Rust API Reference (v0.5.1)
+# Rust API Reference (v0.6.1)
 
 *Auto-generated from source — do not edit.*
 
@@ -574,7 +574,7 @@ pub fn parse_algo_params(strategy: &str, params: &[TagValue]) -> Result<AlgoPara
 
 #### `req_mkt_data`
 
-Subscribe to market data. When `snapshot` is true, delivers the first available quote then calls `tick_snapshot_end` and auto-cancels the subscription.
+Subscribe to market data. When `snapshot` is true, delivers the first available quote then calls `tick_snapshot_end` and auto-cancels the subscription. `generic_tick_list` is NOT transmitted to the gateway, with one exception: "292" additionally subscribes per-contract news. Other generic tick types (RTVolume and friends) have no emission path, and `tick_generic` never fires (ibx#234). Delayed data cannot be requested either — see `req_market_data_type`.
 
 ```rust
 pub fn req_mkt_data( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool, ) -> Result<(), String>
@@ -736,9 +736,33 @@ pub fn cancel_real_time_bars(&self, req_id: i64) -> Result<(), String>
 
 ---
 
+#### `req_ping`
+
+Set market data type preference (1=live, 2=frozen, 3=delayed, 4=delayed-frozen). Request an auth-connection round-trip time sample (ibx#158): sends a lightweight liveness probe with no side effects on subscriptions, contract caches, or pacing budgets. The result lands asynchronously — poll `last_rtt()` after a moment. No-op while a probe is already in flight or the connection is down.
+
+```rust
+pub fn req_ping(&self) -> Result<(), String>
+```
+
+**Returns:** `Result<(), String>`
+
+---
+
+#### `last_rtt`
+
+Last measured auth-connection round-trip time, if any (ibx#158). A gauge, not a benchmark: the sample is the interval from a probe to the first inbound traffic that followed it, which on an active feed can undercount by racing data already in flight. Also sampled automatically whenever liveness sends its own probe.
+
+```rust
+pub fn last_rtt(&self) -> Option<std::time::Duration>
+```
+
+**Returns:** `Option<std::time::Duration>`
+
+---
+
 #### `req_market_data_type`
 
-Set market data type preference (1=live, 2=frozen, 3=delayed, 4=delayed-frozen).
+NOT supported end to end (ibx#234): the requested type is stored locally but never sent to the gateway, so subscriptions always deliver realtime data and delayed tick variants never arrive. Requesting a non-realtime type logs a warning, and the `market_data_type` callback reports the DELIVERED type (realtime) rather than echoing the request.
 
 ```rust
 pub fn req_market_data_type(&self, market_data_type: i32)
@@ -782,17 +806,17 @@ pub fn quote(&self, req_id: i64) -> Option<Quote>
 
 #### `quote_by_instrument`
 
-Direct SeqLock read by InstrumentId (for callers who track IDs themselves).
+Direct SeqLock read by InstrumentId (for callers who track IDs themselves). Returns None for an out-of-range id — this used to panic (ibx#234).
 
 ```rust
-pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Quote
+pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Option<Quote>
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
 
-**Returns:** `Quote`
+**Returns:** `Option<Quote>`
 
 ---
 
