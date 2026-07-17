@@ -1,4 +1,4 @@
-# Rust API Reference (v0.6.1)
+# Rust API Reference (v0.7.0)
 
 *Auto-generated from source — do not edit.*
 
