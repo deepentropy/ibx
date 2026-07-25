@@ -1,4 +1,4 @@
-# Rust API Reference (v0.6.1)
+# Rust API Reference (v0.7.1)
 
 *Auto-generated from source — do not edit.*
 
@@ -27,6 +27,23 @@ pub fn connect(config: &EClientConfig) -> Result<Self, Box<dyn std::error::Error
 | `config` | `&EClientConfig` | Connection configuration (username, password, host, paper, core_id). |
 
 **Returns:** `Result<Self, Box<dyn std::error::Error>>`
+
+---
+
+#### `connect_with_events`
+
+Connect to IB and start the engine with an [`Event`] channel attached. Returns the client plus a receiver carrying every [`Event`] the engine produces. This is a second, optional delivery path that runs alongside [`process_msgs()`](EClient::process_msgs) — it does not replace it, and nothing is removed from the wrapper callbacks when it is in use. The channel is bounded by `capacity`; the engine never blocks on it, so a consumer that falls behind loses events rather than slowing the hot loop. Drain it from a thread that is not the one calling `process_msgs()`, or keep `capacity` generous. Attaching a channel makes the engine build events it would otherwise skip, which for bar batches and contract definitions means one deep copy each. Use [`connect()`](EClient::connect) when you only need the wrapper callbacks (ibx#242).
+
+```rust
+pub fn connect_with_events( config: &EClientConfig, capacity: usize, ) -> Result<(Self, Receiver<Event>), Box<dyn std::error::Error>>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `config` | `&EClientConfig` | Connection configuration (username, password, host, paper, core_id). |
+| `capacity` | `usize` |  |
+
+**Returns:** `Result<(Self, Receiver<Event>), Box<dyn std::error::Error>>`
 
 ---
 
@@ -97,7 +114,7 @@ pub fn seed_instrument(&self, con_id: i64, instrument: InstrumentId)
 
 #### `is_connected`
 
-Check if the client is connected.
+False after [`disconnect()`](EClient::disconnect), and after a `process_msgs()` call that observed the engine stopping (ibx#242).
 
 ```rust
 pub fn is_connected(&self) -> bool
