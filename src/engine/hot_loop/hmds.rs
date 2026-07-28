@@ -470,8 +470,17 @@ impl HmdsState {
             };
             match entry {
                 tick_decoder::TbtEntry::Trade { timestamp, price_cents_delta, size, exchange, conditions } => {
-                    let cents = self.update_tbt_price(instrument, *price_cents_delta, 0);
-                    let price = cents * (PRICE_SCALE / 100);
+                    // Drop the tick rather than publish a wrapped price: the
+                    // previous one standing is the honest failure (ibx#272).
+                    let Some(cents) = self.update_tbt_price(instrument, *price_cents_delta, 0)
+                    else {
+                        log::warn!("35=E trade price out of range (delta={price_cents_delta}), tick dropped");
+                        continue;
+                    };
+                    let Some(price) = cents.checked_mul(PRICE_SCALE / 100) else {
+                        log::warn!("35=E trade price out of range (cents={cents}), tick dropped");
+                        continue;
+                    };
                     let trade = crate::types::TbtTrade {
                         instrument,
                         price,
@@ -484,11 +493,23 @@ impl HmdsState {
                     emit(event_tx, Event::TbtTrade(trade));
                 }
                 tick_decoder::TbtEntry::Quote { timestamp, bid_cents_delta, ask_cents_delta, bid_size, ask_size } => {
-                    let (bid_cents, ask_cents) = self.update_tbt_bid_ask(instrument, *bid_cents_delta, *ask_cents_delta);
+                    let Some((bid_cents, ask_cents)) =
+                        self.update_tbt_bid_ask(instrument, *bid_cents_delta, *ask_cents_delta)
+                    else {
+                        log::warn!("35=E quote price out of range, tick dropped");
+                        continue;
+                    };
+                    let (Some(bid), Some(ask)) = (
+                        bid_cents.checked_mul(PRICE_SCALE / 100),
+                        ask_cents.checked_mul(PRICE_SCALE / 100),
+                    ) else {
+                        log::warn!("35=E quote price out of range (bid={bid_cents} ask={ask_cents}), tick dropped");
+                        continue;
+                    };
                     let quote = crate::types::TbtQuote {
                         instrument,
-                        bid: bid_cents * (PRICE_SCALE / 100),
-                        ask: ask_cents * (PRICE_SCALE / 100),
+                        bid,
+                        ask,
                         bid_size: *bid_size as i64,
                         ask_size: *ask_size as i64,
                         timestamp: *timestamp,
@@ -525,18 +546,30 @@ impl HmdsState {
     }
 
     #[inline]
-    fn update_tbt_price(&mut self, instrument: InstrumentId, delta: i64, _: i64) -> i64 {
+    /// Accumulate a wire-controlled delta into the running price.
+    ///
+    /// Returns `None` when the sum would leave the range, rather than trapping
+    /// in debug and wrapping in release — the same rule the 35=P price path
+    /// follows (ibx#272). The running state is left untouched, so the previous
+    /// price stands rather than becoming an arbitrary one.
+    fn update_tbt_price(&mut self, instrument: InstrumentId, delta: i64, _: i64) -> Option<i64> {
         let entry = &mut self.tbt_price_state[instrument as usize];
-        entry.0 += delta;
-        entry.0
+        entry.0 = entry.0.checked_add(delta)?;
+        Some(entry.0)
     }
 
     #[inline]
-    fn update_tbt_bid_ask(&mut self, instrument: InstrumentId, bid_delta: i64, ask_delta: i64) -> (i64, i64) {
+    /// As `update_tbt_price`, for the two sides of the book. Neither side is
+    /// advanced unless both fit, so the pair stays consistent.
+    fn update_tbt_bid_ask(
+        &mut self, instrument: InstrumentId, bid_delta: i64, ask_delta: i64,
+    ) -> Option<(i64, i64)> {
         let entry = &mut self.tbt_price_state[instrument as usize];
-        entry.1 += bid_delta;
-        entry.2 += ask_delta;
-        (entry.1, entry.2)
+        let bid = entry.1.checked_add(bid_delta)?;
+        let ask = entry.2.checked_add(ask_delta)?;
+        entry.1 = bid;
+        entry.2 = ask;
+        Some((bid, ask))
     }
 
     pub(crate) fn send_tbt_subscribe(
@@ -1116,6 +1149,41 @@ impl HmdsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tick-by-tick price path had the same unchecked arithmetic this
+    /// change removes from the primary path: a wire-controlled delta is
+    /// accumulated and then scaled, so a well-formed but extreme delta traps in
+    /// debug and wraps in release — publishing an arbitrary price.
+    #[test]
+    fn a_tick_by_tick_price_that_cannot_be_scaled_is_dropped() {
+        let mut hmds = HmdsState::new();
+
+        // A delta that fits the wire and the accumulator but not the scale.
+        let huge = i64::MAX / 2;
+        assert_eq!(
+            hmds.update_tbt_price(0, huge, 0), Some(huge),
+            "the accumulator itself still advances",
+        );
+        assert!(
+            huge.checked_mul(PRICE_SCALE / 100).is_none(),
+            "and the scale is what cannot represent it",
+        );
+
+        // Another delta on top of that overflows the running total.
+        assert_eq!(
+            hmds.update_tbt_price(0, i64::MAX, 0), None,
+            "the accumulation reports rather than wrapping",
+        );
+
+        // Ordinary values are unaffected.
+        let mut hmds = HmdsState::new();
+        assert_eq!(hmds.update_tbt_price(0, 12_345, 0), Some(12_345));
+        assert_eq!(hmds.update_tbt_price(0, -45, 0), Some(12_300));
+        assert_eq!(
+            hmds.update_tbt_bid_ask(0, 100, 200), Some((100, 200)),
+            "and both sides of the book advance together",
+        );
+    }
 
     fn make_query_error_msg(query_id: &str, error: &str) -> Vec<u8> {
         let xml = format!(

@@ -221,14 +221,56 @@ impl FarmState {
             let mts = context.market.min_tick_scaled(instrument);
             let q = context.market.quote_mut(instrument);
 
+            // The extended 35=P format carries a full 8-bit byte width, so a
+            // magnitude can reach i64::MAX and the scaling multiply wrapped to
+            // an arbitrary price in release builds (ibx#272). Drop the price
+            // rather than pinning it: a saturated value is ~92e9 at
+            // PRICE_SCALE, which reads downstream as an ordinary quote, and
+            // leaving the previous one standing is the honest failure.
+            let scaled = |m: i64| m.checked_mul(mts);
             match tick.tick_type {
-                tick_decoder::O_BID_PRICE => { q.bid = tick.magnitude * mts; }
-                tick_decoder::O_ASK_PRICE => { q.ask = tick.magnitude * mts; }
-                tick_decoder::O_LAST_PRICE => { q.last = tick.magnitude * mts; }
-                tick_decoder::O_HIGH_PRICE => { q.high = tick.magnitude * mts; }
-                tick_decoder::O_LOW_PRICE => { q.low = tick.magnitude * mts; }
-                tick_decoder::O_OPEN_PRICE => { q.open = tick.magnitude * mts; }
-                tick_decoder::O_CLOSE_PRICE => { q.close = tick.magnitude * mts; }
+                tick_decoder::O_BID_PRICE => {
+                    match scaled(tick.magnitude) {
+                        Some(v) => q.bid = v,
+                        None => log::warn!("35=P bid price out of range (magnitude={}), tick dropped", tick.magnitude),
+                    }
+                }
+                tick_decoder::O_ASK_PRICE => {
+                    match scaled(tick.magnitude) {
+                        Some(v) => q.ask = v,
+                        None => log::warn!("35=P ask price out of range (magnitude={}), tick dropped", tick.magnitude),
+                    }
+                }
+                tick_decoder::O_LAST_PRICE => {
+                    match scaled(tick.magnitude) {
+                        Some(v) => q.last = v,
+                        None => log::warn!("35=P last price out of range (magnitude={}), tick dropped", tick.magnitude),
+                    }
+                }
+                tick_decoder::O_HIGH_PRICE => {
+                    match scaled(tick.magnitude) {
+                        Some(v) => q.high = v,
+                        None => log::warn!("35=P high price out of range (magnitude={}), tick dropped", tick.magnitude),
+                    }
+                }
+                tick_decoder::O_LOW_PRICE => {
+                    match scaled(tick.magnitude) {
+                        Some(v) => q.low = v,
+                        None => log::warn!("35=P low price out of range (magnitude={}), tick dropped", tick.magnitude),
+                    }
+                }
+                tick_decoder::O_OPEN_PRICE => {
+                    match scaled(tick.magnitude) {
+                        Some(v) => q.open = v,
+                        None => log::warn!("35=P open price out of range (magnitude={}), tick dropped", tick.magnitude),
+                    }
+                }
+                tick_decoder::O_CLOSE_PRICE => {
+                    match scaled(tick.magnitude) {
+                        Some(v) => q.close = v,
+                        None => log::warn!("35=P close price out of range (magnitude={}), tick dropped", tick.magnitude),
+                    }
+                }
                 tick_decoder::O_BID_SIZE => { q.bid_size = tick.magnitude; }
                 tick_decoder::O_ASK_SIZE => { q.ask_size = tick.magnitude; }
                 tick_decoder::O_LAST_SIZE => { q.last_size = tick.magnitude; }
@@ -1015,3 +1057,83 @@ impl FarmState {
     }
 }
 
+
+#[cfg(test)]
+mod price_scaling_tests {
+    use super::*;
+    use crate::bridge::SharedState;
+    use crate::engine::context::Context;
+    use crate::protocol::tick_decoder;
+
+    fn push(bits: &mut Vec<u8>, val: u64, n: usize) {
+        for i in (0..n).rev() {
+            bits.push(((val >> i) & 1) as u8);
+        }
+    }
+
+    /// One 35=P body carrying a single extended entry, framed as the farm
+    /// connection delivers it. The extended header carries a full byte width,
+    /// which is how a magnitude large enough to overflow the price scaling
+    /// arrives from the wire.
+    fn framed_extended(server_tag: u32, tick_type: u64, byte_width: u64, value: u64) -> Vec<u8> {
+        let mut bits: Vec<u8> = Vec::new();
+        push(&mut bits, 0, 1);
+        push(&mut bits, server_tag as u64, 31);
+        push(&mut bits, 31, 5); // extended sentinel
+        push(&mut bits, 0, 1);  // has_more
+        push(&mut bits, 0, 2);  // raw width, ignored for extended
+        push(&mut bits, tick_type, 8);
+        push(&mut bits, byte_width, 8);
+        push(&mut bits, 0, 1);  // sign
+        push(&mut bits, value, (byte_width * 8 - 1) as usize);
+
+        let byte_count = (bits.len() + 7) / 8;
+        let mut payload = vec![0u8; byte_count];
+        for (i, &b) in bits.iter().enumerate() {
+            if b == 1 {
+                payload[i >> 3] |= 1 << (7 - (i & 7));
+            }
+        }
+        let mut tick_payload = Vec::with_capacity(2 + byte_count);
+        tick_payload.push((bits.len() >> 8) as u8);
+        tick_payload.push((bits.len() & 0xFF) as u8);
+        tick_payload.extend_from_slice(&payload);
+
+        let body_len = 5 + tick_payload.len() + 15;
+        let mut msg = format!("8=O\x019={}\x01", body_len).into_bytes();
+        msg.extend_from_slice(b"35=P\x01");
+        msg.extend_from_slice(&tick_payload);
+        msg.extend_from_slice(b"\x018349=AABBCCDD\x01");
+        msg
+    }
+
+    /// A magnitude the price scaling cannot represent must leave the previous
+    /// quote standing. Wrapping it publishes an arbitrary price — the probe
+    /// for this test produces -1000000, a negative price indistinguishable
+    /// downstream from a real quote (ibx#272).
+    #[test]
+    fn a_price_that_cannot_be_scaled_does_not_replace_the_quote() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(7, id);
+        context.market.set_min_tick(id, 0.01);
+
+        farm.handle_tick_data(
+            &framed_extended(7, tick_decoder::O_LAST_PRICE, 2, 15_000),
+            &mut context, &shared, &None,
+        );
+        let good = context.market.quote(id).last;
+        assert!(good > 0, "the ordinary tick must land");
+
+        farm.handle_tick_data(
+            &framed_extended(7, tick_decoder::O_LAST_PRICE, 8, u64::MAX >> 1),
+            &mut context, &shared, &None,
+        );
+        assert_eq!(
+            context.market.quote(id).last, good,
+            "an unrepresentable price must be dropped, leaving the last good quote",
+        );
+    }
+}
