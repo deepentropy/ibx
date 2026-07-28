@@ -633,6 +633,14 @@ pub struct IbKeyChallenge {
 /// wrong code returns state=4 FAILED and the socket is torn down. The
 /// callback should pull the code from a deterministic source (stdin,
 /// secrets vault, etc.) or return an `io::Error` to abort the login.
+///
+/// The callback runs on its own thread and may block for as long as the
+/// operator needs — the gate keeps answering the server's keepalive probes
+/// meanwhile. The code is submitted on the first inbound message after the
+/// callback returns, so submission trails entry by up to one probe interval
+/// for as long as the server keeps probing. The thread is not cancelled if
+/// the gate returns early, so a callback holding a shared resource (stdin,
+/// say) keeps holding it until it returns on its own.
 pub type CodeProvider = std::sync::Arc<
     dyn Fn(IbKeyChallenge) -> io::Result<String> + Send + Sync,
 >;
@@ -651,9 +659,6 @@ pub const IB_KEY_DEFAULT_TIMEOUT_SECS: u64 = 1080;
 /// configurations require a different value — override via
 /// [`crate::gateway::GatewayConfig::ib_key_token_sub_type`].
 pub const IB_KEY_DEFAULT_TOKEN_SUB_TYPE: &str = "2a";
-
-/// Cadence at which the server probes during the wait window.
-const IB_KEY_HEARTBEAT_CADENCE_SECS: u64 = 20;
 
 /// Execute the second-factor approval gate that follows SRP on a live login.
 ///
@@ -698,6 +703,7 @@ pub fn do_ib_key_2fa<S: Read + Write>(
     let mut announced_wait = false;
     let mut saw_challenge = false;
     let mut code_submitted = false;
+    let mut pending_code: Option<std::sync::mpsc::Receiver<io::Result<String>>> = None;
 
     loop {
         if Instant::now() >= deadline {
@@ -748,23 +754,25 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                 }
                 // Challenge/Response branch: if a code_provider is configured,
                 // pull the 8-char code from the callback and submit state=3
-                // instead of waiting for a phone tap. Guarded so a repeated
-                // state=2 (server retransmission) doesn't double-submit.
-                if !code_submitted {
+                // instead of waiting for a phone tap. The callback runs off
+                // this thread because it blocks for as long as the operator
+                // needs to read the code off the IBKey app — this loop must
+                // keep answering the server's NS_TEST_REQUEST probes (~20 s
+                // cadence) in the meantime or the socket is torn down before
+                // the code is ever submitted. Guarded so a repeated state=2
+                // (server retransmission) doesn't spawn a second provider.
+                if !code_submitted && pending_code.is_none() {
                     if let Some(provider) = code_provider {
+                        let provider = provider.clone();
                         let challenge_info = IbKeyChallenge {
                             display_id: session_id.clone(),
                             avth_url: approval_url.clone(),
                         };
-                        let code = provider(challenge_info)?;
-                        let submission = xyz::xyz_build_swcr_token_code_submission(&code);
-                        let framed = xyz::xyz_wrap(&submission);
-                        stream.write_all(&framed)?;
-                        log::info!(
-                            "2FA gate: submitted SWCR_TOKEN state=3 code (len={}, {} bytes framed)",
-                            code.len(), framed.len(),
-                        );
-                        code_submitted = true;
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(provider(challenge_info));
+                        });
+                        pending_code = Some(rx);
                     }
                 }
             }
@@ -835,7 +843,35 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                 // Unknown message during 2FA wait. Log and keep looping —
                 // the server may send other informational frames.
                 log::warn!("2FA gate: unexpected message {:?}", other);
-                let _ = IB_KEY_HEARTBEAT_CADENCE_SECS;  // referenced for docs
+            }
+        }
+
+        // Submit the C/R code once the provider thread yields it. Checked after
+        // every inbound message, so submission trails the operator's entry by
+        // up to one server probe interval (~20 s). Polling on inbound traffic
+        // keeps the socket single-threaded; if that delay ever matters, give
+        // the stream a read timeout and select on both instead.
+        if let Some(rx) = pending_code.as_ref() {
+            match rx.try_recv() {
+                Ok(result) => {
+                    pending_code = None;
+                    let code = result?;
+                    let submission = xyz::xyz_build_swcr_token_code_submission(&code);
+                    let framed = xyz::xyz_wrap(&submission);
+                    stream.write_all(&framed)?;
+                    log::info!(
+                        "2FA gate: submitted SWCR_TOKEN state=3 code (len={}, {} bytes framed)",
+                        code.len(), framed.len(),
+                    );
+                    code_submitted = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(ib_key_err(
+                        io::ErrorKind::Other,
+                        "2FA gate: code_provider panicked without returning a code",
+                    ));
+                }
             }
         }
     }
@@ -1093,6 +1129,82 @@ mod tests {
         assert!(!parts[0].is_empty());
         // Millis part: always 4 hex chars (format {:04x}, range 0..999)
         assert_eq!(parts[1].len(), 4, "Millis part must be zero-padded to 4 hex chars");
+    }
+
+    // ── IBKey Challenge/Response gate (ibx#176) ─────────────────────────────
+
+    /// Timestamp echoed in the scripted server's keepalive probes.
+    const PROBE_TS: &str = "20260430-22:58:25";
+
+    /// Scripted gateway for the Challenge/Response gate. Serves `head`, then
+    /// keeps issuing `NS_TEST_REQUEST` probes — as the live server does every
+    /// ~20 s while the operator reads the code off the IBKey app — until the
+    /// client submits `expect` (the state=3 frame), then serves `tail`.
+    ///
+    /// This is what makes the C/R tests deterministic: the result frames can't
+    /// arrive before the code does, and a gate that blocks on the provider
+    /// instead of answering probes never gets past the probe stream.
+    struct ProbingGateway {
+        pending: Vec<u8>,
+        pos: usize,
+        tail: Vec<u8>,
+        expect: Vec<u8>,
+        served_tail: bool,
+        probes_left: u32,
+        written: Vec<u8>,
+    }
+
+    impl ProbingGateway {
+        fn new(head: Vec<u8>, expect: Vec<u8>, tail: Vec<u8>) -> Self {
+            Self {
+                pending: head,
+                pos: 0,
+                tail,
+                expect,
+                served_tail: false,
+                // Bounded (~10 s at the pacing below) so a client that never
+                // submits ends the test instead of probing forever.
+                probes_left: 5_000,
+                written: Vec::new(),
+            }
+        }
+
+        fn code_submitted(&self) -> bool {
+            !self.expect.is_empty()
+                && self.written.windows(self.expect.len()).any(|f| f == self.expect)
+        }
+    }
+
+    impl Read for ProbingGateway {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos >= self.pending.len() {
+                if self.code_submitted() && !self.served_tail {
+                    self.served_tail = true;
+                    self.pending = std::mem::take(&mut self.tail);
+                } else if self.probes_left > 0 && !self.served_tail {
+                    self.probes_left -= 1;
+                    // Paced so the probe stream stands in for the live server's
+                    // ~20 s cadence without burning through the budget.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    self.pending = ns_build(NS_VERSION, NS_TEST_REQUEST, &[PROBE_TS], "MISC");
+                } else {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "script exhausted"));
+                }
+                self.pos = 0;
+            }
+            let n = buf.len().min(self.pending.len() - self.pos);
+            buf[..n].copy_from_slice(&self.pending[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    impl Write for ProbingGateway {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
     }
 
     // ── recv_8eq1 framing / coalesced tail (ibx#237) ────────────────────────
@@ -1683,15 +1795,18 @@ mod tests {
         ]);
         let state4_passed = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "johnbegood", &["PASSED"]);
         let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 3, "johnbegood", &["PASSED"]);
-        let mut incoming = frame_xyz(&challenge);
-        incoming.extend_from_slice(&frame_xyz(&state4_passed));
-        incoming.extend_from_slice(&frame_xyz(&auth_finish));
-        let mut stream = ScriptedStream::new(incoming);
+        let mut tail = frame_xyz(&state4_passed);
+        tail.extend_from_slice(&frame_xyz(&auth_finish));
+        let submission = frame_xyz(&xyz::xyz_build_swcr_token_code_submission(RUN_A_CODE));
+        let mut stream = ProbingGateway::new(frame_xyz(&challenge), submission.clone(), tail);
 
         let seen_challenge = std::sync::Arc::new(std::sync::Mutex::new(IbKeyChallenge::default()));
         let seen_clone = seen_challenge.clone();
+        // The operator takes their time reading the code off the phone; the
+        // gate must stay responsive to the server's probes meanwhile.
         let provider: CodeProvider = std::sync::Arc::new(move |c: IbKeyChallenge| {
             *seen_clone.lock().unwrap() = c;
+            std::thread::sleep(std::time::Duration::from_millis(50));
             Ok(RUN_A_CODE.to_string())
         });
 
@@ -1709,43 +1824,45 @@ mod tests {
         assert_eq!(seen.display_id, RUN_A_SESSION_ID);
         assert_eq!(seen.avth_url, RUN_A_AVTH_URL);
 
-        // Walk written frames: 1st = SWCR_TOKEN state=1 init, 2nd = state=3 submission.
-        // The 2nd frame must be byte-for-byte the 40-byte capture from run A.
-        let mut frames: Vec<Vec<u8>> = Vec::new();
-        let mut offset = 0;
-        while offset + 8 <= stream.written.len() {
-            let len = u32::from_be_bytes(
-                stream.written[offset + 4..offset + 8].try_into().unwrap(),
-            ) as usize;
-            frames.push(stream.written[offset + 8..offset + 8 + len].to_vec());
-            offset += 8 + len;
-        }
-        assert!(frames.len() >= 2, "expected at least 2 frames (init + submission); got {}", frames.len());
-        let expected_state3 = xyz::xyz_build_swcr_token_code_submission(RUN_A_CODE);
-        assert_eq!(frames[1], expected_state3,
-            "state=3 submission must byte-match the ib-agent#149 run-A capture");
+        // The state=3 frame must be byte-for-byte the 40-byte run-A capture, and
+        // it must be preceded by a heartbeat reply: the operator's think time
+        // spans at least one server probe, and a gate that stalls on the
+        // provider instead of answering it loses the socket (ibx#176).
+        let sent = &stream.written;
+        let heartbeat = ns_build_heart_beat(NS_VERSION, PROBE_TS);
+        let hb_at = sent.windows(heartbeat.len()).position(|f| f == heartbeat)
+            .expect("heartbeat reply must be sent while the provider is running");
+        let code_at = sent.windows(submission.len()).position(|f| f == submission)
+            .expect("state=3 submission must byte-match the ib-agent#149 run-A capture");
+        assert!(hb_at < code_at, "heartbeat must be answered before the code is submitted");
     }
 
     #[test]
     fn ib_key_2fa_cr_code_rejected_on_state_4_failed() {
-        // Server: state=2 → state=4 FAILED. Server tears the socket down after
-        // (no AUTH_FINISH on the wire). Client must surface PermissionDenied
-        // immediately on FAILED, without waiting for further frames.
+        // Server: state=2 → (client submits a wrong code) → state=4 FAILED. The
+        // server tears the socket down after, with no AUTH_FINISH on the wire.
+        // Client must surface PermissionDenied on FAILED, without waiting for
+        // further frames. The gateway withholds FAILED until the code is on the
+        // wire, so this also pins that the rejection follows a real submission.
+        const WRONG_CODE: &str = "99999999";
         let challenge = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 2, "user", &[
             "e7429fde5b4c26f81fff956be6749908a8653558e7429fde5b4c26f81fff956b",
             "399 830",
             "https://x.example/u",
         ]);
         let state4_failed = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "user", &["FAILED"]);
-        let mut incoming = frame_xyz(&challenge);
-        incoming.extend_from_slice(&frame_xyz(&state4_failed));
-        let mut stream = ScriptedStream::new(incoming);
+        let submission = frame_xyz(&xyz::xyz_build_swcr_token_code_submission(WRONG_CODE));
+        let mut stream = ProbingGateway::new(
+            frame_xyz(&challenge), submission.clone(), frame_xyz(&state4_failed),
+        );
 
-        let provider: CodeProvider = std::sync::Arc::new(|_| Ok("99999999".to_string()));
+        let provider: CodeProvider = std::sync::Arc::new(|_| Ok(WRONG_CODE.to_string()));
         let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(err.to_string().contains("C/R code rejected"),
             "expected C/R rejection message; got {}", err);
+        assert!(stream.written.windows(submission.len()).any(|f| f == submission),
+            "the rejected code must have been submitted as state=3");
     }
 
     #[test]
@@ -1757,7 +1874,7 @@ mod tests {
             "399 830",
             "https://x.example/u",
         ]);
-        let mut stream = ScriptedStream::new(frame_xyz(&challenge));
+        let mut stream = ProbingGateway::new(frame_xyz(&challenge), Vec::new(), Vec::new());
         let provider: CodeProvider = std::sync::Arc::new(|_| {
             Err(io::Error::new(io::ErrorKind::Interrupted, "user cancelled"))
         });
