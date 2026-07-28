@@ -1442,7 +1442,7 @@ pub(crate) fn drain_and_send_orders(
                 }
                 last_result
             }
-            OrderRequest::Modify { new_order_id, order_id, price, qty } => {
+            OrderRequest::Modify { new_order_id, order_id, price, qty, outside_rth } => {
                 let orig = context.order(order_id).copied();
                 // Modify carries no instrument; resolve it from the tracked
                 // order to snap the new price to the tick grid (ibx#216).
@@ -1491,7 +1491,15 @@ pub(crate) fn drain_and_send_orders(
                     (44, &price_str),    // Price
                     (1, account_id),     // Account
                     (6122, "c"),         // Client version
-                    (6433, "1"),         // OutsideRTH (preserve from original)
+                ];
+                // OutsideRTH, from the order the caller resubmitted rather than
+                // hard-coded: the tracked record cannot express it, and asserting
+                // 1 unconditionally opted every modified order into the extended
+                // session (ibx#247). Same position it held in the capture.
+                if outside_rth {
+                    fields.push((6433, "1"));
+                }
+                let rest: [(u32, &str); 11] = [
                     (38, &qty_str),      // OrderQty
                     (54, side_str),      // Side
                     (40, &ord_type_str), // OrdType
@@ -1504,6 +1512,7 @@ pub(crate) fn drain_and_send_orders(
                     (6211, ""),          // Empty (matches reference)
                     (6238, ""),          // Empty (matches reference)
                 ];
+                fields.extend(rest);
                 // Include stop price for order types that need it
                 let stop_str;
                 if let Some(o) = orig {
@@ -2055,5 +2064,51 @@ mod tests {
 
         assert_eq!(context.order(8).unwrap().status, OrderStatus::Filled);
         assert!(shared.orders.drain_order_updates().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod modify_wire_tests {
+    use super::*;
+    use crate::protocol::connection::Connection;
+    use std::io::Read;
+
+    /// Drive the Modify arm and read what actually reaches the socket.
+    fn replace_bytes(outside_rth: bool) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+
+        let mut context = Context::new();
+        context.insert_order(crate::types::Order::new(
+            7, 0, Side::Buy, 1, 100 * crate::types::PRICE_SCALE, b'2', b'0', 0,
+        ));
+        context.modify(7, 200 * crate::types::PRICE_SCALE, 50, outside_rth);
+
+        let shared = std::sync::Arc::new(SharedState::new());
+        let mut hb = HeartbeatState::new();
+        drain_and_send_orders(&mut conn, &mut context, "DU111111", &mut hb, false, &shared);
+
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|")
+    }
+
+    /// ibx#247: the replace asserted 6433=1 unconditionally, so an RTH-only
+    /// order was opted into the extended session by its first modify. Pins the
+    /// 6122/6433/38 neighbourhood in both polarities — presence and captured
+    /// position when the caller sets the flag, absence when it does not.
+    #[test]
+    fn modify_emits_outside_rth_only_when_the_caller_set_it() {
+        let on = replace_bytes(true);
+        assert!(on.contains("|6122=c|6433=1|38=50|"),
+            "6433 must keep its captured position between 6122 and 38: {}", on);
+
+        let off = replace_bytes(false);
+        assert!(!off.contains("|6433="), "an RTH-only order must not assert 6433: {}", off);
+        assert!(off.contains("|6122=c|38=50|"), "the rest of the message is unchanged: {}", off);
     }
 }

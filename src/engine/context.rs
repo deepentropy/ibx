@@ -853,7 +853,9 @@ impl Context {
             .push(OrderRequest::CancelAll { instrument });
     }
 
-    pub fn modify(&mut self, order_id: OrderId, price: Price, qty: u32) -> OrderId {
+    /// `outside_rth` is asserted on the replace: the tracked record has no
+    /// field for it, so it has to come from the caller (ibx#247).
+    pub fn modify(&mut self, order_id: OrderId, price: Price, qty: u32, outside_rth: bool) -> OrderId {
         let new_id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::Modify {
@@ -861,6 +863,7 @@ impl Context {
             order_id,
             price,
             qty,
+            outside_rth,
         });
         new_id
     }
@@ -1067,7 +1070,7 @@ mod tests {
     #[test]
     fn modify_drains_correctly() {
         let mut ctx = Context::new();
-        ctx.modify(7, 200 * PRICE_SCALE, 50);
+        ctx.modify(7, 200 * PRICE_SCALE, 50, false);
 
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         match orders[0] {

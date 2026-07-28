@@ -44,6 +44,7 @@ impl EClient {
                 order_id: oid,
                 price,
                 qty,
+                outside_rth: api_order.outside_rth,
             })
         } else {
             ClientCore::build_order_request(&api_order, oid, instrument)
