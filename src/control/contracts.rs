@@ -652,13 +652,12 @@ pub fn format_sessions_string(sessions: &[ScheduleSession]) -> String {
     for (i, s) in sessions.iter().enumerate() {
         if i > 0 { out.push(';'); }
         if s.start == s.end {
-            let date = if s.trade_date.len() >= 8 {
-                &s.trade_date[..8]
-            } else if s.start.len() >= 8 {
-                &s.start[..8]
-            } else {
-                s.start.as_str()
-            };
+            // get() rather than a length check plus a slice: it rejects a
+            // non-char boundary as well as a short field, so a lossily-decoded
+            // frame cannot panic here (ibx#258).
+            let date = s.trade_date.get(..8)
+                .or_else(|| s.start.get(..8))
+                .unwrap_or(s.start.as_str());
             out.push_str(date);
             out.push_str(":CLOSED");
         } else {
@@ -674,7 +673,11 @@ pub fn format_sessions_string(sessions: &[ScheduleSession]) -> String {
 /// Returns the input unchanged if the format does not match.
 fn trim_session_endpoint(s: &str) -> String {
     let bytes = s.as_bytes();
-    if bytes.len() >= 14 && bytes[8] == b'-' && bytes[11] == b':' {
+    // The reasoning below is in bytes, so it is only sound on ASCII. Frame
+    // bodies are decoded with from_utf8_lossy, and one invalid byte becomes a
+    // three-byte U+FFFD that can straddle a slice boundary — a panic on the
+    // hot loop rather than a bad value (ibx#258).
+    if s.is_ascii() && bytes.len() >= 14 && bytes[8] == b'-' && bytes[11] == b':' {
         let mut out = String::with_capacity(13);
         out.push_str(&s[..8]);
         out.push(':');
@@ -685,6 +688,54 @@ fn trim_session_endpoint(s: &str) -> String {
         s.to_string()
     }
 }
+#[cfg(test)]
+mod hot_loop_panic_tests {
+    use super::*;
+
+    /// ibx#258: frame bodies are decoded with from_utf8_lossy, so one invalid
+    /// byte becomes a three-byte U+FFFD that can straddle a byte-indexed slice
+    /// boundary. These must return a value, not abort the hot loop.
+    #[test]
+    fn session_endpoint_survives_a_lossily_decoded_field() {
+        // U+FFFD at bytes 12..15 — the old &s[12..14] cut inside it.
+        let lossy = format!("20260728-09:{}0", '\u{FFFD}');
+        assert!(!lossy.is_ascii());
+        let _ = trim_session_endpoint(&lossy);
+
+        let lossy2 = format!("2026072{}-09:30", '\u{FFFD}');
+        let _ = trim_session_endpoint(&lossy2);
+
+        // The ASCII form still trims exactly as before.
+        assert_eq!(trim_session_endpoint("20260728-09:30"), "20260728:0930");
+        assert_eq!(trim_session_endpoint("short"), "short");
+    }
+
+    /// The closed-session branch is the one that slices trade_date/start, and
+    /// it is only taken when start == end. The previous version of this test
+    /// set them differently, so it never reached the slice at all and passed
+    /// against the unfixed code too.
+    #[test]
+    fn sessions_string_survives_a_non_ascii_trade_date() {
+        let closed = format!("2026072{}", '\u{FFFD}');
+        let s = ScheduleSession {
+            trade_date: closed.clone(),
+            start: closed.clone(),
+            end: closed,
+        };
+        let out = format_sessions_string(&[s]);
+        assert!(!out.is_empty(), "a closed session must still render");
+
+        // A short trade_date falls back to start, and a short start to the
+        // whole string, without slicing past a boundary.
+        let short = ScheduleSession {
+            trade_date: "2026".to_string(),
+            start: "2026".to_string(),
+            end: "2026".to_string(),
+        };
+        let _ = format_sessions_string(&[short]);
+    }
+}
+
 
 // ─── Matching symbols search ───
 

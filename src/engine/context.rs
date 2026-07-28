@@ -890,6 +890,10 @@ impl Context {
 
     // ── Instrument management ──
 
+    pub fn try_register_instrument(&mut self, con_id: i64) -> Option<InstrumentId> {
+        self.market.try_register(con_id)
+    }
+
     pub fn register_instrument(&mut self, con_id: i64) -> InstrumentId {
         self.market.register(con_id)
     }
