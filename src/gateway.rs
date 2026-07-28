@@ -438,6 +438,24 @@ pub struct Gateway {
     pub hmds_farm: String,
 }
 
+/// Farm slot the caller resolves before connecting: 17 is the market-data /
+/// historical farm, 18 the trading farm. These are the literals the call sites
+/// already pass.
+pub const FARM_SLOT_HMDS: u32 = 17;
+pub const FARM_SLOT_TRADING: u32 = 18;
+
+/// Channel role for a farm's routing request, from the slot the caller already
+/// resolved: historical-data farms take `2`, everything else `1`.
+///
+/// Keyed on the slot rather than the farm name. The name is not a reliable
+/// discriminator — routing tags carry whatever the server sends, and this
+/// codebase already has `cashhmds` on the trading slot — whereas the caller
+/// splits trading and market-data farms at the call site and passes the slot
+/// accordingly (ibx#253).
+pub fn farm_channel_id(slot: u32) -> &'static str {
+    if slot == FARM_SLOT_HMDS { "2" } else { "1" }
+}
+
 /// Connect to a data farm: key exchange → encrypted logon → token auth → routing → Connection.
 pub fn connect_farm(
     host: &str,
@@ -507,7 +525,7 @@ pub fn connect_farm(
     let sign_mac_key = channel.key_block().map(|kb| kb[64..84].to_vec()).unwrap_or_default();
 
     // Send routing table request after logon.
-    let channel_id = if farm_id == "ushmds" { "2" } else { "1" };
+    let channel_id = farm_channel_id(slot);
     let now = chrono_free_timestamp();
     let routing_msg = fix_build(&[
         (fix::TAG_MSG_TYPE, "U"),
@@ -1637,11 +1655,11 @@ impl Gateway {
             let enc = &encoded;
             let trading_handle = scope.spawn(move || {
                 connect_farm(&trading_host, &trading_farm, username, password,
-                    paper, ssid, token, hw, enc, 18)
+                    paper, ssid, token, hw, enc, FARM_SLOT_TRADING)
             });
             let mktdata_handle = scope.spawn(move || {
                 connect_farm(&mktdata_host, &mktdata_farm, username, password,
-                    paper, ssid, token, hw, enc, 17)
+                    paper, ssid, token, hw, enc, FARM_SLOT_HMDS)
             });
             let trading = trading_handle.join().expect("trading farm thread panicked");
             let mktdata = mktdata_handle.join().expect("mktdata farm thread panicked");
@@ -1913,6 +1931,24 @@ mod tests {
         let parsed = parse_farm_route("zdc1.ibllc.com/euhmds/4000").unwrap();
         assert_eq!(parsed, ("zdc1.ibllc.com".to_string(), "euhmds".to_string()));
     }
+
+    #[test]
+    fn the_channel_role_comes_from_the_slot_not_the_farm_name() {
+        // ibx#253: the role was keyed on the literal "ushmds", so a regional
+        // historical-data farm was established on the trading channel. The
+        // caller already splits the two and passes the slot, which is the
+        // discriminator that holds for every farm name — including `cashhmds`,
+        // which this codebase connects on the trading slot despite the suffix.
+        // Asserted on the wire values rather than through the constants: a
+        // drifting constant would otherwise put every historical-data farm on
+        // the trading channel with the suite still green.
+        assert_eq!(farm_channel_id(17), "2");
+        assert_eq!(farm_channel_id(18), "1");
+        assert_eq!(FARM_SLOT_HMDS, 17);
+        assert_eq!(FARM_SLOT_TRADING, 18);
+        assert_eq!(farm_channel_id(0), "1", "an unknown slot is not historical data");
+    }
+
 
     #[test]
     fn parse_farm_route_us_account() {
