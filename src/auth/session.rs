@@ -645,6 +645,32 @@ pub type CodeProvider = std::sync::Arc<
     dyn Fn(IbKeyChallenge) -> io::Result<String> + Send + Sync,
 >;
 
+/// How long the gate waits inline for a freshly started `code_provider` before
+/// falling back to polling it between inbound messages. Sized to cover a
+/// provider that reads from a vault, an env var or a file, and to stay far
+/// below the server's probe cadence so nothing is starved by the wait.
+const IB_KEY_PROVIDER_FAST_PATH_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(1);
+
+/// Put the 8-character Challenge/Response code on the wire as `XYZ 775` state=3.
+fn submit_swcr_code<S: Write>(stream: &mut S, code: &str) -> io::Result<()> {
+    let framed = xyz::xyz_wrap(&xyz::xyz_build_swcr_token_code_submission(code));
+    stream.write_all(&framed)?;
+    log::info!(
+        "2FA gate: submitted SWCR_TOKEN state=3 code (len={}, {} bytes framed)",
+        code.len(), framed.len(),
+    );
+    Ok(())
+}
+
+/// The provider thread dropped its sender without sending: it panicked.
+fn provider_panicked() -> io::Error {
+    ib_key_err(
+        io::ErrorKind::Other,
+        "2FA gate: code_provider panicked without returning a code",
+    )
+}
+
 /// Compact hex dump for diagnostic logging.
 fn hex_dump(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
@@ -769,10 +795,29 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                             avth_url: approval_url.clone(),
                         };
                         let (tx, rx) = std::sync::mpsc::channel();
-                        std::thread::spawn(move || {
-                            let _ = tx.send(provider(challenge_info));
-                        });
-                        pending_code = Some(rx);
+                        std::thread::Builder::new()
+                            .name("ibkey-code-provider".into())
+                            .spawn(move || {
+                                let _ = tx.send(provider(challenge_info));
+                            })?;
+                        // An unattended provider (vault, env, file) resolves at
+                        // once and shouldn't have to wait for the next probe to
+                        // get its code on the wire, so give it a brief inline
+                        // grace period first. Far below the probe cadence, so
+                        // nothing is starved; a provider waiting on a human
+                        // falls through to the probe-driven path below.
+                        match rx.recv_timeout(IB_KEY_PROVIDER_FAST_PATH_GRACE) {
+                            Ok(result) => {
+                                submit_swcr_code(stream, &result?)?;
+                                code_submitted = true;
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                pending_code = Some(rx);
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                return Err(provider_panicked());
+                            }
+                        }
                     }
                 }
             }
@@ -846,31 +891,25 @@ pub fn do_ib_key_2fa<S: Read + Write>(
             }
         }
 
-        // Submit the C/R code once the provider thread yields it. Checked after
-        // every inbound message, so submission trails the operator's entry by
-        // up to one server probe interval (~20 s). Polling on inbound traffic
-        // keeps the socket single-threaded; if that delay ever matters, give
-        // the stream a read timeout and select on both instead.
+        // A provider that outlived the grace period yields here instead. Polling
+        // on inbound traffic keeps the socket single-threaded, at the cost of
+        // trailing the operator's entry by up to one probe interval (~20 s); if
+        // that ever matters, give the stream a read timeout and select on both.
         if let Some(rx) = pending_code.as_ref() {
             match rx.try_recv() {
                 Ok(result) => {
                     pending_code = None;
-                    let code = result?;
-                    let submission = xyz::xyz_build_swcr_token_code_submission(&code);
-                    let framed = xyz::xyz_wrap(&submission);
-                    stream.write_all(&framed)?;
-                    log::info!(
-                        "2FA gate: submitted SWCR_TOKEN state=3 code (len={}, {} bytes framed)",
-                        code.len(), framed.len(),
-                    );
-                    code_submitted = true;
+                    // Don't burn a single-use code on a login we're about to
+                    // abandon: the deadline check at the top of the loop would
+                    // fire before the server's answer could be read.
+                    if Instant::now() < deadline {
+                        submit_swcr_code(stream, &result?)?;
+                        code_submitted = true;
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return Err(ib_key_err(
-                        io::ErrorKind::Other,
-                        "2FA gate: code_provider panicked without returning a code",
-                    ));
+                    return Err(provider_panicked());
                 }
             }
         }
@@ -1142,8 +1181,9 @@ mod tests {
     /// client submits `expect` (the state=3 frame), then serves `tail`.
     ///
     /// This is what makes the C/R tests deterministic: the result frames can't
-    /// arrive before the code does, and a gate that blocks on the provider
-    /// instead of answering probes never gets past the probe stream.
+    /// arrive before the code does. It models a server that keeps probing, not
+    /// one that enforces the probe, so what a blocked gate loses here is the
+    /// heartbeat ordering the tests assert on, not the frames themselves.
     struct ProbingGateway {
         pending: Vec<u8>,
         pos: usize,
@@ -1802,11 +1842,10 @@ mod tests {
 
         let seen_challenge = std::sync::Arc::new(std::sync::Mutex::new(IbKeyChallenge::default()));
         let seen_clone = seen_challenge.clone();
-        // The operator takes their time reading the code off the phone; the
-        // gate must stay responsive to the server's probes meanwhile.
+        // Unattended provider: resolves inside the fast-path grace, so the code
+        // goes out without waiting on a probe.
         let provider: CodeProvider = std::sync::Arc::new(move |c: IbKeyChallenge| {
             *seen_clone.lock().unwrap() = c;
-            std::thread::sleep(std::time::Duration::from_millis(50));
             Ok(RUN_A_CODE.to_string())
         });
 
@@ -1824,16 +1863,48 @@ mod tests {
         assert_eq!(seen.display_id, RUN_A_SESSION_ID);
         assert_eq!(seen.avth_url, RUN_A_AVTH_URL);
 
-        // The state=3 frame must be byte-for-byte the 40-byte run-A capture, and
-        // it must be preceded by a heartbeat reply: the operator's think time
-        // spans at least one server probe, and a gate that stalls on the
-        // provider instead of answering it loses the socket (ibx#176).
+        // The state=3 frame must be byte-for-byte the 40-byte run-A capture.
+        assert!(stream.written.windows(submission.len()).any(|f| f == submission),
+            "state=3 submission must byte-match the ib-agent#149 run-A capture");
+        // Nothing was waited on: an unattended login submits before any probe.
+        let heartbeat = ns_build_heart_beat(NS_VERSION, PROBE_TS);
+        assert!(!stream.written.windows(heartbeat.len()).any(|f| f == heartbeat),
+            "an immediate provider must not have to wait for a probe");
+    }
+
+    /// A provider that waits on a human outlives the fast-path grace, so the
+    /// code lands on the probe-driven path. The gate must answer the server's
+    /// keepalives throughout: called inline, it answers none of them, which is
+    /// what cost the C/R path its connection (ibx#244).
+    #[test]
+    fn ib_key_2fa_cr_slow_provider_keeps_heartbeats_flowing() {
+        const CODE: &str = "02226534";
+        let challenge = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 2, "user", &[
+            "10a447bc4f269b5161a6133b0265cf590c9dc714",
+            "399 830",
+            "https://x.example/u",
+        ]);
+        let state4_passed = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "user", &["PASSED"]);
+        let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 3, "user", &["PASSED"]);
+        let mut tail = frame_xyz(&state4_passed);
+        tail.extend_from_slice(&frame_xyz(&auth_finish));
+        let submission = frame_xyz(&xyz::xyz_build_swcr_token_code_submission(CODE));
+        let mut stream = ProbingGateway::new(frame_xyz(&challenge), submission.clone(), tail);
+
+        let provider: CodeProvider = std::sync::Arc::new(|_| {
+            std::thread::sleep(IB_KEY_PROVIDER_FAST_PATH_GRACE + std::time::Duration::from_millis(200));
+            Ok(CODE.to_string())
+        });
+
+        let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider)).unwrap();
+        assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
+
         let sent = &stream.written;
         let heartbeat = ns_build_heart_beat(NS_VERSION, PROBE_TS);
         let hb_at = sent.windows(heartbeat.len()).position(|f| f == heartbeat)
             .expect("heartbeat reply must be sent while the provider is running");
         let code_at = sent.windows(submission.len()).position(|f| f == submission)
-            .expect("state=3 submission must byte-match the ib-agent#149 run-A capture");
+            .expect("state=3 submission must reach the wire");
         assert!(hb_at < code_at, "heartbeat must be answered before the code is submitted");
     }
 
