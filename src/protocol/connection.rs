@@ -282,7 +282,18 @@ impl Connection {
             return (msg.to_vec(), true);
         }
         let (undistorted, new_iv, valid) = fix::fix_unsign(msg, &self.read_key, &self.read_iv);
-        self.read_iv = new_iv;
+        if valid {
+            self.read_iv = new_iv;
+        } else {
+            // Do not chain off a frame that failed verification. The
+            // undistortion step XORs byte positions using this IV, so advancing
+            // it here desynchronised the read chain permanently and every later
+            // genuine frame arrived corrupted, with nothing surfaced (ibx#275).
+            log::warn!(
+                "inbound frame failed HMAC verification ({} bytes) — read IV not advanced",
+                msg.len(),
+            );
+        }
         (undistorted, valid)
     }
 
@@ -476,6 +487,33 @@ mod tests {
         assert_eq!(find_subsequence(b"hello world", b"world"), Some(6));
         assert_eq!(find_subsequence(b"hello world", b"xyz"), None);
         assert_eq!(find_subsequence(b"8=FIX.4.1\x01", b"8=FIX."), Some(0));
+    }
+
+    /// ibx#275: a frame that fails verification must not chain the read IV.
+    /// The undistortion step XORs byte positions using it, so advancing it on a
+    /// bad frame corrupted every genuine frame that followed.
+    #[test]
+    fn failed_verification_does_not_advance_the_read_iv() {
+        let key = vec![0xAAu8; 20];
+        let iv = vec![0x11u8; 16];
+        let mut conn = test_connection_with_buf(Vec::new());
+        conn.read_key = key.clone();
+        conn.read_iv = iv.clone();
+
+        // A properly signed frame, then the same frame with one payload byte
+        // flipped so the MAC no longer matches.
+        let (signed, _next_iv) = fix::fix_sign(&fix_build(&[(35, "0")], 1), &key, &iv);
+        let mut tampered = signed.clone();
+        let last = tampered.len() - 12;
+        tampered[last] ^= 0x01;
+
+        let (_out, valid) = conn.unsign(&tampered);
+        assert!(!valid, "tampering must be detected by the code that computes the flag");
+        assert_eq!(conn.read_iv, iv, "a rejected frame must not chain the IV");
+
+        // The genuine frame still verifies against the unadvanced IV.
+        let (_out, valid) = conn.unsign(&signed);
+        assert!(valid, "a genuine frame must still verify after a rejected one");
     }
 
     /// Helper: create a Connection with a dummy TCP stream for buffer tests.
