@@ -231,7 +231,7 @@ pub(super) fn phase_modify_order(conns: Conns) -> Conns {
                         } else if !order_acked {
                             order_acked = true;
                             control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                order_id, new_order_id, price: 2_00_000_000, qty: 1,
+                                order_id, new_order_id, price: 2_00_000_000, qty: 1, outside_rth: false,
                             })).unwrap();
                             modify_sent = true;
                         }
@@ -459,7 +459,7 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
                         } else if !order_acked {
                             order_acked = true;
                             control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                order_id, new_order_id, price: 1_00_000_000, qty: 2,
+                                order_id, new_order_id, price: 1_00_000_000, qty: 2, outside_rth: false,
                             })).unwrap();
                             modify_sent = true;
                         }
@@ -1729,7 +1729,7 @@ pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
                             order_acked = true;
                             // Modify BOTH price ($1→$2) and qty (1→3) in a single Modify
                             control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                order_id, new_order_id, price: 2_00_000_000, qty: 3,
+                                order_id, new_order_id, price: 2_00_000_000, qty: 3, outside_rth: false,
                             })).unwrap();
                             modify_sent = true;
                         }
@@ -1797,14 +1797,14 @@ pub(super) fn phase_double_modify(conns: Conns) -> Conns {
                             0 => {
                                 // Original order acked → modify to $2
                                 control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                    order_id, new_order_id: modify_id_1, price: 2_00_000_000, qty: 1,
+                                    order_id, new_order_id: modify_id_1, price: 2_00_000_000, qty: 1, outside_rth: false,
                                 })).unwrap();
                                 phase = 1;
                             }
                             1 => {
                                 // First modify acked → modify again to $3
                                 control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                    order_id: modify_id_1, new_order_id: modify_id_2, price: 3_00_000_000, qty: 1,
+                                    order_id: modify_id_1, new_order_id: modify_id_2, price: 3_00_000_000, qty: 1, outside_rth: false,
                                 })).unwrap();
                                 phase = 2;
                             }
@@ -1877,7 +1877,7 @@ pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
                             order_acked = true;
                             // Send modify AND cancel back-to-back — no waiting
                             control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                order_id, new_order_id, price: 2_00_000_000, qty: 1,
+                                order_id, new_order_id, price: 2_00_000_000, qty: 1, outside_rth: false,
                             })).unwrap();
                             control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
                             control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: new_order_id })).unwrap();

@@ -393,6 +393,42 @@ fn place_order_adjustable_trail_carries_trailing_amount_and_unit() {
 }
 
 #[test]
+fn modify_carries_outside_rth_from_the_resubmitted_order() {
+    // ibx#247: the replace asserted 6433=1 unconditionally, so an order placed
+    // with outside_rth=false came back outside-RTH after any modify. The flag
+    // has to travel with the modify, since the tracked record has no field for
+    // it.
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, outside_rth: false, ..Default::default()
+    };
+    client.place_order(70, &spy(), &order).unwrap();
+    let _submit = rx.try_recv().unwrap();
+
+    // Same id -> modify. Caller still says outside_rth=false.
+    let reprice = Order { lmt_price: 101.0, ..order.clone() };
+    client.place_order(70, &spy(), &reprice).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::Modify { outside_rth, .. }) => {
+            assert!(!outside_rth, "a modify must not opt the order into the extended session");
+        }
+        cmd => panic!("expected Modify, got {:?}", cmd),
+    }
+
+    // And it survives when the caller does want it.
+    let rth_out = Order { lmt_price: 102.0, outside_rth: true, ..order.clone() };
+    client.place_order(70, &spy(), &rth_out).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::Modify { outside_rth, .. }) => {
+            assert!(outside_rth, "an explicit outside_rth=true must reach the replace");
+        }
+        cmd => panic!("expected Modify, got {:?}", cmd),
+    }
+}
+
+#[test]
 fn place_order_adjustable_trail_percent_unit_passes_through() {
     // Percent unit (100) must survive; the trailing amount is a percent value.
     let (client, rx, shared) = test_client();
