@@ -1468,15 +1468,21 @@ impl ClientCore {
             } else {
                 order.adjusted_trailing_amount
             };
-            return Ok(ControlCommand::Order(OrderRequest::SubmitAdjustableStop {
+            // Through SubmitEx like every other order type, so a bracket child
+            // keeps its parent link, its OCA group and its tif (ibx#240).
+            return Ok(ControlCommand::Order(OrderRequest::SubmitEx {
                 order_id, instrument, side, qty,
-                stop_price: scale(order.aux_price),
-                trigger_price: scale(order.trigger_price),
-                adjusted_order_type: adjusted,
-                adjusted_stop_price: scale(order.adjusted_stop_price),
-                adjusted_stop_limit_price: scale(order.adjusted_stop_limit_price),
-                adjusted_trailing_amount: scale(adj_trail),
-                adjustable_trailing_unit: order.adjustable_trailing_unit,
+                kind: OrderKind::AdjustableStop {
+                    stop_price: scale(order.aux_price),
+                    trigger_price: scale(order.trigger_price),
+                    adjusted_order_type: adjusted,
+                    adjusted_stop_price: scale(order.adjusted_stop_price),
+                    adjusted_stop_limit_price: scale(order.adjusted_stop_limit_price),
+                    adjusted_trailing_amount: scale(adj_trail),
+                    adjustable_trailing_unit: order.adjustable_trailing_unit,
+                },
+                tif: order.tif_byte(),
+                attrs: order.attrs(),
             }));
         }
 

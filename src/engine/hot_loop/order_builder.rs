@@ -1039,64 +1039,6 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ])
             }
-            OrderRequest::SubmitAdjustableStop { order_id, instrument, side, qty,
-                stop_price, trigger_price, adjusted_order_type,
-                adjusted_stop_price, adjusted_stop_limit_price,
-                adjusted_trailing_amount, adjustable_trailing_unit } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, b'3', b'0', stop_price,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let stop_str = format_price(stop_price);
-                let trigger_str = format_price(trigger_price);
-                let adj_stop_str = format_price(adjusted_stop_price);
-                let adj_limit_str = format_price(adjusted_stop_limit_price);
-                let adj_trail_str = format_price(adjusted_trailing_amount);
-                let adj_unit_str = adjustable_trailing_unit.to_string();
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "3"),              // OrdType = Stop
-                    (99, &stop_str),        // StopPx
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                    (6257, "1"),            // Has adjustable params flag
-                    (6261, adjusted_order_type.fix_code()), // Adjusted order type
-                    (6258, &trigger_str),   // Trigger price
-                    (6259, &adj_stop_str),  // Adjusted stop price
-                ];
-                if adjusted_stop_limit_price > 0 {
-                    fields.push((6262, &adj_limit_str)); // Adjusted stop limit price
-                }
-                // When the stop converts to a trailing type, carry the trailing
-                // amount (6260) and its unit (6269: 0=amount, 100=percent).
-                // Captured in ib-agent#167 (ibx#225).
-                if matches!(adjusted_order_type,
-                    crate::types::AdjustedOrderType::Trail
-                    | crate::types::AdjustedOrderType::TrailLimit)
-                {
-                    fields.push((6260, &adj_trail_str));
-                    fields.push((6269, &adj_unit_str));
-                }
-                conn.send_fix(&fields)
-            }
             OrderRequest::SubmitMtl { order_id, instrument, side, qty } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'K', b'0', 0,
@@ -1632,6 +1574,7 @@ fn send_order_ex(
         K::PegMkt { offset } => (crate::types::ORD_PEG_MKT, 0, offset),
         K::PegMid { offset } => (crate::types::ORD_PEG_MID, 0, offset),
         K::Rel { offset } => (b'R', 0, offset),
+        K::AdjustableStop { stop_price, .. } => (b'3', 0, stop_price),
     };
     context.insert_order(crate::types::Order::new(
         order_id, instrument, side, qty, track_price, ord_type_byte, tif, track_stop,
@@ -1676,6 +1619,13 @@ fn send_order_ex(
             fields.push((40, "4".to_string()));
             fields.push((44, format_price(price).to_string()));
             fields.push((99, format_price(stop_price).to_string()));
+        }
+        K::AdjustableStop { stop_price, .. } => {
+            // Base order type only. The 6257+ adjustable tags are appended after
+            // the attribute block below, where the dedicated encoder this path
+            // replaced put them.
+            fields.push((40, "3".to_string()));                       // OrdType = Stop
+            fields.push((99, format_price(stop_price).to_string()));  // StopPx
         }
         K::TrailingStop { trail_amt, trail_stop_price } => {
             // Per ib-agent#136 capture: amount-based trailing stop carries
@@ -1862,6 +1812,32 @@ fn send_order_ex(
             fields.push((6245, cond_strs[base + 8].clone()));  // percent
             fields.push((6263, cond_strs[base + 9].clone()));  // volume
             fields.push((6246, cond_strs[base + 10].clone())); // execution
+        }
+    }
+
+    // Adjustable-stop tags last, keeping the position they held in the encoder
+    // this path replaced: after 204 and the attribute block, not in among the
+    // order-type tags. Values and conditions are unchanged; only the encoder
+    // they come from is new (ibx#240).
+    if let K::AdjustableStop {
+        trigger_price, adjusted_order_type, adjusted_stop_price,
+        adjusted_stop_limit_price, adjusted_trailing_amount, adjustable_trailing_unit, ..
+    } = kind {
+        fields.push((6257, "1".to_string()));                     // has adjustable params
+        fields.push((6261, adjusted_order_type.fix_code().to_string()));
+        fields.push((6258, format_price(trigger_price).to_string()));
+        fields.push((6259, format_price(adjusted_stop_price).to_string()));
+        if adjusted_stop_limit_price > 0 {
+            fields.push((6262, format_price(adjusted_stop_limit_price).to_string()));
+        }
+        // Trailing amount + unit for a Trail/TrailLimit conversion
+        // (ib-agent#167, ibx#225).
+        if matches!(adjusted_order_type,
+            crate::types::AdjustedOrderType::Trail
+            | crate::types::AdjustedOrderType::TrailLimit)
+        {
+            fields.push((6260, format_price(adjusted_trailing_amount).to_string()));
+            fields.push((6269, adjustable_trailing_unit.to_string()));
         }
     }
 
@@ -2055,5 +2031,102 @@ mod tests {
 
         assert_eq!(context.order(8).unwrap().status, OrderStatus::Filled);
         assert!(shared.orders.drain_order_updates().is_empty());
+    }
+
+    /// ibx#240: the tags a bracket child cannot ship without. Asserted on the
+    /// bytes `send_order_ex` puts on the wire, not on the request enum — the
+    /// enum-level tests passed throughout the period the child shipped naked.
+    #[test]
+    fn adjustable_stop_wire_carries_parent_oca_and_tif() {
+        use std::io::Read;
+        let (mut conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut context = Context::new();
+        let attrs = crate::types::OrderAttrs {
+            parent_id: 42,
+            oca_group_str: "bracket_1".to_string(),
+            oca_type: 1,
+            ..Default::default()
+        };
+        send_order_ex(
+            &mut conn, &mut context, "DU123456", 7, 0, Side::Sell, 1,
+            crate::types::OrderKind::AdjustableStop {
+                stop_price: 11 * crate::types::PRICE_SCALE,
+                trigger_price: 12 * crate::types::PRICE_SCALE,
+                adjusted_order_type: crate::types::AdjustedOrderType::Stop,
+                adjusted_stop_price: 11 * crate::types::PRICE_SCALE + crate::types::PRICE_SCALE / 2,
+                adjusted_stop_limit_price: 0,
+                adjusted_trailing_amount: 0,
+                adjustable_trailing_unit: 0,
+            },
+            b'1',           // GTC
+            &attrs,
+        ).unwrap();
+
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        let msg = String::from_utf8_lossy(&buf[..n]);
+        let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
+
+        assert_eq!(tag("6107=").as_deref(), Some("42.0"), "parent link missing: {}", msg);
+        assert_eq!(tag("583=").as_deref(), Some("bracket_1"), "OCA group missing: {}", msg);
+        assert_eq!(tag("59=").as_deref(), Some("1"), "tif must be GTC, not DAY: {}", msg);
+        // The adjustable-specific tags keep both the values and the position the
+        // standalone arm gave them — after 204 and the attribute block — which
+        // the sibling test pins by asserting 204 precedes 6257.
+        assert_eq!(tag("40=").as_deref(), Some("3"));
+        assert_eq!(tag("99="), Some(format_price(11 * crate::types::PRICE_SCALE).to_string()));
+        assert_eq!(tag("6257=").as_deref(), Some("1"));
+        assert_eq!(tag("6261=").as_deref(), Some(crate::types::AdjustedOrderType::Stop.fix_code()));
+        assert_eq!(tag("6258="), Some(format_price(12 * crate::types::PRICE_SCALE).to_string()));
+        assert_eq!(tag("6259="),
+            Some(format_price(11 * crate::types::PRICE_SCALE + crate::types::PRICE_SCALE / 2).to_string()));
+    }
+
+    /// The conditional adjustable tags: 6262 only with a stop-limit conversion,
+    /// 6260/6269 only with a trailing one. Same rules as the standalone arm.
+    #[test]
+    fn adjustable_stop_wire_carries_trail_and_limit_tags() {
+        use std::io::Read;
+        let (mut conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut context = Context::new();
+        send_order_ex(
+            &mut conn, &mut context, "DU123456", 8, 0, Side::Sell, 1,
+            crate::types::OrderKind::AdjustableStop {
+                stop_price: 11 * crate::types::PRICE_SCALE,
+                trigger_price: 12 * crate::types::PRICE_SCALE,
+                adjusted_order_type: crate::types::AdjustedOrderType::TrailLimit,
+                adjusted_stop_price: 11 * crate::types::PRICE_SCALE,
+                adjusted_stop_limit_price: 10 * crate::types::PRICE_SCALE,
+                adjusted_trailing_amount: crate::types::PRICE_SCALE / 2,
+                adjustable_trailing_unit: 0,
+            },
+            b'0',
+            &crate::types::OrderAttrs::default(),
+        ).unwrap();
+
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        let msg = String::from_utf8_lossy(&buf[..n]);
+        let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
+
+        assert_eq!(tag("6262="), Some(format_price(10 * crate::types::PRICE_SCALE).to_string()));
+        assert_eq!(tag("6260="), Some(format_price(crate::types::PRICE_SCALE / 2).to_string()));
+        assert_eq!(tag("6269=").as_deref(), Some("0"));
+        // No parent, no OCA set: those tags must be absent, not empty.
+        assert_eq!(tag("6107="), None);
+        assert_eq!(tag("583="), None);
+
+        // Order, not just presence: the adjustable tags sit after 204 and the
+        // base type tags before 59, exactly where the dedicated encoder this
+        // path replaced put them. Tag order is not supposed to carry meaning,
+        // but this path had a shipped layout and there is no reason to change
+        // it as a side effect (ibx#240).
+        let pos = |t: &str| msg.split('\u{1}').position(|f| f.starts_with(t));
+        assert!(pos("40=") < pos("59="), "base type tags precede tif: {}", msg);
+        assert!(pos("99=") < pos("59="), "stop price precedes tif: {}", msg);
+        assert!(pos("204=") < pos("6257="), "adjustable tags follow 204: {}", msg);
+        assert!(pos("6257=") < pos("6261="), "adjustable tags keep their order: {}", msg);
+        assert!(pos("6259=") < pos("6262="), "adjustable tags keep their order: {}", msg);
+        assert!(pos("6262=") < pos("6260="), "adjustable tags keep their order: {}", msg);
     }
 }
