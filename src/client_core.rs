@@ -279,8 +279,48 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
 
 // ── Execution storage ──
 
+/// Does a stored execution satisfy an `ExecutionFilter`? Shared by the index
+/// form and the snapshot form so the two cannot disagree about what matches.
+fn execution_matches(se: &StoredExecution, filter: &ExecutionFilter) -> bool {
+    if !filter.symbol.is_empty() && !se.contract.symbol.eq_ignore_ascii_case(&filter.symbol) {
+        return false;
+    }
+    if !filter.sec_type.is_empty() && !se.contract.sec_type.eq_ignore_ascii_case(&filter.sec_type) {
+        return false;
+    }
+    if !filter.exchange.is_empty() && !se.execution.exchange.eq_ignore_ascii_case(&filter.exchange) {
+        return false;
+    }
+    if !filter.side.is_empty() && !se.execution.side.eq_ignore_ascii_case(&filter.side) {
+        return false;
+    }
+    if !filter.acct_code.is_empty() && !se.execution.acct_number.eq_ignore_ascii_case(&filter.acct_code) {
+        return false;
+    }
+    if filter.client_id != 0 && se.execution.client_id != filter.client_id {
+        return false;
+    }
+    // ibapi treats `time` as a lower bound — executions at or after it. The
+    // two sides can be punctuated differently ("20260729-10:00:00" against
+    // "20260729 10:00:00"), so compare on digits alone; both are yyyyMMdd
+    // first, so that ordering is chronological. A bound carrying less
+    // precision than the timestamp compares against the same prefix, so a
+    // date-only filter keeps that whole day rather than dropping it.
+    if !filter.time.is_empty() {
+        let digits = |s: &str| s.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+        let lo = digits(&filter.time);
+        let at = digits(&se.execution.time);
+        let n = lo.len().min(at.len());
+        if at.get(..n).unwrap_or("") < lo.get(..n).unwrap_or("") {
+            return false;
+        }
+    }
+    true
+}
+
 /// A stored execution + commission_and_fees pair for `req_executions` replay.
 /// Shared between Rust and Python adapters via `ClientCore`.
+#[derive(Clone)]
 pub struct StoredExecution {
     pub req_id: i64,
     pub contract: ApiContract,
@@ -731,30 +771,17 @@ impl ClientCore {
         });
     }
 
-    /// Return executions matching the given filter.
-    pub fn filter_executions(&self, filter: &ExecutionFilter) -> Vec<usize> {
+    /// Executions matching `filter`, cloned out under one short lock.
+    ///
+    /// Callers replay these into user callbacks, and a callback may re-enter
+    /// any path that locks `executions` — re-requesting from `exec_details` is
+    /// an ordinary ibapi pattern, and the dispatch thread pushes fills through
+    /// the same mutex. Handing back indices to be dereferenced later also
+    /// raced `reset()`, which clears the vector. Snapshotting closes both
+    /// (ibx#265).
+    pub fn snapshot_executions(&self, filter: &ExecutionFilter) -> Vec<StoredExecution> {
         let execs = self.executions.lock().unwrap();
-        execs.iter().enumerate().filter_map(|(i, se)| {
-            if !filter.symbol.is_empty() && !se.contract.symbol.eq_ignore_ascii_case(&filter.symbol) {
-                return None;
-            }
-            if !filter.sec_type.is_empty() && !se.contract.sec_type.eq_ignore_ascii_case(&filter.sec_type) {
-                return None;
-            }
-            if !filter.exchange.is_empty() && !se.execution.exchange.eq_ignore_ascii_case(&filter.exchange) {
-                return None;
-            }
-            if !filter.side.is_empty() && !se.execution.side.eq_ignore_ascii_case(&filter.side) {
-                return None;
-            }
-            if !filter.acct_code.is_empty() && !se.execution.acct_number.eq_ignore_ascii_case(&filter.acct_code) {
-                return None;
-            }
-            if filter.client_id != 0 && se.execution.client_id != filter.client_id {
-                return None;
-            }
-            Some(i)
-        }).collect()
+        execs.iter().filter(|se| execution_matches(se, filter)).cloned().collect()
     }
 
     // ── Open order tracking ──

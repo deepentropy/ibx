@@ -161,10 +161,11 @@ impl EClient {
     /// Replays stored executions (optionally filtered), firing `exec_details` +
     /// `commission_and_fees_report` for each, then `exec_details_end`.
     pub fn req_executions(&self, req_id: i64, filter: &ExecutionFilter, wrapper: &mut impl Wrapper) {
-        let indices = self.core.filter_executions(filter);
-        let execs = self.core.executions.lock().unwrap();
-        for i in indices {
-            let se = &execs[i];
+        // Snapshot first: a callback may re-enter a path that locks
+        // `executions`, and the dispatch thread pushes fills through the same
+        // mutex — holding it across user code deadlocks one and stalls the
+        // other (ibx#265).
+        for se in self.core.snapshot_executions(filter) {
             wrapper.exec_details(req_id, &se.contract, &se.execution);
             wrapper.commission_and_fees_report(&se.commission_and_fees);
         }

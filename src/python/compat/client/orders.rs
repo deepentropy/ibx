@@ -172,22 +172,32 @@ impl EClient {
                     .and_then(|v| v.extract::<String>(py))
                     .unwrap_or_default()
             };
+            let get_i64 = |attr: &str| -> i64 {
+                fobj.getattr(py, pyo3::types::PyString::new(py, attr))
+                    .and_then(|v| v.extract::<i64>(py))
+                    .unwrap_or_default()
+            };
             ExecutionFilter {
                 symbol: get("symbol"),
                 sec_type: get("secType"),
                 exchange: get("exchange"),
                 side: get("side"),
                 acct_code: get("acctCode"),
-                ..Default::default()
+                // Dropping these silently replayed executions the caller had
+                // filtered out — another client's fills, or ones before the
+                // requested cutoff.
+                client_id: get_i64("clientId"),
+                time: get("time"),
             }
         } else {
             ExecutionFilter::default()
         };
 
-        let indices = self.core.filter_executions(&filter);
-        let execs = self.core.executions.lock().unwrap();
-        for i in indices {
-            let se = &execs[i];
+        let snapshot = self.core.snapshot_executions(&filter);
+        // Snapshot before any Python call: the callback runs with the GIL
+        // held, and re-entering a path that locks `executions` would freeze
+        // the interpreter, not just this thread (ibx#265).
+        for se in snapshot {
             let c_py = Py::new(py, Contract {
                 con_id: se.contract.con_id,
                 symbol: se.contract.symbol.clone(),
