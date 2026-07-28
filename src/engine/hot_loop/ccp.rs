@@ -1144,27 +1144,36 @@ impl CcpState {
 
         let Some(oid) = orig_clord else { return };
 
+        // FIX CxlRejReason 1 = UnknownOrder: the gateway is saying the order
+        // does not exist on its side, so there is nothing to restore it to.
+        // Restoring it anyway left the engine asserting a phantom order was
+        // working while the cache row that would surface it was removed —
+        // opposite halves of the same state disagreeing (ibx#252). Every other
+        // reason (TooLate, OrderInProcess, ...) means the order really is still
+        // working, so the cancel is undone and a follow-up exec report
+        // reconciles.
+        let unknown_order = reason_code == 1;
+
         // Update local context only if we tracked the order in this session.
         let instrument = if let Some(order) = context.order(oid).copied() {
-            let restore_status = if order.filled > 0 {
-                crate::types::OrderStatus::PartiallyFilled
+            if unknown_order {
+                context.remove_order(oid);
             } else {
-                crate::types::OrderStatus::Submitted
-            };
-            // Deliberate regression (PendingCancel back to working) — the
-            // ibx#212 guard would rightly block it on the ordinary path.
-            context.set_order_status_forced(oid, restore_status);
+                let restore_status = if order.filled > 0 {
+                    crate::types::OrderStatus::PartiallyFilled
+                } else {
+                    crate::types::OrderStatus::Submitted
+                };
+                // Deliberate regression (PendingCancel back to working) — the
+                // ibx#212 guard would rightly block it on the ordinary path.
+                context.set_order_status_forced(oid, restore_status);
+            }
             order.instrument
         } else {
             0
         };
 
-        // FIX CxlRejReason 1 = UnknownOrder. The gateway is telling us the
-        // order it just listed in the mass-status burst doesn't exist on its
-        // side — drop the stale cache entry so subsequent req_open_orders
-        // stops returning it. Other reasons (TooLate, OrderInProcess, ...)
-        // leave the cache alone; a follow-up exec report will reconcile.
-        if reason_code == 1 {
+        if unknown_order {
             shared.orders.remove_order_info(oid);
         }
 
@@ -2175,6 +2184,39 @@ mod tests {
             m.insert(*tag, val.to_string());
         }
         m
+    }
+
+    fn cancel_reject_frame(reason_code: &str) -> std::collections::HashMap<u32, String> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(41u32, "42".to_string());   // OrigClOrdID
+        m.insert(434u32, "1".to_string());   // CxlRejResponseTo = cancel request
+        m.insert(102u32, reason_code.to_string());
+        m.insert(58u32, "reject".to_string());
+        m
+    }
+
+    /// ibx#252: CxlRejReason 1 is the gateway saying the order does not exist.
+    /// Restoring it to working left the engine asserting a phantom order while
+    /// the cache row was dropped — the two halves disagreeing.
+    #[test]
+    fn cancel_reject_unknown_order_drops_the_order_rather_than_restoring_it() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        context.set_order_status_forced(42, crate::types::OrderStatus::PendingCancel);
+        ccp.handle_cancel_reject(&cancel_reject_frame("1"), &mut context, &shared, &None);
+        assert!(context.order(42).is_none(),
+            "an order the gateway does not have must not stay in the engine");
+    }
+
+    /// Every other reason means the order really is still working, so the
+    /// cancel is undone exactly as before.
+    #[test]
+    fn cancel_reject_too_late_restores_the_order_to_working() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        context.set_order_status_forced(42, crate::types::OrderStatus::PendingCancel);
+        ccp.handle_cancel_reject(&cancel_reject_frame("0"), &mut context, &shared, &None);
+        assert_eq!(context.order(42).map(|o| o.status),
+            Some(crate::types::OrderStatus::Submitted),
+            "a TooLate reject must leave the order working");
     }
 
     #[test]
