@@ -1951,10 +1951,17 @@ pub(crate) fn handle_position_update(
         Some(v) => v,
         None => return,
     };
-    let position: i64 = parsed.get(&6064)
+    // An absent quantity means this frame carries no quantity, not that the
+    // account is flat. Defaulting to 0 reconciled the engine's position to zero
+    // off a marks-only frame and published a flat book to reqPositions and both
+    // P&L paths until the next frame that did carry 6064 (ibx#261).
+    let position: Option<i64> = parsed.get(&6064)
         .and_then(|s| s.parse::<f64>().ok())
-        .map(|v| v as i64)
-        .unwrap_or(0);
+        // `"NaN".parse()` succeeds and `NaN as i64` is 0, so a non-finite
+        // value would flatten a live position by the same route the absent
+        // tag did. Route it to no-data instead.
+        .filter(|v| v.is_finite())
+        .map(|v| v as i64);
     // Tag map verified against the updatePortfolio callback (ib-agent#172):
     // 6101 = averageCost, 6065 = marketPrice (per share), 6067 = marketValue,
     // 6100 = unrealizedPNL, 6099 = realizedPNL. Earlier code read 6065 as the
@@ -1963,7 +1970,13 @@ pub(crate) fn handle_position_update(
         .and_then(|s| s.parse::<f64>().ok())
         .map(|v| (v * PRICE_SCALE as f64) as Price)
         .unwrap_or(0);
-    let avg_cost: Price = price_tag(6101);
+    // The average cost is written into a row that persists, so an absent tag
+    // must not overwrite a real one with zero — the same rule the quantity
+    // above follows. Marks are refreshed every frame and are handled apart.
+    let avg_cost: Option<Price> = parsed.get(&6101)
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .map(|v| (v * PRICE_SCALE as f64) as Price);
     let market_price: Price = price_tag(6065);
     let market_value: Price = price_tag(6067);
     let unrealized_pnl: Price = price_tag(6100);
@@ -1974,7 +1987,22 @@ pub(crate) fn handle_position_update(
     let currency = parsed.get(&15).cloned().unwrap_or_default();
     let multiplier = parsed.get(&8002).cloned().unwrap_or_default();
 
+    let Some(position) = position else {
+        // Marks-only frame. Apply the marks to a row that already exists, but do
+        // not create one: set_position_marks inserts a default PositionInfo, and
+        // a row conjured here would carry position 0 and read as flat — the very
+        // thing this is fixing. Ordering matters for the same reason, so the
+        // quantity-bearing path below still writes the info row first.
+        if shared.portfolio.position_info(con_id).is_some() {
+            shared.portfolio.set_position_marks(con_id, market_price, market_value, unrealized_pnl, realized_pnl);
+        }
+        return;
+    };
+
     // Always store position info for reqPositions/pnlSingle, regardless of instrument registry.
+    let avg_cost = avg_cost
+        .or_else(|| shared.portfolio.position_info(con_id).map(|p| p.avg_cost))
+        .unwrap_or(0);
     shared.portfolio.set_position_info(PositionInfo {
         con_id, position, avg_cost,
         symbol, sec_type, currency, multiplier,
@@ -1996,6 +2024,115 @@ pub(crate) fn handle_position_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn position_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(6008u32, "265598".to_string());
+        for (t, v) in pairs { m.insert(*t, v.to_string()); }
+        m
+    }
+
+    /// ibx#261: a frame carrying marks but no quantity must leave the position
+    /// alone. Reading absent as zero reconciled a live position to flat and
+    /// published it to reqPositions and both P&L paths.
+    /// The average cost is written into a row that persists, so a frame that
+    /// omits the tag must not replace a real one with zero — the same rule the
+    /// quantity follows, on the price side.
+    #[test]
+    fn a_frame_without_an_average_cost_keeps_the_stored_one() {
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let frame = |pairs: &[(u32, &str)]| {
+            let mut m = std::collections::HashMap::new();
+            for (t, v) in pairs { m.insert(*t, v.to_string()); }
+            m
+        };
+
+        // A frame stating both.
+        handle_position_update(
+            &frame(&[(6008, "756733"), (6064, "100"), (6101, "150.00"), (6068, "SPY")]),
+            &mut context, &shared, &None,
+        );
+        let stored = shared.portfolio.position_info(756733).expect("row").avg_cost;
+        assert_eq!(stored, 150 * PRICE_SCALE);
+
+        // A later frame stating the quantity but not the cost.
+        handle_position_update(
+            &frame(&[(6008, "756733"), (6064, "120"), (6068, "SPY")]),
+            &mut context, &shared, &None,
+        );
+        let after = shared.portfolio.position_info(756733).expect("row");
+        assert_eq!(after.position, 120, "the quantity it did state is applied");
+        assert_eq!(
+            after.avg_cost, 150 * PRICE_SCALE,
+            "and the cost it did not state is kept, not zeroed",
+        );
+    }
+
+    #[test]
+    fn marks_only_frame_does_not_flatten_a_live_position() {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(265598);
+        let shared = SharedState::new();
+
+        handle_position_update(&position_frame(&[(6064, "100"), (6101, "150.0")]),
+            &mut context, &shared, &None);
+        assert_eq!(context.position(instrument), 100);
+
+        // Marks move, no 6064 on the frame.
+        handle_position_update(&position_frame(&[(6065, "151.0"), (6100, "100.0")]),
+            &mut context, &shared, &None);
+        assert_eq!(context.position(instrument), 100,
+            "a marks-only frame must not flatten the position");
+        assert_eq!(shared.portfolio.position_infos().iter()
+            .find(|p| p.con_id == 265598).map(|p| p.position), Some(100),
+            "reqPositions must still report the held quantity");
+
+        // The marks from that frame did land on the existing row.
+        let row = shared.portfolio.position_infos().into_iter()
+            .find(|p| p.con_id == 265598).expect("row still present");
+        assert_eq!(row.market_price, (151.0 * PRICE_SCALE as f64) as Price,
+            "a marks-only frame must still update the marks");
+
+        // A frame that really does carry a flat quantity still flattens it.
+        handle_position_update(&position_frame(&[(6064, "0")]), &mut context, &shared, &None);
+        assert_eq!(context.position(instrument), 0);
+    }
+
+    /// A marks-only frame for a contract never seen before must not conjure a
+    /// row: set_position_marks inserts a default PositionInfo, and that row
+    /// would report position 0 to reqPositions and both P&L paths.
+    /// Same class as the absent tag: `"NaN".parse::<f64>()` succeeds and
+    /// `NaN as i64` is 0, so a non-finite value reached the flatten path by
+    /// exactly the route ibx#261 closed.
+    #[test]
+    fn a_non_finite_quantity_is_treated_as_no_quantity() {
+        for bad in ["NaN", "inf", "-inf"] {
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            handle_position_update(
+                &position_frame(&[(6064, "100"), (6101, "150.0")]), &mut context, &shared, &None);
+            assert_eq!(
+                shared.portfolio.position_info(265598).map(|p| p.position), Some(100),
+                "seed must establish a live position");
+
+            handle_position_update(
+                &position_frame(&[(6064, bad), (6101, "151.0")]), &mut context, &shared, &None);
+            assert_eq!(
+                shared.portfolio.position_info(265598).map(|p| p.position), Some(100),
+                "{} must not flatten a live position", bad);
+        }
+    }
+
+    #[test]
+    fn marks_only_frame_for_an_unknown_contract_creates_no_row() {
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        handle_position_update(&position_frame(&[(6065, "151.0"), (6100, "100.0")]),
+            &mut context, &shared, &None);
+        assert!(shared.portfolio.position_infos().iter().all(|p| p.con_id != 265598),
+            "no position row may be fabricated from a marks-only frame");
+    }
 
     // Regression for ibx#198: the fill-dedup set must NOT be wiped wholesale
     // when it reaches its cap. A recently-seen ExecID has to stay deduplicated
