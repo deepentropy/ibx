@@ -472,6 +472,13 @@ impl FarmState {
             None => return,
         };
         self.md_resub_info.retain(|(id, ..)| *id != instrument);
+        // Forget the pending acks too. A `35=Q` still in flight when the
+        // unsubscribe goes out would otherwise resolve its request id after
+        // the slot has been reclaimed and reused, binding this subscription's
+        // server_tag AND its minTick onto whatever contract now holds the
+        // slot — prices for the new contract then scale by the old one's tick
+        // size, which reads as plausible rather than broken (ibx#289).
+        self.md_req_to_instrument.retain(|(req_id, _)| !reqs.contains(req_id));
 
         let conn = match farm_conn.as_mut() {
             Some(c) => c,
@@ -1015,3 +1022,38 @@ impl FarmState {
     }
 }
 
+
+#[cfg(test)]
+mod stale_ack_tests {
+    use super::*;
+    use crate::engine::context::Context;
+
+    /// A `35=Q` in flight when the unsubscribe goes out used to resolve its
+    /// request id afterwards. If the slot had been reclaimed and reused by
+    /// then, the ack bound its server_tag and minTick onto the new contract,
+    /// whose prices then scaled by the previous contract's tick size — a
+    /// plausible wrong price rather than an obvious fault (ibx#289).
+    #[test]
+    fn a_late_ack_for_an_unsubscribed_request_is_ignored() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.market.register(756733);
+
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            &mut None, &mut hb,
+        );
+        let pending: Vec<u32> = farm.md_req_to_instrument.iter().map(|(r, _)| *r).collect();
+        assert!(!pending.is_empty(), "the subscribe must register at least one request");
+
+        farm.send_mktdata_unsubscribe(instrument, &mut None, &mut hb);
+
+        for req_id in pending {
+            assert!(
+                !farm.md_req_to_instrument.iter().any(|(r, _)| *r == req_id),
+                "request {} must not resolve after its unsubscribe", req_id,
+            );
+        }
+    }
+}
