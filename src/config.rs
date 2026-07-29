@@ -210,10 +210,36 @@ pub fn parse_ib_expiry(input: &str) -> Result<Option<IbExpiry>, String> {
             "UTC"
         }
     };
-    let zoned = dt
-        .in_tz(zone)
-        .map_err(|e| format!("expiry '{}': unknown timezone '{}': {}", input, zone, e))?;
+    // Ask for the name as given first: a host that has the legacy names, or a
+    // deliberately customised database, should answer for itself. The mapping
+    // is a fallback for the hosts that do not carry them, not an override.
+    let zoned = match dt.in_tz(zone) {
+        Ok(zoned) => zoned,
+        Err(_) => dt
+            .in_tz(canonical_zone(zone))
+            .map_err(|e| format!("expiry '{}': unknown timezone '{}': {}", input, zone, e))?,
+    };
     Ok(Some(IbExpiry::Instant(zoned.timestamp().as_second())))
+}
+
+/// Resolve the legacy zone names IB states its times in.
+///
+/// `US/Eastern` and its siblings are backward-compatibility links in the tz
+/// database, and Debian and Ubuntu ship those in a separate package that is not
+/// installed by default. Resolving them to the primary name keeps an expiry
+/// from being dropped on a host that has only the primary names — which
+/// includes a stock container image.
+fn canonical_zone(zone: &str) -> &str {
+    match zone {
+        "US/Eastern" => "America/New_York",
+        "US/Central" => "America/Chicago",
+        "US/Mountain" => "America/Denver",
+        "US/Pacific" => "America/Los_Angeles",
+        "US/Alaska" => "America/Anchorage",
+        "US/Hawaii" => "Pacific/Honolulu",
+        "US/Arizona" => "America/Phoenix",
+        other => other,
+    }
 }
 
 /// Convert days since Unix epoch to (year, month, day).
@@ -281,6 +307,58 @@ mod expiry_tests {
         // parse -> seconds -> tag 126 wire string must be the dash UTC form.
         let secs = instant("20260620 18:00:00 US/Eastern");
         assert_eq!(unix_to_ib_utc_dash(secs), "20260620-22:00:00");
+    }
+
+    /// IB states its times in the legacy zone names, and those are a separate,
+    /// not-installed-by-default package on Debian and Ubuntu. Without resolving
+    /// them the expiry fails to parse, `attrs()` logs and drops it, and a GTD
+    /// order goes out with no expiry at all.
+    #[test]
+    fn legacy_zone_names_map_to_their_documented_targets() {
+        // Asserted directly, because comparing one summer instant cannot tell a
+        // correct target from an offset-equivalent wrong one: Alaska and
+        // Pitcairn agree in June and differ by an hour in December.
+        for (legacy, primary) in [
+            ("US/Eastern", "America/New_York"),
+            ("US/Central", "America/Chicago"),
+            ("US/Mountain", "America/Denver"),
+            ("US/Pacific", "America/Los_Angeles"),
+            ("US/Alaska", "America/Anchorage"),
+            ("US/Hawaii", "Pacific/Honolulu"),
+            ("US/Arizona", "America/Phoenix"),
+        ] {
+            assert_eq!(canonical_zone(legacy), primary, "{legacy}");
+        }
+        // Anything already primary, and anything non-US, passes through.
+        for untouched in ["America/New_York", "Europe/London", "Asia/Tokyo", "UTC", ""] {
+            assert_eq!(canonical_zone(untouched), untouched);
+        }
+    }
+
+    #[test]
+    fn legacy_zone_names_resolve_to_the_same_instant() {
+        for (legacy, primary) in [
+            ("US/Eastern", "America/New_York"),
+            ("US/Central", "America/Chicago"),
+            ("US/Mountain", "America/Denver"),
+            ("US/Pacific", "America/Los_Angeles"),
+            ("US/Alaska", "America/Anchorage"),
+            ("US/Hawaii", "Pacific/Honolulu"),
+            ("US/Arizona", "America/Phoenix"),
+        ] {
+            // Both seasons: a wrong target that happens to share an offset in
+            // summer usually differs in winter.
+            for date in ["20260620", "20261215"] {
+                assert_eq!(
+                    instant(&format!("{date} 18:00:00 {legacy}")),
+                    instant(&format!("{date} 18:00:00 {primary}")),
+                    "{legacy} must resolve like {primary} on {date}",
+                );
+            }
+        }
+        // A name that is already primary is untouched.
+        assert_eq!(canonical_zone("Europe/London"), "Europe/London");
+        assert_eq!(canonical_zone("UTC"), "UTC");
     }
 
     #[test]
