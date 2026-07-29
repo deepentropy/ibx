@@ -882,11 +882,13 @@ mod tests {
             instrument: 0, order_id: 1, side: Side::Buy,
             price: 100 * PRICE_SCALE, qty: 10, remaining: 0,
             commission: 0, timestamp_ns: 0,
+            cum_qty: 10, avg_price: 100 * PRICE_SCALE,
         });
         ss.orders.push_fill(Fill {
             instrument: 0, order_id: 2, side: Side::Sell,
             price: 101 * PRICE_SCALE, qty: 5, remaining: 0,
             commission: 0, timestamp_ns: 0,
+            cum_qty: 5, avg_price: 101 * PRICE_SCALE,
         });
         let fills = ss.orders.drain_fills();
         assert_eq!(fills.len(), 2);
