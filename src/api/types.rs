@@ -479,6 +479,14 @@ impl Order {
             || self.all_or_none
             || self.trigger_method > 0
             || self.cash_qty > 0.0
+            // Everything `attrs()` carries has to be named here, or the order
+            // takes the plain encoder and the attribute is dropped without a
+            // word. Conditions are the costly one: the order goes out
+            // unconditional and routes immediately.
+            || !self.conditions.is_empty()
+            || self.conditions_cancel_order
+            || self.conditions_ignore_rth
+            || self.oca_type > 0
     }
 }
 
@@ -969,5 +977,64 @@ mod tests {
         let pi = PriceIncrement { low_edge: 0.0, increment: 0.01 };
         assert_eq!(pi.low_edge, 0.0);
         assert_eq!(pi.increment, 0.01);
+    }
+
+    /// `has_extended_attrs` decides whether an order routes through the encoder
+    /// that emits the attribute block. Anything `attrs()` carries but this does
+    /// not name is copied into `OrderAttrs` and then thrown away, with no error
+    /// and nothing on the wire — so the two have to agree field for field.
+    ///
+    /// One entry per attribute `attrs()` carries. Adding a field there without
+    /// adding it here is the bug this guards.
+    #[test]
+    fn every_carried_attribute_routes_through_the_extended_encoder() {
+        let cases: Vec<(&str, fn(&mut Order))> = vec![
+            ("display_size", |o| o.display_size = 100),
+            ("min_qty", |o| o.min_qty = 50),
+            ("hidden", |o| o.hidden = true),
+            ("outside_rth", |o| o.outside_rth = true),
+            // Named by the predicate but deliberately not carried: `attrs()`
+            // hardcodes `good_after` to 0 pending a wire capture (ibx#199), so
+            // this entry pins the routing rather than an emitted tag.
+            ("good_after_time", |o| o.good_after_time = "20260311 09:30:00".into()),
+            ("good_till_date", |o| o.good_till_date = "20260311 16:00:00".into()),
+            ("oca_group", |o| o.oca_group = "G1".into()),
+            ("oca_type", |o| o.oca_type = 2),
+            ("parent_id", |o| o.parent_id = 7),
+            ("discretionary_amt", |o| o.discretionary_amt = 0.05),
+            ("sweep_to_fill", |o| o.sweep_to_fill = true),
+            ("all_or_none", |o| o.all_or_none = true),
+            ("trigger_method", |o| o.trigger_method = 2),
+            ("cash_qty", |o| o.cash_qty = 1000.0),
+            ("conditions", |o| o.conditions.push(
+                OrderCondition::Time { time: "20260311-09:30:00".into(), is_more: true },
+            )),
+            ("conditions_cancel_order", |o| o.conditions_cancel_order = true),
+            ("conditions_ignore_rth", |o| o.conditions_ignore_rth = true),
+        ];
+
+        // Structural link to `attrs()`: destructured without `..`, so adding a
+        // field to `OrderAttrs` stops compiling here until it is accounted for
+        // both in the predicate and in the list above.
+        let crate::types::OrderAttrs {
+            display_size: _, min_qty: _, hidden: _, outside_rth: _, good_after: _,
+            good_till: _, good_till_date_ymd: _, oca_group: _, oca_group_str: _,
+            oca_type: _, parent_id: _, discretionary_amt: _, sweep_to_fill: _,
+            all_or_none: _, trigger_method: _, cash_qty: _, conditions: _,
+            conditions_cancel_order: _, conditions_ignore_rth: _,
+        } = Order::default().attrs();
+
+        assert!(
+            !Order::default().has_extended_attrs(),
+            "a default order carries nothing extended",
+        );
+        for (name, set) in cases {
+            let mut order = Order::default();
+            set(&mut order);
+            assert!(
+                order.has_extended_attrs(),
+                "{name} is carried by attrs() but does not route through the extended encoder",
+            );
+        }
     }
 }
