@@ -918,7 +918,11 @@ impl CcpState {
             let exec_exchange = parsed.get(&30).cloned().unwrap_or_default();
             let transact_time = parsed.get(&60).cloned().unwrap_or_default();
             let avg_px: f64 = parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let cum_qty: f64 = parsed.get(&14).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            // Absent is not zero. This value is written into a row that
+            // persists, so a later report that omits the tag — a pending
+            // cancel, say — would otherwise wipe a real filled quantity back
+            // to nothing, which is the symptom this is correcting.
+            let cum_qty: Option<f64> = parsed.get(&14).and_then(|s| s.parse().ok());
             let last_liq: i32 = parsed.get(&851).and_then(|s| s.parse().ok()).unwrap_or(0);
 
             let sec_type_str = match sec_type.as_str() {
@@ -1040,7 +1044,13 @@ impl CcpState {
                 tif: if tif_str.is_empty() { fb_tif.to_string() } else { tif_str.to_string() },
                 account: if account.is_empty() { account_id.to_string() } else { account.clone() },
                 perm_id,
-                filled_quantity: leaves_qty as f64,
+                // Tag 14 (CumQty), not tag 151 (LeavesQty). The two are
+                // complements, so reporting the remainder as the filled amount
+                // makes a completed order read as entirely unfilled (ibx#309).
+                filled_quantity: cum_qty.unwrap_or_else(|| {
+                    shared.orders.get_order_info(clord_id)
+                        .map_or(0.0, |info| info.order.filled_quantity)
+                }),
                 outside_rth,
                 clearing_intent,
                 auto_cancel_date,
@@ -1089,7 +1099,9 @@ impl CcpState {
                 shares: last_shares as f64,
                 price: last_px,
                 order_id: clord_id as i64,
-                cum_qty,
+                // The execution record describes this report, so an absent
+                // cumulative is zero here rather than the cached total.
+                cum_qty: cum_qty.unwrap_or(0.0),
                 avg_price: avg_px,
                 last_liquidity: last_liq,
                 ..Default::default()
@@ -2075,6 +2087,100 @@ mod tests {
             stop_price: 0,
         });
         (CcpState::new(), context, SharedState::new())
+    }
+
+    /// LeavesQty is still the remainder everywhere it was already right. The
+    /// two are complements, so a change that confuses them shows up here as
+    /// well as on the filled side.
+    #[test]
+    fn leaves_qty_is_still_reported_as_the_remainder() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = exec_report_frame(&[
+            (150, "2"), (39, "1"), (32, "30"), (31, "150.00"),
+            (14, "30"), (151, "70"), (6, "150.00"), (17, "E1"),
+        ]);
+
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        let fills = shared.orders.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].remaining, 70, "the fill reports what is still working");
+    }
+
+    /// `filled_quantity` was taken from tag 151 (LeavesQty), the *unfilled*
+    /// remainder, rather than tag 14 (CumQty). The two are complements, so a
+    /// partially filled order reported the wrong number and a completed one —
+    /// LeavesQty zero — reported as entirely unfilled (ibx#309).
+    #[test]
+    fn filled_quantity_is_the_filled_amount_not_the_remainder() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(265598);
+        context.insert_order(crate::types::Order {
+            order_id: 77, instrument, side: Side::Buy, price: 0, qty: 100,
+            filled: 0, status: crate::types::OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+
+        // 100 ordered, 30 filled, 70 still working.
+        let frame: std::collections::HashMap<u32, String> = [
+            (11u32, "77"), (150, "1"), (39, "1"), (6008, "265598"),
+            (38, "100"), (14, "30"), (151, "70"), (54, "1"), (6, "150.0"),
+        ].iter().map(|(k, v)| (*k, v.to_string())).collect();
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        let orders = shared.orders.drain_open_orders();
+        let (_, info) = orders.iter().find(|(id, _)| *id == 77)
+            .expect("the order must be reported");
+        assert_eq!(info.order.filled_quantity, 30.0,
+            "filled must be CumQty (30), not LeavesQty (70)");
+
+        // On a consistent frame the complement `total - leaves` gives the same
+        // number, so it has to be told apart on a frame without tag 151 —
+        // where the complement would report the whole order as filled.
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(265598);
+        context.insert_order(crate::types::Order {
+            order_id: 78, instrument, side: Side::Buy, price: 0, qty: 100,
+            filled: 0, status: crate::types::OrderStatus::Submitted,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        let frame: std::collections::HashMap<u32, String> = [
+            (11u32, "78"), (150, "1"), (39, "1"), (6008, "265598"),
+            (38, "100"), (14, "30"), (54, "1"), (6, "150.0"),
+        ].iter().map(|(k, v)| (*k, v.to_string())).collect();
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        let orders = shared.orders.drain_open_orders();
+        let (_, info) = orders.iter().find(|(id, _)| *id == 78)
+            .expect("the order must be reported");
+        assert_eq!(
+            info.order.filled_quantity, 30.0,
+            "still CumQty with no LeavesQty on the frame, not the complement (100)",
+        );
+
+        // A later report that omits tag 14 must not wipe what was established.
+        // A pending cancel is exactly that shape, and zeroing there would put
+        // back the symptom this corrects.
+        let later: std::collections::HashMap<u32, String> = [
+            (11u32, "78"), (150, "6"), (39, "6"), (6008, "265598"),
+            (38, "100"), (151, "70"), (54, "1"),
+        ].iter().map(|(k, v)| (*k, v.to_string())).collect();
+        ccp.handle_exec_report(&later, &mut context, &shared, &None, "");
+
+        let orders = shared.orders.drain_open_orders();
+        let (_, info) = orders.iter().find(|(id, _)| *id == 78)
+            .expect("the order must still be reported");
+        assert_eq!(
+            info.order.filled_quantity, 30.0,
+            "a report without tag 14 keeps the filled quantity, it does not zero it",
+        );
+
+        // And the remainder is still the remainder, on the same reports.
+        assert_eq!(info.order.total_quantity, 100.0);
     }
 
     // ibx#205: a margin-reducing preview (close, cash-account sell) resolves to a
