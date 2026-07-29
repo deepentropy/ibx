@@ -95,6 +95,8 @@ impl EClient {
             price: (price * ps) as i64, qty, remaining,
             commission: (commission * ps) as i64,
             timestamp_ns: 100,
+            // Single-print injection: the order total is this print.
+            cum_qty: qty, avg_price: (price * ps) as i64,
         });
         Ok(())
     }

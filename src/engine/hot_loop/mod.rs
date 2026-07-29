@@ -1537,6 +1537,7 @@ mod tests {
             remaining: 0,
             commission: 1_00000000,
             timestamp_ns: 0,
+            cum_qty: 100, avg_price: 150_00000000,
         };
         engine.inject_fill(&fill);
         assert_eq!(engine.context_mut().position(0), 100);
