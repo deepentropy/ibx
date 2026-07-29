@@ -681,7 +681,10 @@ impl CcpState {
         // context.order(clord_id) and emit OrderUpdate events to the user. ibx#191.
         let is_new_ack = parsed.get(&150).map(|s| s.as_str()) == Some("0")
             && parsed.get(&39).map(|s| s.as_str()) == Some("0");
-        if is_new_ack && context.order(clord_id).is_none() {
+        // The sentinel is dropped further down, but this recovery insert runs
+        // first — without the guard, a `11='*'` terminator registers a conId
+        // and inserts the reserved order id 0 before being "discarded".
+        if is_new_ack && clord_id != 0 && context.order(clord_id).is_none() {
             let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
             let side = match parsed.get(&54).map(|s| s.as_str()) {
                 Some("1") => Side::Buy,
@@ -700,7 +703,22 @@ impl CcpState {
             let ord_type_byte: u8 = parsed.get(&40).and_then(|s| s.bytes().next()).unwrap_or(b'2');
             let tif_byte: u8 = parsed.get(&59).and_then(|s| s.bytes().next()).unwrap_or(b'1');
             if con_id != 0 && qty > 0 {
-                let instrument = context.register_instrument(con_id);
+                // Recovery is fed by gateway frames, so a full instrument
+                // table must degrade to a missing order rather than take the
+                // engine down (ibx#257). The reconnect burst replays every
+                // resting order, which is exactly when the table fills.
+                // Skipping only the insert keeps the order in last_clord and
+                // the rich-order cache, so req_open_orders still shows it —
+                // but it is NOT in the engine book, so a later fill or
+                // terminal status for it is dropped and no OrderUpdate
+                // reaches the caller (ibx#297). A missing order beats taking
+                // the engine down; it is not a complete answer.
+                match context.try_register_instrument(con_id) {
+                    None => log::warn!(
+                        "recovery: instrument table full, order clord={} con_id={} not tracked in the engine book",
+                        clord_id, con_id,
+                    ),
+                    Some(instrument) => {
                 if let Some(sym) = parsed.get(&55) {
                     context.set_symbol(instrument, sym.clone());
                 }
@@ -719,6 +737,8 @@ impl CcpState {
                 log::info!("CCP recovery: inserted orderId={} sym={:?} side={:?} qty={} px={}",
                     clord_id, parsed.get(&55), side, qty,
                     limit_price_i64 as f64 / PRICE_SCALE as f64);
+                    }
+                }
             }
         }
 
@@ -2077,6 +2097,30 @@ mod tests {
         (CcpState::new(), context, SharedState::new())
     }
 
+    /// The recovery-push terminator carries `11='*'`, which parses to the
+    /// reserved order id 0. It is dropped further down the handler, but the
+    /// recovery insert runs first — so without a guard there it registers the
+    /// frame's conId and inserts order 0 before the "discard".
+    #[test]
+    fn the_recovery_terminator_mutates_no_state_before_it_is_dropped() {
+        // A clean context: the shared fixture pre-registers its conId, which
+        // would mask exactly what this test is looking for.
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let frame: std::collections::HashMap<u32, String> = [
+            (11u32, "*"), (150, "0"), (39, "0"), (6008, "265598"), (38, "1"), (54, "1"),
+        ].iter().map(|(k, v)| (*k, v.to_string())).collect();
+
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert!(context.order(0).is_none(), "the reserved order id must not be inserted");
+        assert!(
+            context.market.instrument_by_con_id(265598).is_none(),
+            "the terminator must not register an instrument",
+        );
+    }
+
     // ibx#205: a margin-reducing preview (close, cash-account sell) resolves to a
     // post-trade init margin of exactly 0, which the gateway sends as numeric "0"
     // (ib-agent#160). The old `> 0.0` guard dropped it and the caller timed out.
@@ -2166,6 +2210,42 @@ mod tests {
             42, instrument, Side::Buy, 1, 100 * PRICE_SCALE, b'2', b'0', 0,
         )); // starts at PendingSubmit
         (CcpState::new(), context, SharedState::new())
+    }
+
+    /// A recovery record arriving with the instrument table already full used
+    /// to take the engine down. A missing order beats a dead hot loop, and the
+    /// conversion to the fallible register is what makes that true — nothing
+    /// else in the suite fails if it is reverted.
+    #[test]
+    fn a_full_instrument_table_does_not_abort_the_recovery_path() {
+        let mut context = Context::new();
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+
+        // Fill every slot, so the next registration has nowhere to go.
+        for con_id in 1..=(crate::types::MAX_INSTRUMENTS as i64) {
+            assert!(context.try_register_instrument(con_id).is_some(), "slot {con_id}");
+        }
+        assert!(
+            context.try_register_instrument(999_999).is_none(),
+            "the table really is full",
+        );
+
+        let mut frame = std::collections::HashMap::new();
+        for (tag, val) in [
+            (11u32, "42"), (150, "0"), (39, "0"), (6008, "888888"),
+            (38, "100"), (55, "SPY"), (54, "1"),
+        ] {
+            frame.insert(tag, val.to_string());
+        }
+
+        // The point of the test: this must return rather than panic.
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert!(
+            context.order(42).is_none(),
+            "the order is not tracked, which is the acknowledged cost",
+        );
     }
 
     fn exec_report_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {

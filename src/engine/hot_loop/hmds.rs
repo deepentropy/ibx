@@ -195,7 +195,10 @@ impl HmdsState {
                     log::debug!(
                         "HMDS W xml head (len={}): {:?}",
                         xml_tag.len(),
-                        &xml_tag[..xml_tag.len().min(200)],
+                        // Byte-slicing a lossily decoded value panics when
+                        // byte 200 lands inside a multi-byte character, which
+                        // aborts the hot loop exactly when debug logging is on.
+                        xml_tag.get(..200).unwrap_or(xml_tag),
                     );
                     if let Some(resp) = crate::control::historical::parse_bar_response(xml_tag) {
                         if let Some(pos) = self.pending_historical.iter().position(|(qid, _, _)| resp.query_id.starts_with(qid.as_str())) {
@@ -1116,6 +1119,26 @@ impl HmdsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The diagnostic log byte-sliced a lossily decoded value, so a tag whose
+    /// two-hundredth byte fell inside a multi-byte character aborted the hot
+    /// loop — and only when debug logging was on, which is to say only while
+    /// someone was diagnosing an incident.
+    #[test]
+    fn a_non_utf8_xml_tag_does_not_abort_the_hot_loop() {
+        // 199 ASCII bytes then one invalid byte: byte 200 is not a boundary.
+        let mut value = "a".repeat(199).into_bytes();
+        value.push(0xFF);
+        let lossy = String::from_utf8_lossy(&value).to_string();
+
+        // The slice the log performs, on the value the parser would hold.
+        let head = lossy.get(..200).unwrap_or(&lossy);
+        assert!(!head.is_empty(), "a head is produced rather than panicking");
+        assert!(
+            lossy.len() > 200 || head.len() <= lossy.len(),
+            "and it never exceeds the value it came from",
+        );
+    }
 
     fn make_query_error_msg(query_id: &str, error: &str) -> Vec<u8> {
         let xml = format!(
