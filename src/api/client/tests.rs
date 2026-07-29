@@ -31,6 +31,98 @@ fn spy() -> Contract {
 //  Algo parsing
 // ═══════════════════════════════════════════════════════════════════
 
+/// The quantity reaches the wire through `as u32`, which truncates. Asking for
+/// 1.5 shares sent an order for 1 and reported nothing — the fill, the status
+/// and the position were all consistent with an order that was never placed.
+#[test]
+fn a_fractional_quantity_is_refused_rather_than_truncated() {
+    let (client, rx, _shared) = test_client();
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.5, order_type: "MKT".into(),
+        tif: "DAY".into(), ..Default::default()
+    };
+    let err = client.place_order(9101, &spy(), &order).expect_err("must be refused");
+    assert!(format!("{err}").contains("whole number"), "the error says why: {err}");
+    assert!(rx.try_recv().is_err(), "and nothing reaches the wire");
+}
+
+/// A quantity that is not a number, or is negative, or overflows the wire
+/// type, all reach `as u32` and become something the caller did not ask for.
+#[test]
+fn an_unusable_quantity_is_refused() {
+    for (qty, expect) in [
+        (f64::NAN, "finite"),
+        (f64::INFINITY, "finite"),
+        (-5.0, "negative"),
+        (5e9, "too large"),
+    ] {
+        let (client, _rx, _shared) = test_client();
+        let order = Order {
+            action: "BUY".into(), total_quantity: qty, order_type: "MKT".into(),
+            tif: "DAY".into(), ..Default::default()
+        };
+        let err = client.place_order(9102, &spy(), &order)
+            .expect_err("must be refused").to_string();
+        assert!(err.contains(expect), "quantity {qty}: expected {expect:?}, got: {err}");
+    }
+}
+
+/// The boundaries, exactly. Each of these was reachable by a mutation that the
+/// round-number cases above could not see: rejecting the valid maximum,
+/// admitting one past it, admitting a small negative, admitting a fraction
+/// near a half, and misclassifying negative infinity.
+#[test]
+fn the_quantity_boundaries_are_exact() {
+    let place = |qty: f64| {
+        let (client, _rx, _shared) = test_client();
+        let order = Order {
+            action: "BUY".into(), total_quantity: qty, order_type: "MKT".into(),
+            tif: "DAY".into(), ..Default::default()
+        };
+        client.place_order(9601, &spy(), &order)
+    };
+
+    assert!(place(u32::MAX as f64).is_ok(), "the largest carryable quantity still places");
+    assert!(place(u32::MAX as f64 + 1.0).is_err(), "one past it does not");
+    assert!(place(-1.0).is_err(), "a small negative is refused, not just a large one");
+    assert!(place(1.25).is_err(), "a fraction below a half is refused too");
+    assert!(place(f64::NEG_INFINITY).is_err(), "negative infinity is not finite either");
+}
+
+/// A cash-quantity order states its size in currency and carries no shares, so
+/// zero is only wrong when nothing else says how much to buy.
+#[test]
+fn zero_shares_is_refused_unless_the_order_is_cash_sized() {
+    let (client, rx, _shared) = test_client();
+    let bare = Order {
+        action: "BUY".into(), total_quantity: 0.0, order_type: "MKT".into(),
+        tif: "DAY".into(), ..Default::default()
+    };
+    assert!(
+        client.place_order(9602, &spy(), &bare).is_err(),
+        "zero shares with no cash quantity is not an order",
+    );
+    assert!(rx.try_recv().is_err(), "and nothing reaches the wire");
+
+    let cash = Order {
+        action: "BUY".into(), total_quantity: 0.0, order_type: "LMT".into(),
+        lmt_price: 100.0, cash_qty: 1000.0, tif: "DAY".into(), ..Default::default()
+    };
+    client.place_order(9603, &spy(), &cash).expect("a cash-sized order still places");
+}
+
+/// Whole quantities are unaffected.
+#[test]
+fn a_whole_quantity_still_places() {
+    let (client, rx, _shared) = test_client();
+    let order = Order {
+        action: "BUY".into(), total_quantity: 200.0, order_type: "MKT".into(),
+        tif: "DAY".into(), ..Default::default()
+    };
+    client.place_order(9103, &spy(), &order).expect("a whole quantity places");
+    assert!(rx.try_recv().is_ok(), "and reaches the wire");
+}
+
 #[test]
 fn parse_algo_vwap() {
     let params = vec![

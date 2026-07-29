@@ -1266,6 +1266,33 @@ impl ClientCore {
     pub fn validate_order(order: &ApiOrder) -> Result<(), String> {
         order.side()?;
 
+        // The quantity reaches the wire through `as u32`, which truncates. A
+        // caller asking for 1.5 was sent an order for 1 and told nothing —
+        // the fill, the status and the position were all consistent with an
+        // order they never placed. Fractional quantities are not carried on
+        // this path, so say so rather than rounding someone's size down.
+        if !order.total_quantity.is_finite() {
+            return Err("total_quantity must be a finite number".to_string());
+        }
+        if order.total_quantity < 0.0 {
+            return Err(format!("total_quantity {} is negative", order.total_quantity));
+        }
+        if order.total_quantity.fract() != 0.0 {
+            return Err(format!(
+                "total_quantity {} is not a whole number of shares, which this path cannot carry",
+                order.total_quantity
+            ));
+        }
+        if order.total_quantity > u32::MAX as f64 {
+            return Err(format!("total_quantity {} is too large", order.total_quantity));
+        }
+        // A cash-quantity order legitimately carries no shares — the size is
+        // stated in currency instead — so zero is only wrong when nothing else
+        // says how much to buy.
+        if order.total_quantity == 0.0 && order.cash_qty <= 0.0 {
+            return Err("total_quantity is zero and no cash_qty was supplied".to_string());
+        }
+
         // transmit=false cannot be honoured: every order is sent to the
         // broker immediately when place_order is called; there is no
         // staging concept. Accepting it would send a "staged" bracket
