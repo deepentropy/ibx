@@ -10,7 +10,7 @@ use std::io;
 use crate::bridge::{Event, SharedState};
 use crate::engine::context::Context;
 use crate::config::chrono_free_timestamp;
-use crate::gateway::{connect_farm, reconnect_ccp, ReconnectAuth};
+use crate::gateway::{connect_farm, reconnect_ccp, ReconnectAuth, FARM_SLOT_HMDS, FARM_SLOT_TRADING};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{ControlCommand, Fill, InstrumentId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
@@ -882,7 +882,7 @@ impl HotLoop {
                     &auth.host, "usfarm",
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
-                    &auth.hw_info, &auth.encoded, 18,
+                    &auth.hw_info, &auth.encoded, FARM_SLOT_TRADING,
                 );
                 let _ = tx.send(result);
             })
@@ -1018,7 +1018,7 @@ impl HotLoop {
                     &auth.hmds_host, &auth.hmds_farm,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
-                    &auth.hw_info, &auth.encoded, 17,
+                    &auth.hw_info, &auth.encoded, FARM_SLOT_HMDS,
                 );
                 let _ = tx.send(result);
             })
