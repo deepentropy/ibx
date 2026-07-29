@@ -310,6 +310,27 @@ impl Connection {
         Ok(())
     }
 
+    /// Test-only connection over a loopback pair. The peer is returned so the
+    /// caller can hold it open: sends have to succeed for the send paths to
+    /// behave as they do in production, where a write error unwinds the order.
+    #[cfg(test)]
+    pub(crate) fn paired_for_test() -> (Self, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let conn = Self {
+            stream: Stream::Raw(stream),
+            buf: Vec::new(),
+            seq: 0,
+            sign_key: Vec::new(),
+            sign_iv: Vec::new(),
+            read_key: Vec::new(),
+            read_iv: Vec::new(),
+        };
+        (conn, peer)
+    }
+
     /// Build a message, compress, sign, and send. For farm subscribe/data messages.
     /// Uses seq=0 (separate seq space from heartbeats).
     ///

@@ -715,6 +715,10 @@ impl CcpState {
                     ord_type: ord_type_byte,
                     tif: tif_byte,
                     stop_price: stop_price_i64,
+                    // The recovery record restates the order, so take the flag
+                    // from it rather than defaulting — a later modify restates
+                    // it in turn.
+                    outside_rth: parsed.get(&6433).map(|v| v == "1").unwrap_or(false),
                 });
                 log::info!("CCP recovery: inserted orderId={} sym={:?} side={:?} qty={} px={}",
                     clord_id, parsed.get(&55), side, qty,
@@ -2073,6 +2077,7 @@ mod tests {
             ord_type: b'2',
             tif: b'0',
             stop_price: 0,
+            outside_rth: false,
         });
         (CcpState::new(), context, SharedState::new())
     }
@@ -2166,6 +2171,36 @@ mod tests {
             42, instrument, Side::Buy, 1, 100 * PRICE_SCALE, b'2', b'0', 0,
         )); // starts at PendingSubmit
         (CcpState::new(), context, SharedState::new())
+    }
+
+    /// A recovered order carries its own extended-hours flag on the report. If
+    /// the recovery insert drops it, the order silently narrows to regular
+    /// hours the next time it is modified, because the replace restates what
+    /// the engine recorded.
+    #[test]
+    fn a_recovery_record_keeps_its_outside_rth_flag() {
+        for (tag6433, expected) in [(Some("1"), true), (Some("0"), false), (None, false)] {
+            let mut context = Context::new();
+            let mut ccp = CcpState::new();
+            let shared = SharedState::new();
+            let mut frame = std::collections::HashMap::new();
+            for (tag, val) in [
+                (11u32, "78"), (150, "0"), (39, "0"), (6008, "756733"),
+                (38, "100"), (55, "SPY"), (54, "1"),
+            ] {
+                frame.insert(tag, val.to_string());
+            }
+            if let Some(v) = tag6433 {
+                frame.insert(6433, v.to_string());
+            }
+
+            ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+            assert_eq!(
+                context.order(78).expect("recovered").outside_rth, expected,
+                "6433={tag6433:?}",
+            );
+        }
     }
 
     fn exec_report_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {

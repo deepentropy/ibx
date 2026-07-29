@@ -263,12 +263,22 @@ pub struct Order {
     pub tif: u8,
     /// FIX tag 99 stop price (for Stop/StopLimit/MIT/LIT orders)
     pub stop_price: Price,
+    /// FIX tag 6433 OutsideRTH. Tracked so a replace can restate it: the
+    /// server reads the flag off the replace, so a modify that guesses would
+    /// silently change when the order is eligible to execute.
+    pub outside_rth: bool,
 }
 
 impl Order {
     /// Create a new tracked order with FIX type metadata.
     pub fn new(order_id: OrderId, instrument: InstrumentId, side: Side, qty: u32, price: Price, ord_type: u8, tif: u8, stop_price: Price) -> Self {
-        Self { order_id, instrument, side, price, qty, filled: 0, status: OrderStatus::PendingSubmit, ord_type, tif, stop_price }
+        Self { order_id, instrument, side, price, qty, filled: 0, status: OrderStatus::PendingSubmit, ord_type, tif, stop_price, outside_rth: false }
+    }
+
+    /// Record that the order was submitted with OutsideRTH set.
+    pub fn with_outside_rth(mut self, outside_rth: bool) -> Self {
+        self.outside_rth = outside_rth;
+        self
     }
 }
 
@@ -2009,6 +2019,7 @@ mod tests {
             ord_type: b'2',
             tif: b'0',
             stop_price: 0,
+            outside_rth: false,
         };
         let o2 = o; // Copy
         assert_eq!(o.order_id, o2.order_id);
