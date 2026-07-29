@@ -31,6 +31,44 @@ fn spy() -> Contract {
 //  Algo parsing
 // ═══════════════════════════════════════════════════════════════════
 
+/// Nothing on an execution report carries a parent order id, so the engine
+/// reports none. This client placed the order and was told the parent, so it
+/// can answer where the engine cannot — and an order it did not place keeps
+/// the engine's answer rather than borrowing someone else's.
+#[test]
+fn a_locally_placed_child_reports_the_parent_it_was_given() {
+    let (client, rx, shared) = test_client();
+    let child = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 110.0, tif: "DAY".into(), parent_id: 4242, ..Default::default()
+    };
+    client.place_order(9401, &spy(), &child).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 9401, instrument: 0, status: OrderStatus::Submitted,
+        filled_qty: 0, remaining_qty: 1, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let status = w.events.iter().find(|e| e.starts_with("order_status:9401:"))
+        .expect("the status was dispatched");
+    assert!(status.contains(":9401:"), "{status}");
+    assert_eq!(
+        w.parent_ids.last().copied(), Some(4242),
+        "the parent this client recorded is reported: {:?}", w.events,
+    );
+
+    // An order this client never placed keeps the engine's answer.
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 9999, instrument: 0, status: OrderStatus::Submitted,
+        filled_qty: 0, remaining_qty: 1, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    let mut w2 = RecordingWrapper::default();
+    client.process_msgs(&mut w2);
+    assert_eq!(w2.parent_ids.last().copied(), Some(0), "no parent is invented");
+}
+
 #[test]
 fn parse_algo_vwap() {
     let params = vec![

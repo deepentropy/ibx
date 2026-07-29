@@ -159,8 +159,14 @@ impl EClient {
         let updates = shared.orders.drain_order_updates();
         for update in updates {
             let status = order_status_str(update.status);
+            // The engine cannot know the parent — nothing on the execution
+            // report carries one — but this client placed the order and was
+            // told. Prefer what it recorded; an order it did not place keeps
+            // the engine's answer of none.
+            let parent_id = self.core.tracked_parent_id(update.order_id)
+                .unwrap_or(update.parent_id);
             call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, update.filled_qty as f64,
-                 update.remaining_qty as f64, 0.0f64, update.perm_id, update.parent_id, 0.0f64, 0i64, "", 0.0f64));
+                 update.remaining_qty as f64, 0.0f64, update.perm_id, parent_id, 0.0f64, 0i64, "", 0.0f64));
 
             // Track open orders
             self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);

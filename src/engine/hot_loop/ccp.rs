@@ -880,7 +880,12 @@ impl CcpState {
         if status_changed && !had_fill {
             if let Some(order) = context.order(clord_id).copied() {
                 let perm_id: i64 = parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
-                let parent_id: i64 = parsed.get(&583).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
+                // Tag 583 is the link id this engine sends the OCA group on, not
+                // a parent order. Hashing it produced a stable non-zero value
+                // shared by every order in a group, none of which has a parent,
+                // and nothing distinguished it from a real link. Nothing on
+                // this report carries a parent order id, so report none.
+                let parent_id: i64 = 0;
                 let update = crate::types::OrderUpdate {
                     order_id: clord_id,
                     instrument: order.instrument,
@@ -2166,6 +2171,89 @@ mod tests {
             42, instrument, Side::Buy, 1, 100 * PRICE_SCALE, b'2', b'0', 0,
         )); // starts at PendingSubmit
         (CcpState::new(), context, SharedState::new())
+    }
+
+    /// Tag 583 is the link id the engine sends the OCA group on. Reading it
+    /// back as a parent produced a stable non-zero value shared by every order
+    /// in the group — none of which has a parent — and nothing told it apart
+    /// from a real link.
+    #[test]
+    fn an_oca_group_is_not_reported_as_a_parent() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = exec_report_frame(&[
+            (39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1"),
+            (583, "PROBE-OCA-1"),
+        ]);
+
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.len(), 1, "the status is still reported");
+        assert_eq!(
+            updates[0].parent_id, 0,
+            "an order in an OCA group has no parent, so none is reported",
+        );
+    }
+
+    /// Not just the one group name, and not just one status: any value on 583
+    /// is a link id rather than a parent, at every point in the order's life.
+    #[test]
+    fn no_group_name_or_status_produces_a_parent() {
+        for group in ["PROBE-OCA-1", "G", "12345", "a name with spaces"] {
+            for (ord_status, exec_type) in [("0", "0"), ("1", "2"), ("2", "2"), ("4", "4")] {
+                let (mut ccp, mut context, shared) = ord_status_test_state();
+                let frame = exec_report_frame(&[
+                    (39, ord_status), (150, exec_type), (100, "ARCA"), (198, "ARCA:1"),
+                    (583, group),
+                ]);
+                ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+                for update in shared.orders.drain_order_updates() {
+                    assert_eq!(
+                        update.parent_id, 0,
+                        "group {group:?} at status {ord_status} must not become a parent",
+                    );
+                }
+            }
+        }
+    }
+
+    /// A report carrying no group reported no parent before this change too, so
+    /// that case alone cannot tell the fix from the bug.
+    #[test]
+    fn a_report_without_a_group_still_has_no_parent() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1")]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].parent_id, 0);
+    }
+
+    /// Tag 6107 is what the bracket path *sends* a parent on, and it is a
+    /// client id rather than an order id — reading it back would be the same
+    /// mistake in a new place.
+    #[test]
+    fn tag_6107_is_not_read_back_as_a_parent() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = exec_report_frame(&[
+            (39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1"), (6107, "4242"),
+        ]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates[0].parent_id, 0, "6107 is a client id, not a parent order");
+    }
+
+    /// The order id hash on tag 37 is a separate concern and must keep working.
+    #[test]
+    fn the_order_id_still_produces_a_stable_perm_id() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = exec_report_frame(&[
+            (39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1"),
+            (37, "0256d0f1.0001417e.6a6982d2.0001"),
+        ]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        let updates = shared.orders.drain_order_updates();
+        assert_ne!(updates[0].perm_id, 0, "the order id still yields a permId");
     }
 
     fn exec_report_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
