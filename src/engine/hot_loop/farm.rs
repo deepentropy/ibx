@@ -12,6 +12,62 @@ use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, fast_extract_msg_type, find_body_after_tag};
 
+/// Build the 35=V subscribe tag list for a contract whose conId is known.
+///
+/// Kept pure so the wire shape stays unit-testable. SecurityType (167) and
+/// Exchange (207) must describe the actual contract: the server routes the
+/// subscription by them, and a mismatch is answered with a partial ack rather
+/// than an error.
+fn build_conid_subscribe_tags(
+    realtime: bool,
+    bid_ask_id: u32,
+    last_id: u32,
+    con_id: i64,
+    exchange: &str,
+    sec_type: &str,
+    mode_9887: i32,
+    ts: &str,
+) -> Vec<(u32, String)> {
+    let con_id_str = (con_id as u32).to_string();
+    // Subscribing by conId alone is a supported shape — `Contract` defaults
+    // both fields to empty, and the in-tree benchmark does exactly that. Keep
+    // the smart-routed stock those callers used to get rather than sending an
+    // empty SecurityType and Exchange, which is the silent partial-ack this
+    // change exists to remove.
+    let exchange = if exchange.is_empty() { "SMART" } else { exchange };
+    let sec_type = if sec_type.is_empty() { "STK" } else { sec_type };
+    let fix_exchange = crate::control::contracts::exchange_to_fix(exchange);
+    let fix_sec_type = crate::control::contracts::sec_type_to_fix(sec_type);
+
+    // 146 = NoRelatedSym count: 2 entries for the realtime fan-out, 1 for TOP.
+    let mut tags: Vec<(u32, String)> = vec![
+        (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
+        (fix::TAG_SENDING_TIME, ts.to_string()),
+        (263, "1".to_string()),
+        (146, if realtime { "2" } else { "1" }.to_string()),
+    ];
+
+    let entries: &[(u32, &str)] = if realtime {
+        &[(bid_ask_id, "442"), (last_id, "443")]
+    } else {
+        &[(bid_ask_id, "1")]
+    };
+    for (req_id, depth) in entries {
+        tags.push((262, req_id.to_string()));
+        tags.push((6008, con_id_str.clone()));
+        tags.push((207, fix_exchange.to_string()));
+        tags.push((167, fix_sec_type.to_string()));
+        tags.push((264, depth.to_string()));
+        tags.push((6088, "Socket".to_string()));
+        tags.push((9830, "1".to_string()));
+        tags.push((9839, "1".to_string()));
+        if !realtime {
+            tags.push((9887, mode_9887.to_string()));
+        }
+    }
+    tags
+}
+
 pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
@@ -369,53 +425,28 @@ impl FarmState {
         if let Some(conn) = farm_conn.as_mut() {
             let bid_ask_str = bid_ask_id.to_string();
             let last_str = last_id.to_string();
-            let con_id_str = (con_id as u32).to_string();
             let mode_str = mode_9887.to_string();
             let ts = chrono_free_timestamp();
 
             // 146 = NoRelatedSym count: 2 entries for realtime fan-out, 1 for TOP.
             let no_related_sym = if realtime { "2" } else { "1" };
 
-            // When con_id is known, use the proven minimal format (con_id + BEST + CS).
-            // The server resolves the full contract details from con_id regardless of sec_type.
-            // When con_id is 0, include descriptive fields so the server can resolve by description.
+            let fix_exchange = crate::control::contracts::exchange_to_fix(exchange);
+            let fix_sec_type = crate::control::contracts::sec_type_to_fix(sec_type);
+
+            // When con_id is known the server still routes the subscription by
+            // SecurityType (167) and Exchange (207), so both must describe the
+            // actual contract. When con_id is 0, include the descriptive fields
+            // as well so the server can resolve by description.
             if con_id > 0 {
-                let mut tags: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                    (fix::TAG_SENDING_TIME, &ts),
-                    (263, "1"),
-                    (146, no_related_sym),
-                ];
-                if realtime {
-                    for (req_str, depth) in [(&bid_ask_str, "442"), (&last_str, "443")] {
-                        tags.push((262, req_str));
-                        tags.push((6008, &con_id_str));
-                        tags.push((207, "BEST"));
-                        tags.push((167, "CS"));
-                        tags.push((264, depth));
-                        tags.push((6088, "Socket"));
-                        tags.push((9830, "1"));
-                        tags.push((9839, "1"));
-                    }
-                } else {
-                    tags.push((262, &bid_ask_str));
-                    tags.push((6008, &con_id_str));
-                    tags.push((207, "BEST"));
-                    tags.push((167, "CS"));
-                    tags.push((264, "1"));
-                    tags.push((6088, "Socket"));
-                    tags.push((9830, "1"));
-                    tags.push((9839, "1"));
-                    tags.push((9887, &mode_str));
-                }
-                let _ = conn.send_fixcomp(&tags);
+                let tags = build_conid_subscribe_tags(
+                    realtime, bid_ask_id, last_id, con_id, exchange, sec_type, mode_9887, &ts,
+                );
+                let refs: Vec<(u32, &str)> =
+                    tags.iter().map(|(tag, val)| (*tag, val.as_str())).collect();
+                let _ = conn.send_fixcomp(&refs);
             } else {
                 // No con_id — send descriptive fields
-                let fix_exchange = crate::control::contracts::exchange_to_fix(exchange);
-                let fix_sec_type = match sec_type {
-                    "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND",
-                    "CASH" => "CASH", other => other,
-                };
                 let strike_str = if strike > 0.0 { strike.to_string() } else { String::new() };
                 let mut tags: Vec<(u32, &str)> = vec![
                     (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
@@ -1015,3 +1046,124 @@ impl FarmState {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn tag_values(tags: &[(u32, String)], tag: u32) -> Vec<&str> {
+        tags.iter().filter(|(t, _)| *t == tag).map(|(_, v)| v.as_str()).collect()
+    }
+
+    /// The server routes a market-data subscription by SecurityType and
+    /// Exchange even when a conId is supplied. Describing every contract as a
+    /// SMART-routed common stock makes the server ack only the trade leg of a
+    /// futures subscription, so bid/ask never arrives.
+    #[test]
+    fn conid_subscribe_describes_the_actual_contract() {
+        let fut = build_conid_subscribe_tags(true, 1, 2, 793356225, "CME", "FUT", 0, "T");
+        assert_eq!(tag_values(&fut, 167), ["FUT", "FUT"], "SecurityType must say FUT");
+        assert_eq!(tag_values(&fut, 207), ["CME", "CME"], "Exchange must say CME");
+
+        // Both legs of the realtime fan-out are requested: 442 bid/ask, 443 last.
+        assert_eq!(tag_values(&fut, 264), ["442", "443"]);
+        assert_eq!(tag_values(&fut, 262), ["1", "2"]);
+        assert_eq!(tag_values(&fut, 146), ["2"]);
+    }
+
+    /// Stocks keep the exact wire shape they had before: SMART maps to BEST and
+    /// STK to CS, so this path is unchanged for equities. Pinned as the whole
+    /// ordered tag list rather than the two mapped tags, so a reordering or a
+    /// dropped field is caught here too.
+    #[test]
+    fn conid_subscribe_is_unchanged_for_stocks() {
+        let stk = build_conid_subscribe_tags(true, 1, 2, 265598, "SMART", "STK", 0, "T");
+        assert_eq!(
+            stk,
+            vec![
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
+                (fix::TAG_SENDING_TIME, "T".to_string()),
+                (263, "1".to_string()),
+                (146, "2".to_string()),
+                (262, "1".to_string()),
+                (6008, "265598".to_string()),
+                (207, "BEST".to_string()),
+                (167, "CS".to_string()),
+                (264, "442".to_string()),
+                (6088, "Socket".to_string()),
+                (9830, "1".to_string()),
+                (9839, "1".to_string()),
+                (262, "2".to_string()),
+                (6008, "265598".to_string()),
+                (207, "BEST".to_string()),
+                (167, "CS".to_string()),
+                (264, "443".to_string()),
+                (6088, "Socket".to_string()),
+                (9830, "1".to_string()),
+                (9839, "1".to_string()),
+            ],
+        );
+
+        let delayed = build_conid_subscribe_tags(false, 1, 2, 265598, "SMART", "STK", 3, "T");
+        assert_eq!(
+            delayed,
+            vec![
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
+                (fix::TAG_SENDING_TIME, "T".to_string()),
+                (263, "1".to_string()),
+                (146, "1".to_string()),
+                (262, "1".to_string()),
+                (6008, "265598".to_string()),
+                (207, "BEST".to_string()),
+                (167, "CS".to_string()),
+                (264, "1".to_string()),
+                (6088, "Socket".to_string()),
+                (9830, "1".to_string()),
+                (9839, "1".to_string()),
+                (9887, "3".to_string()),
+            ],
+        );
+    }
+
+    /// Subscribing by conId alone is a supported shape: `Contract` defaults
+    /// both descriptive fields to empty and the in-tree benchmark relies on it.
+    /// Those callers used to get a smart-routed stock from the two literals;
+    /// sending an empty SecurityType and Exchange instead would reintroduce the
+    /// silent partial ack from the other side.
+    #[test]
+    fn conid_subscribe_falls_back_when_the_contract_is_not_described() {
+        let bare = build_conid_subscribe_tags(true, 1, 2, 265598, "", "", 0, "T");
+        assert_eq!(tag_values(&bare, 167), ["CS", "CS"]);
+        assert_eq!(tag_values(&bare, 207), ["BEST", "BEST"]);
+
+        let described = build_conid_subscribe_tags(true, 1, 2, 265598, "SMART", "STK", 0, "T");
+        assert_eq!(bare, described, "an undescribed conId keeps the smart-routed stock shape");
+    }
+
+    /// Non-realtime modes collapse to a single TOP subscription carrying 9887.
+    #[test]
+    fn conid_subscribe_collapses_to_one_entry_when_not_realtime() {
+        let delayed = build_conid_subscribe_tags(false, 7, 8, 265598, "SMART", "STK", 3, "T");
+        assert_eq!(tag_values(&delayed, 262), ["7"], "only the first req id is used");
+        assert_eq!(tag_values(&delayed, 264), ["1"]);
+        assert_eq!(tag_values(&delayed, 146), ["1"]);
+        assert_eq!(tag_values(&delayed, 9887), ["3"], "delayed mode must be carried");
+
+        let realtime = build_conid_subscribe_tags(true, 7, 8, 265598, "SMART", "STK", 0, "T");
+        assert!(tag_values(&realtime, 9887).is_empty(), "realtime carries no 9887");
+    }
+
+    /// Every entry must be self-contained: the server reads conId per entry.
+    #[test]
+    fn each_entry_carries_its_own_conid() {
+        let fut = build_conid_subscribe_tags(true, 1, 2, 793356225, "CME", "FUT", 0, "T");
+        assert_eq!(tag_values(&fut, 6008), ["793356225", "793356225"]);
+
+        let counts: HashMap<u32, usize> =
+            fut.iter().fold(HashMap::new(), |mut m, (t, _)| { *m.entry(*t).or_insert(0) += 1; m });
+        for tag in [262, 6008, 207, 167, 264, 6088, 9830, 9839] {
+            assert_eq!(counts[&tag], 2, "tag {tag} must appear once per entry");
+        }
+    }
+}
