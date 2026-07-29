@@ -16,6 +16,16 @@ pub type Qty = i64;
 pub const PRICE_SCALE: i64 = 100_000_000; // 10^8
 pub const QTY_SCALE: i64 = 10_000; // 10^4
 
+/// Convert a wire quantity into the `QTY_SCALE` fixed-point form the `Quote`
+/// fields hold. Every reader divides by `QTY_SCALE`, so a decode path that
+/// stores the magnitude raw delivers quantities 10_000x too small (ibx#287).
+/// Saturating: the magnitude is server-supplied, and a clamped quantity is
+/// preferable to a wrapped one.
+#[inline(always)]
+pub fn qty_from_wire(magnitude: i64) -> Qty {
+    magnitude.saturating_mul(QTY_SCALE)
+}
+
 /// Snap a fixed-point price to the nearest multiple of `tick` (ties round
 /// away from zero). A non-positive tick means the grid is unknown and the
 /// price is returned unchanged. Pure integer math — exact on the fixed-point
@@ -1498,6 +1508,32 @@ pub struct MidnightSeed {
 
 #[cfg(test)]
 mod tests {
+
+    /// The producer and the consumer have to agree on the units. This is the
+    /// disagreement that shipped: the decode path stored the wire magnitude
+    /// and every reader divided by `QTY_SCALE`, so one contract arrived as
+    /// 0.0001. Pinning both halves together is what catches it — either side
+    /// changing alone fails here.
+    #[test]
+    fn wire_quantity_survives_the_round_trip_through_qty_scale() {
+        for wire in [0i64, 1, 2, 7, 500, 10_000, 1_000_000] {
+            let stored = qty_from_wire(wire);
+            let delivered = stored as f64 / QTY_SCALE as f64;
+            assert_eq!(delivered, wire as f64, "wire quantity {} came back as {}", wire, delivered);
+        }
+    }
+
+    #[test]
+    fn qty_from_wire_clamps_instead_of_wrapping() {
+        // Server-supplied magnitude; a wrapped quantity would read as a
+        // plausible negative size rather than an obvious ceiling.
+        assert_eq!(qty_from_wire(i64::MAX), i64::MAX);
+        assert_eq!(qty_from_wire(i64::MIN), i64::MIN);
+        // Not a fixed point of the identity function, so this fails if the
+        // conversion is dropped as well as if it wraps.
+        assert_eq!(qty_from_wire(i64::MAX / 2), i64::MAX);
+    }
+
     use super::*;
     use std::mem;
 

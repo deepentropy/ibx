@@ -7,7 +7,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::InstrumentId;
+use crate::types::{qty_from_wire, InstrumentId};
 use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, fast_extract_msg_type, find_body_after_tag};
@@ -229,10 +229,12 @@ impl FarmState {
                 tick_decoder::O_LOW_PRICE => { q.low = tick.magnitude * mts; }
                 tick_decoder::O_OPEN_PRICE => { q.open = tick.magnitude * mts; }
                 tick_decoder::O_CLOSE_PRICE => { q.close = tick.magnitude * mts; }
-                tick_decoder::O_BID_SIZE => { q.bid_size = tick.magnitude; }
-                tick_decoder::O_ASK_SIZE => { q.ask_size = tick.magnitude; }
-                tick_decoder::O_LAST_SIZE => { q.last_size = tick.magnitude; }
-                tick_decoder::O_VOLUME => { q.volume = tick.magnitude; }
+                // Quantities are fixed-point, the same way prices are; every
+                // reader divides by `QTY_SCALE` on the way out (ibx#287).
+                tick_decoder::O_BID_SIZE => { q.bid_size = qty_from_wire(tick.magnitude); }
+                tick_decoder::O_ASK_SIZE => { q.ask_size = qty_from_wire(tick.magnitude); }
+                tick_decoder::O_LAST_SIZE => { q.last_size = qty_from_wire(tick.magnitude); }
+                tick_decoder::O_VOLUME => { q.volume = qty_from_wire(tick.magnitude); }
                 tick_decoder::O_TIMESTAMP | tick_decoder::O_LAST_TS => { q.timestamp_ns = tick.magnitude as u64; }
                 tick_decoder::O_BID_EXCH => { q.bid_exch_mask = tick.magnitude; }
                 tick_decoder::O_ASK_EXCH => { q.ask_exch_mask = tick.magnitude; }
@@ -1015,3 +1017,97 @@ impl FarmState {
     }
 }
 
+
+#[cfg(test)]
+mod decode_publish_tests {
+    use super::*;
+    use crate::bridge::SharedState;
+    use crate::engine::context::Context;
+    use crate::protocol::tick_decoder;
+    use crate::types::QTY_SCALE;
+
+    fn push_bits(bits: &mut Vec<u8>, val: u64, n: usize) {
+        for i in (0..n).rev() {
+            bits.push(((val >> i) & 1) as u8);
+        }
+    }
+
+    /// One 35=P body carrying `ticks` for `server_tag`, framed as the farm
+    /// connection delivers it.
+    fn framed_35p(server_tag: u32, ticks: &[(u64, u64, u64)]) -> Vec<u8> {
+        let mut bits: Vec<u8> = Vec::new();
+        push_bits(&mut bits, 0, 1);
+        push_bits(&mut bits, server_tag as u64, 31);
+        for (i, &(tick_type, width, value)) in ticks.iter().enumerate() {
+            push_bits(&mut bits, tick_type, 5);
+            push_bits(&mut bits, if i < ticks.len() - 1 { 1 } else { 0 }, 1);
+            push_bits(&mut bits, width - 1, 2);
+            push_bits(&mut bits, 0, 1); // positive
+            push_bits(&mut bits, value, (width * 8 - 1) as usize);
+        }
+        let byte_count = (bits.len() + 7) / 8;
+        let mut payload = vec![0u8; byte_count];
+        for (i, &b) in bits.iter().enumerate() {
+            if b == 1 {
+                payload[i >> 3] |= 1 << (7 - (i & 7));
+            }
+        }
+        let mut tick_payload = Vec::with_capacity(2 + byte_count);
+        tick_payload.push((bits.len() >> 8) as u8);
+        tick_payload.push((bits.len() & 0xFF) as u8);
+        tick_payload.extend_from_slice(&payload);
+
+        let body_len = 5 + tick_payload.len() + 15;
+        let mut msg = format!("8=O\x019={}\x01", body_len).into_bytes();
+        msg.extend_from_slice(b"35=P\x01");
+        msg.extend_from_slice(&tick_payload);
+        msg.extend_from_slice(b"\x018349=AABBCCDD\x01");
+        msg
+    }
+
+    /// The producer half of the quantity contract. Everything downstream
+    /// divides by `QTY_SCALE`, so a decode path that stores the wire magnitude
+    /// raw delivers quantities 10_000x too small (ibx#287) — and nothing else
+    /// in the suite reaches this function, which is why that shipped.
+    #[test]
+    fn decoded_quantities_are_stored_as_fixed_point() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(7, id);
+        context.market.set_min_tick(id, 0.01);
+
+        let msg = framed_35p(7, &[
+            (tick_decoder::O_BID_SIZE, 1, 42),
+            (tick_decoder::O_ASK_SIZE, 1, 17),
+            (tick_decoder::O_LAST_SIZE, 1, 5),
+            (tick_decoder::O_VOLUME, 2, 1234),
+        ]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+
+        let q = context.market.quote(id);
+        assert_eq!(q.bid_size, 42 * QTY_SCALE, "bid_size must be stored fixed-point");
+        assert_eq!(q.ask_size, 17 * QTY_SCALE, "ask_size must be stored fixed-point");
+        assert_eq!(q.last_size, 5 * QTY_SCALE, "last_size must be stored fixed-point");
+        assert_eq!(q.volume, 1234 * QTY_SCALE, "volume must be stored fixed-point");
+    }
+
+    /// Prices were already scaled correctly; pin that the quantity change did
+    /// not disturb them.
+    #[test]
+    fn decoded_prices_are_still_scaled_by_min_tick() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(9, id);
+        context.market.set_min_tick(id, 0.01);
+        let mts = context.market.min_tick_scaled(id);
+
+        let msg = framed_35p(9, &[(tick_decoder::O_BID_PRICE, 2, 15000)]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+
+        assert_eq!(context.market.quote(id).bid, 15000 * mts);
+    }
+}

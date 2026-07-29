@@ -1782,11 +1782,19 @@ fn process_msgs_dispatches_all_quote_fields() {
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:7:")));   // low
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:9:")));   // close
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:14:"))); // open
-    // tick_size for: bid_size(0), ask_size(3), last_size(5), volume(8)
-    assert!(w.events.iter().any(|e| e.starts_with("tick_size:1:0:")));   // bid_size
-    assert!(w.events.iter().any(|e| e.starts_with("tick_size:1:3:")));   // ask_size
-    assert!(w.events.iter().any(|e| e.starts_with("tick_size:1:5:")));   // last_size
-    assert!(w.events.iter().any(|e| e.starts_with("tick_size:1:8:")));   // volume
+    // tick_size for: bid_size(0), ask_size(3), last_size(5), volume(8).
+    // Assert the delivered quantity, not just that a tick appeared — the
+    // scaling defect in ibx#287 fired every one of these with a value four
+    // orders of magnitude off, and a `starts_with` check passed throughout.
+    let delivered = |prefix: &str| -> Option<f64> {
+        w.events.iter().find(|e| e.starts_with(prefix))
+            .and_then(|e| e.rsplit(':').next())
+            .and_then(|v| v.parse().ok())
+    };
+    assert_eq!(delivered("tick_size:1:0:"), Some(1000.0), "bid_size");
+    assert_eq!(delivered("tick_size:1:3:"), Some(2000.0), "ask_size");
+    assert_eq!(delivered("tick_size:1:5:"), Some(500.0), "last_size");
+    assert_eq!(delivered("tick_size:1:8:"), Some(10_000.0), "volume");
 }
 
 #[test]
