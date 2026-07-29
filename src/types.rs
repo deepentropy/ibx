@@ -263,12 +263,22 @@ pub struct Order {
     pub tif: u8,
     /// FIX tag 99 stop price (for Stop/StopLimit/MIT/LIT orders)
     pub stop_price: Price,
+    /// FIX tag 6433 OutsideRTH. Tracked so a replace can restate it: the
+    /// server reads the flag off the replace, so a modify that guesses would
+    /// silently change when the order is eligible to execute.
+    pub outside_rth: bool,
 }
 
 impl Order {
     /// Create a new tracked order with FIX type metadata.
     pub fn new(order_id: OrderId, instrument: InstrumentId, side: Side, qty: u32, price: Price, ord_type: u8, tif: u8, stop_price: Price) -> Self {
-        Self { order_id, instrument, side, price, qty, filled: 0, status: OrderStatus::PendingSubmit, ord_type, tif, stop_price }
+        Self { order_id, instrument, side, price, qty, filled: 0, status: OrderStatus::PendingSubmit, ord_type, tif, stop_price, outside_rth: false }
+    }
+
+    /// Record that the order was submitted with OutsideRTH set.
+    pub fn with_outside_rth(mut self, outside_rth: bool) -> Self {
+        self.outside_rth = outside_rth;
+        self
     }
 }
 
@@ -294,9 +304,11 @@ impl AdaptivePriority {
 /// All fields default to "not set" (0/false).
 #[derive(Debug, Clone, Default)]
 pub struct OrderAttrs {
-    /// Show on book as this many shares (tag 111). 0 = not set (show full qty).
+    /// Show on book as this many shares (tag 6103). 0 = not set (show full qty).
+    /// The gateway requires a multiple of the contract's lot size.
     pub display_size: u32,
-    /// Minimum fill quantity (FIX tag 110). 0 = not set.
+    /// Minimum fill quantity. Not supported: no tag in this dialect carries it,
+    /// and a non-zero value is refused rather than sent.
     pub min_qty: u32,
     /// Hidden order — not displayed on book (IB tag 6135).
     pub hidden: bool,
@@ -335,9 +347,9 @@ pub struct OrderAttrs {
     pub cash_qty: Price,
     /// Conditions that must be met before the order activates (IB tag 6136+).
     pub conditions: Vec<OrderCondition>,
-    /// Cancel order if conditions are no longer met (IB tag 6128). Default false.
+    /// Cancel order if conditions are no longer met (IB tag 6579). Default false.
     pub conditions_cancel_order: bool,
-    /// Evaluate conditions outside regular trading hours (IB tag 6151). Default false.
+    /// Evaluate conditions outside regular trading hours (IB tag 6128). Default false.
     pub conditions_ignore_rth: bool,
     /// OCA cancellation semantics (IB tag 6209), 1..=4. 0 = not set, which
     /// emits the gateway default 3 (ReduceOnFillNonBlock). Only emitted when
@@ -601,7 +613,8 @@ pub enum OrderRequest {
         /// Optional initial stop trigger (tag 6117); 0 = not set.
         trail_stop_price: Price,
     },
-    /// Trailing stop by percentage (tag 6268). Trail percent is in basis points (1% = 100).
+    /// Trailing stop by percentage. Trail percent is in basis points (1% = 100);
+    /// it reaches the wire as a fraction on tag 9822, with 6268 stating the unit.
     SubmitTrailingStopPct {
         order_id: OrderId,
         instrument: InstrumentId,
@@ -2009,6 +2022,7 @@ mod tests {
             ord_type: b'2',
             tif: b'0',
             stop_price: 0,
+            outside_rth: false,
         };
         let o2 = o; // Copy
         assert_eq!(o.order_id, o2.order_id);

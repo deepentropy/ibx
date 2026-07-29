@@ -107,7 +107,7 @@ pub(crate) fn drain_and_send_orders(
             OrderRequest::SubmitLimitGtc { order_id, instrument, side, qty, price, outside_rth } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'1', 0,
-                ));
+                ).with_outside_rth(outside_rth));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
@@ -215,7 +215,7 @@ pub(crate) fn drain_and_send_orders(
             OrderRequest::SubmitStopGtc { order_id, instrument, side, qty, stop_price, outside_rth } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, stop_price, b'3', b'1', stop_price,
-                ));
+                ).with_outside_rth(outside_rth));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
@@ -251,7 +251,7 @@ pub(crate) fn drain_and_send_orders(
             OrderRequest::SubmitStopLimitGtc { order_id, instrument, side, qty, price, stop_price, outside_rth } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'4', b'1', stop_price,
-                ));
+                ).with_outside_rth(outside_rth));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
@@ -444,12 +444,13 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let pct_str = trail_pct.to_string(); // basis points: 100 = 1%
-                // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
-                // percent in decimal form (1.00 for 1%), alongside 6268 in basis
-                // points and 18=a (ExecInst=TrailingStop). Without 99/211/18 the
-                // gateway rejects with "Invalid value in field # 18".
+                // 99/211 mirror the percent in decimal form (1.00 for 1%) and
+                // 18=a marks it trailing; without those three the gateway
+                // rejects with "Invalid value in field # 18". The percentage
+                // itself rides on 9822 as a fraction, and 6268 is the unit it
+                // is expressed in rather than a value.
                 let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
+                let pct_fraction = format!("{:.4}", trail_pct as f64 / 10000.0);
                 let trail_stop_str = format_price(trail_stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
@@ -467,7 +468,8 @@ pub(crate) fn drain_and_send_orders(
                     (99, &pct_decimal),     // StopPx = percent as decimal
                     (211, &pct_decimal),    // PegOffset = percent as decimal (mirror of 99)
                     (18, "a"),              // ExecInst = TrailingStop
-                    (6268, &pct_str),       // TrailingPercent (basis points)
+                    (9822, &pct_fraction), // PercentOffset = percentage as a fraction
+                    (6268, "100"),          // TrailingAmtUnit: 100 = percent
                     (59, "0"),              // TIF = DAY
                     (60, &now),
                     (167, &sec_type_str),
@@ -1449,10 +1451,13 @@ pub(crate) fn drain_and_send_orders(
                 let price = orig.map_or(price, |o| crate::types::snap_to_tick(
                     price, context.market.min_tick_scaled(o.instrument)));
                 if let Some(orig) = orig {
+                    // Carried like every other attribute of the original: a
+                    // replace that dropped it would leave the next modify
+                    // restating a flag the order no longer records.
                     context.insert_order(crate::types::Order::new(
                         new_order_id, orig.instrument, orig.side, qty, price,
                         orig.ord_type, orig.tif, orig.stop_price,
-                    ));
+                    ).with_outside_rth(orig.outside_rth));
                 }
                 // Versioned ClOrdID chaining: orderId.0 → .1 → .2
                 let prev_ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
@@ -1482,36 +1487,20 @@ pub(crate) fn drain_and_send_orders(
                 let con_id_str = orig.and_then(|o| context.market.con_id(o.instrument))
                     .map(|c| c.to_string()).unwrap_or_default();
 
-                // Lean modify message — omit identity tags (6121, 6119, 231, 100, 15, 204)
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),    // ClOrdID (versioned)
-                    (41, &orig_clord),   // OrigClOrdID (previous version)
-                    (44, &price_str),    // Price
-                    (1, account_id),     // Account
-                    (6122, "c"),         // Client version
-                    (6433, "1"),         // OutsideRTH (preserve from original)
-                    (38, &qty_str),      // OrderQty
-                    (54, side_str),      // Side
-                    (40, &ord_type_str), // OrdType
-                    (55, &symbol),       // Symbol
-                    (167, &sec_type_str),        // SecurityType
-                    (6035, &symbol),     // LocalSymbol echo
-                    (59, &tif_str),      // TIF
-                    (6008, &con_id_str), // ConId
-                    (6088, "Socket"),    // Connection type
-                    (6211, ""),          // Empty (matches reference)
-                    (6238, ""),          // Empty (matches reference)
-                ];
                 // Include stop price for order types that need it
                 let stop_str;
-                if let Some(o) = orig {
-                    if o.stop_price != 0 {
+                let stop = match orig {
+                    Some(o) if o.stop_price != 0 => {
                         stop_str = format_price(o.stop_price);
-                        fields.push((99, &stop_str));
+                        Some(&*stop_str)
                     }
-                }
+                    _ => None,
+                };
+                let fields = build_replace_fields(
+                    &now, &clord_str, &orig_clord, &price_str, account_id, &qty_str,
+                    side_str, &ord_type_str, &symbol, &sec_type_str, &tif_str,
+                    &con_id_str, orig.map(|o| o.outside_rth).unwrap_or(false), stop,
+                );
                 conn.send_fix(&fields)
             }
         };
@@ -1588,6 +1577,61 @@ fn oca_type_str(oca_type: u8) -> &'static str {
     }
 }
 
+/// Build the 35=G replace tag list. Lean by design — identity tags (6121,
+/// 6119, 231, 100, 15, 204) are omitted.
+///
+/// Kept pure so the wire shape stays testable without a connection. OutsideRTH
+/// (6433) is restated from the tracked order and is present only when the order
+/// carries it, matching the submit path: a literal here would widen every
+/// RTH-only order to the extended session the first time it was modified.
+#[allow(clippy::too_many_arguments)]
+fn build_replace_fields<'a>(
+    now: &'a str,
+    clord: &'a str,
+    orig_clord: &'a str,
+    price: &'a str,
+    account_id: &'a str,
+    qty: &'a str,
+    side: &'a str,
+    ord_type: &'a str,
+    symbol: &'a str,
+    sec_type: &'a str,
+    tif: &'a str,
+    con_id: &'a str,
+    outside_rth: bool,
+    stop: Option<&'a str>,
+) -> Vec<(u32, &'a str)> {
+    let mut fields: Vec<(u32, &str)> = vec![
+        (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
+        (fix::TAG_SENDING_TIME, now),
+        (11, clord),         // ClOrdID (versioned)
+        (41, orig_clord),    // OrigClOrdID (previous version)
+        (44, price),         // Price
+        (1, account_id),     // Account
+        (6122, "c"),         // Client version
+    ];
+    if outside_rth {
+        fields.push((6433, "1")); // OutsideRTH
+    }
+    fields.extend_from_slice(&[
+        (38, qty),           // OrderQty
+        (54, side),          // Side
+        (40, ord_type),      // OrdType
+        (55, symbol),        // Symbol
+        (167, sec_type),     // SecurityType
+        (6035, symbol),      // LocalSymbol echo
+        (59, tif),           // TIF
+        (6008, con_id),      // ConId
+        (6088, "Socket"),    // Connection type
+        (6211, ""),          // Empty (matches reference)
+        (6238, ""),          // Empty (matches reference)
+    ]);
+    if let Some(stop) = stop {
+        fields.push((99, stop));
+    }
+    fields
+}
+
 /// One shared encoder for every extended order submission (ibx#224): the
 /// order-type-specific tags come from `kind`; the TIF and the full
 /// `OrderAttrs` block are emitted identically for all kinds.
@@ -1635,7 +1679,7 @@ fn send_order_ex(
     };
     context.insert_order(crate::types::Order::new(
         order_id, instrument, side, qty, track_price, ord_type_byte, tif, track_stop,
-    ));
+    ).with_outside_rth(attrs.outside_rth));
 
     let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
     let symbol = context.market.symbol(instrument).to_string();
@@ -1701,15 +1745,16 @@ fn send_order_ex(
             if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
         }
         K::TrailPct { trail_pct, trail_stop_price } => {
-            // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
-            // percent in decimal form (1.00 for 1%), alongside 6268 in
-            // basis points and 18=a.
+            // 99/211 mirror the percent in decimal form (1.00 for 1%) and
+            // 18=a marks it trailing. The percentage itself rides on 9822 as a
+            // fraction, and 6268 is the unit it is expressed in.
             let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
             fields.push((40, "P".to_string()));
             fields.push((99, pct_decimal.clone()));
             fields.push((211, pct_decimal));
             fields.push((18, "a".to_string()));
-            fields.push((6268, trail_pct.to_string()));
+            fields.push((9822, format!("{:.4}", trail_pct as f64 / 10000.0)));
+            fields.push((6268, "100".to_string()));
             if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
             has_base_exec_inst = true;
         }
@@ -1786,10 +1831,12 @@ fn send_order_ex(
     // Extended attributes — same tag order as the historical SubmitLimitEx
     // block.
     if attrs.display_size > 0 {
-        fields.push((111, format_uint(attrs.display_size as u64).to_string()));
+        fields.push((6103, format_uint(attrs.display_size as u64).to_string()));
     }
     if attrs.min_qty > 0 {
-        fields.push((110, format_uint(attrs.min_qty as u64).to_string()));
+        // Refused at the API boundary; a caller reaching the engine directly
+        // gets a word rather than an attribute that quietly does nothing.
+        log::warn!("min_qty is not carried on the wire and is being ignored");
     }
     if attrs.outside_rth {
         fields.push((6433, "1".to_string()));
@@ -1843,10 +1890,10 @@ fn send_order_ex(
         let cond_strs = build_condition_strings(&attrs.conditions);
         fields.push((6136, cond_strs[0].clone())); // first element is count
         if attrs.conditions_cancel_order {
-            fields.push((6128, "1".to_string()));
+            fields.push((6579, "1".to_string()));
         }
         if attrs.conditions_ignore_rth {
-            fields.push((6151, "1".to_string()));
+            fields.push((6128, "1".to_string()));
         }
         // Per-condition tags start at index 1, 11 strings per condition
         for i in 0..attrs.conditions.len() {
@@ -2022,6 +2069,7 @@ mod tests {
         Order {
             order_id: oid, instrument: 0, side: Side::Buy, price: 100,
             qty: 10, filled, status, ord_type: b'2', tif: b'0', stop_price: 0,
+            outside_rth: false,
         }
     }
 
@@ -2055,5 +2103,233 @@ mod tests {
 
         assert_eq!(context.order(8).unwrap().status, OrderStatus::Filled);
         assert!(shared.orders.drain_order_updates().is_empty());
+    }
+
+    /// Drive the real send path and inspect what it recorded. The peer is held
+    /// open for the call so the send succeeds — a failed send unwinds the
+    /// order, which would mask what these tests are checking.
+    fn drain(context: &mut Context) -> String {
+        use std::io::Read;
+        let shared = Arc::new(SharedState::new());
+        let (c, mut peer) = crate::protocol::connection::Connection::paired_for_test();
+        let mut conn = Some(c);
+        let mut hb = HeartbeatState::new();
+        drain_and_send_orders(&mut conn, context, "ACC", &mut hb, false, &shared);
+
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(250))).unwrap();
+        let mut sent = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = peer.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            sent.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&sent).replace('\x01', "|")
+    }
+
+    /// The flag has to survive being modified, not just being submitted. A
+    /// replace builds a fresh tracked order from the original; dropping the
+    /// flag there leaves the first replace correct and every later one wrong,
+    /// which is the shape that hides in testing.
+    #[test]
+    fn an_order_keeps_outside_rth_across_repeated_modifies() {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(
+            crate::types::Order::new(7, instrument, Side::Buy, 10, 100 * crate::types::PRICE_SCALE, b'2', b'1', 0)
+                .with_outside_rth(true),
+        );
+
+        let second = context.modify(7, 101 * crate::types::PRICE_SCALE, 10);
+        let first_replace = drain(&mut context);
+        assert!(first_replace.contains("|6433=1|"), "first replace restates the flag: {first_replace}");
+        assert!(
+            context.order(second).expect("replacement tracked").outside_rth,
+            "the replacement order must carry the flag forward",
+        );
+
+        let third = context.modify(second, 102 * crate::types::PRICE_SCALE, 10);
+        let second_replace = drain(&mut context);
+        assert!(
+            second_replace.contains("|6433=1|"),
+            "and the next replace restates it too: {second_replace}",
+        );
+        assert!(
+            context.order(third).expect("second replacement tracked").outside_rth,
+            "and keeps carrying it",
+        );
+    }
+
+    /// Every one of these tags was rejected by the gateway or landed on a
+    /// field that means something else. The values are what a live session
+    /// accepts; the point of the test is that the tag numbers do not drift
+    /// back.
+    #[test]
+    fn the_extended_attributes_go_on_the_tags_the_gateway_reads() {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.submit_limit_ex(
+            instrument, Side::Buy, 1000, 100 * crate::types::PRICE_SCALE, b'0',
+            crate::types::OrderAttrs {
+                display_size: 200,
+                conditions_cancel_order: true,
+                conditions_ignore_rth: true,
+                conditions: vec![crate::types::OrderCondition::Time {
+                    time: "20260311-09:30:00".into(),
+                    is_more: true,
+                }],
+                ..Default::default()
+            },
+        );
+        let sent = drain(&mut context);
+
+        assert!(sent.contains("|6103=200|"), "display size rides on 6103: {sent}");
+        assert!(!sent.contains("|111="), "and never on 111: {sent}");
+        assert!(sent.contains("|6579=1|"), "cancel-on-condition rides on 6579: {sent}");
+        assert!(sent.contains("|6128=1|"), "ignore-RTH rides on 6128: {sent}");
+        assert!(!sent.contains("|6151="), "and neither lands on the price field: {sent}");
+    }
+
+    /// The percentage is a fraction on its own tag; 6268 states the unit it is
+    /// in. Putting the percentage on 6268 made every value except 1% invalid,
+    /// because 100 basis points collides with the code for "percent".
+    ///
+    /// Both encoders are checked: the plain one and the shared extended one,
+    /// which carried the same wrong assignment and would otherwise be pinned by
+    /// nothing.
+    #[test]
+    fn a_trailing_percent_states_its_unit_and_its_value_separately() {
+        for extended in [false, true] {
+            let mut context = Context::new();
+            let instrument = context.register_instrument(756733);
+            if extended {
+                context.pending_orders.push(crate::types::OrderRequest::SubmitEx {
+                    order_id: 11,
+                    instrument,
+                    side: Side::Sell,
+                    qty: 1,
+                    kind: crate::types::OrderKind::TrailPct {
+                        trail_pct: 250,
+                        trail_stop_price: 0,
+                    },
+                    tif: b'0',
+                    attrs: crate::types::OrderAttrs::default(),
+                });
+            } else {
+                context.submit_trailing_stop_pct(instrument, Side::Sell, 1, 250);
+            }
+            let sent = drain(&mut context);
+
+            assert!(sent.contains("|6268=100|"), "extended={extended}: 6268 is the unit: {sent}");
+            assert!(
+                sent.contains("|9822=0.0250|"),
+                "extended={extended}: 9822 is 2.5% as a fraction: {sent}",
+            );
+            assert!(sent.contains("|18=a|"), "extended={extended}: still trailing: {sent}");
+        }
+    }
+
+    /// Each condition flag must drive its own tag. Setting both at once cannot
+    /// tell the two apart, so they are submitted one at a time and the other
+    /// tag is asserted absent.
+    #[test]
+    fn each_condition_flag_drives_only_its_own_tag() {
+        let condition = || crate::types::OrderCondition::Time {
+            time: "20260311-09:30:00".into(),
+            is_more: true,
+        };
+        for (cancel, ignore_rth, present, absent) in [
+            (true, false, "|6579=1|", "|6128=1|"),
+            (false, true, "|6128=1|", "|6579=1|"),
+        ] {
+            let mut context = Context::new();
+            let instrument = context.register_instrument(756733);
+            context.submit_limit_ex(
+                instrument, Side::Buy, 1, 100 * crate::types::PRICE_SCALE, b'0',
+                crate::types::OrderAttrs {
+                    conditions: vec![condition()],
+                    conditions_cancel_order: cancel,
+                    conditions_ignore_rth: ignore_rth,
+                    ..Default::default()
+                },
+            );
+            let sent = drain(&mut context);
+
+            assert!(sent.contains(present), "cancel={cancel}: expected {present}: {sent}");
+            assert!(!sent.contains(absent), "cancel={cancel}: {absent} must be absent: {sent}");
+        }
+    }
+
+    /// A submit that offers the flag has to record it, or the replace has
+    /// nothing truthful to restate.
+    #[test]
+    fn a_submit_records_the_flag_it_was_given() {
+        for requested in [true, false] {
+            let mut context = Context::new();
+            let instrument = context.register_instrument(756733);
+            let id = context.submit_limit_gtc(instrument, Side::Buy, 10, 100 * crate::types::PRICE_SCALE, requested);
+            let sent = drain(&mut context);
+            assert_eq!(
+                sent.contains("|6433=1|"), requested,
+                "the submit itself only carries 6433 when asked: {sent}",
+            );
+            assert_eq!(
+                context.order(id).expect("order tracked").outside_rth, requested,
+                "submitted with outside_rth={requested}",
+            );
+        }
+    }
+
+    fn replace(outside_rth: bool, stop: Option<&str>) -> Vec<(u32, &str)> {
+        build_replace_fields(
+            "T", "7.1", "7.0", "101.00", "ACC", "10", "1", "2", "SPY", "CS", "0",
+            "756733", outside_rth, stop,
+        )
+    }
+
+    /// A replace restates the order, so OutsideRTH must come from the order.
+    /// Sending it unconditionally widens an RTH-only order to the extended
+    /// session the first time it is modified, and nothing reports the change.
+    #[test]
+    fn replace_carries_outside_rth_only_when_the_order_has_it() {
+        let rth_only = replace(false, None);
+        assert!(
+            !rth_only.iter().any(|(tag, _)| *tag == 6433),
+            "an RTH-only order must not acquire 6433 by being modified",
+        );
+
+        let extended = replace(true, None);
+        assert_eq!(
+            extended.iter().filter(|(tag, _)| *tag == 6433).map(|(_, v)| *v).collect::<Vec<_>>(),
+            ["1"],
+            "an order submitted outside RTH must keep the flag across a modify",
+        );
+    }
+
+    /// Setting the flag must not disturb the rest of the message.
+    #[test]
+    fn outside_rth_is_the_only_difference_between_the_two_shapes() {
+        let without = replace(false, None);
+        let with: Vec<_> = replace(true, None).into_iter().filter(|(tag, _)| *tag != 6433).collect();
+        assert_eq!(without, with);
+    }
+
+    /// The flag sits between the client version and the quantity, where the
+    /// submit path puts it.
+    #[test]
+    fn outside_rth_keeps_its_position() {
+        let tags: Vec<u32> = replace(true, None).iter().map(|(tag, _)| *tag).collect();
+        let at = tags.iter().position(|t| *t == 6433).expect("6433 present");
+        assert_eq!(tags[at - 1], 6122);
+        assert_eq!(tags[at + 1], 38);
+    }
+
+    /// The stop price is appended only for order types that carry one.
+    #[test]
+    fn replace_appends_the_stop_price_when_there_is_one() {
+        assert!(!replace(false, None).iter().any(|(tag, _)| *tag == 99));
+        let stopped = replace(false, Some("99.50"));
+        assert_eq!(stopped.last(), Some(&(99u32, "99.50")));
     }
 }

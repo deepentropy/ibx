@@ -715,6 +715,10 @@ impl CcpState {
                     ord_type: ord_type_byte,
                     tif: tif_byte,
                     stop_price: stop_price_i64,
+                    // The recovery record restates the order, so take the flag
+                    // from it rather than defaulting — a later modify restates
+                    // it in turn.
+                    outside_rth: parsed.get(&6433).map(|v| v == "1").unwrap_or(false),
                 });
                 log::info!("CCP recovery: inserted orderId={} sym={:?} side={:?} qty={} px={}",
                     clord_id, parsed.get(&55), side, qty,
@@ -2073,6 +2077,7 @@ mod tests {
             ord_type: b'2',
             tif: b'0',
             stop_price: 0,
+            outside_rth: false,
         });
         (CcpState::new(), context, SharedState::new())
     }
