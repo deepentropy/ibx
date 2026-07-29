@@ -37,6 +37,16 @@ impl EClient {
 
         // If orderId is already tracked, this is a modification — emit Modify instead of Submit.
         let cmd = if self.core.is_order_tracked(oid) {
+            // A replace states the order type, the limit price and the trigger.
+            // An order defined by anything else cannot survive one.
+            if let Some(tracked) = self.core.tracked_order(oid) {
+                if let Some(why) = ClientCore::replace_cannot_restate(&tracked) {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "{why} cannot be modified: the replace does not carry the fields that \
+                         define it, and sending one would cancel the order"
+                    )));
+                }
+            }
             let price = (api_order.lmt_price * crate::api::types::PRICE_SCALE_F) as i64;
             let qty = api_order.total_quantity as u32;
             ControlCommand::Order(OrderRequest::Modify {
