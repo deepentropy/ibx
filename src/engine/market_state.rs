@@ -1,16 +1,6 @@
 use std::collections::HashMap;
 use crate::types::{InstrumentId, Price, Qty, Quote, PRICE_SCALE, MAX_INSTRUMENTS};
 
-/// Max server_tag value for flat lookup array. Gateway sessions assign tags
-/// monotonically and can climb well past 1024 for long-running paper accounts
-/// or thin-volume / sub-penny names (which seem to consume blocks of tags).
-/// 65536 covers a busy day on a single session at ~256 KB heap; tags that
-/// exceed this are logged and dropped.
-const MAX_SERVER_TAG: usize = 65536;
-
-/// Sentinel value for empty server_tag slots.
-const NO_INSTRUMENT: u32 = u32::MAX;
-
 /// Sentinel conId marking a freed instrument slot (ibx#233). Cannot collide
 /// with a real conId (0 occurs in practice for conId-less contracts).
 const FREE_SLOT: i64 = i64::MIN;
@@ -31,8 +21,12 @@ pub struct MarketState {
     /// Reverse map: InstrumentId → conId. Flat array lookup. `FREE_SLOT`
     /// marks a reclaimed slot.
     instrument_to_con_id: [i64; MAX_INSTRUMENTS],
-    /// O(1) server_tag → InstrumentId lookup. Server tags are small integers.
-    server_tag_table: Box<[u32; MAX_SERVER_TAG]>,
+    /// Maps an IB server_tag → InstrumentId. Keyed rather than indexed: the
+    /// tag space is the gateway's to choose and a live session starts well
+    /// past any fixed bound. One entry per subscription ack, so an instrument
+    /// with several requests holds several; entries are dropped on unregister
+    /// and cleared wholesale on farm disconnect.
+    server_tag_to_instrument: HashMap<u32, InstrumentId>,
     /// Per-instrument minTick (from 35=Q). Used to scale tick magnitudes to prices.
     min_ticks: [f64; MAX_INSTRUMENTS],
     /// Pre-computed min_tick * PRICE_SCALE as integer for hot-path price conversion.
@@ -55,7 +49,7 @@ impl MarketState {
             free_ids: Vec::new(),
             con_id_to_instrument: HashMap::new(),
             instrument_to_con_id: [0; MAX_INSTRUMENTS],
-            server_tag_table: Box::new([NO_INSTRUMENT; MAX_SERVER_TAG]),
+            server_tag_to_instrument: HashMap::new(),
             min_ticks: [0.0; MAX_INSTRUMENTS],
             min_tick_scaled: [0; MAX_INSTRUMENTS],
             symbols: std::array::from_fn(|_| None),
@@ -119,25 +113,22 @@ impl MarketState {
         self.exchanges[instrument as usize] = None;
         self.min_ticks[instrument as usize] = 0.0;
         self.min_tick_scaled[instrument as usize] = 0;
-        for slot in self.server_tag_table.iter_mut() {
-            if *slot == instrument {
-                *slot = NO_INSTRUMENT;
-            }
-        }
+        self.clear_server_tags_for(instrument);
         self.free_ids.push(instrument);
         Some(con_id)
     }
 
+    /// Drop every tag mapped to this instrument. Tags arrive from more than
+    /// one exchange — `35=Q` acks for L1 and `35=L` ticker setup for news
+    /// routing — so this is only safe where the instrument itself is going
+    /// away, not when one of its subscriptions ends.
+    pub fn clear_server_tags_for(&mut self, instrument: InstrumentId) {
+        self.server_tag_to_instrument.retain(|_, id| *id != instrument);
+    }
+
     /// Map an IB server_tag (from 35=Q subscription ack) to an InstrumentId.
     pub fn register_server_tag(&mut self, server_tag: u32, instrument: InstrumentId) {
-        if (server_tag as usize) < MAX_SERVER_TAG {
-            self.server_tag_table[server_tag as usize] = instrument;
-        } else {
-            log::warn!(
-                "server_tag {} exceeds MAX_SERVER_TAG ({}); ticks for instrument {} will be dropped",
-                server_tag, MAX_SERVER_TAG, instrument,
-            );
-        }
+        self.server_tag_to_instrument.insert(server_tag, instrument);
     }
 
     /// Slot iteration bound (high-water mark). Freed slots below this count
@@ -170,15 +161,10 @@ impl MarketState {
         self.con_id_to_instrument.get(&con_id).copied()
     }
 
-    /// Look up InstrumentId by server_tag. O(1) flat array lookup.
+    /// Look up InstrumentId by server_tag. O(1) hash lookup.
     #[inline(always)]
     pub fn instrument_by_server_tag(&self, server_tag: u32) -> Option<InstrumentId> {
-        if (server_tag as usize) < MAX_SERVER_TAG {
-            let id = self.server_tag_table[server_tag as usize];
-            if id != NO_INSTRUMENT { Some(id) } else { None }
-        } else {
-            None
-        }
+        self.server_tag_to_instrument.get(&server_tag).copied()
     }
 
     /// Set symbol name for an instrument (e.g. "AAPL"). Used for orders.
@@ -297,7 +283,7 @@ impl MarketState {
 
     /// Clear server tag mappings (called on farm disconnect — old tags are invalid).
     pub fn clear_server_tags(&mut self) {
-        self.server_tag_table.fill(NO_INSTRUMENT);
+        self.server_tag_to_instrument.clear();
     }
 
     /// Zero all quote data to prevent stale price trading after farm disconnect.
@@ -319,6 +305,60 @@ mod tests {
         assert_eq!(ms.register(265598), 0); // AAPL
         assert_eq!(ms.register(272093), 1); // MSFT
         assert_eq!(ms.register(756733), 2); // SPY
+    }
+
+    #[test]
+    fn server_tags_resolve_far_above_any_fixed_bound() {
+        // A live session does not start its tags near zero. These are the
+        // first four a real one assigned, and a table sized by the tag space
+        // dropped every tick for all of them.
+        let mut ms = MarketState::new();
+        let nq = ms.register(563947733);
+        let mnq = ms.register(497222760);
+        ms.register_server_tag(274555, nq);
+        ms.register_server_tag(274556, mnq);
+        assert_eq!(ms.instrument_by_server_tag(274555), Some(nq));
+        assert_eq!(ms.instrument_by_server_tag(274556), Some(mnq));
+        assert_eq!(ms.instrument_by_server_tag(274557), None);
+        // Tag reuse after a farm reconnect must not resurrect the old mapping.
+        ms.clear_server_tags();
+        assert_eq!(ms.instrument_by_server_tag(274555), None);
+    }
+
+    #[test]
+    fn clearing_tags_for_one_instrument_leaves_it_registered() {
+        // An instrument pinned by an open order, tbt or news subscription
+        // outlives its L1 requests. Its tags are dead the moment the last one
+        // is unsubscribed, and slot reclamation — the only other thing that
+        // drops them — will not run while it is pinned.
+        let mut ms = MarketState::new();
+        let a = ms.register(1111);
+        let b = ms.register(2222);
+        ms.register_server_tag(400000, a);
+        ms.register_server_tag(400001, a);
+        ms.register_server_tag(400002, b);
+
+        ms.clear_server_tags_for(a);
+        assert_eq!(ms.instrument_by_server_tag(400000), None);
+        assert_eq!(ms.instrument_by_server_tag(400001), None);
+        assert_eq!(ms.instrument_by_server_tag(400002), Some(b), "another instrument keeps its own");
+        assert_eq!(ms.con_id(a), Some(1111), "the instrument itself stays registered");
+    }
+
+    #[test]
+    fn unregister_drops_only_its_own_server_tags() {
+        let mut ms = MarketState::new();
+        let a = ms.register(1111);
+        let b = ms.register(2222);
+        // One instrument can hold several tags — a request per subscription
+        // ack. Unregister has to drop all of them, not just the first found.
+        ms.register_server_tag(300000, a);
+        ms.register_server_tag(300002, a);
+        ms.register_server_tag(300001, b);
+        ms.unregister(a);
+        assert_eq!(ms.instrument_by_server_tag(300000), None);
+        assert_eq!(ms.instrument_by_server_tag(300002), None, "a leftover tag repaints the next contract that reuses the slot");
+        assert_eq!(ms.instrument_by_server_tag(300001), Some(b));
     }
 
     #[test]
