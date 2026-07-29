@@ -1304,6 +1304,13 @@ impl ClientCore {
             ));
         }
 
+        // No tag in this dialect carries a minimum quantity. It used to go out
+        // on one the gateway rejects, which left the order Inactive; refusing
+        // it is the same outcome without the round trip, and says why.
+        if order.min_qty > 0 {
+            return Err("min_qty is not supported".to_string());
+        }
+
         if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
             return Ok(());
         }
@@ -1336,6 +1343,17 @@ impl ClientCore {
             "STP LMT" | "LIT" if order.aux_price == 0.0 => {
                 return Err(format!(
                     "{} order requires aux_price (stop/trigger price) but got 0.0",
+                    order.order_type
+                ));
+            }
+            // NaN compares false against everything, so it slips past both the
+            // zero check below and the `> 0.0` branch that picks the percent
+            // path — it has to be rejected on its own terms.
+            "TRAIL" | "TRAIL LIMIT"
+                if !order.trailing_percent.is_finite() || !order.aux_price.is_finite() =>
+            {
+                return Err(format!(
+                    "{} order requires finite trailing_percent and aux_price",
                     order.order_type
                 ));
             }
@@ -1525,7 +1543,16 @@ impl ClientCore {
                 // Optional initial stop trigger (tag 6117); default f64::MAX = unset.
                 let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { (order.trail_stop_price * PRICE_SCALE_F) as i64 };
                 if order.trailing_percent > 0.0 {
-                    let pct = (order.trailing_percent * 100.0) as u32;
+                    // Basis points, rounded rather than truncated: 0.29% is
+                    // 28.999... in floating point and would otherwise reach the
+                    // gateway as 0.28%.
+                    let pct = (order.trailing_percent * 100.0).round() as u32;
+                    if pct == 0 {
+                        return Err(format!(
+                            "trailing_percent {} is below the smallest the wire carries (0.01%)",
+                            order.trailing_percent
+                        ));
+                    }
                     if extended {
                         OrderRequest::SubmitTrailingStopPctEx {
                             order_id, instrument, side, qty, trail_pct: pct,

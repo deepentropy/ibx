@@ -31,6 +31,71 @@ fn spy() -> Contract {
 //  Algo parsing
 // ═══════════════════════════════════════════════════════════════════
 
+/// No tag in this dialect carries a minimum quantity. It used to go out on one
+/// the gateway rejects, which left the order Inactive with its quantity
+/// reported as zero — refusing says why, without the round trip.
+#[test]
+fn min_qty_is_refused_rather_than_sent() {
+    let (client, rx, _shared) = test_client();
+    let order = Order {
+        action: "BUY".into(), total_quantity: 200.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), min_qty: 50, ..Default::default()
+    };
+    let err = client.place_order(9001, &spy(), &order).expect_err("must be refused");
+    assert!(format!("{err}").contains("min_qty"), "the error names the field: {err}");
+    assert!(rx.try_recv().is_err(), "and nothing reaches the wire");
+}
+
+/// A percentage that quantises to zero basis points would rest as a trailing
+/// stop that never trails.
+#[test]
+fn a_trailing_percent_below_the_wire_resolution_is_refused() {
+    let (client, _rx, _shared) = test_client();
+    let order = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(),
+        trailing_percent: 0.004, tif: "DAY".into(), ..Default::default()
+    };
+    let err = client.place_order(9002, &spy(), &order).expect_err("must be refused");
+    assert!(format!("{err}").contains("0.01%"), "the error names the limit: {err}");
+}
+
+/// A percentage that is not a number cannot become one by casting. `as u32`
+/// turns NaN into 0 and infinity into `u32::MAX`, either of which would reach
+/// the wire as a trail nobody asked for.
+#[test]
+fn a_non_finite_trailing_percent_is_refused() {
+    for pct in [f64::NAN, f64::INFINITY] {
+        let (client, _rx, _shared) = test_client();
+        let order = Order {
+            action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(),
+            trailing_percent: pct, tif: "DAY".into(), ..Default::default()
+        };
+        let err = client.place_order(9004, &spy(), &order)
+            .expect_err("a non-finite percentage must be refused");
+        assert!(
+            format!("{err}").contains("finite") || format!("{err}").contains("0.01%"),
+            "the error explains itself: {err}",
+        );
+    }
+}
+
+/// Basis points are rounded, not truncated: 0.29% is 28.999... in floating
+/// point and would otherwise reach the gateway as 0.28%.
+#[test]
+fn a_trailing_percent_rounds_to_the_nearest_basis_point() {
+    let (client, rx, _shared) = test_client();
+    let order = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(),
+        trailing_percent: 0.29, tif: "DAY".into(), ..Default::default()
+    };
+    client.place_order(9003, &spy(), &order).unwrap();
+    match rx.try_recv().expect("the submit") {
+        ControlCommand::Order(OrderRequest::SubmitTrailingStopPct { trail_pct, .. }) =>
+            assert_eq!(trail_pct, 29, "0.29% is 29 basis points, not 28"),
+        other => panic!("expected a trailing-percent submit, got {other:?}"),
+    }
+}
+
 #[test]
 fn parse_algo_vwap() {
     let params = vec![

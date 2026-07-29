@@ -444,12 +444,13 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let pct_str = trail_pct.to_string(); // basis points: 100 = 1%
-                // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
-                // percent in decimal form (1.00 for 1%), alongside 6268 in basis
-                // points and 18=a (ExecInst=TrailingStop). Without 99/211/18 the
-                // gateway rejects with "Invalid value in field # 18".
+                // 99/211 mirror the percent in decimal form (1.00 for 1%) and
+                // 18=a marks it trailing; without those three the gateway
+                // rejects with "Invalid value in field # 18". The percentage
+                // itself rides on 9822 as a fraction, and 6268 is the unit it
+                // is expressed in rather than a value.
                 let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
+                let pct_fraction = format!("{:.4}", trail_pct as f64 / 10000.0);
                 let trail_stop_str = format_price(trail_stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
@@ -467,7 +468,8 @@ pub(crate) fn drain_and_send_orders(
                     (99, &pct_decimal),     // StopPx = percent as decimal
                     (211, &pct_decimal),    // PegOffset = percent as decimal (mirror of 99)
                     (18, "a"),              // ExecInst = TrailingStop
-                    (6268, &pct_str),       // TrailingPercent (basis points)
+                    (9822, &pct_fraction), // PercentOffset = percentage as a fraction
+                    (6268, "100"),          // TrailingAmtUnit: 100 = percent
                     (59, "0"),              // TIF = DAY
                     (60, &now),
                     (167, &sec_type_str),
@@ -1743,15 +1745,16 @@ fn send_order_ex(
             if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
         }
         K::TrailPct { trail_pct, trail_stop_price } => {
-            // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
-            // percent in decimal form (1.00 for 1%), alongside 6268 in
-            // basis points and 18=a.
+            // 99/211 mirror the percent in decimal form (1.00 for 1%) and
+            // 18=a marks it trailing. The percentage itself rides on 9822 as a
+            // fraction, and 6268 is the unit it is expressed in.
             let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
             fields.push((40, "P".to_string()));
             fields.push((99, pct_decimal.clone()));
             fields.push((211, pct_decimal));
             fields.push((18, "a".to_string()));
-            fields.push((6268, trail_pct.to_string()));
+            fields.push((9822, format!("{:.4}", trail_pct as f64 / 10000.0)));
+            fields.push((6268, "100".to_string()));
             if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
             has_base_exec_inst = true;
         }
@@ -1828,10 +1831,12 @@ fn send_order_ex(
     // Extended attributes — same tag order as the historical SubmitLimitEx
     // block.
     if attrs.display_size > 0 {
-        fields.push((111, format_uint(attrs.display_size as u64).to_string()));
+        fields.push((6103, format_uint(attrs.display_size as u64).to_string()));
     }
     if attrs.min_qty > 0 {
-        fields.push((110, format_uint(attrs.min_qty as u64).to_string()));
+        // Refused at the API boundary; a caller reaching the engine directly
+        // gets a word rather than an attribute that quietly does nothing.
+        log::warn!("min_qty is not carried on the wire and is being ignored");
     }
     if attrs.outside_rth {
         fields.push((6433, "1".to_string()));
@@ -1885,10 +1890,10 @@ fn send_order_ex(
         let cond_strs = build_condition_strings(&attrs.conditions);
         fields.push((6136, cond_strs[0].clone())); // first element is count
         if attrs.conditions_cancel_order {
-            fields.push((6128, "1".to_string()));
+            fields.push((6579, "1".to_string()));
         }
         if attrs.conditions_ignore_rth {
-            fields.push((6151, "1".to_string()));
+            fields.push((6128, "1".to_string()));
         }
         // Per-condition tags start at index 1, 11 strings per condition
         for i in 0..attrs.conditions.len() {
@@ -2154,6 +2159,106 @@ mod tests {
             context.order(third).expect("second replacement tracked").outside_rth,
             "and keeps carrying it",
         );
+    }
+
+    /// Every one of these tags was rejected by the gateway or landed on a
+    /// field that means something else. The values are what a live session
+    /// accepts; the point of the test is that the tag numbers do not drift
+    /// back.
+    #[test]
+    fn the_extended_attributes_go_on_the_tags_the_gateway_reads() {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.submit_limit_ex(
+            instrument, Side::Buy, 1000, 100 * crate::types::PRICE_SCALE, b'0',
+            crate::types::OrderAttrs {
+                display_size: 200,
+                conditions_cancel_order: true,
+                conditions_ignore_rth: true,
+                conditions: vec![crate::types::OrderCondition::Time {
+                    time: "20260311-09:30:00".into(),
+                    is_more: true,
+                }],
+                ..Default::default()
+            },
+        );
+        let sent = drain(&mut context);
+
+        assert!(sent.contains("|6103=200|"), "display size rides on 6103: {sent}");
+        assert!(!sent.contains("|111="), "and never on 111: {sent}");
+        assert!(sent.contains("|6579=1|"), "cancel-on-condition rides on 6579: {sent}");
+        assert!(sent.contains("|6128=1|"), "ignore-RTH rides on 6128: {sent}");
+        assert!(!sent.contains("|6151="), "and neither lands on the price field: {sent}");
+    }
+
+    /// The percentage is a fraction on its own tag; 6268 states the unit it is
+    /// in. Putting the percentage on 6268 made every value except 1% invalid,
+    /// because 100 basis points collides with the code for "percent".
+    ///
+    /// Both encoders are checked: the plain one and the shared extended one,
+    /// which carried the same wrong assignment and would otherwise be pinned by
+    /// nothing.
+    #[test]
+    fn a_trailing_percent_states_its_unit_and_its_value_separately() {
+        for extended in [false, true] {
+            let mut context = Context::new();
+            let instrument = context.register_instrument(756733);
+            if extended {
+                context.pending_orders.push(crate::types::OrderRequest::SubmitEx {
+                    order_id: 11,
+                    instrument,
+                    side: Side::Sell,
+                    qty: 1,
+                    kind: crate::types::OrderKind::TrailPct {
+                        trail_pct: 250,
+                        trail_stop_price: 0,
+                    },
+                    tif: b'0',
+                    attrs: crate::types::OrderAttrs::default(),
+                });
+            } else {
+                context.submit_trailing_stop_pct(instrument, Side::Sell, 1, 250);
+            }
+            let sent = drain(&mut context);
+
+            assert!(sent.contains("|6268=100|"), "extended={extended}: 6268 is the unit: {sent}");
+            assert!(
+                sent.contains("|9822=0.0250|"),
+                "extended={extended}: 9822 is 2.5% as a fraction: {sent}",
+            );
+            assert!(sent.contains("|18=a|"), "extended={extended}: still trailing: {sent}");
+        }
+    }
+
+    /// Each condition flag must drive its own tag. Setting both at once cannot
+    /// tell the two apart, so they are submitted one at a time and the other
+    /// tag is asserted absent.
+    #[test]
+    fn each_condition_flag_drives_only_its_own_tag() {
+        let condition = || crate::types::OrderCondition::Time {
+            time: "20260311-09:30:00".into(),
+            is_more: true,
+        };
+        for (cancel, ignore_rth, present, absent) in [
+            (true, false, "|6579=1|", "|6128=1|"),
+            (false, true, "|6128=1|", "|6579=1|"),
+        ] {
+            let mut context = Context::new();
+            let instrument = context.register_instrument(756733);
+            context.submit_limit_ex(
+                instrument, Side::Buy, 1, 100 * crate::types::PRICE_SCALE, b'0',
+                crate::types::OrderAttrs {
+                    conditions: vec![condition()],
+                    conditions_cancel_order: cancel,
+                    conditions_ignore_rth: ignore_rth,
+                    ..Default::default()
+                },
+            );
+            let sent = drain(&mut context);
+
+            assert!(sent.contains(present), "cancel={cancel}: expected {present}: {sent}");
+            assert!(!sent.contains(absent), "cancel={cancel}: {absent} must be absent: {sent}");
+        }
     }
 
     /// A submit that offers the flag has to record it, or the replace has
