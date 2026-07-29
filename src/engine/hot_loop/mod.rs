@@ -1299,6 +1299,12 @@ pub(crate) fn format_price(price: Price) -> StackStr {
     let whole = price / PRICE_SCALE;
     let frac = (price % PRICE_SCALE).unsigned_abs();
     let mut s = StackStr::new();
+    // Division truncates toward zero, so a price in (-1, 0) has a whole part
+    // of 0 and carries its sign only in the fraction. Writing the integer
+    // alone would turn -0.35 into 0.35.
+    if price < 0 && whole == 0 {
+        s.push(b'-');
+    }
     s.write_i64(whole);
     if frac != 0 {
         s.push(b'.');
@@ -1669,7 +1675,35 @@ mod tests {
         assert!(hist[0].1.bars.is_empty());
     }
 
+    /// A price between -1 and 0 has a whole part of 0, so the sign lives only
+    /// in the fraction. Writing the integer alone turns a credit into a debit —
+    /// the same number with the opposite meaning, and nothing rejects it.
     #[test]
+    fn format_price_keeps_the_sign_below_one() {
+        let p = |v: f64| format_price((v * PRICE_SCALE as f64) as Price).to_string();
+        assert_eq!(p(-0.35), "-0.35");
+        assert_eq!(p(-0.5), "-0.5");
+        assert_eq!(p(-0.01), "-0.01");
+        // Either side of the boundary, and the cases that already worked.
+        assert_eq!(p(-1.5), "-1.5");
+        assert_eq!(p(-1.0), "-1");
+        assert_eq!(p(0.0), "0");
+        assert_eq!(p(0.35), "0.35");
+        assert_eq!(p(1.5), "1.5");
+        assert_eq!(p(737.53), "737.53");
+
+        // Raw fixed-point units, so the boundary is pinned at the smallest
+        // representable tick rather than only at prices a float can express.
+        // A guard that fires slightly too late still formats these positive.
+        let raw = |v: Price| format_price(v).to_string();
+        assert_eq!(raw(-1), "-0.00000001", "the smallest negative tick keeps its sign");
+        assert_eq!(raw(-PRICE_SCALE + 1), "-0.99999999", "just inside the interval");
+        assert_eq!(raw(-PRICE_SCALE), "-1", "the boundary itself");
+        assert_eq!(raw(-PRICE_SCALE - 1), "-1.00000001", "just outside it");
+        assert_eq!(raw(0), "0");
+        assert_eq!(raw(1), "0.00000001");
+    }
+
     // ibx#218: the CCP/farm ladder — floor 2s, ladder 0/5/15/30/50/60s,
     // jitter range growing 5s -> 20s, ceiling 82s.
     #[test]
