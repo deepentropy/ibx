@@ -245,7 +245,12 @@ impl EClient {
     #[pyo3(signature = (api_only=false))]
     fn req_completed_orders(&self, py: Python<'_>, api_only: bool) -> PyResult<()> {
         let _ = api_only;
-        if let Some(shared) = self.shared.lock().unwrap().clone() {
+        // Bind the clone out of the guard first. A MutexGuard temporary in an
+        // if-let scrutinee lives to the end of the body, so cloning alone does
+        // not release it — a callback re-entering disconnect() would deadlock
+        // on this same mutex (ibx#268).
+        let shared = self.shared.lock().unwrap().clone();
+        if let Some(shared) = shared {
             let completed = shared.orders.drain_completed_orders();
             for co in &completed {
                 let status_str = crate::client_core::order_status_str(co.status);

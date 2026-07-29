@@ -277,7 +277,10 @@ impl EClient {
 
     /// Request market rule details.
     fn req_market_rule(&self, py: Python<'_>, market_rule_id: i32) -> PyResult<()> {
-        if let Some(shared) = self.shared.lock().unwrap().clone() {
+        // Released before the callback below — see the note in
+        // req_completed_orders (ibx#268).
+        let shared = self.shared.lock().unwrap().clone();
+        if let Some(shared) = shared {
             if let Some(rule) = shared.reference.market_rule(market_rule_id) {
                 let increments: Vec<(f64, f64)> = rule.price_increments.iter()
                     .map(|pi| (pi.low_edge, pi.increment)).collect();

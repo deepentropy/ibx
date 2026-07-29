@@ -34,13 +34,28 @@ impl EClient {
     /// Single iteration of event dispatch: drain all shared queues and fire Python callbacks.
     pub(crate) fn dispatch_once(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
         // Drain engine events — surface disconnects as error callbacks.
-        if let Some(rx) = self.event_rx.lock().unwrap().as_ref() {
-            while let Ok(event) = rx.try_recv() {
-                if matches!(event, Event::Disconnected) {
-                    call_wrapper!(self.wrapper, py, "error", (-1i64, 1100i64, "Connectivity between client and server has been lost", ""));
-                    self.connected.store(false, Ordering::Release);
-                }
-            }
+        //
+        // Collect under a short lock and dispatch after releasing it. Binding
+        // `rx` from the guard would hold the mutex across the 1100 callback,
+        // and a handler answering connectivity loss with disconnect() locks the
+        // same mutex — non-reentrant, GIL held, so the interpreter freezes
+        // rather than one call failing (ibx#268, same shape as ibx#265).
+        let events: Vec<Event> = {
+            let guard = self.event_rx.lock().unwrap();
+            guard.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default()
+        };
+        // One batch is one session — the channel is replaced on reconnect — so
+        // several `Disconnected` events in it are one loss, and a network cut
+        // that takes both the farm and CCP down emits more than one. Firing per
+        // event meant a handler that reconnected on the first would then take a
+        // stale second 1100 into the new session, marking it disconnected.
+        if events.iter().any(|e| matches!(e, Event::Disconnected)) {
+            // Mark disconnected BEFORE the callback. A handler that answers
+            // 1100 with disconnect() then connect() establishes a new session
+            // and sets connected=true; storing false afterwards would clobber
+            // the new session's state (ibx#268).
+            self.connected.store(false, Ordering::Release);
+            call_wrapper!(self.wrapper, py, "error", (-1i64, 1100i64, "Connectivity between client and server has been lost", ""));
         }
 
         // Drain fills -> execDetails + orderStatus
