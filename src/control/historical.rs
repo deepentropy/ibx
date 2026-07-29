@@ -166,8 +166,12 @@ pub struct HistoricalRequest {
     pub query_id: String,
     pub con_id: u32,
     pub symbol: String,
-    pub sec_type: &'static str,
-    pub exchange: &'static str,
+    /// Wire security type and exchange for the contract being requested.
+    /// Owned rather than static: they come from the caller's `Contract`, and
+    /// hardcoding them described a different contract than was asked for
+    /// (ibx#305).
+    pub sec_type: String,
+    pub exchange: String,
     pub data_type: BarDataType,
     pub end_time: String,
     pub duration: String,
@@ -200,7 +204,7 @@ pub struct HistoricalResponse {
 
 /// Build the XML query for a historical bar data request.
 pub fn build_query_xml(req: &HistoricalRequest) -> String {
-    let exchange = match req.exchange {
+    let exchange = match req.exchange.as_str() {
         "SMART" => "BEST",
         e => e,
     };
@@ -838,8 +842,8 @@ mod tests {
             query_id: "q1".to_string(),
             con_id: 265598,
             symbol: "AAPL".to_string(),
-            sec_type: "CS",
-            exchange: "SMART",
+            sec_type: "CS".to_string(),
+            exchange: "SMART".to_string(),
             data_type: BarDataType::Trades,
             end_time: "20260228-15:00:00".to_string(),
             duration: "1 d".to_string(),
@@ -863,8 +867,8 @@ mod tests {
             query_id: "q1".to_string(),
             con_id: 265598,
             symbol: "AAPL".to_string(),
-            sec_type: "CS",
-            exchange: "SMART",
+            sec_type: "CS".to_string(),
+            exchange: "SMART".to_string(),
             data_type: BarDataType::Trades,
             end_time: "20260228-15:00:00".to_string(),
             duration: "1 d".to_string(),
@@ -988,6 +992,51 @@ mod tests {
         assert_eq!(extract_xml_tag("<a>hello</a>", "a"), Some("hello"));
         assert_eq!(extract_xml_tag("<x>123</x>", "x"), Some("123"));
         assert_eq!(extract_xml_tag("<x>123</x>", "y"), None);
+    }
+
+    /// The contract's own security type and exchange have to reach the query.
+    /// Hardcoding them described a stock on SMART whatever was asked for, and
+    /// the gateway rejected anything venue-specific with error 162 (ibx#305).
+    #[test]
+    fn a_futures_query_carries_its_own_sec_type_and_exchange() {
+        let req = HistoricalRequest {
+            query_id: "hist_1".into(),
+            con_id: 793356225,
+            symbol: "MNQ".into(),
+            sec_type: "FUT".into(),
+            exchange: "CME".into(),
+            data_type: BarDataType::Trades,
+            end_time: String::new(),
+            duration: "2 D".into(),
+            bar_size: BarSize::Day1,
+            use_rth: false,
+            keep_up_to_date: false,
+        };
+        let xml = build_query_xml(&req);
+        assert!(xml.contains("<secType>FUT</secType>"), "got: {}", xml);
+        assert!(xml.contains("<exchange>CME</exchange>"), "got: {}", xml);
+        assert!(!xml.contains("BEST"), "a futures query must not be routed to BEST: {}", xml);
+    }
+
+    /// SMART still maps to BEST, which is what stock callers relied on.
+    #[test]
+    fn a_smart_query_still_routes_to_best() {
+        let req = HistoricalRequest {
+            query_id: "hist_2".into(),
+            con_id: 756733,
+            symbol: "SPY".into(),
+            sec_type: "CS".into(),
+            exchange: "SMART".into(),
+            data_type: BarDataType::Trades,
+            end_time: String::new(),
+            duration: "1 D".into(),
+            bar_size: BarSize::Day1,
+            use_rth: true,
+            keep_up_to_date: false,
+        };
+        let xml = build_query_xml(&req);
+        assert!(xml.contains("<exchange>BEST</exchange>"), "got: {}", xml);
+        assert!(xml.contains("<secType>CS</secType>"), "got: {}", xml);
     }
 
     #[test]

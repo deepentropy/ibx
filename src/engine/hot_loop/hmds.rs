@@ -50,6 +50,20 @@ pub(crate) struct HmdsState {
     pub(crate) cold_scanner_results: Vec<(u32, crate::control::scanner::ScannerResult)>,
 }
 
+/// Wire security type for a historical query. Empty falls back to the stock
+/// encoding, which is what every caller got unconditionally before (ibx#305).
+fn hist_sec_type(sec_type: &str) -> String {
+    if sec_type.is_empty() {
+        return "CS".to_string();
+    }
+    crate::control::contracts::SecurityType::from_fix(sec_type).to_fix().to_string()
+}
+
+/// Exchange for a historical query, defaulting to the previous constant.
+fn hist_exchange(exchange: &str) -> String {
+    if exchange.is_empty() { "SMART".to_string() } else { exchange.to_string() }
+}
+
 impl HmdsState {
     pub(crate) fn new() -> Self {
         Self {
@@ -627,6 +641,8 @@ impl HmdsState {
         use_rth: bool,
         keep_up_to_date: bool,
         symbol: &str,
+        sec_type: &str,
+        exchange: &str,
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
         shared: &SharedState,
@@ -668,8 +684,8 @@ impl HmdsState {
             query_id: query_id.clone(),
             con_id: con_id as u32,
             symbol: symbol.to_string(),
-            sec_type: "CS",
-            exchange: "SMART",
+            sec_type: hist_sec_type(sec_type),
+            exchange: hist_exchange(exchange),
             data_type,
             end_time: end_date_time.to_string(),
             duration: duration.to_string(),
@@ -704,6 +720,8 @@ impl HmdsState {
         what_to_show: &str,
         use_rth: bool,
         symbol: &str,
+        sec_type: &str,
+        exchange: &str,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
         sign_key: &[u8],
@@ -755,8 +773,8 @@ impl HmdsState {
             query_id: query_id.clone(),
             con_id: con_id as u32,
             symbol: symbol.to_string(),
-            sec_type: "CS",
-            exchange: "SMART",
+            sec_type: hist_sec_type(sec_type),
+            exchange: hist_exchange(exchange),
             data_type,
             end_time: end_date_time,
             duration: duration.to_string(),
@@ -1246,7 +1264,7 @@ mod tests {
         let mut conn: Option<Connection> = None;
 
         hmds.send_historical_request_ex(9, 756733, "", "2 d", "1 Min", "TRADES",
-            true, false, "SPY", &mut conn, &mut hb, &shared);
+            true, false, "SPY", "STK", "SMART", &mut conn, &mut hb, &shared);
 
         assert!(hmds.pending_historical.is_empty(), "rejected request must not go pending");
         let errors = shared.reference.drain_historical_errors();
