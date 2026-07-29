@@ -683,10 +683,30 @@ impl CcpState {
             && parsed.get(&39).map(|s| s.as_str()) == Some("0");
         if is_new_ack && context.order(clord_id).is_none() {
             let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // The side has to be stated. A guess does not stay in the recovered
+            // record: every later fill for the order books through the tracked
+            // path and takes its side from here, so a recovered buy recorded as
+            // a sell moves the position down by the filled quantity instead of
+            // up — wrong by twice the fill, and indistinguishable afterwards
+            // from a side the report actually carried.
             let side = match parsed.get(&54).map(|s| s.as_str()) {
-                Some("1") => Side::Buy,
-                Some("5") => Side::ShortSell,
-                _ => Side::Sell,
+                Some("1") => Some(Side::Buy),
+                Some("2") => Some(Side::Sell),
+                Some("5") => Some(Side::ShortSell),
+                other => {
+                    // The sentinel that terminates a recovery burst, and the
+                    // mass-status echo, both parse to id 0 and carry no side.
+                    // Warning about those once per connect would cry wolf on
+                    // the one signal that matters when a real record is
+                    // refused.
+                    if clord_id != 0 {
+                        log::warn!(
+                            "Recovery record for order {} has Side={:?}; not tracking it",
+                            clord_id, other,
+                        );
+                    }
+                    None
+                }
             };
             let qty: u32 = parsed.get(&38).and_then(|s| s.parse::<f64>().ok()).map(|q| q as u32).unwrap_or(0);
             let limit_price_i64: i64 = parsed.get(&44)
@@ -699,7 +719,7 @@ impl CcpState {
                 .unwrap_or(0);
             let ord_type_byte: u8 = parsed.get(&40).and_then(|s| s.bytes().next()).unwrap_or(b'2');
             let tif_byte: u8 = parsed.get(&59).and_then(|s| s.bytes().next()).unwrap_or(b'1');
-            if con_id != 0 && qty > 0 {
+            if let (Some(side), true) = (side, con_id != 0 && qty > 0) {
                 let instrument = context.register_instrument(con_id);
                 if let Some(sym) = parsed.get(&55) {
                     context.set_symbol(instrument, sym.clone());
@@ -2166,6 +2186,57 @@ mod tests {
             42, instrument, Side::Buy, 1, 100 * PRICE_SCALE, b'2', b'0', 0,
         )); // starts at PendingSubmit
         (CcpState::new(), context, SharedState::new())
+    }
+
+    /// The recovered side is not confined to the recovered record: every later
+    /// fill for that order books through the tracked path and takes its side
+    /// from here, so a guess moves the position by twice the fill in the wrong
+    /// direction, and nothing afterwards distinguishes it from a stated side.
+    #[test]
+    fn a_recovery_record_without_a_side_is_not_tracked() {
+        for missing in ["", "9", "X"] {
+            let mut context = Context::new();
+            let mut ccp = CcpState::new();
+            let shared = SharedState::new();
+            let mut frame = std::collections::HashMap::new();
+            for (tag, val) in [
+                (11u32, "77"), (150, "0"), (39, "0"), (6008, "756733"), (38, "100"), (55, "SPY"),
+            ] {
+                frame.insert(tag, val.to_string());
+            }
+            if !missing.is_empty() {
+                frame.insert(54, missing.to_string());
+            }
+
+            ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+            assert!(
+                context.order(77).is_none(),
+                "Side={missing:?} must not be guessed into a tracked order",
+            );
+        }
+    }
+
+    /// A stated side is still recovered.
+    #[test]
+    fn a_recovery_record_with_a_side_is_tracked() {
+        for (tag54, expected) in [("1", Side::Buy), ("2", Side::Sell), ("5", Side::ShortSell)] {
+            let mut context = Context::new();
+            let mut ccp = CcpState::new();
+            let shared = SharedState::new();
+            let mut frame = std::collections::HashMap::new();
+            for (tag, val) in [
+                (11u32, "77"), (150, "0"), (39, "0"), (6008, "756733"), (38, "100"),
+                (55, "SPY"), (54, tag54),
+            ] {
+                frame.insert(tag, val.to_string());
+            }
+
+            ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+            let order = context.order(77).expect("a stated side is recovered");
+            assert_eq!(order.side, expected, "Side={tag54}");
+        }
     }
 
     fn exec_report_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
