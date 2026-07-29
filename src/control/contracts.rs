@@ -192,6 +192,17 @@ impl Default for ContractDefinition {
 pub fn exchange_to_fix(exchange: &str) -> &str {
     match exchange {
         "SMART" => "BEST",
+        // Legacy spelling for NASDAQ. The depth path already translates it;
+        // routing a subscription under the old name reaches nothing.
+        "ISLAND" => "NASDAQ",
+        other => other,
+    }
+}
+
+/// Map a security type to its wire format.
+pub fn sec_type_to_fix(sec_type: &str) -> &str {
+    match sec_type {
+        "STK" => "CS",
         other => other,
     }
 }
@@ -824,8 +835,18 @@ mod tests {
     fn exchange_mapping() {
         assert_eq!(exchange_to_fix("SMART"), "BEST");
         assert_eq!(exchange_to_fix("NYSE"), "NYSE");
+        assert_eq!(exchange_to_fix("ISLAND"), "NASDAQ", "legacy spelling must route");
         assert_eq!(exchange_from_fix("BEST"), "SMART");
         assert_eq!(exchange_from_fix("ARCA"), "ARCA");
+    }
+
+    #[test]
+    fn sec_type_wire_mapping() {
+        // Only STK is renamed on the wire; everything else passes through.
+        assert_eq!(sec_type_to_fix("STK"), "CS");
+        assert_eq!(sec_type_to_fix("FUT"), "FUT");
+        assert_eq!(sec_type_to_fix("OPT"), "OPT");
+        assert_eq!(sec_type_to_fix("CASH"), "CASH");
     }
 
     #[test]
