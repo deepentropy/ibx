@@ -1,0 +1,45 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: cargo test --lib
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `config::expiry_tests` resolves zones by their legacy aliases
+      # (`US/Eastern`). On 24.04 — which `ubuntu-latest` resolves to — those
+      # aliases are not in `tzdata` at all: they moved to `tzdata-legacy`, so a
+      # full `tzdata` install still leaves `/usr/share/zoneinfo/US/` absent and
+      # both tests failing.
+      - name: Install tzdata
+        run: sudo apt-get update && sudo apt-get install -y tzdata tzdata-legacy
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --lib --all-targets
+
+      - name: Test
+        run: cargo test --lib
+
+      # The bindings are behind a non-default feature, so nothing above builds
+      # them. Their tests need a live session and cannot run here, but keeping
+      # them compiling is most of the value and costs one step.
+      - name: Build the Python bindings
+        run: cargo build --lib --features python
