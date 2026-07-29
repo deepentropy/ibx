@@ -1745,22 +1745,27 @@ fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
     };
     let mut seeds = Vec::new();
     let mut con_id: i64 = 0;
-    let mut qty_midnight: i64 = 0;
+    let mut qty_midnight: Option<i64> = None;
     let mut money_traded: f64 = 0.0;
     let mut realized_pnl: f64 = 0.0;
     let mut count = 0;
     for part in text.split('\x01') {
         if let Some(v) = part.strip_prefix("6008=") {
             if count > 0 && con_id != 0 {
-                seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
+                if let Some(qty_midnight) = qty_midnight {
+                    seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
+                }
             }
             con_id = v.parse().unwrap_or(0);
-            qty_midnight = 0;
+            qty_midnight = None;
             money_traded = 0.0;
             realized_pnl = 0.0;
             count += 1;
         } else if let Some(v) = part.strip_prefix("6064=") {
-            qty_midnight = v.parse::<f64>().unwrap_or(0.0) as i64;
+            // Same rule as the position feed above: a quantity that is absent
+            // or unparseable is not a flat. Reading it as zero here makes the
+            // day's P&L look as though the position were opened intraday.
+            qty_midnight = v.parse::<f64>().ok().filter(|q| q.is_finite()).map(|q| q as i64);
         } else if let Some(v) = part.strip_prefix("6822=") {
             // moneyTradedSinceMidnight: signed net cash, SELL positive / BUY
             // negative. Stored with the wire sign; poll_pnl adds it (ib-agent#163).
@@ -1770,7 +1775,9 @@ fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
         }
     }
     if count > 0 && con_id != 0 {
-        seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
+        if let Some(qty_midnight) = qty_midnight {
+            seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
+        }
     }
     shared.portfolio.set_midnight_seeds(seeds);
 }
@@ -1796,42 +1803,53 @@ impl CcpState {
     };
     // Parse repeating group by scanning for 6008= boundaries
     let mut con_id: i64 = 0;
-    let mut qty: i64 = 0;
+    // `None` until this entry carries a parseable, finite quantity. A zero
+    // default meant an entry without one flattened a live position, published
+    // it to reqPositions and both P&L paths, and emitted a PositionUpdate
+    // saying flat — the same defect ibx#261 fixed on the account-update path
+    // (ibx#296). A genuine flat still arrives as an explicit `6064=0`.
+    let mut qty: Option<i64> = None;
     let mut avg_cost_raw: f64 = 0.0;
     let mut count = 0;
     for part in text.split('\x01') {
         if let Some(v) = part.strip_prefix("6008=") {
             // Flush previous position if any
             if count > 0 && con_id != 0 {
-                let avg_cost = (avg_cost_raw * PRICE_SCALE as f64) as Price;
-                shared.portfolio.set_position_info(PositionInfo {
-                    con_id, position: qty, avg_cost, ..Default::default()
-                });
-                if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
-                    shared.portfolio.set_position(instrument, qty);
-                    emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
+                if let Some(qty) = qty {
+                    let avg_cost = (avg_cost_raw * PRICE_SCALE as f64) as Price;
+                    shared.portfolio.set_position_info(PositionInfo {
+                        con_id, position: qty, avg_cost, ..Default::default()
+                    });
+                    if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
+                        shared.portfolio.set_position(instrument, qty);
+                        emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
+                    }
                 }
                 self.auto_fetch_secdef_if_cold(con_id, ccp_conn, shared, hb);
             }
             con_id = v.parse().unwrap_or(0);
-            qty = 0;
+            qty = None;
             avg_cost_raw = 0.0;
             count += 1;
         } else if let Some(v) = part.strip_prefix("6064=") {
-            qty = v.parse::<f64>().unwrap_or(0.0) as i64;
+            // Filtered to finite: `"NaN".parse()` succeeds and `NaN as i64`
+            // is 0, which would flatten by the same route.
+            qty = v.parse::<f64>().ok().filter(|f| f.is_finite()).map(|f| f as i64);
         } else if let Some(v) = part.strip_prefix("6101=") {
             avg_cost_raw = v.parse().unwrap_or(0.0);
         }
     }
     // Flush last position
     if count > 0 && con_id != 0 {
-        let avg_cost = (avg_cost_raw * PRICE_SCALE as f64) as Price;
-        shared.portfolio.set_position_info(PositionInfo {
-            con_id, position: qty, avg_cost, ..Default::default()
-        });
-        if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
-            shared.portfolio.set_position(instrument, qty);
-            emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
+        if let Some(qty) = qty {
+            let avg_cost = (avg_cost_raw * PRICE_SCALE as f64) as Price;
+            shared.portfolio.set_position_info(PositionInfo {
+                con_id, position: qty, avg_cost, ..Default::default()
+            });
+            if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
+                shared.portfolio.set_position(instrument, qty);
+                emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
+            }
         }
         self.auto_fetch_secdef_if_cold(con_id, ccp_conn, shared, hb);
     }
@@ -2075,6 +2093,81 @@ mod tests {
             stop_price: 0,
         });
         (CcpState::new(), context, SharedState::new())
+    }
+
+    /// The midnight seed carries the same quantity tag and had the same
+    /// defect: reading an absent one as zero makes the day's P&L look as
+    /// though the position were opened intraday, when it was held overnight.
+    #[test]
+    fn a_midnight_seed_without_a_quantity_is_not_seeded_flat() {
+        let shared = SharedState::new();
+        // Two entries: one stating its quantity, one omitting it.
+        let body = [
+            "6008=756733", "6064=100", "6822=-50.0", "6099=0.0",
+            "6008=265598", "6822=-10.0", "6099=0.0",
+        ].join("\x01");
+        handle_pnl_response(body.as_bytes(), &shared);
+
+        let seeds = shared.portfolio.midnight_seeds();
+        assert_eq!(seeds.len(), 1, "only the entry that stated a quantity is seeded");
+        assert_eq!(seeds[0].con_id, 756733);
+        assert_eq!(seeds[0].qty_midnight, 100);
+    }
+
+    /// ibx#296: the 75 feed defaulted its running quantity to zero, so an entry
+    /// carrying a conId but no parseable 6064 flattened a live position and
+    /// published it — the same defect ibx#261 fixed on the account-update path.
+    #[test]
+    fn a_position_feed_entry_without_a_quantity_leaves_the_position_alone() {
+        for body in [
+            // no 6064 at all
+            "6008=265598\x016101=151.0\x01",
+            // present but not a number
+            "6008=265598\x016064=abc\x016101=151.0\x01",
+            // parses, but is not a quantity
+            "6008=265598\x016064=NaN\x016101=151.0\x01",
+        ] {
+            let mut ccp = CcpState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(265598);
+            shared.portfolio.set_position_info(PositionInfo {
+                con_id: 265598, position: 100, avg_cost: 0, ..Default::default()
+            });
+            shared.portfolio.set_position(instrument, 100);
+
+            ccp.handle_position_feed(
+                body.as_bytes(), &mut None, &mut context, &shared, &None, &mut hb);
+
+            assert_eq!(
+                shared.portfolio.position_info(265598).map(|p| p.position), Some(100),
+                "{:?} must not flatten a live position", body,
+            );
+        }
+    }
+
+    /// An explicit zero is a genuine flat and must still be published.
+    #[test]
+    fn a_position_feed_entry_with_an_explicit_zero_still_flattens() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.market.register(265598);
+        shared.portfolio.set_position_info(PositionInfo {
+            con_id: 265598, position: 100, avg_cost: 0, ..Default::default()
+        });
+        shared.portfolio.set_position(instrument, 100);
+
+        ccp.handle_position_feed(
+            b"6008=265598\x016064=0\x016101=151.0\x01",
+            &mut None, &mut context, &shared, &None, &mut hb);
+
+        assert_eq!(
+            shared.portfolio.position_info(265598).map(|p| p.position), Some(0),
+            "an explicit zero is a genuine flat",
+        );
     }
 
     // ibx#205: a margin-reducing preview (close, cash-account sell) resolves to a
