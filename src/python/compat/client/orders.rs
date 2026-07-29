@@ -39,12 +39,16 @@ impl EClient {
         let cmd = if self.core.is_order_tracked(oid) {
             let price = (api_order.lmt_price * crate::api::types::PRICE_SCALE_F) as i64;
             let qty = api_order.total_quantity as u32;
+            // A stop's trigger rides on aux_price, exactly as it does on the
+            // submit path.
+            let stop_price = (api_order.aux_price * crate::api::types::PRICE_SCALE_F) as i64;
             ControlCommand::Order(OrderRequest::Modify {
                 new_order_id: oid,
                 order_id: oid,
                 price,
                 qty,
                 outside_rth: api_order.outside_rth,
+                stop_price,
             })
         } else {
             ClientCore::build_order_request(&api_order, oid, instrument)

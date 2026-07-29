@@ -869,6 +869,10 @@ pub enum OrderRequest {
         /// asserts tag 6433 from this rather than from the tracked record,
         /// which has no field for it (ibx#247).
         outside_rth: bool,
+        /// New trigger price. Zero means the caller did not supply one, in
+        /// which case a trigger-only order type takes `price` as its trigger
+        /// and every other type keeps the trigger it already had.
+        stop_price: Price,
     },
 }
 
@@ -1625,6 +1629,7 @@ mod tests {
             price: 100 * PRICE_SCALE,
             qty: 200,
             outside_rth: false,
+            stop_price: 0,
         };
         let req2 = req.clone();
         match (req, req2) {
@@ -1873,7 +1878,7 @@ mod tests {
         assert_eq!(req.instrument(), Some(7));
         assert_eq!(OrderRequest::Cancel { order_id: 1 }.instrument(), None);
         assert_eq!(
-            OrderRequest::Modify { new_order_id: 2, order_id: 1, price: 0, qty: 1, outside_rth: false }.instrument(),
+            OrderRequest::Modify { new_order_id: 2, order_id: 1, price: 0, qty: 1, outside_rth: false, stop_price: 0 }.instrument(),
             None
         );
     }
@@ -1898,7 +1903,7 @@ mod tests {
 
     #[test]
     fn order_request_modify_fields() {
-        let req = OrderRequest::Modify { new_order_id: 100, order_id: 99, price: 200 * PRICE_SCALE, qty: 10, outside_rth: false };
+        let req = OrderRequest::Modify { new_order_id: 100, order_id: 99, price: 200 * PRICE_SCALE, qty: 10, outside_rth: false, stop_price: 0 };
         match req {
             OrderRequest::Modify { order_id, price, qty, .. } => {
                 assert_eq!(order_id, 99);

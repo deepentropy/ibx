@@ -1442,16 +1442,49 @@ pub(crate) fn drain_and_send_orders(
                 }
                 last_result
             }
-            OrderRequest::Modify { new_order_id, order_id, price, qty, outside_rth } => {
+            OrderRequest::Modify {
+                new_order_id, order_id, price, qty, outside_rth, stop_price,
+            } => {
                 let orig = context.order(order_id).copied();
                 // Modify carries no instrument; resolve it from the tracked
                 // order to snap the new price to the tick grid (ibx#216).
                 let price = orig.map_or(price, |o| crate::types::snap_to_tick(
                     price, context.market.min_tick_scaled(o.instrument)));
+                // Which tag each price belongs on depends on the order type,
+                // and the answer is needed twice: once for what the engine
+                // records, once for what goes on the wire. A replacement that
+                // recorded the old trigger would leave the next modify
+                // restating a price this one just moved.
+                let ord_type_byte = orig.map(|o| o.ord_type).unwrap_or(b'2');
+                let trigger_only = is_trigger_only(ord_type_byte);
+                let orig_stop = orig.map_or(0, |o| o.stop_price);
+                // A two-legged type can have its trigger moved, but only if it
+                // has one: b'K' is Limit-if-Touched and Market-to-Limit both,
+                // and the tracked trigger is what separates them. Every other
+                // type keeps the shape it had, so a trigger supplied on the
+                // request cannot become a tag 99 for a limit order.
+                //
+                // A pegged or relative order tracks its offset in `stop_price`,
+                // so its replace does restate that on 99 — unchanged from
+                // before, and one of the reasons those types are refused a
+                // modify outright (ibx#334).
+                let carries_trigger =
+                    trigger_only || (matches!(ord_type_byte, b'4' | b'K') && orig_stop != 0);
+                let new_stop = if trigger_only && stop_price == 0 {
+                    price
+                } else if carries_trigger && stop_price != 0 {
+                    stop_price
+                } else {
+                    orig_stop
+                };
+
                 if let Some(orig) = orig {
+                    // The moved trigger is recorded too: a replacement that
+                    // kept the old one would leave the next modify restating a
+                    // price this one just moved.
                     context.insert_order(crate::types::Order::new(
                         new_order_id, orig.instrument, orig.side, qty, price,
-                        orig.ord_type, orig.tif, orig.stop_price,
+                        orig.ord_type, orig.tif, new_stop,
                     ));
                 }
                 // Versioned ClOrdID chaining: orderId.0 → .1 → .2
@@ -1488,10 +1521,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),    // ClOrdID (versioned)
                     (41, &orig_clord),   // OrigClOrdID (previous version)
-                    (44, &price_str),    // Price
-                    (1, account_id),     // Account
-                    (6122, "c"),         // Client version
                 ];
+                // Each price goes to the tag its order type uses. A
+                // trigger-only type has no limit leg, so its price is the
+                // trigger and tag 44 is left off entirely — the shape its own
+                // submit has. Anything else keeps 44 for the limit.
+                if !trigger_only {
+                    fields.push((44, &price_str)); // Price
+                }
+                fields.push((1, account_id)); // Account
+                fields.push((6122, "c"));     // Client version
                 // OutsideRTH, from the order the caller resubmitted rather than
                 // hard-coded: the tracked record cannot express it, and asserting
                 // 1 unconditionally opted every modified order into the extended
@@ -1513,13 +1552,11 @@ pub(crate) fn drain_and_send_orders(
                     (6238, ""),          // Empty (matches reference)
                 ];
                 fields.extend(rest);
-                // Include stop price for order types that need it
+                // The trigger the caller moved, or the one the order already had.
                 let stop_str;
-                if let Some(o) = orig {
-                    if o.stop_price != 0 {
-                        stop_str = format_price(o.stop_price);
-                        fields.push((99, &stop_str));
-                    }
+                if new_stop != 0 {
+                    stop_str = format_price(new_stop);
+                    fields.push((99, &stop_str));
                 }
                 conn.send_fix(&fields)
             }
@@ -1595,6 +1632,13 @@ fn oca_type_str(oca_type: u8) -> &'static str {
         4 => "ReduceOnFillWBlockFromTotal",
         _ => "ReduceOnFillNonBlock",
     }
+}
+
+/// Order types whose price *is* the trigger: they have no limit leg, so a
+/// replace states the price in tag 99 and sends no tag 44 at all — which is
+/// the shape their own submit has.
+fn is_trigger_only(ord_type: u8) -> bool {
+    matches!(ord_type, b'3' | b'J') || ord_type == crate::types::ORD_STP_PRT
 }
 
 /// One shared encoder for every extended order submission (ibx#224): the
@@ -2073,8 +2117,8 @@ mod modify_wire_tests {
     use crate::protocol::connection::Connection;
     use std::io::Read;
 
-    /// Drive the Modify arm and read what actually reaches the socket.
-    fn replace_bytes(outside_rth: bool) -> String {
+    /// Drive the order queue and read what actually reaches the socket.
+    fn drain(context: &mut Context) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let client = std::net::TcpStream::connect(addr).unwrap();
@@ -2082,19 +2126,23 @@ mod modify_wire_tests {
         peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
         let mut conn = Some(Connection::new_raw(client).unwrap());
 
+        let shared = std::sync::Arc::new(SharedState::new());
+        let mut hb = HeartbeatState::new();
+        drain_and_send_orders(&mut conn, context, "DU111111", &mut hb, false, &shared);
+
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|")
+    }
+
+    /// A plain limit modified with the flag in each polarity.
+    fn replace_bytes(outside_rth: bool) -> String {
         let mut context = Context::new();
         context.insert_order(crate::types::Order::new(
             7, 0, Side::Buy, 1, 100 * crate::types::PRICE_SCALE, b'2', b'0', 0,
         ));
         context.modify(7, 200 * crate::types::PRICE_SCALE, 50, outside_rth);
-
-        let shared = std::sync::Arc::new(SharedState::new());
-        let mut hb = HeartbeatState::new();
-        drain_and_send_orders(&mut conn, &mut context, "DU111111", &mut hb, false, &shared);
-
-        let mut buf = [0u8; 4096];
-        let n = peer.read(&mut buf).unwrap();
-        String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|")
+        drain(&mut context)
     }
 
     /// ibx#247: the replace asserted 6433=1 unconditionally, so an RTH-only
@@ -2110,5 +2158,166 @@ mod modify_wire_tests {
         let off = replace_bytes(false);
         assert!(!off.contains("|6433="), "an RTH-only order must not assert 6433: {}", off);
         assert!(off.contains("|6122=c|38=50|"), "the rest of the message is unchanged: {}", off);
+    }
+
+    /// ibx#324: a stop has no limit leg, so the price a caller supplies to a
+    /// modify can only mean the trigger. Writing it to tag 44 and restating the
+    /// original trigger in 99 leaves the stop where it was — and on a live
+    /// gateway the replace is rejected outright, so the order the caller meant
+    /// to move ends up Inactive.
+    #[test]
+    fn modifying_a_stop_moves_its_trigger() {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            7, instrument, Side::Sell, 1, 600 * crate::types::PRICE_SCALE, b'3', b'0',
+            600 * crate::types::PRICE_SCALE,
+        ));
+
+        context.modify(7, 610 * crate::types::PRICE_SCALE, 1, false);
+        let sent = drain(&mut context);
+
+        assert!(sent.contains("|99=610|"), "the trigger moves to the new price: {sent}");
+        assert!(!sent.contains("|99=600|"), "and does not restate the old one: {sent}");
+        assert!(!sent.contains("|44="), "a stop has no limit leg to state: {sent}");
+    }
+
+    /// Every trigger-only type, not just the plain stop. Market-if-touched and
+    /// stop-with-protection have no limit leg either.
+    #[test]
+    fn every_trigger_only_type_moves_its_trigger() {
+        for (ord_type, name) in [
+            (b'3', "STP"), (b'J', "MIT"), (crate::types::ORD_STP_PRT, "STP PRT"),
+        ] {
+            let mut context = Context::new();
+            let instrument = context.register_instrument(756733);
+            context.insert_order(crate::types::Order::new(
+                7, instrument, Side::Sell, 1, 600 * crate::types::PRICE_SCALE, ord_type, b'0',
+                600 * crate::types::PRICE_SCALE,
+            ));
+
+            context.modify(7, 610 * crate::types::PRICE_SCALE, 1, false);
+            let sent = drain(&mut context);
+
+            assert!(sent.contains("|99=610|"), "{name}: trigger moves: {sent}");
+            assert!(!sent.contains("|44="), "{name}: no limit leg to state: {sent}");
+        }
+
+        // The bucket is pinned from above as well: a type that is not
+        // trigger-only must keep its limit leg.
+        for ord_type in [b'U', b'2', b'1'] {
+            let mut context = Context::new();
+            let instrument = context.register_instrument(756733);
+            context.insert_order(crate::types::Order::new(
+                7, instrument, Side::Sell, 1, 100 * crate::types::PRICE_SCALE, ord_type, b'0', 0,
+            ));
+            context.modify(7, 610 * crate::types::PRICE_SCALE, 1, false);
+            let sent = drain(&mut context);
+            assert!(
+                sent.contains("|44=610|"),
+                "{ord_type} is not trigger-only and keeps tag 44: {sent}",
+            );
+        }
+    }
+
+    /// A type that carries no trigger must not acquire one. The public client
+    /// fills the request's trigger from `aux_price`, which is meaningless on a
+    /// limit and is the offset on a pegged order — neither belongs in tag 99.
+    #[test]
+    fn a_type_without_a_trigger_never_gains_one() {
+        for (ord_type, name) in [
+            (b'2', "LMT"), (b'1', "MKT"), (b'P', "TRAIL"), (b'K', "MTL"),
+            (crate::types::ORD_PEG_MID, "PEG MID"),
+        ] {
+            let mut context = Context::new();
+            let instrument = context.register_instrument(756733);
+            // Tracked with no trigger. A pegged or relative order tracks its
+            // offset in this field, so this pins the request-supplied path
+            // rather than claiming those types never emit a 99.
+            context.insert_order(crate::types::Order::new(
+                7, instrument, Side::Sell, 1, 100 * crate::types::PRICE_SCALE, ord_type, b'0', 0,
+            ));
+
+            // A trigger arrives on the request anyway.
+            context.pending_orders.push(crate::types::OrderRequest::Modify {
+                new_order_id: 8,
+                order_id: 7,
+                price: 101 * crate::types::PRICE_SCALE,
+                qty: 1,
+                outside_rth: false,
+                stop_price: 610 * crate::types::PRICE_SCALE,
+            });
+            let sent = drain(&mut context);
+
+            assert!(!sent.contains("|99="), "{name} must not gain a trigger: {sent}");
+            assert!(sent.contains("|44=101|"), "{name} keeps its limit leg: {sent}");
+        }
+    }
+
+    /// A two-legged type can have its trigger moved when it has one.
+    #[test]
+    fn a_supplied_trigger_moves_a_two_legged_order() {
+        for (ord_type, name) in [(b'4', "STP LMT"), (b'K', "LIT")] {
+            let mut context = Context::new();
+            let instrument = context.register_instrument(756733);
+            context.insert_order(crate::types::Order::new(
+                7, instrument, Side::Sell, 1, 605 * crate::types::PRICE_SCALE, ord_type, b'0',
+                600 * crate::types::PRICE_SCALE,
+            ));
+
+            context.pending_orders.push(crate::types::OrderRequest::Modify {
+                new_order_id: 8,
+                order_id: 7,
+                price: 610 * crate::types::PRICE_SCALE,
+                qty: 1,
+                outside_rth: false,
+                stop_price: 590 * crate::types::PRICE_SCALE,
+            });
+            let sent = drain(&mut context);
+
+            assert!(sent.contains("|44=610|"), "{name}: the limit moves: {sent}");
+            assert!(sent.contains("|99=590|"), "{name}: and so does the trigger: {sent}");
+        }
+    }
+
+    /// The replacement carries the trigger forward, so a second modify still
+    /// has one to restate.
+    #[test]
+    fn the_replacement_keeps_the_trigger() {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            7, instrument, Side::Sell, 1, 600 * crate::types::PRICE_SCALE, b'3', b'0',
+            600 * crate::types::PRICE_SCALE,
+        ));
+
+        let second = context.modify(7, 610 * crate::types::PRICE_SCALE, 1, false);
+        drain(&mut context);
+        assert_eq!(
+            context.order(second).expect("tracked").stop_price,
+            610 * crate::types::PRICE_SCALE,
+            "the replacement records the trigger it just asked for",
+        );
+
+        context.modify(second, 620 * crate::types::PRICE_SCALE, 1, false);
+        let sent = drain(&mut context);
+        assert!(sent.contains("|99=620|"), "and the next modify moves it again: {sent}");
+    }
+
+    /// A type with both legs keeps the limit on 44 and holds its trigger.
+    #[test]
+    fn modifying_a_stop_limit_moves_the_limit_and_keeps_the_trigger() {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            7, instrument, Side::Sell, 1, 605 * crate::types::PRICE_SCALE, b'4', b'0',
+            600 * crate::types::PRICE_SCALE,
+        ));
+
+        context.modify(7, 610 * crate::types::PRICE_SCALE, 1, false);
+        let sent = drain(&mut context);
+
+        assert!(sent.contains("|44=610|"), "the limit moves: {sent}");
+        assert!(sent.contains("|99=600|"), "the trigger is restated unchanged: {sent}");
     }
 }

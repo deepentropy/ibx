@@ -31,6 +31,31 @@ fn spy() -> Contract {
 //  Algo parsing
 // ═══════════════════════════════════════════════════════════════════
 
+/// Re-placing a tracked id is a modify, and a stop order's price lives in
+/// `aux_price`. Reading only `lmt_price` sent a limit price of zero for an
+/// order that has no limit leg, which the gateway rejects outright.
+#[test]
+fn modifying_a_stop_carries_the_new_trigger() {
+    let (client, rx, _shared) = test_client();
+    let stop = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
+        aux_price: 600.0, tif: "DAY".into(), ..Default::default()
+    };
+    client.place_order(9201, &spy(), &stop).unwrap();
+    rx.try_recv().expect("the submit");
+
+    let moved = Order { aux_price: 610.0, ..stop };
+    client.place_order(9201, &spy(), &moved).unwrap();
+
+    match rx.try_recv().expect("the modify") {
+        ControlCommand::Order(OrderRequest::Modify { stop_price, .. }) => assert_eq!(
+            stop_price, (610.0 * PRICE_SCALE_F) as i64,
+            "the new trigger must reach the request",
+        ),
+        other => panic!("expected a Modify, got {other:?}"),
+    }
+}
+
 #[test]
 fn parse_algo_vwap() {
     let params = vec![

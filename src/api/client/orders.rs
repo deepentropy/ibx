@@ -33,12 +33,17 @@ impl EClient {
         let cmd = if self.core.is_order_tracked(oid) {
             let price = (order.lmt_price * PRICE_SCALE_F) as i64;
             let qty = order.total_quantity as u32;
+            // A stop's trigger rides on aux_price, exactly as it does on the
+            // submit path. Reading only lmt_price left a stop order modifying
+            // itself to a limit price of zero.
+            let stop_price = (order.aux_price * PRICE_SCALE_F) as i64;
             ControlCommand::Order(OrderRequest::Modify {
                 new_order_id: oid,
                 order_id: oid,
                 price,
                 qty,
                 outside_rth: order.outside_rth,
+                stop_price,
             })
         } else {
             ClientCore::build_order_request(order, oid, instrument)?

@@ -862,6 +862,9 @@ impl Context {
             new_order_id: new_id,
             order_id,
             price,
+            // Not supplied: on a trigger-only order the single price argument
+            // can only have meant the trigger, and the builder routes it there.
+            stop_price: 0,
             qty,
             outside_rth,
         });

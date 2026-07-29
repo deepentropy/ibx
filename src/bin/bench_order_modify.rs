@@ -113,6 +113,7 @@ fn main() {
             qty: 1,
             // Matches the outside_rth=true the order was placed with above.
             outside_rth: true,
+            stop_price: 0,
         });
 
         // Wait for ack on new_order_id
