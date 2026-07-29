@@ -200,20 +200,29 @@ impl MarketState {
     }
 
     /// Routing tags for an outbound order on this instrument (ibx#217):
-    /// (security type, destination). Rules: the security type is the
-    /// instrument's real one (default STK); IBKRATS resolves to IDEALPRO
-    /// for CASH and BEST otherwise; CASH without an explicit venue routes
-    /// to IDEALPRO; any other explicit non-SMART exchange is respected;
-    /// everything else routes BEST — the wire form of default routing.
-    /// The reference encoder structurally cannot emit "SMART": it
-    /// canonicalizes to it internally and translates to "BEST" at the
-    /// encode boundary (ib-agent#165), and sending "SMART" was observed to
-    /// produce NO ack at all for pre-market opening-auction orders while
-    /// the gateway answers "BEST" in ~130ms (ib-agent#164).
+    /// (security type, destination).
+    ///
+    /// The security type is the instrument's real one, in its wire spelling —
+    /// which is what every caller puts on tag 167. The API-facing name and the
+    /// wire name differ for stocks, where the gateway answers `CS` on every
+    /// execution report, so an instrument with no recorded type defaults to
+    /// `CS` rather than to the API's `STK` (ibx#328).
+    ///
+    /// Destination rules: IBKRATS resolves to IDEALPRO for CASH and BEST
+    /// otherwise; CASH without an explicit venue routes to IDEALPRO; any other
+    /// explicit non-SMART exchange is respected; everything else routes BEST —
+    /// the wire form of default routing. The reference encoder structurally
+    /// cannot emit "SMART": it canonicalizes to it internally and translates to
+    /// "BEST" at the encode boundary (ib-agent#165), and sending "SMART" was
+    /// observed to produce NO ack at all for pre-market opening-auction orders
+    /// while the gateway answers "BEST" in ~130ms (ib-agent#164).
     pub fn order_routing(&self, id: InstrumentId) -> (String, String) {
         let sec_type = self.sec_types[id as usize]
             .clone()
             .unwrap_or_else(|| "STK".to_string());
+        let sec_type = crate::control::contracts::SecurityType::from_fix(&sec_type)
+            .to_fix()
+            .to_string();
         let exchange = self.exchanges[id as usize].as_deref().unwrap_or("");
         let is_cash = sec_type == "CASH";
         let destination = match exchange {
@@ -416,13 +425,27 @@ mod tests {
     fn order_routing_rules() {
         let mut ms = MarketState::new();
         let stk = ms.register(1);
-        // Unset routing = the historical defaults: a stock on SMART.
-        assert_eq!(ms.order_routing(stk), ("STK".into(), "BEST".into()));
+        // Unset routing = the historical defaults: a stock on SMART. The
+        // security type comes back in its wire spelling — the gateway answers
+        // `CS` on every execution report, and the rest of the client already
+        // converts before sending.
+        assert_eq!(ms.order_routing(stk), ("CS".into(), "BEST".into()));
 
         // The registered security type is what goes on the wire.
         let fx = ms.register(2);
         ms.set_routing(fx, "CASH", "");
         assert_eq!(ms.order_routing(fx), ("CASH".into(), "IDEALPRO".into()));
+
+        // An explicit stock converts the same way.
+        let stk2 = ms.register(20);
+        ms.set_routing(stk2, "STK", "NYSE");
+        assert_eq!(ms.order_routing(stk2), ("CS".into(), "NYSE".into()));
+
+        // A type the client cannot classify is sent empty rather than as a
+        // stock, so the gateway rejects it visibly (ibx#223).
+        let unknown = ms.register(21);
+        ms.set_routing(unknown, "WIDGET", "NYSE");
+        assert_eq!(ms.order_routing(unknown), ("".into(), "NYSE".into()));
 
         // IBKRATS resolves to IDEALPRO for CASH, SMART otherwise.
         let fx2 = ms.register(3);
@@ -430,18 +453,18 @@ mod tests {
         assert_eq!(ms.order_routing(fx2), ("CASH".into(), "IDEALPRO".into()));
         let stk2 = ms.register(4);
         ms.set_routing(stk2, "STK", "IBKRATS");
-        assert_eq!(ms.order_routing(stk2), ("STK".into(), "BEST".into()));
+        assert_eq!(ms.order_routing(stk2), ("CS".into(), "BEST".into()));
 
         // An explicit directed exchange is respected.
         let directed = ms.register(5);
         ms.set_routing(directed, "STK", "NYSE");
-        assert_eq!(ms.order_routing(directed), ("STK".into(), "NYSE".into()));
+        assert_eq!(ms.order_routing(directed), ("CS".into(), "NYSE".into()));
 
         // Unregister clears the routing for slot reuse.
         ms.unregister(fx);
         let reused = ms.register(6);
         assert_eq!(reused, fx);
-        assert_eq!(ms.order_routing(reused), ("STK".into(), "BEST".into()));
+        assert_eq!(ms.order_routing(reused), ("CS".into(), "BEST".into()));
     }
 
     // ── ibx#233: unregister + slot reuse ──
