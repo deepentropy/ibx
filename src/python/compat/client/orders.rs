@@ -326,6 +326,9 @@ impl EClient {
                         ord.tif = o.order.tif.clone();
                         ord.account = o.order.account.clone();
                         ord.perm_id = o.order.perm_id;
+                        // The value ibx#309 corrected; without it a completed
+                        // order reads as entirely unfilled on this surface.
+                        ord.filled_quantity = o.order.filled_quantity;
                         ord
                     })
                 });
@@ -352,6 +355,7 @@ impl EClient {
                     o.tif = info.order.tif;
                     o.account = info.order.account;
                     o.perm_id = info.order.perm_id;
+                    o.filled_quantity = info.order.filled_quantity;
                     let c_py = Py::new(py, c)?.into_any();
                     let o_py = Py::new(py, o)?.into_any();
                     self.wrapper.call_method1(py, "completed_order", (&c_py, &o_py, &state_py))?;
