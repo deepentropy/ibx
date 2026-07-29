@@ -1548,6 +1548,8 @@ impl Order {
             good_after_time: self.good_after_time.clone(),
             good_till_date: self.good_till_date.clone(),
             oca_group: self.oca_group.clone(),
+            oca_type: self.oca_type,
+            trail_stop_price: self.trail_stop_price,
             trailing_percent: self.trailing_percent,
             algo_strategy: self.algo_strategy.clone(),
             algo_params: self.algo_params.iter().map(|tv| crate::api::types::TagValue {
