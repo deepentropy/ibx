@@ -34,6 +34,7 @@ fn full_lifecycle() {
         remaining: 0,
         commission: 0,
         timestamp_ns: 0,
+        cum_qty: 100, avg_price: 150 * PRICE_SCALE,
     };
     engine.inject_fill(&fill);
 

@@ -848,12 +848,17 @@ impl ClientCore {
                 } else {
                     info.contract
                 };
+                // The order carries its own filled quantity; reporting zero
+                // here made a partially filled order that this client did not
+                // place read as untouched.
+                let filled = info.order.filled_quantity;
+                let remaining = (info.order.total_quantity - filled).max(0.0);
                 result.push((oid, TrackedOrder {
                     contract,
                     order: info.order,
                     status: info.order_state.status.clone(),
-                    filled: 0.0,
-                    remaining: 0.0,
+                    filled,
+                    remaining,
                     instrument: 0,
                 }));
             }
@@ -1633,6 +1638,32 @@ impl ClientCore {
 mod tests {
     use super::*;
     use crate::types::SmartComponent;
+
+    /// An order this client did not place still arrives through the shared
+    /// cache, and it carries its own filled quantity. Reporting zero made a
+    /// partially filled order read as untouched to anything polling
+    /// `req_open_orders`.
+    #[test]
+    fn a_shared_order_reports_its_filled_quantity() {
+        let shared = SharedState::new();
+        let core = ClientCore::new();
+        let mut order = crate::api::types::Order::default();
+        order.total_quantity = 10.0;
+        order.filled_quantity = 4.0;
+        let mut order_state = crate::api::types::OrderState::default();
+        order_state.status = "Submitted".to_string();
+        shared.orders.push_order_info(55, crate::bridge::RichOrderInfo {
+            contract: crate::api::types::Contract::default(),
+            order,
+            order_state,
+            last_exec: crate::api::types::Execution::default(),
+        });
+
+        let open = core.collect_open_orders(&shared);
+        let (_, tracked) = open.iter().find(|(id, _)| *id == 55).expect("the shared order");
+        assert_eq!(tracked.filled, 4.0, "the filled quantity it carries");
+        assert_eq!(tracked.remaining, 6.0, "and what is left of the order");
+    }
 
     fn shared_with_components(comps: Vec<(i32, &str)>) -> SharedState {
         let s = SharedState::new();

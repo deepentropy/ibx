@@ -843,6 +843,26 @@ impl CcpState {
         let last_px = parsed.get(&31).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
         let last_shares = parsed.get(&32).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         let leaves_qty = parsed.get(&151).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        // 14 CumQty and 6 AvgPx describe the order as a whole; 32 and 31
+        // describe this print alone. The gateway sends all four on every
+        // execution report.
+        //
+        // When the cumulative quantity is absent, the print alone is not a
+        // substitute: on the second fill of an order it is smaller than what
+        // was already reported, so `filled` would go backwards. Add the print
+        // to what the order has already accumulated instead. The average price
+        // is not reconstructible that way, so it falls back to the print — and
+        // a negative average is a real value for a spread, so only an absent
+        // or unparseable tag falls back at all.
+        let order_cum_qty = parsed.get(&14).and_then(|s| s.parse::<f64>().ok())
+            .map(|q| q as i64)
+            .filter(|q| *q > 0)
+            .unwrap_or_else(|| {
+                context.order(clord_id).map_or(last_shares, |o| o.filled as i64 + last_shares)
+            });
+        let order_avg_px = parsed.get(&6)
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(last_px);
         let commission = parsed.get(&12).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
 
         if ord_status == "8" {
@@ -926,6 +946,8 @@ impl CcpState {
                         remaining: leaves_qty,
                         commission: (commission * PRICE_SCALE as f64) as i64,
                         timestamp_ns: context.now_ns(),
+                        cum_qty: order_cum_qty,
+                        avg_price: (order_avg_px * PRICE_SCALE as f64) as i64,
                     };
                     let delta = match side {
                         Side::Buy => last_shares,
@@ -2278,6 +2300,114 @@ mod tests {
             context.position(fills[0].instrument), 5,
             "the position must move by the filled quantity",
         );
+    }
+
+    /// The cumulative pair has to come off the wire. Tag 14 is the order's
+    /// filled total and tag 6 its volume-weighted average; 32 and 31 describe
+    /// only the print that triggered the report.
+    #[test]
+    fn the_fill_carries_the_orders_totals_not_the_prints() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        // Second print of 5 at 101, taking the order to 12 filled at 100.50.
+        let frame = untracked_fill(&[
+            (32, "5"), (31, "101.00"), (14, "12"), (6, "100.50"), (151, "3"), (39, "1"),
+        ]);
+
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        let fills = shared.orders.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].qty, 5, "qty stays the print");
+        assert_eq!(fills[0].price, 101 * PRICE_SCALE, "price stays the print");
+        assert_eq!(fills[0].cum_qty, 12, "cum_qty is the order total from tag 14");
+        assert_eq!(
+            fills[0].avg_price, 100 * PRICE_SCALE + PRICE_SCALE / 2,
+            "avg_price is the volume-weighted average from tag 6",
+        );
+    }
+
+    /// Without tag 14 the print alone is not a substitute: on a later fill it
+    /// is smaller than what was already reported, so `filled` would go
+    /// backwards. The order's own accumulated quantity carries it instead.
+    #[test]
+    fn a_missing_cumulative_quantity_does_not_walk_backwards() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+
+        // Seven filled so far, stated.
+        ccp.handle_exec_report(
+            &exec_report_frame(&[
+                (150, "2"), (39, "1"), (32, "7"), (31, "100.00"), (14, "7"), (6, "100.00"),
+                (151, "3"), (17, "E1"),
+            ]),
+            &mut context, &shared, &None, "",
+        );
+        let first = shared.orders.drain_fills();
+        assert_eq!(first[0].cum_qty, 7);
+
+        // One more, with the cumulative fields absent.
+        ccp.handle_exec_report(
+            &exec_report_frame(&[
+                (150, "2"), (39, "1"), (32, "1"), (31, "101.00"), (151, "2"), (17, "E2"),
+            ]),
+            &mut context, &shared, &None, "",
+        );
+        let second = shared.orders.drain_fills();
+        assert_eq!(
+            second[0].cum_qty, 8,
+            "the order's own total carries it, rather than dropping back to the print",
+        );
+    }
+
+    /// A negative average price is a real value for a spread quoted as a net
+    /// credit, so only an absent or unparseable tag falls back.
+    #[test]
+    fn a_negative_average_price_is_not_treated_as_absent() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = untracked_fill(&[(32, "5"), (31, "-2.00"), (14, "5"), (6, "-1.50")]);
+
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        let fills = shared.orders.drain_fills();
+        assert_eq!(fills[0].avg_price, -(PRICE_SCALE + PRICE_SCALE / 2), "-1.50 is kept");
+    }
+
+    /// With no order to accumulate against and no tags, the print is all there
+    /// is — which is what the callback reported before.
+    #[test]
+    fn the_fill_falls_back_to_the_print_when_the_totals_are_absent() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = untracked_fill(&[(32, "5"), (31, "101.00"), (14, ""), (6, "")]);
+
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        let fills = shared.orders.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].cum_qty, 5);
+        assert_eq!(fills[0].avg_price, 101 * PRICE_SCALE);
+    }
+
+    /// The side mapping is the whole sign of the position delta, so every arm
+    /// is pinned — a short sale booked as an ordinary sell is the same
+    /// direction, but a buy booked as a sell is twice the fill in the wrong one.
+    #[test]
+    fn every_side_maps_to_the_right_position_delta() {
+        for (tag54, expected_side, expected_delta) in [
+            ("1", Side::Buy, 5),
+            ("2", Side::Sell, -5),
+            ("5", Side::ShortSell, -5),
+        ] {
+            let (mut ccp, mut context, shared) = ord_status_test_state();
+            ccp.handle_exec_report(
+                &untracked_fill(&[(54, tag54)]), &mut context, &shared, &None, "",
+            );
+            let fills = shared.orders.drain_fills();
+            assert_eq!(fills.len(), 1, "Side={tag54} books");
+            assert_eq!(fills[0].side, expected_side, "Side={tag54}");
+            assert_eq!(
+                context.position(fills[0].instrument), expected_delta,
+                "Side={tag54} moves the position {expected_delta}",
+            );
+        }
     }
 
     /// A sell books the other way. Taking the side from the report rather than

@@ -154,6 +154,11 @@ pub struct Fill {
     pub remaining: i64,
     pub commission: Price,
     pub timestamp_ns: u64,
+    /// FIX tag 14 CumQty — filled across the whole order, not this print.
+    pub cum_qty: i64,
+    /// FIX tag 6 AvgPx — volume-weighted across every print of this order.
+    /// `price` is this print alone.
+    pub avg_price: Price,
 }
 
 /// Order status change notification.
@@ -1988,6 +1993,7 @@ mod tests {
             remaining: 0,
             commission: 0,
             timestamp_ns: 123456789,
+            cum_qty: 100, avg_price: 150 * PRICE_SCALE,
         };
         let f2 = f; // Copy
         assert_eq!(f.order_id, f2.order_id);
