@@ -107,7 +107,7 @@ pub(crate) fn drain_and_send_orders(
             OrderRequest::SubmitLimitGtc { order_id, instrument, side, qty, price, outside_rth } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'1', 0,
-                ));
+                ).with_outside_rth(outside_rth));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
@@ -215,7 +215,7 @@ pub(crate) fn drain_and_send_orders(
             OrderRequest::SubmitStopGtc { order_id, instrument, side, qty, stop_price, outside_rth } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, stop_price, b'3', b'1', stop_price,
-                ));
+                ).with_outside_rth(outside_rth));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
@@ -251,7 +251,7 @@ pub(crate) fn drain_and_send_orders(
             OrderRequest::SubmitStopLimitGtc { order_id, instrument, side, qty, price, stop_price, outside_rth } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'4', b'1', stop_price,
-                ));
+                ).with_outside_rth(outside_rth));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
@@ -1449,10 +1449,13 @@ pub(crate) fn drain_and_send_orders(
                 let price = orig.map_or(price, |o| crate::types::snap_to_tick(
                     price, context.market.min_tick_scaled(o.instrument)));
                 if let Some(orig) = orig {
+                    // Carried like every other attribute of the original: a
+                    // replace that dropped it would leave the next modify
+                    // restating a flag the order no longer records.
                     context.insert_order(crate::types::Order::new(
                         new_order_id, orig.instrument, orig.side, qty, price,
                         orig.ord_type, orig.tif, orig.stop_price,
-                    ));
+                    ).with_outside_rth(orig.outside_rth));
                 }
                 // Versioned ClOrdID chaining: orderId.0 → .1 → .2
                 let prev_ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
@@ -1482,36 +1485,20 @@ pub(crate) fn drain_and_send_orders(
                 let con_id_str = orig.and_then(|o| context.market.con_id(o.instrument))
                     .map(|c| c.to_string()).unwrap_or_default();
 
-                // Lean modify message — omit identity tags (6121, 6119, 231, 100, 15, 204)
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),    // ClOrdID (versioned)
-                    (41, &orig_clord),   // OrigClOrdID (previous version)
-                    (44, &price_str),    // Price
-                    (1, account_id),     // Account
-                    (6122, "c"),         // Client version
-                    (6433, "1"),         // OutsideRTH (preserve from original)
-                    (38, &qty_str),      // OrderQty
-                    (54, side_str),      // Side
-                    (40, &ord_type_str), // OrdType
-                    (55, &symbol),       // Symbol
-                    (167, &sec_type_str),        // SecurityType
-                    (6035, &symbol),     // LocalSymbol echo
-                    (59, &tif_str),      // TIF
-                    (6008, &con_id_str), // ConId
-                    (6088, "Socket"),    // Connection type
-                    (6211, ""),          // Empty (matches reference)
-                    (6238, ""),          // Empty (matches reference)
-                ];
                 // Include stop price for order types that need it
                 let stop_str;
-                if let Some(o) = orig {
-                    if o.stop_price != 0 {
+                let stop = match orig {
+                    Some(o) if o.stop_price != 0 => {
                         stop_str = format_price(o.stop_price);
-                        fields.push((99, &stop_str));
+                        Some(&*stop_str)
                     }
-                }
+                    _ => None,
+                };
+                let fields = build_replace_fields(
+                    &now, &clord_str, &orig_clord, &price_str, account_id, &qty_str,
+                    side_str, &ord_type_str, &symbol, &sec_type_str, &tif_str,
+                    &con_id_str, orig.map(|o| o.outside_rth).unwrap_or(false), stop,
+                );
                 conn.send_fix(&fields)
             }
         };
@@ -1588,6 +1575,61 @@ fn oca_type_str(oca_type: u8) -> &'static str {
     }
 }
 
+/// Build the 35=G replace tag list. Lean by design — identity tags (6121,
+/// 6119, 231, 100, 15, 204) are omitted.
+///
+/// Kept pure so the wire shape stays testable without a connection. OutsideRTH
+/// (6433) is restated from the tracked order and is present only when the order
+/// carries it, matching the submit path: a literal here would widen every
+/// RTH-only order to the extended session the first time it was modified.
+#[allow(clippy::too_many_arguments)]
+fn build_replace_fields<'a>(
+    now: &'a str,
+    clord: &'a str,
+    orig_clord: &'a str,
+    price: &'a str,
+    account_id: &'a str,
+    qty: &'a str,
+    side: &'a str,
+    ord_type: &'a str,
+    symbol: &'a str,
+    sec_type: &'a str,
+    tif: &'a str,
+    con_id: &'a str,
+    outside_rth: bool,
+    stop: Option<&'a str>,
+) -> Vec<(u32, &'a str)> {
+    let mut fields: Vec<(u32, &str)> = vec![
+        (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
+        (fix::TAG_SENDING_TIME, now),
+        (11, clord),         // ClOrdID (versioned)
+        (41, orig_clord),    // OrigClOrdID (previous version)
+        (44, price),         // Price
+        (1, account_id),     // Account
+        (6122, "c"),         // Client version
+    ];
+    if outside_rth {
+        fields.push((6433, "1")); // OutsideRTH
+    }
+    fields.extend_from_slice(&[
+        (38, qty),           // OrderQty
+        (54, side),          // Side
+        (40, ord_type),      // OrdType
+        (55, symbol),        // Symbol
+        (167, sec_type),     // SecurityType
+        (6035, symbol),      // LocalSymbol echo
+        (59, tif),           // TIF
+        (6008, con_id),      // ConId
+        (6088, "Socket"),    // Connection type
+        (6211, ""),          // Empty (matches reference)
+        (6238, ""),          // Empty (matches reference)
+    ]);
+    if let Some(stop) = stop {
+        fields.push((99, stop));
+    }
+    fields
+}
+
 /// One shared encoder for every extended order submission (ibx#224): the
 /// order-type-specific tags come from `kind`; the TIF and the full
 /// `OrderAttrs` block are emitted identically for all kinds.
@@ -1635,7 +1677,7 @@ fn send_order_ex(
     };
     context.insert_order(crate::types::Order::new(
         order_id, instrument, side, qty, track_price, ord_type_byte, tif, track_stop,
-    ));
+    ).with_outside_rth(attrs.outside_rth));
 
     let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
     let symbol = context.market.symbol(instrument).to_string();
@@ -2022,6 +2064,7 @@ mod tests {
         Order {
             order_id: oid, instrument: 0, side: Side::Buy, price: 100,
             qty: 10, filled, status, ord_type: b'2', tif: b'0', stop_price: 0,
+            outside_rth: false,
         }
     }
 
@@ -2055,5 +2098,133 @@ mod tests {
 
         assert_eq!(context.order(8).unwrap().status, OrderStatus::Filled);
         assert!(shared.orders.drain_order_updates().is_empty());
+    }
+
+    /// Drive the real send path and inspect what it recorded. The peer is held
+    /// open for the call so the send succeeds — a failed send unwinds the
+    /// order, which would mask what these tests are checking.
+    fn drain(context: &mut Context) -> String {
+        use std::io::Read;
+        let shared = Arc::new(SharedState::new());
+        let (c, mut peer) = crate::protocol::connection::Connection::paired_for_test();
+        let mut conn = Some(c);
+        let mut hb = HeartbeatState::new();
+        drain_and_send_orders(&mut conn, context, "ACC", &mut hb, false, &shared);
+
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(250))).unwrap();
+        let mut sent = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = peer.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            sent.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&sent).replace('\x01', "|")
+    }
+
+    /// The flag has to survive being modified, not just being submitted. A
+    /// replace builds a fresh tracked order from the original; dropping the
+    /// flag there leaves the first replace correct and every later one wrong,
+    /// which is the shape that hides in testing.
+    #[test]
+    fn an_order_keeps_outside_rth_across_repeated_modifies() {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(
+            crate::types::Order::new(7, instrument, Side::Buy, 10, 100 * crate::types::PRICE_SCALE, b'2', b'1', 0)
+                .with_outside_rth(true),
+        );
+
+        let second = context.modify(7, 101 * crate::types::PRICE_SCALE, 10);
+        let first_replace = drain(&mut context);
+        assert!(first_replace.contains("|6433=1|"), "first replace restates the flag: {first_replace}");
+        assert!(
+            context.order(second).expect("replacement tracked").outside_rth,
+            "the replacement order must carry the flag forward",
+        );
+
+        let third = context.modify(second, 102 * crate::types::PRICE_SCALE, 10);
+        let second_replace = drain(&mut context);
+        assert!(
+            second_replace.contains("|6433=1|"),
+            "and the next replace restates it too: {second_replace}",
+        );
+        assert!(
+            context.order(third).expect("second replacement tracked").outside_rth,
+            "and keeps carrying it",
+        );
+    }
+
+    /// A submit that offers the flag has to record it, or the replace has
+    /// nothing truthful to restate.
+    #[test]
+    fn a_submit_records_the_flag_it_was_given() {
+        for requested in [true, false] {
+            let mut context = Context::new();
+            let instrument = context.register_instrument(756733);
+            let id = context.submit_limit_gtc(instrument, Side::Buy, 10, 100 * crate::types::PRICE_SCALE, requested);
+            let sent = drain(&mut context);
+            assert_eq!(
+                sent.contains("|6433=1|"), requested,
+                "the submit itself only carries 6433 when asked: {sent}",
+            );
+            assert_eq!(
+                context.order(id).expect("order tracked").outside_rth, requested,
+                "submitted with outside_rth={requested}",
+            );
+        }
+    }
+
+    fn replace(outside_rth: bool, stop: Option<&str>) -> Vec<(u32, &str)> {
+        build_replace_fields(
+            "T", "7.1", "7.0", "101.00", "ACC", "10", "1", "2", "SPY", "CS", "0",
+            "756733", outside_rth, stop,
+        )
+    }
+
+    /// A replace restates the order, so OutsideRTH must come from the order.
+    /// Sending it unconditionally widens an RTH-only order to the extended
+    /// session the first time it is modified, and nothing reports the change.
+    #[test]
+    fn replace_carries_outside_rth_only_when_the_order_has_it() {
+        let rth_only = replace(false, None);
+        assert!(
+            !rth_only.iter().any(|(tag, _)| *tag == 6433),
+            "an RTH-only order must not acquire 6433 by being modified",
+        );
+
+        let extended = replace(true, None);
+        assert_eq!(
+            extended.iter().filter(|(tag, _)| *tag == 6433).map(|(_, v)| *v).collect::<Vec<_>>(),
+            ["1"],
+            "an order submitted outside RTH must keep the flag across a modify",
+        );
+    }
+
+    /// Setting the flag must not disturb the rest of the message.
+    #[test]
+    fn outside_rth_is_the_only_difference_between_the_two_shapes() {
+        let without = replace(false, None);
+        let with: Vec<_> = replace(true, None).into_iter().filter(|(tag, _)| *tag != 6433).collect();
+        assert_eq!(without, with);
+    }
+
+    /// The flag sits between the client version and the quantity, where the
+    /// submit path puts it.
+    #[test]
+    fn outside_rth_keeps_its_position() {
+        let tags: Vec<u32> = replace(true, None).iter().map(|(tag, _)| *tag).collect();
+        let at = tags.iter().position(|t| *t == 6433).expect("6433 present");
+        assert_eq!(tags[at - 1], 6122);
+        assert_eq!(tags[at + 1], 38);
+    }
+
+    /// The stop price is appended only for order types that carry one.
+    #[test]
+    fn replace_appends_the_stop_price_when_there_is_one() {
+        assert!(!replace(false, None).iter().any(|(tag, _)| *tag == 99));
+        let stopped = replace(false, Some("99.50"));
+        assert_eq!(stopped.last(), Some(&(99u32, "99.50")));
     }
 }

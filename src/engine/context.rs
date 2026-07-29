@@ -1151,6 +1151,7 @@ mod tests {
             ord_type: b'2',
             tif: b'0',
             stop_price: 0,
+            outside_rth: false,
         };
         ctx.insert_order(order);
         assert!(ctx.order(1).is_some());
@@ -1171,6 +1172,7 @@ mod tests {
             ord_type: b'2',
             tif: b'0',
             stop_price: 0,
+            outside_rth: false,
         });
         ctx.insert_order(Order {
             order_id: 2,
@@ -1183,6 +1185,7 @@ mod tests {
             ord_type: b'2',
             tif: b'0',
             stop_price: 0,
+            outside_rth: false,
         });
 
         let inst0_orders = ctx.open_orders_for(0);
@@ -1204,6 +1207,7 @@ mod tests {
             ord_type: b'2',
             tif: b'0',
             stop_price: 0,
+            outside_rth: false,
         });
         ctx.update_order_status(1, OrderStatus::Cancelled);
         assert_eq!(ctx.order(1).unwrap().status, OrderStatus::Cancelled);
@@ -1219,6 +1223,7 @@ mod tests {
             order_id: oid, instrument: 0, side: Side::Buy, price: 100,
             qty: 100, filled: 0, status: OrderStatus::Submitted,
             ord_type: b'2', tif: b'0', stop_price: 0,
+            outside_rth: false,
         });
     }
 
@@ -1297,6 +1302,7 @@ mod tests {
             ord_type: b'2',
             tif: b'0',
             stop_price: 0,
+            outside_rth: false,
         });
         ctx.remove_order(1);
         assert!(ctx.order(1).is_none());
@@ -1465,18 +1471,21 @@ mod tests {
             price: 150 * PRICE_SCALE, qty: 100, filled: 0,
             status: OrderStatus::Submitted,
             ord_type: b'2', tif: b'0', stop_price: 0,
+            outside_rth: false,
         });
         ctx.insert_order(Order {
             order_id: 2, instrument: 0, side: Side::Sell,
             price: 155 * PRICE_SCALE, qty: 50, filled: 0,
             status: OrderStatus::Submitted,
             ord_type: b'2', tif: b'0', stop_price: 0,
+            outside_rth: false,
         });
         ctx.insert_order(Order {
             order_id: 3, instrument: 0, side: Side::Buy,
             price: 149 * PRICE_SCALE, qty: 200, filled: 0,
             status: OrderStatus::Filled,
             ord_type: b'2', tif: b'0', stop_price: 0,
+            outside_rth: false,
         });
 
         // open_orders_for only returns Submitted
@@ -1526,6 +1535,7 @@ mod tests {
             price: PRICE_SCALE, qty: 100, filled: 0,
             status: OrderStatus::PendingSubmit,
             ord_type: b'2', tif: b'0', stop_price: 0,
+            outside_rth: false,
         });
         ctx.update_order_filled(1, 30);
         assert_eq!(ctx.order(1).unwrap().filled, 30);
@@ -1541,18 +1551,21 @@ mod tests {
             price: PRICE_SCALE, qty: 100, filled: 0,
             status: OrderStatus::PendingSubmit,
             ord_type: b'2', tif: b'0', stop_price: 0,
+            outside_rth: false,
         });
         ctx.insert_order(Order {
             order_id: 2, instrument: 0, side: Side::Buy,
             price: PRICE_SCALE, qty: 100, filled: 50,
             status: OrderStatus::PartiallyFilled,
             ord_type: b'2', tif: b'0', stop_price: 0,
+            outside_rth: false,
         });
         ctx.insert_order(Order {
             order_id: 3, instrument: 0, side: Side::Buy,
             price: PRICE_SCALE, qty: 100, filled: 100,
             status: OrderStatus::Filled,
             ord_type: b'2', tif: b'0', stop_price: 0,
+            outside_rth: false,
         });
         let open = ctx.open_orders_for(0);
         // PendingSubmit and PartiallyFilled count as open; Filled does not
