@@ -155,23 +155,48 @@ impl<'a> LsbBitReader<'a> {
 pub const O_BID_PRICE: u64 = 0;
 pub const O_ASK_PRICE: u64 = 1;
 pub const O_LAST_PRICE: u64 = 2;
-pub const O_HIGH_PRICE: u64 = 3;
 pub const O_BID_SIZE: u64 = 4;
 pub const O_ASK_SIZE: u64 = 5;
-pub const O_VOLUME: u64 = 6;
-pub const O_OPEN_PRICE: u64 = 8;
+/// Size of the trade this record reports, not the day's volume. Measured on a
+/// live front-month future: 120 samples, values 1..6, decreasing 60 times in
+/// 119 transitions — a running total cannot decrease (ibx#303).
+pub const O_LAST_SIZE: u64 = 6;
+/// Session high — 28177.25 on the wire against a daily-bar high of exactly
+/// 28177.25 for the same contract and session (ibx#303).
+pub const O_HIGH_PRICE: u64 = 8;
 pub const O_LOW_PRICE: u64 = 9;
-pub const O_TIMESTAMP: u64 = 10;
-pub const O_LAST_SIZE: u64 = 12;
+/// Cumulative session volume. Measured: 228 samples, zero decreases across 227
+/// transitions, increments of 1..6 matching the per-trade sizes on type 6
+/// (ibx#303). Previously read as a timestamp.
+pub const O_VOLUME: u64 = 10;
+/// Trade timestamp, in two parts: 20 carries a Unix-seconds base (measured
+/// 1785325554) and 21 an offset advancing by exactly 1 per wall-clock second
+/// across 164 samples (ibx#303). Neither was decoded before.
+pub const O_TS_BASE: u64 = 20;
+pub const O_TS_OFFSET: u64 = 21;
 pub const O_LAST_EXCH: u64 = 13;
 pub const O_BID_EXCH: u64 = 16;
 pub const O_ASK_EXCH: u64 = 17;
 pub const O_HALTED: u64 = 18;
-pub const O_CLOSE_PRICE: u64 = 22;
+/// One of the session's open/close pair. Type 3 is the other; a single
+/// capture cannot say which is which, since both are constant over a short
+/// window. What it does establish is that 3 is not the high — see
+/// Previous session's close. Settled against the authoritative daily bars for
+/// the same contract: the wire carried 27922.00 while the current session's
+/// bar closed at 27913.75 and the prior session's closed at exactly 27922.00
+/// (ibx#303).
+pub const O_CLOSE_PRICE: u64 = 3;
+/// Current session's open — 27962.25 on the wire against a daily-bar open of
+/// exactly 27962.25 (ibx#303).
+pub const O_OPEN_PRICE: u64 = 22;
+/// Type 23 was read as the last-trade timestamp and no longer is: the
+/// timestamp arrives on 20, and captures show 23 carrying something else on
+/// this feed. Retained under its old name until that something is identified.
 pub const O_LAST_TS: u64 = 23;
 
-/// Volume multiplier: IB encodes volume * 10000.
-pub const VOLUME_MULT: f64 = 0.0001;
+/// Type 12 was read as the last size, which type 6 carries. Left undecoded
+/// rather than remapped, since nothing in the captures says what it is.
+
 
 /// A single decoded tick from a 35=P message.
 #[derive(Debug, Clone, Copy)]
@@ -848,7 +873,7 @@ mod tests {
         // raw_tick_type == 31 triggers extended: 8-bit tick_type + 8-bit byte_width
         let mut b = PayloadBuilder::new();
         b.server_tag(0, 42);
-        // Extended tick with tick_type=O_CLOSE_PRICE(22), byte_width=2, value=777, positive
+        // Extended tick carrying O_CLOSE_PRICE, byte_width=2, value=777, positive
         b.tick_extended(0, O_CLOSE_PRICE, 2, 777, false);
         let ticks = decode_ticks_35p(&b.build());
         assert_eq!(ticks.len(), 1);
@@ -1277,5 +1302,54 @@ mod tests {
         payload.push(0x99); // unknown
         payload.extend(encode_vlq(100));
         assert!(decode_ticks_35e(&payload).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod wire_identity_tests {
+    use super::*;
+
+    /// The `35=P` field identities were wrong for five fields and no test
+    /// noticed, because nothing pinned a wire number to a meaning. These are
+    /// the numbers measured on a live front-month future (ibx#303); they are
+    /// asserted directly so a remap has to change a test that says why.
+    #[test]
+    fn wire_tick_identities_match_what_the_feed_sends() {
+        // Volume is the monotonic one: 228 samples, zero decreases.
+        assert_eq!(O_VOLUME, 10);
+        // Per-trade size is the one that oscillates: 120 samples, 60 decreases.
+        assert_eq!(O_LAST_SIZE, 6);
+        // The high read above every last price; the field previously mapped to
+        // it read below the last trade, which a high cannot do.
+        assert_eq!(O_HIGH_PRICE, 8);
+        assert_eq!(O_LOW_PRICE, 9);
+        // The timestamp is carried on 20/21, not on the volume field.
+        assert_eq!(O_TS_BASE, 20);
+        assert_eq!(O_TS_OFFSET, 21);
+        // Open and close, settled against the daily bars for the same session:
+        // the wire's 22 matched the bar open exactly, and its 3 matched the
+        // PRIOR session's close — not the current one. Getting these the wrong
+        // way round silently swaps them for every caller, and P&L reads close.
+        assert_eq!(O_OPEN_PRICE, 22);
+        assert_eq!(O_CLOSE_PRICE, 3);
+        // Unchanged and confirmed by the same capture.
+        assert_eq!(O_BID_PRICE, 0);
+        assert_eq!(O_ASK_PRICE, 1);
+        assert_eq!(O_LAST_PRICE, 2);
+        assert_eq!(O_BID_SIZE, 4);
+        assert_eq!(O_ASK_SIZE, 5);
+        // No two fields may share a wire number.
+        // Every wire number the decoder names, including the ones with no
+        // consumer — a remap colliding with one of those would otherwise pass.
+        let all = [
+            O_BID_PRICE, O_ASK_PRICE, O_LAST_PRICE, O_BID_SIZE, O_ASK_SIZE,
+            O_LAST_SIZE, O_HIGH_PRICE, O_LOW_PRICE, O_VOLUME, O_TS_BASE,
+            O_TS_OFFSET, O_OPEN_PRICE, O_CLOSE_PRICE,
+            O_LAST_EXCH, O_BID_EXCH, O_ASK_EXCH, O_HALTED, O_LAST_TS,
+        ];
+        let mut seen = all.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), all.len(), "two fields are mapped to the same wire type");
     }
 }

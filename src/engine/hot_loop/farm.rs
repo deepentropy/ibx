@@ -235,7 +235,19 @@ impl FarmState {
                 tick_decoder::O_ASK_SIZE => { q.ask_size = qty_from_wire(tick.magnitude); }
                 tick_decoder::O_LAST_SIZE => { q.last_size = qty_from_wire(tick.magnitude); }
                 tick_decoder::O_VOLUME => { q.volume = qty_from_wire(tick.magnitude); }
-                tick_decoder::O_TIMESTAMP | tick_decoder::O_LAST_TS => { q.timestamp_ns = tick.magnitude as u64; }
+                // Type 20 carries Unix seconds. Guarded because the same
+                // type also carried a `yyyymmdd` value in capture, and a date
+                // read as an epoch is worse than no timestamp. Type 21 is a
+                // per-second offset against it and is left undecoded until a
+                // capture settles how the two combine (ibx#303).
+                // Type 23 was previously folded in here and is now dropped:
+                // it did not appear once in 733 captured entries on a future,
+                // and it was writing a raw magnitude of unknown unit into a
+                // nanosecond field. Left unmapped until a capture identifies
+                // it rather than guessed at (ibx#303).
+                tick_decoder::O_TS_BASE if tick.magnitude > 1_000_000_000 => {
+                    q.timestamp_ns = (tick.magnitude as u64).saturating_mul(1_000_000_000);
+                }
                 tick_decoder::O_BID_EXCH => { q.bid_exch_mask = tick.magnitude; }
                 tick_decoder::O_ASK_EXCH => { q.ask_exch_mask = tick.magnitude; }
                 tick_decoder::O_LAST_EXCH => { q.last_exch_mask = tick.magnitude; }
@@ -1063,6 +1075,73 @@ mod decode_publish_tests {
         msg.extend_from_slice(&tick_payload);
         msg.extend_from_slice(b"\x018349=AABBCCDD\x01");
         msg
+    }
+
+    /// The constants table says which wire type is which; this says where each
+    /// one lands. Nothing else pins that: swapping the open and close arms with
+    /// the table intact passes the whole suite, and that is precisely the
+    /// failure this decode change exists to remove — two plausible prices
+    /// exchanged, with the P&L path reading the wrong one.
+    #[test]
+    fn each_price_type_lands_in_its_own_quote_field() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(9, id);
+        context.market.set_min_tick(id, 0.01);
+
+        // Distinct magnitudes, so no two fields can be confused.
+        let msg = framed_35p(9, &[
+            (tick_decoder::O_LAST_PRICE, 2, 501),
+            (tick_decoder::O_HIGH_PRICE, 2, 502),
+            (tick_decoder::O_LOW_PRICE, 2, 503),
+            (tick_decoder::O_OPEN_PRICE, 2, 504),
+            (tick_decoder::O_CLOSE_PRICE, 2, 505),
+        ]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+
+        let mts = context.market.min_tick_scaled(id);
+        let q = context.market.quote(id);
+        assert_eq!(q.last, 501 * mts, "last");
+        assert_eq!(q.high, 502 * mts, "high");
+        assert_eq!(q.low, 503 * mts, "low");
+        assert_eq!(q.open, 504 * mts, "open");
+        assert_eq!(q.close, 505 * mts, "close");
+    }
+
+    /// The timestamp arm carries seconds and is stored in nanoseconds, and the
+    /// guard is what keeps a date-shaped value out of the field.
+    #[test]
+    fn the_timestamp_is_seconds_stored_as_nanoseconds() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(11, id);
+        context.market.set_min_tick(id, 0.01);
+
+        farm.handle_tick_data(
+            &framed_35p(11, &[(tick_decoder::O_TS_BASE, 4, 1_785_325_554)]),
+            &mut context, &shared, &None,
+        );
+        assert_eq!(
+            context.market.quote(id).timestamp_ns, 1_785_325_554_000_000_000,
+            "an epoch second is stored as nanoseconds",
+        );
+
+        // A yyyymmdd-shaped value is not a timestamp and must not land here.
+        let id2 = context.market.register(265598);
+        context.market.register_server_tag(12, id2);
+        context.market.set_min_tick(id2, 0.01);
+        farm.handle_tick_data(
+            &framed_35p(12, &[(tick_decoder::O_TS_BASE, 4, 20_260_729)]),
+            &mut context, &shared, &None,
+        );
+        assert_eq!(
+            context.market.quote(id2).timestamp_ns, 0,
+            "a date-shaped magnitude is dropped rather than stored",
+        );
     }
 
     /// The producer half of the quantity contract. Everything downstream

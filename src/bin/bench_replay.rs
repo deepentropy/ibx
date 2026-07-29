@@ -59,7 +59,8 @@ fn main() {
         ]),
         (2, &[
             (0, 2, 20050, false), (1, 2, 20055, false),
-            (2, 2, 20052, false), (4, 2, 200, false), (6, 4, 1_000_000, false),
+            (2, 2, 20052, false), (4, 2, 200, false),
+            (tick_decoder::O_VOLUME as u64, 4, 1_000_000, false),
         ]),
     ]);
 
@@ -622,8 +623,8 @@ fn apply_tick(q: &mut Quote, tick: &RawTick, min_tick_scaled: i64) {
         tick_decoder::O_ASK_SIZE => q.ask_size = ibx::types::qty_from_wire(tick.magnitude),
         tick_decoder::O_LAST_SIZE => q.last_size = ibx::types::qty_from_wire(tick.magnitude),
         tick_decoder::O_VOLUME => q.volume = ibx::types::qty_from_wire(tick.magnitude),
-        tick_decoder::O_TIMESTAMP | tick_decoder::O_LAST_TS => {
-            q.timestamp_ns = tick.magnitude as u64;
+        tick_decoder::O_TS_BASE if tick.magnitude > 1_000_000_000 => {
+            q.timestamp_ns = (tick.magnitude as u64).saturating_mul(1_000_000_000);
         }
         _ => {}
     }
