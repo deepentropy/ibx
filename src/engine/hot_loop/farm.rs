@@ -958,7 +958,16 @@ impl FarmState {
         if tick_type != 0x1E90 { return; }
 
         let server_tag = u32::from_be_bytes([body[2], body[3], body[4], body[5]]);
-        let instrument = context.market.instrument_by_server_tag(server_tag).unwrap_or(0);
+        // Instrument 0 is a real instrument — the first one registered — so an
+        // unrecognised tag must be dropped rather than defaulted, or the
+        // article is attributed to whatever was subscribed first.
+        let instrument = match context.market.instrument_by_server_tag(server_tag) {
+            Some(id) => id,
+            None => {
+                log::debug!("News for unknown server tag {server_tag}; dropping");
+                return;
+            }
+        };
 
         let batch_count = u32::from_be_bytes([body[8], body[9], body[10], body[11]]) as usize;
         let mut pos = 12;
@@ -1015,3 +1024,67 @@ impl FarmState {
     }
 }
 
+#[cfg(test)]
+mod news_tests {
+    use super::*;
+    use crate::bridge::SharedState;
+    use crate::engine::context::Context;
+
+    /// Wrap a news body in the frame the farm connection delivers it in.
+    fn framed_news(body: &[u8]) -> Vec<u8> {
+        let mut msg = b"35=G\x01".to_vec();
+        msg.extend_from_slice(body);
+        msg
+    }
+
+    /// Instrument 0 is a real instrument — the first one registered — so an
+    /// unrecognised news tag must be dropped, not defaulted onto it. Before
+    /// this mapping change every live-session news tick carried a tag above the
+    /// old bound and hit exactly that path.
+    #[test]
+    fn news_for_an_unknown_tag_is_dropped_not_misattributed() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let first = context.market.register(756733);
+        assert_eq!(first, 0, "the first instrument really is id 0");
+
+        // One article, laid out as the handler reads it: u32 provider length
+        // and bytes, a skipped u32, a u16 article-id length and bytes, a
+        // skipped u32 then the timestamp, and a u32 headline length and bytes.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0x1E90u16.to_be_bytes());
+        body.extend_from_slice(&999_999u32.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&4u32.to_be_bytes());
+        body.extend_from_slice(b"BRFG");
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&2u16.to_be_bytes());
+        body.extend_from_slice(b"id");
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&1_785_325_554u32.to_be_bytes());
+        body.extend_from_slice(&8u32.to_be_bytes());
+        body.extend_from_slice(b"headline");
+        let msg = framed_news(&body);
+        farm.handle_tick_news(&msg, &context, &shared, &None);
+
+        assert!(
+            shared.market.drain_tick_news().is_empty(),
+            "an article for an unknown tag is dropped rather than pinned on instrument 0",
+        );
+
+        // Positive control: the same frame with a registered tag must produce
+        // an article, or the assertion above proves nothing.
+        context.market.register_server_tag(999_999, first);
+        assert_eq!(
+            context.market.instrument_by_server_tag(999_999), Some(first),
+            "the tag resolves once registered",
+        );
+        farm.handle_tick_news(&msg, &context, &shared, &None);
+        assert_eq!(
+            shared.market.drain_tick_news().len(), 1,
+            "a registered tag does deliver, so the drop above is the tag and not the frame",
+        );
+    }
+}
