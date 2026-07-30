@@ -58,16 +58,37 @@ pub(crate) struct HmdsState {
 /// blanks anything else so an unclassified instrument cannot masquerade as a
 /// stock (ibx#223) — but that reasoning is about the order path. A historical
 /// query for a valid type the enum happens not to carry, `FOP` say, would
-/// otherwise be narrowed to nothing. The subscribe path already passes such
-/// types through verbatim, and this now agrees with it.
+/// otherwise be narrowed to nothing. The descriptive branch of the subscribe
+/// path passes such types through in the same way.
+///
+/// The value goes into a query document, so what passes through is restricted
+/// to the shape a security type actually has. Anything else is blanked rather
+/// than embedded: a caller-supplied `&` or `<` would otherwise produce a
+/// malformed query instead of a refused one.
+///
+/// This helps a caller that states the type itself. It does not recover one the
+/// client has already lost: a contract returned by `req_contract_details` for
+/// an unlisted type arrives with an empty `sec_type`, because the enum cannot
+/// carry it, and an empty type still means stock here. That round trip needs
+/// the enum to stop discarding what it cannot name (ibx#230).
 fn hist_sec_type(sec_type: &str) -> String {
     if sec_type.is_empty() {
         return "CS".to_string();
     }
     match crate::control::contracts::SecurityType::from_fix(sec_type).to_fix() {
-        "" => sec_type.to_string(),
+        "" if is_plausible_sec_type(sec_type) => sec_type.to_string(),
+        "" => String::new(),
         known => known.to_string(),
     }
+}
+
+/// Whether a string is shaped like a security type: short, and letters or
+/// digits only. Deliberately strict — it guards a document, and every type the
+/// gateway uses fits inside it.
+fn is_plausible_sec_type(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 8
+        && s.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// Exchange for a historical query, defaulting to the previous constant.
@@ -1156,9 +1177,17 @@ mod historical_contract_tests {
         // narrowed away — the subscribe path does the same.
         assert_eq!(hist_sec_type("FOP"), "FOP");
         assert_eq!(hist_sec_type("CFD"), "CFD");
-        // And a value that is not a security type at all still reaches the
-        // gateway to be named there, rather than being described as a stock.
+        // A value shaped like a type but unknown to both the enum and the
+        // gateway still reaches it, to be named there rather than silently
+        // described as a stock.
         assert_eq!(hist_sec_type("NOPE"), "NOPE");
+        // Anything that could break the query document is blanked instead of
+        // embedded. The value lands in XML, so this is the difference between
+        // a refused query and a malformed one.
+        assert_eq!(hist_sec_type("FOP&"), "");
+        assert_eq!(hist_sec_type("<x>"), "");
+        assert_eq!(hist_sec_type("A B"), "");
+        assert_eq!(hist_sec_type("VERYLONGTYPE"), "");
     }
 
     #[test]
@@ -1452,10 +1481,19 @@ mod tests {
                 Ok(0) => break,
                 Ok(n) => {
                     acc.extend_from_slice(&buf[..n]);
-                    if String::from_utf8_lossy(&acc).contains("</secType>")
+                    // Stop on a complete frame, not on a field in the middle
+                    // of one: a split right after the query would otherwise
+                    // return a truncated read that happens to satisfy the
+                    // assertions above it.
+                    // A plain FIX frame ends with its checksum field; a
+                    // compressed one states its own length.
+                    let ends_with_trailer = acc.len() >= 7
+                        && acc[acc.len() - 1] == 0x01
+                        && acc[acc.len() - 7..acc.len() - 4] == *b"\x0110=";
+                    let complete = ends_with_trailer
                         || crate::protocol::fixcomp::fixcomp_length(&acc)
-                            .is_some_and(|len| acc.len() >= len)
-                    {
+                            .is_some_and(|len| acc.len() >= len);
+                    if complete {
                         break;
                     }
                 }
