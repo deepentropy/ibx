@@ -63,10 +63,10 @@ fn raw_farm_subscribe_test() {
             };
             // Decompress if FIXCOMP
             let msgs = if raw.starts_with(b"8=FIXCOMP") {
-                let (unsigned, _) = farm.unsign(raw);
+                let Some(unsigned) = farm.unsign(raw) else { continue };
                 fixcomp::fixcomp_decompress(&unsigned).unwrap_or_default()
             } else {
-                let (unsigned, _) = farm.unsign(raw);
+                let Some(unsigned) = farm.unsign(raw) else { continue };
                 vec![unsigned]
             };
             for msg in &msgs {

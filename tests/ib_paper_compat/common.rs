@@ -103,7 +103,7 @@ pub(super) fn ccp_keepalive(ccp: &mut Connection) {
                 // Control-state frames are not consumed downstream (ibx#185).
                 Frame::Control(_) => continue,
             };
-            let (unsigned, _) = ccp.unsign(raw);
+            let Some(unsigned) = ccp.unsign(raw) else { continue };
             let msg = if matches!(frame, Frame::FixComp(_)) {
                 fixcomp::fixcomp_decompress(&unsigned)
                     .ok()

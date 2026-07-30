@@ -271,19 +271,60 @@ impl Connection {
         frames
     }
 
-    /// Unsign a received frame using the read IV. Chains the IV.
-    /// Returns the undistorted message bytes and whether the signature was valid.
-    pub fn unsign(&mut self, msg: &[u8]) -> (Vec<u8>, bool) {
+    /// Unsign a received frame using the read IV, chaining the IV.
+    ///
+    /// `None` means the frame did not verify and must not be parsed. The result
+    /// used to be a `(bytes, bool)` pair and every one of the twelve callers
+    /// discarded the flag, so a tampered frame — an order ack, a fill, an
+    /// account push — was applied exactly like an authentic one. Returning no
+    /// message is the same information in a form a caller cannot ignore.
+    ///
+    /// A failed frame also leaves the IV alone, because the IV it would advance
+    /// to is derived from the body the signature just failed to vouch for.
+    /// Advancing would let one injected frame steer the receiver's chain and
+    /// drop every genuine frame after it.
+    ///
+    /// This costs the case where a genuine frame is damaged in exactly its
+    /// signature: its body is intact, so the derived IV would have been the
+    /// sender's true next one, and the connection is left unable to verify what
+    /// follows until it reconnects. That case cannot be told apart from an
+    /// injection here, and the reasoning for preferring this side is set out
+    /// where the decision is made, below.
+    pub fn unsign(&mut self, msg: &[u8]) -> Option<Vec<u8>> {
         if self.read_key.is_empty() {
-            return (msg.to_vec(), true); // no signing configured
+            return Some(msg.to_vec()); // no signing configured
         }
-        // Only unsign if 8349= HMAC tag is present (matching Python _unsign_conn)
-        if !msg.windows(5).any(|w| w == b"8349=") {
-            return (msg.to_vec(), true);
+        // A frame carrying no 8349 tag is still accepted, as the reference
+        // client does. Whether the gateway ever sends one on a keyed
+        // connection is not established here, and refusing them on that
+        // assumption would drop real traffic; the warning makes the case
+        // visible so the question can be settled from logs rather than guessed.
+        if !msg.windows(6).any(|w| w == b"\x018349=") {
+            log::warn!("inbound frame carries no 8349 signature on a signed connection");
+            return Some(msg.to_vec());
         }
         let (undistorted, new_iv, valid) = fix::fix_unsign(msg, &self.read_key, &self.read_iv);
+        if !valid {
+            // The chain is not advanced. `new_iv` is derived from the received
+            // body, and a failed MAC is exactly the statement that this body
+            // cannot be vouched for — so advancing would let one injected frame
+            // steer the receiver's chain state and drop every genuine frame
+            // after it.
+            //
+            // The cost is a genuine frame whose signature alone was damaged in
+            // transit: its body is intact, so `new_iv` would have been the
+            // sender's true next one, and holding it back leaves the connection
+            // stuck. That case is indistinguishable from an injection at this
+            // point, and a channel where a MAC failure has occurred is not one
+            // whose state can be inferred either way. Failing closed on
+            // unauthenticated input is the side to err on; the connection
+            // wanting a teardown rather than a guess is the real answer, and is
+            // a larger change than this.
+            log::warn!("inbound frame failed signature verification — dropped");
+            return None;
+        }
         self.read_iv = new_iv;
-        (undistorted, valid)
+        Some(undistorted)
     }
 
     /// Build a FIX message, sign it, and send it. Increments seq and chains sign IV.
@@ -663,5 +704,121 @@ mod tests {
     fn find_subsequence_empty_needle() {
         // windows(0) panics, so empty needle panics
         find_subsequence(b"hello", b"");
+    }
+
+    /// Build a connection with signing configured, over a loopback pair.
+    fn signed_conn(key: &[u8], iv: &[u8]) -> Connection {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let mut conn = Connection::new_raw(stream).unwrap();
+        conn.read_key = key.to_vec();
+        conn.read_iv = iv.to_vec();
+        conn
+    }
+
+    /// A frame that does not verify must not reach a parser. The result used to
+    /// be a pair whose validity flag every caller discarded, so a tampered
+    /// order ack or fill was applied like an authentic one.
+    #[test]
+    fn a_frame_that_fails_verification_is_not_returned() {
+        let key = b"0123456789abcdef";
+        let iv = vec![0u8; 16];
+        let (frame, _) = crate::protocol::fix::fix_sign(&fix_build(&[(35, "8")], 1), key, &iv);
+
+        let mut conn = signed_conn(key, &iv);
+        assert!(conn.unsign(&frame).is_some(), "the genuine frame verifies");
+
+        // Flip a byte in the body, leaving the signature tag in place.
+        let mut tampered = frame.clone();
+        let at = tampered.len() / 2;
+        tampered[at] ^= 0x01;
+        let mut conn = signed_conn(key, &iv);
+        assert!(conn.unsign(&tampered).is_none(), "a tampered frame is dropped");
+    }
+
+    /// A frame that fails is dropped without moving the chain, so a genuine
+    /// frame after it still verifies. The batch is the case that matters —
+    /// good, bad, good — because an injected frame between two authentic ones
+    /// is what advancing on unauthenticated input would let poison the rest.
+    #[test]
+    fn an_injected_frame_does_not_poison_the_authentic_ones_around_it() {
+        let key = b"0123456789abcdef";
+        let iv0 = vec![0u8; 16];
+
+        // Two frames as a sender produces them: the second signed from the IV
+        // the first chained to.
+        let (first, iv1) =
+            crate::protocol::fix::fix_sign(&fix_build(&[(35, "8")], 1), key, &iv0);
+        let (second, _) =
+            crate::protocol::fix::fix_sign(&fix_build(&[(35, "8")], 2), key, &iv1);
+
+        // Something else entirely, arriving between them.
+        let (mut injected, _) =
+            crate::protocol::fix::fix_sign(&fix_build(&[(35, "8"), (58, "x")], 9), b"wrongkey00000000", &iv1);
+        let at = find_subsequence(&injected, b"\x018349=").expect("signed") + 6;
+        injected[at] = if injected[at] == b'0' { b'1' } else { b'0' };
+
+        let mut conn = signed_conn(key, &iv0);
+        assert!(conn.unsign(&first).is_some(), "the first authentic frame");
+        assert_eq!(conn.read_iv, iv1, "and it advanced the chain");
+
+        assert!(conn.unsign(&injected).is_none(), "the injected frame is dropped");
+        assert_eq!(conn.read_iv, iv1, "without moving the chain");
+
+        assert!(
+            conn.unsign(&second).is_some(),
+            "so the authentic frame after it still verifies",
+        );
+    }
+
+    /// Two shapes that must keep working, because refusing either would drop
+    /// real traffic rather than protect anything: an unsigned connection, and a
+    /// frame carrying no signature tag on a signed one.
+    #[test]
+    fn unsigned_connections_and_untagged_frames_still_pass() {
+        let plain = fix_build(&[(35, "0")], 1);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let mut conn = Connection::new_raw(stream).unwrap();
+        assert_eq!(conn.unsign(&plain), Some(plain.clone()), "no key configured");
+
+        let mut conn = signed_conn(b"0123456789abcdef", &vec![0u8; 16]);
+        assert_eq!(conn.unsign(&plain), Some(plain), "no 8349 tag on the frame");
+    }
+
+    /// The same rule at the pre-check. An *unsigned* frame quoting the tag in a
+    /// value must not be routed into verification at all: it carries no
+    /// signature field, so it would be judged invalid and dropped. The signed
+    /// case below cannot catch this — its pre-check passes under either needle.
+    #[test]
+    fn an_unsigned_frame_quoting_the_signature_tag_is_not_verified() {
+        let quoting = fix_build(&[(35, "8"), (58, "rejected: 8349= missing")], 1);
+
+        let mut conn = signed_conn(b"0123456789abcdef", &vec![0u8; 16]);
+        assert_eq!(
+            conn.unsign(&quoting),
+            Some(quoting.clone()),
+            "the tag text in a value is not a signature field",
+        );
+    }
+
+    /// A signature is a field, not a substring. A legitimate signed frame whose
+    /// *value* happens to contain the same text — a reject reason quoting it,
+    /// say — was reported invalid, and enforcing that verdict would drop it.
+    #[test]
+    fn a_signed_frame_quoting_the_signature_tag_in_a_value_still_verifies() {
+        let key = b"0123456789abcdef";
+        let iv = vec![0u8; 16];
+        let quoting = fix_build(&[(35, "8"), (58, "rejected: 8349= missing")], 1);
+        let (frame, _) = crate::protocol::fix::fix_sign(&quoting, key, &iv);
+
+        let mut conn = signed_conn(key, &iv);
+        assert!(
+            conn.unsign(&frame).is_some(),
+            "the tag text inside a value is not the signature field",
+        );
     }
 }

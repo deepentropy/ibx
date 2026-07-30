@@ -279,10 +279,18 @@ pub fn farm_logon_exchange(
 
         // FIX.4.1 message
         if msg.starts_with(b"8=FIX.4.1\x01") {
-            let has_sig = msg.windows(5).any(|w| w == b"8349=");
+            let has_sig = msg.windows(6).any(|w| w == b"\x018349=");
             // Check for HMAC signature → unsign
             let parsed_msg = if has_sig {
-                let (unsigned, new_iv, _valid) = fix::fix_unsign(&msg, read_mac_key, &read_iv);
+                let (unsigned, new_iv, valid) = fix::fix_unsign(&msg, read_mac_key, &read_iv);
+                if !valid {
+                    // Same rule as `Connection::unsign`: a frame that does not
+                    // verify is neither parsed nor allowed to move the chain,
+                    // since the IV it would move to is derived from a body the
+                    // MAC just declined to vouch for.
+                    log::warn!("auth frame failed signature verification — dropped");
+                    continue;
+                }
                 read_iv = new_iv;
                 unsigned
             } else {
@@ -565,7 +573,7 @@ pub fn connect_farm(
     for frame in &frames {
         match frame {
             crate::protocol::connection::Frame::FixComp(raw) => {
-                let (unsigned, _valid) = conn.unsign(raw);
+                let Some(unsigned) = conn.unsign(raw) else { continue };
                 let inner = fixcomp::fixcomp_decompress(&unsigned).unwrap_or_else(|e| {
                     log::warn!("{}: dropping malformed FIXCOMP frame: {}", farm_id, e);
                     Vec::new()
@@ -586,7 +594,7 @@ pub fn connect_farm(
                 }
             }
             crate::protocol::connection::Frame::Fix(raw) => {
-                let (unsigned, _valid) = conn.unsign(raw);
+                let Some(unsigned) = conn.unsign(raw) else { continue };
                 let parsed = fix_parse(&unsigned);
                 let mt = parsed.get(&35).map(|s| s.as_str()).unwrap_or("");
                 log::debug!("{} routing FIX 35={}", farm_id, mt);
@@ -601,7 +609,7 @@ pub fn connect_farm(
                 }
             }
             crate::protocol::connection::Frame::Binary(raw) => {
-                let (_unsigned, _valid) = conn.unsign(raw);
+                let Some(_unsigned) = conn.unsign(raw) else { continue };
                 log::info!("{} routing 8=O: {} bytes", farm_id, raw.len());
             }
             crate::protocol::connection::Frame::Control(raw) => {

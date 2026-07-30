@@ -115,7 +115,7 @@ impl HmdsState {
                 for frame in &frames {
                     match frame {
                         Frame::FixComp(raw) => {
-                            let (unsigned, _valid) = conn.unsign(raw);
+                            let Some(unsigned) = conn.unsign(raw) else { continue };
                             match fixcomp::fixcomp_decompress(&unsigned) {
                                 Ok(inner) => {
                                     if log::log_enabled!(log::Level::Trace) {
@@ -134,14 +134,14 @@ impl HmdsState {
                             }
                         }
                         Frame::Binary(raw) => {
-                            let (unsigned, _valid) = conn.unsign(raw);
+                            let Some(unsigned) = conn.unsign(raw) else { continue };
                             if log::log_enabled!(log::Level::Trace) {
                                 log::trace!("WIRE< hmds/bin {}", crate::protocol::fix::fmt_pipe(&unsigned));
                             }
                             msgs.push(unsigned);
                         }
                         Frame::Fix(raw) => {
-                            let (unsigned, _valid) = conn.unsign(raw);
+                            let Some(unsigned) = conn.unsign(raw) else { continue };
                             if log::log_enabled!(log::Level::Trace) {
                                 log::trace!("WIRE< hmds/fix {}", crate::protocol::fix::fmt_pipe(&unsigned));
                             }
