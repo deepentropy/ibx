@@ -899,11 +899,13 @@ pub struct GatewayConfig {
     /// server-side deadline). Set lower to fail fast for unattended logins.
     /// Only consulted on non-paper logins; paper logins skip the gate entirely.
     pub ib_key_timeout_secs: u64,
-    /// Account-specific second-factor token sub-type used in the SWCR_TOKEN
-    /// state=1 init body (`M.D` field). Default `"2a"` matches the captured
-    /// reference profile; other accounts may use a different value. Capture
-    /// the live value via ib-agent's `SWCR_TOKEN_SUBTYPE` hook if the default
-    /// doesn't trigger the IBKey push for your account.
+    /// Fallback second-factor token sub-type for the SWCR_TOKEN state=1 init
+    /// body (`M.D` field).
+    ///
+    /// `AUTH_START` states the sub-type for the session, and that value wins:
+    /// it is account- and session-specific, so a fixed setting can only ever
+    /// match the profile it came from. This is what gets used when the server
+    /// states none. Default `"2a"` matches the captured reference profile.
     pub ib_key_token_sub_type: String,
     /// If set, the IBKey gate uses the **Challenge/Response** path instead
     /// of waiting for a mobile push approval. After the server delivers
@@ -912,6 +914,26 @@ pub struct GatewayConfig {
     /// [`session::CodeProvider`] for the contract; `None` leaves behavior
     /// unchanged (push approval).
     pub code_provider: Option<session::CodeProvider>,
+}
+
+/// The second-factor sub-type `AUTH_START` states for the IBKey token.
+///
+/// Field 4 carries `<type>` or `<type>.<sub-type>`, and a comma-separated list
+/// when the account has more than one factor enabled — `4,5` was advertised for
+/// an account holding both an authenticator and IBKey. The list is split before
+/// the dot, so a sub-type on one entry cannot swallow the entries after it:
+/// reading `"5.2a,4"` as one pair yields `2a,4`, which is not a sub-type at all
+/// and is rejected by a server that would have accepted `2a`.
+///
+/// The sub-type returned is the one belonging to type `5`, since that is the
+/// token this gate sends. A sub-type stated against some other type is not
+/// IBKey's and is ignored.
+fn parse_auth_start_sub_type(auth_start: &str) -> Option<String> {
+    let field = auth_start.split(';').nth(4)?;
+    field.split(',').find_map(|entry| {
+        let (ty, sub) = entry.trim().split_once('.')?;
+        (ty.trim() == "5" && !sub.trim().is_empty()).then(|| sub.trim().to_string())
+    })
 }
 
 impl Gateway {
@@ -1016,7 +1038,7 @@ impl Gateway {
         session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
 
         // Receive AUTH_START (may get a redirect instead for paper accounts)
-        let _auth_start = match session::recv_secure(&mut tls, &mut channel) {
+        let auth_start = match session::recv_secure(&mut tls, &mut channel) {
             Ok(data) => data,
             Err(e) if e.to_string().starts_with("REDIRECT:") => {
                 let target = e.to_string().strip_prefix("REDIRECT:").unwrap().to_string();
@@ -1028,6 +1050,15 @@ impl Gateway {
             }
             Err(e) => return Err(e),
         };
+
+        // AUTH_START field 4 names the second-factor token type and its
+        // per-session subtype, e.g. "5.2i" = tokenType 5 (IBKey), subtype "2i".
+        // The subtype is account- and session-specific, so the compiled-in
+        // default only ever matches the profile it was captured from; every
+        // other account has its SWCR_TOKEN rejected and the socket closed
+        // before a challenge is issued (ibx#279).
+        let server_token_sub_type =
+            parse_auth_start_sub_type(&String::from_utf8_lossy(&auth_start));
 
         // Authentication
         log::info!("Starting auth for {}", config.username);
@@ -1062,9 +1093,20 @@ impl Gateway {
                     config.username, config.ib_key_timeout_secs,
                 );
             }
+            // The server's per-session value wins. `ib_key_token_sub_type` is
+            // the fallback for an AUTH_START that states none, not an override
+            // — a fixed value cannot be right for a session it predates.
+            let token_sub_type = server_token_sub_type
+                .as_deref()
+                .unwrap_or(&config.ib_key_token_sub_type);
+            log::info!(
+                "2FA gate: token sub-type {:?} ({})",
+                token_sub_type,
+                if server_token_sub_type.is_some() { "from AUTH_START" } else { "configured default" },
+            );
             match session::do_ib_key_2fa(
                 &mut tls,
-                &config.ib_key_token_sub_type,
+                token_sub_type,
                 deadline,
                 config.code_provider.as_ref(),
             )? {
@@ -1883,6 +1925,37 @@ pub use crate::config::{chrono_free_timestamp, days_to_ymd};
 
 #[cfg(test)]
 mod tests {
+
+    /// Field 4 selects the second factor and states its sub-type. The whole
+    /// field was read as one pair, so a list put the following entries inside
+    /// the sub-type: `"5.2a,4"` sent `2a,4`, which is not a sub-type — an
+    /// account that worked on the compiled-in `2a` would have had its token
+    /// rejected and the socket closed before any challenge (ibx#279).
+    #[test]
+    fn the_ib_key_sub_type_comes_from_the_ib_key_entry() {
+        use super::parse_auth_start_sub_type as parse;
+        let frame = |token: &str| format!("a;b;c;d;{token};f");
+
+        // The single-factor case this was written for.
+        assert_eq!(parse(&frame("5.2i")), Some("2i".into()));
+        assert_eq!(parse(&frame(" 5.2i ")), Some("2i".into()));
+
+        // A list must not fold the later entries into the sub-type.
+        assert_eq!(parse(&frame("5.2a,4")), Some("2a".into()));
+        assert_eq!(parse(&frame("4,5.2i")), Some("2i".into()));
+
+        // A sub-type stated against another factor is not IBKey's.
+        assert_eq!(parse(&frame("4.auth")), None);
+        assert_eq!(parse(&frame("4.auth,5.2i")), Some("2i".into()));
+
+        // Nothing to take: the configured value is used instead.
+        assert_eq!(parse(&frame("5")), None);
+        assert_eq!(parse(&frame("4,5")), None);
+        assert_eq!(parse(&frame("5.")), None);
+        assert_eq!(parse(&frame("")), None);
+        assert_eq!(parse("a;b;c"), None, "a short frame has no field 4");
+    }
+
     use super::*;
 
     #[test]

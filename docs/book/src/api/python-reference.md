@@ -46,7 +46,7 @@ def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".
 | `paper` | `bool` | If `true`, connect to paper trading. If `false`, connect blocks on the live second-factor approval window (see method note). |
 | `core_id` | `usize or None` | CPU core affinity for the hot loop thread. Use a distinct value per engine when running several in one process. |
 | `ib_key_timeout_secs` | `int or None` | Live second-factor approval timeout in seconds (default ~18 min). Lower it to fail fast on unattended live logins; ignored for paper. |
-| `ib_key_token_sub_type` | `str or None` | Account-specific second-factor token sub-type (default `"2a"`); ignored for paper. |
+| `ib_key_token_sub_type` | `str or None` | Fallback second-factor token sub-type (default `"2a"`), used only when the server states none for the session; ignored for paper. |
 
 ---
 
