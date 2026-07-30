@@ -182,9 +182,13 @@ impl EClient {
 
     /// Track an order locally (for req_open_orders regression tests).
     #[doc(hidden)]
+    #[pyo3(signature = (
+        order_id, instrument, symbol, action, total_quantity, lmt_price, parent_id=0,
+    ))]
     fn _test_track_order(
         &self, order_id: u64, instrument: u32,
         symbol: &str, action: &str, total_quantity: f64, lmt_price: f64,
+        parent_id: i64,
     ) -> PyResult<()> {
         use crate::api::types::{Contract as ApiContract, Order as ApiOrder};
         let contract = ApiContract {
@@ -200,6 +204,7 @@ impl EClient {
             total_quantity,
             order_type: "LMT".into(),
             lmt_price,
+            parent_id,
             ..Default::default()
         };
         self.core.track_order(order_id, contract, order, instrument);
