@@ -92,12 +92,33 @@ impl SecureChannel {
     ///
     /// `fields` are the semicolon-split parts after version and msg_type:
     /// `[server_random_b64, server_pub_b64, ...]`
-    pub fn process_server_hello(&mut self, fields: &[&str]) {
-        let server_random = B64.decode(fields[0]).unwrap();
-        let server_pub_bytes = B64.decode(fields[1]).unwrap();
+    pub fn process_server_hello(&mut self, fields: &[&str]) -> std::io::Result<()> {
+        let invalid = |what: &str| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("DH server hello: {what}"))
+        };
+        // Every field below was indexed directly and decoded with `unwrap`, so a
+        // short or non-base64 hello aborted the process on the ordinary connect
+        // path rather than failing the connection (ibx#276).
+        let [server_random_b64, server_pub_b64, ..] = fields else {
+            return Err(invalid(&format!("expected at least 2 fields, got {}", fields.len())));
+        };
+        let server_random = B64.decode(server_random_b64)
+            .map_err(|e| invalid(&format!("undecodable server random: {e}")))?;
+        let server_pub_bytes = B64.decode(server_pub_b64)
+            .map_err(|e| invalid(&format!("undecodable server public value: {e}")))?;
         let server_pub = BigUint::from_bytes_be(&server_pub_bytes);
 
         let n = dh_n();
+
+        // The public value has to lie in [2, N-2]. 0 and 1 pin the pre-master
+        // secret to a known constant, and so therefore the whole key block
+        // derived from it — both AES keys, both IVs, both HMAC keys. Nothing
+        // downstream would notice: the channel's own MAC would be verifying
+        // against the key the peer chose.
+        let two = BigUint::from(2u32);
+        if server_pub < two || server_pub > &n - &two {
+            return Err(invalid("public value outside [2, N-2]"));
+        }
 
         // Pre-master secret = server_pub ^ client_private mod N
         let shared = server_pub.modpow(&self.private_key, &n);
@@ -127,6 +148,7 @@ impl SecureChannel {
         self.write_mac_key = Some(key_block[64..84].to_vec());
         self.read_mac_key = Some(key_block[84..104].to_vec());
         self.key_block = Some(key_block);
+        Ok(())
     }
 
     /// Encrypt plaintext using Encrypt-then-MAC.
@@ -401,8 +423,8 @@ mod tests {
 
         // Each channel processes the other's hello as if it were a server response
         // process_server_hello expects [server_random_b64, server_pub_b64]
-        channel_a.process_server_hello(&[b_random, b_pub]);
-        channel_b.process_server_hello(&[a_random, a_pub]);
+        channel_a.process_server_hello(&[b_random, b_pub]).unwrap();
+        channel_b.process_server_hello(&[a_random, a_pub]).unwrap();
 
         // Both should now have key_blocks of 104 bytes
         let kb_a = channel_a.key_block().expect("channel_a should have key_block");
@@ -432,8 +454,8 @@ mod tests {
         let parts_b: Vec<&str> = payload_b.trim_end_matches(';').split(';').collect();
 
         // Each processes the other's hello
-        channel_a.process_server_hello(&[parts_b[4], parts_b[5]]);
-        channel_b.process_server_hello(&[parts_a[4], parts_a[5]]);
+        channel_a.process_server_hello(&[parts_b[4], parts_b[5]]).unwrap();
+        channel_b.process_server_hello(&[parts_a[4], parts_a[5]]).unwrap();
 
         // Both have valid key blocks
         assert_eq!(channel_a.key_block().unwrap().len(), 104);
@@ -451,5 +473,55 @@ mod tests {
         let fresh_b = channel_b.encrypt_fresh(b"fresh from B");
         assert!(fresh_a.len() >= 36);
         assert!(fresh_b.len() >= 36);
+    }
+
+    /// ibx#276: the server's public value was used without any range check. 0
+    /// and 1 pin the pre-master secret to a known constant, and every key
+    /// derived from it follows — including the one the channel's own MAC would
+    /// then be verifying against.
+    #[test]
+    fn a_degenerate_public_value_is_refused() {
+        let n = dh_n();
+        let random = B64.encode([0u8; 32]);
+        for (label, value) in [
+            ("zero", BigUint::from(0u32)),
+            ("one", BigUint::from(1u32)),
+            ("n-1", &n - BigUint::from(1u32)),
+            ("n", n.clone()),
+        ] {
+            let mut channel = SecureChannel::new();
+            let pub_b64 = B64.encode(value.to_bytes_be());
+            let err = channel.process_server_hello(&[&random, &pub_b64])
+                .expect_err(&format!("{label} must be refused"));
+            assert!(err.to_string().contains("outside [2, N-2]"), "{label}: {err}");
+        }
+
+        // The positive control: a value inside the range is still accepted, so
+        // the assertions above are not passing for want of a working path.
+        let mut channel = SecureChannel::new();
+        let ok = B64.encode((&n - BigUint::from(2u32)).to_bytes_be());
+        assert!(channel.process_server_hello(&[&random, &ok]).is_ok());
+    }
+
+    /// The half that needs no adversary: a short or non-base64 hello used to
+    /// abort the process on the ordinary connect path, through direct indexing
+    /// and two `unwrap`s.
+    #[test]
+    fn a_malformed_hello_is_an_error_not_a_panic() {
+        let random = B64.encode([0u8; 32]);
+
+        let mut channel = SecureChannel::new();
+        assert!(channel.process_server_hello(&[]).is_err(), "no fields");
+
+        let mut channel = SecureChannel::new();
+        assert!(channel.process_server_hello(&[&random]).is_err(), "one field");
+
+        let mut channel = SecureChannel::new();
+        let err = channel.process_server_hello(&[&random, "not base64!!"]).unwrap_err();
+        assert!(err.to_string().contains("undecodable"), "{err}");
+
+        let mut channel = SecureChannel::new();
+        let err = channel.process_server_hello(&["not base64!!", &random]).unwrap_err();
+        assert!(err.to_string().contains("undecodable"), "{err}");
     }
 }
