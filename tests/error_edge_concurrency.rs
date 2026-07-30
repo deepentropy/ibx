@@ -652,9 +652,7 @@ fn concurrent_account_read_write() {
 fn order_buffer_push_drain_cycle() {
     let mut buf = OrderBuffer::new();
     for i in 0..64 {
-        buf.push(OrderRequest::SubmitMarket {
-            order_id: i, instrument: 0, side: Side::Buy, qty: 1,
-        });
+        buf.push(OrderRequest::SubmitEx { order_id: i, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() });
     }
     let drained: Vec<_> = buf.drain().collect();
     assert_eq!(drained.len(), 64);
@@ -667,9 +665,7 @@ fn order_buffer_multiple_drain_cycles() {
     let mut buf = OrderBuffer::new();
     for cycle in 0..5 {
         for i in 0..10 {
-            buf.push(OrderRequest::SubmitMarket {
-                order_id: cycle * 10 + i, instrument: 0, side: Side::Buy, qty: 1,
-            });
+            buf.push(OrderRequest::SubmitEx { order_id: cycle * 10 + i, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() });
         }
         let drained: Vec<_> = buf.drain().collect();
         assert_eq!(drained.len(), 10);

@@ -54,11 +54,14 @@ fn main() {
     for i in 0..iterations {
         // BUY
         let buy_time = Instant::now();
-        session.send_order(OrderRequest::SubmitMarket {
+        session.send_order(OrderRequest::SubmitEx {
             order_id,
             instrument,
             side: Side::Buy,
             qty: 1,
+            kind: OrderKind::Market,
+            tif: b'0',
+            attrs: OrderAttrs::default(),
         });
 
         let buy_ns = wait_for_fill(&session.event_rx, order_id, buy_time, &start, "BUY");
@@ -71,11 +74,14 @@ fn main() {
 
         // SELL
         let sell_time = Instant::now();
-        session.send_order(OrderRequest::SubmitMarket {
+        session.send_order(OrderRequest::SubmitEx {
             order_id,
             instrument,
             side: Side::Sell,
             qty: 1,
+            kind: OrderKind::Market,
+            tif: b'0',
+            attrs: OrderAttrs::default(),
         });
 
         let sell_ns = wait_for_fill(&session.event_rx, order_id, sell_time, &start, "SELL");

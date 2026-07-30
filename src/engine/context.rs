@@ -155,12 +155,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitLimit {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            price,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Limit { price },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -173,11 +171,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitMarket {
-            order_id: id,
-            instrument,
-            side,
-            qty,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Market,
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -191,12 +188,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitStop {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            stop_price,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Stop { stop_price },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -211,13 +206,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitStopLimit {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            price,
-            stop_price,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::StopLimit { price, stop_price },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -334,13 +326,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitTrailingStop {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            trail_amt,
-            trail_stop_price: 0,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::TrailingStop { trail_amt, trail_stop_price: 0 },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -355,14 +344,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitTrailingStopLimit {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            lmt_offset,
-            trail_amt,
-            trail_stop_price: 0,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::TrailingStopLimit { lmt_offset, trail_amt, trail_stop_price: 0 },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -376,13 +361,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitTrailingStopPct {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            trail_pct,
-            trail_stop_price: 0,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::TrailPct { trail_pct, trail_stop_price: 0 },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -395,11 +377,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitMoc {
-            order_id: id,
-            instrument,
-            side,
-            qty,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Moc,
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -413,12 +394,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitLoc {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            price,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Loc { price },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -432,12 +411,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitMit {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            stop_price,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Mit { stop_price },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -452,13 +429,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitLit {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            price,
-            stop_price,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Lit { price, stop_price },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -505,14 +479,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitLimitEx {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            price,
-            tif,
-            attrs,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Limit { price },
+            tif, attrs,
         });
         id
     }
@@ -526,12 +496,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitRel {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            offset,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Rel { offset },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -562,16 +530,15 @@ impl Context {
         qty: u32,
         price: Price,
         priority: AdaptivePriority,
+        tif: u8,
+        attrs: OrderAttrs,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitAdaptive {
-            order_id: id,
-            instrument,
-            side,
-            qty,
-            price,
-            priority,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Adaptive { price, priority },
+            tif, attrs,
         });
         id
     }
@@ -584,8 +551,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitMtl {
+        self.pending_orders.push(OrderRequest::SubmitEx {
             order_id: id, instrument, side, qty,
+            kind: OrderKind::Mtl,
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -598,8 +567,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitMktPrt {
+        self.pending_orders.push(OrderRequest::SubmitEx {
             order_id: id, instrument, side, qty,
+            kind: OrderKind::MktPrt,
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -613,8 +584,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitStpPrt {
-            order_id: id, instrument, side, qty, stop_price,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::StpPrt { stop_price },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -628,8 +601,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitMidPrice {
-            order_id: id, instrument, side, qty, price_cap,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::MidPrice { price_cap },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -642,8 +617,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitSnapMkt {
+        self.pending_orders.push(OrderRequest::SubmitEx {
             order_id: id, instrument, side, qty,
+            kind: OrderKind::SnapMkt,
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -656,8 +633,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitSnapMid {
+        self.pending_orders.push(OrderRequest::SubmitEx {
             order_id: id, instrument, side, qty,
+            kind: OrderKind::SnapMid,
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -670,8 +649,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitSnapPri {
+        self.pending_orders.push(OrderRequest::SubmitEx {
             order_id: id, instrument, side, qty,
+            kind: OrderKind::SnapPri,
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -685,8 +666,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitPegMkt {
-            order_id: id, instrument, side, qty, offset,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::PegMkt { offset },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -700,8 +683,10 @@ impl Context {
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitPegMid {
-            order_id: id, instrument, side, qty, offset,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::PegMid { offset },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -714,11 +699,15 @@ impl Context {
         qty: u32,
         price: Price,
         algo: AlgoParams,
+        tif: u8,
+        attrs: OrderAttrs,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitAlgo {
-            order_id: id, instrument, side, qty, price, algo,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::Algo { price, algo },
+            tif, attrs,
         });
         id
     }
@@ -794,11 +783,15 @@ impl Context {
         side: Side,
         qty: u32,
         price: Price,
+        tif: u8,
+        attrs: OrderAttrs,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitWhatIf {
-            order_id: id, instrument, side, qty, price,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::WhatIf { price },
+            tif, attrs,
         });
         id
     }
@@ -821,6 +814,10 @@ impl Context {
     }
 
     /// Submit an adjustable stop order. Adjusts to a different order type when trigger is hit.
+    /// Takes `tif` and `attrs` like the other extended submitters: an adjustable
+    /// stop is a normal bracket child, so it needs its parent link and OCA group
+    /// (ibx#240). `tif`: b'0' = DAY, b'1' = GTC, b'6' = GTD.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_adjustable_stop(
         &mut self,
         instrument: InstrumentId,
@@ -833,13 +830,19 @@ impl Context {
         adjusted_stop_limit_price: Price,
         adjusted_trailing_amount: Price,
         adjustable_trailing_unit: i32,
+        tif: u8,
+        attrs: OrderAttrs,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
-        self.pending_orders.push(OrderRequest::SubmitAdjustableStop {
-            order_id: id, instrument, side, qty, stop_price, trigger_price,
-            adjusted_order_type, adjusted_stop_price, adjusted_stop_limit_price,
-            adjusted_trailing_amount, adjustable_trailing_unit,
+        self.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: id, instrument, side, qty,
+            kind: OrderKind::AdjustableStop {
+                stop_price, trigger_price, adjusted_order_type, adjusted_stop_price,
+                adjusted_stop_limit_price, adjusted_trailing_amount, adjustable_trailing_unit,
+            },
+            tif,
+            attrs,
         });
         id
     }
@@ -1002,12 +1005,9 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match orders[0] {
-            OrderRequest::SubmitLimit {
-                instrument,
-                side,
-                qty,
-                price,
-                ..
+            OrderRequest::SubmitEx {
+                order_id, instrument, side, qty,
+                kind: OrderKind::Limit { price }, ..
             } => {
                 assert_eq!(instrument, 0);
                 assert_eq!(side, Side::Buy);
@@ -1026,11 +1026,9 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match orders[0] {
-            OrderRequest::SubmitMarket {
-                instrument,
-                side,
-                qty,
-                ..
+            OrderRequest::SubmitEx {
+                order_id, instrument, side, qty,
+                kind: OrderKind::Market, ..
             } => {
                 assert_eq!(instrument, 1);
                 assert_eq!(side, Side::Sell);
@@ -1349,7 +1347,10 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match orders[0] {
-            OrderRequest::SubmitLimit { price, .. } => {
+            OrderRequest::SubmitEx {
+                order_id, instrument, side, qty,
+                kind: OrderKind::Limit { price }, ..
+            } => {
                 assert_eq!(price, 150 * PRICE_SCALE);
             }
             _ => panic!("expected SubmitLimit"),
@@ -1507,7 +1508,10 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match orders[0] {
-            OrderRequest::SubmitStop { order_id, instrument, side, qty, stop_price } => {
+            OrderRequest::SubmitEx {
+                order_id, instrument, side, qty,
+                kind: OrderKind::Stop { stop_price }, ..
+            } => {
                 assert_eq!(order_id, id);
                 assert_eq!(instrument, 0);
                 assert_eq!(side, Side::Sell);
@@ -1624,7 +1628,10 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitMtl { order_id, instrument, side, qty } => {
+            OrderRequest::SubmitEx {
+                order_id, instrument, side, qty,
+                kind: OrderKind::Mtl, ..
+            } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);
@@ -1637,18 +1644,21 @@ mod tests {
     #[test]
     fn submit_what_if_drains_correctly() {
         let mut ctx = Context::new();
-        let id = ctx.submit_what_if(0, Side::Buy, 100, 256_20 * (PRICE_SCALE / 100));
+        let id = ctx.submit_what_if(0, Side::Buy, 100, 256_20 * (PRICE_SCALE / 100),
+            b'0', OrderAttrs::default());
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price } => {
+            OrderRequest::SubmitEx {
+                order_id, instrument, side, qty, kind: OrderKind::WhatIf { price }, ..
+            } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);
                 assert_eq!(*qty, 100);
                 assert_eq!(*price, 256_20 * (PRICE_SCALE / 100));
             }
-            _ => panic!("expected SubmitWhatIf"),
+            _ => panic!("expected a what-if"),
         }
     }
 
@@ -1683,12 +1693,15 @@ mod tests {
             252_20 * (PRICE_SCALE / 100), // adjusted_limit
             0,                             // adjusted_trailing_amount (StopLimit: unused)
             0,                             // adjustable_trailing_unit
+            b'1',                          // GTC
+            OrderAttrs { parent_id: 9, ..Default::default() },
         );
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitAdjustableStop { order_id, side, qty, stop_price,
-                trigger_price, adjusted_order_type, adjusted_stop_price, adjusted_stop_limit_price, .. } => {
+            OrderRequest::SubmitEx { order_id, side, qty, kind: OrderKind::AdjustableStop {
+                stop_price, trigger_price, adjusted_order_type, adjusted_stop_price,
+                adjusted_stop_limit_price, .. }, tif, attrs, .. } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*side, Side::Sell);
                 assert_eq!(*qty, 1);
@@ -1697,8 +1710,10 @@ mod tests {
                 assert_eq!(*adjusted_order_type, AdjustedOrderType::StopLimit);
                 assert_eq!(*adjusted_stop_price, 253_20 * (PRICE_SCALE / 100));
                 assert_eq!(*adjusted_stop_limit_price, 252_20 * (PRICE_SCALE / 100));
+                assert_eq!(*tif, b'1');
+                assert_eq!(attrs.parent_id, 9);
             }
-            _ => panic!("expected SubmitAdjustableStop"),
+            _ => panic!("expected SubmitEx carrying AdjustableStop"),
         }
     }
 }

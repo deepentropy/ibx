@@ -38,72 +38,6 @@ pub(crate) fn drain_and_send_orders(
             order_req.snap_prices(context.market.min_tick_scaled(instrument));
         }
         let result = match order_req {
-            OrderRequest::SubmitLimit { order_id, instrument, side, qty, price } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, b'2', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),   // ClOrdID
-                    (1, account_id),    // Account
-                    (21, "2"),          // HandlInst = Automated
-                    (55, &symbol),      // Symbol
-                    (54, side_str),     // Side
-                    (38, &qty_str),     // OrderQty
-                    (40, "2"),          // OrdType = Limit
-                    (44, &price_str),   // Price
-                    (59, "0"),          // TIF = DAY
-                    (60, &now),         // TransactTime
-                    (167, &sec_type_str),       // SecurityType = CommonStock
-                    (100, &destination),
-                    (6210, &destination),     // ExDestination
-                    (15, "USD"),        // Currency
-                    (204, "0"),         // CustomerOrFirm
-                ])
-            }
-            OrderRequest::SubmitStopLimit { order_id, instrument, side, qty, price, stop_price } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, b'4', b'0', stop_price,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let stop_str = format_price(stop_price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "4"),          // OrdType = Stop Limit
-                    (44, &price_str),   // Limit Price
-                    (99, &stop_str),    // StopPx
-                    (59, "0"),          // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
             OrderRequest::SubmitLimitGtc { order_id, instrument, side, qty, price, outside_rth } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'1', 0,
@@ -140,77 +74,9 @@ pub(crate) fn drain_and_send_orders(
                 }
                 conn.send_fix(&fields)
             }
-            OrderRequest::SubmitLimitEx { order_id, instrument, side, qty, price, tif, attrs } => {
-                send_order_ex(conn, context, account_id, order_id, instrument, side, qty,
-                    crate::types::OrderKind::Limit { price }, tif, &attrs)
-            }
             OrderRequest::SubmitEx { order_id, instrument, side, qty, kind, tif, attrs } => {
                 send_order_ex(conn, context, account_id, order_id, instrument, side, qty,
                     kind, tif, &attrs)
-            }
-            OrderRequest::SubmitMarket { order_id, instrument, side, qty } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, b'1', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                log::info!("Sending MKT order: clord={} acct={} sym={} side={} qty={}",
-                    clord_str, account_id, symbol, side_str, qty_str);
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),    // Account
-                    (21, "2"),          // HandlInst = Automated
-                    (55, &symbol),      // Symbol
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "1"),          // OrdType = Market
-                    (59, "0"),          // TIF = DAY
-                    (60, &now),         // TransactTime
-                    (167, &sec_type_str),       // SecurityType
-                    (100, &destination),
-                    (6210, &destination),     // ExDestination
-                    (15, "USD"),        // Currency
-                    (204, "0"),         // CustomerOrFirm
-                ])
-            }
-            OrderRequest::SubmitStop { order_id, instrument, side, qty, stop_price } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, stop_price, b'3', b'0', stop_price,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let stop_str = format_price(stop_price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),          // HandlInst = Automated
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "3"),          // OrdType = Stop
-                    (99, &stop_str),    // StopPx
-                    (59, "0"),          // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
             }
             OrderRequest::SubmitStopGtc { order_id, instrument, side, qty, stop_price, outside_rth } => {
                 context.insert_order(crate::types::Order::new(
@@ -350,267 +216,6 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ])
             }
-            OrderRequest::SubmitTrailingStop { order_id, instrument, side, qty, trail_amt, trail_stop_price } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, b'P', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let trail_str = format_price(trail_amt);
-                let trail_stop_str = format_price(trail_stop_price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                // Per ib-agent#136 capture: amount-based trailing stop carries
-                // the trail amount in both 99 (StopPx) and 211 (PegOffset),
-                // and requires 18=a (ExecInst = TrailingStop). Without 18,
-                // the gateway rejects with "Invalid value in field # 18".
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "P"),          // OrdType = Stop (used for trailing too)
-                    (99, &trail_str),   // StopPx = trail amount
-                    (211, &trail_str), // PegOffset = trail amount
-                    (18, "a"),          // ExecInst = TrailingStop
-                    (59, "0"),          // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ];
-                // Optional initial stop trigger (tag 6117), only when set
-                // (ib-agent#173).
-                if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
-                conn.send_fix(&fields)
-            }
-            OrderRequest::SubmitTrailingStopLimit { order_id, instrument, side, qty, lmt_offset, trail_amt, trail_stop_price } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, lmt_offset, b'P', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let offset_str = format_price(lmt_offset);
-                let trail_str = format_price(trail_amt);
-                let trail_stop_str = format_price(trail_stop_price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                // Per ib-agent#136 capture: TRAIL LIMIT uses OrdType=TSL (not P),
-                // does NOT carry tag 44 (gateway derives the limit price from
-                // 6370 + the activation reference), does NOT carry tag 18, and
-                // carries the trail amount in both 99 and 211. The 6370
-                // LimitPriceOffset is the limit-vs-trail offset.
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "TSL"),         // OrdType = Trailing Stop Limit
-                    (99, &trail_str),    // StopPx = trail amount
-                    (6370, &offset_str), // LimitPriceOffset
-                    (211, &trail_str),   // PegOffset = trail amount
-                    (59, "0"),           // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ];
-                if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
-                conn.send_fix(&fields)
-            }
-            OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_pct, trail_stop_price } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, b'P', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let pct_str = trail_pct.to_string(); // basis points: 100 = 1%
-                // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
-                // percent in decimal form (1.00 for 1%), alongside 6268 in basis
-                // points and 18=a (ExecInst=TrailingStop). Without 99/211/18 the
-                // gateway rejects with "Invalid value in field # 18".
-                let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
-                let trail_stop_str = format_price(trail_stop_price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "P"),              // OrdType = Trailing Stop
-                    (99, &pct_decimal),     // StopPx = percent as decimal
-                    (211, &pct_decimal),    // PegOffset = percent as decimal (mirror of 99)
-                    (18, "a"),              // ExecInst = TrailingStop
-                    (6268, &pct_str),       // TrailingPercent (basis points)
-                    (59, "0"),              // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ];
-                if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
-                conn.send_fix(&fields)
-            }
-            OrderRequest::SubmitTrailingStopPctEx { order_id, instrument, side, qty, trail_pct, tif, attrs, trail_stop_price } => {
-                send_order_ex(conn, context, account_id, order_id, instrument, side, qty,
-                    crate::types::OrderKind::TrailPct { trail_pct, trail_stop_price }, tif, &attrs)
-            }
-            OrderRequest::SubmitMoc { order_id, instrument, side, qty } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, b'5', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "5"),          // OrdType = Market on Close
-                    (59, "0"),          // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
-            OrderRequest::SubmitLoc { order_id, instrument, side, qty, price } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, b'B', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "B"),          // OrdType = Limit on Close
-                    (44, &price_str),   // Limit price
-                    (59, "0"),          // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
-            OrderRequest::SubmitMit { order_id, instrument, side, qty, stop_price } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, stop_price, b'J', b'0', stop_price,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let stop_str = format_price(stop_price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "J"),          // OrdType = Market if Touched
-                    (99, &stop_str),    // StopPx = trigger price
-                    (59, "0"),          // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
-            OrderRequest::SubmitLit { order_id, instrument, side, qty, price, stop_price } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, b'K', b'0', stop_price,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let stop_str = format_price(stop_price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "LT"),         // OrdType = Limit If Touched (per ib-agent#138)
-                    (44, &price_str),   // Limit price
-                    (99, &stop_str),    // StopPx = trigger price
-                    (59, "0"),          // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
             OrderRequest::SubmitBracket { parent_id, tp_id, sl_id, instrument, side, qty, entry_price, take_profit, stop_loss } => {
                 let exit_side = match side { Side::Buy => Side::Sell, Side::Sell | Side::ShortSell => Side::Buy };
                 let exit_side_str = fix_side(exit_side);
@@ -707,42 +312,6 @@ pub(crate) fn drain_and_send_orders(
                     (6209, "ReduceOnFillNonBlock"), // OCA type: gateway default 3 (ibx#215)
                 ])
             }
-            OrderRequest::SubmitRel { order_id, instrument, side, qty, offset } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, b'R', b'0', offset,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let offset_str = format_price(offset);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                // Per ib-agent#138 capture: Relative shares OrdType=P with
-                // Trail and is disambiguated by ExecInst=R. Peg offset goes
-                // on tag 211 (not 99 outbound), and there is no tag 44.
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "P"),              // OrdType = Pegged (used for Relative too)
-                    (211, &offset_str),     // PegOffset
-                    (18, "R"),              // ExecInst = Relative
-                    (59, "0"),              // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
             OrderRequest::SubmitLimitOpg { order_id, instrument, side, qty, price } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, b'2', b'2', 0,
@@ -774,101 +343,6 @@ pub(crate) fn drain_and_send_orders(
                     (15, "USD"),
                     (204, "0"),
                 ])
-            }
-            OrderRequest::SubmitAdaptive { order_id, instrument, side, qty, price, priority } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, b'2', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let priority_str = priority.as_str();
-                // Per ib-agent#136 capture: Adaptive needs 18=e (ExecInst =
-                // Adaptive algo wrapper). Without it, gateway rejects with
-                // "Invalid value in field # 18".
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "2"),              // OrdType = Limit
-                    (44, &price_str),
-                    (18, "e"),              // ExecInst = Adaptive algo
-                    (59, "0"),              // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                    (847, "Adaptive"),      // AlgoStrategy
-                    (5957, "1"),            // AlgoParamCount
-                    (5958, "adaptivePriority"), // AlgoParamTag
-                    (5960, priority_str),   // AlgoParamValue
-                ])
-            }
-            OrderRequest::SubmitAlgo { order_id, instrument, side, qty, price, algo } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, b'2', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "2"),              // OrdType = Limit
-                    (44, &price_str),
-                    (59, "0"),              // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ];
-                let (algo_name, param_strs) = build_algo_tags(&algo);
-                fields.push((847, algo_name));
-                // Tag 849 (maxPctVol) for algos that use it
-                let pct_str = match &algo {
-                    AlgoParams::Vwap { max_pct_vol, .. }
-                    | AlgoParams::ArrivalPx { max_pct_vol, .. }
-                    | AlgoParams::ClosePx { max_pct_vol, .. } => format!("{}", max_pct_vol),
-                    _ => String::new(),
-                };
-                if !pct_str.is_empty() {
-                    fields.push((849, &pct_str));
-                }
-                let count_str = (param_strs.len() / 2).to_string();
-                fields.push((5957, &count_str));
-                // Emit key/value pairs: 5958=key, 5960=value (repeated)
-                let mut i = 0;
-                while i < param_strs.len() {
-                    fields.push((5958, &param_strs[i]));
-                    fields.push((5960, &param_strs[i + 1]));
-                    i += 2;
-                }
-                conn.send_fix(&fields)
             }
             OrderRequest::SubmitPegBench { order_id, instrument, side, qty, price,
                 ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount } => {
@@ -973,40 +447,6 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ])
             }
-            OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price } => {
-                // What-if: insert with ORD_WHAT_IF marker so we can detect the response
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, crate::types::ORD_WHAT_IF, b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "2"),           // OrdType = Limit
-                    (44, &price_str),
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                    (6091, "1"),         // What-If flag
-                ])
-            }
             OrderRequest::SubmitLimitFractional { order_id, instrument, side, qty, price } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, 0, price, b'2', b'0', 0,
@@ -1038,356 +478,6 @@ pub(crate) fn drain_and_send_orders(
                     (15, "USD"),
                     (204, "0"),
                 ])
-            }
-            OrderRequest::SubmitAdjustableStop { order_id, instrument, side, qty,
-                stop_price, trigger_price, adjusted_order_type,
-                adjusted_stop_price, adjusted_stop_limit_price,
-                adjusted_trailing_amount, adjustable_trailing_unit } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, b'3', b'0', stop_price,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let stop_str = format_price(stop_price);
-                let trigger_str = format_price(trigger_price);
-                let adj_stop_str = format_price(adjusted_stop_price);
-                let adj_limit_str = format_price(adjusted_stop_limit_price);
-                let adj_trail_str = format_price(adjusted_trailing_amount);
-                let adj_unit_str = adjustable_trailing_unit.to_string();
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "3"),              // OrdType = Stop
-                    (99, &stop_str),        // StopPx
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                    (6257, "1"),            // Has adjustable params flag
-                    (6261, adjusted_order_type.fix_code()), // Adjusted order type
-                    (6258, &trigger_str),   // Trigger price
-                    (6259, &adj_stop_str),  // Adjusted stop price
-                ];
-                if adjusted_stop_limit_price > 0 {
-                    fields.push((6262, &adj_limit_str)); // Adjusted stop limit price
-                }
-                // When the stop converts to a trailing type, carry the trailing
-                // amount (6260) and its unit (6269: 0=amount, 100=percent).
-                // Captured in ib-agent#167 (ibx#225).
-                if matches!(adjusted_order_type,
-                    crate::types::AdjustedOrderType::Trail
-                    | crate::types::AdjustedOrderType::TrailLimit)
-                {
-                    fields.push((6260, &adj_trail_str));
-                    fields.push((6269, &adj_unit_str));
-                }
-                conn.send_fix(&fields)
-            }
-            OrderRequest::SubmitMtl { order_id, instrument, side, qty } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, b'K', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "K"),          // OrdType = Market to Limit
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
-            OrderRequest::SubmitMktPrt { order_id, instrument, side, qty } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, b'U', b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "U"),          // OrdType = Market with Protection
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
-            OrderRequest::SubmitStpPrt { order_id, instrument, side, qty, stop_price } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_STP_PRT, b'0', stop_price,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let stop_str = format_price(stop_price);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "SP"),         // OrdType = Stop with Protection
-                    (99, &stop_str),    // StopPx
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
-            OrderRequest::SubmitMidPrice { order_id, instrument, side, qty, price_cap } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price_cap, crate::types::ORD_MIDPX, b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "MIDPX"),      // OrdType = Mid-Price
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
-                    (15, "USD"),
-                    (204, "0"),
-                ];
-                let cap_str;
-                if price_cap > 0 {
-                    cap_str = format_price(price_cap);
-                    fields.push((44, &cap_str)); // Price cap
-                }
-                conn.send_fix(&fields)
-            }
-            OrderRequest::SubmitSnapMkt { order_id, instrument, side, qty } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MKT, b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "SMKT"),       // OrdType = Snap to Market
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
-            OrderRequest::SubmitSnapMid { order_id, instrument, side, qty } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MID, b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "SMID"),       // OrdType = Snap to Midpoint
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
-            OrderRequest::SubmitSnapPri { order_id, instrument, side, qty } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_PRI, b'0', 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "SREL"),       // OrdType = Snap to Primary
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
-                    (15, "USD"),
-                    (204, "0"),
-                ])
-            }
-            OrderRequest::SubmitPegMkt { order_id, instrument, side, qty, offset } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_PEG_MKT, b'0', offset,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "E"),          // OrdType = Pegged (no mid-offset tags = PEGMKT)
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
-                    (15, "USD"),
-                    (204, "0"),
-                ];
-                let offset_str;
-                if offset > 0 {
-                    offset_str = format_price(offset);
-                    fields.push((211, &offset_str)); // PegOffsetValue
-                }
-                conn.send_fix(&fields)
-            }
-            OrderRequest::SubmitPegMid { order_id, instrument, side, qty, offset } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_PEG_MID, b'0', offset,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "E"),          // OrdType = Pegged (tags 8403/8404 = PEGMID)
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
-                    (15, "USD"),
-                    (204, "0"),
-                    (8403, "0.0"),      // midOffsetAtWhole — differentiates PEGMID from PEGMKT
-                    (8404, "0.0"),      // midOffsetAtHalf
-                ];
-                let offset_str;
-                if offset > 0 {
-                    offset_str = format_price(offset);
-                    fields.push((211, &offset_str)); // PegOffsetValue
-                }
-                conn.send_fix(&fields)
             }
             OrderRequest::Cancel { order_id } => {
                 // OrigClOrdID must match exactly what the server has on record.
@@ -1632,6 +722,11 @@ fn send_order_ex(
         K::PegMkt { offset } => (crate::types::ORD_PEG_MKT, 0, offset),
         K::PegMid { offset } => (crate::types::ORD_PEG_MID, 0, offset),
         K::Rel { offset } => (b'R', 0, offset),
+        K::AdjustableStop { stop_price, .. } => (b'3', 0, stop_price),
+        K::Adaptive { price, .. } | K::Algo { price, .. } => (b'2', price, 0),
+        // Tracked under the what-if marker so the response is recognised as a
+        // preview; it never becomes a live order.
+        K::WhatIf { price } => (crate::types::ORD_WHAT_IF, price, 0),
     };
     context.insert_order(crate::types::Order::new(
         order_id, instrument, side, qty, track_price, ord_type_byte, tif, track_stop,
@@ -1677,7 +772,14 @@ fn send_order_ex(
             fields.push((44, format_price(price).to_string()));
             fields.push((99, format_price(stop_price).to_string()));
         }
-        K::TrailingStop { trail_amt, trail_stop_price } => {
+        K::AdjustableStop { stop_price, .. } => {
+            // Base order type only. The 6257+ adjustable tags are appended after
+            // the attribute block below, where the dedicated encoder this path
+            // replaced put them.
+            fields.push((40, "3".to_string()));                       // OrdType = Stop
+            fields.push((99, format_price(stop_price).to_string()));  // StopPx
+        }
+        K::TrailingStop { trail_amt, .. } => {
             // Per ib-agent#136 capture: amount-based trailing stop carries
             // the trail amount in both 99 and 211 and requires 18=a.
             let t = format_price(trail_amt).to_string();
@@ -1685,11 +787,9 @@ fn send_order_ex(
             fields.push((99, t.clone()));
             fields.push((211, t));
             fields.push((18, "a".to_string()));
-            // Optional initial stop trigger (tag 6117), only when set (ib-agent#173).
-            if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
             has_base_exec_inst = true;
         }
-        K::TrailingStopLimit { lmt_offset, trail_amt, trail_stop_price } => {
+        K::TrailingStopLimit { lmt_offset, trail_amt, .. } => {
             // Per ib-agent#136 capture: TRAIL LIMIT uses OrdType=TSL, no
             // tag 44, no tag 18; trail amount in both 99 and 211; 6370 is
             // the limit-vs-trail offset.
@@ -1698,9 +798,8 @@ fn send_order_ex(
             fields.push((99, t.clone()));
             fields.push((6370, format_price(lmt_offset).to_string()));
             fields.push((211, t));
-            if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
         }
-        K::TrailPct { trail_pct, trail_stop_price } => {
+        K::TrailPct { trail_pct, .. } => {
             // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
             // percent in decimal form (1.00 for 1%), alongside 6268 in
             // basis points and 18=a.
@@ -1710,7 +809,6 @@ fn send_order_ex(
             fields.push((211, pct_decimal));
             fields.push((18, "a".to_string()));
             fields.push((6268, trail_pct.to_string()));
-            if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
             has_base_exec_inst = true;
         }
         K::Moc => fields.push((40, "5".to_string())),
@@ -1733,29 +831,12 @@ fn send_order_ex(
             fields.push((40, "SP".to_string()));
             fields.push((99, format_price(stop_price).to_string()));
         }
-        K::MidPrice { price_cap } => {
-            fields.push((40, "MIDPX".to_string()));
-            if price_cap > 0 {
-                fields.push((44, format_price(price_cap).to_string()));
-            }
-        }
+        K::MidPrice { .. } => fields.push((40, "MIDPX".to_string())),
         K::SnapMkt => fields.push((40, "SMKT".to_string())),
         K::SnapMid => fields.push((40, "SMID".to_string())),
         K::SnapPri => fields.push((40, "SREL".to_string())),
-        K::PegMkt { offset } => {
-            fields.push((40, "E".to_string()));
-            if offset > 0 {
-                fields.push((211, format_price(offset).to_string()));
-            }
-        }
-        K::PegMid { offset } => {
-            fields.push((40, "E".to_string()));
-            fields.push((8403, "0.0".to_string())); // midOffsetAtWhole — differentiates PEGMID
-            fields.push((8404, "0.0".to_string())); // midOffsetAtHalf
-            if offset > 0 {
-                fields.push((211, format_price(offset).to_string()));
-            }
-        }
+        K::PegMkt { .. } => fields.push((40, "E".to_string())),
+        K::PegMid { .. } => fields.push((40, "E".to_string())),
         K::Rel { offset } => {
             // Per ib-agent#138 capture: Relative shares OrdType=P and is
             // disambiguated by 18=R; peg offset on 211, no tag 44.
@@ -1763,6 +844,24 @@ fn send_order_ex(
             fields.push((211, format_price(offset).to_string()));
             fields.push((18, "R".to_string()));
             has_base_exec_inst = true;
+        }
+        K::Adaptive { price, .. } => {
+            // Per ib-agent#136 capture: Adaptive needs 18=e (ExecInst = adaptive
+            // algo wrapper). Without it the gateway rejects with "Invalid value
+            // in field # 18". The strategy and its one parameter are appended
+            // after the attribute block, where the encoder this replaced put them.
+            fields.push((40, "2".to_string()));
+            fields.push((44, format_price(price).to_string()));
+            fields.push((18, "e".to_string()));
+            has_base_exec_inst = true;
+        }
+        K::Algo { price, .. } => {
+            fields.push((40, "2".to_string()));
+            fields.push((44, format_price(price).to_string()));
+        }
+        K::WhatIf { price } => {
+            fields.push((40, "2".to_string()));
+            fields.push((44, format_price(price).to_string()));
         }
     }
 
@@ -1863,6 +962,88 @@ fn send_order_ex(
             fields.push((6263, cond_strs[base + 9].clone()));  // volume
             fields.push((6246, cond_strs[base + 10].clone())); // execution
         }
+    }
+
+    // Adjustable-stop tags last, keeping the position they held in the encoder
+    // this path replaced: after 204 and the attribute block, not in among the
+    // order-type tags. Values and conditions are unchanged; only the encoder
+    // they come from is new (ibx#240).
+    if let K::AdjustableStop {
+        trigger_price, adjusted_order_type, adjusted_stop_price,
+        adjusted_stop_limit_price, adjusted_trailing_amount, adjustable_trailing_unit, ..
+    } = &kind {
+        fields.push((6257, "1".to_string()));                     // has adjustable params
+        fields.push((6261, adjusted_order_type.fix_code().to_string()));
+        fields.push((6258, format_price(*trigger_price).to_string()));
+        fields.push((6259, format_price(*adjusted_stop_price).to_string()));
+        if *adjusted_stop_limit_price > 0 {
+            fields.push((6262, format_price(*adjusted_stop_limit_price).to_string()));
+        }
+        // Trailing amount + unit for a Trail/TrailLimit conversion
+        // (ib-agent#167, ibx#225).
+        if matches!(adjusted_order_type,
+            crate::types::AdjustedOrderType::Trail
+            | crate::types::AdjustedOrderType::TrailLimit)
+        {
+            fields.push((6260, format_price(*adjusted_trailing_amount).to_string()));
+            fields.push((6269, adjustable_trailing_unit.to_string()));
+        }
+    }
+
+    // The optional tags each type appends last, in the position the per-type
+    // encoders give them: after 204 and the attribute block, not in among the
+    // order-type tags. The values and the conditions are unchanged.
+    match &kind {
+        K::MidPrice { price_cap } if *price_cap > 0 => {
+            fields.push((44, format_price(*price_cap).to_string()));
+        }
+        K::PegMkt { offset } if *offset > 0 => {
+            fields.push((211, format_price(*offset).to_string()));
+        }
+        K::PegMid { offset } => {
+            fields.push((8403, "0.0".to_string())); // midOffsetAtWhole — differentiates PEGMID
+            fields.push((8404, "0.0".to_string())); // midOffsetAtHalf
+            if *offset > 0 {
+                fields.push((211, format_price(*offset).to_string()));
+            }
+        }
+        // Optional initial stop trigger (ib-agent#173).
+        K::TrailingStop { trail_stop_price, .. }
+        | K::TrailingStopLimit { trail_stop_price, .. }
+        | K::TrailPct { trail_stop_price, .. } if *trail_stop_price > 0 => {
+            fields.push((6117, format_price(*trail_stop_price).to_string()));
+        }
+        _ => {}
+    }
+
+    // Strategy and preview tags last, in the position they held in the encoders
+    // this path replaced: after 204 and the attribute block (ibx#318).
+    match &kind {
+        K::Adaptive { priority, .. } => {
+            fields.push((847, "Adaptive".to_string()));
+            fields.push((5957, "1".to_string()));
+            fields.push((5958, "adaptivePriority".to_string()));
+            fields.push((5960, priority.as_str().to_string()));
+        }
+        K::Algo { algo, .. } => {
+            let (algo_name, param_strs) = build_algo_tags(algo);
+            fields.push((847, algo_name.to_string()));
+            // Tag 849 (maxPctVol) for the algos that use it.
+            if let AlgoParams::Vwap { max_pct_vol, .. }
+                | AlgoParams::ArrivalPx { max_pct_vol, .. }
+                | AlgoParams::ClosePx { max_pct_vol, .. } = algo
+            {
+                fields.push((849, format!("{}", max_pct_vol)));
+            }
+            fields.push((5957, (param_strs.len() / 2).to_string()));
+            // Key/value pairs: 5958=key, 5960=value, repeated.
+            for pair in param_strs.chunks_exact(2) {
+                fields.push((5958, pair[0].clone()));
+                fields.push((5960, pair[1].clone()));
+            }
+        }
+        K::WhatIf { .. } => fields.push((6091, "1".to_string())),
+        _ => {}
     }
 
     let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
@@ -2055,5 +1236,208 @@ mod tests {
 
         assert_eq!(context.order(8).unwrap().status, OrderStatus::Filled);
         assert!(shared.orders.drain_order_updates().is_empty());
+    }
+
+    /// ibx#318: adaptive, algo and what-if orders returned early into their own
+    /// encoders, which carried no attribute block at all — so outside-RTH, the
+    /// parent link and the OCA group were accepted by the API and silently
+    /// dropped, and the tif was hard-coded to DAY. Asserted on the bytes,
+    /// because the enum-level tests passed throughout.
+    #[test]
+    fn adaptive_wire_carries_the_attributes_and_keeps_its_algo_tags() {
+        let msg = send_kind_for_test(
+            crate::types::OrderKind::Adaptive {
+                price: 100 * crate::types::PRICE_SCALE,
+                priority: crate::types::AdaptivePriority::Urgent,
+            },
+            b'1',
+            bracket_child_attrs(),
+        );
+        let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
+
+        assert_eq!(tag("6433=").as_deref(), Some("1"), "outside RTH missing: {}", msg);
+        assert_eq!(tag("6107=").as_deref(), Some("42.0"), "parent link missing: {}", msg);
+        assert_eq!(tag("583=").as_deref(), Some("bracket_1"), "OCA group missing: {}", msg);
+        assert_eq!(tag("59=").as_deref(), Some("1"), "tif must be GTC, not DAY: {}", msg);
+
+        // And everything the standalone encoder emitted is unchanged.
+        assert_eq!(tag("40=").as_deref(), Some("2"));
+        assert_eq!(tag("18=").as_deref(), Some("e"), "adaptive wrapper missing: {}", msg);
+        assert_eq!(tag("847=").as_deref(), Some("Adaptive"));
+        assert_eq!(tag("5957=").as_deref(), Some("1"));
+        assert_eq!(tag("5958=").as_deref(), Some("adaptivePriority"));
+        assert_eq!(tag("5960=").as_deref(), Some("Urgent"));
+        assert!(msg.find("204=").unwrap() < msg.find("847=").unwrap(),
+            "the strategy tags keep their position after 204: {}", msg);
+    }
+
+    #[test]
+    fn algo_wire_carries_the_attributes_and_keeps_its_algo_tags() {
+        let msg = send_kind_for_test(
+            crate::types::OrderKind::Algo {
+                price: 100 * crate::types::PRICE_SCALE,
+                algo: AlgoParams::Vwap {
+                    max_pct_vol: 0.25,
+                    no_take_liq: true,
+                    allow_past_end_time: false,
+                    start_time: String::new(),
+                    end_time: String::new(),
+                },
+            },
+            b'1',
+            bracket_child_attrs(),
+        );
+        let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
+
+        assert_eq!(tag("6433=").as_deref(), Some("1"), "outside RTH missing: {}", msg);
+        assert_eq!(tag("6107=").as_deref(), Some("42.0"), "parent link missing: {}", msg);
+        assert_eq!(tag("583=").as_deref(), Some("bracket_1"), "OCA group missing: {}", msg);
+        assert_eq!(tag("59=").as_deref(), Some("1"), "tif must be GTC, not DAY: {}", msg);
+
+        assert_eq!(tag("847=").as_deref(), Some("Vwap"));
+        assert_eq!(tag("849=").as_deref(), Some("0.25"), "maxPctVol missing: {}", msg);
+        assert_eq!(tag("5957=").as_deref(), Some("4"), "param count: {}", msg);
+        assert_eq!(tag("5958=").as_deref(), Some("noTakeLiq"));
+        assert_eq!(tag("5960=").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn what_if_wire_carries_the_attributes_and_keeps_its_preview_flag() {
+        let msg = send_kind_for_test(
+            crate::types::OrderKind::WhatIf { price: 100 * crate::types::PRICE_SCALE },
+            b'1',
+            bracket_child_attrs(),
+        );
+        let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
+
+        assert_eq!(tag("6433=").as_deref(), Some("1"), "outside RTH missing: {}", msg);
+        assert_eq!(tag("6107=").as_deref(), Some("42.0"), "parent link missing: {}", msg);
+        assert_eq!(tag("59=").as_deref(), Some("1"), "tif must be GTC, not DAY: {}", msg);
+        assert_eq!(tag("6091=").as_deref(), Some("1"), "what-if flag missing: {}", msg);
+        assert!(msg.find("204=").unwrap() < msg.find("6091=").unwrap(),
+            "the preview flag keeps its position after 204: {}", msg);
+    }
+
+    fn bracket_child_attrs() -> crate::types::OrderAttrs {
+        crate::types::OrderAttrs {
+            parent_id: 42,
+            oca_group_str: "bracket_1".to_string(),
+            oca_type: 1,
+            outside_rth: true,
+            ..Default::default()
+        }
+    }
+
+    /// Encode one kind and return the frame as text.
+    fn send_kind_for_test(
+        kind: crate::types::OrderKind,
+        tif: u8,
+        attrs: crate::types::OrderAttrs,
+    ) -> String {
+        use std::io::Read;
+        let (mut conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut context = Context::new();
+        send_order_ex(&mut conn, &mut context, "DU123456", 7, 0, Side::Buy, 1, kind, tif, &attrs)
+            .unwrap();
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf[..n]).to_string()
+    }
+
+    /// ibx#240: the tags a bracket child cannot ship without. Asserted on the
+    /// bytes `send_order_ex` puts on the wire, not on the request enum — the
+    /// enum-level tests passed throughout the period the child shipped naked.
+    #[test]
+    fn adjustable_stop_wire_carries_parent_oca_and_tif() {
+        use std::io::Read;
+        let (mut conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut context = Context::new();
+        let attrs = crate::types::OrderAttrs {
+            parent_id: 42,
+            oca_group_str: "bracket_1".to_string(),
+            oca_type: 1,
+            ..Default::default()
+        };
+        send_order_ex(
+            &mut conn, &mut context, "DU123456", 7, 0, Side::Sell, 1,
+            crate::types::OrderKind::AdjustableStop {
+                stop_price: 11 * crate::types::PRICE_SCALE,
+                trigger_price: 12 * crate::types::PRICE_SCALE,
+                adjusted_order_type: crate::types::AdjustedOrderType::Stop,
+                adjusted_stop_price: 11 * crate::types::PRICE_SCALE + crate::types::PRICE_SCALE / 2,
+                adjusted_stop_limit_price: 0,
+                adjusted_trailing_amount: 0,
+                adjustable_trailing_unit: 0,
+            },
+            b'1',           // GTC
+            &attrs,
+        ).unwrap();
+
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        let msg = String::from_utf8_lossy(&buf[..n]);
+        let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
+
+        assert_eq!(tag("6107=").as_deref(), Some("42.0"), "parent link missing: {}", msg);
+        assert_eq!(tag("583=").as_deref(), Some("bracket_1"), "OCA group missing: {}", msg);
+        assert_eq!(tag("59=").as_deref(), Some("1"), "tif must be GTC, not DAY: {}", msg);
+        // The adjustable-specific tags keep both the values and the position the
+        // standalone arm gave them — after 204 and the attribute block — which
+        // the sibling test pins by asserting 204 precedes 6257.
+        assert_eq!(tag("40=").as_deref(), Some("3"));
+        assert_eq!(tag("99="), Some(format_price(11 * crate::types::PRICE_SCALE).to_string()));
+        assert_eq!(tag("6257=").as_deref(), Some("1"));
+        assert_eq!(tag("6261=").as_deref(), Some(crate::types::AdjustedOrderType::Stop.fix_code()));
+        assert_eq!(tag("6258="), Some(format_price(12 * crate::types::PRICE_SCALE).to_string()));
+        assert_eq!(tag("6259="),
+            Some(format_price(11 * crate::types::PRICE_SCALE + crate::types::PRICE_SCALE / 2).to_string()));
+    }
+
+    /// The conditional adjustable tags: 6262 only with a stop-limit conversion,
+    /// 6260/6269 only with a trailing one. Same rules as the standalone arm.
+    #[test]
+    fn adjustable_stop_wire_carries_trail_and_limit_tags() {
+        use std::io::Read;
+        let (mut conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut context = Context::new();
+        send_order_ex(
+            &mut conn, &mut context, "DU123456", 8, 0, Side::Sell, 1,
+            crate::types::OrderKind::AdjustableStop {
+                stop_price: 11 * crate::types::PRICE_SCALE,
+                trigger_price: 12 * crate::types::PRICE_SCALE,
+                adjusted_order_type: crate::types::AdjustedOrderType::TrailLimit,
+                adjusted_stop_price: 11 * crate::types::PRICE_SCALE,
+                adjusted_stop_limit_price: 10 * crate::types::PRICE_SCALE,
+                adjusted_trailing_amount: crate::types::PRICE_SCALE / 2,
+                adjustable_trailing_unit: 0,
+            },
+            b'0',
+            &crate::types::OrderAttrs::default(),
+        ).unwrap();
+
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        let msg = String::from_utf8_lossy(&buf[..n]);
+        let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
+
+        assert_eq!(tag("6262="), Some(format_price(10 * crate::types::PRICE_SCALE).to_string()));
+        assert_eq!(tag("6260="), Some(format_price(crate::types::PRICE_SCALE / 2).to_string()));
+        assert_eq!(tag("6269=").as_deref(), Some("0"));
+        // No parent, no OCA set: those tags must be absent, not empty.
+        assert_eq!(tag("6107="), None);
+        assert_eq!(tag("583="), None);
+
+        // Order, not just presence: the adjustable tags sit after 204 and the
+        // base type tags before 59, exactly where the dedicated encoder this
+        // path replaced put them. Tag order is not supposed to carry meaning,
+        // but this path had a shipped layout and there is no reason to change
+        // it as a side effect (ibx#240).
+        let pos = |t: &str| msg.split('\u{1}').position(|f| f.starts_with(t));
+        assert!(pos("40=") < pos("59="), "base type tags precede tif: {}", msg);
+        assert!(pos("99=") < pos("59="), "stop price precedes tif: {}", msg);
+        assert!(pos("204=") < pos("6257="), "adjustable tags follow 204: {}", msg);
+        assert!(pos("6257=") < pos("6261="), "adjustable tags keep their order: {}", msg);
+        assert!(pos("6259=") < pos("6262="), "adjustable tags keep their order: {}", msg);
+        assert!(pos("6262=") < pos("6260="), "adjustable tags keep their order: {}", msg);
     }
 }

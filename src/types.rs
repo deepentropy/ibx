@@ -479,7 +479,7 @@ pub enum AlgoParams {
 /// which pairs any of these with a TIF and an `OrderAttrs` block, so every
 /// order type can carry extended attributes without a per-type `*Ex`
 /// variant (ibx#224).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum OrderKind {
     Market,
     Limit { price: Price },
@@ -508,39 +508,37 @@ pub enum OrderKind {
     PegMkt { offset: Price },
     PegMid { offset: Price },
     Rel { offset: Price },
+    /// Stop that converts to another order type once `trigger_price` is hit.
+    /// Tags: 6257=1, 6261=adjusted type, 6258=trigger, 6259=adjusted stop,
+    /// 6262=adjusted limit, 6260/6269=trailing amount + unit.
+    AdjustableStop {
+        stop_price: Price,
+        trigger_price: Price,
+        adjusted_order_type: AdjustedOrderType,
+        adjusted_stop_price: Price,
+        /// Only used when adjusted_order_type is StopLimit or TrailLimit. 0 = not set.
+        adjusted_stop_limit_price: Price,
+        /// Trailing amount for a Trail/TrailLimit conversion (tag 6260). When the
+        /// unit is amount it is a price offset (scaled); when percent it is the
+        /// percent value scaled (1.00% = PRICE_SCALE). 0 = not set.
+        adjusted_trailing_amount: Price,
+        /// Unit of `adjusted_trailing_amount` on the wire (tag 6269): 0 = amount,
+        /// 100 = percent. Other values are rejected by the gateway.
+        adjustable_trailing_unit: i32,
+    },
+    /// Adaptive limit. Tags: 18=e (adaptive wrapper), 847=Adaptive,
+    /// 5957/5958/5960 = the single adaptivePriority algo parameter.
+    Adaptive { price: Price, priority: AdaptivePriority },
+    /// Generic algo limit. Tags: 847=strategy, 5957 + 5958/5960 per parameter.
+    Algo { price: Price, algo: AlgoParams },
+    /// Margin preview. Tag 6091=1; the order is tracked under `ORD_WHAT_IF` so
+    /// the response is recognised, and never becomes a live order.
+    WhatIf { price: Price },
 }
 
 /// Order request sent via control channel, processed by engine.
 #[derive(Debug, Clone)]
 pub enum OrderRequest {
-    SubmitLimit {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-    },
-    SubmitMarket {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    },
-    SubmitStop {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        stop_price: Price,
-    },
-    SubmitStopLimit {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-        stop_price: Price,
-    },
     SubmitLimitGtc {
         order_id: OrderId,
         instrument: InstrumentId,
@@ -580,76 +578,6 @@ pub enum OrderRequest {
         qty: u32,
         price: Price,
     },
-    SubmitTrailingStop {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        trail_amt: Price,
-        /// Optional initial stop trigger (tag 6117); 0 = not set.
-        trail_stop_price: Price,
-    },
-    SubmitTrailingStopLimit {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        /// Limit offset from the trail-stop price (wire tag 6370 LimitPriceOffset).
-        /// The gateway derives the absolute limit price; do not pass an absolute price here.
-        lmt_offset: Price,
-        trail_amt: Price,
-        /// Optional initial stop trigger (tag 6117); 0 = not set.
-        trail_stop_price: Price,
-    },
-    /// Trailing stop by percentage (tag 6268). Trail percent is in basis points (1% = 100).
-    SubmitTrailingStopPct {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        trail_pct: u32, // basis points: 100 = 1%, 250 = 2.5%
-        /// Optional initial stop trigger (tag 6117); 0 = not set.
-        trail_stop_price: Price,
-    },
-    SubmitTrailingStopPctEx {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        trail_pct: u32,
-        tif: u8,
-        attrs: OrderAttrs,
-        /// Optional initial stop trigger (tag 6117); 0 = not set.
-        trail_stop_price: Price,
-    },
-    SubmitMoc {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    },
-    SubmitLoc {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-    },
-    SubmitMit {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        stop_price: Price,
-    },
-    SubmitLit {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-        stop_price: Price,
-    },
     /// Bracket order: parent entry + take-profit + stop-loss, linked via OCA.
     /// Generates 3 FIX messages: parent (35=D), TP child (35=D with 6107+583), SL child (35=D with 6107+583).
     SubmitBracket {
@@ -662,16 +590,6 @@ pub enum OrderRequest {
         entry_price: Price,
         take_profit: Price,
         stop_loss: Price,
-    },
-    /// Extended limit order with optional attributes (display size, hidden, GAT, GTD).
-    SubmitLimitEx {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-        tif: u8,
-        attrs: OrderAttrs,
     },
     /// Extended submission for any order type: `kind` selects the order type
     /// and its prices, paired with a TIF and the full `OrderAttrs` block.
@@ -686,14 +604,6 @@ pub enum OrderRequest {
         tif: u8,
         attrs: OrderAttrs,
     },
-    /// Relative / Pegged-to-Primary order: pegs to NBBO with optional offset.
-    SubmitRel {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        offset: Price, // peg offset in tag 99
-    },
     /// Limit order for opening auction (TIF=OPG).
     SubmitLimitOpg {
         order_id: OrderId,
@@ -702,91 +612,7 @@ pub enum OrderRequest {
         qty: u32,
         price: Price,
     },
-    /// Adaptive algo limit order: LMT with IB Adaptive algorithm overlay.
-    SubmitAdaptive {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-        priority: AdaptivePriority,
-    },
-    /// Market to Limit: fills at market, remainder converts to limit at fill price. OrdType K.
-    SubmitMtl {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    },
-    /// Market with Protection: market order with price protection for futures. OrdType U.
-    SubmitMktPrt {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    },
-    /// Stop with Protection: stop order with price protection. OrdType SP.
-    SubmitStpPrt {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        stop_price: Price,
-    },
-    /// Mid-Price: pegs to midpoint with optional price cap. OrdType MIDPX.
-    SubmitMidPrice {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price_cap: Price, // 0 = no cap
-    },
-    /// Snap to Market: snaps to market price. OrdType SMKT.
-    SubmitSnapMkt {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    },
-    /// Snap to Midpoint: snaps to midpoint. OrdType SMID.
-    SubmitSnapMid {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    },
-    /// Snap to Primary: snaps to primary (NBBO). OrdType SREL.
-    SubmitSnapPri {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-    },
-    /// Pegged to Market: pegs to market with optional offset. OrdType E + ExecInst P.
-    SubmitPegMkt {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        offset: Price, // peg offset, 0 = no offset
-    },
-    /// Pegged to Midpoint: pegs to midpoint with optional offset. OrdType E + ExecInst M.
-    SubmitPegMid {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        offset: Price, // peg offset, 0 = no offset
-    },
     /// Algorithmic order: limit order with IB algo strategy overlay (VWAP, TWAP, etc.).
-    SubmitAlgo {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-        algo: AlgoParams,
-    },
     /// Pegged to Benchmark: pegs to a benchmark instrument's price. OrdType PB.
     /// Companion tags: 6941=refConId, 6938=isPegDecrease, 6939=pegChangeAmt, 6942=refChangeAmt.
     SubmitPegBench {
@@ -817,13 +643,6 @@ pub enum OrderRequest {
     },
     /// What-If order: sends a limit order with tag 6091=1 for margin/commission preview.
     /// The order is NOT placed — response comes back as 35=8 with margin fields.
-    SubmitWhatIf {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-    },
     /// Fractional shares limit order. Qty is fixed-point (QTY_SCALE = 10^4).
     /// E.g., 0.5 shares = 5000. Tag 38 sent as decimal string.
     SubmitLimitFractional {
@@ -832,27 +651,6 @@ pub enum OrderRequest {
         side: Side,
         qty: Qty, // QTY_SCALE fixed-point
         price: Price,
-    },
-    /// Adjustable stop: a stop order that adjusts to a different order type when trigger_price is hit.
-    /// Tags: 6257=1, 6261=adjusted type, 6258=trigger, 6259=adjusted stop, 6262=adjusted limit.
-    SubmitAdjustableStop {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        stop_price: Price,
-        trigger_price: Price,
-        adjusted_order_type: AdjustedOrderType,
-        adjusted_stop_price: Price,
-        /// Only used when adjusted_order_type is StopLimit or TrailLimit. 0 = not set.
-        adjusted_stop_limit_price: Price,
-        /// Trailing amount for a Trail/TrailLimit conversion (tag 6260). When the
-        /// unit is amount it is a price offset (scaled); when percent it is the
-        /// percent value scaled (1.00% = PRICE_SCALE). 0 = not set.
-        adjusted_trailing_amount: Price,
-        /// Unit of `adjusted_trailing_amount` on the wire (tag 6269): 0 = amount,
-        /// 100 = percent. Other values are rejected by the gateway.
-        adjustable_trailing_unit: i32,
     },
     Cancel {
         order_id: OrderId,
@@ -875,43 +673,16 @@ impl OrderRequest {
             Self::Cancel { order_id } => *order_id,
             Self::CancelAll { .. } => 0,
             Self::Modify { order_id, .. } => *order_id,
-            Self::SubmitLimit { order_id, .. }
-            | Self::SubmitMarket { order_id, .. }
-            | Self::SubmitStop { order_id, .. }
-            | Self::SubmitStopLimit { order_id, .. }
             | Self::SubmitLimitGtc { order_id, .. }
             | Self::SubmitStopGtc { order_id, .. }
             | Self::SubmitStopLimitGtc { order_id, .. }
             | Self::SubmitLimitIoc { order_id, .. }
             | Self::SubmitLimitFok { order_id, .. }
-            | Self::SubmitTrailingStop { order_id, .. }
-            | Self::SubmitTrailingStopLimit { order_id, .. }
-            | Self::SubmitTrailingStopPct { order_id, .. }
-            | Self::SubmitTrailingStopPctEx { order_id, .. }
-            | Self::SubmitMoc { order_id, .. }
-            | Self::SubmitLoc { order_id, .. }
-            | Self::SubmitMit { order_id, .. }
-            | Self::SubmitLit { order_id, .. }
-            | Self::SubmitLimitEx { order_id, .. }
-            | Self::SubmitRel { order_id, .. }
             | Self::SubmitLimitOpg { order_id, .. }
-            | Self::SubmitAdaptive { order_id, .. }
-            | Self::SubmitMtl { order_id, .. }
-            | Self::SubmitMktPrt { order_id, .. }
-            | Self::SubmitStpPrt { order_id, .. }
-            | Self::SubmitMidPrice { order_id, .. }
-            | Self::SubmitSnapMkt { order_id, .. }
-            | Self::SubmitSnapMid { order_id, .. }
-            | Self::SubmitSnapPri { order_id, .. }
-            | Self::SubmitPegMkt { order_id, .. }
-            | Self::SubmitPegMid { order_id, .. }
-            | Self::SubmitAlgo { order_id, .. }
             | Self::SubmitPegBench { order_id, .. }
             | Self::SubmitLimitAuc { order_id, .. }
             | Self::SubmitMtlAuc { order_id, .. }
-            | Self::SubmitWhatIf { order_id, .. }
             | Self::SubmitLimitFractional { order_id, .. }
-            | Self::SubmitAdjustableStop { order_id, .. }
             | Self::SubmitEx { order_id, .. } => *order_id,
             Self::SubmitBracket { parent_id, .. } => *parent_id,
         }
@@ -924,43 +695,16 @@ impl OrderRequest {
         match self {
             Self::Cancel { .. } | Self::Modify { .. } => None,
             Self::CancelAll { instrument }
-            | Self::SubmitLimit { instrument, .. }
-            | Self::SubmitMarket { instrument, .. }
-            | Self::SubmitStop { instrument, .. }
-            | Self::SubmitStopLimit { instrument, .. }
             | Self::SubmitLimitGtc { instrument, .. }
             | Self::SubmitStopGtc { instrument, .. }
             | Self::SubmitStopLimitGtc { instrument, .. }
             | Self::SubmitLimitIoc { instrument, .. }
             | Self::SubmitLimitFok { instrument, .. }
-            | Self::SubmitTrailingStop { instrument, .. }
-            | Self::SubmitTrailingStopLimit { instrument, .. }
-            | Self::SubmitTrailingStopPct { instrument, .. }
-            | Self::SubmitTrailingStopPctEx { instrument, .. }
-            | Self::SubmitMoc { instrument, .. }
-            | Self::SubmitLoc { instrument, .. }
-            | Self::SubmitMit { instrument, .. }
-            | Self::SubmitLit { instrument, .. }
-            | Self::SubmitLimitEx { instrument, .. }
-            | Self::SubmitRel { instrument, .. }
             | Self::SubmitLimitOpg { instrument, .. }
-            | Self::SubmitAdaptive { instrument, .. }
-            | Self::SubmitMtl { instrument, .. }
-            | Self::SubmitMktPrt { instrument, .. }
-            | Self::SubmitStpPrt { instrument, .. }
-            | Self::SubmitMidPrice { instrument, .. }
-            | Self::SubmitSnapMkt { instrument, .. }
-            | Self::SubmitSnapMid { instrument, .. }
-            | Self::SubmitSnapPri { instrument, .. }
-            | Self::SubmitPegMkt { instrument, .. }
-            | Self::SubmitPegMid { instrument, .. }
-            | Self::SubmitAlgo { instrument, .. }
             | Self::SubmitPegBench { instrument, .. }
             | Self::SubmitLimitAuc { instrument, .. }
             | Self::SubmitMtlAuc { instrument, .. }
-            | Self::SubmitWhatIf { instrument, .. }
             | Self::SubmitLimitFractional { instrument, .. }
-            | Self::SubmitAdjustableStop { instrument, .. }
             | Self::SubmitEx { instrument, .. }
             | Self::SubmitBracket { instrument, .. } => Some(*instrument),
         }
@@ -978,58 +722,38 @@ impl OrderRequest {
         }
         let s = |p: &mut Price| *p = snap_to_tick(*p, tick);
         match self {
-            Self::Cancel { .. } | Self::CancelAll { .. }
-            | Self::SubmitMarket { .. } | Self::SubmitMoc { .. }
-            | Self::SubmitMtl { .. } | Self::SubmitMktPrt { .. }
-            | Self::SubmitSnapMkt { .. } | Self::SubmitSnapMid { .. }
-            | Self::SubmitSnapPri { .. } | Self::SubmitMtlAuc { .. } => {}
+            Self::Cancel { .. } | Self::CancelAll { .. } | Self::SubmitMtlAuc { .. } => {}
             Self::Modify { price, .. } => s(price),
-            Self::SubmitLimit { price, .. }
-            | Self::SubmitLimitGtc { price, .. }
+            Self::SubmitLimitGtc { price, .. }
             | Self::SubmitLimitIoc { price, .. }
             | Self::SubmitLimitFok { price, .. }
-            | Self::SubmitLimitEx { price, .. }
             | Self::SubmitLimitOpg { price, .. }
             | Self::SubmitLimitAuc { price, .. }
-            | Self::SubmitLimitFractional { price, .. }
-            | Self::SubmitAdaptive { price, .. }
-            | Self::SubmitAlgo { price, .. }
-            | Self::SubmitWhatIf { price, .. }
-            | Self::SubmitLoc { price, .. } => s(price),
-            Self::SubmitStop { stop_price, .. }
-            | Self::SubmitStopGtc { stop_price, .. }
-            | Self::SubmitMit { stop_price, .. }
-            | Self::SubmitStpPrt { stop_price, .. } => s(stop_price),
-            Self::SubmitStopLimit { price, stop_price, .. }
-            | Self::SubmitStopLimitGtc { price, stop_price, .. }
-            | Self::SubmitLit { price, stop_price, .. } => { s(price); s(stop_price); }
-            Self::SubmitTrailingStop { trail_amt, trail_stop_price, .. } => { s(trail_amt); s(trail_stop_price); }
-            Self::SubmitTrailingStopLimit { lmt_offset, trail_amt, trail_stop_price, .. } => { s(lmt_offset); s(trail_amt); s(trail_stop_price); }
-            Self::SubmitTrailingStopPct { trail_stop_price, .. }
-            | Self::SubmitTrailingStopPctEx { trail_stop_price, .. } => s(trail_stop_price),
-            Self::SubmitMidPrice { price_cap, .. } => s(price_cap),
-            Self::SubmitRel { offset, .. }
-            | Self::SubmitPegMkt { offset, .. }
-            | Self::SubmitPegMid { offset, .. } => s(offset),
+            | Self::SubmitLimitFractional { price, .. } => s(price),
+            Self::SubmitStopGtc { stop_price, .. } => s(stop_price),
+            Self::SubmitStopLimitGtc { price, stop_price, .. } => { s(price); s(stop_price); }
             Self::SubmitBracket { entry_price, take_profit, stop_loss, .. } => {
                 s(entry_price); s(take_profit); s(stop_loss);
             }
             Self::SubmitPegBench { price, pegged_change_amount, ref_change_amount, .. } => {
                 s(price); s(pegged_change_amount); s(ref_change_amount);
             }
-            Self::SubmitAdjustableStop {
-                stop_price, trigger_price, adjusted_stop_price, adjusted_stop_limit_price,
-                adjusted_trailing_amount, adjustable_trailing_unit, ..
-            } => {
-                s(stop_price); s(trigger_price); s(adjusted_stop_price); s(adjusted_stop_limit_price);
-                // Snap the trailing amount only when it is an absolute price
-                // offset; a percent (unit 100) is not a price and must not snap.
-                if *adjustable_trailing_unit == 0 { s(adjusted_trailing_amount); }
-            }
             Self::SubmitEx { kind, .. } => match kind {
                 OrderKind::Market | OrderKind::Moc | OrderKind::Mtl | OrderKind::MktPrt
                 | OrderKind::SnapMkt | OrderKind::SnapMid | OrderKind::SnapPri => {}
                 OrderKind::TrailPct { trail_stop_price, .. } => s(trail_stop_price),
+                OrderKind::Adaptive { price, .. }
+                | OrderKind::Algo { price, .. }
+                | OrderKind::WhatIf { price } => s(price),
+                OrderKind::AdjustableStop {
+                    stop_price, trigger_price, adjusted_stop_price, adjusted_stop_limit_price,
+                    adjusted_trailing_amount, adjustable_trailing_unit, ..
+                } => {
+                    s(stop_price); s(trigger_price); s(adjusted_stop_price); s(adjusted_stop_limit_price);
+                    // Snap the trailing amount only when it is an absolute price
+                    // offset; a percent (unit 100) is not a price and must not snap.
+                    if *adjustable_trailing_unit == 0 { s(adjusted_trailing_amount); }
+                }
                 OrderKind::Limit { price } | OrderKind::Loc { price } => s(price),
                 OrderKind::Stop { stop_price }
                 | OrderKind::Mit { stop_price }
@@ -1568,12 +1292,10 @@ mod tests {
     #[test]
     fn order_buffer_push_and_drain() {
         let mut buf = OrderBuffer::new();
-        buf.push(OrderRequest::SubmitLimit {
-            order_id: 1,
-            instrument: 0,
-            side: Side::Buy,
-            qty: 100,
-            price: 150 * PRICE_SCALE,
+        buf.push(OrderRequest::SubmitEx {
+            order_id: 1, instrument: 0, side: Side::Buy, qty: 100,
+            kind: OrderKind::Limit { price: 150 * PRICE_SCALE },
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         buf.push(OrderRequest::Cancel { order_id: 42 });
         assert!(!buf.is_empty());
@@ -1597,11 +1319,10 @@ mod tests {
     #[test]
     fn order_buffer_drain_reusable() {
         let mut buf = OrderBuffer::new();
-        buf.push(OrderRequest::SubmitMarket {
-            order_id: 1,
-            instrument: 0,
-            side: Side::Sell,
-            qty: 50,
+        buf.push(OrderRequest::SubmitEx {
+            order_id: 1, instrument: 0, side: Side::Sell, qty: 50,
+            kind: OrderKind::Market,
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         let _: Vec<_> = buf.drain().collect();
         assert!(buf.is_empty());
@@ -1757,26 +1478,6 @@ mod tests {
 
     // --- All OrderRequest variants ---
 
-    #[test]
-    fn order_request_submit_limit_fields() {
-        let req = OrderRequest::SubmitLimit {
-            order_id: 1,
-            instrument: 42,
-            side: Side::Buy,
-            qty: 100,
-            price: 150 * PRICE_SCALE,
-        };
-        match req {
-            OrderRequest::SubmitLimit { instrument, side, qty, price, .. } => {
-                assert_eq!(instrument, 42);
-                assert_eq!(side, Side::Buy);
-                assert_eq!(qty, 100);
-                assert_eq!(price, 150 * PRICE_SCALE);
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
     // ── ibx#216: snap-to-tick ──
 
     const TICK_CENT: i64 = PRICE_SCALE / 100; // 0.01
@@ -1806,13 +1507,14 @@ mod tests {
 
     #[test]
     fn snap_prices_limit_and_stop_fields() {
-        let mut req = OrderRequest::SubmitStopLimit {
+        let mut req = OrderRequest::SubmitEx {
             order_id: 1, instrument: 0, side: Side::Buy, qty: 1,
-            price: 15_012_345_678, stop_price: 15_099_999_999,
+            kind: OrderKind::StopLimit { price: 15_012_345_678, stop_price: 15_099_999_999 },
+            tif: b'0', attrs: OrderAttrs::default(),
         };
         req.snap_prices(TICK_CENT);
         match req {
-            OrderRequest::SubmitStopLimit { price, stop_price, .. } => {
+            OrderRequest::SubmitEx { kind: OrderKind::StopLimit { price, stop_price }, .. } => {
                 assert_eq!(price, 15_012_000_000);
                 assert_eq!(stop_price, 15_100_000_000);
             }
@@ -1839,56 +1541,46 @@ mod tests {
     #[test]
     fn snap_prices_leaves_percent_trail_alone() {
         // trail_pct is basis points, not a price — must never be snapped.
-        let mut req = OrderRequest::SubmitTrailingStopPct {
-            order_id: 1, instrument: 0, side: Side::Sell, qty: 1, trail_pct: 137,
-            trail_stop_price: 0,
+        let mut req = OrderRequest::SubmitEx {
+            order_id: 1, instrument: 0, side: Side::Sell, qty: 1,
+            kind: OrderKind::TrailPct { trail_pct: 137, trail_stop_price: 0 },
+            tif: b'0', attrs: OrderAttrs::default(),
         };
         req.snap_prices(TICK_CENT);
         match req {
-            OrderRequest::SubmitTrailingStopPct { trail_pct, .. } => assert_eq!(trail_pct, 137),
+            OrderRequest::SubmitEx { kind: OrderKind::TrailPct { trail_pct, .. }, .. } =>
+                assert_eq!(trail_pct, 137),
             _ => unreachable!(),
         }
     }
 
     #[test]
     fn snap_prices_unknown_tick_is_noop() {
-        let mut req = OrderRequest::SubmitLimit {
-            order_id: 1, instrument: 0, side: Side::Buy, qty: 1, price: 15_012_345_678,
+        let mut req = OrderRequest::SubmitEx {
+            order_id: 1, instrument: 0, side: Side::Buy, qty: 1,
+            kind: OrderKind::Limit { price: 15_012_345_678 },
+            tif: b'0', attrs: OrderAttrs::default(),
         };
         req.snap_prices(0);
         match req {
-            OrderRequest::SubmitLimit { price, .. } => assert_eq!(price, 15_012_345_678),
+            OrderRequest::SubmitEx { kind: OrderKind::Limit { price }, .. } =>
+                assert_eq!(price, 15_012_345_678),
             _ => unreachable!(),
         }
     }
 
     #[test]
     fn instrument_accessor_covers_submits() {
-        let req = OrderRequest::SubmitMarket { order_id: 1, instrument: 7, side: Side::Buy, qty: 1 };
+        let req = OrderRequest::SubmitEx {
+            order_id: 1, instrument: 7, side: Side::Buy, qty: 1,
+            kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default(),
+        };
         assert_eq!(req.instrument(), Some(7));
         assert_eq!(OrderRequest::Cancel { order_id: 1 }.instrument(), None);
         assert_eq!(
             OrderRequest::Modify { new_order_id: 2, order_id: 1, price: 0, qty: 1 }.instrument(),
             None
         );
-    }
-
-    #[test]
-    fn order_request_submit_market_fields() {
-        let req = OrderRequest::SubmitMarket {
-            order_id: 1,
-            instrument: 0,
-            side: Side::Sell,
-            qty: 50,
-        };
-        match req {
-            OrderRequest::SubmitMarket { instrument, side, qty, .. } => {
-                assert_eq!(instrument, 0);
-                assert_eq!(side, Side::Sell);
-                assert_eq!(qty, 50);
-            }
-            _ => panic!("wrong variant"),
-        }
     }
 
     #[test]
