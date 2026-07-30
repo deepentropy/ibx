@@ -32,6 +32,26 @@ pub(crate) struct FarmState {
 }
 
 impl FarmState {
+    /// Whether this instrument still has market-data state that would be
+    /// repointed by a slot reuse: a live subscription, or a record kept for the
+    /// next reconnect.
+    ///
+    /// The resubscribe record is the reason this matters. Before it existed a
+    /// reclaimed slot replayed nothing; now it replays the old contract's
+    /// descriptor against whatever contract holds the id at reconnect (ibx#288).
+    ///
+    /// `md_req_to_instrument` is deliberately not consulted. A subscribe fills
+    /// it and `instrument_md_reqs` together, so it says nothing the first check
+    /// does not already cover — and an entry left there after an unsubscribe is
+    /// a defect in its own right (ibx#289), not a reason to pin the slot. Held
+    /// on that basis, a subscribe/unsubscribe cycle would consume a slot
+    /// permanently and the instrument cap would become cumulative per session,
+    /// which is the failure ibx#233 exists to prevent.
+    pub(crate) fn holds_market_data(&self, instrument: InstrumentId) -> bool {
+        self.instrument_md_reqs.iter().any(|(id, _)| *id == instrument)
+            || self.md_resub_info.iter().any(|r| r.0 == instrument)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             next_md_req_id: 1,
@@ -462,6 +482,13 @@ impl FarmState {
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
+        // Drop the resubscribe record first. The lookup below early-returns
+        // when the instrument has no active requests, which is always the case
+        // while the farm is down — `handle_disconnect` cleared that list — so
+        // an unsubscribe issued during an outage would otherwise leave the
+        // record standing and the reconnect would re-subscribe an instrument
+        // the caller explicitly cancelled (ibx#288).
+        self.md_resub_info.retain(|(id, ..)| *id != instrument);
         let reqs = match self.instrument_md_reqs.iter()
             .position(|(id, _)| *id == instrument)
         {
@@ -471,7 +498,6 @@ impl FarmState {
             }
             None => return,
         };
-        self.md_resub_info.retain(|(id, ..)| *id != instrument);
 
         let conn = match farm_conn.as_mut() {
             Some(c) => c,
@@ -900,6 +926,24 @@ impl FarmState {
         self.disconnected = true;
     }
 
+    /// The L1 subscriptions to re-issue on a new farm connection, drained from
+    /// the record that survives a disconnect. `handle_disconnect` clears
+    /// `instrument_md_reqs`, so selecting from that list re-subscribes nothing
+    /// and the reconnect silently delivers no market data (ibx#288). Skips
+    /// instruments whose slot was reclaimed while the farm was down.
+    fn take_resub_targets(
+        &mut self,
+        market: &crate::engine::market_state::MarketState,
+    ) -> Vec<(InstrumentId, i64, String, String, String, String, f64, String, String, i32)> {
+        std::mem::take(&mut self.md_resub_info)
+            .into_iter()
+            .filter_map(|(id, sym, exch, st, ltd, strike, right, mult, mode)| {
+                market.con_id(id)
+                    .map(|con_id| (id, con_id, sym, exch, st, ltd, strike, right, mult, mode))
+            })
+            .collect()
+    }
+
     pub(crate) fn reconnect(
         &mut self,
         conn: Connection,
@@ -913,25 +957,17 @@ impl FarmState {
         hb.last_farm_recv = Instant::now();
         hb.pending_farm_test = None;
 
-        // Snapshot active subscriptions and re-issue them on the new connection.
-        let active: Vec<(InstrumentId, i64, String, String, String, String, f64, String, String, i32)> = self.instrument_md_reqs.iter()
-            .filter_map(|(id, _)| {
-                context.market.con_id(*id).map(|con_id| {
-                    let (sym, exch, st, ltd, strike, right, mult, mode) = self.md_resub_info.iter()
-                        .find(|(iid, ..)| *iid == *id)
-                        .map(|(_, s, e, st, l, k, r, m, mode)| (s.clone(), e.clone(), st.clone(), l.clone(), *k, r.clone(), m.clone(), *mode))
-                        .unwrap_or_default();
-                    (*id, con_id, sym, exch, st, ltd, strike, right, mult, mode)
-                })
-            })
-            .collect();
+        // Re-issue the L1 subscriptions from `md_resub_info`, which survives a
+        // disconnect for exactly this purpose — the same shape the depth path
+        // below uses. Driving this off `instrument_md_reqs` re-subscribed
+        // nothing, because `handle_disconnect` clears that list before the
+        // reconnect runs (ibx#288).
+        let active = self.take_resub_targets(&context.market);
         self.md_req_to_instrument.clear();
         self.instrument_md_reqs.clear();
-        let old_resub = std::mem::take(&mut self.md_resub_info);
         for (instrument, con_id, sym, exch, st, ltd, strike, right, mult, mode) in active {
             self.send_mktdata_subscribe(con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, mode, farm_conn, hb);
         }
-        drop(old_resub);
 
         // Re-subscribe depth subscriptions (depth_resub_info survived disconnect)
         let depth_params: Vec<_> = self.depth_resub_info.drain(..).collect();
@@ -1015,3 +1051,149 @@ impl FarmState {
     }
 }
 
+
+#[cfg(test)]
+mod resub_tests {
+    use super::*;
+    use crate::engine::market_state::MarketState;
+
+    /// A disconnect clears `instrument_md_reqs` and keeps `md_resub_info`.
+    /// Selecting the reconnect's work from the cleared list re-subscribed
+    /// nothing, so the farm came back healthy and delivered no ticks for the
+    /// rest of the session (ibx#288).
+    ///
+    /// Drives the real `handle_disconnect` rather than simulating what it does
+    /// — the test-only hook that skips the clearing is what let this survive,
+    /// and a hand-written stand-in can drift from the real one the same way.
+    #[test]
+    fn resub_targets_survive_a_real_disconnect() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.market.register(756733);
+
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            &mut None, &mut hb,
+        );
+        farm.handle_disconnect(&mut context, &None);
+        assert!(farm.instrument_md_reqs.is_empty(), "the disconnect clears the request list");
+
+        let targets = farm.take_resub_targets(&context.market);
+        assert_eq!(targets.len(), 1, "the subscription must survive the disconnect");
+        assert_eq!(targets[0].0, instrument);
+        assert_eq!(targets[0].1, 756733, "con_id must be resolved for the re-issue");
+        assert_eq!(targets[0].2, "SPY");
+
+        // Re-issuing with no connection must still leave the record standing,
+        // so a later reconnect can retry rather than losing the subscription.
+        let (id, con_id, sym, exch, st, ltd, k, r, m, mode) = targets.into_iter().next().unwrap();
+        farm.send_mktdata_subscribe(
+            con_id, &sym, &exch, &st, &ltd, k, &r, &m, id, mode, &mut None, &mut hb,
+        );
+        assert_eq!(farm.md_resub_info.len(), 1, "the record must survive an absent connection");
+    }
+
+    /// An unsubscribe issued while the farm is down must still cancel. The
+    /// lookup it does first early-returns during an outage, so a record left
+    /// standing would be replayed on reconnect as a subscription the caller
+    /// had explicitly cancelled.
+    #[test]
+    fn unsubscribing_while_down_does_not_leave_a_resubscribe_record() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.market.register(756733);
+
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            &mut None, &mut hb,
+        );
+        farm.handle_disconnect(&mut context, &None);
+        farm.send_mktdata_unsubscribe(instrument, &mut None, &mut hb);
+
+        assert!(
+            farm.take_resub_targets(&context.market).is_empty(),
+            "a cancelled subscription must not come back on reconnect",
+        );
+    }
+
+    /// The other side of keeping a slot resident: it has to become releasable
+    /// again, or the guard turns a bounded pool into a leak and the instrument
+    /// cap becomes cumulative-per-session — the failure ibx#233 exists to
+    /// prevent. Every route out of a subscription has to clear all three
+    /// references, whether the farm is up or down.
+    #[test]
+    fn a_slot_becomes_reclaimable_again_once_the_subscription_ends() {
+        for down in [false, true] {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let mut hb = HeartbeatState::new();
+            let instrument = context.market.register(756733);
+
+            farm.send_mktdata_subscribe(
+                756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+                &mut None, &mut hb,
+            );
+            assert!(farm.holds_market_data(instrument), "subscribed: held");
+
+            if down {
+                farm.handle_disconnect(&mut context, &None);
+                // The record deliberately survives a disconnect, so the slot
+                // stays held — that is what makes the resubscribe possible.
+                assert!(farm.holds_market_data(instrument), "disconnected: still held");
+            }
+
+            farm.send_mktdata_unsubscribe(instrument, &mut None, &mut hb);
+            assert!(
+                !farm.holds_market_data(instrument),
+                "unsubscribed (farm down: {down}): the slot must be releasable",
+            );
+        }
+    }
+
+    /// A slot reclaimed while the farm was down has no con_id to subscribe.
+    #[test]
+    fn resub_targets_skip_an_instrument_reclaimed_while_down() {
+        let mut farm = FarmState::new();
+        let mut market = MarketState::new();
+        let instrument = market.register(756733);
+        farm.md_resub_info.push((
+            instrument, "SPY".into(), "SMART".into(), "STK".into(), String::new(),
+            0.0, String::new(), String::new(), 0,
+        ));
+        market.unregister(instrument);
+
+        assert!(farm.take_resub_targets(&market).is_empty());
+    }
+
+    /// The case the test above does not reach: the slot is not merely freed but
+    /// handed to another contract before the reconnect. `md_resub_info` holds
+    /// no con_id of its own, so the record is combined with whatever con_id the
+    /// id now resolves to — the old contract's descriptor subscribing the new
+    /// contract's instrument. The guard is that a slot holding market-data
+    /// state is not reclaimable in the first place.
+    #[test]
+    fn an_instrument_holding_a_resubscribe_record_is_not_reclaimable() {
+        let mut farm = FarmState::new();
+        let mut market = MarketState::new();
+        let instrument = market.register(756733);
+        farm.md_resub_info.push((
+            instrument, "SPY".into(), "SMART".into(), "STK".into(), String::new(),
+            0.0, String::new(), String::new(), 0,
+        ));
+
+        assert!(
+            farm.holds_market_data(instrument),
+            "the record alone must keep the slot resident",
+        );
+
+        // And a live subscription does the same on its own.
+        let mut farm = FarmState::new();
+        farm.instrument_md_reqs.push((instrument, vec![7]));
+        assert!(farm.holds_market_data(instrument), "a live subscription");
+
+        // An instrument with none of the three is free to go.
+        assert!(!FarmState::new().holds_market_data(instrument));
+    }
+}
