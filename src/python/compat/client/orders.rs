@@ -37,6 +37,11 @@ impl EClient {
 
         // If orderId is already tracked, this is a modification — emit Modify instead of Submit.
         let cmd = if self.core.is_order_tracked(oid) {
+            // A replace states the order type, the limit price and the trigger.
+            // An order defined by anything else cannot survive one.
+            if let Some(refusal) = self.core.modify_refusal(oid, &api_order) {
+                return Err(PyRuntimeError::new_err(refusal));
+            }
             let price = (api_order.lmt_price * crate::api::types::PRICE_SCALE_F) as i64;
             let qty = api_order.total_quantity as u32;
             ControlCommand::Order(OrderRequest::Modify {
