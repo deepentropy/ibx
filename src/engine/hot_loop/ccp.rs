@@ -710,7 +710,14 @@ impl CcpState {
                     side,
                     price: limit_price_i64,
                     qty,
-                    filled: 0,
+                    // Seeded from the recovery push rather than assumed zero.
+                    // Without it a fresh process believes nothing has filled,
+                    // and the replayed executions behind this record all look
+                    // like new quantity (ibx#320).
+                    filled: parsed.get(&14)
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .map(|c| c as u32)
+                        .unwrap_or(0),
                     status: crate::types::OrderStatus::Submitted,
                     ord_type: ord_type_byte,
                     tif: tif_byte,
@@ -846,34 +853,123 @@ impl CcpState {
         // frame the guard rejects must not surface as an order_status either.
         let status_changed = context.update_order_status(clord_id, status);
 
+        // The gateway marks a report that restates history: 97=Y is PossResend
+        // and 43=Y is PossDupFlag. Neither was read anywhere, and the only
+        // thing standing between a replayed execution and a second booking was
+        // the ExecID window — which a fresh process does not have, because it
+        // has never seen the ID (ibx#320). At session start the gateway replays
+        // recent executions, so a restart with open partially-filled orders
+        // emitted a fill for something that happened before it started.
+        let is_resend = ["Y", "y"].contains(&parsed.get(&97).map(|v| v.as_str()).unwrap_or(""))
+            || ["Y", "y"].contains(&parsed.get(&43).map(|v| v.as_str()).unwrap_or(""));
+
+        // CumQty — the order's cumulative filled quantity as of this report.
+        let report_cum_qty = parsed.get(&14)
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|c| c as i64)
+            .unwrap_or(0);
+
+        // Dedup key. An execution with no ExecID skipped the window entirely,
+        // so a replayed copy booked a second time — and an absent tag 17 is the
+        // shape a replay takes, which is precisely when the window matters
+        // (ibx#260). Falling back to the fields that identify an execution
+        // dedups it on its content instead of trusting it.
+        //
+        // CumQty is what separates two otherwise identical slices: it advances
+        // with every execution on the order, including across a replacement
+        // that raised the total, where LastShares, price, LeavesQty and the
+        // timestamp tick can all repeat.
+        let dedup_key = if exec_id.is_empty() {
+            format!(
+                "{}|{}|{}|{}|{}",
+                clord_id,
+                parsed.get(&60).map(|s| s.as_str()).unwrap_or(""),
+                last_shares,
+                last_px,
+                report_cum_qty,
+            )
+        } else {
+            exec_id.to_string()
+        };
+
         let mut had_fill = false;
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
-            if !exec_id.is_empty() && !self.record_exec_id(exec_id) {
-                log::warn!("Duplicate ExecID={} — skipping fill", exec_id);
-                return;
-            }
             if let Some(order) = context.order(clord_id).copied() {
-                context.update_order_filled(clord_id, last_shares as u32);
-                let fill = Fill {
-                    instrument: order.instrument,
-                    order_id: clord_id,
-                    side: order.side,
-                    price: (last_px * PRICE_SCALE as f64) as i64,
-                    qty: last_shares,
-                    remaining: leaves_qty,
-                    commission: (commission * PRICE_SCALE as f64) as i64,
-                    timestamp_ns: context.now_ns(),
+                // What this report adds that the order does not already hold.
+                //
+                // A live report is an increment: LastShares is new quantity by
+                // definition, and the dedup window is what stops a repeat.
+                //
+                // A resent one restates history, so its increment is whatever
+                // CumQty carries above what the order holds — zero when it
+                // restates. Reading the cumulative figure rather than the
+                // increment is what makes replay safe: the same report twice
+                // adds nothing the second time, and reports arriving out of
+                // order settle on the highest cumulative rather than losing the
+                // ones behind it. A marked report is not vetoed outright
+                // because a CCP reconnect replays executions that ran during
+                // the outage, and those are the first news of a real fill.
+                let booked = if is_resend {
+                    // Recorded even though the cumulative figure is what decides
+                    // this copy: the same execution can arrive again without its
+                    // marker, and the window is what catches that one. Recorded
+                    // here rather than earlier so an execution that reaches this
+                    // handler before its order does is not spent on a delivery
+                    // that had nothing to book against.
+                    self.record_exec_id(&dedup_key);
+                    if report_cum_qty <= 0 {
+                        // Nothing to reconcile against. Booking the increment
+                        // would double what the recovery record already seeded.
+                        log::debug!("Resent execution for order {} carries no CumQty — not booked",
+                            clord_id);
+                        0
+                    } else {
+                        let delta = (report_cum_qty - order.filled as i64).max(0);
+                        if delta != last_shares && delta > 0 {
+                            // The report's own increment is not what this client
+                            // is missing, so the fill that follows carries a
+                            // reconciled quantity at this report's price rather
+                            // than one execution's own terms. The order's total
+                            // and the position are right; the execution record
+                            // is approximate, and says so here.
+                            log::warn!(
+                                "Resent execution for order {}: booking {} to reach CumQty {} \
+                                 (report states {}) — execution detail is reconciled, not exact",
+                                clord_id, delta, report_cum_qty, last_shares,
+                            );
+                        }
+                        delta
+                    }
+                } else {
+                    if !self.record_exec_id(&dedup_key) {
+                        log::warn!("Duplicate execution key={} — skipping fill", dedup_key);
+                        return;
+                    }
+                    last_shares
                 };
-                let delta = match order.side {
-                    Side::Buy => last_shares,
-                    Side::Sell | Side::ShortSell => -last_shares,
-                };
-                context.update_position(order.instrument, delta);
-                // notify_fill inlined
-                shared.orders.push_fill(fill);
-                shared.portfolio.set_position(fill.instrument, context.position(fill.instrument));
-                emit(event_tx, Event::Fill(fill));
-                had_fill = true;
+                if booked > 0 {
+                    context.update_order_filled(clord_id, booked as u32);
+                    let fill = Fill {
+                        instrument: order.instrument,
+                        order_id: clord_id,
+                        side: order.side,
+                        price: (last_px * PRICE_SCALE as f64) as i64,
+                        qty: booked,
+                        remaining: leaves_qty,
+                        commission: (commission * PRICE_SCALE as f64) as i64,
+                        timestamp_ns: context.now_ns(),
+                    };
+                    let delta = match order.side {
+                        Side::Buy => booked,
+                        Side::Sell | Side::ShortSell => -booked,
+                    };
+                    context.update_position(order.instrument, delta);
+                    // notify_fill inlined
+                    shared.orders.push_fill(fill);
+                    shared.portfolio.set_position(fill.instrument, context.position(fill.instrument));
+                    emit(event_tx, Event::Fill(fill));
+                    had_fill = true;
+                }
             }
         }
 
@@ -2166,6 +2262,329 @@ mod tests {
             42, instrument, Side::Buy, 1, 100 * PRICE_SCALE, b'2', b'0', 0,
         )); // starts at PendingSubmit
         (CcpState::new(), context, SharedState::new())
+    }
+
+    /// Build a fill report for order 42. `extra` adds or overrides tags.
+    fn fill_frame(extra: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
+        let mut m = std::collections::HashMap::new();
+        for (tag, val) in [
+            (11u32, "42"), (150u32, "F"), (39u32, "1"),
+            (17u32, "EXEC-1"), (31u32, "100.0"), (32u32, "10"), (151u32, "90"),
+            (14u32, "10"),
+            (60u32, "20260101-16:00:00"),
+        ] {
+            m.insert(tag, val.to_string());
+        }
+        for (tag, val) in extra {
+            m.insert(*tag, val.to_string());
+        }
+        m
+    }
+
+    fn tracked_order_state() -> (CcpState, Context, SharedState) {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Buy, 100, 100 * PRICE_SCALE, b'2', b'0', 0,
+        ));
+        (CcpState::new(), context, SharedState::new())
+    }
+
+    /// ibx#320: at session start the gateway replays recent executions, each
+    /// carrying its original ExecID and a resend marker. A fresh process has
+    /// never seen that ID, so the dedup window cannot stop it — and the order
+    /// is tracked by then, because the recovery insert ran first. The result
+    /// was a fill event and a position move for something that happened before
+    /// the process started.
+    #[test]
+    fn a_resent_execution_does_not_book_a_fill() {
+        for marker in [(97u32, "Y"), (43u32, "Y")] {
+            let (mut ccp, mut context, shared) = tracked_order_state();
+            context.update_order_filled(42, 10); // already counted
+            let frame = fill_frame(&[marker]);
+            ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+            assert!(
+                shared.orders.drain_fills().is_empty(),
+                "tag {} = Y restates history and must not book", marker.0,
+            );
+            assert_eq!(context.position(0), 0, "and must not move the position");
+        }
+
+        // The positive control: the same report without a marker is a real
+        // execution and still books, so the assertions above are not passing
+        // against a handler that books nothing.
+        let (mut ccp, mut context, shared) = tracked_order_state();
+        ccp.handle_exec_report(&fill_frame(&[]), &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_fills().len(), 1, "a live execution books");
+        assert_eq!(context.position(0), 10);
+    }
+
+    /// ibx#320 end to end, as a fresh process sees it: the gateway replays the
+    /// order as a recovery record and then replays its executions. The record
+    /// carries the cumulative quantity already filled, so the executions behind
+    /// it state nothing new. Treating that record as unfilled made every one of
+    /// them look like fresh quantity, and each emitted a fill for something
+    /// that happened before the process started.
+    #[test]
+    fn a_fresh_process_does_not_book_the_history_it_is_replayed() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+
+        // 1. The recovery record: not tracked locally, ten of a hundred filled.
+        let mut recovery = std::collections::HashMap::new();
+        for (tag, val) in [
+            (11u32, "78"), (150u32, "0"), (39u32, "0"), (6008u32, "756733"),
+            (38u32, "100"), (14u32, "10"), (55u32, "SPY"), (54u32, "1"), (40u32, "2"),
+        ] {
+            recovery.insert(tag, val.to_string());
+        }
+        ccp.handle_exec_report(&recovery, &mut context, &shared, &None, "");
+        let _ = shared.orders.drain_fills();
+
+        assert_eq!(
+            context.order(78).expect("recovered").filled, 10,
+            "the record's own cumulative quantity is the baseline",
+        );
+
+        // 2. Its replayed execution, carrying the same cumulative quantity.
+        let mut replay = std::collections::HashMap::new();
+        for (tag, val) in [
+            (11u32, "78"), (150u32, "F"), (39u32, "1"), (97u32, "Y"),
+            (17u32, "OLD-EXEC"), (14u32, "10"), (32u32, "10"), (31u32, "100.0"),
+            (151u32, "90"), (60u32, "20260101-16:00:00"),
+        ] {
+            replay.insert(tag, val.to_string());
+        }
+        ccp.handle_exec_report(&replay, &mut context, &shared, &None, "");
+
+        assert!(
+            shared.orders.drain_fills().is_empty(),
+            "the replayed execution states nothing the record did not already carry",
+        );
+        assert_eq!(context.order(78).expect("tracked").filled, 10, "and nothing is double-counted");
+    }
+
+    /// The case a blanket suppression of marked reports loses. A CCP reconnect
+    /// keeps this state — window and order book both survive — and the gateway
+    /// replays recent executions on the new session. A fill that executed
+    /// during the outage therefore arrives marked, with an ExecID this session
+    /// has never seen, and is the first news of it. Refusing it would leave the
+    /// order permanently short a real fill.
+    #[test]
+    fn a_resent_execution_carrying_new_quantity_is_still_booked() {
+        let (mut ccp, mut context, shared) = tracked_order_state();
+
+        // Five already booked before the outage.
+        context.update_order_filled(42, 5);
+
+        // The replay carries eight cumulative — three of which are news.
+        let frame = fill_frame(&[(97, "Y"), (14, "8"), (32, "3"), (151, "92")]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert_eq!(
+            shared.orders.drain_fills().len(), 1,
+            "a marked report carrying quantity the order does not have is a real fill",
+        );
+        assert_eq!(context.position(0), 3);
+
+        // And a second copy of that same replay states no more, so it is history.
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        assert!(
+            shared.orders.drain_fills().is_empty(),
+            "restating the same cumulative quantity is not new",
+        );
+        assert_eq!(context.position(0), 3);
+    }
+
+    /// Two genuine slices of one order, same size and price inside one
+    /// timestamp tick — the ordinary shape of algo and iceberg execution. The
+    /// synthesised key must tell them apart, which the cumulative quantity does
+    /// because it advances with every execution on the order.
+    #[test]
+    fn two_same_priced_slices_in_one_tick_are_not_one_execution() {
+        let (mut ccp, mut context, shared) = tracked_order_state();
+
+        let mut first = fill_frame(&[(32, "10"), (151, "90"), (14, "10")]);
+        first.remove(&17);
+        let mut second = fill_frame(&[(32, "10"), (151, "80"), (14, "20")]);
+        second.remove(&17);
+
+        ccp.handle_exec_report(&first, &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&second, &mut context, &shared, &None, "");
+
+        assert_eq!(shared.orders.drain_fills().len(), 2, "both slices book");
+        assert_eq!(context.position(0), 20);
+    }
+
+    /// ibx#260: the dedup window was skipped entirely when tag 17 was absent,
+    /// which is the shape a replay takes — so the copy booked a second time and
+    /// the position doubled. Without an ExecID the execution is keyed on the
+    /// fields that identify it instead.
+    #[test]
+    fn an_execution_without_an_exec_id_is_still_deduplicated() {
+        let (mut ccp, mut context, shared) = tracked_order_state();
+        let mut frame = fill_frame(&[]);
+        frame.remove(&17);
+
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert_eq!(shared.orders.drain_fills().len(), 1, "booked once, not twice");
+        assert_eq!(context.position(0), 10, "and the position moved once");
+
+        // A genuinely different execution on the same order is not swallowed by
+        // the synthesised key.
+        let mut other = fill_frame(&[]);
+        other.remove(&17);
+        other.insert(32, "5".to_string());
+        ccp.handle_exec_report(&other, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_fills().len(), 1, "a distinct execution still books");
+        assert_eq!(context.position(0), 15);
+    }
+
+    /// A long session rolls executions out of the ExecID window, and a replay
+    /// arrives unordered and without ExecIDs of its own. Summing what each
+    /// report says it executed counts quantity the order already holds; reading
+    /// the cumulative figure it reports settles on the true total whatever
+    /// order the copies arrive in.
+    #[test]
+    fn a_replay_of_booked_history_adds_nothing_to_the_order() {
+        let (mut ccp, mut context, shared) = tracked_order_state();
+        context.update_order_filled(42, 12); // both executions already booked
+
+        let mut later = fill_frame(&[(97, "Y"), (14, "12"), (32, "4"), (151, "88")]);
+        later.remove(&17);
+        let mut earlier = fill_frame(&[(97, "Y"), (14, "8"), (32, "3"), (151, "92")]);
+        earlier.remove(&17);
+        ccp.handle_exec_report(&later, &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&earlier, &mut context, &shared, &None, "");
+
+        assert!(shared.orders.drain_fills().is_empty(), "history restated is not new quantity");
+        assert_eq!(context.order(42).unwrap().filled, 12, "and the order is not overcounted");
+        assert_eq!(context.position(0), 0);
+
+        // A fill from the same replay that this session has not booked is news
+        // and still reaches the caller.
+        let mut fresh = fill_frame(&[(97, "Y"), (14, "15"), (32, "3"), (151, "85")]);
+        fresh.remove(&17);
+        ccp.handle_exec_report(&fresh, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_fills().len(), 1, "quantity the order lacks still books");
+        assert_eq!(context.position(0), 3);
+    }
+
+    /// The same execution delivered marked and then unmarked. The cumulative
+    /// figure decides the marked copy, but the unmarked one is an ordinary
+    /// report and the window is the only thing that can catch it — so a marked
+    /// report has to be remembered even though it was not judged by the window.
+    #[test]
+    fn a_marked_execution_is_remembered_for_its_unmarked_twin() {
+        let (mut ccp, mut context, shared) = tracked_order_state();
+        context.update_order_filled(42, 5);
+
+        let marked = fill_frame(&[(97, "Y"), (17, "E-9"), (14, "9"), (32, "4"), (151, "91")]);
+        ccp.handle_exec_report(&marked, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_fills().len(), 1, "the marked copy books what is new");
+        assert_eq!(context.order(42).unwrap().filled, 9);
+
+        // The same execution again, this time without its marker.
+        let unmarked = fill_frame(&[(17, "E-9"), (14, "9"), (32, "4"), (151, "91")]);
+        ccp.handle_exec_report(&unmarked, &mut context, &shared, &None, "");
+
+        assert!(
+            shared.orders.drain_fills().is_empty(),
+            "the window catches the copy the cumulative figure cannot judge",
+        );
+        assert_eq!(context.order(42).unwrap().filled, 9, "and nothing is double-booked");
+    }
+
+    /// ibx#344: the ExecID window evicts oldest-first, so a replay batch deeper
+    /// than the window no longer holds its own head and the duplicate booked a
+    /// second time. For an order this session tracks, that window was the only
+    /// guard.
+    ///
+    /// A replayed execution is marked, so it is booked on the cumulative
+    /// quantity it reports rather than on the increment — and a copy that
+    /// restates quantity the order already holds adds nothing whether or not
+    /// its ExecID is still in the window. The window stops being the guard.
+    #[test]
+    fn a_replay_deeper_than_the_exec_id_window_does_not_double_count() {
+        let (mut ccp, mut context, shared) = tracked_order_state();
+        context.update_order_filled(42, 12);
+
+        // The window has rolled past this execution, so its ID is unseen here —
+        // which is the whole point: the dedup window cannot be what saves this.
+        let replayed = fill_frame(&[(97, "Y"), (17, "EVICTED-1"), (14, "12"), (32, "4"), (151, "88")]);
+
+        ccp.handle_exec_report(&replayed, &mut context, &shared, &None, "");
+
+        assert!(
+            shared.orders.drain_fills().is_empty(),
+            "a replay the window has forgotten still adds no quantity the order holds",
+        );
+        assert_eq!(context.order(42).unwrap().filled, 12);
+        assert_eq!(context.position(0), 0);
+    }
+
+    /// The same marked execution delivered twice, both copies carrying more
+    /// cumulative quantity than the order held when the first arrived.
+    #[test]
+    fn a_marked_execution_delivered_twice_books_once() {
+        let (mut ccp, mut context, shared) = tracked_order_state();
+        context.update_order_filled(42, 5);
+
+        let frame = fill_frame(&[(97, "Y"), (14, "12"), (32, "4"), (151, "88")]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert_eq!(shared.orders.drain_fills().len(), 1, "the second copy adds nothing");
+        assert_eq!(context.order(42).unwrap().filled, 12);
+        assert_eq!(context.position(0), 7);
+    }
+
+    /// A replacement that raises the total lets an order fill the same size at
+    /// the same price and leave the same quantity behind twice. Everything the
+    /// synthesised key had to work with repeats except the cumulative figure.
+    #[test]
+    fn a_raised_total_does_not_collapse_two_slices_into_one() {
+        let (mut ccp, mut context, shared) = tracked_order_state();
+
+        let mut first = fill_frame(&[(32, "10"), (151, "90"), (14, "10")]);
+        first.remove(&17);
+        // Total raised from 100 to 110; the next slice again leaves 90.
+        let mut second = fill_frame(&[(32, "10"), (151, "90"), (14, "20")]);
+        second.remove(&17);
+
+        ccp.handle_exec_report(&first, &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&second, &mut context, &shared, &None, "");
+
+        assert_eq!(shared.orders.drain_fills().len(), 2, "both slices book");
+        assert_eq!(context.position(0), 20);
+    }
+
+    /// An execution with no ExecID that arrives ahead of the recovery record
+    /// for its order. The key must not be spent on the copy that had nothing to
+    /// book against, or the delivery that finally could is refused.
+    #[test]
+    fn a_key_is_not_spent_before_the_order_exists() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut frame = fill_frame(&[]);
+        frame.remove(&17);
+
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_fills().is_empty(), "nothing to book against yet");
+
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Buy, 100, 100 * PRICE_SCALE, b'2', b'0', 0,
+        ));
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert_eq!(shared.orders.drain_fills().len(), 1, "the execution is still bookable");
+        assert_eq!(context.position(0), 10);
     }
 
     fn exec_report_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {

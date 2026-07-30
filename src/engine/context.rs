@@ -958,7 +958,7 @@ impl Context {
 
     pub fn update_order_filled(&mut self, order_id: OrderId, last_shares: u32) {
         if let Some(order) = self.open_orders.get_mut(&order_id) {
-            order.filled += last_shares;
+            order.filled = order.filled.saturating_add(last_shares);
         }
     }
 
@@ -1531,6 +1531,21 @@ mod tests {
         assert_eq!(ctx.order(1).unwrap().filled, 30);
         ctx.update_order_filled(1, 50);
         assert_eq!(ctx.order(1).unwrap().filled, 80);
+    }
+
+    /// A gateway figure large enough to overflow the counter must not wrap the
+    /// order's filled quantity round to nothing.
+    #[test]
+    fn update_order_filled_saturates() {
+        let mut ctx = Context::new();
+        ctx.insert_order(Order {
+            order_id: 1, instrument: 0, side: Side::Buy,
+            price: PRICE_SCALE, qty: u32::MAX, filled: u32::MAX - 1,
+            status: OrderStatus::PartiallyFilled,
+            ord_type: b'2', tif: b'0', stop_price: 0,
+        });
+        ctx.update_order_filled(1, 10);
+        assert_eq!(ctx.order(1).unwrap().filled, u32::MAX);
     }
 
     #[test]
