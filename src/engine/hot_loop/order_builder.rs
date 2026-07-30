@@ -1478,7 +1478,12 @@ pub(crate) fn drain_and_send_orders(
                     .map(|o| context.market.order_routing(o.instrument))
                     .unwrap_or_else(|| ("STK".to_string(), "SMART".to_string()));
                 let ord_type_str = crate::types::ord_type_fix_str(orig.map(|o| o.ord_type).unwrap_or(b'2')).to_string();
-                let tif_str = std::str::from_utf8(&[orig.map(|o| o.tif).unwrap_or(b'0')]).unwrap_or("0").to_string();
+                // An order recovered without a stated time-in-force has none to
+                // restate. Tag 59 carries a real instruction on a replace, so a
+                // guess here would set what the gateway is holding — omitted
+                // instead, leaving the resting order's own value in force.
+                let tif_byte = orig.map(|o| o.tif).unwrap_or(b'0');
+                let tif_str = std::str::from_utf8(&[tif_byte]).unwrap_or("0").to_string();
                 let con_id_str = orig.and_then(|o| context.market.con_id(o.instrument))
                     .map(|c| c.to_string()).unwrap_or_default();
 
@@ -1498,12 +1503,15 @@ pub(crate) fn drain_and_send_orders(
                     (55, &symbol),       // Symbol
                     (167, &sec_type_str),        // SecurityType
                     (6035, &symbol),     // LocalSymbol echo
-                    (59, &tif_str),      // TIF
+                    (59, &tif_str),      // TIF — dropped below when unstated
                     (6008, &con_id_str), // ConId
                     (6088, "Socket"),    // Connection type
                     (6211, ""),          // Empty (matches reference)
                     (6238, ""),          // Empty (matches reference)
                 ];
+                if tif_byte == crate::types::TIF_UNSTATED {
+                    fields.retain(|(tag, _)| *tag != 59);
+                }
                 // Include stop price for order types that need it
                 let stop_str;
                 if let Some(o) = orig {

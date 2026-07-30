@@ -191,6 +191,13 @@ pub const ORD_SNAP_PRI: u8 = 5;  // FIX "SREL" — Snap to Primary
 pub const ORD_PEG_MKT: u8 = 6;   // FIX "E" + ExecInst "P" — Pegged to Market
 pub const ORD_PEG_MID: u8 = 7;   // FIX "E" + ExecInst "M" — Pegged to Midpoint
 pub const ORD_PEG_BENCH: u8 = 8; // FIX "PB" — Pegged to Benchmark
+/// A time-in-force this client does not know. A recovery record with no tag 59
+/// states none, and the order was not placed by this session, so there is
+/// nothing to recover it from. Distinct from every real code, so it reports as
+/// unstated rather than as an ordinary value, and a replace omits tag 59 rather
+/// than restating a guess as an instruction (ibx#307).
+pub const TIF_UNSTATED: u8 = 0;
+
 pub const ORD_WHAT_IF: u8 = 9;   // Not a real OrdType — marker for what-if orders
 
 /// Convert an `ord_type` discriminant to the FIX tag 40 string.
