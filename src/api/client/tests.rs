@@ -31,6 +31,31 @@ fn spy() -> Contract {
 //  Algo parsing
 // ═══════════════════════════════════════════════════════════════════
 
+/// Re-placing a tracked id is a modify, and a stop order's price lives in
+/// `aux_price`. Reading only `lmt_price` sent a limit price of zero for an
+/// order that has no limit leg, which the gateway rejects outright.
+#[test]
+fn modifying_a_stop_carries_the_new_trigger() {
+    let (client, rx, _shared) = test_client();
+    let stop = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
+        aux_price: 600.0, tif: "DAY".into(), ..Default::default()
+    };
+    client.place_order(9201, &spy(), &stop).unwrap();
+    rx.try_recv().expect("the submit");
+
+    let moved = Order { aux_price: 610.0, ..stop };
+    client.place_order(9201, &spy(), &moved).unwrap();
+
+    match rx.try_recv().expect("the modify") {
+        ControlCommand::Order(OrderRequest::Modify { stop_price, .. }) => assert_eq!(
+            stop_price, (610.0 * PRICE_SCALE_F) as i64,
+            "the new trigger must reach the request",
+        ),
+        other => panic!("expected a Modify, got {other:?}"),
+    }
+}
+
 #[test]
 fn parse_algo_vwap() {
     let params = vec![
@@ -389,6 +414,42 @@ fn place_order_adjustable_trail_carries_trailing_amount_and_unit() {
             assert_eq!(adjustable_trailing_unit, 0);
         }
         _ => panic!("expected SubmitAdjustableStop, got {:?}", cmd),
+    }
+}
+
+#[test]
+fn modify_carries_outside_rth_from_the_resubmitted_order() {
+    // ibx#247: the replace asserted 6433=1 unconditionally, so an order placed
+    // with outside_rth=false came back outside-RTH after any modify. The flag
+    // has to travel with the modify, since the tracked record has no field for
+    // it.
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, outside_rth: false, ..Default::default()
+    };
+    client.place_order(70, &spy(), &order).unwrap();
+    let _submit = rx.try_recv().unwrap();
+
+    // Same id -> modify. Caller still says outside_rth=false.
+    let reprice = Order { lmt_price: 101.0, ..order.clone() };
+    client.place_order(70, &spy(), &reprice).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::Modify { outside_rth, .. }) => {
+            assert!(!outside_rth, "a modify must not opt the order into the extended session");
+        }
+        cmd => panic!("expected Modify, got {:?}", cmd),
+    }
+
+    // And it survives when the caller does want it.
+    let rth_out = Order { lmt_price: 102.0, outside_rth: true, ..order.clone() };
+    client.place_order(70, &spy(), &rth_out).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::Modify { outside_rth, .. }) => {
+            assert!(outside_rth, "an explicit outside_rth=true must reach the replace");
+        }
+        cmd => panic!("expected Modify, got {:?}", cmd),
     }
 }
 
