@@ -224,7 +224,7 @@ impl CcpState {
                 for frame in frames {
                     match frame {
                         Frame::FixComp(raw) => {
-                            let (unsigned, _) = conn.unsign(&raw);
+                            let Some(unsigned) = conn.unsign(&raw) else { continue };
                             match fixcomp::fixcomp_decompress(&unsigned) {
                                 Ok(inner) => {
                                     if log::log_enabled!(log::Level::Trace) {
@@ -243,14 +243,14 @@ impl CcpState {
                             }
                         }
                         Frame::Fix(raw) => {
-                            let (unsigned, _) = conn.unsign(&raw);
+                            let Some(unsigned) = conn.unsign(&raw) else { continue };
                             if log::log_enabled!(log::Level::Trace) {
                                 log::trace!("WIRE< ccp/fix {}", fix::fmt_pipe(&unsigned));
                             }
                             msgs.push(unsigned);
                         }
                         Frame::Binary(raw) => {
-                            let (unsigned, _) = conn.unsign(&raw);
+                            let Some(unsigned) = conn.unsign(&raw) else { continue };
                             if log::log_enabled!(log::Level::Trace) {
                                 log::trace!("WIRE< ccp/bin {}", fix::fmt_pipe(&unsigned));
                             }

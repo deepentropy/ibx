@@ -271,19 +271,39 @@ impl Connection {
         frames
     }
 
-    /// Unsign a received frame using the read IV. Chains the IV.
-    /// Returns the undistorted message bytes and whether the signature was valid.
-    pub fn unsign(&mut self, msg: &[u8]) -> (Vec<u8>, bool) {
+    /// Unsign a received frame using the read IV, chaining the IV.
+    ///
+    /// `None` means the frame did not verify and must not be parsed. The result
+    /// used to be a `(bytes, bool)` pair and every one of the twelve callers
+    /// discarded the flag, so a tampered frame — an order ack, a fill, an
+    /// account push — was applied exactly like an authentic one. Returning no
+    /// message is the same information in a form a caller cannot ignore.
+    ///
+    /// A failed frame also leaves the IV alone. Advancing it meant one bad
+    /// frame desynchronised the chain permanently, and since undistortion XORs
+    /// byte positions from that IV, every genuine frame after it was silently
+    /// corrupted before parsing. That part is a plain robustness bug: it needs
+    /// no adversary, only one damaged frame.
+    pub fn unsign(&mut self, msg: &[u8]) -> Option<Vec<u8>> {
         if self.read_key.is_empty() {
-            return (msg.to_vec(), true); // no signing configured
+            return Some(msg.to_vec()); // no signing configured
         }
-        // Only unsign if 8349= HMAC tag is present (matching Python _unsign_conn)
+        // A frame carrying no 8349 tag is still accepted, as the reference
+        // client does. Whether the gateway ever sends one on a keyed
+        // connection is not established here, and refusing them on that
+        // assumption would drop real traffic; the warning makes the case
+        // visible so the question can be settled from logs rather than guessed.
         if !msg.windows(5).any(|w| w == b"8349=") {
-            return (msg.to_vec(), true);
+            log::warn!("inbound frame carries no 8349 signature on a signed connection");
+            return Some(msg.to_vec());
         }
         let (undistorted, new_iv, valid) = fix::fix_unsign(msg, &self.read_key, &self.read_iv);
+        if !valid {
+            log::warn!("inbound frame failed signature verification — dropped");
+            return None;
+        }
         self.read_iv = new_iv;
-        (undistorted, valid)
+        Some(undistorted)
     }
 
     /// Build a FIX message, sign it, and send it. Increments seq and chains sign IV.
@@ -663,5 +683,76 @@ mod tests {
     fn find_subsequence_empty_needle() {
         // windows(0) panics, so empty needle panics
         find_subsequence(b"hello", b"");
+    }
+
+    /// Build a connection with signing configured, over a loopback pair.
+    fn signed_conn(key: &[u8], iv: &[u8]) -> Connection {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let mut conn = Connection::new_raw(stream).unwrap();
+        conn.read_key = key.to_vec();
+        conn.read_iv = iv.to_vec();
+        conn
+    }
+
+    /// A frame that does not verify must not reach a parser. The result used to
+    /// be a pair whose validity flag every caller discarded, so a tampered
+    /// order ack or fill was applied like an authentic one.
+    #[test]
+    fn a_frame_that_fails_verification_is_not_returned() {
+        let key = b"0123456789abcdef";
+        let iv = vec![0u8; 16];
+        let (frame, _) = crate::protocol::fix::fix_sign(&fix_build(&[(35, "8")], 1), key, &iv);
+
+        let mut conn = signed_conn(key, &iv);
+        assert!(conn.unsign(&frame).is_some(), "the genuine frame verifies");
+
+        // Flip a byte in the body, leaving the signature tag in place.
+        let mut tampered = frame.clone();
+        let at = tampered.len() / 2;
+        tampered[at] ^= 0x01;
+        let mut conn = signed_conn(key, &iv);
+        assert!(conn.unsign(&tampered).is_none(), "a tampered frame is dropped");
+    }
+
+    /// The robustness half, which needs no adversary: one frame that fails must
+    /// not move the IV on. Undistortion XORs byte positions from it, so a single
+    /// damaged frame used to desynchronise the chain permanently and every
+    /// genuine frame after it arrived silently corrupted.
+    #[test]
+    fn a_failed_frame_does_not_advance_the_read_iv() {
+        let key = b"0123456789abcdef";
+        let iv = vec![0u8; 16];
+        let (frame, _) = crate::protocol::fix::fix_sign(&fix_build(&[(35, "8")], 1), key, &iv);
+
+        let mut conn = signed_conn(key, &iv);
+        let mut tampered = frame.clone();
+        let at = tampered.len() / 2;
+        tampered[at] ^= 0x01;
+
+        assert!(conn.unsign(&tampered).is_none());
+        assert_eq!(conn.read_iv, iv, "the chain must not have moved");
+
+        // The positive control: the next genuine frame still verifies, which is
+        // the whole point — it would not if the IV had advanced.
+        assert!(conn.unsign(&frame).is_some(), "recovery after a bad frame");
+    }
+
+    /// Two shapes that must keep working, because refusing either would drop
+    /// real traffic rather than protect anything: an unsigned connection, and a
+    /// frame carrying no signature tag on a signed one.
+    #[test]
+    fn unsigned_connections_and_untagged_frames_still_pass() {
+        let plain = fix_build(&[(35, "0")], 1);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let mut conn = Connection::new_raw(stream).unwrap();
+        assert_eq!(conn.unsign(&plain), Some(plain.clone()), "no key configured");
+
+        let mut conn = signed_conn(b"0123456789abcdef", &vec![0u8; 16]);
+        assert_eq!(conn.unsign(&plain), Some(plain), "no 8349 tag on the frame");
     }
 }
