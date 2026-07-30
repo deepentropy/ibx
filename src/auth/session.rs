@@ -1983,9 +1983,13 @@ mod tests {
             "no code may reach the wire once the login is lost",
         );
 
-        // Polled path: the provider outlasts the inline grace period, so the
-        // code arrives on a later loop. The guard there needs its own case —
-        // the fast-path test above never reaches it.
+        // A provider that outlasts the inline grace period. This pins that no
+        // code reaches the wire by the polled route once the deadline has
+        // passed — but it does not exercise the guard on that route: the loop
+        // aborts on the deadline before the poll ever returns the code, so
+        // deleting that guard leaves this passing. Reaching it needs the
+        // deadline to expire between the top-of-loop check and the poll within
+        // one iteration, which is a race rather than a sequence.
         let mut stream = ProbingGateway::new(
             frame_xyz(&challenge), submission.clone(), Vec::new(),
         );
