@@ -652,13 +652,19 @@ pub fn format_sessions_string(sessions: &[ScheduleSession]) -> String {
     for (i, s) in sessions.iter().enumerate() {
         if i > 0 { out.push(';'); }
         if s.start == s.end {
-            let date = if s.trade_date.len() >= 8 {
-                &s.trade_date[..8]
-            } else if s.start.len() >= 8 {
-                &s.start[..8]
-            } else {
-                s.start.as_str()
-            };
+            // `get` rather than a length check and a slice: these are gateway
+            // strings decoded with `from_utf8_lossy`, so an invalid byte
+            // becomes a three-byte replacement character and a cut that was
+            // ASCII in the intended payload lands mid-character. Slicing a
+            // `&str` off a character boundary is a panic, and this runs on the
+            // hot loop (ibx#258).
+            //
+            // What replaces the panic is a degraded field, not a correct one:
+            // a reply this malformed has no recoverable date in it. The point
+            // is that it does not take the loop down with it.
+            let date = s.trade_date.get(..8)
+                .or_else(|| s.start.get(..8))
+                .unwrap_or(s.start.as_str());
             out.push_str(date);
             out.push_str(":CLOSED");
         } else {
@@ -674,7 +680,11 @@ pub fn format_sessions_string(sessions: &[ScheduleSession]) -> String {
 /// Returns the input unchanged if the format does not match.
 fn trim_session_endpoint(s: &str) -> String {
     let bytes = s.as_bytes();
-    if bytes.len() >= 14 && bytes[8] == b'-' && bytes[11] == b':' {
+    // The format is ASCII by definition, and requiring that outright is what
+    // makes the byte positions below sound rather than incidentally correct:
+    // the guard establishes what is at bytes 8 and 11 and says nothing about
+    // 12 to 14, where a multi-byte character would panic the slice (ibx#258).
+    if s.is_ascii() && bytes.len() >= 14 && bytes[8] == b'-' && bytes[11] == b':' {
         let mut out = String::with_capacity(13);
         out.push_str(&s[..8]);
         out.push(':');
@@ -1360,5 +1370,70 @@ mod tests {
         assert_eq!(rules[0].rule_id, 10);
         assert_eq!(rules[0].price_increments.len(), 1);
         assert_eq!(rules[0].price_increments[0].increment, 0.005);
+    }
+
+    /// The character `from_utf8_lossy` substitutes for an invalid byte.
+    const REPLACEMENT: &str = "\u{FFFD}";
+
+    /// ibx#258: schedule strings come off the wire and are decoded with
+    /// `from_utf8_lossy`, so one invalid byte becomes a three-byte replacement
+    /// character and every byte position after it shifts. The parser validated
+    /// byte positions and then sliced the `&str`, which panics off a character
+    /// boundary — and this runs on the hot loop, so it is an engine-down on
+    /// malformed input rather than a dropped message.
+    #[test]
+    fn a_schedule_that_is_not_ascii_does_not_panic() {
+        // The shapes a lossy decode produces: a replacement character sitting
+        // where the parser expects an ASCII digit, at each boundary it cuts on.
+        let hostile = [
+            "2026010@-09:30:00",
+            "20260101-0@:30:00",
+            "20260101-09:3@:00",
+            "20260101-09:30:0@",
+            "@",
+            "",
+            "short",
+            "@@@@@",
+        ];
+
+        for h in hostile {
+            let h = h.replace('@', REPLACEMENT);
+            let sessions = [ScheduleSession {
+                start: h.clone(),
+                end: "20260101-16:00:00".to_string(),
+                trade_date: h.clone(),
+            }];
+            let _ = format_sessions_string(&sessions);
+
+            // And the closed-session branch, which takes the other two slices.
+            let closed = [ScheduleSession {
+                start: h.clone(),
+                end: h.clone(),
+                trade_date: h,
+            }];
+            let _ = format_sessions_string(&closed);
+        }
+    }
+
+    /// The positive control: a well-formed schedule still gets trimmed to the
+    /// compact form, so the guard above is not simply refusing everything.
+    #[test]
+    fn a_well_formed_schedule_is_still_trimmed() {
+        let sessions = [
+            ScheduleSession {
+                start: "20260101-09:30:00".to_string(),
+                end: "20260101-16:00:00".to_string(),
+                trade_date: "20260101".to_string(),
+            },
+            ScheduleSession {
+                start: "20260102-00:00:00".to_string(),
+                end: "20260102-00:00:00".to_string(),
+                trade_date: "20260102".to_string(),
+            },
+        ];
+        assert_eq!(
+            format_sessions_string(&sessions),
+            "20260101:0930-20260101:1600;20260102:CLOSED",
+        );
     }
 }
