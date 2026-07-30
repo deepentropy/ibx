@@ -53,12 +53,22 @@ pub fn ns_build(version: u32, msg_type: u32, fields: &[&str], prefix: &str) -> V
 /// Parse NS payload into (version, msg_type, remaining_fields).
 pub fn ns_parse(payload: &[u8]) -> Option<(u32, u32, Vec<String>)> {
     let text = std::str::from_utf8(payload).ok()?;
-    // Strip MISC prefix if present
-    let text = if text.to_uppercase().starts_with("MISC") {
-        &text[4..]
-    } else {
-        text
-    };
+    // Strip MISC prefix if present.
+    //
+    // Compared in place rather than through `to_uppercase`, because
+    // uppercasing is not length-preserving: U+0131 and U+017F both uppercase
+    // to a single ASCII byte, so a payload beginning "m\u{131}\u{17F}c" passed the
+    // check while byte 4 sat inside a character — and slicing a `&str` there
+    // is a panic (same class as ibx#258).
+    //
+    // The framed receive path does not reach it: `is_ns_text` admits only an
+    // ASCII digit or a literal "MISC" before dispatching here. This is the
+    // parser's own guard, for callers that hold it directly.
+    let text = text
+        .get(..4)
+        .filter(|p| p.eq_ignore_ascii_case("MISC"))
+        .and_then(|_| text.get(4..))
+        .unwrap_or(text);
     let parts: Vec<&str> = text.split(';').collect();
     if parts.len() < 2 {
         return None;
@@ -316,6 +326,91 @@ mod tests {
             values.len(),
             set.len(),
             "Duplicate values found among NS_* constants"
+        );
+    }
+
+    /// Uppercasing is not length-preserving: U+0131 and U+017F each occupy two
+    /// bytes and uppercase to one ASCII byte. So a payload whose first four
+    /// characters uppercase to "MISC" while occupying more than four bytes
+    /// passed the prefix check, and the slice that followed landed inside a
+    /// character — a panic. Reachable through this function directly; the
+    /// framed receive path screens it out earlier with `is_ns_text`.
+    #[test]
+    fn a_prefix_that_changes_length_when_uppercased_does_not_panic() {
+        // 'ı' U+0131 uppercases to 'I'; 'ſ' U+017F uppercases to 'S'.
+        let hostile: &[&[u8]] = &[
+            "m\u{131}\u{17F}c;1;2".as_bytes(),
+            "M\u{131}SC;1;2".as_bytes(),
+            "\u{17F}\u{131}sc;1;2".as_bytes(),
+            "mis".as_bytes(),
+            "MISC".as_bytes(),
+            "".as_bytes(),
+        ];
+        for payload in hostile {
+            let _ = ns_parse(payload);
+            let _ = parse_test_request_timestamp(payload);
+        }
+    }
+
+    /// The positive control: a genuine MISC prefix is still stripped, in any
+    /// ASCII casing, and a payload without one is still parsed whole.
+    #[test]
+    fn a_genuine_misc_prefix_is_still_stripped() {
+        for prefixed in ["MISC1;2;abc", "misc1;2;abc", "MiSc1;2;abc"] {
+            assert_eq!(
+                ns_parse(prefixed.as_bytes()),
+                Some((1, 2, vec!["abc".to_string()])),
+                "{prefixed}",
+            );
+        }
+        assert_eq!(
+            ns_parse(b"1;2;abc"),
+            Some((1, 2, vec!["abc".to_string()])),
+            "no prefix, parsed whole",
+        );
+    }
+
+    /// What the prefix means, and why the change is confined to the panic.
+    ///
+    /// The prefix is an ASCII "MISC" in any casing. The old code uppercased
+    /// first, so it also recognised spellings that are not ASCII — U+0131 and
+    /// U+017F uppercase to "I" and "S" — but it then removed four *bytes*,
+    /// and each of those characters occupies two. So a non-ASCII spelling
+    /// either put byte 4 inside a character, which panicked, or shifted the cut
+    /// so the remainder began mid-prefix and failed to parse. Either way no
+    /// such payload ever parsed, which is what makes the outcomes agree.
+    ///
+    /// The guard for the change itself is the panic test above; this pins the
+    /// boundary the prefix rule draws.
+    fn the_prefix_is_an_ascii_misc_and_nothing_else() {
+        // A non-ASCII spelling is not the prefix. It never parsed before
+        // either: the four-byte cut landed one character early and left "C…".
+        assert_eq!(ns_parse("M\u{131}SC;1;2".as_bytes()), None);
+        assert_eq!(
+            ns_parse("M\u{131}SC1;2;body".as_bytes()), None,
+            "a payload that is not literally MISC-prefixed is not silently stripped",
+        );
+        // And the genuine prefix still is.
+        assert_eq!(
+            ns_parse(b"MISC1;2;body"),
+            Some((1, 2, vec!["body".to_string()])),
+        );
+    }
+
+    fn stripping_leaves_the_defined_shapes_alone() {
+        // Exactly the prefix and nothing else: the old code sliced to empty and
+        // fell through to the field-count check.
+        assert_eq!(ns_parse(b"MISC"), None);
+        assert_eq!(ns_parse(b"misc"), None);
+        // A prefix followed by too few fields, same outcome.
+        assert_eq!(ns_parse(b"MISC1"), None);
+        // Three bytes cannot be the prefix and are parsed whole.
+        assert_eq!(ns_parse(b"MIS;1;2"), None);
+        // A non-ASCII body after a genuine ASCII prefix is still stripped and
+        // still parsed — an is_ascii gate would have refused this.
+        assert_eq!(
+            ns_parse("MISC1;2;caf\u{e9}".as_bytes()),
+            Some((1, 2, vec!["caf\u{e9}".to_string()])),
         );
     }
 }
