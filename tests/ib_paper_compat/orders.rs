@@ -1338,7 +1338,14 @@ pub(super) fn phase_fractional_order(conns: Conns) -> Conns {
 pub(super) fn phase_adjustable_stop_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 75: Adjustable Stop Order (SPY)",
-        OrderRequest::SubmitAdjustableStop { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, stop_price: 1_00_000_000, trigger_price: 500_00_000_000, adjusted_order_type: AdjustedOrderType::StopLimit, adjusted_stop_price: 1_50_000_000, adjusted_stop_limit_price: 1_00_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Sell, qty: 1,
+            kind: ibx::types::OrderKind::AdjustableStop {
+                stop_price: 1_00_000_000, trigger_price: 500_00_000_000,
+                adjusted_order_type: AdjustedOrderType::StopLimit,
+                adjusted_stop_price: 1_50_000_000, adjusted_stop_limit_price: 1_00_000_000,
+                adjusted_trailing_amount: 0, adjustable_trailing_unit: 0,
+            },
+            tif: b'0', attrs: Default::default() },
         false)
 }
 

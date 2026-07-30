@@ -361,7 +361,7 @@ fn place_order_trailing_stop_without_trigger_is_unset() {
 #[test]
 fn place_order_adjustable_trail_carries_trailing_amount_and_unit() {
     // ibx#225 / ib-agent#167: a base STP that converts to a TRAIL must carry
-    // the trailing amount and unit through to the SubmitAdjustableStop request.
+    // the trailing amount and unit through to the AdjustableStop request.
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order {
@@ -378,9 +378,9 @@ fn place_order_adjustable_trail_carries_trailing_amount_and_unit() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitAdjustableStop {
+        ControlCommand::Order(OrderRequest::SubmitEx { kind: crate::types::OrderKind::AdjustableStop {
             adjusted_order_type, stop_price, trigger_price, adjusted_stop_price,
-            adjusted_trailing_amount, adjustable_trailing_unit, .. }) => {
+            adjusted_trailing_amount, adjustable_trailing_unit, .. }, .. }) => {
             assert_eq!(adjusted_order_type, crate::types::AdjustedOrderType::Trail);
             assert_eq!(stop_price, (11.00 * PRICE_SCALE_F) as i64);
             assert_eq!(trigger_price, (11.00 * PRICE_SCALE_F) as i64);
@@ -388,7 +388,40 @@ fn place_order_adjustable_trail_carries_trailing_amount_and_unit() {
             assert_eq!(adjusted_trailing_amount, (0.50 * PRICE_SCALE_F) as i64);
             assert_eq!(adjustable_trailing_unit, 0);
         }
-        _ => panic!("expected SubmitAdjustableStop, got {:?}", cmd),
+        _ => panic!("expected SubmitEx carrying AdjustableStop, got {:?}", cmd),
+    }
+}
+
+#[test]
+fn place_order_adjustable_stop_carries_bracket_attrs_and_tif() {
+    // ibx#240: an adjustable stop used as a bracket child must stay linked to
+    // its parent and its OCA group and keep the caller's tif. Routing it around
+    // the extended-attrs path shipped the child naked, unlinked and DAY.
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
+        aux_price: 11.00,
+        adjusted_order_type: "STP".into(),
+        trigger_price: 12.00,
+        adjusted_stop_price: 11.50,
+        parent_id: 42,
+        oca_group: "bracket_1".into(),
+        oca_type: 1,
+        tif: "GTC".into(),
+        ..Default::default()
+    };
+    client.place_order(7, &spy(), &order).unwrap();
+
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitEx { kind, tif, attrs, .. }) => {
+            assert!(matches!(kind, crate::types::OrderKind::AdjustableStop { .. }),
+                "adjustable stop must route through the extended path; got {:?}", kind);
+            assert_eq!(tif, b'1', "tif must survive as GTC");
+            assert_eq!(attrs.parent_id, 42, "bracket child must stay linked to its parent");
+            assert_eq!(attrs.oca_group_str, "bracket_1", "OCA group must survive");
+        }
+        cmd => panic!("expected SubmitEx carrying AdjustableStop, got {:?}", cmd),
     }
 }
 
@@ -408,12 +441,12 @@ fn place_order_adjustable_trail_percent_unit_passes_through() {
     client.place_order(1, &spy(), &order).unwrap();
 
     match rx.try_recv().unwrap() {
-        ControlCommand::Order(OrderRequest::SubmitAdjustableStop {
-            adjustable_trailing_unit, adjusted_trailing_amount, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { kind: crate::types::OrderKind::AdjustableStop {
+            adjustable_trailing_unit, adjusted_trailing_amount, .. }, .. }) => {
             assert_eq!(adjustable_trailing_unit, 100);
             assert_eq!(adjusted_trailing_amount, (1.00 * PRICE_SCALE_F) as i64);
         }
-        cmd => panic!("expected SubmitAdjustableStop, got {:?}", cmd),
+        cmd => panic!("expected SubmitEx carrying AdjustableStop, got {:?}", cmd),
     }
 }
 

@@ -286,6 +286,27 @@ impl Connection {
         (undistorted, valid)
     }
 
+    /// Test-only: a `Connection` whose writes land on the returned peer socket,
+    /// so a test can assert on the bytes an encoder actually puts on the wire.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> (Connection, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let conn = Connection {
+            stream: Stream::Raw(client),
+            buf: Vec::new(),
+            seq: 0,
+            sign_key: Vec::new(),
+            sign_iv: Vec::new(),
+            read_key: Vec::new(),
+            read_iv: Vec::new(),
+        };
+        (conn, peer)
+    }
+
     /// Build a FIX message, sign it, and send it. Increments seq and chains sign IV.
     ///
     /// State (seq, sign_iv) is committed only after `write_all` returns Ok,
