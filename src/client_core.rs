@@ -987,11 +987,26 @@ impl ClientCore {
         for con_id in con_ids {
             let seed = seeds.get(&con_id);
             let pi = shared.portfolio.position_info(con_id);
+
+            // Realized P&L is stated outright by the row and does not depend on
+            // knowing either quantity, so it accrues before the guards below.
+            total_realized += seed.map(|s| s.realized_pnl).unwrap_or(0.0);
+
+            // A position we held at midnight and cannot currently size is not
+            // a flat one. Pricing the absence as zero reports the whole
+            // overnight holding as sold; skipping leaves the gateway's own
+            // account-level figure to stand (ibx#296).
+            if seed.is_some() && pi.is_none() {
+                continue;
+            }
             let qty_now = pi.as_ref().map(|p| p.position).unwrap_or(0);
             let avg_cost = pi.as_ref().map(|p| p.avg_cost).unwrap_or(0);
-            let qty_midnight = seed.map(|s| s.qty_midnight).unwrap_or(0);
-
-            total_realized += seed.map(|s| s.realized_pnl).unwrap_or(0.0);
+            // Likewise for the overnight leg: a seed row whose quantity did not
+            // parse says the position is not intraday, only that its size is
+            // unknown, so there is nothing to price it against.
+            let Some(qty_midnight) = seed.map_or(Some(0), |s| s.qty_midnight) else {
+                continue;
+            };
 
             let Some(&iid) = con_id_map.get(&con_id) else { continue; };
             let q = shared.market.quote(iid);
@@ -1086,7 +1101,11 @@ impl ClientCore {
             }
 
             let seed = seeds.get(&con_id);
-            let qty_midnight = seed.map(|s| s.qty_midnight).unwrap_or(0);
+            // An unparseable overnight quantity leaves nothing to price the
+            // day's change against — see the whole-account path (ibx#296).
+            let Some(qty_midnight) = seed.map_or(Some(0), |s| s.qty_midnight) else {
+                continue;
+            };
             let prev_close = q.close;
             if prev_close == 0 && qty_midnight != 0 {
                 continue;
@@ -1712,6 +1731,76 @@ mod tests {
         assert!(core.poll_pnl(&shared).is_none());
     }
 
+    /// ibx#296, consumer side. Dropping an unusable position row stops the feed
+    /// publishing a flat, but P&L reads the absence back as zero shares and
+    /// reports the whole overnight holding as sold. Held 10 at a $730 close,
+    /// now $735: the honest answer is 50, the flat reading is -7300, and with
+    /// nothing priceable the gateway's own account figure stands instead.
+    #[test]
+    fn an_unsizeable_overnight_position_is_not_priced_as_sold() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.subscribe_pnl(7);
+
+        // A quote and a seed, but no position row — the feed dropped it.
+        core.con_id_to_instrument.lock().unwrap().insert(756733, 0);
+        core.instrument_to_req.lock().unwrap().insert(0, 1);
+        let mut q = Quote::default();
+        q.last = (735.00 * PRICE_SCALE_F) as i64;
+        q.close = (730.00 * PRICE_SCALE_F) as i64;
+        shared.market.push_quote(0, &q);
+        shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
+            con_id: 756733,
+            qty_midnight: Some(10),
+            money_traded: 0.0,
+            realized_pnl: 0.0,
+        }]);
+        shared.portfolio.set_account(&AccountState {
+            daily_pnl: (50.0 * PRICE_SCALE_F) as i64,
+            unrealized_pnl: (350.0 * PRICE_SCALE_F) as i64,
+            ..Default::default()
+        });
+
+        let update = core.poll_pnl(&shared).expect("callback must fire");
+        assert!(
+            (update.daily_pnl - 50.0).abs() < 1e-6,
+            "the gateway's own figure stands; -7300 is the flat reading: daily={}",
+            update.daily_pnl,
+        );
+    }
+
+    /// The same absence on the overnight leg. A seed row that stated no
+    /// quantity means the position's midnight size is unknown — not that it was
+    /// opened today, which is what a missing row means. Held 10 from $700, a
+    /// $730 close and $735 now: the intraday reading synthesizes cash from
+    /// average cost and reports 350, the unrealized figure, as the day's move.
+    #[test]
+    fn a_seed_without_a_quantity_is_not_read_as_opened_today() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.subscribe_pnl(8);
+
+        seed_pnl_position(&core, &shared, 756733, 0, 10, 700.00, 735.00, 730.00);
+        shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
+            con_id: 756733,
+            qty_midnight: None,
+            money_traded: 0.0,
+            realized_pnl: 0.0,
+        }]);
+        shared.portfolio.set_account(&AccountState {
+            daily_pnl: (50.0 * PRICE_SCALE_F) as i64,
+            unrealized_pnl: (350.0 * PRICE_SCALE_F) as i64,
+            ..Default::default()
+        });
+
+        let update = core.poll_pnl(&shared).expect("callback must fire");
+        assert!(
+            (update.daily_pnl - 50.0).abs() < 1e-6,
+            "350 is the intraday synthesis, not the day's move: daily={}",
+            update.daily_pnl,
+        );
+    }
+
     #[test]
     fn poll_pnl_intraday_opened_position_fires_callback() {
         // #166: flat-at-midnight account opens an intraday position.
@@ -1742,7 +1831,7 @@ mod tests {
         seed_pnl_position(&core, &shared, 756733, 0, 10, 700.00, 735.00, 730.00);
         shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
             con_id: 756733,
-            qty_midnight: 10,
+            qty_midnight: Some(10),
             money_traded: 0.0,
             realized_pnl: 0.0,
         }]);
@@ -1768,7 +1857,7 @@ mod tests {
         seed_pnl_position(&core, &shared, 1, 0, 7, 100.00, 110.00, 100.00);
         shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
             con_id: 1,
-            qty_midnight: 10,
+            qty_midnight: Some(10),
             money_traded: 330.0,   // +330 = sold 3 @ $110 (wire sign, SELL positive)
             realized_pnl: 30.0,
         }]);
@@ -1905,7 +1994,7 @@ mod tests {
         seed_pnl_position(&core, &shared, 756733, 0, 10, 700.00, 735.00, 730.00);
         shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
             con_id: 756733,
-            qty_midnight: 10,
+            qty_midnight: Some(10),
             money_traded: 0.0,
             realized_pnl: 12.34,
         }]);

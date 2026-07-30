@@ -1752,9 +1752,7 @@ fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
     for part in text.split('\x01') {
         if let Some(v) = part.strip_prefix("6008=") {
             if count > 0 && con_id != 0 {
-                if let Some(qty_midnight) = qty_midnight {
-                    seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
-                }
+                seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
             }
             con_id = v.parse().unwrap_or(0);
             qty_midnight = None;
@@ -1764,7 +1762,10 @@ fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
         } else if let Some(v) = part.strip_prefix("6064=") {
             // Same rule as the position feed above: a quantity that is absent
             // or unparseable is not a flat. Reading it as zero here makes the
-            // day's P&L look as though the position were opened intraday.
+            // day's P&L look as though the position were opened intraday. The
+            // row is still kept — dropping it says the same thing, because a
+            // position with no seed row *is* the intraday case, and it would
+            // discard the cash and realized figures the row does carry.
             qty_midnight = v.parse::<f64>().ok().filter(|q| q.is_finite()).map(|q| q as i64);
         } else if let Some(v) = part.strip_prefix("6822=") {
             // moneyTradedSinceMidnight: signed net cash, SELL positive / BUY
@@ -1775,9 +1776,7 @@ fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
         }
     }
     if count > 0 && con_id != 0 {
-        if let Some(qty_midnight) = qty_midnight {
-            seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
-        }
+        seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
     }
     shared.portfolio.set_midnight_seeds(seeds);
 }
@@ -2098,20 +2097,32 @@ mod tests {
     /// The midnight seed carries the same quantity tag and had the same
     /// defect: reading an absent one as zero makes the day's P&L look as
     /// though the position were opened intraday, when it was held overnight.
+    ///
+    /// The row is kept with an unknown quantity rather than dropped, because
+    /// dropping it says the same wrong thing — a position with no seed row *is*
+    /// the intraday case — and would discard the cash and realized figures the
+    /// row does state.
     #[test]
     fn a_midnight_seed_without_a_quantity_is_not_seeded_flat() {
         let shared = SharedState::new();
         // Two entries: one stating its quantity, one omitting it.
         let body = [
-            "6008=756733", "6064=100", "6822=-50.0", "6099=0.0",
-            "6008=265598", "6822=-10.0", "6099=0.0",
+            "6008=756733", "6064=100", "6822=-50.0", "6099=7.5",
+            "6008=265598", "6822=-10.0", "6099=2.5",
         ].join("\x01");
         handle_pnl_response(body.as_bytes(), &shared);
 
-        let seeds = shared.portfolio.midnight_seeds();
-        assert_eq!(seeds.len(), 1, "only the entry that stated a quantity is seeded");
-        assert_eq!(seeds[0].con_id, 756733);
-        assert_eq!(seeds[0].qty_midnight, 100);
+        let mut seeds = shared.portfolio.midnight_seeds();
+        seeds.sort_by_key(|s| s.con_id);
+        assert_eq!(seeds.len(), 2, "both entries are seeded");
+
+        let stated = seeds.iter().find(|s| s.con_id == 756733).expect("stated entry");
+        assert_eq!(stated.qty_midnight, Some(100));
+
+        let silent = seeds.iter().find(|s| s.con_id == 265598).expect("silent entry");
+        assert_eq!(silent.qty_midnight, None, "absent is unknown, not flat");
+        assert_eq!(silent.money_traded, -10.0, "the figures it did state survive");
+        assert_eq!(silent.realized_pnl, 2.5);
     }
 
     /// ibx#296: the 75 feed defaulted its running quantity to zero, so an entry
@@ -2126,11 +2137,17 @@ mod tests {
             "6008=265598\x016064=abc\x016101=151.0\x01",
             // parses, but is not a quantity
             "6008=265598\x016064=NaN\x016101=151.0\x01",
+            // the same entry flushed by the next conId rather than by the end
+            // of the message — a repeating group publishes at both boundaries.
+            "6008=265598\x016101=151.0\x016008=756733\x016064=5\x01",
+            "6008=265598\x016064=abc\x016101=151.0\x016008=756733\x016064=5\x01",
         ] {
             let mut ccp = CcpState::new();
             let mut context = Context::new();
             let shared = SharedState::new();
             let mut hb = HeartbeatState::new();
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let event_tx = Some(tx);
             let instrument = context.market.register(265598);
             shared.portfolio.set_position_info(PositionInfo {
                 con_id: 265598, position: 100, avg_cost: 0, ..Default::default()
@@ -2138,13 +2155,54 @@ mod tests {
             shared.portfolio.set_position(instrument, 100);
 
             ccp.handle_position_feed(
-                body.as_bytes(), &mut None, &mut context, &shared, &None, &mut hb);
+                body.as_bytes(), &mut None, &mut context, &shared, &event_tx, &mut hb);
 
+            // All three stores move together, so all three are asserted: the
+            // row callers read, the atomic the engine reads, and the event.
             assert_eq!(
                 shared.portfolio.position_info(265598).map(|p| p.position), Some(100),
-                "{:?} must not flatten a live position", body,
+                "{:?} must not flatten the position row", body,
             );
+            assert_eq!(
+                shared.portfolio.position(instrument), 100,
+                "{:?} must not flatten the shared position", body,
+            );
+            let flattened = rx.try_iter().any(|e| matches!(
+                e, Event::PositionUpdate { con_id: 265598, position: 0, .. }));
+            assert!(!flattened, "{:?} must not publish a flat", body);
         }
+    }
+
+    /// The positive control for the test above: an entry that does state a
+    /// quantity has to reach all three stores, and at the flush triggered by
+    /// the next conId rather than only at the end of the message. Without this
+    /// the absence assertions pass just as well against a feed that publishes
+    /// nothing at all.
+    #[test]
+    fn a_position_feed_entry_with_a_quantity_publishes_it_everywhere() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let event_tx = Some(tx);
+        let instrument = context.market.register(265598);
+
+        // Two entries, so the first is flushed by the second's conId.
+        let body = "6008=265598\x016064=42\x016101=151.0\x016008=756733\x016064=5\x01";
+        ccp.handle_position_feed(
+            body.as_bytes(), &mut None, &mut context, &shared, &event_tx, &mut hb);
+
+        assert_eq!(
+            shared.portfolio.position_info(265598).map(|p| p.position), Some(42),
+            "the position row",
+        );
+        assert_eq!(shared.portfolio.position(instrument), 42, "the shared position");
+        assert!(
+            rx.try_iter().any(|e| matches!(
+                e, Event::PositionUpdate { con_id: 265598, position: 42, .. })),
+            "the published event",
+        );
     }
 
     /// An explicit zero is a genuine flat and must still be published.
