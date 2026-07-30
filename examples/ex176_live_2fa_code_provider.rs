@@ -1,12 +1,14 @@
-//! Verify issue #176: live login through the Challenge/Response variant of the
-//! second-factor approval gate. Instead of tapping Approve on the mobile push,
-//! the example reads the 8-character code from stdin and submits it.
+//! Verify issue #176: live login through a typed second-factor code rather than
+//! a mobile push. Serves both factors — the 8-character IBKey
+//! Challenge/Response code, and an authenticator app's code — reading whichever
+//! the account uses from stdin.
 //!
 //! Run:
 //!   $env:RUST_LOG="info"; cargo run --release --example ex176_live_2fa_code_provider
 //!
 //! Requires `IB_LIVE_USERNAME` / `IB_LIVE_PASSWORD` in `.env` (auto-loaded).
-//! When the IBKey app shows the 8-char code, type it at the prompt.
+//! Type the code at the prompt. Authenticator codes expire in ~30s, so read a
+//! fresh one when asked rather than ahead of time.
 //!
 //! Note: one wrong code is terminal — the server skips AUTH_FINISH and tears
 //! the socket down (ib-agent#149). There is no retry loop.
@@ -17,7 +19,7 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 use std::time::Instant;
 
-use ibx::auth::session::{self, CodeProvider, IbKeyChallenge};
+use ibx::auth::session::{self, CodeProvider, IbKeyChallenge, SecondFactor};
 use ibx::gateway::{Gateway, GatewayConfig};
 use zeroize::Zeroizing;
 
@@ -39,27 +41,46 @@ fn load_dotenv() {
     }
 }
 
-/// Prompt the operator for the 8-character code displayed in the IBKey app.
+/// Prompt the operator for whichever code this account's factor calls for.
 fn read_code_from_stdin(challenge: IbKeyChallenge) -> io::Result<String> {
     println!();
-    println!("== IBKey Challenge/Response ==");
+    let (banner, prompt, want) = match challenge.factor {
+        SecondFactor::IbKeyChallengeResponse => (
+            "== IBKey Challenge/Response ==",
+            "Enter the 8-character code shown in the IBKey app: ",
+            Some(8),
+        ),
+        // Length is not fixed across authenticator configurations, so take
+        // what the operator types rather than rejecting a valid code.
+        SecondFactor::AuthenticatorCode => (
+            "== Authenticator code ==",
+            "Enter the current code from your authenticator app: ",
+            None,
+        ),
+    };
+    println!("{}", banner);
     if !challenge.display_id.is_empty() {
         println!("   display_id : {}", challenge.display_id);
     }
     if !challenge.avth_url.is_empty() {
         println!("   avth_url   : {}", challenge.avth_url);
     }
-    print!("Enter the 8-character code shown in the IBKey app: ");
+    print!("{}", prompt);
     io::stdout().flush()?;
 
     let mut line = String::new();
     io::stdin().lock().read_line(&mut line)?;
     let code = line.trim().to_string();
-    if code.len() != 8 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("expected 8 characters, got {}", code.len()),
-        ));
+    if code.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no code entered"));
+    }
+    if let Some(n) = want {
+        if code.len() != n {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("expected {} characters, got {}", n, code.len()),
+            ));
+        }
     }
     Ok(code)
 }
@@ -87,12 +108,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         code_provider: Some(provider),
     };
 
-    println!("== Connecting LIVE ({}). Waiting for IBKey challenge...", host);
+    println!("== Connecting LIVE ({}). Waiting for the second-factor challenge...", host);
     let t0 = Instant::now();
     let (gw, _farm, _ccp, _hmds) = Gateway::connect(&config)?;
     let elapsed = t0.elapsed().as_secs_f64();
     println!();
-    println!("PASS — issue #176 verified: C/R login succeeded in {:.1}s (account_id={})",
+    println!("PASS — issue #176 verified: second-factor login succeeded in {:.1}s (account_id={})",
         elapsed, gw.account_id);
     Ok(())
 }

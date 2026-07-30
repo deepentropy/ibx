@@ -2706,3 +2706,38 @@ fn queued_data_is_dispatched_before_connection_closed() {
 
     assert_eq!(w.events, vec!["contract_details_end:7", "connection_closed"]);
 }
+
+/// The provider reaching the gateway is the whole of what makes the
+/// authenticator factor usable from this client, and it is one line in a
+/// struct literal. Reverting it to `None` broke nothing that was tested.
+#[test]
+fn the_second_factor_provider_reaches_the_gateway_config() {
+    use crate::api::client::gateway_config;
+
+    let base = crate::api::client::EClientConfig {
+        username: "u".into(), password: "p".into(), host: "h".into(),
+        paper: false, core_id: None, code_provider: None,
+    };
+    assert!(gateway_config(&base).code_provider.is_none(), "none stays none");
+
+    let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = called.clone();
+    let with_provider = crate::api::client::EClientConfig {
+        code_provider: Some(std::sync::Arc::new(move |_: crate::auth::session::IbKeyChallenge| {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok("12345678".to_string())
+        })),
+        ..base
+    };
+    let forwarded = gateway_config(&with_provider).code_provider
+        .expect("the provider is forwarded, not dropped");
+
+    // Identity, not just presence: forwarding some other closure would pass a
+    // bare `is_some`.
+    forwarded(crate::auth::session::IbKeyChallenge {
+        factor: crate::auth::session::SecondFactor::AuthenticatorCode,
+        display_id: String::new(),
+        avth_url: String::new(),
+    }).unwrap();
+    assert!(called.load(std::sync::atomic::Ordering::SeqCst), "it is the caller's own provider");
+}

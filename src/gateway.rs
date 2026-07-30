@@ -907,33 +907,109 @@ pub struct GatewayConfig {
     /// match the profile it came from. This is what gets used when the server
     /// states none. Default `"2a"` matches the captured reference profile.
     pub ib_key_token_sub_type: String,
-    /// If set, the IBKey gate uses the **Challenge/Response** path instead
-    /// of waiting for a mobile push approval. After the server delivers
-    /// state=2, the callback is invoked once with the challenge details
-    /// and the returned 8-character code is submitted as state=3. See
-    /// [`session::CodeProvider`] for the contract; `None` leaves behavior
-    /// unchanged (push approval).
+    /// Supplies the second factor's code, for whichever exchange `AUTH_START`
+    /// selects.
+    ///
+    /// On the IBKey path it takes the **Challenge/Response** route instead of
+    /// waiting for a mobile push: after the server delivers state=2 the
+    /// callback is invoked once with the challenge details and the returned
+    /// 8-character code is submitted as state=3. `None` there leaves behaviour
+    /// unchanged, and the login completes by push approval.
+    ///
+    /// On an authenticator-code account it is the only way to log in — there is
+    /// no push to approve — so `None` fails the connect rather than falling
+    /// back. See [`session::CodeProvider`] for the contract.
     pub code_provider: Option<session::CodeProvider>,
 }
 
-/// The second-factor sub-type `AUTH_START` states for the IBKey token.
+/// Which second-factor exchange an `AUTH_START` token type selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecondFactorRoute {
+    /// No gate at all. Paper sessions never present a second factor.
+    None,
+    /// `XYZ 775` — the IBKey push, or its Challenge/Response variant.
+    IbKey,
+    /// `XYZ 774` — an authenticator code.
+    SecurityCode,
+    /// A type this client has no exchange for. Better to say so than to send
+    /// the wrong message and report whatever the server does about it.
+    Unsupported,
+}
+
+/// The second-factor token AUTH_START names, as `(type, sub-type)`.
 ///
-/// Field 4 carries `<type>` or `<type>.<sub-type>`, and a comma-separated list
-/// when the account has more than one factor enabled — `4,5` was advertised for
-/// an account holding both an authenticator and IBKey. The list is split before
-/// the dot, so a sub-type on one entry cannot swallow the entries after it:
-/// reading `"5.2a,4"` as one pair yields `2a,4`, which is not a sub-type at all
-/// and is rejected by a server that would have accepted `2a`.
+/// Field 4 carries the type, optionally followed by a per-session sub-type
+/// after a `.`, and carries a comma-separated list when the account has more
+/// than one factor enabled. The list is split first, so a sub-type on one
+/// entry cannot swallow the entries after it — `"5.2i,4"` is type `5`
+/// sub-type `2i` and a second entry, not a sub-type of `"2i,4"`.
 ///
-/// The sub-type returned is the one belonging to type `5`, since that is the
-/// token this gate sends. A sub-type stated against some other type is not
-/// IBKey's and is ignored.
-fn parse_auth_start_sub_type(auth_start: &str) -> Option<String> {
-    let field = auth_start.split(';').nth(4)?;
-    field.split(',').find_map(|entry| {
-        let (ty, sub) = entry.trim().split_once('.')?;
-        (ty.trim() == "5" && !sub.trim().is_empty()).then(|| sub.trim().to_string())
-    })
+/// The sub-type returned is the one belonging to the type the gate will route
+/// to, and the type string keeps the whole list for that routing decision.
+fn parse_auth_start_token(auth_start: &str) -> (String, Option<String>) {
+    let fields: Vec<&str> = auth_start.split(';').collect();
+    let token = fields.get(4).map(|f| f.trim()).unwrap_or("");
+
+    let mut entries: Vec<(String, Option<String>)> = Vec::new();
+    for entry in token.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (ty, sub) = match entry.split_once('.') {
+            Some((t, s)) => (t.trim(), s.trim()),
+            None => (entry, ""),
+        };
+        entries.push((ty.to_string(), (!sub.is_empty()).then(|| sub.to_string())));
+    }
+
+    // The sub-type has to belong to the type the gate routes to, and routing
+    // prefers IBKey. Keeping the first sub-type stated instead sent the
+    // authenticator's sub-type in the IBKey init on a mixed account.
+    let sub_type = ["5", "4"]
+        .iter()
+        .find_map(|want| {
+            entries.iter().find(|(ty, sub)| ty == want && sub.is_some())
+        })
+        .or_else(|| entries.iter().find(|(_, sub)| sub.is_some()))
+        .and_then(|(_, sub)| sub.clone());
+
+    let types: Vec<&str> = entries.iter().map(|(ty, _)| ty.as_str()).collect();
+    (types.join(","), sub_type)
+}
+
+/// An absent token type routes to the IBKey gate rather than skipping the
+/// second factor. That gate opens by sending its init and reports `Skipped`
+/// when the server answers `AUTH_FINISH PASSED`, which is how an account with
+/// no second factor completes — so skipping it would leave the server waiting
+/// on an init that never comes.
+///
+/// The field carries a comma-separated list when the account has more than one
+/// factor enabled — `AUTH_START` advertised `4,5` for an account with both an
+/// authenticator and IBKey. Reading the whole field as one type refused the
+/// login outright, so each entry is considered and IBKey is preferred: it is
+/// the only one that completes without a `code_provider`, and it still serves
+/// a configured one through Challenge/Response.
+fn second_factor_route(paper: bool, token_type: &str) -> SecondFactorRoute {
+    if paper {
+        return SecondFactorRoute::None;
+    }
+    if token_type.is_empty() {
+        return SecondFactorRoute::IbKey;
+    }
+    let mut saw_security_code = false;
+    for entry in token_type.split(',') {
+        match entry.trim() {
+            "5" => return SecondFactorRoute::IbKey,
+            "4" => saw_security_code = true,
+            _ => {}
+        }
+    }
+    if saw_security_code {
+        SecondFactorRoute::SecurityCode
+    } else {
+        SecondFactorRoute::Unsupported
+    }
 }
 
 impl Gateway {
@@ -1057,8 +1133,8 @@ impl Gateway {
         // default only ever matches the profile it was captured from; every
         // other account has its SWCR_TOKEN rejected and the socket closed
         // before a challenge is issued (ibx#279).
-        let server_token_sub_type =
-            parse_auth_start_sub_type(&String::from_utf8_lossy(&auth_start));
+        let (server_token_type, server_token_sub_type) =
+            parse_auth_start_token(&String::from_utf8_lossy(&auth_start));
 
         // Authentication
         log::info!("Starting auth for {}", config.username);
@@ -1068,10 +1144,57 @@ impl Gateway {
         // Per-session second-factor approval gate (IBKey / seamless push).
         // Skipped on paper logins; live logins enter a wait state if the
         // account has a second factor configured server-side.
-        // Captures the SOFT session token from AUTH_FINISH PASSED — this is
-        // the token used for downstream farm logons (NOT the SRP session_key).
+        // Would capture a SOFT session token from AUTH_FINISH PASSED, but per
+        // ib-agent#125 that body carries none, so this stays `None` on both
+        // live paths and the farm logon falls back to the SRP session key.
         let mut soft_token: Option<BigUint> = None;
+        // An advertised type this client cannot perform is worth saying out
+        // loud: sending 775 at it gets the socket closed before any challenge,
+        // and skipping the gate leaves the server waiting until the connect
+        // dies with "Never received data start after auth". Neither names the
+        // cause (ibx#279). See `second_factor_route` for why an absent type is
+        // the one case that is not an error.
+        let route = second_factor_route(config.paper, &server_token_type);
         if !config.paper {
+            log::debug!(
+                "second factor: AUTH_START type {:?} sub {:?} -> {:?}",
+                server_token_type, server_token_sub_type, route,
+            );
+        }
+        if route == SecondFactorRoute::SecurityCode {
+            // Authenticator-code accounts take the 774 exchange rather than the
+            // IBKey push. The same code_provider supplies the code (ibx#282).
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(config.ib_key_timeout_secs);
+            log::info!(
+                "Live login for {}: second factor is an authenticator code; awaiting code_provider",
+                config.username,
+            );
+            // The code is written raw, with no DH encryption — the same
+            // transport the IBKey gate uses. The encrypted variant gets the
+            // connection reset on receipt.
+            // Poll the socket so the gate can submit as soon as the code is
+            // available instead of waiting for the server's next keepalive: an
+            // authenticator code is only valid for ~30s, and a 20s wait spends
+            // most of it. Restored afterwards.
+            tls.get_ref().set_read_timeout(Some(Duration::from_millis(500)))?;
+            let gate = session::do_security_code_2fa(
+                &mut tls, deadline, config.code_provider.as_ref(),
+            );
+            let restore = tls.get_ref().set_read_timeout(None);
+            gate?;
+            restore?;
+            log::info!("security-code gate: passed")
+        } else if route == SecondFactorRoute::Unsupported {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "second-factor token type {:?} is not supported; AUTH_START advertised it for {}",
+                    server_token_type, config.username,
+                ),
+            ));
+        }
+        if route == SecondFactorRoute::IbKey {
             let deadline = std::time::Instant::now()
                 + std::time::Duration::from_secs(config.ib_key_timeout_secs);
             // Live logins enter a human-approval window here: connect() blocks
@@ -1926,34 +2049,75 @@ pub use crate::config::{chrono_free_timestamp, days_to_ymd};
 #[cfg(test)]
 mod tests {
 
-    /// Field 4 selects the second factor and states its sub-type. The whole
-    /// field was read as one pair, so a list put the following entries inside
-    /// the sub-type: `"5.2a,4"` sent `2a,4`, which is not a sub-type — an
-    /// account that worked on the compiled-in `2a` would have had its token
-    /// rejected and the socket closed before any challenge (ibx#279).
+    /// Field 4 is where the second-factor type lives, and reading the wrong
+    /// field is what caused both live failures this gate was written for — a
+    /// sub-type sent to the wrong account shape, and a factor routed to the
+    /// wrong prompt. Nothing pinned it.
     #[test]
-    fn the_ib_key_sub_type_comes_from_the_ib_key_entry() {
-        use super::parse_auth_start_sub_type as parse;
+    fn auth_start_token_comes_from_field_four() {
         let frame = |token: &str| format!("a;b;c;d;{token};f");
 
-        // The single-factor case this was written for.
-        assert_eq!(parse(&frame("5.2i")), Some("2i".into()));
-        assert_eq!(parse(&frame(" 5.2i ")), Some("2i".into()));
+        assert_eq!(parse_auth_start_token(&frame("5.2i")), ("5".into(), Some("2i".into())));
+        assert_eq!(parse_auth_start_token(&frame("4")), ("4".into(), None));
+        assert_eq!(parse_auth_start_token(&frame("4,5")), ("4,5".into(), None));
+        assert_eq!(parse_auth_start_token(&frame(" 5.2i ")), ("5".into(), Some("2i".into())));
 
-        // A list must not fold the later entries into the sub-type.
-        assert_eq!(parse(&frame("5.2a,4")), Some("2a".into()));
-        assert_eq!(parse(&frame("4,5.2i")), Some("2i".into()));
+        // A sub-type on one entry must not swallow the entries after it.
+        assert_eq!(parse_auth_start_token(&frame("5.2i,4")), ("5,4".into(), Some("2i".into())));
 
-        // A sub-type stated against another factor is not IBKey's.
-        assert_eq!(parse(&frame("4.auth")), None);
-        assert_eq!(parse(&frame("4.auth,5.2i")), Some("2i".into()));
+        // On a mixed account the sub-type must belong to the type the gate
+        // routes to, which prefers IBKey. Keeping the first one stated sent
+        // the authenticator's sub-type in the IBKey init.
+        assert_eq!(
+            parse_auth_start_token(&frame("4.auth,5.2i")),
+            ("4,5".into(), Some("2i".into())),
+        );
+        assert_eq!(
+            parse_auth_start_token(&frame("5.2i,4.auth")),
+            ("5,4".into(), Some("2i".into())),
+        );
+        // With no IBKey entry the authenticator's own sub-type is the one that
+        // belongs to the route taken.
+        assert_eq!(
+            parse_auth_start_token(&frame("4.auth,9.other")),
+            ("4,9".into(), Some("auth".into())),
+        );
+        // A sub-type on a type neither gate serves is still better than none.
+        assert_eq!(
+            parse_auth_start_token(&frame("9.other")),
+            ("9".into(), Some("other".into())),
+        );
 
-        // Nothing to take: the configured value is used instead.
-        assert_eq!(parse(&frame("5")), None);
-        assert_eq!(parse(&frame("4,5")), None);
-        assert_eq!(parse(&frame("5.")), None);
-        assert_eq!(parse(&frame("")), None);
-        assert_eq!(parse("a;b;c"), None, "a short frame has no field 4");
+        // Short or absent field 4 yields no type rather than a wrong one.
+        assert_eq!(parse_auth_start_token("a;b;c"), ("".into(), None));
+        assert_eq!(parse_auth_start_token(&frame("")), ("".into(), None));
+    }
+
+    #[test]
+    fn second_factor_route_covers_every_token_type() {
+        use super::{second_factor_route, SecondFactorRoute::*};
+        // An absent type must still enter the IBKey gate. That gate opens by
+        // sending its init, and an account with no second factor completes
+        // through it — routing it to `None` sends nothing and leaves the
+        // server waiting on an init that never arrives.
+        assert_eq!(second_factor_route(false, ""), IbKey);
+        assert_eq!(second_factor_route(false, "5"), IbKey);
+        assert_eq!(second_factor_route(false, "4"), SecurityCode);
+        // The field is a list when more than one factor is enabled. An
+        // account with both an authenticator and IBKey advertises `4,5`, and
+        // reading that as one type refused the login outright.
+        assert_eq!(second_factor_route(false, "4,5"), IbKey);
+        assert_eq!(second_factor_route(false, "5,4"), IbKey, "order must not matter");
+        assert_eq!(second_factor_route(false, "3,4"), SecurityCode, "an unknown entry must not veto a known one");
+        assert_eq!(second_factor_route(false, " 4 , 5 "), IbKey, "entries may be padded");
+        assert_eq!(second_factor_route(false, "3,6"), Unsupported, "a list of unknowns is still unsupported");
+        assert_eq!(second_factor_route(false, "3"), Unsupported);
+        assert_eq!(second_factor_route(false, "05"), Unsupported);
+        assert_eq!(second_factor_route(false, "banana"), Unsupported);
+        // Paper never presents one, whatever the field says.
+        for t in ["", "3", "4", "5"] {
+            assert_eq!(second_factor_route(true, t), None, "paper, type {:?}", t);
+        }
     }
 
     use super::*;

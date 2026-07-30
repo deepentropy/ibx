@@ -384,6 +384,7 @@ fn get_config() -> Option<EClientConfig> {
         host,
         paper: true,
         core_id: None,
+        code_provider: None,
     })
 }
 

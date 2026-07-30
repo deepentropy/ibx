@@ -78,6 +78,7 @@ fn connect() -> Result<EClient, Box<dyn std::error::Error>> {
         host: env::var("IB_HOST").unwrap_or_else(|_| "cdc1.ibllc.com".into()),
         paper: true,
         core_id: None,
+        code_provider: None,
     })?)
 }
 

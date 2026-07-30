@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("== Connecting LIVE ({}). Approve the second-factor push on your phone when it arrives.", host);
     let t0 = Instant::now();
     let client = EClient::connect(&EClientConfig {
-        username, password, host, paper: false, core_id: None,
+        username, password, host, paper: false, core_id: None, code_provider: None,
     })?;
     println!("== Connected in {:.1}s", t0.elapsed().as_secs_f64());
 
