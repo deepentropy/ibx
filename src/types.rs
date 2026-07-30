@@ -1491,7 +1491,10 @@ pub struct PositionInfo {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MidnightSeed {
     pub con_id: i64,
-    pub qty_midnight: i64,            // position held at midnight
+    /// Position held at midnight. `None` when the row arrived without a
+    /// parseable quantity: the position exists but its overnight size is
+    /// unknown, which is not the same as having opened it today (ibx#296).
+    pub qty_midnight: Option<i64>,
     pub money_traded: f64,            // net cash from today's fills (signed)
     pub realized_pnl: f64,           // realized P&L since midnight
 }
