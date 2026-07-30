@@ -110,8 +110,7 @@ fn main() {
             new_order_id,
             order_id: current_order_id,
             price: new_price,
-            qty: 1,
-        });
+            qty: 1, ord_type: 0, tif: 0, stop_price: 0 });
 
         // Wait for ack on new_order_id
         let deadline = Instant::now() + Duration::from_secs(30);

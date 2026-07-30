@@ -31,6 +31,12 @@ impl EClient {
 
         // If orderId is already tracked, this is a modification — emit Modify instead of Submit.
         let cmd = if self.core.is_order_tracked(oid) {
+            // A replace states the order type, the limit price and the trigger.
+            // An order defined by anything else cannot survive one, so refuse
+            // rather than send a message that destroys it.
+            if let Some(refusal) = self.core.modify_refusal(oid, order) {
+                return Err(refusal);
+            }
             let price = (order.lmt_price * PRICE_SCALE_F) as i64;
             let qty = order.total_quantity as u32;
             ControlCommand::Order(OrderRequest::Modify {
@@ -38,6 +44,9 @@ impl EClient {
                 order_id: oid,
                 price,
                 qty,
+                ord_type: order.ord_type_byte(),
+                tif: order.tif_byte(),
+                stop_price: (order.aux_price * PRICE_SCALE_F) as i64,
             })
         } else {
             ClientCore::build_order_request(order, oid, instrument)?

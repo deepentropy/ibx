@@ -394,6 +394,28 @@ impl Order {
     }
 
     /// Parse the TIF string to FIX byte.
+    /// The order-type byte this order tracks under, or 0 when the type is one
+    /// a replace cannot state.
+    ///
+    /// Only the types a modify is accepted for are mapped; everything else is
+    /// refused before it reaches a replace, and 0 tells the encoder to keep
+    /// whatever the resting order holds (ibx#349).
+    pub fn ord_type_byte(&self) -> u8 {
+        match self.order_type.to_uppercase().as_str() {
+            "MKT" => b'1',
+            "LMT" => b'2',
+            "STP" => b'3',
+            "STP LMT" => b'4',
+            "MOC" => b'5',
+            "LOC" => b'B',
+            "MIT" => b'J',
+            "MTL" | "BOX TOP" => b'K',
+            "MKT PRT" => b'U',
+            "STP PRT" => crate::types::ORD_STP_PRT,
+            _ => 0,
+        }
+    }
+
     pub fn tif_byte(&self) -> u8 {
         match self.tif.as_str() {
             "GTC" => b'1',

@@ -853,7 +853,26 @@ impl Context {
             .push(OrderRequest::CancelAll { instrument });
     }
 
+    /// Replace a working order's price and quantity, keeping everything else
+    /// the resting order holds. Use `modify_ex` to change the order type, the
+    /// time-in-force or the trigger.
     pub fn modify(&mut self, order_id: OrderId, price: Price, qty: u32) -> OrderId {
+        self.modify_ex(order_id, price, qty, 0, 0, 0)
+    }
+
+    /// Replace a working order, stating what the replace should carry.
+    ///
+    /// A zero `ord_type`, `tif` or `stop_price` states nothing and leaves what
+    /// the resting order holds in force (ibx#349, ibx#372).
+    pub fn modify_ex(
+        &mut self,
+        order_id: OrderId,
+        price: Price,
+        qty: u32,
+        ord_type: u8,
+        tif: u8,
+        stop_price: Price,
+    ) -> OrderId {
         let new_id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::Modify {
@@ -861,6 +880,9 @@ impl Context {
             order_id,
             price,
             qty,
+            ord_type,
+            tif,
+            stop_price,
         });
         new_id
     }

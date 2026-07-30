@@ -764,6 +764,128 @@ impl ClientCore {
         self.open_orders.lock().unwrap().contains_key(&order_id)
     }
 
+    /// The order a tracked id was submitted with, if it is tracked.
+    pub fn tracked_order(&self, order_id: u64) -> Option<ApiOrder> {
+        self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.clone())
+    }
+
+    /// Why a replace cannot restate this order, or `None` if it can.
+    ///
+    /// The replace message carries the order type, the limit price and the
+    /// trigger, and nothing else — no peg offset, no trailing amount, no
+    /// execution instruction, no algo block. For an order defined by any of
+    /// those, the replace describes something other than the order being
+    /// replaced: a trailing stop arrives as a pegged order with no offset, and
+    /// the gateway rejects it, leaving the caller with no stop at all.
+    ///
+    /// The order type alone does not decide this. An adaptive or algo order is
+    /// an ordinary `LMT` that is defined by its algo tags, and an adjustable
+    /// stop is an ordinary `STP` that is defined by its conversion — both are
+    /// destroyed by a replace that states only the type.
+    pub fn replace_cannot_restate(order: &ApiOrder) -> Option<String> {
+        if !order.algo_strategy.is_empty() {
+            return Some(format!("an order running the {} algo", order.algo_strategy));
+        }
+        if !order.adjusted_order_type.is_empty() {
+            return Some(format!("an order that adjusts to {}", order.adjusted_order_type));
+        }
+        if !order.conditions.is_empty() {
+            return Some("a conditional order".to_string());
+        }
+        // These ride tags the replace does not carry either — hidden on 6135,
+        // all-or-none as an execution instruction, and the cash quantity on
+        // 5920 — so a replace states an order without them.
+        if order.hidden {
+            return Some("a hidden order".to_string());
+        }
+        if order.all_or_none {
+            return Some("an all-or-none order".to_string());
+        }
+        if order.cash_qty > 0.0 {
+            return Some("a cash-quantity order".to_string());
+        }
+        // A what-if is a margin preview, not a resting order, so there is
+        // nothing on the book for a replace to act on.
+        if order.what_if {
+            return Some("a what-if order".to_string());
+        }
+        // The replace is rebuilt from the tracked record, which holds side,
+        // price, quantity, order type, time-in-force and trigger — and nothing
+        // else. Every attribute below rides a tag the replace does not carry,
+        // so a modify would state the order without it (ibx#248).
+        //
+        // The bracket links are the costly pair. A replace that omits the
+        // parent link or the OCA group leaves a child resting alone: a fill on
+        // one leg no longer cancels the other, and the position is left with a
+        // naked order against it. Whether the gateway reads an omitted 583 or
+        // 6107 as unchanged or as cleared is not established here, and the
+        // difference between "latent" and "detached" is the whole risk — so
+        // the modify is refused rather than sent and hoped for.
+        if !order.oca_group.is_empty() {
+            return Some("an order in an OCA group".to_string());
+        }
+        if order.parent_id != 0 {
+            return Some("a bracket child".to_string());
+        }
+        if !order.good_till_date.is_empty() {
+            return Some("an order with a good-till expiry".to_string());
+        }
+        if !order.good_after_time.is_empty() {
+            return Some("an order with a good-after time".to_string());
+        }
+        if order.display_size > 0 {
+            return Some("an iceberg order".to_string());
+        }
+        if order.min_qty > 0 {
+            return Some("an order with a minimum quantity".to_string());
+        }
+        if order.discretionary_amt > 0.0 {
+            return Some("a discretionary order".to_string());
+        }
+        if order.sweep_to_fill {
+            return Some("a sweep-to-fill order".to_string());
+        }
+        if order.trigger_method != 0 {
+            return Some("an order with a non-default trigger method".to_string());
+        }
+        let ty = order.order_type.to_uppercase();
+        // `LIT` is submitted as `LT` but tracked under a byte the replace
+        // renders as `K`, which is market-to-limit in this dialect — so a
+        // replace would describe a different order type entirely.
+        //
+        // `MTL`, `BOX TOP` and `MKT PRT` are here because the replace renders
+        // the same byte they were submitted under, so it restates them as
+        // themselves — which is the whole test for membership.
+        if matches!(
+            ty.as_str(),
+            "MKT" | "LMT" | "STP" | "STP LMT" | "MOC" | "LOC" | "MIT" | "STP PRT"
+                | "MTL" | "BOX TOP" | "MKT PRT"
+        ) {
+            return None;
+        }
+        Some(format!("a {ty} order"))
+    }
+
+    /// Why a modify of `order_id` cannot be sent, if it cannot.
+    ///
+    /// Both sides are checked. The resting order is the one the replace has to
+    /// restate, and the incoming order is what the caller is asking it to
+    /// become — a modify that *adds* a bracket link or an OCA group states an
+    /// order that has neither, so examining only the record on the book lets
+    /// the attribute through on the very message that was supposed to carry it.
+    ///
+    /// One place, so the two bindings cannot diverge on either the rule or the
+    /// wording (ibx#248).
+    pub fn modify_refusal(&self, order_id: u64, incoming: &ApiOrder) -> Option<String> {
+        let why = self.tracked_order(order_id)
+            .and_then(|tracked| Self::replace_cannot_restate(&tracked))
+            .or_else(|| Self::replace_cannot_restate(incoming))?;
+        Some(format!(
+            "{why} cannot be modified: the replace does not carry the fields that \
+             define it, and sending one would cancel the order"
+        ))
+    }
+
     /// Track a newly placed order.
     pub fn track_order(&self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId) {
         let remaining = order.total_quantity;

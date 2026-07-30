@@ -31,6 +31,217 @@ fn spy() -> Contract {
 //  Algo parsing
 // ═══════════════════════════════════════════════════════════════════
 
+/// A replace carries the order type, the limit price and the trigger — not the
+/// peg offset, the trailing amount or the execution instruction. Sent for a
+/// trailing stop it describes a pegged order with no offset, the gateway
+/// rejects it, and the caller is left with no stop at all. Refusing keeps the
+/// order they already have.
+#[test]
+fn a_type_the_replace_cannot_restate_is_not_modified() {
+    for order_type in ["TRAIL", "TRAIL LIMIT", "REL", "PEG MID", "MIDPX", "SNAP MID"] {
+        let (client, rx, _shared) = test_client();
+        let submit = Order {
+            action: "SELL".into(), total_quantity: 1.0, order_type: order_type.into(),
+            aux_price: 1.0, trailing_percent: 0.0, tif: "DAY".into(), ..Default::default()
+        };
+        // Submitting is fine; it is the replace that cannot express it.
+        let _ = client.place_order(9201, &spy(), &submit);
+        while rx.try_recv().is_ok() {}
+
+        // Skipping when tracking did not happen would let this pass without
+        // testing anything, which is how the modify gate went unnoticed.
+        assert!(
+            client.core.is_order_tracked(9201),
+            "{order_type} must submit and be tracked, or the refusal below proves nothing",
+        );
+        let err = client.place_order(9201, &spy(), &submit)
+            .expect_err("modifying it must be refused");
+        assert!(err.contains("cannot be modified"), "{order_type}: {err}");
+        assert!(rx.try_recv().is_err(), "{order_type}: nothing reaches the wire");
+    }
+}
+
+/// The order type alone does not decide this. An adaptive or algo order is an
+/// ordinary LMT defined by its algo tags; an adjustable stop is an ordinary STP
+/// defined by its conversion; a conditional order rides submit-only tags. A
+/// replace states none of those, so each is destroyed by one just as surely as
+/// a trailing stop is — and each would have passed a gate that looked only at
+/// the type.
+#[test]
+fn an_order_defined_by_more_than_its_type_is_not_modified() {
+    let cases: Vec<(&str, fn(&mut Order))> = vec![
+        ("adaptive", |o| o.algo_strategy = "Adaptive".into()),
+        ("algo", |o| o.algo_strategy = "Vwap".into()),
+        ("adjustable stop", |o| o.adjusted_order_type = "TRAIL".into()),
+        ("conditional", |o| o.conditions.push(
+            crate::types::OrderCondition::Time { time: "20260311-09:30:00".into(), is_more: true },
+        )),
+        // Every attribute below rides a tag the replace does not carry, so a
+        // modify would state the order without it (ibx#248). The bracket links
+        // are the costly pair: a child sent without its parent or OCA group
+        // rests alone, and a fill on the sibling no longer cancels it.
+        ("bracket child", |o| o.parent_id = 4242),
+        ("OCA member", |o| o.oca_group = "bracket_1".into()),
+        ("good-till expiry", |o| o.good_till_date = "20260311 16:00:00".into()),
+        ("good-after time", |o| o.good_after_time = "20260311 09:30:00".into()),
+        ("iceberg", |o| o.display_size = 100),
+        ("minimum quantity", |o| o.min_qty = 50),
+        ("discretionary", |o| o.discretionary_amt = 0.05),
+        ("sweep to fill", |o| o.sweep_to_fill = true),
+        ("trigger method", |o| o.trigger_method = 2),
+    ];
+    for (name, set) in cases {
+        let (client, rx, _shared) = test_client();
+        let mut order = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+        };
+        set(&mut order);
+        let _ = client.place_order(9301, &spy(), &order);
+        while rx.try_recv().is_ok() {}
+
+        assert!(
+            client.core.is_order_tracked(9301),
+            "{name} must submit and be tracked, or the refusal below proves nothing",
+        );
+        let err = client.place_order(9301, &spy(), &order)
+            .expect_err("modifying it must be refused");
+        assert!(err.contains("cannot be modified"), "{name}: {err}");
+        assert!(rx.try_recv().is_err(), "{name}: nothing reaches the wire");
+    }
+}
+
+/// Limit-if-touched is submitted as `LT` but tracked under a byte the replace
+/// renders as `K`, which is market-to-limit here — so a replace would describe
+/// a different order type entirely.
+#[test]
+fn a_limit_if_touched_is_not_modified() {
+    let (client, rx, _shared) = test_client();
+    let order = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "LIT".into(),
+        lmt_price: 100.0, aux_price: 101.0, tif: "DAY".into(), ..Default::default()
+    };
+    let _ = client.place_order(9302, &spy(), &order);
+    while rx.try_recv().is_ok() {}
+
+    assert!(
+        client.core.is_order_tracked(9302),
+        "the LIT must submit and be tracked, or the refusal below proves nothing",
+    );
+    let err = client.place_order(9302, &spy(), &order)
+        .expect_err("a LIT modify must be refused");
+    assert!(err.contains("cannot be modified"), "{err}");
+}
+
+/// The refusal has to read the order the caller is asking for, not only the one
+/// on the book. A modify that *adds* a bracket link or an OCA group states an
+/// order that has neither — so a gate looking only at the resting record lets
+/// the attribute through on the very message that was supposed to carry it.
+#[test]
+fn an_attribute_added_by_the_modify_is_refused_too() {
+    let cases: Vec<(&str, fn(&mut Order))> = vec![
+        ("bracket child", |o| o.parent_id = 4242),
+        ("OCA member", |o| o.oca_group = "bracket_1".into()),
+        ("iceberg", |o| o.display_size = 100),
+        ("all-or-none", |o| o.all_or_none = true),
+    ];
+    for (name, set) in cases {
+        let (client, rx, _shared) = test_client();
+        let plain = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+        };
+        client.place_order(9303, &spy(), &plain).expect("a plain limit submits");
+        while rx.try_recv().is_ok() {}
+
+        let mut attributed = plain.clone();
+        set(&mut attributed);
+        let err = client.place_order(9303, &spy(), &attributed)
+            .expect_err("adding it by modify must be refused");
+        assert!(err.contains("cannot be modified"), "{name}: {err}");
+        assert!(rx.try_recv().is_err(), "{name}: nothing reaches the wire");
+    }
+}
+
+/// Every allowed type must still modify, not just the one. Excluding any of
+/// them costs a working modify, and only `LMT` was covered.
+#[test]
+fn every_restatable_type_still_modifies() {
+    for (order_type, lmt, aux) in [
+        ("MKT", 0.0, 0.0),
+        ("LMT", 100.0, 0.0),
+        ("STP", 0.0, 90.0),
+        ("STP LMT", 100.0, 90.0),
+        ("MOC", 0.0, 0.0),
+        ("LOC", 100.0, 0.0),
+        ("MIT", 0.0, 90.0),
+        ("STP PRT", 0.0, 90.0),
+        // Regression guard: these three were modifiable before the gate and
+        // the replace renders the same byte they were submitted under.
+        ("MTL", 0.0, 0.0),
+        ("BOX TOP", 0.0, 0.0),
+        ("MKT PRT", 0.0, 0.0),
+    ] {
+        let (client, rx, _shared) = test_client();
+        let order = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: order_type.into(),
+            lmt_price: lmt, aux_price: aux, tif: "DAY".into(), ..Default::default()
+        };
+        client.place_order(9701, &spy(), &order)
+            .unwrap_or_else(|e| panic!("{order_type} must submit: {e}"));
+        while rx.try_recv().is_ok() {}
+
+        client.place_order(9701, &spy(), &order)
+            .unwrap_or_else(|e| panic!("{order_type} must still modify: {e}"));
+        match rx.try_recv().expect("the modify") {
+            ControlCommand::Order(OrderRequest::Modify { .. }) => {}
+            other => panic!("{order_type}: expected a Modify, got {other:?}"),
+        }
+    }
+}
+
+/// The decision is read from the order as it was submitted, not from the one
+/// handed to the modify — a caller cannot make a trailing stop modifiable by
+/// describing it as a limit on the way in.
+#[test]
+fn the_refusal_reads_the_tracked_order_not_the_incoming_one() {
+    let (client, rx, _shared) = test_client();
+    let trail = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(),
+        aux_price: 1.0, tif: "DAY".into(), ..Default::default()
+    };
+    client.place_order(9702, &spy(), &trail).expect("the trailing stop submits");
+    while rx.try_recv().is_ok() {}
+
+    let disguised = Order {
+        action: "SELL".into(), total_quantity: 2.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+    };
+    let err = client.place_order(9702, &spy(), &disguised)
+        .expect_err("the tracked type decides, so this is still refused");
+    assert!(err.contains("cannot be modified"), "{err}");
+    assert!(rx.try_recv().is_err(), "and nothing reaches the wire");
+}
+
+/// The ordinary types still modify.
+#[test]
+fn a_limit_order_still_modifies() {
+    let (client, rx, _shared) = test_client();
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+    };
+    client.place_order(9202, &spy(), &order).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    let moved = Order { lmt_price: 101.0, ..order };
+    client.place_order(9202, &spy(), &moved).expect("a limit modify still goes through");
+    match rx.try_recv().expect("the modify") {
+        ControlCommand::Order(OrderRequest::Modify { .. }) => {}
+        other => panic!("expected a Modify, got {other:?}"),
+    }
+}
+
 #[test]
 fn parse_algo_vwap() {
     let params = vec![
@@ -2404,9 +2615,12 @@ fn modify_tif_day_to_gtc_via_resubmit() {
 
     let mut found_modify = false;
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::Modify { order_id: 88, price, qty, .. }) = cmd {
+        if let ControlCommand::Order(OrderRequest::Modify { order_id: 88, price, qty, tif, .. }) = cmd {
             assert_eq!(price, (150.0 * PRICE_SCALE_F) as i64);
             assert_eq!(qty, 100);
+            // The change the test is named for. Asserting only that a Modify
+            // was emitted passed for as long as the time-in-force was dropped.
+            assert_eq!(tif, b'1', "the modify must carry GTC, not restate DAY");
             found_modify = true;
         }
     }
@@ -2441,6 +2655,32 @@ fn modify_price_and_qty_simultaneously() {
     assert!(found, "Resubmit with same orderId should emit Modify with new price and qty");
 }
 
+/// A zero order-type states nothing and keeps the resting type, so a modify to
+/// a type the replace cannot express must be refused rather than reaching the
+/// encoder — otherwise the caller's new type is silently restated as the old
+/// one and the client caches an order the gateway does not have.
+#[test]
+fn a_modify_to_an_unrepresentable_type_is_refused() {
+    for order_type in ["REL", "TRAIL", "LIT", "MIDPX", "SNAP MKT"] {
+        let (client, rx, shared) = test_client();
+        shared.market.set_instrument_count(1);
+        let plain = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+        };
+        client.place_order(9401, &spy(), &plain).expect("a plain limit submits");
+        while rx.try_recv().is_ok() {}
+
+        let converted = Order {
+            order_type: order_type.into(), aux_price: 99.0, ..plain.clone()
+        };
+        let err = client.place_order(9401, &spy(), &converted)
+            .expect_err("converting to a type the replace cannot express must be refused");
+        assert!(err.contains("cannot be modified"), "{order_type}: {err}");
+        assert!(rx.try_recv().is_err(), "{order_type}: nothing reaches the wire");
+    }
+}
+
 #[test]
 fn modify_order_type_lmt_to_stp() {
     let (client, rx, shared) = test_client();
@@ -2460,7 +2700,14 @@ fn modify_order_type_lmt_to_stp() {
 
     let mut found_modify = false;
     while let Ok(cmd) = rx.try_recv() {
-        if matches!(cmd, ControlCommand::Order(OrderRequest::Modify { order_id: 66, .. })) {
+        if let ControlCommand::Order(OrderRequest::Modify {
+            order_id: 66, ord_type, stop_price, ..
+        }) = cmd {
+            // The change the test is named for. Asserting only that a Modify
+            // was emitted passed for as long as the order type was dropped.
+            assert_eq!(ord_type, b'3', "the modify must carry STP, not restate LMT");
+            assert_eq!(stop_price, (149.0 * PRICE_SCALE_F) as i64,
+                "and the trigger the caller set");
             found_modify = true;
         }
     }
