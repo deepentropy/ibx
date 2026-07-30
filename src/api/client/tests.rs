@@ -2615,9 +2615,12 @@ fn modify_tif_day_to_gtc_via_resubmit() {
 
     let mut found_modify = false;
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::Modify { order_id: 88, price, qty, .. }) = cmd {
+        if let ControlCommand::Order(OrderRequest::Modify { order_id: 88, price, qty, tif, .. }) = cmd {
             assert_eq!(price, (150.0 * PRICE_SCALE_F) as i64);
             assert_eq!(qty, 100);
+            // The change the test is named for. Asserting only that a Modify
+            // was emitted passed for as long as the time-in-force was dropped.
+            assert_eq!(tif, b'1', "the modify must carry GTC, not restate DAY");
             found_modify = true;
         }
     }
@@ -2652,6 +2655,32 @@ fn modify_price_and_qty_simultaneously() {
     assert!(found, "Resubmit with same orderId should emit Modify with new price and qty");
 }
 
+/// A zero order-type states nothing and keeps the resting type, so a modify to
+/// a type the replace cannot express must be refused rather than reaching the
+/// encoder — otherwise the caller's new type is silently restated as the old
+/// one and the client caches an order the gateway does not have.
+#[test]
+fn a_modify_to_an_unrepresentable_type_is_refused() {
+    for order_type in ["REL", "TRAIL", "LIT", "MIDPX", "SNAP MKT"] {
+        let (client, rx, shared) = test_client();
+        shared.market.set_instrument_count(1);
+        let plain = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+        };
+        client.place_order(9401, &spy(), &plain).expect("a plain limit submits");
+        while rx.try_recv().is_ok() {}
+
+        let converted = Order {
+            order_type: order_type.into(), aux_price: 99.0, ..plain.clone()
+        };
+        let err = client.place_order(9401, &spy(), &converted)
+            .expect_err("converting to a type the replace cannot express must be refused");
+        assert!(err.contains("cannot be modified"), "{order_type}: {err}");
+        assert!(rx.try_recv().is_err(), "{order_type}: nothing reaches the wire");
+    }
+}
+
 #[test]
 fn modify_order_type_lmt_to_stp() {
     let (client, rx, shared) = test_client();
@@ -2671,7 +2700,14 @@ fn modify_order_type_lmt_to_stp() {
 
     let mut found_modify = false;
     while let Ok(cmd) = rx.try_recv() {
-        if matches!(cmd, ControlCommand::Order(OrderRequest::Modify { order_id: 66, .. })) {
+        if let ControlCommand::Order(OrderRequest::Modify {
+            order_id: 66, ord_type, stop_price, ..
+        }) = cmd {
+            // The change the test is named for. Asserting only that a Modify
+            // was emitted passed for as long as the order type was dropped.
+            assert_eq!(ord_type, b'3', "the modify must carry STP, not restate LMT");
+            assert_eq!(stop_price, (149.0 * PRICE_SCALE_F) as i64,
+                "and the trigger the caller set");
             found_modify = true;
         }
     }

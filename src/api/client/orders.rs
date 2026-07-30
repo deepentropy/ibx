@@ -44,6 +44,9 @@ impl EClient {
                 order_id: oid,
                 price,
                 qty,
+                ord_type: order.ord_type_byte(),
+                tif: order.tif_byte(),
+                stop_price: (order.aux_price * PRICE_SCALE_F) as i64,
             })
         } else {
             ClientCore::build_order_request(order, oid, instrument)?

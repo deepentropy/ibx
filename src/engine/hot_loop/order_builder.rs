@@ -1442,16 +1442,34 @@ pub(crate) fn drain_and_send_orders(
                 }
                 last_result
             }
-            OrderRequest::Modify { new_order_id, order_id, price, qty } => {
+            OrderRequest::Modify {
+                new_order_id, order_id, price, qty, ord_type, tif, stop_price,
+            } => {
                 let orig = context.order(order_id).copied();
-                // Modify carries no instrument; resolve it from the tracked
-                // order to snap the new price to the tick grid (ibx#216).
-                let price = orig.map_or(price, |o| crate::types::snap_to_tick(
-                    price, context.market.min_tick_scaled(o.instrument)));
+                // What the replace states. A zero field states nothing, so the
+                // resting order's value stays in force — which is what the
+                // encoder used to do for every field, so a caller changing the
+                // order type, the time-in-force or the trigger had the change
+                // accepted, acknowledged, and dropped (ibx#349, ibx#372).
+                let ord_type = if ord_type != 0 { ord_type } else { orig.map_or(b'2', |o| o.ord_type) };
+                let tif = if tif != 0 { tif } else { orig.map_or(b'0', |o| o.tif) };
+                let stop_price = if stop_price != 0 { stop_price } else { orig.map_or(0, |o| o.stop_price) };
+                // Modify carries no instrument, so `snap_prices` cannot reach
+                // it and both price-like fields are snapped here against the
+                // tracked order's grid (ibx#216). The trigger needs it as much
+                // as the limit does — a moved stop off the grid is rejected by
+                // the gateway the same way a limit is.
+                let (price, stop_price) = orig.map_or((price, stop_price), |o| {
+                    let tick = context.market.min_tick_scaled(o.instrument);
+                    (
+                        crate::types::snap_to_tick(price, tick),
+                        if stop_price != 0 { crate::types::snap_to_tick(stop_price, tick) } else { 0 },
+                    )
+                });
                 if let Some(orig) = orig {
                     context.insert_order(crate::types::Order::new(
                         new_order_id, orig.instrument, orig.side, qty, price,
-                        orig.ord_type, orig.tif, orig.stop_price,
+                        ord_type, tif, stop_price,
                     ));
                 }
                 // Versioned ClOrdID chaining: orderId.0 → .1 → .2
@@ -1477,8 +1495,8 @@ pub(crate) fn drain_and_send_orders(
                 let (sec_type_str, _destination) = orig
                     .map(|o| context.market.order_routing(o.instrument))
                     .unwrap_or_else(|| ("STK".to_string(), "SMART".to_string()));
-                let ord_type_str = crate::types::ord_type_fix_str(orig.map(|o| o.ord_type).unwrap_or(b'2')).to_string();
-                let tif_str = std::str::from_utf8(&[orig.map(|o| o.tif).unwrap_or(b'0')]).unwrap_or("0").to_string();
+                let ord_type_str = crate::types::ord_type_fix_str(ord_type).to_string();
+                let tif_str = std::str::from_utf8(&[tif]).unwrap_or("0").to_string();
                 let con_id_str = orig.and_then(|o| context.market.con_id(o.instrument))
                     .map(|c| c.to_string()).unwrap_or_default();
 
@@ -1506,11 +1524,9 @@ pub(crate) fn drain_and_send_orders(
                 ];
                 // Include stop price for order types that need it
                 let stop_str;
-                if let Some(o) = orig {
-                    if o.stop_price != 0 {
-                        stop_str = format_price(o.stop_price);
-                        fields.push((99, &stop_str));
-                    }
+                if stop_price != 0 {
+                    stop_str = format_price(stop_price);
+                    fields.push((99, &stop_str));
                 }
                 conn.send_fix(&fields)
             }
@@ -2015,6 +2031,116 @@ fn build_condition_strings(conditions: &[OrderCondition]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// ibx#349, ibx#372: the replace restated the tracked order's type,
+    /// time-in-force and trigger, so a caller changing any of them had the
+    /// change accepted, acknowledged and dropped. Asserted on the bytes,
+    /// because the request-level tests passed throughout.
+    #[test]
+    fn a_modify_states_the_type_tif_and_trigger_it_carries() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let mut conn = Some(crate::protocol::connection::Connection::new_raw(stream).unwrap());
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.set_symbol(instrument, "SPY".to_string());
+        // Resting: a DAY limit with no trigger.
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Buy, 100, 150 * crate::types::PRICE_SCALE, b'2', b'0', 0,
+        ));
+
+        // Modified to a GTC stop at 149.
+        context.modify_ex(
+            42, 150 * crate::types::PRICE_SCALE, 100,
+            b'3', b'1', 149 * crate::types::PRICE_SCALE,
+        );
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared);
+
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        let msg = String::from_utf8_lossy(&buf[..n]);
+        let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
+
+        assert_eq!(tag("35=").as_deref(), Some("G"), "a replace was sent: {}", msg);
+        assert_eq!(tag("40=").as_deref(), Some("3"), "the type the caller stated: {}", msg);
+        assert_eq!(tag("59=").as_deref(), Some("1"), "the tif the caller stated: {}", msg);
+        assert_eq!(tag("99="), Some(format_price(149 * crate::types::PRICE_SCALE).to_string()),
+            "the trigger the caller stated: {}", msg);
+    }
+
+    /// The trigger is a price and lands on the instrument's grid like any
+    /// other. `Modify` carries no instrument, so the generic snapping cannot
+    /// reach it and both fields are snapped against the tracked order instead.
+    #[test]
+    fn a_moved_trigger_is_snapped_to_the_tick_grid() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let mut conn = Some(crate::protocol::connection::Connection::new_raw(stream).unwrap());
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.set_symbol(instrument, "SPY".to_string());
+        context.market.set_min_tick(instrument, 0.05);
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Sell, 100, 150 * crate::types::PRICE_SCALE,
+            b'3', b'0', 149 * crate::types::PRICE_SCALE,
+        ));
+
+        // 149.03 is off a five-cent grid.
+        let off_grid = 149 * crate::types::PRICE_SCALE + 3 * crate::types::PRICE_SCALE / 100;
+        context.modify_ex(42, 150 * crate::types::PRICE_SCALE, 100, b'3', b'0', off_grid);
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared);
+
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        let msg = String::from_utf8_lossy(&buf[..n]);
+        let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
+        assert_eq!(
+            tag("99="),
+            Some(format_price(149 * crate::types::PRICE_SCALE + 5 * crate::types::PRICE_SCALE / 100).to_string()),
+            "the trigger must be on the grid: {}", msg,
+        );
+    }
+
+    /// A modify that states none of them leaves what the resting order holds in
+    /// force, which is every caller that only moves a price or a quantity.
+    #[test]
+    fn a_modify_that_states_nothing_keeps_the_resting_values() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let mut conn = Some(crate::protocol::connection::Connection::new_raw(stream).unwrap());
+        let mut context = Context::new();
+        let instrument = context.register_instrument(756733);
+        context.set_symbol(instrument, "SPY".to_string());
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Sell, 100, 150 * crate::types::PRICE_SCALE,
+            b'3', b'1', 149 * crate::types::PRICE_SCALE,
+        ));
+
+        context.modify(42, 151 * crate::types::PRICE_SCALE, 100);
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared);
+
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        let msg = String::from_utf8_lossy(&buf[..n]);
+        let tag = |t: &str| msg.split('\u{1}').find_map(|f| f.strip_prefix(t).map(str::to_string));
+
+        assert_eq!(tag("40=").as_deref(), Some("3"), "the resting type: {}", msg);
+        assert_eq!(tag("59=").as_deref(), Some("1"), "the resting tif: {}", msg);
+        assert_eq!(tag("99="), Some(format_price(149 * crate::types::PRICE_SCALE).to_string()),
+            "the resting trigger: {}", msg);
+    }
     use super::*;
     use crate::types::Order;
 
