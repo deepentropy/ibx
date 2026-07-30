@@ -119,6 +119,13 @@ impl EClient {
         for reject in self.shared.orders.drain_cancel_rejects() {
             let code = if reject.reject_type == 1 { 202 } else { 10147 };
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
+            // Reason 1 is UnknownOrder: the gateway has said the order does not
+            // exist, and the engine has already retired its record. The client's
+            // own record has to go with it, or the open-order snapshot keeps
+            // reporting the order the rejection was about (ibx#252).
+            if reject.reason_code == 1 {
+                self.core.untrack_order(reject.order_id);
+            }
             wrapper.error(reject.order_id as i64, code, &msg, "");
         }
 

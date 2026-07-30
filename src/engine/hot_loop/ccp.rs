@@ -1208,27 +1208,58 @@ impl CcpState {
 
         let Some(oid) = orig_clord else { return };
 
+        // FIX CxlRejReason 1 = UnknownOrder: the gateway is stating that the
+        // order does not exist on its side. Restoring it to working asserted
+        // the opposite of the message being handled, and the engine's own view
+        // governs subsequent cancels, modifies and reconnect bookkeeping — so a
+        // phantom order persisted there while the cache row that would have
+        // surfaced it was removed (ibx#252).
+        //
+        // Read as a positive statement, not as an absence: a missing or
+        // unparseable tag 102 is synthesized as -1 here and says nothing, so it
+        // takes the same path as the reasons that do mean the order is working.
+        let unknown_order = reason_code == 1;
+
         // Update local context only if we tracked the order in this session.
         let instrument = if let Some(order) = context.order(oid).copied() {
-            let restore_status = if order.filled > 0 {
-                crate::types::OrderStatus::PartiallyFilled
+            if unknown_order {
+                // Terminal and removed, which is what the gateway just said.
+                // Holding the record in a non-working status instead is not an
+                // option here: those are excluded from the open-order count
+                // that guards instrument reclamation, so the slot could be
+                // handed to another contract while a retained order still
+                // pointed at it, and a late fill would move the wrong position.
+                //
+                // A fill that races the rejection is not lost with the order:
+                // the untracked-fill path books it and moves the position
+                // (ibx#314).
+                context.set_order_status_forced(oid, crate::types::OrderStatus::Cancelled);
+                context.remove_order(oid);
             } else {
-                crate::types::OrderStatus::Submitted
-            };
-            // Deliberate regression (PendingCancel back to working) — the
-            // ibx#212 guard would rightly block it on the ordinary path.
-            context.set_order_status_forced(oid, restore_status);
+                let restore_status = if order.filled > 0 {
+                    crate::types::OrderStatus::PartiallyFilled
+                } else {
+                    crate::types::OrderStatus::Submitted
+                };
+                // Deliberate regression (PendingCancel back to working) — the
+                // ibx#212 guard would rightly block it on the ordinary path.
+                context.set_order_status_forced(oid, restore_status);
+            }
             order.instrument
         } else {
             0
         };
 
-        // FIX CxlRejReason 1 = UnknownOrder. The gateway is telling us the
-        // order it just listed in the mass-status burst doesn't exist on its
-        // side — drop the stale cache entry so subsequent req_open_orders
-        // stops returning it. Other reasons (TooLate, OrderInProcess, ...)
-        // leave the cache alone; a follow-up exec report will reconcile.
-        if reason_code == 1 {
+        // Drop the stale cache entry so subsequent req_open_orders stops
+        // returning it. Other reasons leave the cache alone; a follow-up exec
+        // report will reconcile.
+        //
+        // No synthetic status update is queued alongside it. The cancel-reject
+        // below is the report, and both dispatchers drain fills ahead of order
+        // updates — so an update queued here would reach a caller after the
+        // fill that raced it, stating the order was gone when it had just been
+        // told the order filled.
+        if unknown_order {
             shared.orders.remove_order_info(oid);
         }
 
@@ -2354,6 +2385,105 @@ mod tests {
             shared.orders.drain_fills().len(), 1,
             "the replay must be booked, not dropped as a duplicate",
         );
+    }
+
+    fn cancel_reject_frame(reason_code: &str) -> std::collections::HashMap<u32, String> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(41u32, "C42".to_string()); // OrigClOrdID
+        m.insert(434u32, "1".to_string());
+        m.insert(102u32, reason_code.to_string());
+        m
+    }
+
+    fn tracked_for_cancel(context: &mut Context) {
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Buy, 100, 100 * PRICE_SCALE, b'2', b'0', 0,
+        ));
+        context.update_order_status(42, crate::types::OrderStatus::PendingCancel);
+    }
+
+    /// ibx#252: a cancel answered with UnknownOrder says the order does not
+    /// exist on the gateway's side. Forcing it back to working asserted the
+    /// opposite of the message being handled, and the engine's own view governs
+    /// subsequent cancels, modifies and reconnect bookkeeping — so a phantom
+    /// order persisted there while the cache row that would have surfaced it
+    /// was removed.
+    #[test]
+    fn an_unknown_order_rejection_retires_the_order() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        tracked_for_cancel(&mut context);
+        shared.orders.push_order_info(42, RichOrderInfo {
+            contract: api::Contract::default(),
+            order: api::Order::default(),
+            order_state: api::OrderState::default(),
+            last_exec: api::Execution::default(),
+        });
+
+        ccp.handle_cancel_reject(&cancel_reject_frame("1"), &mut context, &shared, &None);
+
+        assert!(
+            context.order(42).is_none(),
+            "the engine must not keep asserting an order the gateway says is not there",
+        );
+        assert!(
+            shared.orders.get_order_info(42).is_none(),
+            "and the cache row goes with it",
+        );
+        // The rejection itself is the report. A synthetic status update queued
+        // here would reach the caller behind a fill that raced it, because both
+        // dispatchers drain fills ahead of order updates.
+        assert!(shared.orders.drain_order_updates().is_empty());
+        assert_eq!(shared.orders.drain_cancel_rejects().len(), 1);
+    }
+
+    /// A fill that raced the rejection is recoverable, on the terms the
+    /// untracked-fill path sets (ibx#314): the execution has to carry its
+    /// contract id, because nothing else says which instrument moved, and it
+    /// must not be resend-marked, because a replayed execution for an order
+    /// this session does not track is history rather than news. An execution
+    /// that carries neither is dropped — the same as it was before this change
+    /// for any order already removed from the book.
+    #[test]
+    fn an_execution_racing_an_unknown_order_rejection_still_books() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        tracked_for_cancel(&mut context);
+
+        ccp.handle_cancel_reject(&cancel_reject_frame("1"), &mut context, &shared, &None);
+        let frame = exec_report_frame(&[
+            (39, "1"), (17, "e-1"), (150, "F"), (32, "40"), (31, "100.0"), (151, "60"),
+            (6008, "756733"), (38, "100"), (54, "1"),
+        ]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert_eq!(shared.orders.drain_fills().len(), 1, "the fill books");
+        assert_eq!(context.position(0), 40, "and the position moves");
+    }
+
+    /// Only a stated UnknownOrder retires the order. Every other stated reason
+    /// means it is still working and the cancel arrived at the wrong moment; an
+    /// absent or unparseable tag 102 states nothing at all and is synthesized
+    /// as -1, so it takes the same path rather than retiring on an absence.
+    #[test]
+    fn any_other_rejection_leaves_the_order_in_place() {
+        for code in ["0", "2", "-1", ""] {
+            let mut ccp = CcpState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            tracked_for_cancel(&mut context);
+
+            ccp.handle_cancel_reject(&cancel_reject_frame(code), &mut context, &shared, &None);
+
+            assert_eq!(
+                context.order(42).expect("still tracked").status,
+                crate::types::OrderStatus::Submitted,
+                "reason {code:?} does not say the order is gone",
+            );
+        }
     }
 
     fn exec_report_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
