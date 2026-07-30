@@ -51,9 +51,13 @@ impl EClient {
             let price_f = fill.price as f64 / PRICE_SCALE_F;
             let commission_and_fees_f = fill.commission as f64 / PRICE_SCALE_F;
             let status = if fill.remaining == 0 { "Filled" } else { "PartiallyFilled" };
-            let (perm_id, parent_id) = self.shared.orders.get_order_info(fill.order_id)
+            // A fill emits its own order_status and never reaches the branch
+            // below, so the client's record has to be preferred here too.
+            let (perm_id, engine_parent) = self.shared.orders.get_order_info(fill.order_id)
                 .map(|info| (info.order.perm_id, info.order.parent_id))
                 .unwrap_or((0, 0));
+            let parent_id = self.core.tracked_parent_id(fill.order_id)
+                .unwrap_or(engine_parent);
             wrapper.order_status(
                 fill.order_id as i64, status, fill.qty as f64, fill.remaining as f64,
                 price_f, perm_id, parent_id, price_f, 0, "", 0.0,
@@ -108,9 +112,14 @@ impl EClient {
         // Order updates → order_status
         for update in self.shared.orders.drain_order_updates() {
             let status = order_status_str(update.status);
+            // The engine reads no parent from the report, but this client
+            // placed the order and was told. Prefer what it recorded; an order
+            // it did not place keeps the engine's answer of none.
+            let parent_id = self.core.tracked_parent_id(update.order_id)
+                .unwrap_or(update.parent_id);
             wrapper.order_status(
                 update.order_id as i64, status, update.filled_qty as f64,
-                update.remaining_qty as f64, 0.0, update.perm_id, update.parent_id, 0.0, 0, "", 0.0,
+                update.remaining_qty as f64, 0.0, update.perm_id, parent_id, 0.0, 0, "", 0.0,
             );
             self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
         }
@@ -144,8 +153,9 @@ impl EClient {
                 .map(|t| (t.contract, t.order))
                 .unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
             wrapper.open_order(wi.order_id as i64, &contract, &order, &state);
+            let parent_id = self.core.tracked_parent_id(wi.order_id).unwrap_or(0);
             wrapper.order_status(
-                wi.order_id as i64, "PreSubmitted", 0.0, 0.0, 0.0, 0, 0, 0.0, 0, "", 0.0,
+                wi.order_id as i64, "PreSubmitted", 0.0, 0.0, 0.0, 0, parent_id, 0.0, 0, "", 0.0,
             );
             self.core.open_orders.lock().unwrap().remove(&wi.order_id);
         }

@@ -31,6 +31,97 @@ fn spy() -> Contract {
 //  Algo parsing
 // ═══════════════════════════════════════════════════════════════════
 
+/// Nothing on an execution report carries a parent order id, so the engine
+/// reports none. This client placed the order and was told the parent, so it
+/// can answer where the engine cannot — and an order it did not place keeps
+/// the engine's answer rather than borrowing someone else's.
+#[test]
+fn a_locally_placed_child_reports_the_parent_it_was_given() {
+    let (client, rx, shared) = test_client();
+    let child = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 110.0, tif: "DAY".into(), parent_id: 4242, ..Default::default()
+    };
+    client.place_order(9401, &spy(), &child).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 9401, instrument: 0, status: OrderStatus::Submitted,
+        filled_qty: 0, remaining_qty: 1, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let status = w.events.iter().find(|e| e.starts_with("order_status:9401:"))
+        .expect("the status was dispatched");
+    assert!(status.contains(":9401:"), "{status}");
+    assert_eq!(
+        w.parent_ids.last().copied(), Some(4242),
+        "the parent this client recorded is reported: {:?}", w.events,
+    );
+
+    // An order this client never placed keeps the engine's answer.
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 9999, instrument: 0, status: OrderStatus::Submitted,
+        filled_qty: 0, remaining_qty: 1, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    let mut w2 = RecordingWrapper::default();
+    client.process_msgs(&mut w2);
+    assert_eq!(w2.parent_ids.last().copied(), Some(0), "no parent is invented");
+}
+
+/// A fill emits its own order_status from a different branch, so the parent
+/// has to be preferred there as well. Before this it reported zero on every
+/// fill of a bracket child — the callback a caller is most likely to act on.
+#[test]
+fn a_fill_reports_the_parent_the_child_was_given() {
+    let (client, rx, shared) = test_client();
+    let child = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 110.0, tif: "DAY".into(), parent_id: 4242, ..Default::default()
+    };
+    client.place_order(9402, &spy(), &child).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    shared.orders.push_fill(Fill {
+        order_id: 9402, instrument: 0, side: Side::Sell, qty: 1, remaining: 0,
+        price: 110 * crate::types::PRICE_SCALE, commission: 0, timestamp_ns: 0,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(
+        w.parent_ids.first().copied(), Some(4242),
+        "the fill's order_status carries the recorded parent: {:?}", w.events,
+    );
+}
+
+/// The margin preview reports its own status too, and hard-coded a zero
+/// parent. A preview of a bracket child that disowns it is the same wrong
+/// answer as the other two paths gave.
+#[test]
+fn a_what_if_preview_reports_the_parent_the_child_was_given() {
+    let (client, rx, shared) = test_client();
+    let child = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 110.0, tif: "DAY".into(), parent_id: 4242, what_if: true,
+        ..Default::default()
+    };
+    client.place_order(9403, &spy(), &child).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    shared.orders.push_what_if(WhatIfResponse {
+        order_id: 9403, instrument: 0,
+        init_margin_before: 0, maint_margin_before: 0, equity_with_loan_before: 0,
+        init_margin_after: 0, maint_margin_after: 0, equity_with_loan_after: 0,
+        commission: 0,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(
+        w.parent_ids.first().copied(), Some(4242),
+        "the preview carries the recorded parent: {:?}", w.events,
+    );
+}
+
 #[test]
 fn parse_algo_vwap() {
     let params = vec![

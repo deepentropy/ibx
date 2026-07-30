@@ -220,6 +220,8 @@ pub mod tests {
     /// A Wrapper impl that records all callback invocations for testing.
     #[derive(Default)]
     pub struct RecordingWrapper {
+        /// Parent ids seen on `order_status`, in order.
+        pub parent_ids: Vec<i64>,
         pub events: Vec<String>,
     }
 
@@ -244,9 +246,10 @@ pub mod tests {
         }
         fn order_status(
             &mut self, order_id: i64, status: &str, filled: f64, remaining: f64,
-            avg_fill_price: f64, _: i64, _: i64, _: f64, _: i64, _: &str, _: f64,
+            avg_fill_price: f64, _: i64, parent_id: i64, _: f64, _: i64, _: &str, _: f64,
         ) {
             self.events.push(format!("order_status:{order_id}:{status}:{filled}:{remaining}:{avg_fill_price}"));
+            self.parent_ids.push(parent_id);
         }
         fn open_order(&mut self, order_id: i64, _contract: &Contract, _order: &Order, state: &OrderState) {
             self.events.push(format!(
