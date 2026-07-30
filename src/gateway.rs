@@ -914,6 +914,48 @@ pub struct GatewayConfig {
     pub code_provider: Option<session::CodeProvider>,
 }
 
+/// The buffer the init burst is scanned in.
+///
+/// The auth-server's logon ACK arrives DEFLATE-compressed inside one or more
+/// `8=FIXCOMP` envelopes (per ib-agent#129). The compressed body is ~30 kB on
+/// the wire but expands to ~48 kB of plaintext carrying the routing tags
+/// 6145/6171/8008, which the tag scan needs to see.
+///
+/// The inflated plaintext belongs to that scan and nowhere else. The engine is
+/// handed the burst exactly as it arrived and decompresses the same segments
+/// itself, so appending the plaintext to the engine's copy delivered every
+/// message in the burst twice from a single delivery — once from the segment,
+/// once from the appended copy (ibx#317). Takes the burst by reference so the
+/// engine's copy cannot be the one that grows.
+fn init_scan_buffer(init_data: &[u8]) -> Vec<u8> {
+    let mut scan = init_data.to_vec();
+    let mut cursor = 0usize;
+    while cursor + 12 < init_data.len() {
+        if init_data[cursor..].starts_with(b"8=FIXCOMP\x01") {
+            if let Some(total_len) = fixcomp::fixcomp_length(&init_data[cursor..]) {
+                let segment = &init_data[cursor..cursor + total_len.min(init_data.len() - cursor)];
+                let inflated = fixcomp::fixcomp_decompress(segment).unwrap_or_else(|e| {
+                    log::warn!("Init FIXCOMP segment at offset {}: dropping malformed frame: {}", cursor, e);
+                    Vec::new()
+                });
+                let inflated_bytes: usize = inflated.iter().map(|m| m.len() + 1).sum();
+                log::info!(
+                    "Init FIXCOMP segment at offset {}: {} compressed → {} inner messages, ~{} inflated bytes",
+                    cursor, total_len, inflated.len(), inflated_bytes,
+                );
+                for inner in inflated {
+                    scan.extend_from_slice(&inner);
+                    scan.push(b'\x01');
+                }
+                cursor += total_len;
+                continue;
+            }
+        }
+        cursor += 1;
+    }
+    scan
+}
+
 impl Gateway {
     /// Connect to IB: auth + logon + data farm connections.
     /// Returns Gateway + farm Connection + auth Connection + optional historical data Connection.
@@ -1405,44 +1447,10 @@ impl Gateway {
             init_data.len(), read_start.elapsed(),
         );
 
-        // The auth-server's logon ACK arrives DEFLATE-compressed inside one or
-        // more `8=FIXCOMP` envelopes (per ib-agent#129). The compressed body
-        // is ~30 kB on the wire but expands to ~48 kB plaintext containing
-        // the routing tags 6145/6171/8008. Walk the buffer, decompress every
-        // FIXCOMP segment, and concatenate the plaintext with init_data so the
-        // existing tag-scan loop below sees the inflated content.
-        let mut inflated_extra: Vec<u8> = Vec::new();
-        let mut cursor = 0usize;
-        while cursor + 12 < init_data.len() {
-            if init_data[cursor..].starts_with(b"8=FIXCOMP\x01") {
-                if let Some(total_len) = fixcomp::fixcomp_length(&init_data[cursor..]) {
-                    let segment = &init_data[cursor..cursor + total_len.min(init_data.len() - cursor)];
-                    let inflated = fixcomp::fixcomp_decompress(segment).unwrap_or_else(|e| {
-                        log::warn!("Init FIXCOMP segment at offset {}: dropping malformed frame: {}", cursor, e);
-                        Vec::new()
-                    });
-                    let inflated_bytes: usize = inflated.iter().map(|m| m.len() + 1).sum();
-                    log::info!(
-                        "Init FIXCOMP segment at offset {}: {} compressed → {} inner messages, ~{} inflated bytes",
-                        cursor, total_len, inflated.len(), inflated_bytes,
-                    );
-                    for inner in inflated {
-                        inflated_extra.extend_from_slice(&inner);
-                        inflated_extra.push(b'\x01');
-                    }
-                    cursor += total_len;
-                    continue;
-                }
-            }
-            cursor += 1;
-        }
-        if !inflated_extra.is_empty() {
-            log::info!("Inflated {} bytes of FIXCOMP content; appending to scan buffer", inflated_extra.len());
-            init_data.extend_from_slice(&inflated_extra);
-        }
+        let scan_data = init_scan_buffer(&init_data);
 
         // Scan init response for account ID and gateway-local init tags
-        let init_str = String::from_utf8_lossy(&init_data);
+        let init_str = String::from_utf8_lossy(&scan_data);
         // TEMP diagnostic (ib-agent#128 follow-up): log every part containing
         // "farm" or "hmds" so we can locate the routing tags.
         for part in init_str.split('\x01') {
@@ -1884,6 +1892,36 @@ pub use crate::config::{chrono_free_timestamp, days_to_ymd};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ibx#317: the init burst is handed to the engine still compressed, and
+    /// the engine decompresses the same segments itself. Appending the inflated
+    /// plaintext to that buffer — rather than to a copy taken for the local tag
+    /// scan — put every message in the burst in front of the engine twice from
+    /// a single delivery.
+    #[test]
+    fn the_inflated_init_content_is_scanned_but_not_handed_to_the_engine() {
+        let inner = b"8=FIX.4.2\x0135=B\x0158=ROUTING\x016145=farm-a\x0110=000\x01";
+        let mut burst = b"8=FIX.4.2\x0135=A\x01".to_vec();
+        burst.extend_from_slice(&fixcomp::fixcomp_build(inner));
+        burst.extend_from_slice(b"8=FIX.4.2\x0135=0\x01");
+
+        fn count(haystack: &[u8], needle: &[u8]) -> usize {
+            haystack.windows(needle.len()).filter(|w| *w == needle).count()
+        }
+
+        let before = count(&burst, b"58=ROUTING");
+        let scan = init_scan_buffer(&burst);
+
+        assert_eq!(
+            count(&scan, b"58=ROUTING"), before + 1,
+            "the tag scan gains exactly one inflated copy of the segment's content",
+        );
+        assert!(scan.starts_with(&burst), "and still sees everything that arrived");
+        assert_eq!(
+            count(&burst, b"58=ROUTING"), before,
+            "and the buffer the engine is handed is not the one that grew",
+        );
+    }
 
     #[test]
     fn token_short_hash_deterministic() {
