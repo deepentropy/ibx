@@ -764,6 +764,64 @@ impl ClientCore {
         self.open_orders.lock().unwrap().contains_key(&order_id)
     }
 
+    /// The order a tracked id was submitted with, if it is tracked.
+    pub fn tracked_order(&self, order_id: u64) -> Option<ApiOrder> {
+        self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.clone())
+    }
+
+    /// Why a replace cannot restate this order, or `None` if it can.
+    ///
+    /// The replace message carries the order type, the limit price and the
+    /// trigger, and nothing else — no peg offset, no trailing amount, no
+    /// execution instruction, no algo block. For an order defined by any of
+    /// those, the replace describes something other than the order being
+    /// replaced: a trailing stop arrives as a pegged order with no offset, and
+    /// the gateway rejects it, leaving the caller with no stop at all.
+    ///
+    /// The order type alone does not decide this. An adaptive or algo order is
+    /// an ordinary `LMT` that is defined by its algo tags, and an adjustable
+    /// stop is an ordinary `STP` that is defined by its conversion — both are
+    /// destroyed by a replace that states only the type.
+    pub fn replace_cannot_restate(order: &ApiOrder) -> Option<String> {
+        if !order.algo_strategy.is_empty() {
+            return Some(format!("an order running the {} algo", order.algo_strategy));
+        }
+        if !order.adjusted_order_type.is_empty() {
+            return Some(format!("an order that adjusts to {}", order.adjusted_order_type));
+        }
+        if !order.conditions.is_empty() {
+            return Some("a conditional order".to_string());
+        }
+        // These ride tags the replace does not carry either — hidden on 6135,
+        // all-or-none as an execution instruction, and the cash quantity on
+        // 5920 — so a replace states an order without them.
+        if order.hidden {
+            return Some("a hidden order".to_string());
+        }
+        if order.all_or_none {
+            return Some("an all-or-none order".to_string());
+        }
+        if order.cash_qty > 0.0 {
+            return Some("a cash-quantity order".to_string());
+        }
+        // A what-if is a margin preview, not a resting order, so there is
+        // nothing on the book for a replace to act on.
+        if order.what_if {
+            return Some("a what-if order".to_string());
+        }
+        let ty = order.order_type.to_uppercase();
+        // `LIT` is submitted as `LT` but tracked under a byte the replace
+        // renders as `K`, which is market-to-limit in this dialect — so a
+        // replace would describe a different order type entirely.
+        if matches!(
+            ty.as_str(),
+            "MKT" | "LMT" | "STP" | "STP LMT" | "MOC" | "LOC" | "MIT" | "STP PRT"
+        ) {
+            return None;
+        }
+        Some(format!("a {ty} order"))
+    }
+
     /// Track a newly placed order.
     pub fn track_order(&self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId) {
         let remaining = order.total_quantity;
