@@ -25,7 +25,9 @@ pub(crate) struct FarmState {
     /// Primary depth subscription params for reconnect: (req_id, con_id, exchange, sec_type, num_rows, is_smart_depth).
     depth_resub_info: Vec<(u32, i64, String, String, i32, bool)>,
     /// Option resub info: (instrument, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887).
-    md_resub_info: Vec<(InstrumentId, String, String, String, String, f64, String, String, i32)>,
+    /// Carries the con_id the subscription was issued under, so a reconnect
+    /// can tell a reused instrument slot from the contract it was taken for.
+    md_resub_info: Vec<(InstrumentId, i64, String, String, String, String, f64, String, String, i32)>,
     pub(crate) disconnected: bool,
     pub(crate) tick_buf: Vec<tick_decoder::RawTick>,
     pub(crate) farm_msg_buf: Vec<Vec<u8>>,
@@ -362,9 +364,13 @@ impl FarmState {
                 self.instrument_md_reqs.push((instrument, reqs));
             }
         }
-        if self.md_resub_info.iter().all(|(id, ..)| *id != instrument) {
-            self.md_resub_info.push((instrument, symbol.to_string(), exchange.to_string(), sec_type.to_string(), last_trade_date.to_string(), strike, right.to_string(), multiplier.to_string(), mode_9887));
-        }
+        // Replaces rather than skips. A slot holds one contract at a time, so an
+        // entry already under this instrument describes whatever held it before
+        // — and keeping that one meant a slot reused during an outage suppressed
+        // the record for its new contract, then had it dropped by the identity
+        // check on reconnect, leaving the live subscription unrestored.
+        self.md_resub_info.retain(|(id, ..)| *id != instrument);
+        self.md_resub_info.push((instrument, con_id, symbol.to_string(), exchange.to_string(), sec_type.to_string(), last_trade_date.to_string(), strike, right.to_string(), multiplier.to_string(), mode_9887));
 
         if let Some(conn) = farm_conn.as_mut() {
             let bid_ask_str = bid_ask_id.to_string();
@@ -462,6 +468,12 @@ impl FarmState {
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
+        // Dropped first, and unconditionally. A disconnect clears the live
+        // request list, so an unsubscribe issued while the farm is down used to
+        // return below without ever reaching this — leaving a record the
+        // reconnect would replay for a subscription the caller had cancelled.
+        self.md_resub_info.retain(|(id, ..)| *id != instrument);
+
         let reqs = match self.instrument_md_reqs.iter()
             .position(|(id, _)| *id == instrument)
         {
@@ -471,7 +483,6 @@ impl FarmState {
             }
             None => return,
         };
-        self.md_resub_info.retain(|(id, ..)| *id != instrument);
 
         let conn = match farm_conn.as_mut() {
             Some(c) => c,
@@ -914,24 +925,41 @@ impl FarmState {
         hb.pending_farm_test = None;
 
         // Snapshot active subscriptions and re-issue them on the new connection.
-        let active: Vec<(InstrumentId, i64, String, String, String, String, f64, String, String, i32)> = self.instrument_md_reqs.iter()
-            .filter_map(|(id, _)| {
-                context.market.con_id(*id).map(|con_id| {
-                    let (sym, exch, st, ltd, strike, right, mult, mode) = self.md_resub_info.iter()
-                        .find(|(iid, ..)| *iid == *id)
-                        .map(|(_, s, e, st, l, k, r, m, mode)| (s.clone(), e.clone(), st.clone(), l.clone(), *k, r.clone(), m.clone(), *mode))
-                        .unwrap_or_default();
-                    (*id, con_id, sym, exch, st, ltd, strike, right, mult, mode)
-                })
-            })
-            .collect();
+        //
+        // Driven by `md_resub_info`, which the disconnect preserves. It used to
+        // iterate `instrument_md_reqs`, which the disconnect clears — so by the
+        // time a reconnect read it the list was always empty and every farm
+        // reconnect came back with no L1 data at all, while callers still held
+        // valid instrument ids and saw quotes that never updated (ibx#368). The
+        // depth path beside this already resubscribes from its own preserved
+        // list, which is what this now matches.
         self.md_req_to_instrument.clear();
         self.instrument_md_reqs.clear();
-        let old_resub = std::mem::take(&mut self.md_resub_info);
+        let active = std::mem::take(&mut self.md_resub_info);
         for (instrument, con_id, sym, exch, st, ltd, strike, right, mult, mode) in active {
+            // The slot has to still hold the contract the subscription was taken
+            // for. Instrument ids are reused, so a slot freed and handed to
+            // another contract while the farm was down would otherwise have the
+            // old symbol replayed under it.
+            //
+            // Symbol as well as con_id, because zero is a valid con_id: a
+            // descriptive subscription carries no contract id and is identified
+            // by its fields, so two of them in the same reused slot both match
+            // on the number alone.
+            let still_ours = match con_id {
+                // A descriptive subscription carries no contract id and is
+                // identified by its fields, so the number cannot tell two of
+                // them apart in the same reused slot.
+                0 => context.market.symbol(instrument) == sym,
+                id => context.market.con_id(instrument) == Some(id),
+            };
+            if !still_ours {
+                log::info!("Farm reconnect: dropping stale resubscription for {} (con_id {}) — \
+                    instrument {} no longer holds it", sym, con_id, instrument);
+                continue;
+            }
             self.send_mktdata_subscribe(con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, mode, farm_conn, hb);
         }
-        drop(old_resub);
 
         // Re-subscribe depth subscriptions (depth_resub_info survived disconnect)
         let depth_params: Vec<_> = self.depth_resub_info.drain(..).collect();
@@ -1015,3 +1043,220 @@ impl FarmState {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn socket_pair() -> (Connection, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        // Bounded so a test that stops receiving fails rather than hanging.
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        (Connection::new_raw(stream).unwrap(), peer)
+    }
+
+    /// Zero is a valid con_id. A descriptive subscription carries no contract
+    /// id and is identified by its fields, so two of them in the same reused
+    /// slot both match on the number alone — and the old description was
+    /// replayed under the new contract, attributing its market data wrongly.
+    #[test]
+    fn a_reused_slot_without_a_con_id_is_told_apart_by_its_symbol() {
+        use std::io::Read;
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.register_instrument(0);
+        context.set_symbol(instrument, "OLD".to_string());
+
+        let (conn, mut peer) = socket_pair();
+        let mut farm_conn = Some(conn);
+        let mut buf = [0u8; 8192];
+        farm.send_mktdata_subscribe(
+            0, "OLD", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            &mut farm_conn, &mut hb,
+        );
+        let _ = peer.read(&mut buf).unwrap();
+
+        farm.handle_disconnect(&mut context, &None);
+        // The slot is reused for another contract that also has no con_id.
+        context.set_symbol(instrument, "NEW".to_string());
+
+        let (fresh, mut fresh_peer) = socket_pair();
+        farm.reconnect(fresh, &mut farm_conn, &mut context, &mut hb);
+
+        assert!(
+            fresh_peer.read(&mut buf).is_err(),
+            "the old description is not replayed under the contract that holds the slot now",
+        );
+    }
+
+    /// An unsubscribe issued while the farm is down still has to be honoured.
+    /// The disconnect clears the live request list, so the cancel returned
+    /// early without dropping the record the reconnect resubscribes from — and
+    /// the caller got back a subscription they had cancelled.
+    #[test]
+    fn an_unsubscribe_while_disconnected_is_not_replayed() {
+        use std::io::Read;
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.register_instrument(756733);
+
+        let (conn, mut peer) = socket_pair();
+        let mut farm_conn = Some(conn);
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            &mut farm_conn, &mut hb,
+        );
+        let mut buf = [0u8; 8192];
+        let _ = peer.read(&mut buf).unwrap();
+
+        farm.handle_disconnect(&mut context, &None);
+        farm.send_mktdata_unsubscribe(instrument, &mut farm_conn, &mut hb);
+        assert!(
+            farm.md_resub_info.is_empty(),
+            "a cancelled subscription is not kept for the reconnect to replay",
+        );
+
+        let (fresh, mut fresh_peer) = socket_pair();
+        farm.reconnect(fresh, &mut farm_conn, &mut context, &mut hb);
+        assert!(
+            fresh_peer.read(&mut buf).is_err(),
+            "and nothing is re-issued for it",
+        );
+    }
+
+    /// A slot reused for another contract keeps the record for the contract that
+    /// holds it now. Skipping the push when an entry already existed meant the
+    /// new subscription had no record, and the stale one was then dropped by the
+    /// identity check — leaving a live subscription unrestored.
+    #[test]
+    fn a_reused_slot_records_the_contract_that_holds_it() {
+        use std::io::Read;
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.register_instrument(756733);
+
+        let (conn, mut peer) = socket_pair();
+        let mut farm_conn = Some(conn);
+        let mut buf = [0u8; 8192];
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            &mut farm_conn, &mut hb,
+        );
+        let _ = peer.read(&mut buf).unwrap();
+
+        // The slot changes hands and is subscribed for its new contract.
+        context.market.unregister(instrument);
+        let reused = context.register_instrument(265598);
+        assert_eq!(reused, instrument);
+        farm.send_mktdata_subscribe(
+            265598, "QQQ", "SMART", "STK", "", 0.0, "", "", reused, 0,
+            &mut farm_conn, &mut hb,
+        );
+        let _ = peer.read(&mut buf).unwrap();
+
+        assert_eq!(farm.md_resub_info.len(), 1, "one record per slot");
+        assert_eq!(farm.md_resub_info[0].1, 265598, "for the contract that holds it now");
+
+        farm.handle_disconnect(&mut context, &None);
+        let (fresh, mut fresh_peer) = socket_pair();
+        farm.reconnect(fresh, &mut farm_conn, &mut context, &mut hb);
+
+        let mut got = fresh_peer.read(&mut buf).expect("the live subscription is restored");
+        while fixcomp::fixcomp_length(&buf[..got]).is_none_or(|len| got < len) {
+            let more = fresh_peer.read(&mut buf[got..]).expect("the rest of the frame");
+            assert!(more > 0, "peer closed mid-frame");
+            got += more;
+        }
+        let inner = fixcomp::fixcomp_decompress(&buf[..got]).expect("a FIXCOMP frame");
+        let sent: String = inner.iter().map(|m| String::from_utf8_lossy(m).to_string()).collect();
+        assert!(sent.contains("265598"), "for the current contract: {}", sent);
+    }
+
+    /// Instrument slots are reused. A slot freed while the farm was down and
+    /// handed to another contract must not have the old symbol replayed under
+    /// it — the identity the subscription was taken for is what decides, not
+    /// whether the slot is occupied.
+    #[test]
+    fn a_reused_instrument_slot_does_not_replay_the_old_subscription() {
+        use std::io::Read;
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.register_instrument(756733);
+
+        let (conn, mut peer) = socket_pair();
+        let mut farm_conn = Some(conn);
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            &mut farm_conn, &mut hb,
+        );
+        let mut buf = [0u8; 8192];
+        let _ = peer.read(&mut buf).unwrap();
+
+        farm.handle_disconnect(&mut context, &None);
+        // The slot now belongs to a different contract.
+        context.market.unregister(instrument);
+        let reused = context.register_instrument(265598);
+        assert_eq!(reused, instrument, "the same slot was handed out again");
+
+        let (fresh, mut fresh_peer) = socket_pair();
+        farm.reconnect(fresh, &mut farm_conn, &mut context, &mut hb);
+
+        assert!(
+            fresh_peer.read(&mut buf).is_err(),
+            "no subscription is replayed under a slot that changed hands",
+        );
+    }
+
+    /// ibx#368: the disconnect clears `instrument_md_reqs`, and the reconnect
+    /// built its resubscription list from that same collection — so the list was
+    /// always empty by the time it was read, and every farm reconnect came back
+    /// with no L1 data. Callers still held valid instrument ids and saw quotes
+    /// that never updated again.
+    #[test]
+    fn a_farm_reconnect_resubscribes_what_was_subscribed() {
+        use std::io::Read;
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.register_instrument(756733);
+
+        let (conn, mut peer) = socket_pair();
+        let mut farm_conn = Some(conn);
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            &mut farm_conn, &mut hb,
+        );
+        let mut buf = [0u8; 8192];
+        let _ = peer.read(&mut buf).unwrap();
+        assert!(!farm.instrument_md_reqs.is_empty(), "subscribed");
+
+        farm.handle_disconnect(&mut context, &None);
+        assert!(farm.instrument_md_reqs.is_empty(), "the disconnect clears the live list");
+        assert!(!farm.md_resub_info.is_empty(), "and preserves what to resubscribe from");
+
+        let (fresh, mut fresh_peer) = socket_pair();
+        farm.reconnect(fresh, &mut farm_conn, &mut context, &mut hb);
+
+        // TCP has no message boundaries, so read until the frame's declared
+        // length is present rather than trusting one read.
+        let mut got = fresh_peer.read(&mut buf).expect("a subscription is re-issued on the new connection");
+        while fixcomp::fixcomp_length(&buf[..got]).is_none_or(|len| got < len) {
+            let more = fresh_peer.read(&mut buf[got..]).expect("the rest of the frame");
+            assert!(more > 0, "peer closed mid-frame");
+            got += more;
+        }
+        let inner = fixcomp::fixcomp_decompress(&buf[..got]).expect("a FIXCOMP frame was sent");
+        let sent: String = inner.iter().map(|m| String::from_utf8_lossy(m).to_string()).collect();
+        assert!(sent.contains("756733"), "the subscription is re-issued: {}", sent);
+        assert!(
+            !farm.instrument_md_reqs.is_empty(),
+            "and the instrument is tracked as subscribed again",
+        );
+    }
+}
