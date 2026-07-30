@@ -279,11 +279,17 @@ impl Connection {
     /// account push — was applied exactly like an authentic one. Returning no
     /// message is the same information in a form a caller cannot ignore.
     ///
-    /// A failed frame also leaves the IV alone. Advancing it meant one bad
-    /// frame desynchronised the chain permanently, and since undistortion XORs
-    /// byte positions from that IV, every genuine frame after it was silently
-    /// corrupted before parsing. That part is a plain robustness bug: it needs
-    /// no adversary, only one damaged frame.
+    /// A failed frame also leaves the IV alone, because the IV it would advance
+    /// to is derived from the body the signature just failed to vouch for.
+    /// Advancing would let one injected frame steer the receiver's chain and
+    /// drop every genuine frame after it.
+    ///
+    /// This costs the case where a genuine frame is damaged in exactly its
+    /// signature: its body is intact, so the derived IV would have been the
+    /// sender's true next one, and the connection is left unable to verify what
+    /// follows until it reconnects. That case cannot be told apart from an
+    /// injection here, and the reasoning for preferring this side is set out
+    /// where the decision is made, below.
     pub fn unsign(&mut self, msg: &[u8]) -> Option<Vec<u8>> {
         if self.read_key.is_empty() {
             return Some(msg.to_vec()); // no signing configured
@@ -781,6 +787,22 @@ mod tests {
 
         let mut conn = signed_conn(b"0123456789abcdef", &vec![0u8; 16]);
         assert_eq!(conn.unsign(&plain), Some(plain), "no 8349 tag on the frame");
+    }
+
+    /// The same rule at the pre-check. An *unsigned* frame quoting the tag in a
+    /// value must not be routed into verification at all: it carries no
+    /// signature field, so it would be judged invalid and dropped. The signed
+    /// case below cannot catch this — its pre-check passes under either needle.
+    #[test]
+    fn an_unsigned_frame_quoting_the_signature_tag_is_not_verified() {
+        let quoting = fix_build(&[(35, "8"), (58, "rejected: 8349= missing")], 1);
+
+        let mut conn = signed_conn(b"0123456789abcdef", &vec![0u8; 16]);
+        assert_eq!(
+            conn.unsign(&quoting),
+            Some(quoting.clone()),
+            "the tag text in a value is not a signature field",
+        );
     }
 
     /// A signature is a field, not a substring. A legitimate signed frame whose
