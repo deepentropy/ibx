@@ -283,14 +283,15 @@ pub fn farm_logon_exchange(
             // Check for HMAC signature → unsign
             let parsed_msg = if has_sig {
                 let (unsigned, new_iv, valid) = fix::fix_unsign(&msg, read_mac_key, &read_iv);
-                read_iv = new_iv;
                 if !valid {
                     // Same rule as `Connection::unsign`: a frame that does not
-                    // verify is not parsed, but the chain still advances — the
-                    // next IV comes from the body rather than the signature.
+                    // verify is neither parsed nor allowed to move the chain,
+                    // since the IV it would move to is derived from a body the
+                    // MAC just declined to vouch for.
                     log::warn!("auth frame failed signature verification — dropped");
                     continue;
                 }
+                read_iv = new_iv;
                 unsigned
             } else {
                 msg.clone()

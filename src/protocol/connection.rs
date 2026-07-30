@@ -298,17 +298,26 @@ impl Connection {
             return Some(msg.to_vec());
         }
         let (undistorted, new_iv, valid) = fix::fix_unsign(msg, &self.read_key, &self.read_iv);
-        // The chain advances either way. The next IV is derived from the body,
-        // not from the signature, so when only the signature is damaged this is
-        // the sender's true next IV and holding it back would desynchronise the
-        // next authentic frame — causing the poisoning it was meant to prevent.
-        // When the body is damaged the derived IV is wrong, but so is the one
-        // being held, and neither recovers.
-        self.read_iv = new_iv;
         if !valid {
+            // The chain is not advanced. `new_iv` is derived from the received
+            // body, and a failed MAC is exactly the statement that this body
+            // cannot be vouched for — so advancing would let one injected frame
+            // steer the receiver's chain state and drop every genuine frame
+            // after it.
+            //
+            // The cost is a genuine frame whose signature alone was damaged in
+            // transit: its body is intact, so `new_iv` would have been the
+            // sender's true next one, and holding it back leaves the connection
+            // stuck. That case is indistinguishable from an injection at this
+            // point, and a channel where a MAC failure has occurred is not one
+            // whose state can be inferred either way. Failing closed on
+            // unauthenticated input is the side to err on; the connection
+            // wanting a teardown rather than a guess is the real answer, and is
+            // a larger change than this.
             log::warn!("inbound frame failed signature verification — dropped");
             return None;
         }
+        self.read_iv = new_iv;
         Some(undistorted)
     }
 
@@ -722,32 +731,38 @@ mod tests {
         assert!(conn.unsign(&tampered).is_none(), "a tampered frame is dropped");
     }
 
-    /// The chain has to survive a frame that is dropped. The next IV is derived
-    /// from the body rather than the signature, so a frame whose signature text
-    /// alone is damaged still yields the sender's true next IV — and withholding
-    /// it would desynchronise the following authentic frame, causing exactly the
-    /// poisoning that withholding was meant to prevent.
+    /// A frame that fails is dropped without moving the chain, so a genuine
+    /// frame after it still verifies. The batch is the case that matters —
+    /// good, bad, good — because an injected frame between two authentic ones
+    /// is what advancing on unauthenticated input would let poison the rest.
     #[test]
-    fn a_dropped_frame_does_not_poison_the_next_authentic_one() {
+    fn an_injected_frame_does_not_poison_the_authentic_ones_around_it() {
         let key = b"0123456789abcdef";
         let iv0 = vec![0u8; 16];
 
-        // Two frames as a sender would produce them: the second signed from the
-        // IV the first chained to.
-        let (mut first, iv1) =
+        // Two frames as a sender produces them: the second signed from the IV
+        // the first chained to.
+        let (first, iv1) =
             crate::protocol::fix::fix_sign(&fix_build(&[(35, "8")], 1), key, &iv0);
         let (second, _) =
             crate::protocol::fix::fix_sign(&fix_build(&[(35, "8")], 2), key, &iv1);
 
-        // Damage only the transmitted signature, leaving the body intact.
-        let at = find_subsequence(&first, b"\x018349=").expect("signed") + 6;
-        first[at] = if first[at] == b'0' { b'1' } else { b'0' };
+        // Something else entirely, arriving between them.
+        let (mut injected, _) =
+            crate::protocol::fix::fix_sign(&fix_build(&[(35, "8"), (58, "x")], 9), b"wrongkey00000000", &iv1);
+        let at = find_subsequence(&injected, b"\x018349=").expect("signed") + 6;
+        injected[at] = if injected[at] == b'0' { b'1' } else { b'0' };
 
         let mut conn = signed_conn(key, &iv0);
-        assert!(conn.unsign(&first).is_none(), "the damaged frame is dropped");
+        assert!(conn.unsign(&first).is_some(), "the first authentic frame");
+        assert_eq!(conn.read_iv, iv1, "and it advanced the chain");
+
+        assert!(conn.unsign(&injected).is_none(), "the injected frame is dropped");
+        assert_eq!(conn.read_iv, iv1, "without moving the chain");
+
         assert!(
             conn.unsign(&second).is_some(),
-            "and the next authentic frame still verifies",
+            "so the authentic frame after it still verifies",
         );
     }
 
