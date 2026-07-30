@@ -27,7 +27,7 @@ const CCP_HEARTBEAT_SECS: u64 = crate::config::CCP_HEARTBEAT;
 const FARM_HEARTBEAT_SECS: u64 = crate::config::FARM_HEARTBEAT;
 /// Liveness (ibx#219), aligned with the gateway's transport thresholds:
 /// send a test request when nothing has been received for this long...
-const LIVENESS_TEST_SECS: u64 = 15;
+pub(crate) const LIVENESS_TEST_SECS: u64 = 15;
 /// ...and declare the connection dead when nothing has been received for
 /// this long. The old scheme declared death at ~21s — racing the server's
 /// own ~35s reset and losing to transient stalls the server tolerates.

@@ -45,6 +45,16 @@ impl Read for Stream {
     }
 }
 
+impl Stream {
+    /// The underlying socket, whichever transport this is.
+    fn socket(&self) -> &TcpStream {
+        match self {
+            Self::Tls(s) => s.get_ref(),
+            Self::Raw(s) => s,
+        }
+    }
+}
+
 impl Write for Stream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
@@ -61,6 +71,51 @@ impl Write for Stream {
     }
 }
 
+/// How long a write may make no progress at all before it gives up. Every send
+/// goes out on the one hot-loop thread, so an unbounded write stops that thread
+/// evaluating liveness, servicing shutdown, or polling a reconnect — and the
+/// heartbeat that exists to detect a wedged peer is itself a write, so the
+/// detector cannot run in exactly the case it was built for (ibx#254).
+///
+/// This bounds a single write syscall, not a whole frame: a peer draining a
+/// trickle keeps resetting it and a large frame can take proportionally longer.
+/// The case this exists for is the peer that makes no progress whatsoever,
+/// which trips the first timeout. Kept under the liveness probe interval so a
+/// stalled send cannot hold the loop past its own cadence.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The timeouts every connection runs with, in one place so the two
+/// constructors cannot drift apart — a write bound present on one transport and
+/// missing on another is invisible to a test that probes either one.
+fn configure_socket(stream: &TcpStream) -> io::Result<()> {
+    stream.set_read_timeout(Some(std::time::Duration::from_millis(1)))?;
+    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    Ok(())
+}
+
+/// Whether a write that stopped with `err` after `written` bytes leaves the
+/// transport usable. `tls` is whether the bytes went through a TLS layer,
+/// which cannot report how much of the frame actually reached the socket.
+///
+/// Outbound frames are HMAC-chained, so a frame that went out in part is
+/// unrecoverable: the peer has a prefix it cannot verify and every later frame
+/// is signed from state it does not share. A write that made no progress at all
+/// put nothing on the wire — the chain is intact, the frame can be sent again,
+/// and a peer that is merely slow does not cost the transport. Only the
+/// stalled-forever case reaches the liveness deadlines, which is where it
+/// belongs.
+fn write_is_recoverable(err: &io::Error, written: usize, tls: bool) -> bool {
+    // Never on TLS. The count here is plaintext accepted by the TLS layer, not
+    // bytes on the socket: a stalled write can report none accepted while a
+    // partial record has already gone to the peer. Retrying then puts a second
+    // frame behind half of the first, and the sequence and signature state
+    // would be committed for a frame the peer never receives whole — an order
+    // reported as failed here could still arrive at the gateway.
+    !tls
+        && written == 0
+        && matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+}
+
 /// Per-connection state for an auth or data socket.
 pub struct Connection {
     stream: Stream,
@@ -75,46 +130,48 @@ pub struct Connection {
     pub read_key: Vec<u8>,
     /// IV for verifying inbound messages (chains across messages).
     pub read_iv: Vec<u8>,
+    /// Set once a write has failed. A timed-out or errored `write_all` may
+    /// have put part of a frame on the wire, and outbound frames are
+    /// HMAC-chained, so anything sent afterwards would be signed from state
+    /// the peer does not share. There is no resuming mid-frame: the transport
+    /// is finished and the reconnect path takes it from here.
+    write_failed: bool,
 }
 
 impl Connection {
     /// Create a new connection from an already-established TLS stream.
     ///
-    /// Uses a blocking socket with a 1ms read timeout — mirrors `new_raw`.
-    /// Non-blocking writes can return `WouldBlock` after a partial send,
-    /// which poisons the seq/sign_iv chain that already advanced for the
-    /// not-yet-on-the-wire message. Blocking writes either commit fully
-    /// or surface a hard error, which the hot-loop reconnect path handles.
+    /// Uses a blocking socket with a 1ms read timeout and a bounded write —
+    /// mirrors `new_raw`, through the same `configure_socket`. Non-blocking
+    /// writes can return `WouldBlock` after a partial send, which poisons the
+    /// seq/sign_iv chain that already advanced for the not-yet-on-the-wire
+    /// message. A bounded blocking write either commits the frame in full or
+    /// reports how far it got, which `write_frame` acts on.
     pub fn new(stream: TlsStream<TcpStream>) -> io::Result<Self> {
-        stream.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(1)))?;
-        Ok(Self {
-            stream: Stream::Tls(stream),
-            buf: Vec::with_capacity(RECV_BUF_SIZE),
-            seq: 0,
-            sign_key: Vec::new(),
-            sign_iv: Vec::new(),
-            read_key: Vec::new(),
-            read_iv: Vec::new(),
-        })
+        Self::from_stream(Stream::Tls(stream))
     }
 
     /// Create a new connection from a raw TCP stream (for farm connections).
-    /// Sets the stream to non-blocking mode and enables TCP_NODELAY.
+    /// Enables TCP_NODELAY.
     pub fn new_raw(stream: TcpStream) -> io::Result<Self> {
         stream.set_nodelay(true)?;
-        // Use blocking socket with 1ms read timeout instead of non-blocking.
-        // Non-blocking write_all can silently fail (WouldBlock), causing HMAC-signed
-        // messages to never reach the farm — the sign_iv still advances, permanently
-        // breaking the signing chain.
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(1)))?;
+        Self::from_stream(Stream::Raw(stream))
+    }
+
+    /// The one place a connection is built, so a transport cannot be given a
+    /// different set of socket timeouts from the others by being constructed
+    /// down a different path.
+    fn from_stream(stream: Stream) -> io::Result<Self> {
+        configure_socket(stream.socket())?;
         Ok(Self {
-            stream: Stream::Raw(stream),
+            stream,
             buf: Vec::with_capacity(RECV_BUF_SIZE),
             seq: 0,
             sign_key: Vec::new(),
             sign_iv: Vec::new(),
             read_key: Vec::new(),
             read_iv: Vec::new(),
+            write_failed: false,
         })
     }
 
@@ -286,10 +343,56 @@ impl Connection {
         (undistorted, valid)
     }
 
+    /// Write a whole frame, or give up on the transport.
+    ///
+    /// Tracks how much of the frame reached the socket, because that is what
+    /// separates a transport that can carry on from one that cannot: a frame
+    /// sent in part leaves the signature chain desynchronised and the first
+    /// such failure is final, while a write that moved nothing can be retried
+    /// (ibx#254). Once final, every later send fails fast rather than putting
+    /// more frames on a wire the peer can no longer verify.
+    fn write_frame(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.write_failed {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "connection abandoned after an incomplete write",
+            ));
+        }
+        let mut written = 0;
+        while written < bytes.len() {
+            match self.stream.write(&bytes[written..]) {
+                Ok(0) => {
+                    self.write_failed = true;
+                    log::warn!("write returned no progress — abandoning the transport");
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "peer accepted no more of the frame",
+                    ));
+                }
+                Ok(n) => written += n,
+                // A signal is not the peer's doing and costs nothing to retry.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    if write_is_recoverable(&e, written, matches!(self.stream, Stream::Tls(_))) {
+                        log::warn!("write made no progress ({e}) — frame not sent");
+                        return Err(e);
+                    }
+                    self.write_failed = true;
+                    log::warn!("write failed after {written} of {} bytes ({e}) \
+                        — abandoning the transport", bytes.len());
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Build a FIX message, sign it, and send it. Increments seq and chains sign IV.
     ///
-    /// State (seq, sign_iv) is committed only after `write_all` returns Ok,
-    /// so a write error leaves the connection retryable rather than poisoned.
+    /// State (seq, sign_iv) is committed only after the frame is fully written.
+    /// A write that moved nothing leaves the connection usable and the frame
+    /// unsent; one that moved part of a frame finishes the transport, because
+    /// the chain the peer verifies against has moved and cannot be rejoined.
     pub fn send_fix(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
         let next_seq = self.seq + 1;
         let msg = fix::fix_build(fields, next_seq);
@@ -302,7 +405,7 @@ impl Connection {
             let (signed, iv) = fix::fix_sign(&msg, &self.sign_key, &self.sign_iv);
             (signed, Some(iv))
         };
-        self.stream.write_all(&to_send)?;
+        self.write_frame(&to_send)?;
         self.seq = next_seq;
         if let Some(iv) = next_iv {
             self.sign_iv = iv;
@@ -326,7 +429,7 @@ impl Connection {
             let (signed, iv) = fix::fix_sign(&wrapped, &self.sign_key, &self.sign_iv);
             (signed, Some(iv))
         };
-        self.stream.write_all(&to_send)?;
+        self.write_frame(&to_send)?;
         if let Some(iv) = next_iv {
             self.sign_iv = iv;
         }
@@ -335,7 +438,7 @@ impl Connection {
 
     /// Send raw bytes (pre-built message).
     pub fn send_raw(&mut self, data: &[u8]) -> io::Result<()> {
-        self.stream.write_all(data)?;
+        self.write_frame(data)?;
         Ok(())
     }
 
@@ -493,6 +596,7 @@ mod tests {
             sign_iv: Vec::new(),
             read_key: Vec::new(),
             read_iv: Vec::new(),
+            write_failed: false,
         }
     }
 
@@ -663,5 +767,113 @@ mod tests {
     fn find_subsequence_empty_needle() {
         // windows(0) panics, so empty needle panics
         find_subsequence(b"hello", b"");
+    }
+
+    /// ibx#254: the hot loop is one thread driving three transports, and every
+    /// send went out through an unbounded `write_all`. A peer that stops
+    /// draining without closing blocks that thread — so liveness cannot be
+    /// evaluated, shutdown cannot be serviced, and the reconnect cannot be
+    /// polled. The heartbeat that exists to detect a wedged peer is itself a
+    /// write, so the detector cannot run in exactly the case it was built for.
+    #[test]
+    fn a_write_timeout_is_configured_on_both_constructors() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+
+        let probe = stream.try_clone().unwrap();
+        let mut conn = Connection::new_raw(stream).unwrap();
+        assert_eq!(
+            probe.write_timeout().unwrap(), Some(WRITE_TIMEOUT),
+            "a send must be bounded, or one stalled peer stops the whole loop",
+        );
+        assert_eq!(
+            probe.read_timeout().unwrap(), Some(std::time::Duration::from_millis(1)),
+            "and the read cadence is unchanged",
+        );
+        assert!(conn.send_raw(b"x").is_ok(), "and a fresh connection writes");
+
+        // The TLS constructor cannot be built without a real handshake, so it
+        // is held to the same rule by construction: both constructors reach the
+        // socket through `from_stream`, so there is one place the bound can be
+        // dropped from and this probe covers it.
+    }
+
+    /// The first write failure is final. A bounded write can time out after
+    /// part of a frame is already on the wire, and outbound frames are
+    /// HMAC-chained — so anything sent afterwards is signed from state the peer
+    /// does not share. There is no resuming mid-frame.
+    #[test]
+    fn a_failed_write_finishes_the_transport() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        let mut conn = Connection::new_raw(stream).unwrap();
+
+        // Peer gone: the write fails rather than blocking.
+        drop(peer);
+        let big = vec![0u8; 1 << 20];
+        let first = conn.send_raw(&big);
+        if first.is_ok() {
+            // The kernel buffered it; a second one past the buffer will not be.
+            let _ = conn.send_raw(&big);
+            let _ = conn.send_raw(&big);
+        }
+
+
+        // And every later send is refused by this connection rather than
+        // attempted on the socket. Asserted on the message, not the kind: a
+        // dead peer produces a broken pipe of its own, so only our own wording
+        // distinguishes "refused without trying" from "tried and failed".
+        for label in ["send_raw", "send_fix", "send_fixcomp"] {
+            let err = match label {
+                "send_raw" => conn.send_raw(b"x").unwrap_err(),
+                "send_fix" => conn.send_fix(&[(35, "0")]).unwrap_err(),
+                _ => conn.send_fixcomp(&[(35, "0")]).unwrap_err(),
+            };
+            assert!(
+                err.to_string().contains("abandoned after an incomplete write"),
+                "{label} must be refused by the connection, not attempted: {err}",
+            );
+        }
+
+        // The sequence number did not advance for a frame that never went out.
+        assert_eq!(conn.seq, 0, "a refused send does not consume a sequence number");
+    }
+
+    /// What separates a transport that can carry on from one that cannot. A
+    /// frame that went out in part left the peer a prefix it cannot verify and
+    /// the chain cannot be rejoined; a write that moved nothing put nothing on
+    /// the wire, so a merely slow peer does not cost the transport — that case
+    /// belongs to the liveness deadlines, which is where the stalled-forever
+    /// peer is caught.
+    #[test]
+    fn only_a_frame_that_partly_went_out_finishes_the_transport() {
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            let e = io::Error::new(kind, "stalled");
+            assert!(write_is_recoverable(&e, 0, false), "{kind:?} with nothing sent is retryable");
+            assert!(!write_is_recoverable(&e, 1, false), "{kind:?} mid-frame is not");
+            // The plaintext count is not a byte count on TLS: none accepted can
+            // still mean a partial record reached the peer, so there is no
+            // stall it is safe to retry.
+            assert!(!write_is_recoverable(&e, 0, true), "{kind:?} on TLS is never retryable");
+        }
+        for kind in [io::ErrorKind::BrokenPipe, io::ErrorKind::ConnectionReset] {
+            let e = io::Error::new(kind, "gone");
+            assert!(!write_is_recoverable(&e, 0, false), "{kind:?} is not a stall");
+        }
+    }
+
+    /// The bound has to stay under the interval at which the loop probes a
+    /// silent peer, or a stalled send holds the thread past the point the
+    /// liveness machinery was supposed to act.
+    #[test]
+    fn the_write_bound_stays_within_the_liveness_cadence() {
+        assert!(
+            WRITE_TIMEOUT < std::time::Duration::from_secs(
+                crate::engine::hot_loop::LIVENESS_TEST_SECS),
+            "a write may not outlast the liveness probe interval",
+        );
+        assert!(WRITE_TIMEOUT > std::time::Duration::ZERO);
     }
 }

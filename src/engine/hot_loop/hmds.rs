@@ -775,13 +775,16 @@ impl HmdsState {
                 (6118, &xml),
             ], 0);
             let compressed = fixcomp::fixcomp_build(&raw);
-            let to_send = if !sign_key.is_empty() {
-                let mut iv_guard = sign_iv.lock().unwrap();
+            // Held across the send: the next IV is derived from this frame, so
+            // committing it for a frame the transport refuses or fails to put
+            // on the wire desynchronises the chain the peer verifies against,
+            // and the next authentic frame no longer matches (ibx#254).
+            let mut iv_guard = sign_iv.lock().unwrap();
+            let (to_send, next_iv) = if !sign_key.is_empty() {
                 let (signed, new_iv) = fix::fix_sign(&compressed, sign_key, &iv_guard);
-                *iv_guard = new_iv;
-                signed
+                (signed, Some(new_iv))
             } else {
-                compressed
+                (compressed, None)
             };
             // Debug: dump first 80 bytes hex for wire comparison
             let hex: String = to_send.iter().take(80).map(|b| format!("{:02x}", b)).collect();
@@ -791,8 +794,27 @@ impl HmdsState {
                 let full_hex: String = to_send.iter().map(|b| format!("{:02x}", b)).collect();
                 let _ = writeln!(f, "LEN={} HEX={}", to_send.len(), full_hex);
             }
-            let _ = conn.send_raw(&to_send);
+            if let Err(e) = conn.send_raw(&to_send) {
+                // Reported as sent regardless, and the waiter registered below
+                // is exempt from the idle sweep because a keep-up-to-date
+                // request is a subscription rather than a single answer — so a
+                // refused send left a request nothing would ever answer and
+                // nothing would ever expire (ibx#254).
+                log::warn!("keepUpToDate req_id={} not sent: {}", req_id, e);
+                super::push_hmds_error(shared, req_id, e.to_string(), true);
+                return false;
+            }
+            if let Some(iv) = next_iv {
+                *iv_guard = iv;
+            }
             hb.last_ccp_sent = Instant::now();
+        } else {
+            // Reported the same way a failed send is: the caller is waiting on a
+            // callback, and a request that never went out has no answer coming.
+            let e = "no CCP transport".to_string();
+            log::warn!("keepUpToDate req_id={} not sent: {}", req_id, e);
+            super::push_hmds_error(shared, req_id, e, true);
+            return false;
         }
         self.pending_historical.push((query_id, req_id, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
         true
@@ -1115,6 +1137,45 @@ impl HmdsState {
 
 #[cfg(test)]
 mod tests {
+    /// ibx#254: a keep-up-to-date request whose send is refused was still
+    /// registered as pending and reported to the caller as sent. That waiter is
+    /// exempt from the idle sweep — a subscription has no single answer to time
+    /// out — so nothing would ever answer it and nothing would ever expire it.
+    #[test]
+    fn a_keep_up_to_date_request_that_was_not_sent_is_not_registered() {
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let iv = std::sync::Mutex::new(Vec::new());
+
+        // A transport whose peer is gone, so the send fails rather than the
+        // request being rejected by an earlier guard. "5 mins" is a bar size
+        // keep-up-to-date supports, so the call reaches the send.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        drop(peer);
+        let mut conn = Some(crate::protocol::connection::Connection::new_raw(stream).unwrap());
+
+        let mut hmds = HmdsState::new();
+        let mut sent = true;
+        // A dead peer may buffer the first write; keep going until the socket
+        // reports the failure the caller has to be told about.
+        for _ in 0..8 {
+            sent = hmds.send_historical_request_via_ccp(
+                7, 756733, "", "1 D", "5 mins", "TRADES", true, "SPY",
+                &mut conn, &mut hb, &[], &iv, &shared,
+            );
+            if !sent { break; }
+            hmds.pending_historical.clear();
+        }
+
+        assert!(!sent, "a refused send is not reported as sent");
+        assert!(
+            hmds.pending_historical.is_empty(),
+            "and nothing is left waiting for an answer that cannot come",
+        );
+    }
+
     use super::*;
 
     fn make_query_error_msg(query_id: &str, error: &str) -> Vec<u8> {
