@@ -636,11 +636,20 @@ pub struct IbKeyChallenge {
 ///
 /// The callback runs on its own thread and may block for as long as the
 /// operator needs — the gate keeps answering the server's keepalive probes
-/// meanwhile. The code is submitted on the first inbound message after the
-/// callback returns, so submission trails entry by up to one probe interval
-/// for as long as the server keeps probing. The thread is not cancelled if
-/// the gate returns early, so a callback holding a shared resource (stdin,
-/// say) keeps holding it until it returns on its own.
+/// meanwhile.
+///
+/// A callback that returns promptly has its code submitted immediately: the
+/// gate waits inline for a short grace period first, so an unattended source
+/// does not have to wait for a probe. Past that, the code goes out on the
+/// first inbound message after the callback returns, so submission trails by
+/// up to one probe interval for as long as the server keeps probing.
+///
+/// A code that resolves after the login's deadline is not submitted at all.
+/// Codes are single use, and the login is already lost by then.
+///
+/// The thread is not cancelled if the gate returns early, so a callback
+/// holding a shared resource (stdin, say) keeps holding it until it returns on
+/// its own.
 pub type CodeProvider = std::sync::Arc<
     dyn Fn(IbKeyChallenge) -> io::Result<String> + Send + Sync,
 >;
@@ -808,8 +817,14 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                         // falls through to the probe-driven path below.
                         match rx.recv_timeout(IB_KEY_PROVIDER_FAST_PATH_GRACE) {
                             Ok(result) => {
-                                submit_swcr_code(stream, &result?)?;
-                                code_submitted = true;
+                                // Same rule as the polled path below: the grace
+                                // period can straddle the deadline, and a code
+                                // is single use — submitting one on a login the
+                                // next loop abandons spends it for nothing.
+                                if Instant::now() < deadline {
+                                    submit_swcr_code(stream, &result?)?;
+                                    code_submitted = true;
+                                }
                             }
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                                 pending_code = Some(rx);
@@ -1934,6 +1949,70 @@ mod tests {
             "expected C/R rejection message; got {}", err);
         assert!(stream.written.windows(submission.len()).any(|f| f == submission),
             "the rejected code must have been submitted as state=3");
+    }
+
+    /// A code is single use. If the deadline passes while the provider is being
+    /// consulted, the login is already lost — submitting the code spends it on
+    /// a connection the next loop abandons, and the operator's next attempt
+    /// needs a fresh one. Both routes to the submission are pinned: the inline
+    /// grace period, which can straddle the deadline, and the polled path.
+    #[test]
+    fn ib_key_2fa_cr_does_not_burn_a_code_after_the_deadline() {
+        const CODE: &str = "12345678";
+        let challenge = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 2, "user", &[
+            "e7429fde5b4c26f81fff956be6749908a8653558e7429fde5b4c26f81fff956b",
+            "399 830",
+            "https://x.example/u",
+        ]);
+        let submission = frame_xyz(&xyz::xyz_build_swcr_token_code_submission(CODE));
+
+        // Fast path: the provider resolves inside the grace period, but the
+        // deadline has already passed by the time it does.
+        let mut stream = ProbingGateway::new(
+            frame_xyz(&challenge), submission.clone(), Vec::new(),
+        );
+        let provider: CodeProvider = std::sync::Arc::new(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            Ok(CODE.to_string())
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+        let err = do_ib_key_2fa(&mut stream, "2a", deadline, Some(&provider)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "got {err}");
+        assert!(
+            !stream.written.windows(submission.len()).any(|f| f == submission),
+            "no code may reach the wire once the login is lost",
+        );
+
+        // Polled path: the provider outlasts the inline grace period, so the
+        // code arrives on a later loop. The guard there needs its own case —
+        // the fast-path test above never reaches it.
+        let mut stream = ProbingGateway::new(
+            frame_xyz(&challenge), submission.clone(), Vec::new(),
+        );
+        let provider: CodeProvider = std::sync::Arc::new(|_| {
+            std::thread::sleep(IB_KEY_PROVIDER_FAST_PATH_GRACE + std::time::Duration::from_millis(200));
+            Ok(CODE.to_string())
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+        let err = do_ib_key_2fa(&mut stream, "2a", deadline, Some(&provider)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "got {err}");
+        assert!(
+            !stream.written.windows(submission.len()).any(|f| f == submission),
+            "a code that arrives after the deadline is not sent either",
+        );
+
+        // And the same code does reach the wire when the deadline holds, so the
+        // assertions above are not passing for want of a working path.
+        let mut stream = ProbingGateway::new(
+            frame_xyz(&challenge), submission.clone(),
+            frame_xyz(&xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "user", &["PASSED"])),
+        );
+        let provider: CodeProvider = std::sync::Arc::new(|_| Ok(CODE.to_string()));
+        let _ = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider));
+        assert!(
+            stream.written.windows(submission.len()).any(|f| f == submission),
+            "the positive control: a live deadline still submits",
+        );
     }
 
     #[test]
