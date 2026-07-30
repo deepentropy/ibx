@@ -30,6 +30,20 @@ impl<'a> BitReader<'a> {
         self.total_bits.saturating_sub(self.bit_pos)
     }
 
+    /// Advance past `n` bits without decoding them. Used to step over a field
+    /// this decoder cannot represent, so the rest of the message still decodes.
+    ///
+    /// Compares against `remaining`, which saturates, so a width read off the
+    /// wire cannot overflow the position.
+    #[inline]
+    fn skip(&mut self, n: usize) -> bool {
+        if n > self.remaining() {
+            return false;
+        }
+        self.bit_pos += n;
+        true
+    }
+
     /// Read n bits as unsigned integer (MSB first).
     /// Uses word-aligned reads for performance (1-3 ops instead of n iterations).
     #[inline]
@@ -252,6 +266,19 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
             let total_value_bits = (8 * byte_width) as usize;
             if reader.remaining() < total_value_bits {
                 return;
+            }
+
+            // An extended entry states its width in a full byte, so it can name
+            // a value wider than this decoder reads. That entry is lost either
+            // way; abandoning the message threw away every tick after it as
+            // well, including the other server tags in the same 35=P (ibx#302).
+            // Stepping over it keeps the rest.
+            if total_value_bits > 64 {
+                log::debug!("35=P: skipping a {}-byte tick value", byte_width);
+                if !reader.skip(total_value_bits) {
+                    return;
+                }
+                continue;
             }
 
             let sign = match reader.read_unsigned(1) {
@@ -659,9 +686,14 @@ mod tests {
             Self { bits: Vec::new() }
         }
 
-        /// Push `n` bits from the MSB side of `val`.
+        /// Push `n` bits from the MSB side of `val`. Widths above 64 are
+        /// zero-filled on the left, so a field wider than a `u64` can be built
+        /// — which is the point of the extended entries this exercises.
         fn push(&mut self, val: u64, n: usize) {
-            for i in (0..n).rev() {
+            for _ in 64..n {
+                self.bits.push(0);
+            }
+            for i in (0..n.min(64)).rev() {
                 self.bits.push(((val >> i) & 1) as u8);
             }
         }
@@ -724,6 +756,54 @@ mod tests {
             body.extend_from_slice(&payload);
             body
         }
+    }
+
+    /// The width comes off the wire, so the step has to be bounded by what is
+    /// actually left rather than trusted. An unchecked addition wraps in
+    /// release and rewinds the reader instead of stopping it.
+    #[test]
+    fn skipping_past_the_end_refuses_rather_than_wrapping() {
+        let mut reader = BitReader::new(&[0xFF, 0xFF], 16);
+        assert!(reader.read_unsigned(1).is_some());
+        assert!(!reader.skip(usize::MAX), "an absurd width is refused");
+        assert!(!reader.skip(16), "and so is one just past the end");
+        assert_eq!(reader.remaining(), 15, "the position is untouched by either");
+        assert!(reader.skip(15), "while a width that fits still advances");
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    /// ibx#302: an extended entry states its width in a full byte, so it can
+    /// name a value wider than this decoder reads. That entry is lost either
+    /// way — but abandoning the message threw away every tick after it too,
+    /// including the other server tags in the same 35=P. A quote update sitting
+    /// behind one simply never arrived.
+    #[test]
+    fn a_tick_too_wide_to_read_does_not_discard_the_rest_of_the_message() {
+        let mut b = PayloadBuilder::new();
+        b.server_tag(1, 100);
+        // Nine bytes: 72 value bits, which the reader cannot return.
+        b.tick_extended(1, 40, 9, 7, false);
+        b.tick(2, 0, 4, 12_345, false);
+        b.server_tag(0, 200);
+        b.tick(3, 0, 4, 678, false);
+
+        let ticks = decode_ticks_35p(&b.build());
+
+        let seen: Vec<(u32, u64, i64)> = ticks.iter()
+            .map(|t| (t.server_tag, t.tick_type, t.magnitude))
+            .collect();
+        assert!(
+            seen.contains(&(100, 2, 12_345)),
+            "the tick after the wide one, under the same server tag: {seen:?}",
+        );
+        assert!(
+            seen.contains(&(200, 3, 678)),
+            "and the whole server tag after it: {seen:?}",
+        );
+        assert!(
+            !seen.iter().any(|(_, ty, _)| *ty == 40),
+            "the entry itself is still dropped, not guessed at: {seen:?}",
+        );
     }
 
     // ── decode_ticks_35p tests ──────────────────────────────────────────
