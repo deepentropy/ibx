@@ -32,6 +32,19 @@ pub(crate) struct FarmState {
 }
 
 impl FarmState {
+    /// Whether this instrument still has market-data state that would be
+    /// repointed by a slot reuse: a live subscription, a request id waiting on
+    /// its ack, or a record kept for the next reconnect.
+    ///
+    /// The resubscribe record is the reason this matters. Before it existed a
+    /// reclaimed slot replayed nothing; now it replays the old contract's
+    /// descriptor against whatever contract holds the id at reconnect (ibx#288).
+    pub(crate) fn holds_market_data(&self, instrument: InstrumentId) -> bool {
+        self.instrument_md_reqs.iter().any(|(id, _)| *id == instrument)
+            || self.md_req_to_instrument.iter().any(|(_, id)| *id == instrument)
+            || self.md_resub_info.iter().any(|r| r.0 == instrument)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             next_md_req_id: 1,
@@ -1111,5 +1124,39 @@ mod resub_tests {
         market.unregister(instrument);
 
         assert!(farm.take_resub_targets(&market).is_empty());
+    }
+
+    /// The case the test above does not reach: the slot is not merely freed but
+    /// handed to another contract before the reconnect. `md_resub_info` holds
+    /// no con_id of its own, so the record is combined with whatever con_id the
+    /// id now resolves to — the old contract's descriptor subscribing the new
+    /// contract's instrument. The guard is that a slot holding market-data
+    /// state is not reclaimable in the first place.
+    #[test]
+    fn an_instrument_holding_a_resubscribe_record_is_not_reclaimable() {
+        let mut farm = FarmState::new();
+        let mut market = MarketState::new();
+        let instrument = market.register(756733);
+        farm.md_resub_info.push((
+            instrument, "SPY".into(), "SMART".into(), "STK".into(), String::new(),
+            0.0, String::new(), String::new(), 0,
+        ));
+
+        assert!(
+            farm.holds_market_data(instrument),
+            "the record alone must keep the slot resident",
+        );
+
+        // And each of the other two references does the same on its own.
+        let mut farm = FarmState::new();
+        farm.instrument_md_reqs.push((instrument, vec![7]));
+        assert!(farm.holds_market_data(instrument), "a live subscription");
+
+        let mut farm = FarmState::new();
+        farm.md_req_to_instrument.push((7, instrument));
+        assert!(farm.holds_market_data(instrument), "a request awaiting its ack");
+
+        // An instrument with none of the three is free to go.
+        assert!(!FarmState::new().holds_market_data(instrument));
     }
 }

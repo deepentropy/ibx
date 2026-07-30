@@ -252,11 +252,19 @@ impl HotLoop {
     }
 
     /// Reclaim an instrument slot if nothing references it any more
-    /// (ibx#233): no open orders, no tick-by-tick subscription, no news
-    /// subscription. A reused id would repoint those references at the
-    /// wrong contract, so referenced slots stay resident until released.
+    /// (ibx#233): no open orders, no market data, no tick-by-tick
+    /// subscription, no news subscription. A reused id would repoint those
+    /// references at the wrong contract, so referenced slots stay resident
+    /// until released.
     fn try_reclaim_instrument(&mut self, instrument: InstrumentId) {
         if !self.context.open_orders_for(instrument).is_empty() {
+            return;
+        }
+        // Market data was missing from this list. Cancelling tick-by-tick or
+        // news on an instrument that also holds an L1 subscription freed the
+        // slot underneath it, and the resubscribe record then replayed the old
+        // contract's descriptor against the id's new occupant (ibx#288).
+        if self.farm.holds_market_data(instrument) {
             return;
         }
         if self.hmds.tbt_subscriptions.iter().any(|(id, _, _)| *id == instrument) {
