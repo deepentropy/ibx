@@ -479,7 +479,7 @@ pub enum AlgoParams {
 /// which pairs any of these with a TIF and an `OrderAttrs` block, so every
 /// order type can carry extended attributes without a per-type `*Ex`
 /// variant (ibx#224).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum OrderKind {
     Market,
     Limit { price: Price },
@@ -526,6 +526,14 @@ pub enum OrderKind {
         /// 100 = percent. Other values are rejected by the gateway.
         adjustable_trailing_unit: i32,
     },
+    /// Adaptive limit. Tags: 18=e (adaptive wrapper), 847=Adaptive,
+    /// 5957/5958/5960 = the single adaptivePriority algo parameter.
+    Adaptive { price: Price, priority: AdaptivePriority },
+    /// Generic algo limit. Tags: 847=strategy, 5957 + 5958/5960 per parameter.
+    Algo { price: Price, algo: AlgoParams },
+    /// Margin preview. Tag 6091=1; the order is tracked under `ORD_WHAT_IF` so
+    /// the response is recognised, and never becomes a live order.
+    WhatIf { price: Price },
 }
 
 /// Order request sent via control channel, processed by engine.
@@ -721,14 +729,6 @@ pub enum OrderRequest {
         price: Price,
     },
     /// Adaptive algo limit order: LMT with IB Adaptive algorithm overlay.
-    SubmitAdaptive {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-        priority: AdaptivePriority,
-    },
     /// Market to Limit: fills at market, remainder converts to limit at fill price. OrdType K.
     SubmitMtl {
         order_id: OrderId,
@@ -797,14 +797,6 @@ pub enum OrderRequest {
         offset: Price, // peg offset, 0 = no offset
     },
     /// Algorithmic order: limit order with IB algo strategy overlay (VWAP, TWAP, etc.).
-    SubmitAlgo {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-        algo: AlgoParams,
-    },
     /// Pegged to Benchmark: pegs to a benchmark instrument's price. OrdType PB.
     /// Companion tags: 6941=refConId, 6938=isPegDecrease, 6939=pegChangeAmt, 6942=refChangeAmt.
     SubmitPegBench {
@@ -835,13 +827,6 @@ pub enum OrderRequest {
     },
     /// What-If order: sends a limit order with tag 6091=1 for margin/commission preview.
     /// The order is NOT placed — response comes back as 35=8 with margin fields.
-    SubmitWhatIf {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-    },
     /// Fractional shares limit order. Qty is fixed-point (QTY_SCALE = 10^4).
     /// E.g., 0.5 shares = 5000. Tag 38 sent as decimal string.
     SubmitLimitFractional {
@@ -892,7 +877,6 @@ impl OrderRequest {
             | Self::SubmitLimitEx { order_id, .. }
             | Self::SubmitRel { order_id, .. }
             | Self::SubmitLimitOpg { order_id, .. }
-            | Self::SubmitAdaptive { order_id, .. }
             | Self::SubmitMtl { order_id, .. }
             | Self::SubmitMktPrt { order_id, .. }
             | Self::SubmitStpPrt { order_id, .. }
@@ -902,11 +886,9 @@ impl OrderRequest {
             | Self::SubmitSnapPri { order_id, .. }
             | Self::SubmitPegMkt { order_id, .. }
             | Self::SubmitPegMid { order_id, .. }
-            | Self::SubmitAlgo { order_id, .. }
             | Self::SubmitPegBench { order_id, .. }
             | Self::SubmitLimitAuc { order_id, .. }
             | Self::SubmitMtlAuc { order_id, .. }
-            | Self::SubmitWhatIf { order_id, .. }
             | Self::SubmitLimitFractional { order_id, .. }
             | Self::SubmitEx { order_id, .. } => *order_id,
             Self::SubmitBracket { parent_id, .. } => *parent_id,
@@ -940,7 +922,6 @@ impl OrderRequest {
             | Self::SubmitLimitEx { instrument, .. }
             | Self::SubmitRel { instrument, .. }
             | Self::SubmitLimitOpg { instrument, .. }
-            | Self::SubmitAdaptive { instrument, .. }
             | Self::SubmitMtl { instrument, .. }
             | Self::SubmitMktPrt { instrument, .. }
             | Self::SubmitStpPrt { instrument, .. }
@@ -950,11 +931,9 @@ impl OrderRequest {
             | Self::SubmitSnapPri { instrument, .. }
             | Self::SubmitPegMkt { instrument, .. }
             | Self::SubmitPegMid { instrument, .. }
-            | Self::SubmitAlgo { instrument, .. }
             | Self::SubmitPegBench { instrument, .. }
             | Self::SubmitLimitAuc { instrument, .. }
             | Self::SubmitMtlAuc { instrument, .. }
-            | Self::SubmitWhatIf { instrument, .. }
             | Self::SubmitLimitFractional { instrument, .. }
             | Self::SubmitEx { instrument, .. }
             | Self::SubmitBracket { instrument, .. } => Some(*instrument),
@@ -987,9 +966,6 @@ impl OrderRequest {
             | Self::SubmitLimitOpg { price, .. }
             | Self::SubmitLimitAuc { price, .. }
             | Self::SubmitLimitFractional { price, .. }
-            | Self::SubmitAdaptive { price, .. }
-            | Self::SubmitAlgo { price, .. }
-            | Self::SubmitWhatIf { price, .. }
             | Self::SubmitLoc { price, .. } => s(price),
             Self::SubmitStop { stop_price, .. }
             | Self::SubmitStopGtc { stop_price, .. }
@@ -1016,6 +992,9 @@ impl OrderRequest {
                 OrderKind::Market | OrderKind::Moc | OrderKind::Mtl | OrderKind::MktPrt
                 | OrderKind::SnapMkt | OrderKind::SnapMid | OrderKind::SnapPri => {}
                 OrderKind::TrailPct { trail_stop_price, .. } => s(trail_stop_price),
+                OrderKind::Adaptive { price, .. }
+                | OrderKind::Algo { price, .. }
+                | OrderKind::WhatIf { price } => s(price),
                 OrderKind::AdjustableStop {
                     stop_price, trigger_price, adjusted_stop_price, adjusted_stop_limit_price,
                     adjusted_trailing_amount, adjustable_trailing_unit, ..

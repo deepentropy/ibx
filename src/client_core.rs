@@ -1414,6 +1414,20 @@ impl ClientCore {
         let qty = order.total_quantity as u32;
         let order_type = order.order_type.to_uppercase();
 
+        // Every order type must carry extended attributes and a non-DAY tif
+        // when the caller sets them — dropping them silently produced
+        // unlinked, immediate-DAY bracket children (ibx#224). An empty tif
+        // is treated as DAY, matching the official API default.
+        let extended = order.has_extended_attrs()
+            || !matches!(order.tif.as_str(), "" | "DAY");
+
+        let ex = |kind: OrderKind| OrderRequest::SubmitEx {
+            order_id, instrument, side, qty,
+            kind,
+            tif: order.tif_byte(),
+            attrs: order.attrs(),
+        };
+
         // Adaptive orders (special-cased before generic algo)
         if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
             let price = (order.lmt_price * PRICE_SCALE_F) as i64;
@@ -1426,26 +1440,20 @@ impl ClientCore {
                 "Urgent" => AdaptivePriority::Urgent,
                 _ => AdaptivePriority::Normal,
             };
-            return Ok(ControlCommand::Order(OrderRequest::SubmitAdaptive {
-                order_id, instrument, side, qty, price, priority,
-            }));
+            return Ok(ControlCommand::Order(ex(OrderKind::Adaptive { price, priority })));
         }
 
         // Algo orders
         if !order.algo_strategy.is_empty() {
             let algo = crate::api::client::parse_algo_params(&order.algo_strategy, &order.algo_params)?;
             let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-            return Ok(ControlCommand::Order(OrderRequest::SubmitAlgo {
-                order_id, instrument, side, qty, price, algo,
-            }));
+            return Ok(ControlCommand::Order(ex(OrderKind::Algo { price, algo })));
         }
 
         // What-if orders
         if order.what_if {
             let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-            return Ok(ControlCommand::Order(OrderRequest::SubmitWhatIf {
-                order_id, instrument, side, qty, price,
-            }));
+            return Ok(ControlCommand::Order(ex(OrderKind::WhatIf { price })));
         }
 
         // Adjustable stop: a base STP that converts to another order type when
@@ -1485,19 +1493,6 @@ impl ClientCore {
                 attrs: order.attrs(),
             }));
         }
-
-        // Every order type must carry extended attributes and a non-DAY tif
-        // when the caller sets them — dropping them silently produced
-        // unlinked, immediate-DAY bracket children (ibx#224). An empty tif
-        // is treated as DAY, matching the official API default.
-        let extended = order.has_extended_attrs()
-            || !matches!(order.tif.as_str(), "" | "DAY");
-        let ex = |kind: OrderKind| OrderRequest::SubmitEx {
-            order_id, instrument, side, qty,
-            kind,
-            tif: order.tif_byte(),
-            attrs: order.attrs(),
-        };
 
         let req = match order_type.as_str() {
             "MKT" => {
@@ -1950,4 +1945,40 @@ mod tests {
         core.subscribe_pnl_single(7, 1);
         assert_eq!(core.poll_pnl_single(&shared).len(), 1);
     }
+    /// ibx#318: adaptive, algo and what-if returned out of `build_order_request`
+    /// before the extended-attribute block was reached, so a caller could set
+    /// outside-RTH, a parent link, an OCA group or a non-DAY tif on any of them
+    /// and have it accepted and dropped. Asserted on the request the API layer
+    /// produces, which is the boundary where the drop happened.
+    #[test]
+    fn the_algo_order_types_carry_the_attributes_the_caller_set() {
+        let base = ApiOrder {
+            action: "BUY".into(),
+            total_quantity: 100.0,
+            order_type: "LMT".into(),
+            lmt_price: 150.0,
+            tif: "GTC".into(),
+            outside_rth: true,
+            parent_id: 42,
+            oca_group: "bracket_1".into(),
+            ..Default::default()
+        };
+        let cases = [
+            ("adaptive", ApiOrder { algo_strategy: "Adaptive".into(), ..base.clone() }),
+            ("algo", ApiOrder { algo_strategy: "Vwap".into(), ..base.clone() }),
+            ("what-if", ApiOrder { what_if: true, ..base.clone() }),
+        ];
+        for (label, order) in cases {
+            let cmd = ClientCore::build_order_request(&order, 7, 0)
+                .unwrap_or_else(|e| panic!("{label}: {e}"));
+            let ControlCommand::Order(OrderRequest::SubmitEx { tif, attrs, .. }) = cmd else {
+                panic!("{label} must route through the shared extended submission");
+            };
+            assert!(attrs.outside_rth, "{label} dropped outside RTH");
+            assert_eq!(attrs.parent_id, 42, "{label} dropped the parent link");
+            assert_eq!(attrs.oca_group_str, "bracket_1", "{label} dropped the OCA group");
+            assert_eq!(tif, b'1', "{label} was submitted DAY rather than GTC");
+        }
+    }
+
 }

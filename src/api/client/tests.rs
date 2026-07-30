@@ -970,7 +970,8 @@ fn place_order_algo_vwap() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitAlgo { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx {
+        kind: OrderKind::Algo { .. }, .. })));
 }
 
 #[test]
@@ -984,7 +985,8 @@ fn place_order_what_if() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitWhatIf { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx {
+        kind: OrderKind::WhatIf { .. }, .. })));
 }
 
 #[test]

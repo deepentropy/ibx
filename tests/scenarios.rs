@@ -199,10 +199,11 @@ fn order_lifecycle_what_if_preview() {
     };
     client.place_order(90, &spy(), &order).unwrap();
 
-    // Verify SubmitWhatIf was sent
+    // Verify the what-if submission was sent
     let mut found_what_if = false;
     while let Ok(cmd) = rx.try_recv() {
-        if matches!(cmd, ControlCommand::Order(OrderRequest::SubmitWhatIf { .. })) {
+        if matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx {
+            kind: OrderKind::WhatIf { .. }, .. })) {
             found_what_if = true;
         }
     }
