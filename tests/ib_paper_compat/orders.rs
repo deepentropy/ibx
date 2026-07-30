@@ -36,12 +36,7 @@ pub(super) fn phase_market_order(conns: Conns) -> Conns {
                 tick_count += 1;
                 if phase == 0 && tick_count >= 5 {
                     buy_order_id = next_order_id();
-                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-                        order_id: buy_order_id,
-                        instrument,
-                        side: Side::Buy,
-                        qty: 1,
-                    })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: buy_order_id, instrument, side: Side::Buy, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                     buy_sent_at = Some(Instant::now());
                     phase = 1;
                 }
@@ -51,12 +46,7 @@ pub(super) fn phase_market_order(conns: Conns) -> Conns {
                     buy_price = fill.price;
                     buy_rtt_us = buy_sent_at.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
                     sell_order_id = next_order_id() + 1;
-                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-                        order_id: sell_order_id,
-                        instrument: fill.instrument,
-                        side: Side::Sell,
-                        qty: 1,
-                    })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: sell_order_id, instrument: fill.instrument, side: Side::Sell, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                     sell_sent_at = Some(Instant::now());
                     phase = 2;
                 } else if phase == 2 && fill.side == Side::Sell {
@@ -111,13 +101,7 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
 
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
-        order_id,
-        instrument: inst_id,
-        side: Side::Buy,
-        qty: 1,
-        price: 1_00_000_000,
-    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
 
     let join = run_hot_loop(hot_loop);
@@ -187,7 +171,7 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
 pub(super) fn phase_stop_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 8: Stop Order Submit + Cancel (SPY)",
-        OrderRequest::SubmitStop { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, stop_price: 1_00_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Stop { stop_price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -206,9 +190,7 @@ pub(super) fn phase_modify_order(conns: Conns) -> Conns {
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
 
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
-        order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
-    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -274,7 +256,7 @@ pub(super) fn phase_outside_rth(conns: Conns) -> Conns {
 pub(super) fn phase_stop_limit_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 15: Stop Limit Order Submit + Cancel (SPY)",
-        OrderRequest::SubmitStopLimit { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 998_00_000_000, stop_price: 999_00_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::StopLimit { price: 998_00_000_000, stop_price: 999_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -293,9 +275,7 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
 
     let buy_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-        order_id: buy_id, instrument: inst_id, side: Side::Buy, qty: 1,
-    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: buy_id, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -314,9 +294,7 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
                     buy_price = fill.price;
                     buy_comm = fill.commission;
                     let sid = next_order_id() + 1;
-                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-                        order_id: sid, instrument: fill.instrument, side: Side::Sell, qty: 1,
-                    })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: sid, instrument: fill.instrument, side: Side::Sell, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                     phase = 2;
                 } else if phase == 2 && fill.side == Side::Sell {
                     sell_price = fill.price;
@@ -435,9 +413,7 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
 
     let order_id = next_order_id();
     let new_order_id = order_id + 1;
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
-        order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
-    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -493,7 +469,7 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
 pub(super) fn phase_trailing_stop(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 19: Trailing Stop Order (SPY)",
-        OrderRequest::SubmitTrailingStop { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, trail_amt: 5_00_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, kind: OrderKind::TrailingStop { trail_stop_price: 0, trail_amt: 5_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -502,7 +478,7 @@ pub(super) fn phase_trailing_stop(conns: Conns) -> Conns {
 pub(super) fn phase_trailing_stop_limit(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 20: Trailing Stop Limit Order (SPY)",
-        OrderRequest::SubmitTrailingStopLimit { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, lmt_offset: 1_00_000_000, trail_amt: 5_00_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, kind: OrderKind::TrailingStopLimit { trail_stop_price: 0, lmt_offset: 1_00_000_000, trail_amt: 5_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -627,7 +603,7 @@ pub(super) fn phase_stop_limit_gtc(conns: Conns) -> Conns {
 pub(super) fn phase_mit_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 25: Market if Touched Order (SPY)",
-        OrderRequest::SubmitMit { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, stop_price: 1_00_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Mit { stop_price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -636,7 +612,7 @@ pub(super) fn phase_mit_order(conns: Conns) -> Conns {
 pub(super) fn phase_lit_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 26: Limit if Touched Order (SPY)",
-        OrderRequest::SubmitLit { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 2_00_000_000, stop_price: 1_00_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Lit { price: 2_00_000_000, stop_price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -645,7 +621,7 @@ pub(super) fn phase_lit_order(conns: Conns) -> Conns {
 pub(super) fn phase_moc_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 27: MOC Order (SPY)",
-        OrderRequest::SubmitMoc { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Moc, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -654,7 +630,7 @@ pub(super) fn phase_moc_order(conns: Conns) -> Conns {
 pub(super) fn phase_loc_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 28: LOC Order (SPY)",
-        OrderRequest::SubmitLoc { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Loc { price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -740,7 +716,7 @@ pub(super) fn phase_adaptive_order(conns: Conns) -> Conns {
 pub(super) fn phase_rel_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 31: Relative Order (SPY)",
-        OrderRequest::SubmitRel { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, offset: 1_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Rel { offset: 1_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -758,7 +734,7 @@ pub(super) fn phase_limit_opg(conns: Conns) -> Conns {
 pub(super) fn phase_iceberg_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 33: Iceberg Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 10, price: 1_00_000_000, tif: b'1', attrs: OrderAttrs { display_size: 1, outside_rth: true, ..OrderAttrs::default() } },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 10, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { display_size: 1, outside_rth: true, ..OrderAttrs::default() } },
         false)
 }
 
@@ -767,7 +743,7 @@ pub(super) fn phase_iceberg_order(conns: Conns) -> Conns {
 pub(super) fn phase_hidden_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 34: Hidden Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1', attrs: OrderAttrs { hidden: true, outside_rth: true, ..OrderAttrs::default() } },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { hidden: true, outside_rth: true, ..OrderAttrs::default() } },
         false)
 }
 
@@ -776,7 +752,7 @@ pub(super) fn phase_hidden_order(conns: Conns) -> Conns {
 pub(super) fn phase_short_sell(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 35: Short Sell Limit Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::ShortSell, qty: 1, price: 1_00_000_000, tif: b'0', attrs: OrderAttrs::default() },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::ShortSell, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -785,7 +761,7 @@ pub(super) fn phase_short_sell(conns: Conns) -> Conns {
 pub(super) fn phase_trailing_stop_pct(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 36: Trailing Stop Percent Order (SPY)",
-        OrderRequest::SubmitTrailingStopPct { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, trail_pct: 100 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, kind: OrderKind::TrailPct { trail_stop_price: 0, trail_pct: 100 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -806,12 +782,12 @@ pub(super) fn phase_oca_group(conns: Conns) -> Conns {
     let oca = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
     let id1 = next_order_id();
     let id2 = id1 + 1;
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitEx {
-        order_id: id1, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1',
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
+        order_id: id1, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1',
         attrs: OrderAttrs { oca_group: oca, outside_rth: true, ..OrderAttrs::default() },
     })).unwrap();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitEx {
-        order_id: id2, instrument: inst_id, side: Side::Buy, qty: 1, price: 2_00_000_000, tif: b'1',
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
+        order_id: id2, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 2_00_000_000 }, tif: b'1',
         attrs: OrderAttrs { oca_group: oca, outside_rth: true, ..OrderAttrs::default() },
     })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
@@ -867,7 +843,7 @@ pub(super) fn phase_oca_group(conns: Conns) -> Conns {
 pub(super) fn phase_mtl_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 38: Market to Limit Order (SPY)",
-        OrderRequest::SubmitMtl { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Mtl, tif: b'0', attrs: OrderAttrs::default() },
         true)
 }
 
@@ -876,7 +852,7 @@ pub(super) fn phase_mtl_order(conns: Conns) -> Conns {
 pub(super) fn phase_mkt_prt_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 39: Market with Protection Order (SPY)",
-        OrderRequest::SubmitMktPrt { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::MktPrt, tif: b'0', attrs: OrderAttrs::default() },
         true)
 }
 
@@ -885,7 +861,7 @@ pub(super) fn phase_mkt_prt_order(conns: Conns) -> Conns {
 pub(super) fn phase_stp_prt_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 40: Stop with Protection Order (SPY)",
-        OrderRequest::SubmitStpPrt { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, stop_price: 1_00_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, kind: OrderKind::StpPrt { stop_price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -894,7 +870,7 @@ pub(super) fn phase_stp_prt_order(conns: Conns) -> Conns {
 pub(super) fn phase_mid_price_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 41: Mid-Price Order (SPY)",
-        OrderRequest::SubmitMidPrice { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price_cap: 1_00_000_000 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::MidPrice { price_cap: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -903,7 +879,7 @@ pub(super) fn phase_mid_price_order(conns: Conns) -> Conns {
 pub(super) fn phase_snap_mkt_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 42: Snap to Market Order (SPY)",
-        OrderRequest::SubmitSnapMkt { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::SnapMkt, tif: b'0', attrs: OrderAttrs::default() },
         true)
 }
 
@@ -912,7 +888,7 @@ pub(super) fn phase_snap_mkt_order(conns: Conns) -> Conns {
 pub(super) fn phase_snap_mid_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 43: Snap to Midpoint Order (SPY)",
-        OrderRequest::SubmitSnapMid { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::SnapMid, tif: b'0', attrs: OrderAttrs::default() },
         true)
 }
 
@@ -921,7 +897,7 @@ pub(super) fn phase_snap_mid_order(conns: Conns) -> Conns {
 pub(super) fn phase_snap_pri_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 44: Snap to Primary Order (SPY)",
-        OrderRequest::SubmitSnapPri { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::SnapPri, tif: b'0', attrs: OrderAttrs::default() },
         true)
 }
 
@@ -930,7 +906,7 @@ pub(super) fn phase_snap_pri_order(conns: Conns) -> Conns {
 pub(super) fn phase_peg_mkt_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 45: Pegged to Market Order (SPY)",
-        OrderRequest::SubmitPegMkt { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, offset: 0 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::PegMkt { offset: 0 }, tif: b'0', attrs: OrderAttrs::default() },
         true)
 }
 
@@ -939,7 +915,7 @@ pub(super) fn phase_peg_mkt_order(conns: Conns) -> Conns {
 pub(super) fn phase_peg_mid_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 46: Pegged to Midpoint Order (SPY)",
-        OrderRequest::SubmitPegMid { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, offset: 0 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::PegMid { offset: 0 }, tif: b'0', attrs: OrderAttrs::default() },
         true)
 }
 
@@ -948,7 +924,7 @@ pub(super) fn phase_peg_mid_order(conns: Conns) -> Conns {
 pub(super) fn phase_discretionary_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 47: Discretionary Amount Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1', attrs: OrderAttrs { discretionary_amt: 50_000_000, outside_rth: true, ..OrderAttrs::default() } },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { discretionary_amt: 50_000_000, outside_rth: true, ..OrderAttrs::default() } },
         false)
 }
 
@@ -957,7 +933,7 @@ pub(super) fn phase_discretionary_order(conns: Conns) -> Conns {
 pub(super) fn phase_sweep_to_fill_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 48: Sweep to Fill Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1', attrs: OrderAttrs { sweep_to_fill: true, outside_rth: true, ..OrderAttrs::default() } },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { sweep_to_fill: true, outside_rth: true, ..OrderAttrs::default() } },
         false)
 }
 
@@ -966,7 +942,7 @@ pub(super) fn phase_sweep_to_fill_order(conns: Conns) -> Conns {
 pub(super) fn phase_all_or_none_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 49: All or None Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1', attrs: OrderAttrs { all_or_none: true, outside_rth: true, ..OrderAttrs::default() } },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { all_or_none: true, outside_rth: true, ..OrderAttrs::default() } },
         false)
 }
 
@@ -975,7 +951,7 @@ pub(super) fn phase_all_or_none_order(conns: Conns) -> Conns {
 pub(super) fn phase_trigger_method_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 50: Trigger Method Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1', attrs: OrderAttrs { trigger_method: 2, outside_rth: true, ..OrderAttrs::default() } },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1', attrs: OrderAttrs { trigger_method: 2, outside_rth: true, ..OrderAttrs::default() } },
         false)
 }
 
@@ -984,7 +960,7 @@ pub(super) fn phase_trigger_method_order(conns: Conns) -> Conns {
 pub(super) fn phase_price_condition_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 57: Price Condition Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1',
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1',
             attrs: OrderAttrs { outside_rth: true, conditions: vec![OrderCondition::Price { con_id: 756733, exchange: "BEST".into(), price: 1_00_000_000, is_more: false, trigger_method: 0 }], ..OrderAttrs::default() } },
         false)
 }
@@ -994,7 +970,7 @@ pub(super) fn phase_price_condition_order(conns: Conns) -> Conns {
 pub(super) fn phase_time_condition_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 58: Time Condition Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1',
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1',
             attrs: OrderAttrs { outside_rth: true, conditions: vec![OrderCondition::Time { time: "20991231-23:59:59".into(), is_more: false }], ..OrderAttrs::default() } },
         false)
 }
@@ -1004,7 +980,7 @@ pub(super) fn phase_time_condition_order(conns: Conns) -> Conns {
 pub(super) fn phase_volume_condition_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 59: Volume Condition Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1',
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1',
             attrs: OrderAttrs { outside_rth: true, conditions: vec![OrderCondition::Volume { con_id: 756733, exchange: "BEST".into(), volume: 999_999_999, is_more: true }], ..OrderAttrs::default() } },
         false)
 }
@@ -1014,7 +990,7 @@ pub(super) fn phase_volume_condition_order(conns: Conns) -> Conns {
 pub(super) fn phase_multi_condition_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 60: Multi-Condition Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1',
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'1',
             attrs: OrderAttrs {
                 outside_rth: true,
                 conditions: vec![
@@ -1125,7 +1101,7 @@ pub(super) fn phase_mtl_auc_order(conns: Conns) -> Conns {
 pub(super) fn phase_box_top_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 71: Box Top Order (SPY)",
-        OrderRequest::SubmitMtl { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 },
+        OrderRequest::SubmitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, kind: OrderKind::Mtl, tif: b'0', attrs: OrderAttrs::default() },
         true)
 }
 
@@ -1237,8 +1213,9 @@ pub(super) fn phase_cash_qty_order(conns: Conns) -> Conns {
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
 
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitEx {
-        order_id, instrument: inst_id, side: Side::Buy, qty: 100, price: 1_00_000_000, tif: b'0',
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx {
+        order_id, instrument: inst_id, side: Side::Buy, qty: 100,
+        kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'0',
         attrs: OrderAttrs { cash_qty: 1000 * PRICE_SCALE, ..OrderAttrs::default() },
     })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
@@ -1430,9 +1407,7 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
                         cancelled_count += 1;
                         if cancelled_count >= 2 {
                             let sid = next_order_id() + 10;
-                            control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-                                order_id: sid, instrument: inst_id, side: Side::Sell, qty: 1,
-                            })).unwrap();
+                            control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: sid, instrument: inst_id, side: Side::Sell, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                         }
                     }
                     OrderStatus::Rejected => { any_rejected = true; break; }
@@ -1493,9 +1468,7 @@ pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
                 tick_count += 1;
                 if phase == 0 && tick_count >= 5 {
                     let oid = next_order_id();
-                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-                        order_id: oid, instrument: inst_id, side: Side::Buy, qty: 1,
-                    })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: oid, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                     phase = 1;
                 }
                 if phase == 3 {
@@ -1511,9 +1484,7 @@ pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
                 if phase == 1 && fill.side == Side::Buy {
                     buy_filled = true;
                     let sid = next_order_id() + 1;
-                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-                        order_id: sid, instrument: fill.instrument, side: Side::Sell, qty: 1,
-                    })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: sid, instrument: fill.instrument, side: Side::Sell, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                     phase = 2;
                 } else if phase == 2 && fill.side == Side::Sell {
                     sell_filled = true;
@@ -1641,9 +1612,7 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
     let order_ids: Vec<u64> = (0..5).map(|i| base_oid + i * 1000).collect();
     for (i, &oid) in order_ids.iter().enumerate() {
         let price = (1 + i as i64) * 1_00_000_000; // $1, $2, $3, $4, $5
-        control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
-            order_id: oid, instrument: inst_id, side: Side::Buy, qty: 1, price,
-        })).unwrap();
+        control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: oid, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price }, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     }
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
@@ -1721,9 +1690,7 @@ pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
     let order_id = next_order_id();
     let new_order_id = order_id + 1;
     // Submit limit buy at $1, qty=1
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
-        order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
-    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -1794,9 +1761,7 @@ pub(super) fn phase_double_modify(conns: Conns) -> Conns {
     let modify_id_2 = order_id + 2;
 
     // Submit limit buy at $1
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
-        order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
-    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -1873,9 +1838,7 @@ pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
     let new_order_id = order_id + 1;
 
     // Submit limit buy at $1
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
-        order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
-    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -2030,9 +1993,7 @@ pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
                 if phase == 0 && tick_count >= 5 {
                     buy_order_id = next_order_id();
                     instrument_id = instrument;
-                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-                        order_id: buy_order_id, instrument, side: Side::Buy, qty: 1,
-                    })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: buy_order_id, instrument, side: Side::Buy, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                     phase = 1;
                 }
             }
@@ -2076,9 +2037,7 @@ pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
             }
             // Sell to flatten position
             let sell_oid = next_order_id() + 1;
-            control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-                order_id: sell_oid, instrument: instrument_id, side: Side::Sell, qty: 1,
-            })).unwrap();
+            control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: sell_oid, instrument: instrument_id, side: Side::Sell, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
             phase = 3;
             // Wait for sell fill
             let sell_deadline = Instant::now() + Duration::from_secs(15);

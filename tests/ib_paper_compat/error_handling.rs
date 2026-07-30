@@ -22,9 +22,7 @@ pub(super) fn phase_ib_error_handling(conns: Conns) -> Conns {
     let bogus_inst = hot_loop.context_mut().register_instrument(999999999);
     hot_loop.context_mut().set_symbol(bogus_inst, "BOGUS".to_string());
 
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-        order_id: oid, instrument: bogus_inst, side: Side::Buy, qty: 1,
-    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: oid, instrument: bogus_inst, side: Side::Buy, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
 
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);

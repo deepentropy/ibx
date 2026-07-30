@@ -155,18 +155,14 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
                 tick_count += 1;
                 if phase == 0 && tick_count >= 5 {
                     let buy_oid = next_order_id();
-                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-                        order_id: buy_oid, instrument, side: Side::Buy, qty: 1,
-                    })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: buy_oid, instrument, side: Side::Buy, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                     phase = 1;
                 }
             }
             Ok(Event::Fill(fill)) => {
                 if phase == 1 && fill.side == Side::Buy {
                     let sell_order_id = next_order_id() + 1;
-                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-                        order_id: sell_order_id, instrument: fill.instrument, side: Side::Sell, qty: 1,
-                    })).unwrap();
+                    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: sell_order_id, instrument: fill.instrument, side: Side::Sell, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
                     phase = 2;
                 } else if phase == 2 && fill.side == Side::Sell {
                     // Wait a bit more for position update
@@ -776,12 +772,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
     }).unwrap();
 
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-        order_id,
-        instrument: inst_id,
-        side: Side::Buy,
-        qty: 1,
-    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id, instrument: inst_id, side: Side::Buy, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
 
     let join = run_hot_loop(hot_loop);
 
@@ -835,12 +826,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
 
     // Sell back to flatten
     let sell_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
-        order_id: sell_id,
-        instrument: inst_id,
-        side: Side::Sell,
-        qty: 1,
-    })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitEx { order_id: sell_id, instrument: inst_id, side: Side::Sell, qty: 1, kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(100)) {

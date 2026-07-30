@@ -508,46 +508,7 @@ pub(super) fn run_submit_cancel_phase(
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
 
-    let order_id = match &order_req {
-        OrderRequest::SubmitLimit { order_id, .. } => *order_id,
-        OrderRequest::SubmitMarket { order_id, .. } => *order_id,
-        OrderRequest::SubmitStop { order_id, .. } => *order_id,
-        OrderRequest::SubmitStopLimit { order_id, .. } => *order_id,
-        OrderRequest::SubmitLimitGtc { order_id, .. } => *order_id,
-        OrderRequest::SubmitStopGtc { order_id, .. } => *order_id,
-        OrderRequest::SubmitStopLimitGtc { order_id, .. } => *order_id,
-        OrderRequest::SubmitLimitIoc { order_id, .. } => *order_id,
-        OrderRequest::SubmitLimitFok { order_id, .. } => *order_id,
-        OrderRequest::SubmitTrailingStop { order_id, .. } => *order_id,
-        OrderRequest::SubmitTrailingStopLimit { order_id, .. } => *order_id,
-        OrderRequest::SubmitTrailingStopPct { order_id, .. } => *order_id,
-        OrderRequest::SubmitMoc { order_id, .. } => *order_id,
-        OrderRequest::SubmitLoc { order_id, .. } => *order_id,
-        OrderRequest::SubmitMit { order_id, .. } => *order_id,
-        OrderRequest::SubmitLit { order_id, .. } => *order_id,
-        OrderRequest::SubmitLimitEx { order_id, .. } => *order_id,
-        OrderRequest::SubmitRel { order_id, .. } => *order_id,
-        OrderRequest::SubmitLimitOpg { order_id, .. } => *order_id,
-        OrderRequest::SubmitMtl { order_id, .. } => *order_id,
-        OrderRequest::SubmitMktPrt { order_id, .. } => *order_id,
-        OrderRequest::SubmitStpPrt { order_id, .. } => *order_id,
-        OrderRequest::SubmitMidPrice { order_id, .. } => *order_id,
-        OrderRequest::SubmitSnapMkt { order_id, .. } => *order_id,
-        OrderRequest::SubmitSnapMid { order_id, .. } => *order_id,
-        OrderRequest::SubmitSnapPri { order_id, .. } => *order_id,
-        OrderRequest::SubmitPegMkt { order_id, .. } => *order_id,
-        OrderRequest::SubmitPegMid { order_id, .. } => *order_id,
-        OrderRequest::SubmitPegBench { order_id, .. } => *order_id,
-        OrderRequest::SubmitLimitAuc { order_id, .. } => *order_id,
-        OrderRequest::SubmitMtlAuc { order_id, .. } => *order_id,
-        OrderRequest::SubmitLimitFractional { order_id, .. } => *order_id,
-        OrderRequest::SubmitEx { order_id, .. } => *order_id,
-        OrderRequest::SubmitTrailingStopPctEx { order_id, .. } => *order_id,
-        OrderRequest::SubmitBracket { parent_id, .. } => *parent_id,
-        OrderRequest::Cancel { order_id } => *order_id,
-        OrderRequest::CancelAll { .. } => 0,
-        OrderRequest::Modify { new_order_id, .. } => *new_order_id,
-    };
+    let order_id = order_req.order_id();
 
     control_tx.send(ControlCommand::Order(order_req)).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();

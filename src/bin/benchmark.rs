@@ -284,11 +284,14 @@ fn main() {
                         );
                         buy_submit_time = Some(Instant::now());
                         let _ = control_tx2.send(ControlCommand::Order(
-                            OrderRequest::SubmitMarket {
+                            OrderRequest::SubmitEx {
                                 order_id: 1,
                                 instrument: target_instrument,
                                 side: Side::Buy,
                                 qty: 1,
+                                kind: OrderKind::Market,
+                                tif: b'0',
+                                attrs: OrderAttrs::default(),
                             },
                         ));
                         order_phase = 1;
@@ -317,11 +320,14 @@ fn main() {
                         );
                         sell_submit_time = Some(Instant::now());
                         let _ = control_tx2.send(ControlCommand::Order(
-                            OrderRequest::SubmitMarket {
+                            OrderRequest::SubmitEx {
                                 order_id: 2,
                                 instrument: fill.instrument,
                                 side: Side::Sell,
                                 qty: 1,
+                                kind: OrderKind::Market,
+                                tif: b'0',
+                                attrs: OrderAttrs::default(),
                             },
                         ));
                         order_phase = 2;
