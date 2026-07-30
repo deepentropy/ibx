@@ -963,16 +963,20 @@ fn parse_auth_start_token(auth_start: &str) -> (String, Option<String>) {
         entries.push((ty.to_string(), (!sub.is_empty()).then(|| sub.to_string())));
     }
 
-    // The sub-type has to belong to the type the gate routes to, and routing
-    // prefers IBKey. Keeping the first sub-type stated instead sent the
-    // authenticator's sub-type in the IBKey init on a mixed account.
-    let sub_type = ["5", "4"]
-        .iter()
-        .find_map(|want| {
-            entries.iter().find(|(ty, sub)| ty == want && sub.is_some())
-        })
-        .or_else(|| entries.iter().find(|(_, sub)| sub.is_some()))
-        .and_then(|(_, sub)| sub.clone());
+    // The sub-type has to belong to the type the gate routes to, so which type
+    // that is has to be decided first — exactly as `second_factor_route`
+    // decides it, IBKey when present and the authenticator otherwise. Searching
+    // for a sub-type across types instead lets an entry the gate is not using
+    // supply one: `4.auth,5` routes to IBKey and would send `auth`.
+    let routed = ["5", "4"]
+        .into_iter()
+        .find(|want| entries.iter().any(|(ty, _)| ty == want))
+        .or_else(|| entries.first().map(|(ty, _)| ty.as_str()));
+    let sub_type = routed.and_then(|routed| {
+        entries.iter()
+            .find(|(ty, sub)| ty == routed && sub.is_some())
+            .and_then(|(_, sub)| sub.clone())
+    });
 
     let types: Vec<&str> = entries.iter().map(|(ty, _)| ty.as_str()).collect();
     (types.join(","), sub_type)
@@ -2082,6 +2086,13 @@ mod tests {
             parse_auth_start_token(&frame("4.auth,9.other")),
             ("4,9".into(), Some("auth".into())),
         );
+        // The routed entry stating no sub-type of its own must not borrow one
+        // from an entry the gate is not using. `4.auth,5` routes to IBKey, so
+        // the configured fallback is the answer — sending the authenticator's
+        // sub-type in the IBKey init is what this field kept getting wrong.
+        assert_eq!(parse_auth_start_token(&frame("4.auth,5")), ("4,5".into(), None));
+        assert_eq!(parse_auth_start_token(&frame("9.other,5")), ("9,5".into(), None));
+        assert_eq!(parse_auth_start_token(&frame("9.other,4")), ("9,4".into(), None));
         // A sub-type on a type neither gate serves is still better than none.
         assert_eq!(
             parse_auth_start_token(&frame("9.other")),
