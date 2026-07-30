@@ -2057,3 +2057,68 @@ mod tests {
         assert!(shared.orders.drain_order_updates().is_empty());
     }
 }
+
+#[cfg(test)]
+mod outside_rth_polarity_tests {
+    use super::*;
+    use crate::protocol::connection::Connection;
+    use std::io::Read;
+
+    /// Drive the queued orders and read what actually reaches the socket.
+    fn drain(context: &mut Context) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+
+        let shared = std::sync::Arc::new(SharedState::new());
+        let mut hb = HeartbeatState::new();
+        drain_and_send_orders(&mut conn, context, "DU111111", &mut hb, false, &shared);
+
+        let mut buf = vec![0u8; 8192];
+        let n = peer.read(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|")
+    }
+
+    /// Every submit path guards tag 6433, and nothing asserted the guard: the
+    /// assertions checked that the flag is present when the caller asked for
+    /// it, never that it is absent when they did not. Making every encoder emit
+    /// it unconditionally therefore failed no test.
+    ///
+    /// That is the shape ibx#247 took on the replace path, where a hard-coded
+    /// 6433 opted every modified order into the extended session. An order
+    /// widened to outside regular hours fills at prices the caller never meant
+    /// to trade at, and no callback distinguishes it (ibx#352).
+    #[test]
+    fn every_submit_path_emits_outside_rth_only_when_it_was_asked_for() {
+        let cases: Vec<(&str, fn(&mut Context, u32, bool) -> crate::types::OrderId)> = vec![
+            ("limit gtc", |c, i, o| c.submit_limit_gtc(i, Side::Buy, 1, 100 * crate::types::PRICE_SCALE, o)),
+            ("stop gtc", |c, i, o| c.submit_stop_gtc(i, Side::Sell, 1, 90 * crate::types::PRICE_SCALE, o)),
+            ("stop limit gtc", |c, i, o| {
+                c.submit_stop_limit_gtc(i, Side::Sell, 1, 89 * crate::types::PRICE_SCALE, 90 * crate::types::PRICE_SCALE, o)
+            }),
+            ("extended encoder", |c, i, o| {
+                c.submit_limit_ex(
+                    i, Side::Buy, 1, 100 * crate::types::PRICE_SCALE, b'0',
+                    crate::types::OrderAttrs { outside_rth: o, ..Default::default() },
+                )
+            }),
+        ];
+
+        for (label, submit) in cases {
+            for asked in [true, false] {
+                let mut context = Context::new();
+                let instrument = context.register_instrument(756733);
+                submit(&mut context, instrument, asked);
+                let sent = drain(&mut context);
+
+                assert_eq!(
+                    sent.contains("|6433=1|"), asked,
+                    "{label}, outside_rth={asked}: {sent}",
+                );
+            }
+        }
+    }
+}
