@@ -1132,6 +1132,37 @@ impl HmdsState {
 }
 
 #[cfg(test)]
+mod historical_contract_tests {
+    use super::{hist_exchange, hist_sec_type};
+
+    /// The substitution the engine applies to whatever the client sent. The
+    /// query builder honoured these fields before this change too, so testing
+    /// it alone cannot tell the fix from the bug — the constants used to be
+    /// applied here, above it.
+    #[test]
+    fn a_stated_security_type_reaches_the_wire_in_its_own_spelling() {
+        assert_eq!(hist_sec_type("FUT"), "FUT");
+        assert_eq!(hist_sec_type("OPT"), "OPT");
+        assert_eq!(hist_sec_type("CASH"), "CASH");
+        // Both vocabularies for a stock land on the wire spelling.
+        assert_eq!(hist_sec_type("STK"), "CS");
+        assert_eq!(hist_sec_type("CS"), "CS");
+        // Absent keeps exactly what every caller got before.
+        assert_eq!(hist_sec_type(""), "CS");
+        // An unrecognised type stays empty so the gateway names it, rather
+        // than being silently described as something else.
+        assert_eq!(hist_sec_type("NOPE"), "");
+    }
+
+    #[test]
+    fn a_stated_venue_reaches_the_wire_and_an_absent_one_defaults() {
+        assert_eq!(hist_exchange("CME"), "CME");
+        assert_eq!(hist_exchange("IDEALPRO"), "IDEALPRO");
+        assert_eq!(hist_exchange(""), "SMART");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1330,5 +1361,38 @@ mod tests {
         assert_eq!(hmds.pending_historical.len(), 1, "unrelated entry must stay");
         assert!(shared.reference.drain_historical_errors().is_empty());
         assert!(shared.reference.drain_historical_data().is_empty());
+    }
+    /// The helpers above are only worth anything if the request that reaches
+    /// the wire uses them. Reinstating the old `CS`/`SMART` constants in the
+    /// builder passes every test that checks the helpers or the query encoder
+    /// in isolation, so this drives the real function and reads the socket.
+    #[test]
+    fn the_query_on_the_wire_carries_the_contract_s_own_type_and_venue() {
+        use crate::protocol::connection::Connection;
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+
+        let mut hmds = super::HmdsState::new();
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = crate::bridge::SharedState::new();
+
+        hmds.send_historical_request_ex(
+            1, 495512563, "20260101 16:00:00", "1 D", "1 hour", "TRADES",
+            true, false, "ES", "FUT", "CME", &mut conn, &mut hb, &shared,
+        );
+
+        let mut buf = vec![0u8; 8192];
+        let n = peer.read(&mut buf).unwrap();
+        let sent = String::from_utf8_lossy(&buf[..n]).to_string();
+
+        assert!(sent.contains("FUT"), "the contract's security type: {sent}");
+        assert!(sent.contains("CME"), "the contract's venue: {sent}");
+        assert!(!sent.contains("SMART"), "and not the old constant: {sent}");
     }
 }
