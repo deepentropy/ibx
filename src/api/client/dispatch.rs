@@ -109,10 +109,10 @@ impl EClient {
         for update in self.shared.orders.drain_order_updates() {
             let status = order_status_str(update.status);
             wrapper.order_status(
-                update.order_id as i64, status, update.filled_qty as f64,
-                update.remaining_qty as f64, 0.0, update.perm_id, update.parent_id, 0.0, 0, "", 0.0,
+                update.order_id as i64, status, update.filled_qty,
+                update.remaining_qty, 0.0, update.perm_id, update.parent_id, 0.0, 0, "", 0.0,
             );
-            self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
+            self.core.update_order_status(&self.shared, update.order_id, status, update.filled_qty, update.remaining_qty);
         }
 
         // Cancel rejects → error

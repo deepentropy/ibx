@@ -1527,8 +1527,8 @@ pub(crate) fn drain_and_send_orders(
                         order_id: oid,
                         instrument: 0,
                         status: OrderStatus::Rejected,
-                        filled_qty: 0,
-                        remaining_qty: 0,
+                        filled_qty: 0.0,
+                        remaining_qty: 0.0,
                         perm_id: 0,
                         parent_id: 0,
                         timestamp_ns: 0,
@@ -1567,8 +1567,8 @@ fn synthesize_pending_cancel(
             order_id,
             instrument: order.instrument,
             status: OrderStatus::PendingCancel,
-            filled_qty: order.filled as i64,
-            remaining_qty: order.qty as i64 - order.filled as i64,
+            filled_qty: order.filled as f64,
+            remaining_qty: order.qty as f64 - order.filled as f64,
             perm_id: 0,
             parent_id: 0,
             timestamp_ns: context.now_ns(),
@@ -2039,8 +2039,8 @@ mod tests {
         let updates = shared.orders.drain_order_updates();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].status, OrderStatus::PendingCancel);
-        assert_eq!(updates[0].filled_qty, 3);
-        assert_eq!(updates[0].remaining_qty, 7);
+        assert_eq!(updates[0].filled_qty, 3.0);
+        assert_eq!(updates[0].remaining_qty, 7.0);
     }
 
     #[test]

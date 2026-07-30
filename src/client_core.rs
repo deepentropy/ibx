@@ -784,14 +784,26 @@ impl ClientCore {
         }
     }
 
-    /// Update a tracked order status from an order update event.
-    pub fn update_order_status(&self, order_id: u64, status: &str, filled: f64, remaining: f64) {
+    /// Update a tracked order status from an order update event. Upserts:
+    /// an order recovered from an earlier session — one this client never
+    /// submitted itself, so `track_order` never ran for it — has no entry
+    /// here yet either. Doing nothing for it left `collect_open_orders`
+    /// unable to tell such an order had just been withdrawn (ibx#251). A
+    /// freshly inserted entry seeds contract/order from the same enriched
+    /// cache `collect_open_orders` itself reads, rather than leave them
+    /// blank should this status be one it surfaces directly.
+    pub fn update_order_status(&self, shared: &SharedState, order_id: u64, status: &str, filled: f64, remaining: f64) {
         let mut orders = self.open_orders.lock().unwrap();
-        if let Some(o) = orders.get_mut(&order_id) {
-            o.status = status.into();
-            o.filled = filled;
-            o.remaining = remaining;
-        }
+        let o = orders.entry(order_id).or_insert_with(|| {
+            let (contract, order) = match shared.orders.get_order_info(order_id) {
+                Some(info) => (info.contract, info.order),
+                None => (ApiContract::default(), ApiOrder::default()),
+            };
+            TrackedOrder { contract, order, status: String::new(), filled: 0.0, remaining: 0.0, instrument: 0 }
+        });
+        o.status = status.into();
+        o.filled = filled;
+        o.remaining = remaining;
     }
 
     /// Collect open orders: merge local tracking with shared state.
@@ -814,6 +826,18 @@ impl ClientCore {
                 }
             }
         }
+
+        // The orders whose status this client has withdrawn. A disconnect marks
+        // a tracked order unknown without touching the cached view, so the union
+        // below re-imported it as working for the whole outage, contradicting
+        // the callback the caller had already been given (ibx#251). Scoped to
+        // withdrawn statuses so the cache can still carry a genuinely newer one
+        // — a terminal local status the cache has since superseded still wins.
+        let status_withdrawn: std::collections::HashSet<u64> = self.open_orders.lock().unwrap()
+            .iter()
+            .filter(|(_, o)| o.status == "Unknown")
+            .map(|(&id, _)| id)
+            .collect();
 
         // Local tracked orders (non-terminal), enriched from secdef cache
         {
@@ -840,6 +864,9 @@ impl ClientCore {
         // Add shared-only entries not already present from local
         for (oid, info) in shared_orders {
             if !is_open_status(&info.order_state.status) {
+                continue;
+            }
+            if status_withdrawn.contains(&oid) {
                 continue;
             }
             if !result.iter().any(|(id, _)| *id == oid) {
@@ -1944,4 +1971,121 @@ mod tests {
         core.subscribe_pnl_single(7, 1);
         assert_eq!(core.poll_pnl_single(&shared).len(), 1);
     }
+    /// ibx#251: a disconnect marks a tracked order's status unknown, and the
+    /// cached view keeps saying `Submitted` until the reconnect accounts for
+    /// it. The open-order snapshot unions the two, so the cache re-imported the
+    /// order as working for the whole outage — contradicting the callback the
+    /// caller had already been given, on the one surface they would check it
+    /// against.
+    #[test]
+    fn a_cached_status_does_not_override_what_this_client_knows() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+
+        core.track_order(42, ApiContract::default(), ApiOrder::default(), 0);
+        core.update_order_status(&shared, 42, "Submitted", 0.0, 1.0);
+        shared.orders.push_order_info(42, crate::bridge::RichOrderInfo {
+            contract: ApiContract::default(),
+            order: ApiOrder::default(),
+            order_state: crate::api::types::OrderState {
+                status: "Submitted".to_string(), ..Default::default()
+            },
+            last_exec: crate::api::types::Execution::default(),
+        });
+        assert_eq!(core.collect_open_orders(&shared).len(), 1, "working, from both sides");
+
+        // The connection drops: the engine stops believing the status and says
+        // so, while the cached view is untouched.
+        core.update_order_status(&shared, 42, "Unknown", 0.0, 1.0);
+
+        assert!(
+            core.collect_open_orders(&shared).is_empty(),
+            "the cache must not reassert a status this client has withdrawn",
+        );
+
+        // An order this client has no record of is still imported — that is
+        // what the union is for, and without this the assertion above would
+        // pass against a snapshot that had simply stopped merging.
+        shared.orders.push_order_info(99, crate::bridge::RichOrderInfo {
+            contract: ApiContract::default(),
+            order: ApiOrder::default(),
+            order_state: crate::api::types::OrderState {
+                status: "Submitted".to_string(), ..Default::default()
+            },
+            last_exec: crate::api::types::Execution::default(),
+        });
+        let open = core.collect_open_orders(&shared);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].0, 99, "an order from an earlier session still merges");
+
+        // And a local status the cache has since superseded is not suppressed:
+        // only a withdrawn one is, so a stale terminal record does not hide a
+        // newer working status the engine has already published.
+        core.update_order_status(&shared, 42, "Inactive", 0.0, 1.0);
+        let open = core.collect_open_orders(&shared);
+        assert!(open.iter().any(|(id, _)| *id == 42), "a newer cached status still merges");
+    }
+
+    /// ibx#251: an order recovered from an earlier session was never
+    /// submitted through this client, so `track_order` never ran for it and
+    /// it has no local entry — only the cache knows about it. Withdrawing
+    /// such an order used to be a silent no-op (`update_order_status` only
+    /// updated an entry that already existed), so it could never join
+    /// `status_withdrawn` and the stale cached status kept coming back.
+    #[test]
+    fn a_recovered_order_can_still_be_withdrawn_by_a_disconnect() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+
+        // No track_order call: this client learns of the order only from
+        // the cache, as it would for one placed before this session.
+        shared.orders.push_order_info(42, crate::bridge::RichOrderInfo {
+            contract: ApiContract::default(),
+            order: ApiOrder::default(),
+            order_state: crate::api::types::OrderState {
+                status: "Submitted".to_string(), ..Default::default()
+            },
+            last_exec: crate::api::types::Execution::default(),
+        });
+        assert_eq!(core.collect_open_orders(&shared).len(), 1, "working, from the cache alone");
+
+        // The connection drops and the engine withdraws it, exactly as it
+        // would for an order this client had tracked itself.
+        core.update_order_status(&shared, 42, "Unknown", 0.0, 0.0);
+
+        assert!(
+            core.collect_open_orders(&shared).is_empty(),
+            "a recovered order must be withdrawable even though this client never tracked it",
+        );
+    }
+
+    /// The entry `update_order_status` inserts for a recovered order is not
+    /// just a placeholder for `status_withdrawn` — it seeds contract/order
+    /// from the same enriched cache `collect_open_orders` already reads, so
+    /// a transition that IS surfaced (anything still open) does not hand
+    /// back a blank contract the first time this client hears of the order.
+    #[test]
+    fn a_recovered_orders_first_local_entry_is_not_blank() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+
+        shared.orders.push_order_info(42, crate::bridge::RichOrderInfo {
+            contract: ApiContract { con_id: 12345, symbol: "AAPL".to_string(), ..Default::default() },
+            order: ApiOrder { total_quantity: 100.0, ..Default::default() },
+            order_state: crate::api::types::OrderState {
+                status: "PendingCancel".to_string(), ..Default::default()
+            },
+            last_exec: crate::api::types::Execution::default(),
+        });
+
+        // No track_order call: the first this client hears of this order is
+        // the status update itself, same as any other cross-session recovery.
+        core.update_order_status(&shared, 42, "PendingCancel", 0.0, 100.0);
+
+        let open = core.collect_open_orders(&shared);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].1.contract.symbol, "AAPL", "contract is seeded from the cache, not blank");
+        assert_eq!(open[0].1.order.total_quantity, 100.0, "so is the order");
+    }
+
 }

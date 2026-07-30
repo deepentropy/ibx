@@ -674,7 +674,7 @@ impl HotLoop {
             if warmed_up && since_recv > LIVENESS_TEST_SECS {
                 if since_recv > LIVENESS_DEAD_SECS {
                     log::error!("CCP liveness timeout ({}s silent) — connection lost", since_recv);
-                    self.ccp.handle_disconnect(&mut self.context, &self.event_tx);
+                    self.ccp.handle_disconnect(&mut self.context, &self.shared, &self.event_tx);
                 } else if self.hb.pending_ccp_test.is_none() {
                     let test_id = self.hb.next_test_id();
                     let _ = conn.send_fix(&[
