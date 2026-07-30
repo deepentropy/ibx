@@ -963,7 +963,7 @@ fn timeout_sweeps_phase_live() {
     // 1. By con_id — single record.
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 6001, con_id: 756733, symbol: String::new(),
-        sec_type: String::new(), exchange: String::new(), currency: String::new(),
+        sec_type: String::new(), exchange: String::new(), currency: String::new(), filters: Default::default(),
     }).expect("send details by con_id failed");
     let (rows, end, _) = wait_details(6001, "by-conId SPY");
     assert!(rows >= 1, "by-conId lookup returned no rows");
@@ -973,6 +973,7 @@ fn timeout_sweeps_phase_live() {
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 6002, con_id: 0, symbol: "AAPL".into(),
         sec_type: "STK".into(), exchange: String::new(), currency: "USD".into(),
+        filters: Default::default(),
     }).expect("send details by symbol failed");
     let (rows, end, row_after_end) = wait_details(6002, "by-symbol AAPL fan-out");
     assert!(rows >= 1, "by-symbol lookup returned no rows");

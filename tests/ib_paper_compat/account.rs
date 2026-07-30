@@ -388,7 +388,7 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
     // Fetch secdef first to populate contract cache with exchange/localSymbol/tradingClass
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 9999, con_id: 756733, symbol: String::new(),
-        sec_type: String::new(), exchange: String::new(), currency: String::new(),
+        sec_type: String::new(), exchange: String::new(), currency: String::new(), filters: Default::default(),
     }).unwrap();
 
     let order_id = next_order_id();
@@ -547,7 +547,7 @@ pub(super) fn phase_enriched_open_orders(conns: Conns) -> Conns {
     // Fetch secdef to populate contract cache
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 9998, con_id: 756733, symbol: String::new(),
-        sec_type: String::new(), exchange: String::new(), currency: String::new(),
+        sec_type: String::new(), exchange: String::new(), currency: String::new(), filters: Default::default(),
     }).unwrap();
 
     let order_id = next_order_id();
@@ -772,7 +772,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
     // Fetch secdef to populate contract cache
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 9997, con_id: 756733, symbol: String::new(),
-        sec_type: String::new(), exchange: String::new(), currency: String::new(),
+        sec_type: String::new(), exchange: String::new(), currency: String::new(), filters: Default::default(),
     }).unwrap();
 
     let order_id = next_order_id();
