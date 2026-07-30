@@ -44,6 +44,8 @@ impl EClient {
                 req_id: req_id as u32,
                 con_id: contract.con_id,
                 symbol: contract.symbol.clone(),
+                sec_type: contract.sec_type.clone(),
+                exchange: contract.exchange.clone(),
                 end_date_time: end_date_time.to_string(),
                 duration: duration_str.to_string(),
                 bar_size: bar_size_setting.to_string(),

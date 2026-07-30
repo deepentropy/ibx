@@ -50,6 +50,52 @@ pub(crate) struct HmdsState {
     pub(crate) cold_scanner_results: Vec<(u32, crate::control::scanner::ScannerResult)>,
 }
 
+/// Wire security type for a historical query. Empty falls back to the stock
+/// encoding, which is what every caller got unconditionally before (ibx#305).
+///
+/// A type the enum does not list is passed through rather than emptied. The
+/// enum covers the types the order path understands, and `to_fix` deliberately
+/// blanks anything else so an unclassified instrument cannot masquerade as a
+/// stock (ibx#223) — but that reasoning is about the order path. A historical
+/// query for a valid type the enum happens not to carry, `FOP` say, would
+/// otherwise be narrowed to nothing. The descriptive branch of the subscribe
+/// path passes such types through in the same way.
+///
+/// The value goes into a query document, so what passes through is restricted
+/// to the shape a security type actually has. Anything else is blanked rather
+/// than embedded: a caller-supplied `&` or `<` would otherwise produce a
+/// malformed query instead of a refused one.
+///
+/// This helps a caller that states the type itself. It does not recover one the
+/// client has already lost: a contract returned by `req_contract_details` for
+/// an unlisted type arrives with an empty `sec_type`, because the enum cannot
+/// carry it, and an empty type still means stock here. That round trip needs
+/// the enum to stop discarding what it cannot name (ibx#230).
+fn hist_sec_type(sec_type: &str) -> String {
+    if sec_type.is_empty() {
+        return "CS".to_string();
+    }
+    match crate::control::contracts::SecurityType::from_fix(sec_type).to_fix() {
+        "" if is_plausible_sec_type(sec_type) => sec_type.to_string(),
+        "" => String::new(),
+        known => known.to_string(),
+    }
+}
+
+/// Whether a string is shaped like a security type: short, and letters or
+/// digits only. Deliberately strict — it guards a document, and every type the
+/// gateway uses fits inside it.
+fn is_plausible_sec_type(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 8
+        && s.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Exchange for a historical query, defaulting to the previous constant.
+fn hist_exchange(exchange: &str) -> String {
+    if exchange.is_empty() { "SMART".to_string() } else { exchange.to_string() }
+}
+
 impl HmdsState {
     pub(crate) fn new() -> Self {
         Self {
@@ -627,6 +673,8 @@ impl HmdsState {
         use_rth: bool,
         keep_up_to_date: bool,
         symbol: &str,
+        sec_type: &str,
+        exchange: &str,
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
         shared: &SharedState,
@@ -668,8 +716,8 @@ impl HmdsState {
             query_id: query_id.clone(),
             con_id: con_id as u32,
             symbol: symbol.to_string(),
-            sec_type: "CS",
-            exchange: "SMART",
+            sec_type: hist_sec_type(sec_type),
+            exchange: hist_exchange(exchange),
             data_type,
             end_time: end_date_time.to_string(),
             duration: duration.to_string(),
@@ -704,6 +752,8 @@ impl HmdsState {
         what_to_show: &str,
         use_rth: bool,
         symbol: &str,
+        sec_type: &str,
+        exchange: &str,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
         sign_key: &[u8],
@@ -755,8 +805,8 @@ impl HmdsState {
             query_id: query_id.clone(),
             con_id: con_id as u32,
             symbol: symbol.to_string(),
-            sec_type: "CS",
-            exchange: "SMART",
+            sec_type: hist_sec_type(sec_type),
+            exchange: hist_exchange(exchange),
             data_type,
             end_time: end_date_time,
             duration: duration.to_string(),
@@ -783,14 +833,6 @@ impl HmdsState {
             } else {
                 compressed
             };
-            // Debug: dump first 80 bytes hex for wire comparison
-            let hex: String = to_send.iter().take(80).map(|b| format!("{:02x}", b)).collect();
-            log::info!("CCP keepUpToDate 35=W: {} bytes, hex={}", to_send.len(), hex);
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("D:/RustroverProjects/ibx/ibx_kut_debug.log") {
-                use std::io::Write;
-                let full_hex: String = to_send.iter().map(|b| format!("{:02x}", b)).collect();
-                let _ = writeln!(f, "LEN={} HEX={}", to_send.len(), full_hex);
-            }
             let _ = conn.send_raw(&to_send);
             hb.last_ccp_sent = Instant::now();
         }
@@ -1114,6 +1156,49 @@ impl HmdsState {
 }
 
 #[cfg(test)]
+mod historical_contract_tests {
+    use super::{hist_exchange, hist_sec_type};
+
+    /// The substitution the engine applies to whatever the client sent. The
+    /// query builder honoured these fields before this change too, so testing
+    /// it alone cannot tell the fix from the bug — the constants used to be
+    /// applied here, above it.
+    #[test]
+    fn a_stated_security_type_reaches_the_wire_in_its_own_spelling() {
+        assert_eq!(hist_sec_type("FUT"), "FUT");
+        assert_eq!(hist_sec_type("OPT"), "OPT");
+        assert_eq!(hist_sec_type("CASH"), "CASH");
+        // Both vocabularies for a stock land on the wire spelling.
+        assert_eq!(hist_sec_type("STK"), "CS");
+        assert_eq!(hist_sec_type("CS"), "CS");
+        // Absent keeps exactly what every caller got before.
+        assert_eq!(hist_sec_type(""), "CS");
+        // A valid type the enum does not carry is sent as stated, not
+        // narrowed away — the subscribe path does the same.
+        assert_eq!(hist_sec_type("FOP"), "FOP");
+        assert_eq!(hist_sec_type("CFD"), "CFD");
+        // A value shaped like a type but unknown to both the enum and the
+        // gateway still reaches it, to be named there rather than silently
+        // described as a stock.
+        assert_eq!(hist_sec_type("NOPE"), "NOPE");
+        // Anything that could break the query document is blanked instead of
+        // embedded. The value lands in XML, so this is the difference between
+        // a refused query and a malformed one.
+        assert_eq!(hist_sec_type("FOP&"), "");
+        assert_eq!(hist_sec_type("<x>"), "");
+        assert_eq!(hist_sec_type("A B"), "");
+        assert_eq!(hist_sec_type("VERYLONGTYPE"), "");
+    }
+
+    #[test]
+    fn a_stated_venue_reaches_the_wire_and_an_absent_one_defaults() {
+        assert_eq!(hist_exchange("CME"), "CME");
+        assert_eq!(hist_exchange("IDEALPRO"), "IDEALPRO");
+        assert_eq!(hist_exchange(""), "SMART");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1246,7 +1331,7 @@ mod tests {
         let mut conn: Option<Connection> = None;
 
         hmds.send_historical_request_ex(9, 756733, "", "2 d", "1 Min", "TRADES",
-            true, false, "SPY", &mut conn, &mut hb, &shared);
+            true, false, "SPY", "STK", "SMART", &mut conn, &mut hb, &shared);
 
         assert!(hmds.pending_historical.is_empty(), "rejected request must not go pending");
         let errors = shared.reference.drain_historical_errors();
@@ -1312,5 +1397,109 @@ mod tests {
         assert_eq!(hmds.pending_historical.len(), 1, "unrelated entry must stay");
         assert!(shared.reference.drain_historical_errors().is_empty());
         assert!(shared.reference.drain_historical_data().is_empty());
+    }
+    /// The helpers above are only worth anything if the request that reaches
+    /// the wire uses them. Reinstating the old `CS`/`SMART` constants in the
+    /// builder passes every test that checks the helpers or the query encoder
+    /// in isolation, so this drives the real function and reads the socket.
+    #[test]
+    fn the_query_on_the_wire_carries_the_contract_s_own_type_and_venue() {
+        use crate::protocol::connection::Connection;
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+
+        let mut hmds = super::HmdsState::new();
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = crate::bridge::SharedState::new();
+
+        hmds.send_historical_request_ex(
+            1, 495512563, "20260101 16:00:00", "1 D", "1 hour", "TRADES",
+            true, false, "ES", "FUT", "CME", &mut conn, &mut hb, &shared,
+        );
+
+        let sent = String::from_utf8_lossy(&read_frame(&mut peer)).to_string();
+
+        assert!(sent.contains("FUT"), "the contract's security type: {sent}");
+        assert!(sent.contains("CME"), "the contract's venue: {sent}");
+        assert!(!sent.contains("SMART"), "and not the old constant: {sent}");
+    }
+
+    /// The keep-up-to-date request is built by a second function over a
+    /// different transport, and it was changed too. Reverting only that one
+    /// passes every other test here.
+    #[test]
+    fn the_streaming_query_carries_them_too() {
+        use crate::protocol::connection::Connection;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+
+        let mut hmds = super::HmdsState::new();
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = crate::bridge::SharedState::new();
+        let sign_iv = std::sync::Mutex::new(Vec::new());
+
+        hmds.send_historical_request_via_ccp(
+            1, 495512563, "20260101 16:00:00", "1800 S", "5 secs", "TRADES",
+            true, "ES", "FUT", "CME", &mut conn, &mut hb, &[], &sign_iv, &shared,
+        );
+
+        // This transport compresses, so the bytes have to be decoded before
+        // the query is readable at all.
+        let raw = read_frame(&mut peer);
+        let inner = crate::protocol::fixcomp::fixcomp_decompress(&raw)
+            .expect("the frame decompresses");
+        let sent: String = inner.iter()
+            .map(|m| String::from_utf8_lossy(m).to_string())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(sent.contains("<secType>FUT</secType>"), "the contract's security type: {sent}");
+        assert!(sent.contains("<exchange>CME</exchange>"), "the contract's venue: {sent}");
+        assert!(!sent.contains("SMART"), "and not the old constant: {sent}");
+    }
+
+    /// Read until the query XML has closed. A single `read` can legally return
+    /// a partial frame, which would make these tests fail intermittently while
+    /// production is correct.
+    fn read_frame(peer: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+        let mut acc = Vec::new();
+        let mut buf = vec![0u8; 8192];
+        for _ in 0..64 {
+            match peer.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    acc.extend_from_slice(&buf[..n]);
+                    // Stop on a complete frame, not on a field in the middle
+                    // of one: a split right after the query would otherwise
+                    // return a truncated read that happens to satisfy the
+                    // assertions above it.
+                    // A plain FIX frame ends with its checksum field; a
+                    // compressed one states its own length.
+                    let ends_with_trailer = acc.len() >= 7
+                        && acc[acc.len() - 1] == 0x01
+                        && acc[acc.len() - 7..acc.len() - 4] == *b"\x0110=";
+                    let complete = ends_with_trailer
+                        || crate::protocol::fixcomp::fixcomp_length(&acc)
+                            .is_some_and(|len| acc.len() >= len);
+                    if complete {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        acc
     }
 }

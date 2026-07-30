@@ -1313,6 +1313,11 @@ pub enum ControlCommand {
         req_id: u32,
         con_id: i64,
         symbol: String,
+        /// Security type and exchange from the caller's contract. Hardcoding
+        /// these described a stock on SMART regardless of what was asked for,
+        /// so anything venue-specific was rejected (ibx#305).
+        sec_type: String,
+        exchange: String,
         end_date_time: String,
         duration: String,
         bar_size: String,

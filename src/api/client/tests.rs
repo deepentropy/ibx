@@ -1190,13 +1190,41 @@ fn req_historical_data_sends_fetch_historical() {
     client.req_historical_data(5, &spy(), "20260101 16:00:00", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::FetchHistorical { req_id, con_id, duration, bar_size, what_to_show, use_rth, .. } => {
+        ControlCommand::FetchHistorical {
+            req_id, con_id, duration, bar_size, what_to_show, use_rth, sec_type, exchange, ..
+        } => {
             assert_eq!(req_id, 5);
             assert_eq!(con_id, 756733);
             assert_eq!(duration, "1 D");
             assert_eq!(bar_size, "1 hour");
             assert_eq!(what_to_show, "TRADES");
             assert!(use_rth);
+            // The contract's own fields have to leave the client, or the
+            // engine has nothing but the old constants to fall back on
+            // (ibx#305). `spy()` states neither, so both arrive empty and the
+            // engine substitutes — that substitution is tested at its source.
+            assert_eq!(sec_type, "");
+            assert_eq!(exchange, "");
+        }
+        _ => panic!("expected FetchHistorical"),
+    }
+}
+
+/// A contract that does state its own type and venue must carry both, which is
+/// the whole of what this fixes: every historical query described itself as a
+/// SMART-routed stock regardless of the contract asked for.
+#[test]
+fn req_historical_data_carries_the_contract_s_own_type_and_venue() {
+    let (client, rx, _shared) = test_client();
+    let es = Contract {
+        con_id: 495512563, symbol: "ES".into(),
+        sec_type: "FUT".into(), exchange: "CME".into(), ..Default::default()
+    };
+    client.req_historical_data(6, &es, "20260101 16:00:00", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::FetchHistorical { sec_type, exchange, .. } => {
+            assert_eq!(sec_type, "FUT");
+            assert_eq!(exchange, "CME");
         }
         _ => panic!("expected FetchHistorical"),
     }
