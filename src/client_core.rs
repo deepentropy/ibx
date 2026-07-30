@@ -983,6 +983,7 @@ impl ClientCore {
         let mut total_unrealized: f64 = 0.0;
         let mut total_realized: f64 = 0.0;
         let mut priced = 0usize;
+        let mut unpriceable = 0usize;
 
         for con_id in con_ids {
             let seed = seeds.get(&con_id);
@@ -993,10 +994,12 @@ impl ClientCore {
             total_realized += seed.map(|s| s.realized_pnl).unwrap_or(0.0);
 
             // A position we held at midnight and cannot currently size is not
-            // a flat one. Pricing the absence as zero reports the whole
-            // overnight holding as sold; skipping leaves the gateway's own
-            // account-level figure to stand (ibx#296).
+            // a flat one: pricing the absence as zero reports the whole
+            // overnight holding as sold. It is counted as unpriceable rather
+            // than merely skipped, because a total missing one position is not
+            // a smaller correct answer (ibx#296).
             if seed.is_some() && pi.is_none() {
+                unpriceable += 1;
                 continue;
             }
             let qty_now = pi.as_ref().map(|p| p.position).unwrap_or(0);
@@ -1005,6 +1008,7 @@ impl ClientCore {
             // parse says the position is not intraday, only that its size is
             // unknown, so there is nothing to price it against.
             let Some(qty_midnight) = seed.map_or(Some(0), |s| s.qty_midnight) else {
+                unpriceable += 1;
                 continue;
             };
 
@@ -1046,7 +1050,13 @@ impl ClientCore {
         // to the gateway's account-level P&L, which the gateway pushes independently
         // of any market-data subscription. Without this the quote-derived totals stay
         // [0,0,0] and no callback ever fires (ibx#239).
-        if priced == 0 {
+        // A position that could not be priced makes the client-side sum an
+        // incomplete account total, not a smaller correct one — and the realized
+        // figure has already accrued for it, so the three would not even agree
+        // with each other. The gateway's own account-level numbers are complete
+        // by construction, so one unpriceable position sends the whole account
+        // to them rather than reporting a partial sum as if it were the total.
+        if priced == 0 || unpriceable > 0 {
             let acct = shared.portfolio.account();
             total_daily = acct.daily_pnl as f64 / PRICE_SCALE_F;
             total_unrealized = acct.unrealized_pnl as f64 / PRICE_SCALE_F;
@@ -1102,12 +1112,14 @@ impl ClientCore {
 
             let seed = seeds.get(&con_id);
             // An unparseable overnight quantity leaves nothing to price the
-            // day's change against — see the whole-account path (ibx#296).
-            let Some(qty_midnight) = seed.map_or(Some(0), |s| s.qty_midnight) else {
-                continue;
-            };
+            // day's change against. Unlike the whole-account total, that costs
+            // this callback only its daily figure: the position, its value, the
+            // unrealized and the realized are all still known, and suppressing
+            // the callback would leave every one of them stale on the caller's
+            // side rather than reporting one it cannot compute (ibx#296).
+            let qty_midnight = seed.map_or(Some(0), |s| s.qty_midnight);
             let prev_close = q.close;
-            if prev_close == 0 && qty_midnight != 0 {
+            if prev_close == 0 && qty_midnight.unwrap_or(0) != 0 {
                 continue;
             }
 
@@ -1120,8 +1132,19 @@ impl ClientCore {
             };
 
             let mv_now = qty_now as f64 * price_now as f64 / PRICE_SCALE_F;
-            let mv_midnight = qty_midnight as f64 * prev_close as f64 / PRICE_SCALE_F;
-            let daily = mv_now - mv_midnight + money_traded;
+            // Held at the value last reported when the overnight size is
+            // unknown, rather than recomputed from an assumption that would be
+            // wrong in a specific direction: treating the absence as flat
+            // reports the whole holding as sold, and treating it as no seed at
+            // all reports the day's move as the position's entire unrealized.
+            let daily = match qty_midnight {
+                Some(qty_midnight) => {
+                    let mv_midnight = qty_midnight as f64 * prev_close as f64 / PRICE_SCALE_F;
+                    mv_now - mv_midnight + money_traded
+                }
+                None => last_cache.get(&req_id)
+                    .map_or(0.0, |prev| prev[1] as f64 / PRICE_SCALE_F),
+            };
             let unrealized = if avg_cost != 0 {
                 qty_now as f64 * (price_now - avg_cost) as f64 / PRICE_SCALE_F
             } else { 0.0 };
@@ -1729,6 +1752,74 @@ mod tests {
         let core = ClientCore::new();
         let shared = SharedState::new();
         assert!(core.poll_pnl(&shared).is_none());
+    }
+
+    /// A total missing one position is not a smaller correct total. When a
+    /// position cannot be priced the client-side sum is incomplete — and the
+    /// realized figure has already accrued for it, so the three do not even
+    /// agree with each other. The gateway's own account numbers are complete by
+    /// construction, so one unpriceable position sends the whole account there.
+    #[test]
+    fn one_unpriceable_position_sends_the_whole_account_to_the_gateway() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.subscribe_pnl(11);
+
+        // One ordinary position that prices fine.
+        seed_pnl_position(&core, &shared, 1, 0, 1, 100.00, 101.00, 100.00);
+
+        // And one held overnight that this session cannot size.
+        core.con_id_to_instrument.lock().unwrap().insert(2, 1);
+        core.instrument_to_req.lock().unwrap().insert(1, 1);
+        let mut q = Quote::default();
+        q.last = (735.00 * PRICE_SCALE_F) as i64;
+        q.close = (730.00 * PRICE_SCALE_F) as i64;
+        shared.market.push_quote(1, &q);
+        shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
+            con_id: 2, qty_midnight: Some(10), money_traded: 0.0, realized_pnl: 0.0,
+        }]);
+        shared.portfolio.set_account(&AccountState {
+            daily_pnl: (51.0 * PRICE_SCALE_F) as i64,
+            unrealized_pnl: (351.0 * PRICE_SCALE_F) as i64,
+            ..Default::default()
+        });
+
+        let update = core.poll_pnl(&shared).expect("callback must fire");
+        assert!(
+            (update.daily_pnl - 51.0).abs() < 1e-6,
+            "the gateway's complete figure, not the one priceable position: daily={}",
+            update.daily_pnl,
+        );
+    }
+
+    /// `pnlSingle` loses only its daily figure when the overnight size is
+    /// unknown. The position, its value, the unrealized and the realized are all
+    /// still known, and suppressing the callback would leave every one of them
+    /// stale on the caller's side.
+    #[test]
+    fn an_unknown_seed_does_not_suppress_the_rest_of_a_single_callback() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.subscribe_pnl_single(21, 756733);
+
+        seed_pnl_position(&core, &shared, 756733, 0, 10, 700.00, 735.00, 730.00);
+        shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
+            con_id: 756733, qty_midnight: None, money_traded: 0.0, realized_pnl: 0.0,
+        }]);
+
+        let first = core.poll_pnl_single(&shared);
+        assert!(!first.is_empty(), "the known fields must still be reported");
+        assert!((first[0].pos - 10.0).abs() < 1e-6, "position");
+        assert!((first[0].unrealized_pnl - 350.0).abs() < 1e-6, "unrealized");
+
+        // And a later change to a field that IS known still produces an update.
+        let mut q = Quote::default();
+        q.last = (736.00 * PRICE_SCALE_F) as i64;
+        q.close = (730.00 * PRICE_SCALE_F) as i64;
+        shared.market.push_quote(0, &q);
+        let second = core.poll_pnl_single(&shared);
+        assert!(!second.is_empty(), "a moved quote must still reach the caller");
+        assert!((second[0].unrealized_pnl - 360.0).abs() < 1e-6, "unrealized moved");
     }
 
     /// ibx#296, consumer side. Dropping an unusable position row stops the feed
