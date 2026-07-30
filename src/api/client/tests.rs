@@ -76,6 +76,19 @@ fn an_order_defined_by_more_than_its_type_is_not_modified() {
         ("conditional", |o| o.conditions.push(
             crate::types::OrderCondition::Time { time: "20260311-09:30:00".into(), is_more: true },
         )),
+        // Every attribute below rides a tag the replace does not carry, so a
+        // modify would state the order without it (ibx#248). The bracket links
+        // are the costly pair: a child sent without its parent or OCA group
+        // rests alone, and a fill on the sibling no longer cancels it.
+        ("bracket child", |o| o.parent_id = 4242),
+        ("OCA member", |o| o.oca_group = "bracket_1".into()),
+        ("good-till expiry", |o| o.good_till_date = "20260311 16:00:00".into()),
+        ("good-after time", |o| o.good_after_time = "20260311 09:30:00".into()),
+        ("iceberg", |o| o.display_size = 100),
+        ("minimum quantity", |o| o.min_qty = 50),
+        ("discretionary", |o| o.discretionary_amt = 0.05),
+        ("sweep to fill", |o| o.sweep_to_fill = true),
+        ("trigger method", |o| o.trigger_method = 2),
     ];
     for (name, set) in cases {
         let (client, rx, _shared) = test_client();
@@ -111,10 +124,42 @@ fn a_limit_if_touched_is_not_modified() {
     let _ = client.place_order(9302, &spy(), &order);
     while rx.try_recv().is_ok() {}
 
-    if client.core.is_order_tracked(9302) {
-        let err = client.place_order(9302, &spy(), &order)
-            .expect_err("a LIT modify must be refused");
-        assert!(err.contains("cannot be modified"), "{err}");
+    assert!(
+        client.core.is_order_tracked(9302),
+        "the LIT must submit and be tracked, or the refusal below proves nothing",
+    );
+    let err = client.place_order(9302, &spy(), &order)
+        .expect_err("a LIT modify must be refused");
+    assert!(err.contains("cannot be modified"), "{err}");
+}
+
+/// The refusal has to read the order the caller is asking for, not only the one
+/// on the book. A modify that *adds* a bracket link or an OCA group states an
+/// order that has neither — so a gate looking only at the resting record lets
+/// the attribute through on the very message that was supposed to carry it.
+#[test]
+fn an_attribute_added_by_the_modify_is_refused_too() {
+    let cases: Vec<(&str, fn(&mut Order))> = vec![
+        ("bracket child", |o| o.parent_id = 4242),
+        ("OCA member", |o| o.oca_group = "bracket_1".into()),
+        ("iceberg", |o| o.display_size = 100),
+        ("all-or-none", |o| o.all_or_none = true),
+    ];
+    for (name, set) in cases {
+        let (client, rx, _shared) = test_client();
+        let plain = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 100.0, tif: "DAY".into(), ..Default::default()
+        };
+        client.place_order(9303, &spy(), &plain).expect("a plain limit submits");
+        while rx.try_recv().is_ok() {}
+
+        let mut attributed = plain.clone();
+        set(&mut attributed);
+        let err = client.place_order(9303, &spy(), &attributed)
+            .expect_err("adding it by modify must be refused");
+        assert!(err.contains("cannot be modified"), "{name}: {err}");
+        assert!(rx.try_recv().is_err(), "{name}: nothing reaches the wire");
     }
 }
 
@@ -131,6 +176,11 @@ fn every_restatable_type_still_modifies() {
         ("LOC", 100.0, 0.0),
         ("MIT", 0.0, 90.0),
         ("STP PRT", 0.0, 90.0),
+        // Regression guard: these three were modifiable before the gate and
+        // the replace renders the same byte they were submitted under.
+        ("MTL", 0.0, 0.0),
+        ("BOX TOP", 0.0, 0.0),
+        ("MKT PRT", 0.0, 0.0),
     ] {
         let (client, rx, _shared) = test_client();
         let order = Order {

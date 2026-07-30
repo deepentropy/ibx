@@ -809,17 +809,81 @@ impl ClientCore {
         if order.what_if {
             return Some("a what-if order".to_string());
         }
+        // The replace is rebuilt from the tracked record, which holds side,
+        // price, quantity, order type, time-in-force and trigger — and nothing
+        // else. Every attribute below rides a tag the replace does not carry,
+        // so a modify would state the order without it (ibx#248).
+        //
+        // The bracket links are the costly pair. A replace that omits the
+        // parent link or the OCA group leaves a child resting alone: a fill on
+        // one leg no longer cancels the other, and the position is left with a
+        // naked order against it. Whether the gateway reads an omitted 583 or
+        // 6107 as unchanged or as cleared is not established here, and the
+        // difference between "latent" and "detached" is the whole risk — so
+        // the modify is refused rather than sent and hoped for.
+        if !order.oca_group.is_empty() {
+            return Some("an order in an OCA group".to_string());
+        }
+        if order.parent_id != 0 {
+            return Some("a bracket child".to_string());
+        }
+        if !order.good_till_date.is_empty() {
+            return Some("an order with a good-till expiry".to_string());
+        }
+        if !order.good_after_time.is_empty() {
+            return Some("an order with a good-after time".to_string());
+        }
+        if order.display_size > 0 {
+            return Some("an iceberg order".to_string());
+        }
+        if order.min_qty > 0 {
+            return Some("an order with a minimum quantity".to_string());
+        }
+        if order.discretionary_amt > 0.0 {
+            return Some("a discretionary order".to_string());
+        }
+        if order.sweep_to_fill {
+            return Some("a sweep-to-fill order".to_string());
+        }
+        if order.trigger_method != 0 {
+            return Some("an order with a non-default trigger method".to_string());
+        }
         let ty = order.order_type.to_uppercase();
         // `LIT` is submitted as `LT` but tracked under a byte the replace
         // renders as `K`, which is market-to-limit in this dialect — so a
         // replace would describe a different order type entirely.
+        //
+        // `MTL`, `BOX TOP` and `MKT PRT` are here because the replace renders
+        // the same byte they were submitted under, so it restates them as
+        // themselves — which is the whole test for membership.
         if matches!(
             ty.as_str(),
             "MKT" | "LMT" | "STP" | "STP LMT" | "MOC" | "LOC" | "MIT" | "STP PRT"
+                | "MTL" | "BOX TOP" | "MKT PRT"
         ) {
             return None;
         }
         Some(format!("a {ty} order"))
+    }
+
+    /// Why a modify of `order_id` cannot be sent, if it cannot.
+    ///
+    /// Both sides are checked. The resting order is the one the replace has to
+    /// restate, and the incoming order is what the caller is asking it to
+    /// become — a modify that *adds* a bracket link or an OCA group states an
+    /// order that has neither, so examining only the record on the book lets
+    /// the attribute through on the very message that was supposed to carry it.
+    ///
+    /// One place, so the two bindings cannot diverge on either the rule or the
+    /// wording (ibx#248).
+    pub fn modify_refusal(&self, order_id: u64, incoming: &ApiOrder) -> Option<String> {
+        let why = self.tracked_order(order_id)
+            .and_then(|tracked| Self::replace_cannot_restate(&tracked))
+            .or_else(|| Self::replace_cannot_restate(incoming))?;
+        Some(format!(
+            "{why} cannot be modified: the replace does not carry the fields that \
+             define it, and sending one would cancel the order"
+        ))
     }
 
     /// Track a newly placed order.
