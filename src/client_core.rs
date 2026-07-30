@@ -759,18 +759,19 @@ impl ClientCore {
 
     // ── Open order tracking ──
 
-    /// Check if an order with this ID is currently tracked (for modify detection).
     /// The parent this client recorded when it placed the order, if any.
     ///
-    /// Nothing on an execution report carries a parent order id, so this is the
-    /// only place one is known — and only for orders this client placed.
-    pub fn tracked_parent_id(&self, order_id: u64) -> Option<i64> {
+    /// The engine reads no parent from an execution report, so for an order
+    /// this client placed its own record is the only source. An order placed
+    /// elsewhere keeps whatever the engine reports.
+    pub(crate) fn tracked_parent_id(&self, order_id: u64) -> Option<i64> {
         self.open_orders.lock().unwrap()
             .get(&order_id)
             .map(|t| t.order.parent_id)
             .filter(|p| *p > 0)
     }
 
+    /// Check if an order with this ID is currently tracked (for modify detection).
     pub fn is_order_tracked(&self, order_id: u64) -> bool {
         self.open_orders.lock().unwrap().contains_key(&order_id)
     }

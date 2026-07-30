@@ -2207,12 +2207,17 @@ mod tests {
                     (583, group),
                 ]);
                 ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
-                for update in shared.orders.drain_order_updates() {
-                    assert_eq!(
-                        update.parent_id, 0,
-                        "group {group:?} at status {ord_status} must not become a parent",
-                    );
-                }
+                let updates = shared.orders.drain_order_updates();
+                // Without this a case that produced no update at all would
+                // pass the loop below by never entering it.
+                assert_eq!(
+                    updates.len(), 1,
+                    "group {group:?} at status {ord_status} must produce one update",
+                );
+                assert_eq!(
+                    updates[0].parent_id, 0,
+                    "group {group:?} at status {ord_status} must not become a parent",
+                );
             }
         }
     }
@@ -2229,9 +2234,12 @@ mod tests {
         assert_eq!(updates[0].parent_id, 0);
     }
 
-    /// Tag 6107 is what the bracket path *sends* a parent on, and it is a
-    /// client id rather than an order id — reading it back would be the same
-    /// mistake in a new place.
+    /// Tag 6107 is what the bracket path *sends* a parent on. Whether the
+    /// gateway ever echoes it on a report has not been established here, and
+    /// the engine does not read it either way; this pins that, so wiring it up
+    /// becomes a deliberate change with evidence behind it rather than a
+    /// silent one. It passes on the old implementation too — it guards a
+    /// different invariant from the rest of this change.
     #[test]
     fn tag_6107_is_not_read_back_as_a_parent() {
         let (mut ccp, mut context, shared) = ord_status_test_state();

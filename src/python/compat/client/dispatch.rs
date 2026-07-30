@@ -57,9 +57,13 @@ impl EClient {
             let commission = fill.commission as f64 / PRICE_SCALE_F;
 
             let status = if fill.remaining == 0 { "Filled" } else { "PartiallyFilled" };
-            let (perm_id, parent_id) = shared.orders.get_order_info(fill.order_id)
+            // A fill emits its own order_status and never reaches the branch
+            // below, so the client's record has to be preferred here too.
+            let (perm_id, engine_parent) = shared.orders.get_order_info(fill.order_id)
                 .map(|info| (info.order.perm_id, info.order.parent_id))
                 .unwrap_or((0, 0));
+            let parent_id = self.core.tracked_parent_id(fill.order_id)
+                .unwrap_or(engine_parent);
             call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, fill.qty as f64, fill.remaining as f64,
                  price, perm_id, parent_id, price, 0i64, "", 0.0f64));
 
@@ -159,10 +163,9 @@ impl EClient {
         let updates = shared.orders.drain_order_updates();
         for update in updates {
             let status = order_status_str(update.status);
-            // The engine cannot know the parent — nothing on the execution
-            // report carries one — but this client placed the order and was
-            // told. Prefer what it recorded; an order it did not place keeps
-            // the engine's answer of none.
+            // The engine reads no parent from the report, but this client
+            // placed the order and was told. Prefer what it recorded; an order
+            // it did not place keeps the engine's answer of none.
             let parent_id = self.core.tracked_parent_id(update.order_id)
                 .unwrap_or(update.parent_id);
             call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, update.filled_qty as f64,
@@ -314,8 +317,9 @@ impl EClient {
             let state_py = Py::new(py, state)?.into_any();
             call_wrapper!(self.wrapper, py, "open_order",
                 (wi.order_id as i64, &contract_py, &order_py, &state_py));
+            let parent_id = self.core.tracked_parent_id(wi.order_id).unwrap_or(0);
             call_wrapper!(self.wrapper, py, "order_status", (wi.order_id as i64, "PreSubmitted", 0.0f64, 0.0f64,
-                 0.0f64, 0i64, 0i64, 0.0f64, 0i64, "", 0.0f64));
+                 0.0f64, 0i64, parent_id, 0.0f64, 0i64, "", 0.0f64));
             self.core.open_orders.lock().unwrap().remove(&wi.order_id);
         }
 
