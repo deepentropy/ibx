@@ -1414,12 +1414,12 @@ impl ClientCore {
         let qty = order.total_quantity as u32;
         let order_type = order.order_type.to_uppercase();
 
-        // Every order type must carry extended attributes and a non-DAY tif
-        // when the caller sets them — dropping them silently produced
-        // unlinked, immediate-DAY bracket children (ibx#224). An empty tif
-        // is treated as DAY, matching the official API default.
-        let extended = order.has_extended_attrs()
-            || !matches!(order.tif.as_str(), "" | "DAY");
+        // Every order type carries its extended attributes and its time-in-force
+        // through one encoder. Choosing per type between an attribute-carrying
+        // request and a plain one is how an order type ends up shipping without
+        // something the caller set — unlinked, immediate-DAY bracket children
+        // (ibx#224), then the same defect again for the adjustable stop (#240)
+        // and for adaptive, algo and what-if (#318).
 
         let ex = |kind: OrderKind| OrderRequest::SubmitEx {
             order_id, instrument, side, qty,
@@ -1496,51 +1496,30 @@ impl ClientCore {
 
         let req = match order_type.as_str() {
             "MKT" => {
-                if extended { ex(OrderKind::Market) }
-                else { OrderRequest::SubmitMarket { order_id, instrument, side, qty } }
+                ex(OrderKind::Market)
             }
             "LMT" => {
                 let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                if extended {
-                    OrderRequest::SubmitLimitEx {
-                        order_id, instrument, side, qty, price,
-                        tif: order.tif_byte(),
-                        attrs: order.attrs(),
-                    }
-                } else {
-                    OrderRequest::SubmitLimit { order_id, instrument, side, qty, price }
-                }
+                ex(OrderKind::Limit { price })
             }
             "STP" => {
                 let stop = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::Stop { stop_price: stop }) }
-                else { OrderRequest::SubmitStop { order_id, instrument, side, qty, stop_price: stop } }
+                ex(OrderKind::Stop { stop_price: stop })
             }
             "STP LMT" => {
                 let price = (order.lmt_price * PRICE_SCALE_F) as i64;
                 let stop = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::StopLimit { price, stop_price: stop }) }
-                else { OrderRequest::SubmitStopLimit { order_id, instrument, side, qty, price, stop_price: stop } }
+                ex(OrderKind::StopLimit { price, stop_price: stop })
             }
             "TRAIL" => {
                 // Optional initial stop trigger (tag 6117); default f64::MAX = unset.
                 let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { (order.trail_stop_price * PRICE_SCALE_F) as i64 };
                 if order.trailing_percent > 0.0 {
                     let pct = (order.trailing_percent * 100.0) as u32;
-                    if extended {
-                        OrderRequest::SubmitTrailingStopPctEx {
-                            order_id, instrument, side, qty, trail_pct: pct,
-                            tif: order.tif_byte(),
-                            attrs: order.attrs(),
-                            trail_stop_price: trail_stop,
-                        }
-                    } else {
-                        OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_pct: pct, trail_stop_price: trail_stop }
-                    }
+                    ex(OrderKind::TrailPct { trail_pct: pct, trail_stop_price: trail_stop })
                 } else {
                     let trail = (order.aux_price * PRICE_SCALE_F) as i64;
-                    if extended { ex(OrderKind::TrailingStop { trail_amt: trail, trail_stop_price: trail_stop }) }
-                    else { OrderRequest::SubmitTrailingStop { order_id, instrument, side, qty, trail_amt: trail, trail_stop_price: trail_stop } }
+                    ex(OrderKind::TrailingStop { trail_amt: trail, trail_stop_price: trail_stop })
                 }
             }
             "TRAIL LIMIT" => {
@@ -1555,73 +1534,58 @@ impl ClientCore {
                 let lmt_offset = (offset_f * PRICE_SCALE_F) as i64;
                 let trail = (order.aux_price * PRICE_SCALE_F) as i64;
                 let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { (order.trail_stop_price * PRICE_SCALE_F) as i64 };
-                if extended { ex(OrderKind::TrailingStopLimit { lmt_offset, trail_amt: trail, trail_stop_price: trail_stop }) }
-                else { OrderRequest::SubmitTrailingStopLimit { order_id, instrument, side, qty, lmt_offset, trail_amt: trail, trail_stop_price: trail_stop } }
+                ex(OrderKind::TrailingStopLimit { lmt_offset, trail_amt: trail, trail_stop_price: trail_stop })
             }
             "MOC" => {
-                if extended { ex(OrderKind::Moc) }
-                else { OrderRequest::SubmitMoc { order_id, instrument, side, qty } }
+                ex(OrderKind::Moc)
             }
             "LOC" => {
                 let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::Loc { price }) }
-                else { OrderRequest::SubmitLoc { order_id, instrument, side, qty, price } }
+                ex(OrderKind::Loc { price })
             }
             "MIT" => {
                 let stop = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::Mit { stop_price: stop }) }
-                else { OrderRequest::SubmitMit { order_id, instrument, side, qty, stop_price: stop } }
+                ex(OrderKind::Mit { stop_price: stop })
             }
             "LIT" => {
                 let price = (order.lmt_price * PRICE_SCALE_F) as i64;
                 let stop = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::Lit { price, stop_price: stop }) }
-                else { OrderRequest::SubmitLit { order_id, instrument, side, qty, price, stop_price: stop } }
+                ex(OrderKind::Lit { price, stop_price: stop })
             }
             "MTL" | "BOX TOP" => {
-                if extended { ex(OrderKind::Mtl) }
-                else { OrderRequest::SubmitMtl { order_id, instrument, side, qty } }
+                ex(OrderKind::Mtl)
             }
             "MKT PRT" => {
-                if extended { ex(OrderKind::MktPrt) }
-                else { OrderRequest::SubmitMktPrt { order_id, instrument, side, qty } }
+                ex(OrderKind::MktPrt)
             }
             "STP PRT" => {
                 let stop = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::StpPrt { stop_price: stop }) }
-                else { OrderRequest::SubmitStpPrt { order_id, instrument, side, qty, stop_price: stop } }
+                ex(OrderKind::StpPrt { stop_price: stop })
             }
             "REL" => {
                 let offset = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::Rel { offset }) }
-                else { OrderRequest::SubmitRel { order_id, instrument, side, qty, offset } }
+                ex(OrderKind::Rel { offset })
             }
             "PEG MKT" => {
                 let offset = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::PegMkt { offset }) }
-                else { OrderRequest::SubmitPegMkt { order_id, instrument, side, qty, offset } }
+                ex(OrderKind::PegMkt { offset })
             }
             "PEG MID" | "PEG MIDPT" => {
                 let offset = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::PegMid { offset }) }
-                else { OrderRequest::SubmitPegMid { order_id, instrument, side, qty, offset } }
+                ex(OrderKind::PegMid { offset })
             }
             "MIDPX" | "MIDPRICE" => {
                 let cap = (order.lmt_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::MidPrice { price_cap: cap }) }
-                else { OrderRequest::SubmitMidPrice { order_id, instrument, side, qty, price_cap: cap } }
+                ex(OrderKind::MidPrice { price_cap: cap })
             }
             "SNAP MKT" => {
-                if extended { ex(OrderKind::SnapMkt) }
-                else { OrderRequest::SubmitSnapMkt { order_id, instrument, side, qty } }
+                ex(OrderKind::SnapMkt)
             }
             "SNAP MID" | "SNAP MIDPT" => {
-                if extended { ex(OrderKind::SnapMid) }
-                else { OrderRequest::SubmitSnapMid { order_id, instrument, side, qty } }
+                ex(OrderKind::SnapMid)
             }
             "SNAP PRI" | "SNAP PRIM" => {
-                if extended { ex(OrderKind::SnapPri) }
-                else { OrderRequest::SubmitSnapPri { order_id, instrument, side, qty } }
+                ex(OrderKind::SnapPri)
             }
             _ => return Err(format!("Unsupported order type: '{}'", order.order_type)),
         };

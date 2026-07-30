@@ -1502,7 +1502,7 @@ fn send_order_ex(
             fields.push((40, "3".to_string()));                       // OrdType = Stop
             fields.push((99, format_price(stop_price).to_string()));  // StopPx
         }
-        K::TrailingStop { trail_amt, trail_stop_price } => {
+        K::TrailingStop { trail_amt, .. } => {
             // Per ib-agent#136 capture: amount-based trailing stop carries
             // the trail amount in both 99 and 211 and requires 18=a.
             let t = format_price(trail_amt).to_string();
@@ -1510,11 +1510,9 @@ fn send_order_ex(
             fields.push((99, t.clone()));
             fields.push((211, t));
             fields.push((18, "a".to_string()));
-            // Optional initial stop trigger (tag 6117), only when set (ib-agent#173).
-            if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
             has_base_exec_inst = true;
         }
-        K::TrailingStopLimit { lmt_offset, trail_amt, trail_stop_price } => {
+        K::TrailingStopLimit { lmt_offset, trail_amt, .. } => {
             // Per ib-agent#136 capture: TRAIL LIMIT uses OrdType=TSL, no
             // tag 44, no tag 18; trail amount in both 99 and 211; 6370 is
             // the limit-vs-trail offset.
@@ -1523,9 +1521,8 @@ fn send_order_ex(
             fields.push((99, t.clone()));
             fields.push((6370, format_price(lmt_offset).to_string()));
             fields.push((211, t));
-            if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
         }
-        K::TrailPct { trail_pct, trail_stop_price } => {
+        K::TrailPct { trail_pct, .. } => {
             // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
             // percent in decimal form (1.00 for 1%), alongside 6268 in
             // basis points and 18=a.
@@ -1535,7 +1532,6 @@ fn send_order_ex(
             fields.push((211, pct_decimal));
             fields.push((18, "a".to_string()));
             fields.push((6268, trail_pct.to_string()));
-            if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
             has_base_exec_inst = true;
         }
         K::Moc => fields.push((40, "5".to_string())),
@@ -1558,29 +1554,12 @@ fn send_order_ex(
             fields.push((40, "SP".to_string()));
             fields.push((99, format_price(stop_price).to_string()));
         }
-        K::MidPrice { price_cap } => {
-            fields.push((40, "MIDPX".to_string()));
-            if price_cap > 0 {
-                fields.push((44, format_price(price_cap).to_string()));
-            }
-        }
+        K::MidPrice { .. } => fields.push((40, "MIDPX".to_string())),
         K::SnapMkt => fields.push((40, "SMKT".to_string())),
         K::SnapMid => fields.push((40, "SMID".to_string())),
         K::SnapPri => fields.push((40, "SREL".to_string())),
-        K::PegMkt { offset } => {
-            fields.push((40, "E".to_string()));
-            if offset > 0 {
-                fields.push((211, format_price(offset).to_string()));
-            }
-        }
-        K::PegMid { offset } => {
-            fields.push((40, "E".to_string()));
-            fields.push((8403, "0.0".to_string())); // midOffsetAtWhole — differentiates PEGMID
-            fields.push((8404, "0.0".to_string())); // midOffsetAtHalf
-            if offset > 0 {
-                fields.push((211, format_price(offset).to_string()));
-            }
-        }
+        K::PegMkt { .. } => fields.push((40, "E".to_string())),
+        K::PegMid { .. } => fields.push((40, "E".to_string())),
         K::Rel { offset } => {
             // Per ib-agent#138 capture: Relative shares OrdType=P and is
             // disambiguated by 18=R; peg offset on 211, no tag 44.
@@ -1732,6 +1711,32 @@ fn send_order_ex(
             fields.push((6260, format_price(*adjusted_trailing_amount).to_string()));
             fields.push((6269, adjustable_trailing_unit.to_string()));
         }
+    }
+
+    // The optional tags each type appends last, in the position the per-type
+    // encoders give them: after 204 and the attribute block, not in among the
+    // order-type tags. The values and the conditions are unchanged.
+    match &kind {
+        K::MidPrice { price_cap } if *price_cap > 0 => {
+            fields.push((44, format_price(*price_cap).to_string()));
+        }
+        K::PegMkt { offset } if *offset > 0 => {
+            fields.push((211, format_price(*offset).to_string()));
+        }
+        K::PegMid { offset } => {
+            fields.push((8403, "0.0".to_string())); // midOffsetAtWhole — differentiates PEGMID
+            fields.push((8404, "0.0".to_string())); // midOffsetAtHalf
+            if *offset > 0 {
+                fields.push((211, format_price(*offset).to_string()));
+            }
+        }
+        // Optional initial stop trigger (ib-agent#173).
+        K::TrailingStop { trail_stop_price, .. }
+        | K::TrailingStopLimit { trail_stop_price, .. }
+        | K::TrailPct { trail_stop_price, .. } if *trail_stop_price > 0 => {
+            fields.push((6117, format_price(*trail_stop_price).to_string()));
+        }
+        _ => {}
     }
 
     // Strategy and preview tags last, in the position they held in the encoders
@@ -1954,6 +1959,100 @@ mod tests {
 
         assert_eq!(context.order(8).unwrap().status, OrderStatus::Filled);
         assert!(shared.orders.drain_order_updates().is_empty());
+    }
+
+    /// Encode one request and return the frame with the parts that cannot be
+    /// equal between two sends removed: sequence number, both timestamps, and
+    /// the body length and checksum that cover them.
+    fn encode_for_test(req: crate::types::OrderRequest) -> String {
+        use std::io::Read;
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let mut conn = Some(conn);
+        let mut context = Context::new();
+        context.register_instrument(756733);
+        context.set_symbol(0, "SPY".to_string());
+        context.pending_orders.push(req);
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = std::sync::Arc::new(SharedState::new());
+        drain_and_send_orders(&mut conn, &mut context, "DU123456", &mut hb, false, &shared);
+
+        let mut buf = [0u8; 8192];
+        let n = peer.read(&mut buf).unwrap();
+        String::from_utf8_lossy(&buf[..n])
+            .split('\u{1}')
+            .filter(|f| !f.is_empty())
+            .filter(|f| !["9=", "10=", "34=", "52=", "60="].iter().any(|t| f.starts_with(t)))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    /// Every order type is encoded twice: once by its own request variant and
+    /// once through the shared encoder carrying the same order with no extended
+    /// attributes. The two must be the same message.
+    ///
+    /// That equality is what makes the per-type variants redundant. While both
+    /// exist, it is also what stops them drifting — a tag added to one encoder
+    /// and not the other is exactly how an order type ends up shipping without
+    /// something the caller set, which is #240 and #318.
+    #[test]
+    fn the_shared_encoder_restates_every_type_exactly_as_its_own_variant_does() {
+        use crate::types::{OrderKind as K, OrderRequest as R, PRICE_SCALE};
+        let (id, inst, side, qty) = (7u64, 0u32, Side::Buy, 1u32);
+        let px = 100 * PRICE_SCALE;
+        let stop = 90 * PRICE_SCALE;
+        let off = PRICE_SCALE / 2;
+
+        let cases: Vec<(&str, R, K)> = vec![
+            ("MKT", R::SubmitMarket { order_id: id, instrument: inst, side, qty }, K::Market),
+            ("LMT", R::SubmitLimit { order_id: id, instrument: inst, side, qty, price: px },
+                K::Limit { price: px }),
+            ("STP", R::SubmitStop { order_id: id, instrument: inst, side, qty, stop_price: stop },
+                K::Stop { stop_price: stop }),
+            ("STP LMT", R::SubmitStopLimit { order_id: id, instrument: inst, side, qty, price: px, stop_price: stop },
+                K::StopLimit { price: px, stop_price: stop }),
+            ("MOC", R::SubmitMoc { order_id: id, instrument: inst, side, qty }, K::Moc),
+            ("LOC", R::SubmitLoc { order_id: id, instrument: inst, side, qty, price: px },
+                K::Loc { price: px }),
+            ("MIT", R::SubmitMit { order_id: id, instrument: inst, side, qty, stop_price: stop },
+                K::Mit { stop_price: stop }),
+            ("LIT", R::SubmitLit { order_id: id, instrument: inst, side, qty, price: px, stop_price: stop },
+                K::Lit { price: px, stop_price: stop }),
+            ("MTL", R::SubmitMtl { order_id: id, instrument: inst, side, qty }, K::Mtl),
+            ("MKT PRT", R::SubmitMktPrt { order_id: id, instrument: inst, side, qty }, K::MktPrt),
+            ("STP PRT", R::SubmitStpPrt { order_id: id, instrument: inst, side, qty, stop_price: stop },
+                K::StpPrt { stop_price: stop }),
+            ("MIDPX", R::SubmitMidPrice { order_id: id, instrument: inst, side, qty, price_cap: px },
+                K::MidPrice { price_cap: px }),
+            ("SNAP MKT", R::SubmitSnapMkt { order_id: id, instrument: inst, side, qty }, K::SnapMkt),
+            ("SNAP MID", R::SubmitSnapMid { order_id: id, instrument: inst, side, qty }, K::SnapMid),
+            ("SNAP PRI", R::SubmitSnapPri { order_id: id, instrument: inst, side, qty }, K::SnapPri),
+            ("PEG MKT", R::SubmitPegMkt { order_id: id, instrument: inst, side, qty, offset: off },
+                K::PegMkt { offset: off }),
+            ("PEG MID", R::SubmitPegMid { order_id: id, instrument: inst, side, qty, offset: off },
+                K::PegMid { offset: off }),
+            ("REL", R::SubmitRel { order_id: id, instrument: inst, side, qty, offset: off },
+                K::Rel { offset: off }),
+            ("TRAIL", R::SubmitTrailingStop { order_id: id, instrument: inst, side, qty, trail_amt: off, trail_stop_price: stop },
+                K::TrailingStop { trail_amt: off, trail_stop_price: stop }),
+            ("TRAIL LIMIT", R::SubmitTrailingStopLimit { order_id: id, instrument: inst, side, qty, lmt_offset: off, trail_amt: off, trail_stop_price: stop },
+                K::TrailingStopLimit { lmt_offset: off, trail_amt: off, trail_stop_price: stop }),
+            ("TRAIL PCT", R::SubmitTrailingStopPct { order_id: id, instrument: inst, side, qty, trail_pct: 100, trail_stop_price: stop },
+                K::TrailPct { trail_pct: 100, trail_stop_price: stop }),
+        ];
+
+        let mut differences = Vec::new();
+        for (name, plain, kind) in cases {
+            let own = encode_for_test(plain);
+            let shared = encode_for_test(R::SubmitEx {
+                order_id: id, instrument: inst, side, qty, kind,
+                tif: b'0', attrs: crate::types::OrderAttrs::default(),
+            });
+            if own != shared {
+                differences.push(format!("{name}\n   own: {own}\n  shrd: {shared}"));
+            }
+        }
+        assert!(differences.is_empty(),
+            "{} type(s) encoded differently:\n{}", differences.len(), differences.join("\n"));
     }
 
     /// ibx#318: adaptive, algo and what-if orders returned early into their own

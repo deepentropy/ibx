@@ -293,8 +293,8 @@ fn place_order_market() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitMarket { qty, .. }) => assert_eq!(qty, 100),
-        _ => panic!("expected SubmitMarket, got {:?}", cmd),
+        ControlCommand::Order(OrderRequest::SubmitEx { qty, kind: OrderKind::Market, .. }) => assert_eq!(qty, 100),
+        _ => panic!("expected a Market order, got {:?}", cmd),
     }
 }
 
@@ -310,11 +310,11 @@ fn place_order_limit() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitLimit { qty, price, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { qty, kind: OrderKind::Limit { price, .. }, .. }) => {
             assert_eq!(qty, 50);
             assert_eq!(price, (150.25 * PRICE_SCALE_F) as i64);
         }
-        _ => panic!("expected SubmitLimit, got {:?}", cmd),
+        _ => panic!("expected a Limit order, got {:?}", cmd),
     }
 }
 
@@ -332,11 +332,11 @@ fn place_order_trailing_stop_carries_initial_trigger() {
     };
     client.place_order(1, &spy(), &order).unwrap();
     match rx.try_recv().unwrap() {
-        ControlCommand::Order(OrderRequest::SubmitTrailingStop { trail_amt, trail_stop_price, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStop { trail_amt, trail_stop_price, .. }, .. }) => {
             assert_eq!(trail_amt, (0.50 * PRICE_SCALE_F) as i64);
             assert_eq!(trail_stop_price, (10.00 * PRICE_SCALE_F) as i64);
         }
-        cmd => panic!("expected SubmitTrailingStop, got {:?}", cmd),
+        cmd => panic!("expected a TrailingStop order, got {:?}", cmd),
     }
 }
 
@@ -351,10 +351,10 @@ fn place_order_trailing_stop_without_trigger_is_unset() {
     };
     client.place_order(1, &spy(), &order).unwrap();
     match rx.try_recv().unwrap() {
-        ControlCommand::Order(OrderRequest::SubmitTrailingStop { trail_stop_price, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStop { trail_stop_price, .. }, .. }) => {
             assert_eq!(trail_stop_price, 0);
         }
-        cmd => panic!("expected SubmitTrailingStop, got {:?}", cmd),
+        cmd => panic!("expected a TrailingStop order, got {:?}", cmd),
     }
 }
 
@@ -451,7 +451,7 @@ fn place_order_adjustable_trail_percent_unit_passes_through() {
 }
 
 #[test]
-fn place_order_limit_gtc_uses_limit_ex() {
+fn place_order_limit_gtc_carries_the_tif() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order {
@@ -462,15 +462,15 @@ fn place_order_limit_gtc_uses_limit_ex() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitLimitEx { tif, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { tif, kind: OrderKind::Limit { .. }, .. }) => {
             assert_eq!(tif, b'1'); // GTC
         }
-        _ => panic!("expected SubmitLimitEx, got {:?}", cmd),
+        _ => panic!("expected a limit order, got {:?}", cmd),
     }
 }
 
 #[test]
-fn place_order_limit_hidden_uses_limit_ex() {
+fn place_order_limit_hidden_carries_the_attribute() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order {
@@ -481,10 +481,10 @@ fn place_order_limit_hidden_uses_limit_ex() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitLimitEx { attrs, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { attrs, kind: OrderKind::Limit { .. }, .. }) => {
             assert!(attrs.hidden);
         }
-        _ => panic!("expected SubmitLimitEx, got {:?}", cmd),
+        _ => panic!("expected a limit order, got {:?}", cmd),
     }
 }
 
@@ -510,7 +510,7 @@ fn place_order_stop_with_parent_and_gtc_uses_submit_ex() {
             assert_eq!(attrs.parent_id, 42);
             assert_eq!(attrs.oca_group, 77);
         }
-        _ => panic!("expected SubmitEx, got {:?}", cmd),
+        _ => panic!("expected a Ex order, got {:?}", cmd),
     }
 }
 
@@ -531,7 +531,7 @@ fn place_order_market_outside_rth_uses_submit_ex() {
             assert_eq!(tif, b'0'); // DAY
             assert!(attrs.outside_rth);
         }
-        _ => panic!("expected SubmitEx, got {:?}", cmd),
+        _ => panic!("expected a Ex order, got {:?}", cmd),
     }
 }
 
@@ -555,13 +555,13 @@ fn place_order_trailing_amount_with_oca_uses_submit_ex() {
             assert_eq!(attrs.oca_group_str, "exit_9");
             assert_eq!(attrs.oca_type, 2); // ibx#215
         }
-        _ => panic!("expected SubmitEx, got {:?}", cmd),
+        _ => panic!("expected a Ex order, got {:?}", cmd),
     }
 }
 
 #[test]
-fn place_order_empty_tif_stays_plain() {
-    // tif "" is DAY (the official API default) — no extended routing.
+fn place_order_empty_tif_is_day() {
+    // An empty tif is DAY, matching the official API default.
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order {
@@ -569,8 +569,12 @@ fn place_order_empty_tif_stays_plain() {
         aux_price: 240.0, ..Default::default()
     };
     client.place_order(1, &spy(), &order).unwrap();
-    assert!(matches!(rx.try_recv().unwrap(),
-        ControlCommand::Order(OrderRequest::SubmitStop { .. })));
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitEx { tif, kind: OrderKind::Stop { .. }, .. }) => {
+            assert_eq!(tif, b'0', "an empty tif is DAY");
+        }
+        other => panic!("expected a stop order, got {other:?}"),
+    }
 }
 
 // ── ibx#226: transmit=false must be rejected, not silently ignored ──
@@ -638,11 +642,11 @@ fn place_order_stop() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitStop { side, stop_price, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { side, kind: OrderKind::Stop { stop_price, .. }, .. }) => {
             assert!(matches!(side, Side::Sell));
             assert_eq!(stop_price, (145.0 * PRICE_SCALE_F) as i64);
         }
-        _ => panic!("expected SubmitStop, got {:?}", cmd),
+        _ => panic!("expected a Stop order, got {:?}", cmd),
     }
 }
 
@@ -658,11 +662,11 @@ fn place_order_stop_limit() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitStopLimit { price, stop_price, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::StopLimit { price, stop_price, .. }, .. }) => {
             assert_eq!(price, (144.0 * PRICE_SCALE_F) as i64);
             assert_eq!(stop_price, (145.0 * PRICE_SCALE_F) as i64);
         }
-        _ => panic!("expected SubmitStopLimit, got {:?}", cmd),
+        _ => panic!("expected a StopLimit order, got {:?}", cmd),
     }
 }
 
@@ -678,10 +682,10 @@ fn place_order_trailing_stop_amount() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitTrailingStop { trail_amt, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStop { trail_amt, .. }, .. }) => {
             assert_eq!(trail_amt, (2.0 * PRICE_SCALE_F) as i64);
         }
-        _ => panic!("expected SubmitTrailingStop, got {:?}", cmd),
+        _ => panic!("expected a TrailingStop order, got {:?}", cmd),
     }
 }
 
@@ -697,10 +701,10 @@ fn place_order_trailing_stop_percent() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitTrailingStopPct { trail_pct, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailPct { trail_pct, .. }, .. }) => {
             assert_eq!(trail_pct, 500); // 5.0 * 100
         }
-        _ => panic!("expected SubmitTrailingStopPct, got {:?}", cmd),
+        _ => panic!("expected a TrailingStopPct order, got {:?}", cmd),
     }
 }
 
@@ -715,7 +719,7 @@ fn place_order_trailing_stop_limit() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitTrailingStopLimit { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailingStopLimit { .. }, .. })));
 }
 
 #[test]
@@ -728,7 +732,7 @@ fn place_order_moc() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitMoc { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Moc, .. })));
 }
 
 #[test]
@@ -742,7 +746,7 @@ fn place_order_loc() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitLoc { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Loc { .. }, .. })));
 }
 
 #[test]
@@ -756,7 +760,7 @@ fn place_order_mit() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitMit { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Mit { .. }, .. })));
 }
 
 #[test]
@@ -770,7 +774,7 @@ fn place_order_lit() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitLit { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Lit { .. }, .. })));
 }
 
 #[test]
@@ -783,7 +787,7 @@ fn place_order_mtl() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitMtl { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Mtl, .. })));
 }
 
 #[test]
@@ -796,7 +800,7 @@ fn place_order_mkt_prt() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitMktPrt { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::MktPrt, .. })));
 }
 
 #[test]
@@ -810,7 +814,7 @@ fn place_order_stp_prt() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitStpPrt { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::StpPrt { .. }, .. })));
 }
 
 #[test]
@@ -824,7 +828,7 @@ fn place_order_rel() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitRel { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Rel { .. }, .. })));
 }
 
 #[test]
@@ -838,7 +842,7 @@ fn place_order_peg_mkt() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitPegMkt { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::PegMkt { .. }, .. })));
 }
 
 #[test]
@@ -852,7 +856,7 @@ fn place_order_peg_mid() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitPegMid { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::PegMid { .. }, .. })));
 }
 
 #[test]
@@ -866,7 +870,7 @@ fn place_order_midprice() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitMidPrice { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::MidPrice { .. }, .. })));
 }
 
 #[test]
@@ -879,7 +883,7 @@ fn place_order_snap_mkt() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitSnapMkt { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::SnapMkt, .. })));
 }
 
 #[test]
@@ -892,7 +896,7 @@ fn place_order_snap_mid() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitSnapMid { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::SnapMid, .. })));
 }
 
 #[test]
@@ -905,7 +909,7 @@ fn place_order_snap_pri() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitSnapPri { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::SnapPri, .. })));
 }
 
 #[test]
@@ -918,7 +922,7 @@ fn place_order_box_top() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitMtl { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Mtl, .. })));
 }
 
 #[test]
@@ -932,7 +936,7 @@ fn place_order_sell_side() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitMarket { side, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { side, kind: OrderKind::Market, .. }) => {
             assert!(matches!(side, Side::Sell));
         }
         _ => panic!("expected SubmitMarket"),
@@ -950,7 +954,7 @@ fn place_order_short_sell_side() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitMarket { side, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { side, kind: OrderKind::Market, .. }) => {
             assert!(matches!(side, Side::ShortSell));
         }
         _ => panic!("expected SubmitMarket"),
@@ -1052,7 +1056,7 @@ fn place_order_auto_assigns_id_when_zero() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitMarket { order_id, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitEx { order_id, kind: OrderKind::Market, .. }) => {
             assert!(order_id > 0);
         }
         _ => panic!("expected SubmitMarket"),
@@ -1121,7 +1125,7 @@ fn stp_order_with_valid_aux_price_succeeds() {
     };
     client.place_order(1, &spy(), &order).unwrap();
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitStop { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::Stop { .. }, .. })));
 }
 
 #[test]
@@ -1160,7 +1164,7 @@ fn trail_order_with_trailing_percent_succeeds() {
     };
     client.place_order(1, &spy(), &order).unwrap();
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitTrailingStopPct { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitEx { kind: OrderKind::TrailPct { .. }, .. })));
 }
 
 #[test]
