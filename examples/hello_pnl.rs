@@ -34,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         host: "cdc1.ibllc.com".into(),
         paper: true,
         core_id: None,
+        code_provider: None,
     })?;
 
     let account = client.account_id.clone();

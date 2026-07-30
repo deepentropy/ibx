@@ -87,7 +87,7 @@ PARAM_DOCS: dict[str, str] = {
     "manual_order_cancel_time": "Manual cancel time (empty for immediate).",
     "config": "Connection configuration (username, password, host, paper, core_id).",
     "ib_key_timeout_secs": "Live second-factor approval timeout in seconds (default ~18 min). Lower it to fail fast on unattended live logins; ignored for paper.",
-    "ib_key_token_sub_type": "Account-specific second-factor token sub-type (default `\"2a\"`); ignored for paper.",
+    "ib_key_token_sub_type": "Fallback second-factor token sub-type (default `\"2a\"`), used only when the server states none for the session; ignored for paper.",
     "host": "Server hostname.",
     "port": "Port number (unused — ibx connects directly).",
     "client_id": "Client ID (unused — single-client engine).",

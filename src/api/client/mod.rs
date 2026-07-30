@@ -20,6 +20,7 @@
 //!     host: "your_ib_host".into(),
 //!     paper: true,
 //!     core_id: None,
+//!     code_provider: None,
 //! }).unwrap();
 //!
 //! client.req_mkt_data(1, &Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() },
@@ -95,6 +96,11 @@ pub struct EClientConfig {
     /// CPU core to pin this engine's hot loop to. `None` = no pinning. When
     /// running multiple engines, use a **distinct** core per engine.
     pub core_id: Option<usize>,
+    /// Supplies the second-factor code. Required for accounts whose factor is
+    /// an authenticator code — those have no push to fall back to, and connect
+    /// fails without it. For IBKey accounts it selects Challenge/Response over
+    /// waiting for a mobile push, so `None` is fine there (ibx#208, ibx#282).
+    pub code_provider: Option<crate::auth::session::CodeProvider>,
 }
 
 /// ibapi-compatible EClient. Matches C++ `EClientSocket` method signatures.
@@ -139,6 +145,25 @@ impl Drop for EClient {
     }
 }
 
+/// The gateway's view of an [`EClientConfig`].
+///
+/// Extracted so the forwarding is checkable without opening a socket: the
+/// second-factor provider reaching the gateway is the whole of what makes the
+/// feature usable from this client, and it is one line that a refactor can
+/// drop silently.
+fn gateway_config(config: &EClientConfig) -> GatewayConfig {
+    GatewayConfig {
+        username: config.username.clone(),
+        password: zeroize::Zeroizing::new(config.password.clone()),
+        host: config.host.clone(),
+        paper: config.paper,
+        accept_invalid_certs: false,
+        ib_key_timeout_secs: crate::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
+        ib_key_token_sub_type: crate::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
+        code_provider: config.code_provider.clone(),
+    }
+}
+
 impl EClient {
     /// Connect to IB and start the engine.
     pub fn connect(config: &EClientConfig) -> Result<Self, Box<dyn std::error::Error>> {
@@ -174,16 +199,7 @@ impl EClient {
         config: &EClientConfig,
         event_tx: Option<Sender<Event>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let gw_config = GatewayConfig {
-            username: config.username.clone(),
-            password: zeroize::Zeroizing::new(config.password.clone()),
-            host: config.host.clone(),
-            paper: config.paper,
-            accept_invalid_certs: false,
-            ib_key_timeout_secs: crate::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
-            ib_key_token_sub_type: crate::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
-            code_provider: None,
-        };
+        let gw_config = gateway_config(config);
 
         let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&gw_config)?;
         let account_id = gw.account_id.clone();

@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = env::var("IB_HOST").unwrap_or_else(|_| "cdc1.ibllc.com".to_string());
 
     let client = EClient::connect(&EClientConfig {
-        username, password, host, paper: true, core_id: None,
+        username, password, host, paper: true, core_id: None, code_provider: None,
     })?;
 
     println!("ccp_session_id: {:?}", client.ccp_session_id());

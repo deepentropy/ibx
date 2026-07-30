@@ -157,6 +157,7 @@ fn main() {
         host,
         paper: true,
         core_id: None,
+        code_provider: None,
     }).expect("Failed to connect");
     println!("Connected.");
 

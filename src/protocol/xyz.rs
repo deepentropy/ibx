@@ -181,6 +181,41 @@ pub fn xyz_build_swcr_token_code_submission(code: &str) -> Vec<u8> {
     buf
 }
 
+/// Security-code second factor (msg 774), the path used by accounts whose
+/// second factor is an authenticator code rather than an IBKey push.
+pub const XYZ_MSG_SECURITY_CODE: u32 = 774;
+
+/// Message codes on 774. The client sends its code as message code 1; the
+/// server answers with 2. Other codes exist on this message; this path sends
+/// and expects only these two.
+pub const SECURITY_CODE_SEND: u32 = 1;
+pub const SECURITY_CODE_RESULT: u32 = 2;
+
+/// Build the security-code frame: msg 774, **message code 1**, carrying the
+/// code itself.
+///
+/// This is a single message, not a request/submit pair: exactly one 774 goes
+/// on the wire after SRP passes, carrying message code 1 with the code in the
+/// security-token slot. Nothing precedes it and nothing acknowledges it but
+/// the code 2 result.
+///
+/// ```text
+/// Header: version (=20), msg_id (=774), literal 1, message_code (=1), username=""
+/// Body:   security_token = the code, challenge = "", status = ""
+/// ```
+pub fn xyz_build_security_code(code: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&20u32.to_be_bytes());
+    buf.extend_from_slice(&XYZ_MSG_SECURITY_CODE.to_be_bytes());
+    buf.extend_from_slice(&1u32.to_be_bytes());
+    buf.extend_from_slice(&SECURITY_CODE_SEND.to_be_bytes());
+    xyz_write_string(&mut buf, "");      // header username
+    xyz_write_string(&mut buf, code);    // security token = the code
+    xyz_write_string(&mut buf, "");      // challenge
+    xyz_write_string(&mut buf, "");      // status
+    buf
+}
+
 /// Parsed payload from an `XYZ_MSG_SWCR_TOKEN` state=2 reply.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SwcrTokenChallenge {
@@ -298,6 +333,40 @@ mod tests {
     }
 
     // ── Second-factor approval (IBKey / SWCR_TOKEN) ─────────────────
+
+    /// The authenticator-code frame, byte for byte (ibx#282). One message,
+    /// code 1, the code in the security-token slot — the shape the reference
+    /// client puts on the wire after SRP passes. Verified against a live login.
+    #[test]
+    fn security_code_matches_canonical_bytes() {
+        let expected: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x14, // version = 20
+            0x00, 0x00, 0x03, 0x06, // msg_id = 774
+            0x00, 0x00, 0x00, 0x01, // hardcoded 1
+            0x00, 0x00, 0x00, 0x01, // message code = 1
+            0x00, 0x00, 0x00, 0x00, // header username = ""
+            0x00, 0x00, 0x00, 0x06, // security token length = 6
+            0x31, 0x32, 0x33, 0x34, 0x35, 0x36, // "123456"
+            0x00, 0x00,             // padding to 4-byte alignment
+            0x00, 0x00, 0x00, 0x00, // challenge = ""
+            0x00, 0x00, 0x00, 0x00, // status = ""
+        ];
+        assert_eq!(xyz_build_security_code("123456"), expected,
+            "byte-for-byte match required");
+    }
+
+    /// The code lands in the security-token slot, not the header username the
+    /// base header writes first, and not the trailing status.
+    #[test]
+    fn security_code_parses_back_with_the_code_in_the_token_slot() {
+        let payload = xyz_build_security_code("987654");
+        let (msg_id, _, code, fields) = xyz_parse_response(&payload).unwrap();
+        assert_eq!(msg_id, XYZ_MSG_SECURITY_CODE);
+        assert_eq!(code, SECURITY_CODE_SEND);
+        // fields[0] is the header username, fields[1] the security token.
+        assert_eq!(fields[0], "", "header username is empty");
+        assert_eq!(fields[1], "987654", "the code goes in the security-token slot");
+    }
 
     #[test]
     fn swcr_token_init_matches_canonical_bytes() {

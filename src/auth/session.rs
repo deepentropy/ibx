@@ -611,6 +611,18 @@ fn ib_key_err(kind: io::ErrorKind, msg: impl Into<String>) -> io::Error {
     io::Error::new(kind, msg.into())
 }
 
+/// Which second factor the callback is being asked to answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SecondFactor {
+    /// IBKey Challenge/Response — answer with the 8-character code the app
+    /// shows for `display_id`.
+    #[default]
+    IbKeyChallengeResponse,
+    /// Authenticator code — answer with the account's current code, typically
+    /// 6 digits. `display_id` and `avth_url` are empty; there is nothing to show.
+    AuthenticatorCode,
+}
+
 /// Challenge details surfaced to a [`CodeProvider`] callback.
 ///
 /// Populated from the server's `XYZ 775` state=2 reply: the per-session
@@ -619,20 +631,33 @@ fn ib_key_err(kind: io::ErrorKind, msg: impl Into<String>) -> io::Error {
 /// fallback. Either may be empty if the server omitted it in this run.
 #[derive(Debug, Clone, Default)]
 pub struct IbKeyChallenge {
+    /// Which factor is being asked for. The two want different codes, so
+    /// branch on this before validating what the operator typed.
+    pub factor: SecondFactor,
     pub display_id: String,
     pub avth_url: String,
 }
 
-/// 8-character Challenge/Response code provider callback.
+/// Second-factor code provider callback.
 ///
-/// If supplied (via `GatewayConfig::code_provider`), the C/R variant of the
-/// IBKey gate is used instead of waiting for a mobile push approval: after
-/// the server delivers state=2, this callback is invoked once with the
-/// parsed challenge and the returned 8-character code is submitted as
-/// `XYZ 775` state=3. Per ib-agent#149, the server has no retry loop — one
-/// wrong code returns state=4 FAILED and the socket is torn down. The
-/// callback should pull the code from a deterministic source (stdin,
-/// secrets vault, etc.) or return an `io::Error` to abort the login.
+/// Invoked once per login, with [`IbKeyChallenge::factor`] naming what to
+/// return:
+///
+/// - [`SecondFactor::IbKeyChallengeResponse`] — the 8-character code shown for
+///   `display_id`, submitted as `XYZ 775` state=3. Supplying a provider selects
+///   this over waiting for a mobile push.
+/// - [`SecondFactor::AuthenticatorCode`] — the account's current authenticator
+///   code, submitted as `XYZ 774` code=1. Not optional: these accounts have no
+///   push to fall back to, so a missing provider fails the login.
+///
+/// Neither server retries. One wrong code ends the attempt and the socket is
+/// torn down, so pull the code from a deterministic source (stdin, secrets
+/// vault) or return an `io::Error` to abort.
+///
+/// Called on its own thread so the gate can keep answering the server's
+/// keepalives while it waits. It is not cancelled if the gate gives up first,
+/// so bound anything that can block indefinitely — a callback still parked on
+/// stdin outlives the login and competes with the next one for the terminal.
 pub type CodeProvider = std::sync::Arc<
     dyn Fn(IbKeyChallenge) -> io::Result<String> + Send + Sync,
 >;
@@ -654,6 +679,313 @@ pub const IB_KEY_DEFAULT_TOKEN_SUB_TYPE: &str = "2a";
 
 /// Cadence at which the server probes during the wait window.
 const IB_KEY_HEARTBEAT_CADENCE_SECS: u64 = 20;
+/// Ceiling on a frame in the auth gate, where the traffic is 774/771 replies
+/// and keepalives — none of which reach a fraction of this.
+const MAX_GATE_FRAME: usize = 64 * 1024;
+
+/// Frame reader that survives a read timeout mid-message.
+///
+/// The gate polls the socket so a time-limited code is not left unsent while
+/// the loop blocks. `ns_recv` cannot be polled: it is two `read_exact` calls,
+/// and a timeout between them discards the bytes already consumed, leaving the
+/// next read starting mid-frame. This buffers instead, so a timeout is simply
+/// "no complete frame yet".
+#[derive(Default)]
+struct GateReader {
+    buf: Vec<u8>,
+    /// Whether the code was already on the wire when the frame currently being
+    /// assembled began arriving. A frame can span polls, so the loop's own view
+    /// of that is a poll too late.
+    sent_when_frame_began: bool,
+}
+
+impl GateReader {
+    /// One non-blocking-ish step: drain what is available, return a message
+    /// once a whole frame is buffered. `Ok(None)` means "nothing complete yet".
+    /// Returns the frame and whether the code had been sent when that frame's
+    /// first byte arrived.
+    fn poll<S: Read>(&mut self, stream: &mut S, sent: bool) -> io::Result<Option<(RecvMsg, bool)>> {
+        if let Some(msg) = self.take()? {
+            return Ok(Some((msg, self.sent_when_frame_began)));
+        }
+        // Only ever ask for what the frame in progress still needs. Reading
+        // further pulls in bytes belonging to the next frame, and this buffer
+        // is dropped when the gate returns — the caller carries on reading the
+        // raw stream, so an over-read either loses a whole frame or leaves the
+        // stream mid-frame. The gate therefore always exits with an empty
+        // buffer. `take` has already validated the magic and the length.
+        let needed = if self.buf.len() < 8 {
+            8 - self.buf.len()
+        } else {
+            let len = u32::from_be_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]]) as usize;
+            (8 + len) - self.buf.len()
+        };
+        let mut tmp = [0u8; 4096];
+        let want = needed.min(tmp.len());
+        match stream.read(&mut tmp[..want]) {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "server closed the socket")),
+            Ok(n) => {
+                if self.buf.is_empty() {
+                    self.sent_when_frame_began = sent;
+                }
+                self.buf.extend_from_slice(&tmp[..n]);
+                Ok(self.take()?.map(|m| (m, self.sent_when_frame_began)))
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                || e.kind() == io::ErrorKind::TimedOut
+                // `read_exact` retries this for every other reader in this
+                // file; the raw read here is the only one that would die on a
+                // signal, taking the operator's code with it.
+                || e.kind() == io::ErrorKind::Interrupted => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Pull one complete `#%#%` frame out of the buffer, if there is one.
+    fn take(&mut self) -> io::Result<Option<RecvMsg>> {
+        if self.buf.len() < 8 {
+            return Ok(None);
+        }
+        if &self.buf[..4] != NS_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "security-code gate: framing lost (no #%#% magic)",
+            ));
+        }
+        let len = u32::from_be_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]]) as usize;
+        // Auth frames are tens of bytes. A length this far out is a corrupt
+        // header, and believing it means buffering toward 4 GiB while waiting
+        // for a tail that is never coming.
+        if len > MAX_GATE_FRAME {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("security-code gate: frame claims {} bytes", len),
+            ));
+        }
+        if self.buf.len() < 8 + len {
+            return Ok(None);
+        }
+        let payload: Vec<u8> = self.buf[8..8 + len].to_vec();
+        self.buf.drain(..8 + len);
+
+        if ns::is_ns_text(&payload) {
+            if let Some((version, msg_type, fields)) = ns::ns_parse(&payload) {
+                return Ok(Some(RecvMsg::Ns { version, msg_type, fields }));
+            }
+        }
+        if payload.len() >= 16 {
+            if let Some((msg_id, sub_id, state, fields)) = xyz::xyz_parse_response(&payload) {
+                return Ok(Some(RecvMsg::Xyz { msg_id, sub_id, state, fields }));
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "security-code gate: unparseable frame",
+        ))
+    }
+}
+
+/// Second factor for accounts whose token is an authenticator code (msg 774).
+///
+/// `AUTH_START` names the token type; type 4 takes this path, type 5 the IBKey
+/// push in [`do_ib_key_2fa`]. One message goes on the wire: the code as 774
+/// message code 1, framed and written raw like the IBKey messages, straight
+/// after SRP passes. The server answers with code 2 carrying `PASSED` or
+/// `FAILED`. Nothing on the wire prompts for the code first, so a gate that
+/// waits to be asked waits forever.
+///
+/// The provider runs off this thread. It typically waits on a human, and the
+/// loop has to keep answering the server's keepalives meanwhile or the
+/// connection is dropped for going quiet.
+///
+/// `stream` must carry a read timeout. The loop only gets to check for the
+/// code between reads, so on a blocking stream a code that arrives mid-wait
+/// sits unsent until the server next says something — up to a keepalive
+/// interval, against a code that is good for about thirty seconds.
+pub fn do_security_code_2fa<S: Read + Write>(
+    stream: &mut S,
+    deadline: std::time::Instant,
+    code_provider: Option<&CodeProvider>,
+) -> io::Result<IbKeyOutcome> {
+    use std::time::Instant;
+
+    let Some(provider) = code_provider else {
+        return Err(ib_key_err(
+            io::ErrorKind::InvalidInput,
+            "this account's second factor is an authenticator code; \
+             set code_provider to supply it",
+        ));
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let provider = provider.clone();
+        std::thread::Builder::new()
+            .name("ib-security-code".into())
+            .spawn(move || {
+                let _ = tx.send(provider(IbKeyChallenge {
+                    factor: SecondFactor::AuthenticatorCode,
+                    ..Default::default()
+                }));
+            })?;
+    }
+    let mut sent = false;
+    let mut reader = GateReader::default();
+
+    loop {
+        if Instant::now() >= deadline {
+            return Err(ib_key_err(
+                io::ErrorKind::TimedOut,
+                "security-code gate timed out (client deadline)",
+            ));
+        }
+
+        // A verdict only means anything if the code was already on the wire
+        // when the server began sending it. The reader reports that, because a
+        // frame can span polls and the loop would otherwise judge a verdict by
+        // a send that landed between its header and its body.
+        let recv = match reader.poll(stream, sent) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof
+                || e.kind() == io::ErrorKind::ConnectionReset
+                || e.kind() == io::ErrorKind::ConnectionAborted =>
+            {
+                return Err(ib_key_err(
+                    io::ErrorKind::ConnectionAborted,
+                    if sent {
+                        "security-code gate: server closed the socket after the code was sent"
+                    } else {
+                        "security-code gate: server closed the socket before a code was sent"
+                    },
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+
+        if !sent {
+            match rx.try_recv() {
+                Ok(result) => {
+                    let code = result?;
+                    if code.trim().is_empty() {
+                        return Err(ib_key_err(
+                            io::ErrorKind::InvalidInput,
+                            "code_provider returned an empty code; the server has no retry loop, \
+                             so sending it would end the attempt",
+                        ));
+                    }
+                    // The read above can span the deadline. Sending after it
+                    // has passed puts a code on the wire for a login that is
+                    // about to be abandoned.
+                    if Instant::now() >= deadline {
+                        return Err(ib_key_err(
+                            io::ErrorKind::TimedOut,
+                            "security-code gate timed out (client deadline)",
+                        ));
+                    }
+                    // Trimmed on the way out, not just when checking for
+                    // empty: surrounding whitespace reaches the server as part
+                    // of the code and burns the one attempt.
+                    let code = code.trim();
+                    stream.write_all(&xyz::xyz_wrap(&xyz::xyz_build_security_code(code)))?;
+                    log::info!("security-code gate: sent code (len={})", code.len());
+                    sent = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(ib_key_err(
+                        io::ErrorKind::Other,
+                        "security-code gate: code_provider panicked without returning a code",
+                    ));
+                }
+            }
+        }
+
+        let Some((recv, sent_before_read)) = recv else { continue };
+        match recv {
+            RecvMsg::Xyz { msg_id, state, fields, .. }
+                if msg_id == xyz::XYZ_MSG_SECURITY_CODE && state == xyz::SECURITY_CODE_RESULT =>
+            {
+                // Nothing concludes the exchange until the code is out — an
+                // approval with no code sent is the mute failure this gate
+                // exists to prevent.
+                if !sent_before_read {
+                    log::debug!("security-code gate: 774 result before a code was sent");
+                    continue;
+                }
+                let status = fields.iter().rev().find(|f| !f.is_empty()).cloned().unwrap_or_default();
+                if status.eq_ignore_ascii_case("PASSED") {
+                    log::info!("security-code gate: accepted");
+                    return Ok(IbKeyOutcome::Approved {
+                        approval_url: String::new(),
+                        session_id: String::new(),
+                        soft_token_hex: String::new(),
+                    });
+                }
+                // Only echo a status we recognise. The reply's fields are
+                // server-controlled and this one is adjacent to the slot the
+                // code was sent in — never interpolate it blind.
+                let reason = if status.eq_ignore_ascii_case("FAILED") { "FAILED" } else { "unrecognized status" };
+                return Err(ib_key_err(
+                    io::ErrorKind::PermissionDenied,
+                    format!("security code rejected ({})", reason),
+                ));
+            }
+            RecvMsg::Xyz { msg_id, state, fields, .. }
+                if msg_id == xyz::XYZ_MSG_TOKEN_AUTH && (state == 3 || state == 5) =>
+            {
+                // Nothing here concludes the exchange until the code is out —
+                // an unsolicited verdict is neither an approval nor a denial.
+                if !sent_before_read {
+                    log::debug!("security-code gate: AUTH_FINISH before a code was sent");
+                    continue;
+                }
+                if fields.iter().any(|f| f.eq_ignore_ascii_case("PASSED")) {
+                    log::info!("security-code gate: accepted via AUTH_FINISH");
+                    return Ok(IbKeyOutcome::Approved {
+                        approval_url: String::new(),
+                        session_id: String::new(),
+                        soft_token_hex: String::new(),
+                    });
+                }
+                // A rejection arriving this way is still a rejection. Falling
+                // through would spin until the client deadline and then report
+                // a timeout, which hides the reason.
+                return Err(ib_key_err(
+                    io::ErrorKind::PermissionDenied,
+                    "second factor rejected at AUTH_FINISH",
+                ));
+            }
+            RecvMsg::Xyz { msg_id, state, .. } if msg_id == xyz::XYZ_MSG_SECURITY_CODE => {
+                if !sent_before_read {
+                    log::debug!("security-code gate: 774 code {} before a code was sent", state);
+                    continue;
+                }
+                return Err(ib_key_err(
+                    io::ErrorKind::PermissionDenied,
+                    format!("security-code gate: server returned code {}", state),
+                ));
+            }
+            RecvMsg::Ns { msg_type, .. } if msg_type == NS_ERROR_RESPONSE
+                || msg_type == NS_SECURE_ERROR =>
+            {
+                return Err(ib_key_err(
+                    io::ErrorKind::Other,
+                    format!("security-code gate: server error type={}", msg_type),
+                ));
+            }
+            RecvMsg::Ns { msg_type, fields, .. } if msg_type == NS_TEST_REQUEST => {
+                let ts = fields.iter().find(|f| !f.is_empty()).cloned().unwrap_or_default();
+                stream.write_all(&ns_build_heart_beat(NS_VERSION, &ts))?;
+            }
+            // Identifiers only. The derived `Debug` prints every field, and an
+            // echoed frame can carry the code itself.
+            RecvMsg::Ns { msg_type, .. } => log::debug!("security-code gate: ns type={}", msg_type),
+            RecvMsg::Xyz { msg_id, state, .. } => {
+                log::debug!("security-code gate: xyz id={} state={}", msg_id, state)
+            }
+        }
+    }
+}
 
 /// Execute the second-factor approval gate that follows SRP on a live login.
 ///
@@ -753,6 +1085,7 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                 if !code_submitted {
                     if let Some(provider) = code_provider {
                         let challenge_info = IbKeyChallenge {
+                            factor: SecondFactor::IbKeyChallengeResponse,
                             display_id: session_id.clone(),
                             avth_url: approval_url.clone(),
                         };
@@ -1528,6 +1861,646 @@ mod tests {
         out
     }
 
+    /// A server that stays silent until the client has written something, then
+    /// answers `chunk` bytes at a time. Both halves matter: the silence keeps
+    /// these tests independent of when the provider thread happens to return,
+    /// and the chunking reproduces a polled socket handing back a frame in
+    /// pieces.
+    struct RepliesAfterWrite {
+        /// Served before the client writes anything.
+        preface: Vec<u8>,
+        pre_pos: usize,
+        /// Served once the client has written.
+        reply: Vec<u8>,
+        read_pos: usize,
+        written: Vec<u8>,
+        chunk: usize,
+        /// When set, the reply is withheld until this appears in `written` —
+        /// a server that answers the code, not merely the first thing sent.
+        trigger: Option<Vec<u8>>,
+        /// Alternates a timeout between chunks, which is what a polled socket
+        /// actually does and what `read_exact` cannot survive.
+        stall: bool,
+    }
+
+    impl RepliesAfterWrite {
+        fn new(reply: Vec<u8>) -> Self {
+            Self {
+                preface: Vec::new(), pre_pos: 0,
+                reply, read_pos: 0, written: Vec::new(),
+                chunk: usize::MAX, trigger: None, stall: false,
+            }
+        }
+        /// Hand the reply back `chunk` bytes at a time, timing out in between.
+        fn chunked(reply: Vec<u8>, chunk: usize) -> Self {
+            Self { chunk, ..Self::new(reply) }
+        }
+        /// Say something before the client has written, so the gate is
+        /// observed mid-wait rather than after the exchange.
+        fn with_preface(preface: Vec<u8>, trigger: Vec<u8>, reply: Vec<u8>) -> Self {
+            Self { preface, trigger: Some(trigger), ..Self::new(reply) }
+        }
+
+        /// Has the client sent what the server is waiting for?
+        fn ready(&self) -> bool {
+            match &self.trigger {
+                Some(t) => self.written.windows(t.len()).any(|w| w == t.as_slice()),
+                None => !self.written.is_empty(),
+            }
+        }
+    }
+
+    impl io::Read for RepliesAfterWrite {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.chunk != usize::MAX {
+                self.stall = !self.stall;
+                if self.stall {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "poll timeout"));
+                }
+            }
+            let ready = self.ready();
+            let (src, pos) = if ready {
+                (&self.reply, &mut self.read_pos)
+            } else {
+                (&self.preface, &mut self.pre_pos)
+            };
+            let remaining = src.len().saturating_sub(*pos);
+            if remaining == 0 {
+                return if ready {
+                    Err(io::Error::new(io::ErrorKind::UnexpectedEof, "scripted EOF"))
+                } else {
+                    Err(io::Error::new(io::ErrorKind::WouldBlock, "quiet"))
+                };
+            }
+            let n = remaining.min(buf.len()).min(self.chunk);
+            buf[..n].copy_from_slice(&src[*pos..*pos + n]);
+            *pos += n;
+            Ok(n)
+        }
+    }
+
+    impl io::Write for RepliesAfterWrite {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    fn code_provider_returning(code: &'static str) -> CodeProvider {
+        std::sync::Arc::new(move |challenge| {
+            // The callback has to be told which factor it is answering; the
+            // two want different codes and the shipped example branches on it.
+            assert_eq!(
+                challenge.factor,
+                SecondFactor::AuthenticatorCode,
+                "this gate must ask for an authenticator code",
+            );
+            Ok(code.to_string())
+        })
+    }
+
+    /// A provider that never answers, so the gate is observed with `sent=false`.
+    fn code_provider_that_never_answers() -> CodeProvider {
+        std::sync::Arc::new(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            Ok(String::new())
+        })
+    }
+
+    struct VerdictAfterCodeReady {
+        incoming: Vec<u8>,
+        pos: usize,
+        ready: Arc<AtomicBool>,
+        written: Vec<u8>,
+    }
+    impl io::Read for VerdictAfterCodeReady {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            // Hand over the verdict only once the code is sitting in the
+            // channel, so the gate reads it and then sends in the same
+            // pass. That is the ordering the snapshot exists for.
+            while !self.ready.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let remaining = self.incoming.len().saturating_sub(self.pos);
+            if remaining == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "scripted EOF"));
+            }
+            let n = remaining.min(buf.len());
+            buf[..n].copy_from_slice(&self.incoming[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+    impl io::Write for VerdictAfterCodeReady {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    fn security_code_result(fields: &[&str]) -> Vec<u8> {
+        frame_xyz(&xyz::xyz_build(
+            xyz::XYZ_MSG_SECURITY_CODE,
+            xyz::SECURITY_CODE_RESULT,
+            "",
+            fields,
+        ))
+    }
+
+    // ── do_security_code_2fa — authenticator code (ibx#282) ─────────────
+
+    #[test]
+    fn security_code_gate_sends_the_code_and_accepts_passed() {
+        let mut stream = RepliesAfterWrite::new(security_code_result(&["", "", "", "PASSED"]));
+        let outcome = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .expect("PASSED must be accepted");
+        assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
+        // The code must actually reach the wire, in the security-token slot.
+        assert_eq!(
+            stream.written,
+            xyz::xyz_wrap(&xyz::xyz_build_security_code("123456")),
+            "the gate must send exactly the 774 code-1 frame"
+        );
+    }
+
+    #[test]
+    fn security_code_gate_reassembles_a_reply_split_across_reads() {
+        // The gate polls, so a read can return part of a frame. Byte-at-a-time
+        // delivery is the worst case: anything that drops a partial read here
+        // resumes mid-frame and dies on the next magic check.
+        let mut stream = RepliesAfterWrite::chunked(security_code_result(&["", "", "", "PASSED"]), 1);
+        let outcome = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .expect("a frame split across reads must still be accepted");
+        assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
+    }
+
+    #[test]
+    fn security_code_gate_answers_keepalives_while_it_waits() {
+        // Going quiet gets the connection dropped, so the wait loop has to keep
+        // answering NS_TEST_REQUEST.
+        let probe = ns::ns_build(NS_VERSION, NS_TEST_REQUEST, &["20260729-01:02:03"], "MISC");
+        let mut stream = RepliesAfterWrite::with_preface(
+            probe,
+            xyz::xyz_wrap(&xyz::xyz_build_security_code("123456")),
+            security_code_result(&["", "", "", "PASSED"]),
+        );
+        // Slow enough that the probe is answered while the gate is still
+        // waiting on the provider — the situation the off-thread call exists
+        // for. A provider that returns instantly never tests it.
+        let provider: CodeProvider = std::sync::Arc::new(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            Ok("123456".to_string())
+        });
+        do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider))
+            .expect("PASSED must be accepted");
+        let heartbeat = ns_build_heart_beat(NS_VERSION, "20260729-01:02:03");
+        let code_frame = xyz::xyz_wrap(&xyz::xyz_build_security_code("123456"));
+        let hb_at = stream.written.windows(heartbeat.len()).position(|w| w == heartbeat);
+        let code_at = stream.written.windows(code_frame.len()).position(|w| w == code_frame);
+        assert!(hb_at.is_some(), "the gate must answer the keepalive");
+        assert!(
+            hb_at < code_at,
+            "the keepalive must be answered while waiting, not after the code went out"
+        );
+    }
+
+    #[test]
+    fn security_code_gate_reports_a_rejection_as_a_rejection_not_a_timeout() {
+        // A rejection that falls through is answered with keepalives until the
+        // deadline and then reported as a timeout, which hides the reason.
+        let mut stream = RepliesAfterWrite::new(security_code_result(&["", "", "", "FAILED"]));
+        let err = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!err.to_string().contains("timed out"), "got {}", err);
+    }
+
+    #[test]
+    fn security_code_gate_reports_a_rejection_delivered_as_auth_finish() {
+        // The same rejection can arrive on 771 instead of 774.
+        let mut stream = RepliesAfterWrite::new(frame_xyz(&xyz::xyz_build(
+            xyz::XYZ_MSG_TOKEN_AUTH, 5, "", &["FAILED"],
+        )));
+        let err = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!err.to_string().contains("timed out"), "got {}", err);
+    }
+
+    #[test]
+    fn security_code_gate_never_puts_the_code_in_an_error_message() {
+        // The status slot is next to the one the code was sent in, and the
+        // reply is server-controlled — an echo must not reach the log.
+        let mut stream = RepliesAfterWrite::new(security_code_result(&["", "123456", "", ""]));
+        let err = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .unwrap_err();
+        assert!(!err.to_string().contains("123456"), "code leaked into: {}", err);
+    }
+
+    #[test]
+    fn security_code_gate_does_not_accept_passed_before_a_code_is_sent() {
+        // An unsolicited PASSED must not stand in for the exchange.
+        let mut stream = ScriptedStream::new(frame_xyz(&xyz::xyz_build(
+            xyz::XYZ_MSG_TOKEN_AUTH, 5, "", &["PASSED"],
+        )));
+        let err = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_that_never_answers()),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+        assert!(err.to_string().contains("before a code was sent"), "got {}", err);
+    }
+
+    #[test]
+    fn security_code_gate_ignores_a_verdict_whose_read_began_before_the_code() {
+        // Sharper than the whole-frame case: the verdict's header is read, the
+        // provider returns mid-frame, the code goes out, and the frame
+        // completes on the next read. The verdict still predates the code, so
+        // a guard that checks the flag at match time rather than at read time
+        // would accept it.
+        let ready = Arc::new(AtomicBool::new(false));
+        let signal = ready.clone();
+        let provider: CodeProvider = Arc::new(move |_| {
+            signal.store(true, Ordering::SeqCst);
+            Ok("123456".to_string())
+        });
+        let mut stream = VerdictAfterCodeReady {
+            incoming: frame_xyz(&xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 5, "", &["PASSED"])),
+            pos: 0,
+            ready,
+            written: Vec::new(),
+        };
+        // The verdict predates the code even though the code is sent first.
+        let err = do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider))
+            .expect_err("a verdict read before the code was sent must not approve the login");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    /// The same straddle as above, on the 774 result arm — which is the arm a
+    /// live login actually completes through. Pinning only the AUTH_FINISH arm
+    /// left this one dark for exactly the bug class it exists to prevent.
+    #[test]
+    fn security_code_gate_ignores_a_774_verdict_whose_read_began_before_the_code() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let signal = ready.clone();
+        let provider: CodeProvider = Arc::new(move |_| {
+            signal.store(true, Ordering::SeqCst);
+            Ok("123456".to_string())
+        });
+        let mut stream = VerdictAfterCodeReady {
+            incoming: security_code_result(&["", "", "", "PASSED"]),
+            pos: 0,
+            ready,
+            written: Vec::new(),
+        };
+        let err = do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider))
+            .expect_err("a 774 verdict read before the code was sent must not approve the login");
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn security_code_gate_ignores_an_unexpected_774_code_before_a_code_is_sent() {
+        let mut stream = ScriptedStream::new(frame_xyz(&xyz::xyz_build(
+            xyz::XYZ_MSG_SECURITY_CODE, 4, "", &["whatever"],
+        )));
+        let err = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_that_never_answers()),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+        assert!(stream.written.is_empty(), "nothing should have been sent");
+    }
+
+    #[test]
+    fn security_code_gate_survives_an_interrupted_read() {
+        // Every other reader in this file goes through `read_exact`, which
+        // retries a signal. The gate's raw read is the only one that would
+        // die on it, taking a live login and the operator's code with it.
+        struct InterruptsOnce {
+            fired: bool,
+            reply: Vec<u8>,
+            pos: usize,
+            written: Vec<u8>,
+        }
+        impl io::Read for InterruptsOnce {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if !self.fired {
+                    self.fired = true;
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "signal"));
+                }
+                if self.written.is_empty() {
+                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "quiet"));
+                }
+                let remaining = self.reply.len().saturating_sub(self.pos);
+                if remaining == 0 {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "scripted EOF"));
+                }
+                let n = remaining.min(buf.len());
+                buf[..n].copy_from_slice(&self.reply[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+        impl io::Write for InterruptsOnce {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.written.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+
+        let mut stream = InterruptsOnce {
+            fired: false,
+            reply: security_code_result(&["", "", "", "PASSED"]),
+            pos: 0,
+            written: Vec::new(),
+        };
+        let outcome = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .expect("a signal must not end the login");
+        assert!(matches!(outcome, IbKeyOutcome::Approved { .. }));
+    }
+
+    #[test]
+    fn security_code_gate_rejects_an_empty_code_before_sending_it() {
+        // A valid frame with an empty token slot is a guaranteed rejection,
+        // and one wrong code ends the attempt.
+        let mut stream = RepliesAfterWrite::new(Vec::new());
+        let provider: CodeProvider = Arc::new(|_| Ok("  ".to_string()));
+        let err = do_security_code_2fa(&mut stream, far_future_deadline(), Some(&provider))
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(stream.written.is_empty(), "an empty code must not reach the wire");
+    }
+
+    #[test]
+    fn security_code_gate_treats_a_clean_close_as_a_close() {
+        // A half-closed socket returns Ok(0) immediately and forever. Treating
+        // that as "nothing yet" spins hot until the deadline instead of
+        // reporting the close — the read timeout never fires to break it up.
+        struct CleanClose {
+            written: Vec<u8>,
+        }
+        impl io::Read for CleanClose {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Ok(0)
+            }
+        }
+        impl io::Write for CleanClose {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.written.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+
+        let mut stream = CleanClose { written: Vec::new() };
+        let began = std::time::Instant::now();
+        let err = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+        assert!(began.elapsed() < std::time::Duration::from_secs(5), "must not spin on a closed socket");
+    }
+
+    #[test]
+    fn security_code_gate_leaves_the_next_frame_on_the_stream() {
+        // The server can coalesce its reply with what follows. The gate reads
+        // from the raw stream and the caller keeps reading it afterwards, so a
+        // read that crosses the frame boundary either swallows the next frame
+        // whole or strands the stream mid-frame — and on this path each retry
+        // costs the operator a fresh code.
+        let trailing = ns::ns_build(NS_VERSION, 24, &["next"], "MISC");
+        let mut reply = security_code_result(&["", "", "", "PASSED"]);
+        reply.extend_from_slice(&trailing);
+        let mut stream = RepliesAfterWrite::new(reply);
+        do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .expect("PASSED must be accepted");
+        let (payload, _) = ns::ns_recv(&mut stream).expect("the next frame must survive the gate");
+        assert_eq!(
+            payload,
+            trailing[8..],
+            "the frame after the gate's must be readable, whole and unconsumed"
+        );
+    }
+
+    /// A frame larger than one read buffer has to reassemble across reads
+    /// without over-running its own boundary. Every shipped test uses a frame
+    /// that fits in a single 4KiB read, which is the one size where the read
+    /// clamp does nothing — so the clamp was unpinned.
+    #[test]
+    fn security_code_gate_reassembles_a_frame_larger_than_one_read() {
+        let filler = "x".repeat(5000);
+        let trailing = ns::ns_build(NS_VERSION, 24, &["next"], "MISC");
+        let mut reply = security_code_result(&["", &filler, "", "PASSED"]);
+        assert!(reply.len() > 4096, "the frame must cross a read boundary: {}", reply.len());
+        reply.extend_from_slice(&trailing);
+
+        let mut stream = RepliesAfterWrite::new(reply);
+        do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .expect("a large PASSED frame must still be accepted");
+
+        let (payload, _) = ns::ns_recv(&mut stream).expect("the next frame must survive");
+        assert_eq!(
+            payload, trailing[8..],
+            "reassembly must stop at its own frame boundary, not read past it",
+        );
+    }
+
+    /// A code is trimmed on the way out, not merely when checking for empty:
+    /// surrounding whitespace reaches the server as part of the code and burns
+    /// the one attempt the operator gets.
+    #[test]
+    fn security_code_gate_trims_the_code_it_sends() {
+        let mut stream = RepliesAfterWrite::new(security_code_result(&["", "", "", "PASSED"]));
+        do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("  123456  ")),
+        )
+        .expect("PASSED must be accepted");
+
+        let sent = String::from_utf8_lossy(&stream.written).to_string();
+        assert!(sent.contains("123456"), "the code is sent: {sent:?}");
+        assert!(
+            !sent.contains("  123456") && !sent.contains("123456  "),
+            "and without the surrounding whitespace: {sent:?}",
+        );
+    }
+
+    #[test]
+    fn security_code_gate_does_not_accept_a_774_verdict_before_a_code_is_sent() {
+        // Approving without ever sending a code is the mute failure this gate
+        // exists to prevent.
+        let mut stream = ScriptedStream::new(security_code_result(&["", "", "", "PASSED"]));
+        let err = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_that_never_answers()),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+        assert!(err.to_string().contains("before a code was sent"), "got {}", err);
+        assert!(stream.written.is_empty(), "nothing should have been sent");
+    }
+
+    #[test]
+    fn security_code_gate_surfaces_an_ns_error_frame() {
+        let mut stream = RepliesAfterWrite::new(
+            ns::ns_build(NS_VERSION, NS_ERROR_RESPONSE, &["denied"], "MISC"),
+        );
+        let err = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(!err.to_string().contains("timed out"), "got {}", err);
+    }
+
+    #[test]
+    fn security_code_gate_surfaces_an_unexpected_774_code() {
+        // Any 774 that is not the result carries a failure the caller must see
+        // rather than wait out.
+        let mut stream = RepliesAfterWrite::new(frame_xyz(&xyz::xyz_build(
+            xyz::XYZ_MSG_SECURITY_CODE, 4, "", &["whatever"],
+        )));
+        let err = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("code 4"), "got {}", err);
+    }
+
+    #[test]
+    fn security_code_gate_rejects_an_absurd_frame_length_instead_of_buffering() {
+        // A corrupt header must not be believed: waiting for a 4 GiB tail
+        // means growing the buffer until the deadline or the allocator gives
+        // out. Header only, no payload — a reader that trusts the length will
+        // sit on it.
+        let mut reply = ns::NS_MAGIC.to_vec();
+        reply.extend_from_slice(&u32::MAX.to_be_bytes());
+        let mut stream = RepliesAfterWrite::new(reply);
+        let err = do_security_code_2fa(
+            &mut stream,
+            far_future_deadline(),
+            Some(&code_provider_returning("123456")),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn security_code_gate_requires_a_provider() {
+        // These accounts have no push to fall back to.
+        let mut stream = ScriptedStream::new(Vec::new());
+        let err = do_security_code_2fa(&mut stream, far_future_deadline(), None).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn security_code_gate_does_not_send_a_code_after_the_deadline_passes() {
+        // The read can span the deadline. A login that is about to be
+        // abandoned must not put a code on the wire on its way out — the code
+        // is spent either way, and the operator has to fetch another.
+        struct SlowRead {
+            written: Vec<u8>,
+        }
+        impl io::Read for SlowRead {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                Err(io::Error::new(io::ErrorKind::TimedOut, "poll timeout"))
+            }
+        }
+        impl io::Write for SlowRead {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.written.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+
+        let mut stream = SlowRead { written: Vec::new() };
+        let err = do_security_code_2fa(
+            &mut stream,
+            std::time::Instant::now() + std::time::Duration::from_millis(20),
+            Some(&code_provider_returning("123456")),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(stream.written.is_empty(), "no code may go out after the deadline");
+    }
+
+    #[test]
+    fn security_code_gate_honours_the_deadline() {
+        let mut stream = RepliesAfterWrite::new(Vec::new());
+        let began = std::time::Instant::now();
+        let err = do_security_code_2fa(
+            &mut stream,
+            std::time::Instant::now(),
+            Some(&code_provider_that_never_answers()),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        // An expired deadline has to be caught before the loop does anything,
+        // not eventually. Without the check at the top this still ends in
+        // `TimedOut`, but only once the provider gives up — so the kind alone
+        // proves nothing and the elapsed time is what pins it.
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(5),
+            "an expired deadline must return at once, took {:?}",
+            began.elapsed(),
+        );
+    }
+
     fn far_future_deadline() -> std::time::Instant {
         std::time::Instant::now() + std::time::Duration::from_secs(60)
     }
@@ -1704,8 +2677,13 @@ mod tests {
             other => panic!("expected Approved, got {:?}", other),
         }
 
-        // Provider must have received the parsed display_id + avth_url.
+        // Provider must have received the parsed display_id + avth_url, and be
+        // told which factor it is answering: the two want different codes from
+        // different apps, and the shipped example branches on it. Nothing
+        // pinned it on this path, so labelling it as the authenticator went
+        // unnoticed.
         let seen = seen_challenge.lock().unwrap().clone();
+        assert_eq!(seen.factor, SecondFactor::IbKeyChallengeResponse);
         assert_eq!(seen.display_id, RUN_A_SESSION_ID);
         assert_eq!(seen.avth_url, RUN_A_AVTH_URL);
 
