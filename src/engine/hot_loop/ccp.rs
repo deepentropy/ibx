@@ -16,6 +16,52 @@ use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, clone_for_event, parse_price_tag, decode_tif};
 
+/// Where to book a fill whose order this session does not track.
+///
+/// Both the contract and the side come off the report, and both are required:
+/// a guessed side would move the position the wrong way, which is worse than
+/// reporting that the fill could not be placed.
+fn untracked_fill_target(
+    context: &mut Context,
+    parsed: &std::collections::HashMap<u32, String>,
+) -> Option<(InstrumentId, Side)> {
+    // A replayed execution restates history rather than reporting something
+    // new. On a fresh process the gateway resends prior fills with 97=Y and
+    // their original ExecIDs, for orders no session tracks; booking those
+    // would build a position out of the past on top of the one the position
+    // feed already reports. Within a process the ExecID window catches the
+    // reconnect burst, so only the untracked case needs this.
+    let replayed = |tag| parsed.get(&tag).map(|v| v.eq_ignore_ascii_case("Y")).unwrap_or(false);
+    if replayed(97) || replayed(43) {
+        log::debug!("Untracked fill is a replay, leaving the position alone");
+        return None;
+    }
+    let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
+    if con_id == 0 {
+        log::warn!("Untracked fill carries no ContractID, position not updated");
+        return None;
+    }
+    let side = match parsed.get(&54).map(|s| s.as_str()) {
+        Some("1") => Side::Buy,
+        Some("2") => Side::Sell,
+        Some("5") => Side::ShortSell,
+        other => {
+            log::warn!("Untracked fill has Side={:?}, position not updated", other);
+            return None;
+        }
+    };
+    // Fallible: a full instrument table must not abort the engine on an
+    // inbound message.
+    let Some(instrument) = context.try_register_instrument(con_id) else {
+        log::warn!("Untracked fill for conId {con_id}: instrument table full, position not updated");
+        return None;
+    };
+    if let Some(symbol) = parsed.get(&55) {
+        context.set_symbol(instrument, symbol.clone());
+    }
+    Some((instrument, side))
+}
+
 /// Bound for an in-flight contract-details request (secdef reply or
 /// per-exchange fan-out). Refreshed on fan-out activity; on expiry the
 /// request surfaces error 200 + contract_details_end instead of hanging
@@ -848,32 +894,50 @@ impl CcpState {
 
         let mut had_fill = false;
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
-            if !exec_id.is_empty() && !self.record_exec_id(exec_id) {
-                log::warn!("Duplicate ExecID={} — skipping fill", exec_id);
-                return;
-            }
-            if let Some(order) = context.order(clord_id).copied() {
-                context.update_order_filled(clord_id, last_shares as u32);
-                let fill = Fill {
-                    instrument: order.instrument,
-                    order_id: clord_id,
-                    side: order.side,
-                    price: (last_px * PRICE_SCALE as f64) as i64,
-                    qty: last_shares,
-                    remaining: leaves_qty,
-                    commission: (commission * PRICE_SCALE as f64) as i64,
-                    timestamp_ns: context.now_ns(),
-                };
-                let delta = match order.side {
-                    Side::Buy => last_shares,
-                    Side::Sell | Side::ShortSell => -last_shares,
-                };
-                context.update_position(order.instrument, delta);
-                // notify_fill inlined
-                shared.orders.push_fill(fill);
-                shared.portfolio.set_position(fill.instrument, context.position(fill.instrument));
-                emit(event_tx, Event::Fill(fill));
-                had_fill = true;
+            // A fill can arrive for an order this session does not track: one
+            // that raced its own cancel-ack out of the book, one placed from
+            // another client, or one left from an earlier session. The report
+            // names the contract and the side, so book it from that rather
+            // than dropping a position the account actually holds.
+            let booked = match context.order(clord_id).copied() {
+                Some(order) => Some((order.instrument, order.side)),
+                None => untracked_fill_target(context, parsed),
+            };
+            match booked {
+                // The reason is logged where it is decided — the causes are
+                // distinct and a single message would misdiagnose three of them.
+                None => {}
+                Some((instrument, side)) => {
+                    // Recorded only once the fill can be booked, so one that
+                    // could not be stays replayable rather than being burnt.
+                    if !exec_id.is_empty() && !self.record_exec_id(exec_id) {
+                        log::warn!("Duplicate ExecID={} — skipping fill", exec_id);
+                        return;
+                    }
+                    // No-op when the order is untracked, which is the case
+                    // that reaches here through the fallback.
+                    context.update_order_filled(clord_id, last_shares as u32);
+                    let fill = Fill {
+                        instrument,
+                        order_id: clord_id,
+                        side,
+                        price: (last_px * PRICE_SCALE as f64) as i64,
+                        qty: last_shares,
+                        remaining: leaves_qty,
+                        commission: (commission * PRICE_SCALE as f64) as i64,
+                        timestamp_ns: context.now_ns(),
+                    };
+                    let delta = match side {
+                        Side::Buy => last_shares,
+                        Side::Sell | Side::ShortSell => -last_shares,
+                    };
+                    context.update_position(instrument, delta);
+                    // notify_fill inlined
+                    shared.orders.push_fill(fill);
+                    shared.portfolio.set_position(fill.instrument, context.position(fill.instrument));
+                    emit(event_tx, Event::Fill(fill));
+                    had_fill = true;
+                }
             }
         }
 
@@ -1144,27 +1208,58 @@ impl CcpState {
 
         let Some(oid) = orig_clord else { return };
 
+        // FIX CxlRejReason 1 = UnknownOrder: the gateway is stating that the
+        // order does not exist on its side. Restoring it to working asserted
+        // the opposite of the message being handled, and the engine's own view
+        // governs subsequent cancels, modifies and reconnect bookkeeping — so a
+        // phantom order persisted there while the cache row that would have
+        // surfaced it was removed (ibx#252).
+        //
+        // Read as a positive statement, not as an absence: a missing or
+        // unparseable tag 102 is synthesized as -1 here and says nothing, so it
+        // takes the same path as the reasons that do mean the order is working.
+        let unknown_order = reason_code == 1;
+
         // Update local context only if we tracked the order in this session.
         let instrument = if let Some(order) = context.order(oid).copied() {
-            let restore_status = if order.filled > 0 {
-                crate::types::OrderStatus::PartiallyFilled
+            if unknown_order {
+                // Terminal and removed, which is what the gateway just said.
+                // Holding the record in a non-working status instead is not an
+                // option here: those are excluded from the open-order count
+                // that guards instrument reclamation, so the slot could be
+                // handed to another contract while a retained order still
+                // pointed at it, and a late fill would move the wrong position.
+                //
+                // A fill that races the rejection is not lost with the order:
+                // the untracked-fill path books it and moves the position
+                // (ibx#314).
+                context.set_order_status_forced(oid, crate::types::OrderStatus::Cancelled);
+                context.remove_order(oid);
             } else {
-                crate::types::OrderStatus::Submitted
-            };
-            // Deliberate regression (PendingCancel back to working) — the
-            // ibx#212 guard would rightly block it on the ordinary path.
-            context.set_order_status_forced(oid, restore_status);
+                let restore_status = if order.filled > 0 {
+                    crate::types::OrderStatus::PartiallyFilled
+                } else {
+                    crate::types::OrderStatus::Submitted
+                };
+                // Deliberate regression (PendingCancel back to working) — the
+                // ibx#212 guard would rightly block it on the ordinary path.
+                context.set_order_status_forced(oid, restore_status);
+            }
             order.instrument
         } else {
             0
         };
 
-        // FIX CxlRejReason 1 = UnknownOrder. The gateway is telling us the
-        // order it just listed in the mass-status burst doesn't exist on its
-        // side — drop the stale cache entry so subsequent req_open_orders
-        // stops returning it. Other reasons (TooLate, OrderInProcess, ...)
-        // leave the cache alone; a follow-up exec report will reconcile.
-        if reason_code == 1 {
+        // Drop the stale cache entry so subsequent req_open_orders stops
+        // returning it. Other reasons leave the cache alone; a follow-up exec
+        // report will reconcile.
+        //
+        // No synthetic status update is queued alongside it. The cancel-reject
+        // below is the report, and both dispatchers drain fills ahead of order
+        // updates — so an update queued here would reach a caller after the
+        // fill that raced it, stating the order was gone when it had just been
+        // told the order filled.
+        if unknown_order {
             shared.orders.remove_order_info(oid);
         }
 
@@ -2166,6 +2261,229 @@ mod tests {
             42, instrument, Side::Buy, 1, 100 * PRICE_SCALE, b'2', b'0', 0,
         )); // starts at PendingSubmit
         (CcpState::new(), context, SharedState::new())
+    }
+
+    /// A fill whose ClOrdID this session never tracked. Every field the engine
+    /// needs to book it is on the report itself.
+    fn untracked_fill(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
+        let mut m = std::collections::HashMap::new();
+        for (tag, val) in [
+            (11u32, "99"),      // ClOrdID the context does not know
+            (150, "2"),         // ExecType: trade
+            (39, "2"),          // OrdStatus: filled
+            (32, "5"),          // LastShares
+            (31, "100.00"),     // LastPx
+            (54, "1"),          // Side: buy
+            (6008, "888888"),   // ContractID
+            (55, "ZZZ"),
+            (17, "EXEC-1"),
+        ] {
+            m.insert(tag, val.to_string());
+        }
+        for (tag, val) in pairs {
+            if val.is_empty() {
+                m.remove(tag);
+            } else {
+                m.insert(*tag, val.to_string());
+            }
+        }
+        m
+    }
+
+    /// A fill for an order this session does not track is still a position the
+    /// account holds. Dropping it leaves the engine short of the truth with
+    /// nothing to say so — the cancel/fill race reaches this every time.
+    #[test]
+    fn a_fill_for_an_untracked_order_is_still_booked() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = untracked_fill(&[]);
+
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        let fills = shared.orders.drain_fills();
+        assert_eq!(fills.len(), 1, "the fill must be reported");
+        assert_eq!(fills[0].qty, 5);
+        assert_eq!(fills[0].order_id, 99);
+        assert_eq!(fills[0].side, Side::Buy);
+        assert_eq!(
+            context.position(fills[0].instrument), 5,
+            "the position must move by the filled quantity",
+        );
+    }
+
+    /// A sell books the other way. Taking the side from the report rather than
+    /// defaulting is the whole point: the wrong sign is worse than no fill.
+    #[test]
+    fn an_untracked_sell_moves_the_position_down() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = untracked_fill(&[(54, "2")]);
+
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        let fills = shared.orders.drain_fills();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].side, Side::Sell);
+        assert_eq!(context.position(fills[0].instrument), -5);
+    }
+
+    /// Without a contract or a side there is nothing to book against, and
+    /// guessing either one would move a real position the wrong way.
+    #[test]
+    fn an_untracked_fill_is_not_booked_on_a_guess() {
+        for missing in [6008u32, 54] {
+            let (mut ccp, mut context, shared) = ord_status_test_state();
+            let frame = untracked_fill(&[(missing, "")]);
+
+            ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+            assert!(
+                shared.orders.drain_fills().is_empty(),
+                "tag {missing} missing: must not book a guessed fill",
+            );
+        }
+    }
+
+    /// On a fresh process the gateway resends prior executions with 97=Y and
+    /// their original ExecIDs, for orders no session tracks. Booking those
+    /// builds a position out of history on top of the one the position feed
+    /// already reports.
+    #[test]
+    fn a_replayed_execution_is_not_booked_as_a_new_position() {
+        for (tag, name) in [(97u32, "PossResend"), (43, "PossDupFlag")] {
+            let (mut ccp, mut context, shared) = ord_status_test_state();
+
+            ccp.handle_exec_report(&untracked_fill(&[(tag, "Y")]), &mut context, &shared, &None, "");
+
+            assert!(
+                shared.orders.drain_fills().is_empty(),
+                "{name}=Y restates history and must not move the position",
+            );
+        }
+
+        // The same report without the marker is booked, so the guard is the
+        // marker and not something else about the frame.
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        ccp.handle_exec_report(&untracked_fill(&[(97, "N")]), &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_fills().len(), 1);
+    }
+
+    /// An execution that could not be booked must stay replayable. Consuming
+    /// the ExecID for a fill that was dropped makes the loss permanent: the
+    /// replay after a reconnect is then rejected as a duplicate.
+    #[test]
+    fn an_unbookable_fill_does_not_consume_its_exec_id() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+
+        // Same execution, first seen without the contract that would let the
+        // engine place it.
+        ccp.handle_exec_report(&untracked_fill(&[(6008, "")]), &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_fills().is_empty());
+
+        // Replayed in full — it must not be rejected as already seen.
+        ccp.handle_exec_report(&untracked_fill(&[]), &mut context, &shared, &None, "");
+        assert_eq!(
+            shared.orders.drain_fills().len(), 1,
+            "the replay must be booked, not dropped as a duplicate",
+        );
+    }
+
+    fn cancel_reject_frame(reason_code: &str) -> std::collections::HashMap<u32, String> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(41u32, "C42".to_string()); // OrigClOrdID
+        m.insert(434u32, "1".to_string());
+        m.insert(102u32, reason_code.to_string());
+        m
+    }
+
+    fn tracked_for_cancel(context: &mut Context) {
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Buy, 100, 100 * PRICE_SCALE, b'2', b'0', 0,
+        ));
+        context.update_order_status(42, crate::types::OrderStatus::PendingCancel);
+    }
+
+    /// ibx#252: a cancel answered with UnknownOrder says the order does not
+    /// exist on the gateway's side. Forcing it back to working asserted the
+    /// opposite of the message being handled, and the engine's own view governs
+    /// subsequent cancels, modifies and reconnect bookkeeping — so a phantom
+    /// order persisted there while the cache row that would have surfaced it
+    /// was removed.
+    #[test]
+    fn an_unknown_order_rejection_retires_the_order() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        tracked_for_cancel(&mut context);
+        shared.orders.push_order_info(42, RichOrderInfo {
+            contract: api::Contract::default(),
+            order: api::Order::default(),
+            order_state: api::OrderState::default(),
+            last_exec: api::Execution::default(),
+        });
+
+        ccp.handle_cancel_reject(&cancel_reject_frame("1"), &mut context, &shared, &None);
+
+        assert!(
+            context.order(42).is_none(),
+            "the engine must not keep asserting an order the gateway says is not there",
+        );
+        assert!(
+            shared.orders.get_order_info(42).is_none(),
+            "and the cache row goes with it",
+        );
+        // The rejection itself is the report. A synthetic status update queued
+        // here would reach the caller behind a fill that raced it, because both
+        // dispatchers drain fills ahead of order updates.
+        assert!(shared.orders.drain_order_updates().is_empty());
+        assert_eq!(shared.orders.drain_cancel_rejects().len(), 1);
+    }
+
+    /// A fill that raced the rejection is recoverable, on the terms the
+    /// untracked-fill path sets (ibx#314): the execution has to carry its
+    /// contract id, because nothing else says which instrument moved, and it
+    /// must not be resend-marked, because a replayed execution for an order
+    /// this session does not track is history rather than news. An execution
+    /// that carries neither is dropped — the same as it was before this change
+    /// for any order already removed from the book.
+    #[test]
+    fn an_execution_racing_an_unknown_order_rejection_still_books() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        tracked_for_cancel(&mut context);
+
+        ccp.handle_cancel_reject(&cancel_reject_frame("1"), &mut context, &shared, &None);
+        let frame = exec_report_frame(&[
+            (39, "1"), (17, "e-1"), (150, "F"), (32, "40"), (31, "100.0"), (151, "60"),
+            (6008, "756733"), (38, "100"), (54, "1"),
+        ]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert_eq!(shared.orders.drain_fills().len(), 1, "the fill books");
+        assert_eq!(context.position(0), 40, "and the position moves");
+    }
+
+    /// Only a stated UnknownOrder retires the order. Every other stated reason
+    /// means it is still working and the cancel arrived at the wrong moment; an
+    /// absent or unparseable tag 102 states nothing at all and is synthesized
+    /// as -1, so it takes the same path rather than retiring on an absence.
+    #[test]
+    fn any_other_rejection_leaves_the_order_in_place() {
+        for code in ["0", "2", "-1", ""] {
+            let mut ccp = CcpState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            tracked_for_cancel(&mut context);
+
+            ccp.handle_cancel_reject(&cancel_reject_frame(code), &mut context, &shared, &None);
+
+            assert_eq!(
+                context.order(42).expect("still tracked").status,
+                crate::types::OrderStatus::Submitted,
+                "reason {code:?} does not say the order is gone",
+            );
+        }
     }
 
     fn exec_report_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
