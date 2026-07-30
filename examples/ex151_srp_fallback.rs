@@ -53,6 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         encoded: gw.encoded.clone(),
         hmds_host: gw.hmds_host.clone(),
         hmds_farm: gw.hmds_farm.clone(),
+        trading_host: String::new(),
+        trading_farm: String::new(),
     };
 
     drop(ccp);

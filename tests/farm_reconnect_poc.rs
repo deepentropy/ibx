@@ -70,8 +70,13 @@ fn hotloop_auto_reconnect_on_farm_disconnect() {
     let (mut hot_loop, _control_tx) = gw.into_hot_loop_with_farms(
         shared.clone(), Some(event_tx),
         farm_conn, ccp_conn, hmds, None,
+        ibx::gateway::CallerAuth {
+            host: cfg.host.clone(),
+            username: cfg.username.clone(),
+            password: cfg.password.clone(),
+            paper: cfg.paper,
+        },
     );
-    hot_loop.update_reconnect_auth(cfg.host.clone(), cfg.username.clone(), cfg.password.clone(), cfg.paper);
     println!("Reconnect auth set: host={}, user={}, paper={}", cfg.host, cfg.username, cfg.paper);
 
     assert!(!hot_loop.is_farm_disconnected());
@@ -131,6 +136,8 @@ fn ccp_reconnect_with_cached_credentials() {
         encoded: gw.encoded.clone(),
         hmds_host: gw.hmds_host.clone(),
         hmds_farm: gw.hmds_farm.clone(),
+        trading_host: String::new(),
+        trading_farm: String::new(),
     };
 
     println!("Full auth: {}ms | session_id={}", full_auth_ms, auth.server_session_id);

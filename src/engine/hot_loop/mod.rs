@@ -792,21 +792,6 @@ impl HotLoop {
         self.reconnect_auth = Some(auth);
     }
 
-    /// Update caller-specific fields on the reconnect auth (host, username, password, paper).
-    pub fn update_reconnect_auth(
-        &mut self,
-        host: String,
-        username: String,
-        password: zeroize::Zeroizing<String>,
-        paper: bool,
-    ) {
-        if let Some(auth) = self.reconnect_auth.as_mut() {
-            auth.host = host;
-            auth.username = username;
-            auth.password = password;
-            auth.paper = paper;
-        }
-    }
 
     /// Schedule-then-spawn farm reconnects on the jittered backoff ladder
     /// (ibx#218). Called every loop iteration; no-op while connected or an
@@ -878,8 +863,10 @@ impl HotLoop {
         std::thread::Builder::new()
             .name(format!("farm-reconnect-{}", attempt))
             .spawn(move || {
+                let (farm_host, farm_name) =
+                    crate::gateway::reconnect_trading_route(&auth);
                 let result = connect_farm(
-                    &auth.host, "usfarm",
+                    &farm_host, &farm_name,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
                     &auth.hw_info, &auth.encoded, 18,
