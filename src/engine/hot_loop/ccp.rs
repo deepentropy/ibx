@@ -698,7 +698,14 @@ impl CcpState {
                 .map(|p| (p * PRICE_SCALE as f64) as i64)
                 .unwrap_or(0);
             let ord_type_byte: u8 = parsed.get(&40).and_then(|s| s.bytes().next()).unwrap_or(b'2');
-            let tif_byte: u8 = parsed.get(&59).and_then(|s| s.bytes().next()).unwrap_or(b'1');
+            // A recovery record with no tag 59 states no time-in-force, and this
+            // order was not placed by this session, so there is nothing to
+            // recover it from. Recorded as unstated rather than guessed: either
+            // guess is restated as a real instruction on the next replace, and
+            // an invented DAY would expire a resting GTC order at the close.
+            let tif_byte: u8 = parsed.get(&59)
+                .and_then(|s| s.bytes().next())
+                .unwrap_or(crate::types::TIF_UNSTATED);
             if con_id != 0 && qty > 0 {
                 let instrument = context.register_instrument(con_id);
                 if let Some(sym) = parsed.get(&55) {
@@ -943,9 +950,24 @@ impl CcpState {
                 "K" => "MTL", "R" => "REL", _ => ord_type_tag,
             };
 
+            // Unknown maps to empty, which is what `decode_tif` means by it and
+            // what makes the fallback below reachable. A catch-all of `DAY`
+            // reported a perfectly ordinary value for a code this does not know
+            // and for an absent tag alike, so a caller reconciling its own
+            // orders saw a plausible answer that disagreed with what it sent
+            // and nothing said so (ibx#307).
+            //
+            // The sibling above passes the raw tag through instead; that works
+            // there because an absent tag leaves it empty, while any non-empty
+            // TIF code would suppress the fallback that knows the real answer.
             let tif_str = match tif_tag {
                 "0" => "DAY", "1" => "GTC", "3" => "IOC", "4" => "FOK",
-                "2" => "OPG", "6" => "GTD", "8" => "AUC", _ => "DAY",
+                "2" => "OPG", "6" => "GTD", "8" => "AUC",
+                // Stated but unmapped: reported as stated, like the order-type
+                // sibling above. The gateway is authoritative when it says
+                // anything, and a code this does not name is still better seen
+                // than replaced by an unrelated local value.
+                other => other,
             };
 
             let action = match parsed.get(&54).map(|s| s.as_str()) {
@@ -2166,6 +2188,107 @@ mod tests {
             42, instrument, Side::Buy, 1, 100 * PRICE_SCALE, b'2', b'0', 0,
         )); // starts at PendingSubmit
         (CcpState::new(), context, SharedState::new())
+    }
+
+    /// ibx#307: an unrecognised or absent tag 59 was reported as `DAY`, and the
+    /// fallback that knows what the caller actually submitted could never run,
+    /// because every arm of the wire match produced a non-empty string.
+    ///
+    /// `DAY` is an ordinary value, so a caller reconciling its own orders got a
+    /// plausible answer that disagreed with what it sent, with nothing to say so.
+    #[test]
+    fn an_unknown_time_in_force_falls_back_to_the_one_that_was_submitted() {
+        // A tracked order submitted GTC, so a wrong answer is visibly wrong.
+        let tracked = |ccp: &mut CcpState, context: &mut Context, shared: &SharedState, tif59: Option<&str>| {
+            context.insert_order(crate::types::Order::new(
+                42, 0, Side::Buy, 1, 100 * PRICE_SCALE, b'2', b'1', 0,
+            ));
+            let mut pairs = vec![(39u32, "0"), (150u32, "0"), (100u32, "ARCA"), (198u32, "ARCA:1")];
+            if let Some(v) = tif59 {
+                pairs.push((59, v));
+            }
+            let frame = exec_report_frame(&pairs);
+            ccp.handle_exec_report(&frame, context, shared, &None, "");
+            shared.orders.get_order_info(42).expect("published").order.tif.clone()
+        };
+
+        // Absence is the only case the fallback answers: the report states no
+        // time-in-force, and this client knows what it submitted.
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        assert_eq!(
+            tracked(&mut ccp, &mut context, &shared, None), "GTC",
+            "the submitted time-in-force, not a plausible default",
+        );
+
+        // A stated code is still taken from the wire, including one that
+        // happens to differ from the tracked order — the gateway is
+        // authoritative when it says anything at all.
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        assert_eq!(tracked(&mut ccp, &mut context, &shared, Some("0")), "DAY");
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        assert_eq!(tracked(&mut ccp, &mut context, &shared, Some("4")), "FOK");
+
+        // Including a code this does not name: seen as stated rather than
+        // silently replaced by the local order's unrelated value.
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        assert_eq!(tracked(&mut ccp, &mut context, &shared, Some("5")), "5");
+    }
+
+    /// The case the test above cannot reach: an order this session never
+    /// placed, arriving on the session-start recovery push with no tag 59.
+    ///
+    /// There is nothing to recover the time-in-force from, and the recovery
+    /// insert used to invent `GTC` — which the report path then read as though
+    /// it were the caller's own. An invented GTC rests until cancelled; an
+    /// invented DAY expires with the session. Neither is knowledge, so the
+    /// safer guess is the one that does not leave an order resting.
+    #[test]
+    fn a_recovered_order_without_a_time_in_force_states_none() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+
+        // A recovery record: not tracked locally, states a contract and size,
+        // states no time-in-force.
+        let mut frame = std::collections::HashMap::new();
+        for (tag, val) in [
+            (11u32, "78"), (150u32, "0"), (39u32, "0"), (6008u32, "756733"),
+            (38u32, "100"), (55u32, "SPY"), (54u32, "1"), (40u32, "2"),
+        ] {
+            frame.insert(tag, val.to_string());
+        }
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert_eq!(
+            context.order(78).expect("recovered").tif, crate::types::TIF_UNSTATED,
+            "an absent time-in-force is recorded as unstated, not guessed",
+        );
+        assert_eq!(
+            shared.orders.get_order_info(78).expect("published").order.tif, "",
+            "and is reported as unstated rather than as an ordinary value",
+        );
+
+        // And a replace of it carries no tag 59, so the guess is never sent to
+        // the gateway as an instruction — a fabricated DAY would expire an
+        // order that is resting until cancelled.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let mut conn = Some(crate::protocol::connection::Connection::new_raw(stream).unwrap());
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared_arc = std::sync::Arc::new(SharedState::new());
+
+        context.modify(78, 100 * PRICE_SCALE, 100);
+        crate::engine::hot_loop::order_builder::drain_and_send_orders(
+            &mut conn, &mut context, "DU1", &mut hb, false, &shared_arc,
+        );
+
+        let mut buf = [0u8; 4096];
+        let n = std::io::Read::read(&mut peer, &mut buf).unwrap();
+        let msg = String::from_utf8_lossy(&buf[..n]);
+        assert!(msg.contains("35=G"), "a replace was sent: {}", msg);
+        assert!(!msg.split('\u{1}').any(|f| f.starts_with("59=")),
+            "a replace must not restate a time-in-force the order never had: {}", msg);
     }
 
     fn exec_report_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
