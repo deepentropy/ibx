@@ -52,11 +52,22 @@ pub(crate) struct HmdsState {
 
 /// Wire security type for a historical query. Empty falls back to the stock
 /// encoding, which is what every caller got unconditionally before (ibx#305).
+///
+/// A type the enum does not list is passed through rather than emptied. The
+/// enum covers the types the order path understands, and `to_fix` deliberately
+/// blanks anything else so an unclassified instrument cannot masquerade as a
+/// stock (ibx#223) — but that reasoning is about the order path. A historical
+/// query for a valid type the enum happens not to carry, `FOP` say, would
+/// otherwise be narrowed to nothing. The subscribe path already passes such
+/// types through verbatim, and this now agrees with it.
 fn hist_sec_type(sec_type: &str) -> String {
     if sec_type.is_empty() {
         return "CS".to_string();
     }
-    crate::control::contracts::SecurityType::from_fix(sec_type).to_fix().to_string()
+    match crate::control::contracts::SecurityType::from_fix(sec_type).to_fix() {
+        "" => sec_type.to_string(),
+        known => known.to_string(),
+    }
 }
 
 /// Exchange for a historical query, defaulting to the previous constant.
@@ -801,14 +812,6 @@ impl HmdsState {
             } else {
                 compressed
             };
-            // Debug: dump first 80 bytes hex for wire comparison
-            let hex: String = to_send.iter().take(80).map(|b| format!("{:02x}", b)).collect();
-            log::info!("CCP keepUpToDate 35=W: {} bytes, hex={}", to_send.len(), hex);
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("D:/RustroverProjects/ibx/ibx_kut_debug.log") {
-                use std::io::Write;
-                let full_hex: String = to_send.iter().map(|b| format!("{:02x}", b)).collect();
-                let _ = writeln!(f, "LEN={} HEX={}", to_send.len(), full_hex);
-            }
             let _ = conn.send_raw(&to_send);
             hb.last_ccp_sent = Instant::now();
         }
@@ -1149,9 +1152,13 @@ mod historical_contract_tests {
         assert_eq!(hist_sec_type("CS"), "CS");
         // Absent keeps exactly what every caller got before.
         assert_eq!(hist_sec_type(""), "CS");
-        // An unrecognised type stays empty so the gateway names it, rather
-        // than being silently described as something else.
-        assert_eq!(hist_sec_type("NOPE"), "");
+        // A valid type the enum does not carry is sent as stated, not
+        // narrowed away — the subscribe path does the same.
+        assert_eq!(hist_sec_type("FOP"), "FOP");
+        assert_eq!(hist_sec_type("CFD"), "CFD");
+        // And a value that is not a security type at all still reaches the
+        // gateway to be named there, rather than being described as a stock.
+        assert_eq!(hist_sec_type("NOPE"), "NOPE");
     }
 
     #[test]
@@ -1387,12 +1394,74 @@ mod tests {
             true, false, "ES", "FUT", "CME", &mut conn, &mut hb, &shared,
         );
 
-        let mut buf = vec![0u8; 8192];
-        let n = peer.read(&mut buf).unwrap();
-        let sent = String::from_utf8_lossy(&buf[..n]).to_string();
+        let sent = String::from_utf8_lossy(&read_frame(&mut peer)).to_string();
 
         assert!(sent.contains("FUT"), "the contract's security type: {sent}");
         assert!(sent.contains("CME"), "the contract's venue: {sent}");
         assert!(!sent.contains("SMART"), "and not the old constant: {sent}");
+    }
+
+    /// The keep-up-to-date request is built by a second function over a
+    /// different transport, and it was changed too. Reverting only that one
+    /// passes every other test here.
+    #[test]
+    fn the_streaming_query_carries_them_too() {
+        use crate::protocol::connection::Connection;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+
+        let mut hmds = super::HmdsState::new();
+        let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+        let shared = crate::bridge::SharedState::new();
+        let sign_iv = std::sync::Mutex::new(Vec::new());
+
+        hmds.send_historical_request_via_ccp(
+            1, 495512563, "20260101 16:00:00", "1800 S", "5 secs", "TRADES",
+            true, "ES", "FUT", "CME", &mut conn, &mut hb, &[], &sign_iv, &shared,
+        );
+
+        // This transport compresses, so the bytes have to be decoded before
+        // the query is readable at all.
+        let raw = read_frame(&mut peer);
+        let inner = crate::protocol::fixcomp::fixcomp_decompress(&raw)
+            .expect("the frame decompresses");
+        let sent: String = inner.iter()
+            .map(|m| String::from_utf8_lossy(m).to_string())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(sent.contains("<secType>FUT</secType>"), "the contract's security type: {sent}");
+        assert!(sent.contains("<exchange>CME</exchange>"), "the contract's venue: {sent}");
+        assert!(!sent.contains("SMART"), "and not the old constant: {sent}");
+    }
+
+    /// Read until the query XML has closed. A single `read` can legally return
+    /// a partial frame, which would make these tests fail intermittently while
+    /// production is correct.
+    fn read_frame(peer: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+        let mut acc = Vec::new();
+        let mut buf = vec![0u8; 8192];
+        for _ in 0..64 {
+            match peer.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    acc.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&acc).contains("</secType>")
+                        || crate::protocol::fixcomp::fixcomp_length(&acc)
+                            .is_some_and(|len| acc.len() >= len)
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        acc
     }
 }
