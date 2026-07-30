@@ -279,18 +279,18 @@ pub fn farm_logon_exchange(
 
         // FIX.4.1 message
         if msg.starts_with(b"8=FIX.4.1\x01") {
-            let has_sig = msg.windows(5).any(|w| w == b"8349=");
+            let has_sig = msg.windows(6).any(|w| w == b"\x018349=");
             // Check for HMAC signature → unsign
             let parsed_msg = if has_sig {
                 let (unsigned, new_iv, valid) = fix::fix_unsign(&msg, read_mac_key, &read_iv);
+                read_iv = new_iv;
                 if !valid {
                     // Same rule as `Connection::unsign`: a frame that does not
-                    // verify is not parsed, and does not advance the IV — one
-                    // that did would corrupt every genuine frame after it.
+                    // verify is not parsed, but the chain still advances — the
+                    // next IV comes from the body rather than the signature.
                     log::warn!("auth frame failed signature verification — dropped");
                     continue;
                 }
-                read_iv = new_iv;
                 unsigned
             } else {
                 msg.clone()

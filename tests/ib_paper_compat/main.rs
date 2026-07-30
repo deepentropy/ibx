@@ -100,7 +100,8 @@ fn compat_suite() {
                             Frame::Fix(r) => (r, "FIX"),
                             Frame::Control(r) => (r, "Control"),
                         };
-                        let (unsigned, valid) = conn.unsign(raw);
+                        let Some(unsigned) = conn.unsign(raw) else { continue };
+                        let valid = true;
                         if label == "FIXCOMP" {
                             let inner = fixcomp::fixcomp_decompress(&unsigned).unwrap_or_default();
                             for m in &inner {

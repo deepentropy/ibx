@@ -293,16 +293,22 @@ impl Connection {
         // connection is not established here, and refusing them on that
         // assumption would drop real traffic; the warning makes the case
         // visible so the question can be settled from logs rather than guessed.
-        if !msg.windows(5).any(|w| w == b"8349=") {
+        if !msg.windows(6).any(|w| w == b"\x018349=") {
             log::warn!("inbound frame carries no 8349 signature on a signed connection");
             return Some(msg.to_vec());
         }
         let (undistorted, new_iv, valid) = fix::fix_unsign(msg, &self.read_key, &self.read_iv);
+        // The chain advances either way. The next IV is derived from the body,
+        // not from the signature, so when only the signature is damaged this is
+        // the sender's true next IV and holding it back would desynchronise the
+        // next authentic frame — causing the poisoning it was meant to prevent.
+        // When the body is damaged the derived IV is wrong, but so is the one
+        // being held, and neither recovers.
+        self.read_iv = new_iv;
         if !valid {
             log::warn!("inbound frame failed signature verification — dropped");
             return None;
         }
-        self.read_iv = new_iv;
         Some(undistorted)
     }
 
@@ -716,27 +722,33 @@ mod tests {
         assert!(conn.unsign(&tampered).is_none(), "a tampered frame is dropped");
     }
 
-    /// The robustness half, which needs no adversary: one frame that fails must
-    /// not move the IV on. Undistortion XORs byte positions from it, so a single
-    /// damaged frame used to desynchronise the chain permanently and every
-    /// genuine frame after it arrived silently corrupted.
+    /// The chain has to survive a frame that is dropped. The next IV is derived
+    /// from the body rather than the signature, so a frame whose signature text
+    /// alone is damaged still yields the sender's true next IV — and withholding
+    /// it would desynchronise the following authentic frame, causing exactly the
+    /// poisoning that withholding was meant to prevent.
     #[test]
-    fn a_failed_frame_does_not_advance_the_read_iv() {
+    fn a_dropped_frame_does_not_poison_the_next_authentic_one() {
         let key = b"0123456789abcdef";
-        let iv = vec![0u8; 16];
-        let (frame, _) = crate::protocol::fix::fix_sign(&fix_build(&[(35, "8")], 1), key, &iv);
+        let iv0 = vec![0u8; 16];
 
-        let mut conn = signed_conn(key, &iv);
-        let mut tampered = frame.clone();
-        let at = tampered.len() / 2;
-        tampered[at] ^= 0x01;
+        // Two frames as a sender would produce them: the second signed from the
+        // IV the first chained to.
+        let (mut first, iv1) =
+            crate::protocol::fix::fix_sign(&fix_build(&[(35, "8")], 1), key, &iv0);
+        let (second, _) =
+            crate::protocol::fix::fix_sign(&fix_build(&[(35, "8")], 2), key, &iv1);
 
-        assert!(conn.unsign(&tampered).is_none());
-        assert_eq!(conn.read_iv, iv, "the chain must not have moved");
+        // Damage only the transmitted signature, leaving the body intact.
+        let at = find_subsequence(&first, b"\x018349=").expect("signed") + 6;
+        first[at] = if first[at] == b'0' { b'1' } else { b'0' };
 
-        // The positive control: the next genuine frame still verifies, which is
-        // the whole point — it would not if the IV had advanced.
-        assert!(conn.unsign(&frame).is_some(), "recovery after a bad frame");
+        let mut conn = signed_conn(key, &iv0);
+        assert!(conn.unsign(&first).is_none(), "the damaged frame is dropped");
+        assert!(
+            conn.unsign(&second).is_some(),
+            "and the next authentic frame still verifies",
+        );
     }
 
     /// Two shapes that must keep working, because refusing either would drop
@@ -754,5 +766,22 @@ mod tests {
 
         let mut conn = signed_conn(b"0123456789abcdef", &vec![0u8; 16]);
         assert_eq!(conn.unsign(&plain), Some(plain), "no 8349 tag on the frame");
+    }
+
+    /// A signature is a field, not a substring. A legitimate signed frame whose
+    /// *value* happens to contain the same text — a reject reason quoting it,
+    /// say — was reported invalid, and enforcing that verdict would drop it.
+    #[test]
+    fn a_signed_frame_quoting_the_signature_tag_in_a_value_still_verifies() {
+        let key = b"0123456789abcdef";
+        let iv = vec![0u8; 16];
+        let quoting = fix_build(&[(35, "8"), (58, "rejected: 8349= missing")], 1);
+        let (frame, _) = crate::protocol::fix::fix_sign(&quoting, key, &iv);
+
+        let mut conn = signed_conn(key, &iv);
+        assert!(
+            conn.unsign(&frame).is_some(),
+            "the tag text inside a value is not the signature field",
+        );
     }
 }

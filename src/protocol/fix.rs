@@ -349,13 +349,17 @@ pub fn fix_unsign(msg: &[u8], mac_key: &[u8], iv: &[u8]) -> (Vec<u8>, Vec<u8>, b
         None => return (msg_bytes, iv.to_vec(), false),
     };
 
-    // Find 8349= tag
-    let sig_needle = b"8349=";
+    // Find the 8349 signature field. Matched with its leading delimiter: a
+    // bare `8349=` search also matches the same text inside a field *value* —
+    // a reject reason quoting it, say — and then the body boundary lands in the
+    // middle of the message and a legitimate frame reports invalid (ibx#275).
+    let sig_needle = b"\x018349=";
     let t8349 = match msg_bytes
         .windows(sig_needle.len())
         .position(|w| w == sig_needle)
     {
-        Some(p) => p,
+        // Keep the delimiter in the body, where the un-delimited match left it.
+        Some(p) => p + 1,
         None => return (msg_bytes, iv.to_vec(), false),
     };
 
@@ -368,7 +372,7 @@ pub fn fix_unsign(msg: &[u8], mac_key: &[u8], iv: &[u8]) -> (Vec<u8>, Vec<u8>, b
     let expected = xor_fold_bytes(&hmac_res);
 
     // Extract actual signature and compare as bytes (no String alloc)
-    let sig_start = t8349 + sig_needle.len();
+    let sig_start = t8349 + (sig_needle.len() - 1);
     let sig_end = msg_bytes[sig_start..]
         .iter()
         .position(|&b| b == SOH)
