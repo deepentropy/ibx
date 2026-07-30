@@ -304,10 +304,22 @@ pub fn read_vlq(data: &[u8], pos: usize) -> (u64, usize) {
 
 /// Convert VLQ value to signed (upper half of range = negative).
 pub fn vlq_signed(val: u64, num_bytes: usize) -> i64 {
-    let bits = 7 * num_bytes;
+    // Two overflow traps, both reachable from the wire (ibx#272).
+    //
+    // read_vlq walks to the end of the buffer when no byte terminates the run,
+    // so `7 * num_bytes` can exceed the width of the shift below. Nine groups
+    // carry 63 bits, which is every value this encoding can represent, so a
+    // longer run is malformed and is read at the full width rather than
+    // shifting by more than the type allows.
+    //
+    // The sign correction itself also overflows at the top width: for a
+    // well-formed nine-byte negative value, `val as i64 - (1i64 << 63)` is
+    // outside i64. Doing the subtraction in u64 and reinterpreting gives the
+    // same two's-complement answer at every width without the trap.
+    let bits = (7 * num_bytes).clamp(1, 63);
     let half: u64 = 1 << (bits - 1);
     if val >= half {
-        val as i64 - (1i64 << bits)
+        val.wrapping_sub(1u64 << bits) as i64
     } else {
         val as i64
     }
@@ -650,12 +662,12 @@ mod tests {
 
     /// Accumulates individual bits (MSB-first order) and produces the
     /// complete 35=P body: 2-byte big-endian bit_count + payload bytes.
-    struct PayloadBuilder {
+    pub(super) struct PayloadBuilder {
         bits: Vec<u8>, // each element is 0 or 1
     }
 
     impl PayloadBuilder {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self { bits: Vec::new() }
         }
 
@@ -667,7 +679,7 @@ mod tests {
         }
 
         /// Emit a server-tag header: 1-bit continuation + 31-bit tag.
-        fn server_tag(&mut self, cont: u64, tag: u32) {
+        pub(super) fn server_tag(&mut self, cont: u64, tag: u32) {
             self.push(cont, 1);
             self.push(tag as u64, 31);
         }
@@ -677,7 +689,7 @@ mod tests {
         /// `width_bytes`: 1..=4 (maps to raw_width 0..=3).
         /// `value`: absolute value written into `width_bytes * 8 - 1` bits.
         /// `negative`: if true the sign bit is 1.
-        fn tick(&mut self, tick_type: u64, has_more: u64, width_bytes: u64, value: u64, negative: bool) {
+        pub(super) fn tick(&mut self, tick_type: u64, has_more: u64, width_bytes: u64, value: u64, negative: bool) {
             assert!(tick_type < 31);
             assert!((1..=4).contains(&width_bytes));
             self.push(tick_type, 5);
@@ -690,7 +702,7 @@ mod tests {
         }
 
         /// Emit an extended tick entry (raw_tick_type == 31).
-        fn tick_extended(
+        pub(super) fn tick_extended(
             &mut self,
             has_more: u64,
             ext_tick_type: u64,
@@ -709,7 +721,7 @@ mod tests {
         }
 
         /// Finalize into the full body: [bit_count_hi, bit_count_lo, payload…]
-        fn build(&self) -> Vec<u8> {
+        pub(super) fn build(&self) -> Vec<u8> {
             let bit_count = self.bits.len();
             let byte_count = (bit_count + 7) / 8;
             let mut payload = vec![0u8; byte_count];
@@ -1277,5 +1289,77 @@ mod tests {
         payload.push(0x99); // unknown
         payload.extend(encode_vlq(100));
         assert!(decode_ticks_35e(&payload).is_empty());
+    }
+}
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+    use super::tests::PayloadBuilder;
+
+    /// ibx#272: read_vlq walks to the end of the buffer when nothing terminates
+    /// the run, so vlq_signed received a byte count whose 7-bit width overflowed
+    /// the shift — a panic in debug, a masked shift and a garbage delta in
+    /// release, which is what ships.
+    /// The nine-byte negative boundary: `bits == 63`, where the sign correction
+    /// subtracted `1i64 << 63` from a positive value and left i64.
+    #[test]
+    fn nine_byte_negative_boundary_does_not_overflow_the_subtraction() {
+        let body = [0x40u8, 0, 0, 0, 0, 0, 0, 0, 0x80];
+        let (val, n) = read_vlq(&body, 0);
+        assert_eq!((val, n), (1u64 << 62, 9), "a well-formed nine-byte run");
+        assert_eq!(vlq_signed(val, n), -(1i64 << 62),
+            "the top-width negative value must decode, not abort");
+
+        // Either side of the boundary at the same width.
+        assert_eq!(vlq_signed((1u64 << 62) - 1, 9), (1i64 << 62) - 1);
+        assert_eq!(vlq_signed(u64::MAX >> 1, 9), -1);
+    }
+
+    #[test]
+    fn unterminated_vlq_does_not_overflow_the_shift() {
+        // No byte sets bit 7: read_vlq consumes all 12 and reports 12 bytes.
+        let body = [0x01u8; 12];
+        let (val, n) = read_vlq(&body, 0);
+        assert_eq!(n, 12, "an unterminated run is consumed to the end");
+        let _ = vlq_signed(val, n);
+
+        // The sign convention is unchanged for well-formed widths.
+        assert_eq!(vlq_signed(0x01, 1), 1);
+        assert_eq!(vlq_signed(0x7F, 1), -1);
+        assert_eq!(vlq_signed(0x3F, 1), 63);
+        assert_eq!(vlq_signed(0x40, 1), -64);
+    }
+
+    /// The extended 35=P format decodes a full 8-byte magnitude, which the
+    /// quote path then scales. Establish that the decoder really can produce a
+    /// value the multiply cannot represent — the apply path drops those rather
+    /// than publishing a pinned or wrapped price.
+    #[test]
+    fn extended_width_decodes_a_magnitude_the_scaling_cannot_represent() {
+        // The extended header carries a full byte width, so the decoder's own
+        // output reaches the top of the range. Drive a real payload through
+        // the decoder rather than asserting a property of `checked_mul`: what
+        // matters is that this magnitude arrives from the wire.
+        let mut b = PayloadBuilder::new();
+        b.server_tag(0, 7);
+        b.tick_extended(0, O_LAST_PRICE, 8, u64::MAX >> 1, false);
+        let ticks = decode_ticks_35p(&b.build());
+        assert_eq!(ticks.len(), 1, "the extended entry must decode");
+
+        let mts: i64 = 1_000_000; // a one-cent tick against PRICE_SCALE 1e8
+        assert!(
+            ticks[0].magnitude.checked_mul(mts).is_none(),
+            "a decoded magnitude of {} times min_tick_scaled leaves i64, which \
+             is what the consumer has to detect",
+            ticks[0].magnitude,
+        );
+
+        // The ordinary case still scales exactly, through the same path.
+        let mut b2 = PayloadBuilder::new();
+        b2.server_tag(0, 7);
+        b2.tick(O_LAST_PRICE, 0, 2, 15_000, false);
+        let ticks2 = decode_ticks_35p(&b2.build());
+        assert_eq!(ticks2.len(), 1);
+        assert_eq!(ticks2[0].magnitude.checked_mul(mts), Some(15_000_000_000));
     }
 }
