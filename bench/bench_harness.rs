@@ -95,7 +95,13 @@ impl BenchSession {
         let shared = Arc::new(SharedState::new());
         let (event_tx, event_rx) = bounded::<Event>(65536);
         let (mut hot_loop, control_tx) =
-            gw.into_hot_loop(shared.clone(), Some(event_tx), farm_conn, ccp_conn, hmds_conn, None);
+            gw.into_hot_loop(shared.clone(), Some(event_tx), farm_conn, ccp_conn, hmds_conn, None,
+                ibx::gateway::CallerAuth {
+                    host: gw_config.host.clone(),
+                    username: gw_config.username.clone(),
+                    password: gw_config.password.clone(),
+                    paper: gw_config.paper,
+                });
 
         let join = std::thread::spawn(move || {
             hot_loop.run();

@@ -196,6 +196,12 @@ impl EClient {
 
         let (hot_loop, control_tx) = gw.into_hot_loop_with_farms(
             shared.clone(), event_tx, farm_conn, ccp_conn, hmds_conn, config.core_id,
+            crate::gateway::CallerAuth {
+                host: config.host.clone(),
+                username: config.username.clone(),
+                password: zeroize::Zeroizing::new(config.password.clone()),
+                paper: config.paper,
+            },
         );
 
         let handle = thread::Builder::new()

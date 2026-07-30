@@ -185,6 +185,12 @@ fn main() {
     let (event_tx, event_rx) = bounded::<Event>(65536);
     let (mut hot_loop, control_tx) = gw.into_hot_loop(
         shared, Some(event_tx), farm_conn, ccp_conn, hmds_conn, None,
+        ibx::gateway::CallerAuth {
+            host: config.host.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            paper: config.paper,
+        },
     );
 
     // Subscribe to instrument

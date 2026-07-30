@@ -55,6 +55,8 @@ pub fn parse_misc_urls(s: &str) -> std::collections::HashMap<String, String> {
     }
     out
 }
+/// Farm name used when the auth server states no trading route.
+pub(crate) const DEFAULT_TRADING_FARM: &str = "usfarm";
 
 /// Parse a farm-route string from the auth-server's routing tags.
 ///
@@ -72,6 +74,27 @@ pub fn parse_farm_route(route: &str) -> Option<(String, String)> {
     let farm = parts.next()?.to_string();
     if host.is_empty() || farm.is_empty() { return None; }
     Some((host, farm))
+}
+
+/// The trading route a reconnect should use.
+///
+/// The auth server states one per account, and the reconnect used to ignore it
+/// — announcing the literal `usfarm` and connecting to the host the caller
+/// configured, so a regional account reconnected under a farm it is not on
+/// (ibx#295). Empty means no route was parsed, which is the case the literals
+/// were there for; the initial connect falls back the same way.
+pub(crate) fn reconnect_trading_route(auth: &ReconnectAuth) -> (String, String) {
+    let host = if auth.trading_host.is_empty() {
+        auth.host.clone()
+    } else {
+        auth.trading_host.clone()
+    };
+    let farm = if auth.trading_farm.is_empty() {
+        DEFAULT_TRADING_FARM.to_string()
+    } else {
+        auth.trading_farm.clone()
+    };
+    (host, farm)
 }
 
 /// Returns true if `buf` contains at least one complete `8=O` (binary) or
@@ -384,6 +407,20 @@ fn try_frame_farm_msg(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
     Some((buf[..total].to_vec(), total))
 }
 
+/// The connect-time credentials a reconnect needs, supplied by whichever
+/// binding built the session.
+///
+/// A constructor parameter rather than a setter called afterwards: leaving
+/// these blank for the caller to fill meant one binding filled them and the
+/// other did not, and every reconnect scheduler silently refused to run on the
+/// empty host (ibx#378). The compiler asks for them now.
+pub struct CallerAuth {
+    pub host: String,
+    pub username: String,
+    pub password: Zeroizing<String>,
+    pub paper: bool,
+}
+
 /// Credentials cached for auto-reconnect (no SRP needed).
 #[derive(Clone)]
 pub struct ReconnectAuth {
@@ -401,6 +438,13 @@ pub struct ReconnectAuth {
     /// Used by HMDS reconnect (ibx#187) — empty when no HMDS route was parsed.
     pub hmds_host: String,
     pub hmds_farm: String,
+    /// Trading farm routing exactly as parsed from the same response — empty
+    /// when the auth server stated none, rather than carrying the fallback the
+    /// initial connect materializes. The distinction matters: an empty host
+    /// lets the reconnect use whatever host the session has now, which a
+    /// redirect may have changed since (ibx#295).
+    pub trading_host: String,
+    pub trading_farm: String,
 }
 
 /// Full gateway connection.
@@ -436,6 +480,10 @@ pub struct Gateway {
     /// retained for HMDS reconnect (ibx#187).
     pub hmds_host: String,
     pub hmds_farm: String,
+    /// Trading farm routing from the same response, retained so the trading
+    /// reconnect uses the route the auth server gave rather than a literal.
+    pub trading_host: String,
+    pub trading_farm: String,
 }
 
 /// Connect to a data farm: key exchange → encrypted logon → token auth → routing → Connection.
@@ -1610,8 +1658,14 @@ impl Gateway {
         //   trading (6145):  "<host>/<farm>"            (port from tag 6146, default 4000)
         //   mktdata (6171):  "<host>/<farm>/<port>"
         //   secdef  (8008):  "<host>/<farm>/<port>"
-        let (trading_host, trading_farm) = parse_farm_route(&trading_route)
-            .unwrap_or_else(|| (host.to_string(), "usfarm".to_string()));
+        // Kept as parsed, before the fallback below materializes one. Storing
+        // the materialized pair would make "no route was given" indistinguishable
+        // from "the route happens to match the connect host", and the reconnect
+        // would then prefer a stale host over one the caller has since updated
+        // through a redirect.
+        let parsed_trading = parse_farm_route(&trading_route);
+        let (trading_host, trading_farm) = parsed_trading.clone()
+            .unwrap_or_else(|| (host.to_string(), DEFAULT_TRADING_FARM.to_string()));
         let (mktdata_host, mktdata_farm) = parse_farm_route(&mktdata_route)
             .map(|(h, f)| (h, f))
             .unwrap_or_else(|| (host.to_string(), "ushmds".to_string()));
@@ -1622,6 +1676,8 @@ impl Gateway {
         // below are moved into the thread::scope closures.
         let hmds_host_for_gw = mktdata_host.clone();
         let hmds_farm_for_gw = mktdata_farm.clone();
+        let (trading_host_for_gw, trading_farm_for_gw) =
+            parsed_trading.unwrap_or_default();
 
         // Parallel farm logons: validated against paper and live (each farm
         // logon is ~6 s sequentially; running them in parallel halves the
@@ -1670,6 +1726,8 @@ impl Gateway {
             ccp_sign_iv,
             hmds_host: hmds_host_for_gw,
             hmds_farm: hmds_farm_for_gw,
+            trading_host: trading_host_for_gw,
+            trading_farm: trading_farm_for_gw,
         };
         Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
@@ -1789,8 +1847,9 @@ impl Gateway {
         ccp_conn: Connection,
         hmds_conn: Option<Connection>,
         core_id: Option<usize>,
+        caller: CallerAuth,
     ) -> (HotLoop, Sender<ControlCommand>) {
-        self.into_hot_loop_with_farms(shared, event_tx, farm_conn, ccp_conn, hmds_conn, core_id)
+        self.into_hot_loop_with_farms(shared, event_tx, farm_conn, ccp_conn, hmds_conn, core_id, caller)
     }
 
     /// Create the control channel and build a HotLoop with farm connections.
@@ -1802,13 +1861,14 @@ impl Gateway {
         ccp_conn: Connection,
         hmds_conn: Option<Connection>,
         core_id: Option<usize>,
+        caller: CallerAuth,
     ) -> (HotLoop, Sender<ControlCommand>) {
         let (tx, rx) = bounded(64);
         let reconnect_auth = ReconnectAuth {
-            host: String::new(), // Filled by caller (Python EClient or Rust API)
-            username: String::new(), // Filled by caller
-            password: Zeroizing::new(String::new()), // Filled by caller
-            paper: false, // Filled by caller
+            host: caller.host,
+            username: caller.username,
+            password: caller.password,
+            paper: caller.paper,
             session_key: self.session_token.clone(),
             session_token: self.session_token.clone(),
             server_session_id: self.server_session_id.clone(),
@@ -1816,6 +1876,8 @@ impl Gateway {
             encoded: self.encoded.clone(),
             hmds_host: self.hmds_host.clone(),
             hmds_farm: self.hmds_farm.clone(),
+            trading_host: self.trading_host.clone(),
+            trading_farm: self.trading_farm.clone(),
         };
         if let Some(tx) = event_tx.as_ref() {
             let _ = tx.send(Event::GatewayLogon {
@@ -2204,5 +2266,63 @@ mod tests {
         };
         assert_eq!(config.username, "user");
         assert!(config.paper);
+    }
+
+    fn auth_with(host: &str, trading_host: &str, trading_farm: &str) -> ReconnectAuth {
+        ReconnectAuth {
+            host: host.to_string(),
+            username: String::new(),
+            password: zeroize::Zeroizing::new(String::new()),
+            paper: true,
+            session_key: num_bigint::BigUint::from(0u32),
+            session_token: num_bigint::BigUint::from(0u32),
+            server_session_id: String::new(),
+            hw_info: String::new(),
+            encoded: String::new(),
+            hmds_host: String::new(),
+            hmds_farm: String::new(),
+            trading_host: trading_host.to_string(),
+            trading_farm: trading_farm.to_string(),
+        }
+    }
+
+    /// ibx#295: the reconnect announced the literal `usfarm` and dialled the
+    /// configured host, ignoring the route the auth server gave for the
+    /// account. The historical-data reconnect beside it has always carried both
+    /// — this is the trading side catching up.
+    #[test]
+    fn a_reconnect_uses_the_route_the_auth_server_gave() {
+        assert_eq!(
+            reconnect_trading_route(&auth_with("cdc1.ibllc.com", "cdc2.ibllc.com", "euhard")),
+            ("cdc2.ibllc.com".to_string(), "euhard".to_string()),
+        );
+
+        // No route parsed: the literals it fell back to are still the answer,
+        // so an account that reconnected correctly before still does.
+        assert_eq!(
+            reconnect_trading_route(&auth_with("cdc1.ibllc.com", "", "")),
+            ("cdc1.ibllc.com".to_string(), "usfarm".to_string()),
+        );
+
+        // And each half falls back independently.
+        assert_eq!(
+            reconnect_trading_route(&auth_with("cdc1.ibllc.com", "", "euhard")),
+            ("cdc1.ibllc.com".to_string(), "euhard".to_string()),
+        );
+        assert_eq!(
+            reconnect_trading_route(&auth_with("cdc1.ibllc.com", "cdc2.ibllc.com", "")),
+            ("cdc2.ibllc.com".to_string(), "usfarm".to_string()),
+        );
+
+        // The reason the parsed route is stored raw rather than after the
+        // initial connect's fallback: with no route stated, the reconnect has
+        // to use whatever host the session holds now. Storing the materialized
+        // pair would pin the host as it was at connect time and ignore a
+        // redirect that has moved it since.
+        assert_eq!(
+            reconnect_trading_route(&auth_with("cdc3.ibllc.com", "", "")),
+            ("cdc3.ibllc.com".to_string(), "usfarm".to_string()),
+            "an updated host wins when the server stated no route",
+        );
     }
 }
