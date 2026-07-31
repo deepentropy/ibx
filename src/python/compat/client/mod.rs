@@ -68,7 +68,23 @@ impl Drop for EClient {
             let _ = tx.send(ControlCommand::Shutdown);
         }
         if let Some(h) = self._thread.lock().unwrap().take() {
-            let _ = h.join();
+            // A wedged engine (ibx#254) never returns from join(). Detach so
+            // that stall parks this thread, not the whole interpreter
+            // (ibx#271). try_attach, not attach: dealloc also runs during
+            // interpreter shutdown (and `wrapper` commonly points back at
+            // the object embedding this EClient, so the cyclic GC — not
+            // just refcounting — can be the one calling drop), and attach
+            // is unsound there. Fall back to a plain join in that case,
+            // same as before this fix.
+            let mut h = Some(h);
+            Python::try_attach(|py| {
+                if let Some(h) = h.take() {
+                    py.detach(|| { let _ = h.join(); });
+                }
+            });
+            if let Some(h) = h {
+                let _ = h.join();
+            }
         }
     }
 }
@@ -184,12 +200,14 @@ impl EClient {
     }
 
     /// Disconnect from IB.
-    fn disconnect(&self) -> PyResult<()> {
+    fn disconnect(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(tx) = self.control_tx.lock().unwrap().as_ref() {
             let _ = tx.send(ControlCommand::Shutdown);
         }
         if let Some(h) = self._thread.lock().unwrap().take() {
-            let _ = h.join();
+            // Same wedged-engine hazard as Drop (ibx#254): release the GIL
+            // for the join so a stuck engine thread stalls only this call.
+            py.detach(|| { let _ = h.join(); });
         }
         self.connected.store(false, Ordering::Release);
         // Reset per-session state so connect() can be called again.
@@ -250,6 +268,19 @@ impl EClient {
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))
     }
 
+    /// Send a control command to the engine. `control_tx` is a bounded(64)
+    /// channel: a full queue is normal backpressure (the hot loop is behind,
+    /// not gone) and `send` is meant to wait for it to drain, so the send
+    /// itself stays blocking. What must not happen is waiting with the GIL
+    /// held, stalling every Python thread instead of just this call
+    /// (ibx#271), so the wait runs detached, and only the actual send
+    /// crosses that boundary; `cmd` must already be a plain owned value by
+    /// the time it's built (never touching Python state once detached).
+    pub(crate) fn send_control(py: Python<'_>, tx: &Sender<ControlCommand>, cmd: ControlCommand) -> PyResult<()> {
+        py.detach(|| tx.send(cmd))
+            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))
+    }
+
     /// Clone the shared state Arc, or return "Not connected".
     pub(crate) fn shared_state(&self) -> PyResult<Arc<SharedState>> {
         self.shared.lock().unwrap().clone()
@@ -261,13 +292,18 @@ impl EClient {
         self.account_id.lock().unwrap().clone().unwrap_or_default()
     }
 
-    /// Find instrument ID for a contract, registering if needed.
-    pub(crate) fn find_or_register_instrument(&self, contract: &Contract) -> PyResult<u32> {
+    /// Find instrument ID for a contract, registering if needed. The hot
+    /// loop can take up to `REGISTRATION_TIMEOUT` to reply, so the round
+    /// trip runs with the GIL released: otherwise a slow reply stalls every
+    /// Python thread, not just this call (ibx#271).
+    pub(crate) fn find_or_register_instrument(&self, py: Python<'_>, contract: &Contract) -> PyResult<u32> {
         let tx = self.tx()?;
-        self.core.find_or_register_instrument(
-            &tx,
-            contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
-        ).map_err(|e| PyRuntimeError::new_err(e))
+        let con_id = contract.con_id;
+        let symbol = contract.symbol.clone();
+        let exchange = contract.exchange.clone();
+        let sec_type = contract.sec_type.clone();
+        py.detach(|| self.core.find_or_register_instrument(&tx, con_id, &symbol, &exchange, &sec_type))
+            .map_err(|e| PyRuntimeError::new_err(e))
     }
 }
 

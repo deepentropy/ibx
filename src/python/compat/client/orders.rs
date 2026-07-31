@@ -33,7 +33,7 @@ impl EClient {
             self.next_order_id.fetch_add(1, Ordering::Relaxed)
         };
 
-        let instrument = self.find_or_register_instrument(contract)?;
+        let instrument = self.find_or_register_instrument(py, contract)?;
 
         // If orderId is already tracked, this is a modification — emit Modify instead of Submit.
         let cmd = if self.core.is_order_tracked(oid) {
@@ -49,8 +49,7 @@ impl EClient {
             ClientCore::build_order_request(&api_order, oid, instrument)
                 .map_err(|e| PyRuntimeError::new_err(e))?
         };
-        tx.send(cmd)
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Self::send_control(py, &tx, cmd)?;
 
         // Track order in shared core
         let api_contract = ApiContract {
@@ -71,21 +70,20 @@ impl EClient {
 
     /// Cancel an order.
     #[pyo3(signature = (order_id, manual_order_cancel_time=""))]
-    fn cancel_order(&self, order_id: i64, manual_order_cancel_time: &str) -> PyResult<()> {
+    fn cancel_order(&self, py: Python<'_>, order_id: i64, manual_order_cancel_time: &str) -> PyResult<()> {
         let tx = self.tx()?;
-        tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: order_id as u64 }))
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Self::send_control(py, &tx, ControlCommand::Order(OrderRequest::Cancel { order_id: order_id as u64 }))?;
         let _ = manual_order_cancel_time;
         Ok(())
     }
 
     /// Cancel all orders globally.
-    fn req_global_cancel(&self) -> PyResult<()> {
+    fn req_global_cancel(&self, py: Python<'_>) -> PyResult<()> {
         let tx = self.tx()?;
         let shared = self.shared_state()?;
         let count = shared.market.instrument_count();
         for instrument in 0..count {
-            let _ = tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }));
+            let _ = Self::send_control(py, &tx, ControlCommand::Order(OrderRequest::CancelAll { instrument }));
         }
         Ok(())
     }
