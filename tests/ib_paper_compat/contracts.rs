@@ -23,6 +23,7 @@ pub(super) fn phase_contract_details(conns: Conns) -> Conns {
         req_id: 1200, con_id: 756733,
         symbol: String::new(), sec_type: String::new(),
         exchange: String::new(), currency: String::new(),
+        filters: Default::default(),
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -76,6 +77,7 @@ pub(super) fn phase_contract_details_by_symbol(conns: Conns) -> Conns {
         req_id: 7800, con_id: 0,
         symbol: "AAPL".into(), sec_type: "STK".into(),
         exchange: "SMART".into(), currency: "USD".into(),
+        filters: Default::default(),
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -228,6 +230,7 @@ pub(super) fn phase_market_rule_id(conns: Conns) -> Conns {
         req_id: 8400, con_id: 756733,
         symbol: String::new(), sec_type: String::new(),
         exchange: String::new(), currency: String::new(),
+        filters: Default::default(),
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -319,6 +322,7 @@ pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
         req_id: 1001, con_id: 756733,
         symbol: String::new(), sec_type: String::new(),
         exchange: String::new(), currency: String::new(),
+        filters: Default::default(),
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
