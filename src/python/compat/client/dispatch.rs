@@ -18,14 +18,18 @@ use super::super::contract::{Contract, ContractDescription, ContractDetails, Bar
 use super::super::tick_types::*;
 use super::super::super::types::PRICE_SCALE_F;
 
-/// Call a Python wrapper method, catching and logging any exception instead of propagating.
-/// This prevents user callback exceptions from killing the dispatch loop.
+/// Call a Python wrapper method, catching and logging an ordinary exception instead of
+/// propagating it so one bad callback cannot kill the dispatch loop. `KeyboardInterrupt`,
+/// `SystemExit`, and any other exception deriving from `BaseException` rather than
+/// `Exception` are re-raised so Ctrl-C during a callback still stops `run()` and a
+/// callback-raised `SystemExit` still terminates it, matching ibapi.
 macro_rules! call_wrapper {
     ($wrapper:expr, $py:expr, $method:expr, $args:expr) => {
         if let Err(e) = $wrapper.call_method($py, $method, $args, None) {
+            if !e.is_instance_of::<pyo3::exceptions::PyException>($py) {
+                return Err(e);
+            }
             log::error!("Python callback {}() raised: {}", $method, e);
-            e.restore($py);
-            unsafe { pyo3::ffi::PyErr_Clear(); }
         }
     };
 }
