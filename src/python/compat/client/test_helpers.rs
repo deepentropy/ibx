@@ -103,7 +103,7 @@ impl EClient {
     #[doc(hidden)]
     fn _test_push_order_update(
         &self, order_id: u64, instrument: u32, status: &str,
-        filled_qty: i64, remaining_qty: i64,
+        filled_qty: f64, remaining_qty: f64,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
         let st = match status {

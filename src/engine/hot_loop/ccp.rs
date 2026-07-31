@@ -67,6 +67,15 @@ pub(crate) struct CcpState {
     pub(crate) bulletin_next_id: i32,
     pub(crate) news_subscriptions: Vec<(InstrumentId, u32)>,
     pub(crate) disconnected: bool,
+    /// When to account for orders the reconnect did not explain.
+    ///
+    /// An order that terminated while the connection was down leaves no
+    /// message behind — its evidence is an absence, and absence only means
+    /// something once the recovery push is known to be complete. Armed
+    /// generously at reconnect so the sweep still runs when the push says
+    /// nothing at all, and re-armed tightly when the push's own terminator
+    /// arrives (ibx#251). Cleared on a disconnect so a second drop before the
+    /// sweep cancels it rather than reaping against a dead session.
     /// (req_id, is_single_shot). Single-shot = known-conId lookup whose
     /// first 35=d reply is also the last (server emits no 323=5/6 terminator
     /// for these). Multi-record by-symbol/matching-symbols requests push
@@ -206,7 +215,7 @@ impl CcpState {
                     Ok(0) => {}
                     Err(e) => {
                         log::error!("CCP connection lost: {}", e);
-                        self.handle_disconnect(context, event_tx);
+                        self.handle_disconnect(context, shared, event_tx);
                         return;
                     }
                     Ok(_) => {
@@ -885,8 +894,8 @@ impl CcpState {
                     order_id: clord_id,
                     instrument: order.instrument,
                     status,
-                    filled_qty: order.filled as i64,
-                    remaining_qty: leaves_qty,
+                    filled_qty: order.filled as f64,
+                    remaining_qty: leaves_qty as f64,
                     perm_id,
                     parent_id,
                     timestamp_ns: context.now_ns(),
@@ -1652,9 +1661,52 @@ impl CcpState {
         shared.reference.push_depth_exchanges(descs);
     }
 
-    pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {
+    pub(crate) fn handle_disconnect(
+        &mut self,
+        context: &mut Context,
+        shared: &SharedState,
+        event_tx: &Option<Sender<Event>>,
+    ) {
         self.disconnected = true;
+        // The engine stops believing these statuses here, and said so to
+        // nobody — so the API layer went on reporting the pre-disconnect
+        // status and `req_open_orders` kept asserting it (ibx#251).
         context.mark_orders_uncertain();
+        for order in context.uncertain_orders() {
+            let cached = shared.orders.get_order_info(order.order_id);
+            let update = crate::types::OrderUpdate {
+                order_id: order.order_id,
+                instrument: order.instrument,
+                status: crate::types::OrderStatus::Uncertain,
+                filled_qty: order.filled as f64,
+                // A fractional order deliberately tracks `qty` as zero — the
+                // decimal it was submitted with lives only in the enriched
+                // record. Both quantity fields are floating point end to
+                // end — the dispatchers already hand them to the callback
+                // as f64 — so the fraction itself survives exactly here
+                // rather than being rounded to a whole unit.
+                remaining_qty: {
+                    let outstanding = |total: f64| (total - order.filled as f64).max(0.0);
+                    if order.qty > 0 {
+                        outstanding(order.qty as f64)
+                    } else if let Some(c) = cached.as_ref() {
+                        outstanding(c.order.total_quantity)
+                    } else {
+                        // No exec report has reached this order yet, so
+                        // neither its quantity nor a fill is known — both
+                        // arrive on the same message — and there is no
+                        // honest quantity to give. ibapi's own "value not
+                        // set" sentinel, rather than a guessed number.
+                        f64::MAX
+                    }
+                },
+                perm_id: cached.as_ref().map(|c| c.order.perm_id).unwrap_or(0),
+                parent_id: cached.as_ref().map(|c| c.order.parent_id).unwrap_or(0),
+                timestamp_ns: 0,
+            };
+            shared.orders.push_order_update(update);
+            emit(event_tx, Event::OrderUpdate(update));
+        }
         // Don't emit Event::Disconnected — auto-reconnect handles CCP drops transparently.
         // Python is only notified if reconnect exhausts retries.
     }
@@ -2166,6 +2218,137 @@ mod tests {
             42, instrument, Side::Buy, 1, 100 * PRICE_SCALE, b'2', b'0', 0,
         )); // starts at PendingSubmit
         (CcpState::new(), context, SharedState::new())
+    }
+
+    fn working_order(context: &mut Context, id: u64, qty: u32, filled: u32) {
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            id, instrument, Side::Buy, qty, 100 * PRICE_SCALE, b'2', b'0', 0,
+        ));
+        if filled > 0 {
+            context.update_order_filled(id, filled);
+        }
+        context.update_order_status(id, crate::types::OrderStatus::Submitted);
+    }
+
+    /// ibx#251: an order working when the connection dropped is marked
+    /// Uncertain, and the engine told nobody — so the API layer went on
+    /// reporting the pre-disconnect status and `req_open_orders` kept
+    /// asserting a status the engine no longer had.
+    #[test]
+    fn a_disconnect_tells_the_application_the_status_is_no_longer_known() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        working_order(&mut context, 42, 100, 10);
+        shared.orders.push_order_info(42, RichOrderInfo {
+            contract: api::Contract::default(),
+            order: api::Order { perm_id: 77, parent_id: 12, ..Default::default() },
+            order_state: api::OrderState::default(),
+            last_exec: api::Execution::default(),
+        });
+
+        ccp.handle_disconnect(&mut context, &shared, &None);
+
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.len(), 1, "the flip is reported");
+        assert_eq!(updates[0].order_id, 42);
+        assert_eq!(updates[0].status, crate::types::OrderStatus::Uncertain);
+        assert_eq!(updates[0].filled_qty, 10.0, "and carries what is known");
+        // Including the identifiers the caller keys on. A callback that drops
+        // them costs the broker id and the bracket relationship for callers who
+        // retain the latest update.
+        assert_eq!(updates[0].perm_id, 77, "the broker id survives");
+        assert_eq!(updates[0].parent_id, 12, "so does the bracket link");
+    }
+
+    /// A fractional order tracks its quantity as zero — the decimal it was
+    /// submitted with lives only in the enriched record. Both quantity
+    /// fields are floating point end to end, so the exact fraction still
+    /// owed must survive onto the update, not get rounded to a whole share.
+    #[test]
+    fn a_fractional_order_reports_what_is_actually_outstanding() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.register_instrument(756733);
+        // What SubmitLimitFractional records: the integer quantity is zero.
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Buy, 0, 100 * PRICE_SCALE, b'2', b'0', 0,
+        ));
+        context.update_order_filled(42, 1);
+        context.update_order_status(42, crate::types::OrderStatus::PartiallyFilled);
+        shared.orders.push_order_info(42, RichOrderInfo {
+            contract: api::Contract::default(),
+            order: api::Order { total_quantity: 2.5, ..Default::default() },
+            order_state: api::OrderState::default(),
+            last_exec: api::Execution::default(),
+        });
+
+        ccp.handle_disconnect(&mut context, &shared, &None);
+
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].filled_qty, 1.0);
+        assert_eq!(
+            updates[0].remaining_qty, 1.5,
+            "the exact fraction still owed is reported, not rounded up to 2",
+        );
+    }
+
+    /// A disconnect can land before the gateway has sent even the first exec
+    /// report for a freshly submitted fractional order, so the enriched
+    /// cache the previous test relies on does not exist yet — `order.qty` is
+    /// 0 for a fractional order regardless, so there is then no source for
+    /// the total at all. There is no honest quantity to give, so the update
+    /// carries ibapi's own "value not set" sentinel instead of a guess.
+    #[test]
+    fn a_fractional_order_with_no_enrichment_yet_reports_quantity_as_unset() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.register_instrument(756733);
+        context.insert_order(crate::types::Order::new(
+            42, instrument, Side::Buy, 0, 100 * PRICE_SCALE, b'2', b'0', 0,
+        ));
+        context.update_order_status(42, crate::types::OrderStatus::Submitted);
+        // No push_order_info: the reconnect races ahead of the first exec report.
+
+        ccp.handle_disconnect(&mut context, &shared, &None);
+
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].filled_qty, 0.0);
+        assert_eq!(
+            updates[0].remaining_qty, f64::MAX,
+            "unconfirmed is not the same as zero outstanding, and there is no real number to give",
+        );
+    }
+
+    /// An order the reconnect does not account for stays Uncertain and stays
+    /// present. A terminal status guessed from silence is a guess on a money
+    /// path, and removing the order to record it loses the execution that
+    /// arrives next — the fill has nowhere to book and the position never moves.
+    #[test]
+    fn an_order_the_reconnect_does_not_explain_still_books_its_execution() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        working_order(&mut context, 42, 100, 0);
+
+        ccp.handle_disconnect(&mut context, &shared, &None);
+        ccp.disconnected = false;
+        let _ = shared.orders.drain_order_updates();
+
+        // The recovery push says nothing about it; its execution arrives after.
+        let frame = exec_report_frame(&[
+            (39, "1"), (17, "e-1"), (150, "F"), (32, "40"), (31, "100.0"), (14, "40"), (151, "60"),
+        ]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert_eq!(shared.orders.drain_fills().len(), 1, "the fill books");
+        assert_eq!(context.position(0), 40, "and the position moves");
+        assert_eq!(context.order(42).unwrap().filled, 40, "against an order that is still there");
     }
 
     fn exec_report_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {

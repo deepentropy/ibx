@@ -159,11 +159,11 @@ impl EClient {
         let updates = shared.orders.drain_order_updates();
         for update in updates {
             let status = order_status_str(update.status);
-            call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, update.filled_qty as f64,
-                 update.remaining_qty as f64, 0.0f64, update.perm_id, update.parent_id, 0.0f64, 0i64, "", 0.0f64));
+            call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, update.filled_qty,
+                 update.remaining_qty, 0.0f64, update.perm_id, update.parent_id, 0.0f64, 0i64, "", 0.0f64));
 
             // Track open orders
-            self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
+            self.core.update_order_status(shared, update.order_id, status, update.filled_qty, update.remaining_qty);
         }
 
         // Drain cancel rejects -> error
