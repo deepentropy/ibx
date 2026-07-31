@@ -296,8 +296,21 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::*;
 
+    /// The constructor takes the arguments PyO3 passes a `#[new]`, so the only
+    /// way to build one is from Python. That the type is constructible at all
+    /// is what the compiler already checks; this asserts the shape the wrapper
+    /// presents, which is what a caller subclasses.
     #[test]
-    fn ewrapper_can_be_constructed() {
-        let _w = EWrapper::new();
+    fn ewrapper_exposes_the_callback_surface() {
+        Python::initialize();
+        Python::attach(|py| {
+            let cls = py.get_type::<EWrapper>();
+            for method in ["error", "tick_price", "tick_size", "next_valid_id", "connection_closed"] {
+                assert!(
+                    cls.hasattr(method).unwrap(),
+                    "EWrapper must expose {method}() for a subclass to override",
+                );
+            }
+        });
     }
 }
