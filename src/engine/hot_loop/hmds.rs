@@ -75,6 +75,18 @@ impl HmdsState {
         }
     }
 
+    /// Give up on the transport.
+    ///
+    /// The flag and the connection move together. Setting the flag alone left
+    /// the dead socket in place, and the reconnect scheduler returns early
+    /// while a connection is present — so the transport was stuck for the life
+    /// of the process, on both the liveness timeout and the ordinary
+    /// receive-error path (ibx#367).
+    pub(crate) fn disconnect(&mut self, hmds_conn: &mut Option<Connection>) {
+        self.disconnected = true;
+        *hmds_conn = None;
+    }
+
     pub(crate) fn poll(
         &mut self,
         hmds_conn: &mut Option<Connection>,
@@ -91,7 +103,7 @@ impl HmdsState {
                     Ok(0) => {}
                     Err(e) => {
                         log::error!("HMDS connection lost: {}", e);
-                        self.disconnected = true;
+                        self.disconnect(hmds_conn);
                         return;
                     }
                     Ok(n) => {

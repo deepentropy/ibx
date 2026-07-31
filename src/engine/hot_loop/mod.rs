@@ -740,7 +740,7 @@ impl HotLoop {
             if warmed_up && since_recv > LIVENESS_TEST_SECS {
                 if since_recv > LIVENESS_DEAD_SECS {
                     log::error!("HMDS liveness timeout ({}s silent) — connection lost", since_recv);
-                    self.hmds.disconnected = true;
+                    self.hmds.disconnect(&mut self.hmds_conn);
                 } else if self.hb.pending_hmds_test.is_none() {
                     let test_id = self.hb.next_test_id();
                     let _ = conn.send_fix(&[
@@ -1039,6 +1039,14 @@ impl HotLoop {
                 self.hmds.disconnected = false;
                 self.hb.last_hmds_recv = Instant::now();
                 self.hb.last_hmds_sent = Instant::now();
+                // The probe that went unanswered belonged to the dead session.
+                // Leaving it pending suppressed the next one — the liveness
+                // check only sends a TestRequest when none is outstanding — so
+                // a fresh connection went silent-to-dead without ever being
+                // probed. The warm-up starts here too, or the new session is
+                // already past it (ibx#367).
+                self.hb.pending_hmds_test = None;
+                self.hb.hmds_up_since = Instant::now();
                 self.hmds_reconnect_attempt = 0;
                 self.hmds_next_attempt_at = None;
                 self.pending_hmds_reconnect = None;
@@ -1463,6 +1471,87 @@ fn extract_text_tag(msg: &[u8], tag: u32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A reconnected transport must not inherit the dead session's outstanding
+    /// probe. The liveness check only sends a TestRequest when none is pending,
+    /// so a stale one suppressed every probe on the new connection and it went
+    /// from silent to declared dead without being asked anything. The warm-up
+    /// has to restart with it, or the new session is already past it.
+    #[test]
+    fn an_hmds_reconnect_does_not_inherit_the_dead_session_probe() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        hl.hb.pending_hmds_test = Some(("t-1".to_string(), Instant::now()));
+        hl.hb.hmds_up_since = Instant::now() - Duration::from_secs(600);
+        hl.hmds.disconnected = true;
+
+        // A reconnect that has just succeeded.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.send(Ok(crate::protocol::connection::Connection::new_raw(sock).unwrap())).unwrap();
+        hl.pending_hmds_reconnect = Some(rx);
+
+        hl.poll_hmds_reconnect();
+
+        assert!(hl.hmds_conn.is_some(), "the connection is installed");
+        assert!(!hl.hmds.disconnected, "and the transport is live again");
+        assert!(
+            hl.hb.pending_hmds_test.is_none(),
+            "the dead session's probe is dropped, or it suppresses every probe on the new one",
+        );
+        assert!(
+            hl.hb.hmds_up_since.elapsed() < Duration::from_secs(LIVENESS_WARMUP_SECS),
+            "and the new session starts inside its warm-up",
+        );
+    }
+
+    /// ibx#367: the liveness timeout set the disconnected flag and left the
+    /// dead socket in place, and the reconnect scheduler returns early while a
+    /// connection is present — so the first HMDS liveness timeout was permanent
+    /// for the life of the process. Historical requests issued afterwards
+    /// targeted the abandoned socket and never completed.
+    #[test]
+    fn an_hmds_disconnect_lets_its_reconnect_run() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        hl.set_reconnect_auth(crate::gateway::ReconnectAuth {
+            host: "gw.example".into(),
+            username: "u".into(),
+            password: zeroize::Zeroizing::new(String::new()),
+            paper: true,
+            session_key: Default::default(),
+            session_token: Default::default(),
+            server_session_id: String::new(),
+            hw_info: String::new(),
+            encoded: String::new(),
+            hmds_host: "hmds.example".into(),
+            hmds_farm: "hfarm".into(),
+        });
+
+        // A live transport, so releasing it is observable.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        hl.hmds_conn = Some(crate::protocol::connection::Connection::new_raw(sock).unwrap());
+        hl.hmds.disconnected = false;
+        assert!(hl.hmds_next_attempt_at.is_none(), "nothing scheduled while it is up");
+
+        // Driven through the receive path rather than by calling the helper:
+        // the peer is gone, so `try_recv` errors and the poll gives up on the
+        // transport. This is the ordinary way HMDS dies.
+        drop(_peer);
+        hl.hmds.poll(&mut hl.hmds_conn, &SharedState::new(), &None, &mut hl.hb);
+
+        assert!(hl.hmds.disconnected, "the transport is marked dead");
+        assert!(hl.hmds_conn.is_none(), "and the socket is released with it");
+
+        // The scheduler now gets past its early return and arms the first attempt.
+        hl.maybe_spawn_hmds_reconnect();
+        assert!(
+            hl.hmds_next_attempt_at.is_some(),
+            "an HMDS reconnect is scheduled rather than skipped forever",
+        );
+    }
     use super::*;
     use std::sync::Arc;
     use crate::bridge::{Event, SharedState};
