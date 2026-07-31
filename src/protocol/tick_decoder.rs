@@ -178,9 +178,6 @@ pub const O_LAST_EXCH: u64 = 13;
 pub const O_BID_EXCH: u64 = 16;
 pub const O_ASK_EXCH: u64 = 17;
 pub const O_HALTED: u64 = 18;
-/// One of the session's open/close pair. Type 3 is the other; a single
-/// capture cannot say which is which, since both are constant over a short
-/// window. What it does establish is that 3 is not the high — see
 /// Previous session's close. Settled against the authoritative daily bars for
 /// the same contract: the wire carried 27922.00 while the current session's
 /// bar closed at 27913.75 and the prior session's closed at exactly 27922.00
