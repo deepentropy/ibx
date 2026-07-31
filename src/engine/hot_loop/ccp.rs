@@ -1,6 +1,10 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
+/// How long a matching-symbols request waits for its reply. Matches the
+/// historical-request idle timeout: both are one round trip to the gateway.
+const MATCHING_SYMBOLS_TIMEOUT: Duration = Duration::from_secs(60);
+
 use crate::bridge::{Event, RichOrderInfo, SharedState};
 use crate::api::types as api;
 use crate::engine::context::Context;
@@ -77,7 +81,10 @@ pub(crate) struct CcpState {
     /// surfaces error 200 + contract_details_end instead of hanging
     /// forever (ibx#227).
     pub(crate) pending_secdef: Vec<(u32, bool, Instant)>,
-    pub(crate) pending_matching_symbols: Vec<u32>,
+    /// Requests awaiting a matching-symbols reply, with the deadline after
+    /// which one is given up on. Recorded only for a request that actually went
+    /// out, and expired so a stale head cannot absorb a later reply (ibx#369).
+    pub(crate) pending_matching_symbols: Vec<(u32, Instant)>,
     /// keepUpToDate historical queries routed through CCP: (query_id, req_id)
     pub(crate) pending_kut_historical: Vec<(String, u32)>,
     /// tickerId → req_id mapping for keepUpToDate 35=G bar updates
@@ -359,14 +366,14 @@ impl CcpState {
                                 let echoed = extract_tag_value(msg, b"320=")
                                     .and_then(|v| v.parse::<u32>().ok());
                                 let pos = match echoed {
-                                    Some(rid) => self.pending_matching_symbols.iter().position(|p| *p == rid),
+                                    Some(rid) => self.pending_matching_symbols.iter().position(|(p, _)| *p == rid),
                                     // No echo on the wire: attribution is only
                                     // safe with a single request in flight.
                                     None if self.pending_matching_symbols.len() == 1 => Some(0),
                                     None => None,
                                 };
                                 if let Some(pos) = pos {
-                                    let req_id = self.pending_matching_symbols.remove(pos);
+                                    let (req_id, _) = self.pending_matching_symbols.remove(pos);
                                     // An empty result is a legitimate answer
                                     // ("no such symbol") and MUST be delivered:
                                     // dropping it left the caller waiting forever
@@ -1584,20 +1591,54 @@ impl CcpState {
     }
 
     pub(crate) fn send_matching_symbols_request(&mut self, req_id: u32, pattern: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        if let Some(conn) = ccp_conn.as_mut() {
-            let req_id_str = req_id.to_string();
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "U"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6040, "185"),
-                (320, &req_id_str),
-                (58, pattern),
-            ]);
-            hb.last_ccp_sent = Instant::now();
-            log::info!("Sent matching symbols request: req_id={} pattern='{}'", req_id, pattern);
+        // Recorded only where the request went out. It used to be recorded
+        // whether or not it was sent — the send error was discarded, and the
+        // push sat outside the block that needs a connection at all — so a
+        // request issued while the transport was down was queued as pending
+        // with nothing on the wire to answer it (ibx#369).
+        let Some(conn) = ccp_conn.as_mut() else {
+            log::warn!("Matching symbols request req_id={} pattern='{}' not sent: no CCP transport",
+                req_id, pattern);
+            return;
+        };
+        let req_id_str = req_id.to_string();
+        let ts = chrono_free_timestamp();
+        if let Err(e) = conn.send_fix(&[
+            (fix::TAG_MSG_TYPE, "U"),
+            (fix::TAG_SENDING_TIME, &ts),
+            (6040, "185"),
+            (320, &req_id_str),
+            (58, pattern),
+        ]) {
+            log::warn!("Matching symbols request req_id={} pattern='{}' not sent: {}",
+                req_id, pattern, e);
+            return;
         }
-        self.pending_matching_symbols.push(req_id);
+        hb.last_ccp_sent = Instant::now();
+        log::info!("Sent matching symbols request: req_id={} pattern='{}'", req_id, pattern);
+        self.pending_matching_symbols.push((req_id, Instant::now() + MATCHING_SYMBOLS_TIMEOUT));
+    }
+
+    /// Give up on matching-symbols requests the gateway never answered.
+    ///
+    /// Nothing expired them, so an unanswered request stayed in the queue for
+    /// the life of the process — and the reply matcher falls back to the head
+    /// of that queue when a reply carries no echoed request id, so a stale entry
+    /// could absorb a later request's answer (ibx#369).
+    pub(crate) fn sweep_pending_matching_symbols(&mut self) {
+        if self.pending_matching_symbols.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        self.pending_matching_symbols.retain(|(req_id, deadline)| {
+            if now >= *deadline {
+                log::warn!("Matching symbols request req_id={} unanswered after {:?} — giving up",
+                    req_id, MATCHING_SYMBOLS_TIMEOUT);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     pub(crate) fn send_mkt_depth_exchanges_request(&mut self, _ccp_conn: &mut Option<Connection>, _hb: &mut HeartbeatState, shared: &SharedState) {
@@ -2168,6 +2209,49 @@ mod tests {
         (CcpState::new(), context, SharedState::new())
     }
 
+    /// ibx#369: the request was recorded as pending whether or not it went out.
+    /// The send error was discarded and the push sat outside the block that
+    /// needs a connection at all, so a request issued while the transport was
+    /// down was queued with nothing on the wire to answer it.
+    #[test]
+    fn a_matching_symbols_request_that_was_not_sent_is_not_recorded() {
+        let mut ccp = CcpState::new();
+        let mut hb = HeartbeatState::new();
+
+        // No transport at all.
+        let mut no_conn: Option<Connection> = None;
+        ccp.send_matching_symbols_request(7, "AAPL", &mut no_conn, &mut hb);
+        assert!(
+            ccp.pending_matching_symbols.is_empty(),
+            "nothing was sent, so nothing is awaiting a reply",
+        );
+
+        // And with one, it is recorded.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let mut conn = Some(crate::protocol::connection::Connection::new_raw(stream).unwrap());
+        ccp.send_matching_symbols_request(8, "AAPL", &mut conn, &mut hb);
+        assert_eq!(ccp.pending_matching_symbols.len(), 1, "a sent request is awaited");
+        assert_eq!(ccp.pending_matching_symbols[0].0, 8);
+    }
+
+    /// Nothing expired an unanswered request, so it stayed queued for the life
+    /// of the process — and the reply matcher falls back to the head of that
+    /// queue when a reply carries no echoed request id, so a stale entry could
+    /// absorb a later request's answer.
+    #[test]
+    fn an_unanswered_matching_symbols_request_is_given_up_on() {
+        let mut ccp = CcpState::new();
+        ccp.pending_matching_symbols.push((7, Instant::now() - Duration::from_secs(1)));
+        ccp.pending_matching_symbols.push((8, Instant::now() + MATCHING_SYMBOLS_TIMEOUT));
+
+        ccp.sweep_pending_matching_symbols();
+
+        assert_eq!(ccp.pending_matching_symbols.len(), 1, "the expired one is dropped");
+        assert_eq!(ccp.pending_matching_symbols[0].0, 8, "and the live one is kept");
+    }
+
     fn exec_report_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
         let mut m = std::collections::HashMap::new();
         m.insert(11u32, "42".to_string()); // ClOrdID
@@ -2366,8 +2450,8 @@ mod tests {
     #[test]
     fn matching_symbols_matched_by_echoed_req_id_not_fifo() {
         let (mut ccp, mut context, shared) = u186_test_state();
-        ccp.pending_matching_symbols.push(1);
-        ccp.pending_matching_symbols.push(2);
+        ccp.pending_matching_symbols.push((1, Instant::now() + MATCHING_SYMBOLS_TIMEOUT));
+        ccp.pending_matching_symbols.push((2, Instant::now() + MATCHING_SYMBOLS_TIMEOUT));
 
         // Request 2's reply arrives FIRST (out of order).
         let msg = matching_symbols_msg("2", &[("AAPL", "265598")]);
@@ -2377,14 +2461,14 @@ mod tests {
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].0, 2, "reply must land on the echoed req_id, not the queue head");
         assert_eq!(delivered[0].1.len(), 1);
-        assert_eq!(ccp.pending_matching_symbols, vec![1]);
+        assert_eq!(ccp.pending_matching_symbols.iter().map(|(r, _)| *r).collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]
     fn matching_symbols_empty_result_pops_and_delivers() {
         let (mut ccp, mut context, shared) = u186_test_state();
-        ccp.pending_matching_symbols.push(1);
-        ccp.pending_matching_symbols.push(2);
+        ccp.pending_matching_symbols.push((1, Instant::now() + MATCHING_SYMBOLS_TIMEOUT));
+        ccp.pending_matching_symbols.push((2, Instant::now() + MATCHING_SYMBOLS_TIMEOUT));
 
         // Unknown pattern: zero matches. Must still pop req 1 and deliver
         // the empty answer — previously this poisoned the queue head and
@@ -2396,7 +2480,7 @@ mod tests {
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].0, 1);
         assert!(delivered[0].1.is_empty(), "empty result is a legitimate answer");
-        assert_eq!(ccp.pending_matching_symbols, vec![2],
+        assert_eq!(ccp.pending_matching_symbols.iter().map(|(r, _)| *r).collect::<Vec<_>>(), vec![2],
             "queue must not be poisoned by an empty result");
 
         // The next reply attributes correctly.
@@ -2410,7 +2494,7 @@ mod tests {
     #[test]
     fn matching_symbols_ack_frame_does_not_consume_the_request() {
         let (mut ccp, mut context, shared) = u186_test_state();
-        ccp.pending_matching_symbols.push(1);
+        ccp.pending_matching_symbols.push((1, Instant::now() + MATCHING_SYMBOLS_TIMEOUT));
 
         // The not-ready ack (no tag 146) arrives first — it must not pop the
         // request; delivering it as an empty answer orphans the data frame
@@ -2418,7 +2502,7 @@ mod tests {
         let msg = matching_symbols_ack("1");
         ccp.process_ccp_message(&msg, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
         assert!(shared.reference.drain_matching_symbols().is_empty());
-        assert_eq!(ccp.pending_matching_symbols, vec![1]);
+        assert_eq!(ccp.pending_matching_symbols.iter().map(|(r, _)| *r).collect::<Vec<_>>(), vec![1]);
 
         // The data frame then delivers.
         let msg = matching_symbols_msg("1", &[("AAPL", "265598")]);
@@ -2433,8 +2517,8 @@ mod tests {
     #[test]
     fn matching_symbols_unattributable_reply_is_dropped_not_misattributed() {
         let (mut ccp, mut context, shared) = u186_test_state();
-        ccp.pending_matching_symbols.push(1);
-        ccp.pending_matching_symbols.push(2);
+        ccp.pending_matching_symbols.push((1, Instant::now() + MATCHING_SYMBOLS_TIMEOUT));
+        ccp.pending_matching_symbols.push((2, Instant::now() + MATCHING_SYMBOLS_TIMEOUT));
 
         // Echoed id matches nothing pending: with two in flight, guessing
         // would cross-attribute — drop with a warn instead.
@@ -2442,7 +2526,7 @@ mod tests {
         ccp.process_ccp_message(&msg, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
 
         assert!(shared.reference.drain_matching_symbols().is_empty());
-        assert_eq!(ccp.pending_matching_symbols, vec![1, 2]);
+        assert_eq!(ccp.pending_matching_symbols.iter().map(|(r, _)| *r).collect::<Vec<_>>(), vec![1, 2]);
     }
 
     #[test]
