@@ -1,6 +1,5 @@
 //! Account-related methods: positions, PnL, account summary/updates.
 
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::types::*;
@@ -12,21 +11,20 @@ use super::super::super::types::PRICE_SCALE_F;
 impl EClient {
     /// Request P&L updates for the account.
     #[pyo3(signature = (req_id, account, model_code=""))]
-    fn req_pnl(&self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
+    fn req_pnl(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         self.core.subscribe_pnl(req_id);
         let tx = self.tx()?;
         let acct = if account.is_empty() { self.account() } else { account.to_string() };
-        tx.send(ControlCommand::SubscribePnl { req_id, account: acct })
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        Self::send_control(py, &tx, ControlCommand::SubscribePnl { req_id, account: acct })?;
         let _ = model_code;
         Ok(())
     }
 
     /// Cancel P&L subscription.
-    fn cancel_pnl(&self, req_id: i64) -> PyResult<()> {
+    fn cancel_pnl(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         self.core.unsubscribe_pnl(req_id);
         let tx = self.tx()?;
-        let _ = tx.send(ControlCommand::CancelPnl { req_id });
+        let _ = Self::send_control(py, &tx, ControlCommand::CancelPnl { req_id });
         Ok(())
     }
 

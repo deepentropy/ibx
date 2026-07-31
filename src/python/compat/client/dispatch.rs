@@ -208,7 +208,7 @@ impl EClient {
             }
         }
         for req_id in snapshot_done {
-            self.cancel_mkt_data(req_id)?;
+            self.cancel_mkt_data(py, req_id)?;
         }
 
         // Drain TBT trades -> tickByTickAllLast
