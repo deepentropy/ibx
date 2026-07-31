@@ -173,74 +173,106 @@ impl EClient {
 }
 
 /// Parse algo strategy and TagValue params into internal AlgoParams.
+///
+/// A key the caller never set defaults the way IB's own algos do (0.0,
+/// false, or the documented default enum value). A key the caller *did*
+/// set — even to an empty string — is refused if it doesn't parse, instead
+/// of silently taking that same default: a typo like `riskAversion="Aggresive"`
+/// used to submit a Neutral algo with no error, and `maxPctVol=""` used to
+/// submit 0.0. See ibx#263.
 pub fn parse_algo_params(strategy: &str, params: &[TagValue]) -> Result<AlgoParams, String> {
-    let get = |key: &str| -> String {
-        params.iter()
-            .find(|tv| tv.tag == key)
-            .map(|tv| tv.value.clone())
-            .unwrap_or_default()
+    let get = |key: &str| -> Option<String> {
+        params.iter().find(|tv| tv.tag == key).map(|tv| tv.value.clone())
     };
-    let get_f64 = |key: &str| -> f64 { get(key).parse().unwrap_or(0.0) };
-    let get_bool = |key: &str| -> bool {
-        let v = get(key);
-        v == "1" || v.eq_ignore_ascii_case("true")
+    let get_str = |key: &str| -> String { get(key).unwrap_or_default() };
+    let get_f64 = |key: &str| -> Result<f64, String> {
+        let raw = match get(key) {
+            None => return Ok(0.0),
+            Some(raw) => raw,
+        };
+        let v: f64 = raw.parse().map_err(|_| format!("Invalid {} '{}': expected a number", key, raw))?;
+        if !v.is_finite() {
+            return Err(format!("Invalid {} '{}': must be a finite number", key, raw));
+        }
+        Ok(v)
+    };
+    let get_bool = |key: &str| -> Result<bool, String> {
+        let raw = match get(key) {
+            None => return Ok(false),
+            Some(raw) => raw,
+        };
+        match raw.to_lowercase().as_str() {
+            "0" | "false" => Ok(false),
+            "1" | "true" => Ok(true),
+            _ => Err(format!("Invalid {} '{}': expected true/false or 1/0", key, raw)),
+        }
     };
 
     match strategy.to_lowercase().as_str() {
         "vwap" => Ok(AlgoParams::Vwap {
-            max_pct_vol: get_f64("maxPctVol"),
-            no_take_liq: get_bool("noTakeLiq"),
-            allow_past_end_time: get_bool("allowPastEndTime"),
-            start_time: get("startTime"),
-            end_time: get("endTime"),
+            max_pct_vol: get_f64("maxPctVol")?,
+            no_take_liq: get_bool("noTakeLiq")?,
+            allow_past_end_time: get_bool("allowPastEndTime")?,
+            start_time: get_str("startTime"),
+            end_time: get_str("endTime"),
         }),
         "twap" => Ok(AlgoParams::Twap {
-            allow_past_end_time: get_bool("allowPastEndTime"),
-            start_time: get("startTime"),
-            end_time: get("endTime"),
+            allow_past_end_time: get_bool("allowPastEndTime")?,
+            start_time: get_str("startTime"),
+            end_time: get_str("endTime"),
         }),
-        "arrivalpx" | "arrival_price" => {
-            let risk = match get("riskAversion").to_lowercase().as_str() {
-                "get_done" | "getdone" => RiskAversion::GetDone,
-                "aggressive" => RiskAversion::Aggressive,
-                "passive" => RiskAversion::Passive,
-                _ => RiskAversion::Neutral,
+        "arrivalpx" | "arrival_price" => Ok(AlgoParams::ArrivalPx {
+            max_pct_vol: get_f64("maxPctVol")?,
+            risk_aversion: parse_risk_aversion(get("riskAversion").as_deref())?,
+            allow_past_end_time: get_bool("allowPastEndTime")?,
+            force_completion: get_bool("forceCompletion")?,
+            start_time: get_str("startTime"),
+            end_time: get_str("endTime"),
+        }),
+        "closepx" | "close_price" => Ok(AlgoParams::ClosePx {
+            max_pct_vol: get_f64("maxPctVol")?,
+            risk_aversion: parse_risk_aversion(get("riskAversion").as_deref())?,
+            force_completion: get_bool("forceCompletion")?,
+            start_time: get_str("startTime"),
+        }),
+        "darkice" | "dark_ice" => {
+            let display_size = match get("displaySize") {
+                None => 100,
+                Some(raw) => raw.parse().map_err(|_| format!("Invalid displaySize '{}': expected a non-negative integer", raw))?,
             };
-            Ok(AlgoParams::ArrivalPx {
-                max_pct_vol: get_f64("maxPctVol"),
-                risk_aversion: risk,
-                allow_past_end_time: get_bool("allowPastEndTime"),
-                force_completion: get_bool("forceCompletion"),
-                start_time: get("startTime"),
-                end_time: get("endTime"),
+            Ok(AlgoParams::DarkIce {
+                allow_past_end_time: get_bool("allowPastEndTime")?,
+                display_size,
+                start_time: get_str("startTime"),
+                end_time: get_str("endTime"),
             })
         }
-        "closepx" | "close_price" => {
-            let risk = match get("riskAversion").to_lowercase().as_str() {
-                "get_done" | "getdone" => RiskAversion::GetDone,
-                "aggressive" => RiskAversion::Aggressive,
-                "passive" => RiskAversion::Passive,
-                _ => RiskAversion::Neutral,
-            };
-            Ok(AlgoParams::ClosePx {
-                max_pct_vol: get_f64("maxPctVol"),
-                risk_aversion: risk,
-                force_completion: get_bool("forceCompletion"),
-                start_time: get("startTime"),
-            })
-        }
-        "darkice" | "dark_ice" => Ok(AlgoParams::DarkIce {
-            allow_past_end_time: get_bool("allowPastEndTime"),
-            display_size: get("displaySize").parse().unwrap_or(100),
-            start_time: get("startTime"),
-            end_time: get("endTime"),
-        }),
         "pctvol" | "pct_vol" => Ok(AlgoParams::PctVol {
-            pct_vol: get_f64("pctVol"),
-            no_take_liq: get_bool("noTakeLiq"),
-            start_time: get("startTime"),
-            end_time: get("endTime"),
+            pct_vol: get_f64("pctVol")?,
+            no_take_liq: get_bool("noTakeLiq")?,
+            start_time: get_str("startTime"),
+            end_time: get_str("endTime"),
         }),
         _ => Err(format!("Unsupported algo strategy: '{}'", strategy)),
+    }
+}
+
+/// Parse a `riskAversion` tag value (used by ArrivalPx and ClosePx). A
+/// missing tag defaults to Neutral, matching IB's own algo default; a
+/// present value — including an empty string — that isn't a recognized
+/// member is refused rather than silently defaulting to Neutral. See ibx#263.
+fn parse_risk_aversion(raw: Option<&str>) -> Result<RiskAversion, String> {
+    let raw = match raw {
+        None => return Ok(RiskAversion::Neutral),
+        Some(raw) => raw,
+    };
+    match raw.to_lowercase().as_str() {
+        "neutral" => Ok(RiskAversion::Neutral),
+        "get_done" | "getdone" => Ok(RiskAversion::GetDone),
+        "aggressive" => Ok(RiskAversion::Aggressive),
+        "passive" => Ok(RiskAversion::Passive),
+        _ => Err(format!(
+            "Unknown riskAversion '{}': expected Get_Done, Aggressive, Neutral or Passive", raw
+        )),
     }
 }
