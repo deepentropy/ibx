@@ -11,6 +11,7 @@
 //! - External callers read snapshots and poll events without blocking the hot loop.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use std::sync::{Condvar, Mutex};
 use std::cell::UnsafeCell;
 
@@ -249,7 +250,31 @@ pub struct OrderState {
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
     order_cache: Mutex<HashMap<u64, RichOrderInfo>>,
+    /// Orders that reached a terminal state, and when. The cache row is evicted
+    /// when an order completes, so the cached status alone cannot say an order
+    /// is done — a replayed frame would find nothing to refuse and insert it as
+    /// open.
+    completed: Mutex<HashMap<u64, Instant>>,
 }
+
+/// How long a completion is remembered.
+///
+/// Held by age rather than by count. What this has to outlive is the window in
+/// which a stale frame for the order can still arrive — a reconnect replays
+/// recent activity within seconds — and that window is a duration, not a number
+/// of orders. Counting instead meant a busy session's unrelated completions
+/// pushed a still-relevant one out, and the replay it was there to refuse got
+/// back in.
+const COMPLETED_RETENTION: Duration = Duration::from_secs(300);
+
+/// Hard cap on how many completions are remembered at once, regardless of
+/// age. Expired entries are pruned first; a session that completes orders
+/// faster than they expire would otherwise leave every young entry in
+/// place, so once pruning alone cannot bring the map back under this bound,
+/// the oldest survivors are evicted until it does. Generous enough that
+/// reaching it at all means completions are arriving far faster than any
+/// legitimate replay could still be racing the ones being dropped.
+const COMPLETED_MAX: usize = 65_536;
 
 impl OrderState {
     fn new() -> Self {
@@ -260,6 +285,7 @@ impl OrderState {
             what_if_responses: Mutex::new(Vec::with_capacity(8)),
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             order_cache: Mutex::new(HashMap::new()),
+            completed: Mutex::new(HashMap::new()),
         }
     }
 
@@ -325,10 +351,87 @@ impl OrderState {
     }
 
     #[doc(hidden)] pub fn push_completed_order(&self, order: CompletedOrder) {
+        {
+            let now = Instant::now();
+            let mut completed = self.completed.lock().unwrap();
+            completed.insert(order.order_id, now);
+            // Pruned here rather than on every read: this runs once per order,
+            // and a read is on the message path.
+            if completed.len() > COMPLETED_MAX {
+                completed.retain(|_, at| now.duration_since(*at) < COMPLETED_RETENTION);
+            }
+            // A burst faster than the retention window leaves nothing expired
+            // for `retain` to find, so the map can still be over the cap here.
+            // Evict the oldest survivors until it isn't — the actual bound,
+            // not just the common case.
+            if completed.len() > COMPLETED_MAX {
+                let mut by_age: Vec<(u64, Instant)> = completed.iter().map(|(&id, &at)| (id, at)).collect();
+                by_age.sort_unstable_by_key(|&(_, at)| at);
+                for (id, _) in by_age.into_iter().take(completed.len() - COMPLETED_MAX) {
+                    completed.remove(&id);
+                }
+            }
+        }
         self.completed_orders.lock().unwrap().push(order);
     }
 
+    /// Whether this order completed recently enough that a frame reopening it
+    /// is a replay rather than news.
+    fn recently_completed(&self, order_id: u64) -> bool {
+        self.completed.lock().unwrap().get(&order_id)
+            .is_some_and(|at| at.elapsed() < COMPLETED_RETENTION)
+    }
+
+    /// Whether a status ends an order's life.
+    ///
+    /// These are the three the engine acts on by removing the order from its
+    /// book. `Inactive` is not among them — it returns to working when the
+    /// condition holding the order clears — and neither is `Uncertain`, which
+    /// states the opposite of a conclusion.
+    fn is_terminal_status(status: &str) -> bool {
+        matches!(status, "Filled" | "Cancelled" | "Rejected")
+    }
+
+    /// Cache the enriched view of an order.
+    ///
+    /// An order that has completed is not returned to a working status. Nothing
+    /// remembered that an order was done, so a replayed frame — the reconnect
+    /// open-order burst racing a fill, or any message the gateway resends —
+    /// wrote `Submitted` over the terminal entry, and `req_open_orders` then
+    /// reported a completed order as live (ibx#262).
+    ///
+    /// The cached status alone cannot carry that knowledge, because completing
+    /// an order evicts its cache row: the replayed frame finds nothing to refuse
+    /// and inserts itself. The completed-id memory is what survives the
+    /// eviction, and an intervening terminal report cannot overwrite the
+    /// evidence the way a cached string could.
+    ///
+    /// A correction from the gateway is not a replay and goes through
+    /// [`push_order_correction`](Self::push_order_correction).
     #[doc(hidden)] pub fn push_order_info(&self, order_id: u64, info: RichOrderInfo) {
+        if crate::client_core::is_open_status(&info.order_state.status) {
+            if self.recently_completed(order_id) {
+                return;
+            }
+            let cache = self.order_cache.lock().unwrap();
+            if cache.get(&order_id)
+                .is_some_and(|e| Self::is_terminal_status(&e.order_state.status))
+            {
+                return;
+            }
+        }
+        self.order_cache.lock().unwrap().insert(order_id, info);
+    }
+
+    /// Cache a view that supersedes a completed one.
+    ///
+    /// A trade cancel or trade correction restates an execution the gateway has
+    /// already reported, so it can legitimately return a filled order to a
+    /// working quantity. That is the gateway's own statement rather than a
+    /// replay of an older one, so it is not refused, and the order stops being
+    /// remembered as completed.
+    #[doc(hidden)] pub fn push_order_correction(&self, order_id: u64, info: RichOrderInfo) {
+        self.completed.lock().unwrap().remove(&order_id);
         self.order_cache.lock().unwrap().insert(order_id, info);
     }
 }
@@ -996,5 +1099,154 @@ mod tests {
 
         writer.join().unwrap();
         reader.join().unwrap();
+    }
+
+    fn info(status: &str) -> RichOrderInfo {
+        RichOrderInfo {
+            contract: api::Contract::default(),
+            order: api::Order::default(),
+            order_state: api::OrderState { status: status.to_string(), ..Default::default() },
+            last_exec: api::Execution::default(),
+        }
+    }
+
+    fn completed(order_id: u64) -> CompletedOrder {
+        CompletedOrder {
+            order_id, instrument: 0, status: crate::types::OrderStatus::Filled,
+            filled_qty: 100, timestamp_ns: 0,
+        }
+    }
+
+    /// ibx#262: nothing remembered that an order had completed, so a replayed
+    /// frame wrote `Submitted` over the terminal entry and `req_open_orders`
+    /// reported a completed order as live. A strategy then re-manages a position
+    /// it already has, or cancels an order that no longer exists, with the
+    /// open-order snapshot corroborating the wrong picture.
+    #[test]
+    fn a_completed_order_is_not_returned_to_the_open_book() {
+        for terminal in ["Filled", "Cancelled", "Rejected"] {
+            let shared = SharedState::new();
+            shared.orders.push_order_info(7, info(terminal));
+
+            for open in ["Submitted", "PreSubmitted", "PartiallyFilled", "PendingCancel"] {
+                shared.orders.push_order_info(7, info(open));
+                assert_eq!(
+                    shared.orders.get_order_info(7).unwrap().order_state.status, terminal,
+                    "{open} must not overwrite {terminal}",
+                );
+            }
+            assert!(
+                shared.orders.drain_open_orders().is_empty(),
+                "and {terminal} stays out of the open-order snapshot",
+            );
+        }
+    }
+
+    /// Completing an order evicts its cache row, so the cached status cannot be
+    /// what remembers the order is done — the replayed frame finds nothing to
+    /// refuse and inserts itself. This is the ordinary path, not an edge case.
+    #[test]
+    fn a_completion_outlives_the_cache_row_it_evicts() {
+        let shared = SharedState::new();
+        shared.orders.push_order_info(7, info("Filled"));
+        shared.orders.push_completed_order(completed(7));
+        shared.orders.remove_order_info(7);
+
+        shared.orders.push_order_info(7, info("Submitted"));
+        assert!(
+            shared.orders.get_order_info(7).is_none(),
+            "a replayed frame must not re-open an order whose row has been evicted",
+        );
+        assert!(shared.orders.drain_open_orders().is_empty());
+    }
+
+    /// A terminal report arriving between the completion and the replay must
+    /// not become the thing the guard compares against — a cached string is
+    /// overwritten by the next terminal report, and the replay then passes.
+    #[test]
+    fn an_intervening_report_does_not_erase_the_completion() {
+        let shared = SharedState::new();
+        shared.orders.push_order_info(7, info("Filled"));
+        shared.orders.push_completed_order(completed(7));
+
+        shared.orders.push_order_info(7, info("Cancelled"));
+        shared.orders.push_order_info(7, info("Submitted"));
+
+        assert_ne!(
+            shared.orders.get_order_info(7).unwrap().order_state.status, "Submitted",
+            "the completion survives whatever terminal report lands on top of it",
+        );
+        assert!(shared.orders.drain_open_orders().is_empty());
+    }
+
+    /// A trade cancel or correction restates an execution the gateway already
+    /// reported, so it can return a filled order to a working quantity. It is
+    /// the gateway's own statement, not a replay of an older one.
+    #[test]
+    fn a_trade_correction_can_reopen_a_completed_order() {
+        let shared = SharedState::new();
+        shared.orders.push_order_info(7, info("Filled"));
+        shared.orders.push_completed_order(completed(7));
+        shared.orders.remove_order_info(7);
+
+        shared.orders.push_order_correction(7, info("PartiallyFilled"));
+        assert_eq!(
+            shared.orders.get_order_info(7).unwrap().order_state.status, "PartiallyFilled",
+            "a correction is not a replay",
+        );
+
+        // And the order stops being remembered as completed, so its subsequent
+        // ordinary reports are not refused either.
+        shared.orders.push_order_info(7, info("Submitted"));
+        assert_eq!(shared.orders.get_order_info(7).unwrap().order_state.status, "Submitted");
+    }
+
+    /// The ordinary direction still works — without this the guards above would
+    /// pass against a cache that refuses every update.
+    #[test]
+    fn a_fill_still_writes_over_a_working_status() {
+        let shared = SharedState::new();
+        shared.orders.push_order_info(9, info("Submitted"));
+        shared.orders.push_order_info(9, info("Filled"));
+        assert_eq!(shared.orders.get_order_info(9).unwrap().order_state.status, "Filled");
+    }
+
+    /// Held by age, not by count. What the memory has to outlive is the window
+    /// in which a stale frame for the order can still arrive; counting instead
+    /// meant a busy session's unrelated completions pushed a still-relevant
+    /// entry out, and the replay it was there to refuse got back in. Stays one
+    /// short of COMPLETED_MAX so this exercises time-based retention only —
+    /// the hard cap itself is a separate concern, proved below.
+    #[test]
+    fn a_completion_is_remembered_for_a_window_not_a_quota() {
+        let shared = SharedState::new();
+        shared.orders.push_completed_order(completed(7));
+
+        // Far more unrelated completions than any small count-based bound
+        // would hold, without reaching the hard cap.
+        for id in 1000..(1000 + COMPLETED_MAX as u64 - 1) {
+            shared.orders.push_completed_order(completed(id));
+        }
+
+        shared.orders.push_order_info(7, info("Submitted"));
+        assert!(
+            shared.orders.get_order_info(7).is_none(),
+            "the completion survives however many other orders complete beside it",
+        );
+        assert!(shared.orders.drain_open_orders().is_empty());
+    }
+
+    /// And it does not accumulate for the life of the process: past the cap
+    /// the oldest entries are dropped. None of these expire during the test
+    /// (COMPLETED_RETENTION is minutes), so expiry-based pruning alone is a
+    /// no-op here — only the hard eviction fallback can keep the map bounded.
+    #[test]
+    fn the_completed_memory_does_not_grow_without_limit() {
+        let shared = SharedState::new();
+        for id in 0..(COMPLETED_MAX as u64 + 10) {
+            shared.orders.push_completed_order(completed(id));
+        }
+        let held = shared.orders.completed.lock().unwrap().len();
+        assert!(held <= COMPLETED_MAX, "hard cap must hold even with nothing expired, held {held}");
     }
 }

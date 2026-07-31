@@ -1099,9 +1099,16 @@ impl CcpState {
                 shared.reference.cache_contract(con_id, contract.clone());
             }
 
-            shared.orders.push_order_info(clord_id, RichOrderInfo {
-                contract, order, order_state, last_exec,
-            });
+            // A trade cancel (150=H) or trade correction (150=G) restates an
+            // execution the gateway has already reported, so it may legitimately
+            // return a completed order to a working quantity. Every other report
+            // that would do that is a replay (ibx#262).
+            let info = RichOrderInfo { contract, order, order_state, last_exec };
+            if matches!(exec_type, "G" | "H") {
+                shared.orders.push_order_correction(clord_id, info);
+            } else {
+                shared.orders.push_order_info(clord_id, info);
+            }
         }
 
         if matches!(status,
