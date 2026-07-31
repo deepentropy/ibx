@@ -7,7 +7,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::InstrumentId;
+use crate::types::{qty_from_wire, InstrumentId};
 use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, fast_extract_msg_type, find_body_after_tag};
@@ -211,6 +211,17 @@ impl FarmState {
         tick_decoder::decode_ticks_35p_into(body, &mut ticks);
         let mut notified = [0u64; crate::types::MAX_INSTRUMENTS / 64];
 
+        // Every entry as decoded, before the apply loop below drops the types it
+        // does not map. A field that arrives but is unmapped otherwise leaves no
+        // trace anywhere, which is what let the identities above go wrong; this
+        // is the measurement that settles what a given wire number carries.
+        if log::log_enabled!(log::Level::Trace) {
+            for tick in &ticks {
+                log::trace!("35=P raw: server_tag={} type={} magnitude={}",
+                    tick.server_tag, tick.tick_type, tick.magnitude);
+            }
+        }
+
         // Phase 1: Apply all ticks to internal quotes before publishing.
         for tick in &ticks {
             let instrument = match context.market.instrument_by_server_tag(tick.server_tag) {
@@ -229,11 +240,25 @@ impl FarmState {
                 tick_decoder::O_LOW_PRICE => { q.low = tick.magnitude * mts; }
                 tick_decoder::O_OPEN_PRICE => { q.open = tick.magnitude * mts; }
                 tick_decoder::O_CLOSE_PRICE => { q.close = tick.magnitude * mts; }
-                tick_decoder::O_BID_SIZE => { q.bid_size = tick.magnitude; }
-                tick_decoder::O_ASK_SIZE => { q.ask_size = tick.magnitude; }
-                tick_decoder::O_LAST_SIZE => { q.last_size = tick.magnitude; }
-                tick_decoder::O_VOLUME => { q.volume = tick.magnitude; }
-                tick_decoder::O_TIMESTAMP | tick_decoder::O_LAST_TS => { q.timestamp_ns = tick.magnitude as u64; }
+                // Quantities are fixed-point, the same way prices are; every
+                // reader divides by `QTY_SCALE` on the way out (ibx#287).
+                tick_decoder::O_BID_SIZE => { q.bid_size = qty_from_wire(tick.magnitude); }
+                tick_decoder::O_ASK_SIZE => { q.ask_size = qty_from_wire(tick.magnitude); }
+                tick_decoder::O_LAST_SIZE => { q.last_size = qty_from_wire(tick.magnitude); }
+                tick_decoder::O_VOLUME => { q.volume = qty_from_wire(tick.magnitude); }
+                // Type 20 carries Unix seconds. Guarded because the same
+                // type also carried a `yyyymmdd` value in capture, and a date
+                // read as an epoch is worse than no timestamp. Type 21 is a
+                // per-second offset against it and is left undecoded until a
+                // capture settles how the two combine (ibx#303).
+                // Type 23 was previously folded in here and is now dropped:
+                // it did not appear once in 733 captured entries on a future,
+                // and it was writing a raw magnitude of unknown unit into a
+                // nanosecond field. Left unmapped until a capture identifies
+                // it rather than guessed at (ibx#303).
+                tick_decoder::O_TS_BASE if tick.magnitude > 1_000_000_000 => {
+                    q.timestamp_ns = (tick.magnitude as u64).saturating_mul(1_000_000_000);
+                }
                 tick_decoder::O_BID_EXCH => { q.bid_exch_mask = tick.magnitude; }
                 tick_decoder::O_ASK_EXCH => { q.ask_exch_mask = tick.magnitude; }
                 tick_decoder::O_LAST_EXCH => { q.last_exch_mask = tick.magnitude; }
@@ -1015,3 +1040,164 @@ impl FarmState {
     }
 }
 
+
+#[cfg(test)]
+mod decode_publish_tests {
+    use super::*;
+    use crate::bridge::SharedState;
+    use crate::engine::context::Context;
+    use crate::protocol::tick_decoder;
+    use crate::types::QTY_SCALE;
+
+    fn push_bits(bits: &mut Vec<u8>, val: u64, n: usize) {
+        for i in (0..n).rev() {
+            bits.push(((val >> i) & 1) as u8);
+        }
+    }
+
+    /// One 35=P body carrying `ticks` for `server_tag`, framed as the farm
+    /// connection delivers it.
+    fn framed_35p(server_tag: u32, ticks: &[(u64, u64, u64)]) -> Vec<u8> {
+        let mut bits: Vec<u8> = Vec::new();
+        push_bits(&mut bits, 0, 1);
+        push_bits(&mut bits, server_tag as u64, 31);
+        for (i, &(tick_type, width, value)) in ticks.iter().enumerate() {
+            push_bits(&mut bits, tick_type, 5);
+            push_bits(&mut bits, if i < ticks.len() - 1 { 1 } else { 0 }, 1);
+            push_bits(&mut bits, width - 1, 2);
+            push_bits(&mut bits, 0, 1); // positive
+            push_bits(&mut bits, value, (width * 8 - 1) as usize);
+        }
+        let byte_count = (bits.len() + 7) / 8;
+        let mut payload = vec![0u8; byte_count];
+        for (i, &b) in bits.iter().enumerate() {
+            if b == 1 {
+                payload[i >> 3] |= 1 << (7 - (i & 7));
+            }
+        }
+        let mut tick_payload = Vec::with_capacity(2 + byte_count);
+        tick_payload.push((bits.len() >> 8) as u8);
+        tick_payload.push((bits.len() & 0xFF) as u8);
+        tick_payload.extend_from_slice(&payload);
+
+        let body_len = 5 + tick_payload.len() + 15;
+        let mut msg = format!("8=O\x019={}\x01", body_len).into_bytes();
+        msg.extend_from_slice(b"35=P\x01");
+        msg.extend_from_slice(&tick_payload);
+        msg.extend_from_slice(b"\x018349=AABBCCDD\x01");
+        msg
+    }
+
+    /// The constants table says which wire type is which; this says where each
+    /// one lands. Nothing else pins that: swapping the open and close arms with
+    /// the table intact passes the whole suite, and that is precisely the
+    /// failure this decode change exists to remove — two plausible prices
+    /// exchanged, with the P&L path reading the wrong one.
+    #[test]
+    fn each_price_type_lands_in_its_own_quote_field() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(9, id);
+        context.market.set_min_tick(id, 0.01);
+
+        // Distinct magnitudes, so no two fields can be confused.
+        let msg = framed_35p(9, &[
+            (tick_decoder::O_LAST_PRICE, 2, 501),
+            (tick_decoder::O_HIGH_PRICE, 2, 502),
+            (tick_decoder::O_LOW_PRICE, 2, 503),
+            (tick_decoder::O_OPEN_PRICE, 2, 504),
+            (tick_decoder::O_CLOSE_PRICE, 2, 505),
+        ]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+
+        let mts = context.market.min_tick_scaled(id);
+        let q = context.market.quote(id);
+        assert_eq!(q.last, 501 * mts, "last");
+        assert_eq!(q.high, 502 * mts, "high");
+        assert_eq!(q.low, 503 * mts, "low");
+        assert_eq!(q.open, 504 * mts, "open");
+        assert_eq!(q.close, 505 * mts, "close");
+    }
+
+    /// The timestamp arm carries seconds and is stored in nanoseconds, and the
+    /// guard is what keeps a date-shaped value out of the field.
+    #[test]
+    fn the_timestamp_is_seconds_stored_as_nanoseconds() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(11, id);
+        context.market.set_min_tick(id, 0.01);
+
+        farm.handle_tick_data(
+            &framed_35p(11, &[(tick_decoder::O_TS_BASE, 4, 1_785_325_554)]),
+            &mut context, &shared, &None,
+        );
+        assert_eq!(
+            context.market.quote(id).timestamp_ns, 1_785_325_554_000_000_000,
+            "an epoch second is stored as nanoseconds",
+        );
+
+        // A yyyymmdd-shaped value is not a timestamp and must not land here.
+        let id2 = context.market.register(265598);
+        context.market.register_server_tag(12, id2);
+        context.market.set_min_tick(id2, 0.01);
+        farm.handle_tick_data(
+            &framed_35p(12, &[(tick_decoder::O_TS_BASE, 4, 20_260_729)]),
+            &mut context, &shared, &None,
+        );
+        assert_eq!(
+            context.market.quote(id2).timestamp_ns, 0,
+            "a date-shaped magnitude is dropped rather than stored",
+        );
+    }
+
+    /// The producer half of the quantity contract. Everything downstream
+    /// divides by `QTY_SCALE`, so a decode path that stores the wire magnitude
+    /// raw delivers quantities 10_000x too small (ibx#287) — and nothing else
+    /// in the suite reaches this function, which is why that shipped.
+    #[test]
+    fn decoded_quantities_are_stored_as_fixed_point() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(7, id);
+        context.market.set_min_tick(id, 0.01);
+
+        let msg = framed_35p(7, &[
+            (tick_decoder::O_BID_SIZE, 1, 42),
+            (tick_decoder::O_ASK_SIZE, 1, 17),
+            (tick_decoder::O_LAST_SIZE, 1, 5),
+            (tick_decoder::O_VOLUME, 2, 1234),
+        ]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+
+        let q = context.market.quote(id);
+        assert_eq!(q.bid_size, 42 * QTY_SCALE, "bid_size must be stored fixed-point");
+        assert_eq!(q.ask_size, 17 * QTY_SCALE, "ask_size must be stored fixed-point");
+        assert_eq!(q.last_size, 5 * QTY_SCALE, "last_size must be stored fixed-point");
+        assert_eq!(q.volume, 1234 * QTY_SCALE, "volume must be stored fixed-point");
+    }
+
+    /// Prices were already scaled correctly; pin that the quantity change did
+    /// not disturb them.
+    #[test]
+    fn decoded_prices_are_still_scaled_by_min_tick() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(9, id);
+        context.market.set_min_tick(id, 0.01);
+        let mts = context.market.min_tick_scaled(id);
+
+        let msg = framed_35p(9, &[(tick_decoder::O_BID_PRICE, 2, 15000)]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+
+        assert_eq!(context.market.quote(id).bid, 15000 * mts);
+    }
+}
