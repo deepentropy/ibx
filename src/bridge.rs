@@ -100,10 +100,12 @@ impl SeqQuote {
     /// Write a quote (hot loop side). Never blocks.
     #[inline]
     pub fn write(&self, quote: &Quote) {
-        let v = self.version.load(Ordering::Relaxed);
-        self.version.store(v + 1, Ordering::Release); // odd = writing
+        // AcqRel, not Release: the payload write below must not be reordered
+        // above this store. Release alone only fences what precedes it; the
+        // Acquire half is what pins *following* accesses inside the odd window.
+        self.version.fetch_add(1, Ordering::AcqRel); // odd = writing
         unsafe { *self.data.get() = *quote; }
-        self.version.store(v + 2, Ordering::Release); // even = stable
+        self.version.fetch_add(1, Ordering::Release); // even = stable
     }
 
     /// Read a consistent quote snapshot (reader side). Spins on conflict.
@@ -996,5 +998,58 @@ mod tests {
 
         writer.join().unwrap();
         reader.join().unwrap();
+    }
+
+    #[test]
+    fn seqquote_no_torn_reads() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        use std::thread;
+
+        // Every field of a given write carries the same value, so any reader
+        // that ever observes a torn (half-old, half-new) struct will catch a
+        // field disagreeing with `bid` here.
+        fn quote_of(i: i64) -> Quote {
+            Quote {
+                bid: i, ask: i, last: i,
+                bid_size: i, ask_size: i, last_size: i,
+                volume: i, open: i, high: i, low: i, close: i,
+                timestamp_ns: i as u64,
+                bid_exch_mask: i, ask_exch_mask: i, last_exch_mask: i,
+            }
+        }
+
+        let sq = Arc::new(SeqQuote::new());
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let writer = {
+            let sq = sq.clone();
+            thread::spawn(move || {
+                for i in 1..=20_000i64 {
+                    sq.write(&quote_of(i));
+                }
+            })
+        };
+
+        let readers: Vec<_> = (0..4).map(|_| {
+            let sq = sq.clone();
+            let stop = stop.clone();
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let q = sq.read();
+                    let v = q.bid;
+                    let fields = [
+                        q.ask, q.last, q.bid_size, q.ask_size, q.last_size,
+                        q.volume, q.open, q.high, q.low, q.close,
+                        q.timestamp_ns as i64, q.bid_exch_mask, q.ask_exch_mask, q.last_exch_mask,
+                    ];
+                    assert!(fields.iter().all(|&f| f == v), "torn SeqQuote read: bid={v} fields={fields:?}");
+                }
+            })
+        }).collect();
+
+        writer.join().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        for r in readers { r.join().unwrap(); }
     }
 }
