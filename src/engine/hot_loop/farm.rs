@@ -211,6 +211,17 @@ impl FarmState {
         tick_decoder::decode_ticks_35p_into(body, &mut ticks);
         let mut notified = [0u64; crate::types::MAX_INSTRUMENTS / 64];
 
+        // Every entry as decoded, before the apply loop below drops the types it
+        // does not map. A field that arrives but is unmapped otherwise leaves no
+        // trace anywhere, which is what let the identities above go wrong; this
+        // is the measurement that settles what a given wire number carries.
+        if log::log_enabled!(log::Level::Trace) {
+            for tick in &ticks {
+                log::trace!("35=P raw: server_tag={} type={} magnitude={}",
+                    tick.server_tag, tick.tick_type, tick.magnitude);
+            }
+        }
+
         // Phase 1: Apply all ticks to internal quotes before publishing.
         for tick in &ticks {
             let instrument = match context.market.instrument_by_server_tag(tick.server_tag) {
