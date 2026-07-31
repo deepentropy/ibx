@@ -14,7 +14,7 @@ use crossbeam_channel::Sender;
 use crate::api::types::{
     Contract as ApiContract, CommissionAndFeesReport as ApiCommissionAndFeesReport,
     Execution as ApiExecution, ExecutionFilter,
-    Order as ApiOrder,
+    Order as ApiOrder, TagValue,
     PRICE_SCALE_F,
 };
 use crate::bridge::SharedState;
@@ -274,6 +274,43 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
         OrderStatus::Rejected => "Inactive",
         OrderStatus::Inactive => "Inactive",
         OrderStatus::Uncertain => "Unknown",
+    }
+}
+
+// ── Order field validation (ibx#263) ──
+
+/// Reject a price/amount field that a saturating float-to-int cast would
+/// otherwise turn into a different, valid-looking number: NaN becomes 0,
+/// +/-Infinity becomes i64::MAX/MIN, and a finite value whose fixed-point
+/// form overflows i64 saturates the same way.
+fn require_finite_price(field: &str, v: f64) -> Result<(), String> {
+    // `i64::MAX as f64` itself rounds up to 2^63 (f64 cannot represent
+    // i64::MAX exactly), so a strict `>` lets a scaled value of exactly
+    // 2^63 through and the subsequent `as i64` cast saturates to i64::MAX
+    // instead of being refused. `>=` excludes that boundary.
+    if !v.is_finite() || (v * PRICE_SCALE_F).abs() >= i64::MAX as f64 {
+        return Err(format!(
+            "{} must be a finite number representable on the wire, got {}",
+            field, v
+        ));
+    }
+    Ok(())
+}
+
+/// Parse the Adaptive algo's `adaptivePriority` tag. A missing tag defaults
+/// to Normal (IB's own default); a present-but-unrecognized value is
+/// refused instead of silently defaulting to Normal. See ibx#263.
+fn adaptive_priority(params: &[TagValue]) -> Result<AdaptivePriority, String> {
+    match params.iter().find(|tv| tv.tag == "adaptivePriority") {
+        None => Ok(AdaptivePriority::Normal),
+        Some(tv) => match tv.value.as_str() {
+            "Patient" => Ok(AdaptivePriority::Patient),
+            "Normal" => Ok(AdaptivePriority::Normal),
+            "Urgent" => Ok(AdaptivePriority::Urgent),
+            other => Err(format!(
+                "Unknown adaptivePriority '{}': expected Patient, Normal or Urgent", other
+            )),
+        },
     }
 }
 
@@ -1266,6 +1303,55 @@ impl ClientCore {
     pub fn validate_order(order: &ApiOrder) -> Result<(), String> {
         order.side()?;
 
+        // Reject non-finite and out-of-range numerics up front, before any
+        // caller-visible order gets built from a NaN, an Infinity, or a
+        // magnitude the wire's fixed-point i64 can't hold. See ibx#263.
+        require_finite_price("lmt_price", order.lmt_price)?;
+        require_finite_price("aux_price", order.aux_price)?;
+        require_finite_price("discretionary_amt", order.discretionary_amt)?;
+        require_finite_price("cash_qty", order.cash_qty)?;
+        require_finite_price("trigger_price", order.trigger_price)?;
+        require_finite_price("adjusted_stop_price", order.adjusted_stop_price)?;
+        require_finite_price("adjusted_stop_limit_price", order.adjusted_stop_limit_price)?;
+        // f64::MAX is the sentinel for "not set" on these three; any other
+        // value must be finite and representable.
+        if order.trail_stop_price != f64::MAX {
+            require_finite_price("trail_stop_price", order.trail_stop_price)?;
+        }
+        if order.lmt_price_offset != f64::MAX {
+            require_finite_price("lmt_price_offset", order.lmt_price_offset)?;
+        }
+        if order.adjusted_trailing_amount != f64::MAX {
+            require_finite_price("adjusted_trailing_amount", order.adjusted_trailing_amount)?;
+        }
+        if !order.trailing_percent.is_finite()
+            || order.trailing_percent < 0.0
+            || order.trailing_percent * 100.0 > u32::MAX as f64
+        {
+            return Err(format!(
+                "trailing_percent must be a finite, non-negative number, got {}",
+                order.trailing_percent
+            ));
+        }
+        if !order.total_quantity.is_finite()
+            || order.total_quantity < 0.0
+            || order.total_quantity > u32::MAX as f64
+        {
+            return Err(format!(
+                "total_quantity must be a finite number between 0 and {}, got {}",
+                u32::MAX, order.total_quantity
+            ));
+        }
+        if order.display_size < 0 {
+            return Err(format!("display_size must not be negative, got {}", order.display_size));
+        }
+        if order.min_qty < 0 {
+            return Err(format!("min_qty must not be negative, got {}", order.min_qty));
+        }
+        if order.parent_id < 0 {
+            return Err(format!("parent_id must not be negative, got {}", order.parent_id));
+        }
+
         // transmit=false cannot be honoured: every order is sent to the
         // broker immediately when place_order is called; there is no
         // staging concept. Accepting it would send a "staged" bracket
@@ -1305,6 +1391,7 @@ impl ClientCore {
         }
 
         if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
+            adaptive_priority(&order.algo_params)?;
             return Ok(());
         }
         if !order.algo_strategy.is_empty() {
@@ -1417,15 +1504,7 @@ impl ClientCore {
         // Adaptive orders (special-cased before generic algo)
         if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
             let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-            let priority_str = order.algo_params.iter()
-                .find(|tv| tv.tag == "adaptivePriority")
-                .map(|tv| tv.value.as_str())
-                .unwrap_or("Normal");
-            let priority = match priority_str {
-                "Patient" => AdaptivePriority::Patient,
-                "Urgent" => AdaptivePriority::Urgent,
-                _ => AdaptivePriority::Normal,
-            };
+            let priority = adaptive_priority(&order.algo_params)?;
             return Ok(ControlCommand::Order(OrderRequest::SubmitAdaptive {
                 order_id, instrument, side, qty, price, priority,
             }));
@@ -1525,6 +1604,12 @@ impl ClientCore {
                 // Optional initial stop trigger (tag 6117); default f64::MAX = unset.
                 let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { (order.trail_stop_price * PRICE_SCALE_F) as i64 };
                 if order.trailing_percent > 0.0 {
+                    // Wire granularity is basis points (2 decimal places): a
+                    // trailing_percent with finer precision than that, e.g.
+                    // 1.239, truncates to 1.23. validate_order has already
+                    // confirmed the value is finite, non-negative and fits
+                    // u32 once scaled; this is a documented rounding, not a
+                    // coercion. See ibx#263.
                     let pct = (order.trailing_percent * 100.0) as u32;
                     if extended {
                         OrderRequest::SubmitTrailingStopPctEx {

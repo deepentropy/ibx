@@ -106,6 +106,110 @@ fn parse_algo_unsupported() {
     assert!(parse_algo_params("unknown", &[]).is_err());
 }
 
+// ── ibx#263: malformed / non-finite algo params must be rejected, not
+// silently coerced into a valid-looking default ──
+
+#[test]
+fn parse_algo_vwap_rejects_malformed_max_pct_vol() {
+    let params = vec![TagValue { tag: "maxPctVol".into(), value: "abc".into() }];
+    let err = parse_algo_params("vwap", &params).unwrap_err();
+    assert!(err.contains("maxPctVol"), "got: {}", err);
+}
+
+#[test]
+fn parse_algo_vwap_rejects_nan_max_pct_vol() {
+    let params = vec![TagValue { tag: "maxPctVol".into(), value: "NaN".into() }];
+    let err = parse_algo_params("vwap", &params).unwrap_err();
+    assert!(err.contains("maxPctVol"), "got: {}", err);
+}
+
+#[test]
+fn parse_algo_vwap_rejects_infinite_max_pct_vol() {
+    let params = vec![TagValue { tag: "maxPctVol".into(), value: "inf".into() }];
+    let err = parse_algo_params("vwap", &params).unwrap_err();
+    assert!(err.contains("maxPctVol"), "got: {}", err);
+}
+
+#[test]
+fn parse_algo_vwap_rejects_malformed_bool() {
+    let params = vec![TagValue { tag: "noTakeLiq".into(), value: "yes".into() }];
+    let err = parse_algo_params("vwap", &params).unwrap_err();
+    assert!(err.contains("noTakeLiq"), "got: {}", err);
+}
+
+#[test]
+fn parse_algo_vwap_rejects_empty_max_pct_vol() {
+    // A present-but-empty value is a caller who set the tag, not one who
+    // never set it — it must be refused like any other malformed value,
+    // not silently coerced into the "absent" default of 0.0.
+    let params = vec![TagValue { tag: "maxPctVol".into(), value: "".into() }];
+    let err = parse_algo_params("vwap", &params).unwrap_err();
+    assert!(err.contains("maxPctVol"), "got: {}", err);
+}
+
+#[test]
+fn parse_algo_vwap_rejects_empty_bool() {
+    let params = vec![TagValue { tag: "noTakeLiq".into(), value: "".into() }];
+    let err = parse_algo_params("vwap", &params).unwrap_err();
+    assert!(err.contains("noTakeLiq"), "got: {}", err);
+}
+
+#[test]
+fn parse_algo_arrival_price_rejects_unknown_risk_aversion() {
+    // The issue's own repro: a typo must be refused, not silently sent as Neutral.
+    let params = vec![TagValue { tag: "riskAversion".into(), value: "Aggresive".into() }];
+    let err = parse_algo_params("arrivalpx", &params).unwrap_err();
+    assert!(err.contains("riskAversion"), "got: {}", err);
+}
+
+#[test]
+fn parse_algo_arrival_price_defaults_risk_aversion_when_absent() {
+    let algo = parse_algo_params("arrivalpx", &[]).unwrap();
+    match algo {
+        AlgoParams::ArrivalPx { risk_aversion, .. } => assert!(matches!(risk_aversion, RiskAversion::Neutral)),
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn parse_algo_arrival_price_rejects_empty_risk_aversion() {
+    // Present-but-empty is not the same as absent: only a tag the caller
+    // never set may default to Neutral.
+    let params = vec![TagValue { tag: "riskAversion".into(), value: "".into() }];
+    let err = parse_algo_params("arrivalpx", &params).unwrap_err();
+    assert!(err.contains("riskAversion"), "got: {}", err);
+}
+
+#[test]
+fn parse_algo_dark_ice_rejects_malformed_display_size() {
+    let params = vec![TagValue { tag: "displaySize".into(), value: "abc".into() }];
+    let err = parse_algo_params("darkice", &params).unwrap_err();
+    assert!(err.contains("displaySize"), "got: {}", err);
+}
+
+#[test]
+fn parse_algo_dark_ice_rejects_negative_display_size() {
+    let params = vec![TagValue { tag: "displaySize".into(), value: "-5".into() }];
+    let err = parse_algo_params("darkice", &params).unwrap_err();
+    assert!(err.contains("displaySize"), "got: {}", err);
+}
+
+#[test]
+fn parse_algo_dark_ice_defaults_display_size_when_absent() {
+    let algo = parse_algo_params("darkice", &[]).unwrap();
+    match algo {
+        AlgoParams::DarkIce { display_size, .. } => assert_eq!(display_size, 100),
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn parse_algo_dark_ice_rejects_empty_display_size() {
+    let params = vec![TagValue { tag: "displaySize".into(), value: "".into() }];
+    let err = parse_algo_params("darkice", &params).unwrap_err();
+    assert!(err.contains("displaySize"), "got: {}", err);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  Connection
 // ═══════════════════════════════════════════════════════════════════
@@ -1178,6 +1282,221 @@ fn lit_order_with_zero_aux_price_is_rejected() {
     let result = client.place_order(1, &spy(), &order);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("aux_price"));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Order validation — non-finite / out-of-range numerics (issue #263)
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn place_order_rejects_nan_lmt_price() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: f64::NAN, ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("lmt_price"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_infinite_lmt_price() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: f64::INFINITY, ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("lmt_price"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_lmt_price_that_overflows_the_wire() {
+    // Finite, but scaling by PRICE_SCALE_F (1e8) overflows the wire's i64 —
+    // the old code let this saturate to i64::MAX instead of refusing it.
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 1.0e12, ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("lmt_price"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_lmt_price_at_the_exact_wire_boundary() {
+    // `i64::MAX as f64` rounds up to 2^63, so this value scales back to
+    // exactly 2^63 in `require_finite_price` — a `>` comparison against
+    // that rounded boundary let it through and the cast saturated to
+    // i64::MAX instead of refusing it.
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: i64::MAX as f64 / PRICE_SCALE_F, ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("lmt_price"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_nan_aux_price() {
+    // NaN != 0.0, so the pre-existing "aux_price required" check (which only
+    // compares against == 0.0) never catches this on its own.
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "SELL".into(), total_quantity: 100.0, order_type: "STP".into(),
+        aux_price: f64::NAN, ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("aux_price"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_negative_quantity() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: -100.0, order_type: "MKT".into(), ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("total_quantity"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_nan_quantity() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: f64::NAN, order_type: "MKT".into(), ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("total_quantity"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_infinite_quantity() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: f64::INFINITY, order_type: "MKT".into(), ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("total_quantity"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_negative_display_size() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 150.0, display_size: -5, ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("display_size"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_negative_min_qty() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 150.0, min_qty: -5, ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("min_qty"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_negative_parent_id() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 150.0, parent_id: -5, ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("parent_id"), "got: {}", err);
+}
+
+#[test]
+fn place_order_rejects_negative_trailing_percent() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL".into(),
+        trailing_percent: -5.0, ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("trailing_percent"), "got: {}", err);
+}
+
+#[test]
+fn place_order_adaptive_rejects_unknown_priority() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 150.0, algo_strategy: "Adaptive".into(),
+        algo_params: vec![TagValue { tag: "adaptivePriority".into(), value: "Aggressive".into() }],
+        ..Default::default()
+    };
+    let err = client.place_order(1, &spy(), &order).unwrap_err();
+    assert!(err.contains("adaptivePriority"), "got: {}", err);
+}
+
+#[test]
+fn place_order_adaptive_defaults_priority_when_absent() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 150.0, algo_strategy: "Adaptive".into(), ..Default::default()
+    };
+    client.place_order(1, &spy(), &order).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitAdaptive { priority, .. }) => {
+            assert_eq!(priority, crate::types::AdaptivePriority::Normal);
+        }
+        cmd => panic!("expected SubmitAdaptive, got {:?}", cmd),
+    }
+}
+
+// place_order validates before building: the two tests above go through
+// place_order, so either function's check alone makes them pass and neither
+// pins down which one is doing the rejecting. validate_order is also the
+// only check an order Modify (place_order on an already-tracked order_id)
+// runs, since that path never calls build_order_request. These call each
+// function directly to prove its own guard independently of the other.
+
+#[test]
+fn validate_order_adaptive_rejects_unknown_priority() {
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 150.0, algo_strategy: "Adaptive".into(),
+        algo_params: vec![TagValue { tag: "adaptivePriority".into(), value: "Aggressive".into() }],
+        ..Default::default()
+    };
+    let err = crate::client_core::ClientCore::validate_order(&order).unwrap_err();
+    assert!(err.contains("adaptivePriority"), "got: {}", err);
+}
+
+#[test]
+fn build_order_request_adaptive_rejects_unknown_priority() {
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(),
+        lmt_price: 150.0, algo_strategy: "Adaptive".into(),
+        algo_params: vec![TagValue { tag: "adaptivePriority".into(), value: "Aggressive".into() }],
+        ..Default::default()
+    };
+    let err = crate::client_core::ClientCore::build_order_request(&order, 1, 0).unwrap_err();
+    assert!(err.contains("adaptivePriority"), "got: {}", err);
 }
 
 // ═══════════════════════════════════════════════════════════════════
