@@ -28,6 +28,13 @@ const SECDEF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// after a reconnect burst still hits the window.
 const EXEC_ID_WINDOW: usize = 1024;
 
+/// Synthetic ibapi error code for a parked (39=I) order's reason, delivered
+/// through `Wrapper::error` since ibapi has no callback dedicated to an order
+/// held with a reason. Mirrors IB's generic order-message code (399) rather
+/// than the reject code (201) — an Inactive order is not rejected, it can
+/// still reactivate (ibx#250).
+const ORDER_INACTIVE_ERROR_CODE: i32 = 399;
+
 /// Convert a FIX OrderID hex string (e.g. "00cf16ed.000225ed.69ca0941.0001") to a stable i64 permId.
 /// Uses FNV-1a hash of the first 3 dot-segments (the stable prefix) so that permId
 /// remains constant across modifications (the last segment increments on each modify).
@@ -893,6 +900,26 @@ impl CcpState {
                 };
                 shared.orders.push_order_update(update);
                 emit(event_tx, Event::OrderUpdate(update));
+
+                // A parked (39=I) order carries its reason on the same tags
+                // 58/103 as a reject, but OrderState.completedStatus stays
+                // empty for Inactive — it is not completed and may
+                // reactivate, so there is no snapshot field to carry the
+                // reason on. Route it through the same error() path a
+                // cancel/modify reject already uses instead (ibx#250).
+                if status == crate::types::OrderStatus::Inactive {
+                    let text = parsed.get(&58).map(|s| s.as_str()).unwrap_or("");
+                    let reason_code = parsed.get(&103).map(|s| s.as_str()).unwrap_or("");
+                    let reason = match (text.is_empty(), reason_code.is_empty()) {
+                        (false, false) => format!("{} (reason code {})", text, reason_code),
+                        (false, true) => text.to_string(),
+                        (true, false) => format!("reason code {}", reason_code),
+                        (true, true) => String::new(),
+                    };
+                    if !reason.is_empty() {
+                        shared.orders.push_order_inactive(clord_id, ORDER_INACTIVE_ERROR_CODE, reason);
+                    }
+                }
             }
         }
 
@@ -2208,6 +2235,55 @@ mod tests {
         ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
         assert_eq!(context.order(42).unwrap().status,
             crate::types::OrderStatus::Submitted);
+    }
+
+    // ibx#250: 39=I (Inactive) and 39=8 (Rejected) both stringify to
+    // "Inactive" downstream (client_core::order_status_str), but must not be
+    // treated the same here. A parked (39=I) order's reason is queued for
+    // delivery through Wrapper::error, and its completed_status stays empty
+    // (it is not completed and may reactivate). A rejected order's reason
+    // stays on completed_status only, and nothing is queued for it — the
+    // engine still holds the order at this point, so context still knows it
+    // as Inactive/reactivatable while a Rejected order is retired below.
+    #[test]
+    fn ord_status_inactive_reason_reaches_inactive_queue() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = exec_report_frame(&[
+            (39, "I"), (150, "0"),
+            (58, "Order held pending margin check"), (103, "0"),
+        ]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::Inactive);
+
+        let inactive = shared.orders.drain_order_inactive();
+        assert_eq!(inactive.len(), 1);
+        assert_eq!(inactive[0].0, 42);
+        assert_eq!(inactive[0].2, "Order held pending margin check (reason code 0)");
+
+        let info = shared.orders.get_order_info(42).unwrap();
+        assert!(info.order_state.completed_status.is_empty());
+    }
+
+    #[test]
+    fn ord_status_rejected_does_not_queue_an_inactive_reason() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = exec_report_frame(&[
+            (39, "8"), (150, "0"),
+            (58, "No valid bid/ask"), (103, "1"),
+        ]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        // Rejected is terminal — the engine retires the order.
+        assert!(context.order(42).is_none());
+
+        // The reason must not leak into the Inactive-only queue...
+        assert!(shared.orders.drain_order_inactive().is_empty());
+
+        // ...it stays reachable through completed_status instead (unchanged
+        // by ibx#250 — this pins the pre-existing behavior the fix builds on).
+        let info = shared.orders.get_order_info(42).unwrap();
+        assert_eq!(info.order_state.completed_status, "No valid bid/ask");
     }
 
     // ibx#238 / ib-agent#172: in the UP portfolio snapshot the average cost is

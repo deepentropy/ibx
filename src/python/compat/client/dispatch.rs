@@ -163,7 +163,7 @@ impl EClient {
                  update.remaining_qty as f64, 0.0f64, update.perm_id, update.parent_id, 0.0f64, 0i64, "", 0.0f64));
 
             // Track open orders
-            self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
+            self.core.update_order_status(update.order_id, update.status, update.filled_qty as f64, update.remaining_qty as f64);
         }
 
         // Drain cancel rejects -> error
@@ -172,6 +172,11 @@ impl EClient {
             let code = if reject.reject_type == 1 { 202i64 } else { 10147i64 };
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
             call_wrapper!(self.wrapper, py, "error", (reject.order_id as i64, code, msg.as_str(), ""));
+        }
+
+        // Drain inactive-order reasons -> error (ibx#250)
+        for (order_id, code, msg) in shared.orders.drain_order_inactive() {
+            call_wrapper!(self.wrapper, py, "error", (order_id as i64, code as i64, msg.as_str(), ""));
         }
 
         // Poll quotes for changes -> tickPrice/tickSize

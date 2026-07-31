@@ -1699,6 +1699,51 @@ fn process_msgs_dispatches_order_updates() {
     assert!(w.events.iter().any(|e| e.starts_with("order_status:45:Inactive")));
 }
 
+/// ibx#250: a parked (39=I) order's reason reaches the caller through
+/// Wrapper::error, on top of the order_status "Inactive" callback above —
+/// ibapi has no callback dedicated to "order held with reason".
+#[test]
+fn process_msgs_dispatches_inactive_reason_as_error() {
+    let (client, _rx, shared) = test_client();
+    shared.orders.push_order_inactive(46, 399, "Order held pending margin check".into());
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "error:46:399:Order held pending margin check"));
+}
+
+/// ibx#250 end-to-end: a genuinely-Inactive order dispatched through the real
+/// `process_msgs` path (not a direct `ClientCore` call) stays in the
+/// open-order snapshot, while a Rejected one — which stringifies to the same
+/// "Inactive" — does not resurrect into it.
+#[test]
+fn process_msgs_then_open_orders_admits_inactive_excludes_rejected() {
+    let (client, _rx, shared) = test_client();
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0,
+        order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
+    };
+    client.place_order(82, &spy(), &order).unwrap();
+    client.place_order(83, &spy(), &order).unwrap();
+
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 82, instrument: 0, status: OrderStatus::Inactive,
+        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 83, instrument: 0, status: OrderStatus::Rejected,
+        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+
+    w.events.clear();
+    client.req_all_open_orders(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("open_order:82:")),
+        "genuinely-inactive order must remain in the open-order snapshot after dispatch");
+    assert!(!w.events.iter().any(|e| e.starts_with("open_order:83:")),
+        "rejected order must not resurrect into the open-order snapshot after dispatch");
+}
+
 #[test]
 fn process_msgs_dispatches_cancel_reject_type_1() {
     let (client, _rx, shared) = test_client();

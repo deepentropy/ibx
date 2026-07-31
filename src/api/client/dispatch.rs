@@ -112,7 +112,7 @@ impl EClient {
                 update.order_id as i64, status, update.filled_qty as f64,
                 update.remaining_qty as f64, 0.0, update.perm_id, update.parent_id, 0.0, 0, "", 0.0,
             );
-            self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
+            self.core.update_order_status(update.order_id, update.status, update.filled_qty as f64, update.remaining_qty as f64);
         }
 
         // Cancel rejects → error
@@ -120,6 +120,12 @@ impl EClient {
             let code = if reject.reject_type == 1 { 202 } else { 10147 };
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
             wrapper.error(reject.order_id as i64, code, &msg, "");
+        }
+
+        // Inactive (39=I) order reasons → error (ibx#250). order_status above
+        // already reported the "Inactive" string; this carries why.
+        for (order_id, code, msg) in self.shared.orders.drain_order_inactive() {
+            wrapper.error(order_id as i64, code as i64, &msg, "");
         }
 
         // What-if → open_order(contract, order, OrderState) + order_status (iso with ibapi)

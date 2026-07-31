@@ -240,7 +240,8 @@ impl MarketDataState {
     }
 }
 
-/// Fills, order status updates, cancel rejects, what-if responses, and order cache.
+/// Fills, order status updates, cancel rejects, what-if responses, order
+/// cache, and inactive-order reasons.
 pub struct OrderState {
     fills: Mutex<Vec<Fill>>,
     order_updates: Mutex<Vec<OrderUpdate>>,
@@ -249,6 +250,11 @@ pub struct OrderState {
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
     order_cache: Mutex<HashMap<u64, RichOrderInfo>>,
+    /// Reason for a genuinely-Inactive (39=I) transition: (order_id, ibapi
+    /// error code, message). ibapi has no callback dedicated to "order
+    /// parked with reason", so this is drained into `Wrapper::error` the
+    /// same way a cancel/modify reject is (ibx#250).
+    order_inactive: Mutex<Vec<(u64, i32, String)>>,
 }
 
 impl OrderState {
@@ -260,6 +266,7 @@ impl OrderState {
             what_if_responses: Mutex::new(Vec::with_capacity(8)),
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             order_cache: Mutex::new(HashMap::new()),
+            order_inactive: Mutex::new(Vec::with_capacity(8)),
         }
     }
 
@@ -275,6 +282,12 @@ impl OrderState {
         self.cancel_rejects.lock().unwrap().drain(..).collect()
     }
 
+    /// Drain reasons for genuinely-Inactive (39=I) transitions, each as
+    /// (order_id, ibapi error code, message) — see `order_inactive` (ibx#250).
+    pub fn drain_order_inactive(&self) -> Vec<(u64, i32, String)> {
+        self.order_inactive.lock().unwrap().drain(..).collect()
+    }
+
     pub fn drain_what_if_responses(&self) -> Vec<WhatIfResponse> {
         self.what_if_responses.lock().unwrap().drain(..).collect()
     }
@@ -283,14 +296,20 @@ impl OrderState {
         self.completed_orders.lock().unwrap().drain(..).collect()
     }
 
-    /// Snapshot enriched entries whose latest status is an open IB state.
-    /// Terminal entries (Filled / Cancelled / Inactive / etc.) are filtered out
-    /// so `req_open_orders` does not leak historical orders that are still cached
-    /// for `req_completed_orders` lookups.
+    /// Snapshot enriched entries that belong in the open-order book: a
+    /// genuinely open IB state, or a genuinely-Inactive (39=I) order that can
+    /// still reactivate. A rejected order also stringifies to "Inactive"
+    /// (ibapi has no Rejected string) but always carries a non-empty
+    /// `completed_status`, which is how the two are told apart — see
+    /// `is_open_or_reactivatable` (ibx#250). Terminal entries (Filled /
+    /// Cancelled / Rejected) are filtered out so `req_open_orders` does not
+    /// leak historical orders that are still cached for `req_completed_orders`
+    /// lookups.
     pub fn drain_open_orders(&self) -> Vec<(u64, RichOrderInfo)> {
         let lock = self.order_cache.lock().unwrap();
         lock.iter()
-            .filter(|(_, v)| crate::client_core::is_open_status(&v.order_state.status))
+            .filter(|(_, v)| crate::client_core::is_open_or_reactivatable(
+                &v.order_state.status, &v.order_state.completed_status))
             .map(|(&k, v)| (k, v.clone()))
             .collect()
     }
@@ -318,6 +337,10 @@ impl OrderState {
 
     #[doc(hidden)] pub fn push_cancel_reject(&self, reject: CancelReject) {
         self.cancel_rejects.lock().unwrap().push(reject);
+    }
+
+    #[doc(hidden)] pub fn push_order_inactive(&self, order_id: u64, code: i32, message: String) {
+        self.order_inactive.lock().unwrap().push((order_id, code, message));
     }
 
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {
@@ -873,6 +896,33 @@ mod tests {
         let q = sq.read();
         assert_eq!(q.bid, 0);
         assert_eq!(q.ask, 0);
+    }
+
+    #[test]
+    fn order_state_drain_open_orders_admits_inactive_excludes_rejected() {
+        let ss = SharedState::new();
+        ss.orders.push_order_info(90, RichOrderInfo {
+            contract: api::Contract::default(),
+            order: api::Order::default(),
+            order_state: api::OrderState { status: "Inactive".into(), ..Default::default() },
+            last_exec: api::Execution::default(),
+        });
+        ss.orders.push_order_info(91, RichOrderInfo {
+            contract: api::Contract::default(),
+            order: api::Order::default(),
+            order_state: api::OrderState {
+                status: "Inactive".into(),
+                completed_status: "No valid bid/ask".into(),
+                ..Default::default()
+            },
+            last_exec: api::Execution::default(),
+        });
+
+        let open = ss.orders.drain_open_orders();
+        assert!(open.iter().any(|(id, _)| *id == 90),
+            "genuinely-inactive order must be admitted to the open-order snapshot");
+        assert!(!open.iter().any(|(id, _)| *id == 91),
+            "rejected order (non-empty completed_status) must not resurrect");
     }
 
     #[test]

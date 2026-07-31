@@ -257,6 +257,23 @@ pub fn is_open_status(status: &str) -> bool {
     )
 }
 
+/// True when `status`/`completed_status` describe an order that belongs in
+/// the open-order snapshot: either genuinely open per [`is_open_status`], or
+/// a genuinely-Inactive order (FIX 39=I) that can still reactivate.
+///
+/// `order_status_str` collapses both Rejected (39=8) and Inactive (39=I) to
+/// the single ibapi string "Inactive" (ibapi has no Rejected string), so
+/// widening `is_open_status` to admit "Inactive" would also readmit rejected
+/// orders into the open book — the trap this function avoids by checking
+/// `completed_status` too. It is populated only for terminal statuses
+/// (Filled/Cancelled/Rejected) and stays empty for a genuine Inactive, so an
+/// empty `completed_status` on an "Inactive" row means the order is parked,
+/// not dead (ibx#250).
+#[inline]
+pub fn is_open_or_reactivatable(status: &str, completed_status: &str) -> bool {
+    is_open_status(status) || (status == "Inactive" && completed_status.is_empty())
+}
+
 /// Convert OrderStatus enum to ibapi-compatible string.
 #[inline]
 pub fn order_status_str(status: OrderStatus) -> &'static str {
@@ -299,6 +316,13 @@ pub struct TrackedOrder {
     pub filled: f64,
     pub remaining: f64,
     pub instrument: InstrumentId,
+    /// True once this order's last transition was a genuine Rejected (FIX
+    /// 39=8). Rejected and Inactive both stringify to `status == "Inactive"`
+    /// (ibapi has no Rejected string), so that string alone cannot tell a
+    /// dead order from a parked, reactivatable one — `collect_open_orders`
+    /// uses this flag as the discriminator instead of widening
+    /// `is_open_status` (ibx#250).
+    pub rejected: bool,
 }
 
 // ── ClientCore ──
@@ -769,6 +793,7 @@ impl ClientCore {
         let remaining = order.total_quantity;
         self.open_orders.lock().unwrap().insert(order_id, TrackedOrder {
             contract, order, status: "PendingSubmit".into(), filled: 0.0, remaining, instrument,
+            rejected: false,
         });
     }
 
@@ -784,11 +809,17 @@ impl ClientCore {
         }
     }
 
-    /// Update a tracked order status from an order update event.
-    pub fn update_order_status(&self, order_id: u64, status: &str, filled: f64, remaining: f64) {
+    /// Update a tracked order status from an order update event. Takes the
+    /// pre-stringification `OrderStatus` (not the ibapi string) so a
+    /// Rejected transition can be flagged apart from a genuinely-Inactive
+    /// one: both stringify to "Inactive" (ibapi has no Rejected string), but
+    /// only a genuine Inactive is reactivatable and belongs back in the
+    /// open-order snapshot (ibx#250).
+    pub fn update_order_status(&self, order_id: u64, status: OrderStatus, filled: f64, remaining: f64) {
         let mut orders = self.open_orders.lock().unwrap();
         if let Some(o) = orders.get_mut(&order_id) {
-            o.status = status.into();
+            o.status = order_status_str(status).into();
+            o.rejected = status == OrderStatus::Rejected;
             o.filled = filled;
             o.remaining = remaining;
         }
@@ -815,11 +846,12 @@ impl ClientCore {
             }
         }
 
-        // Local tracked orders (non-terminal), enriched from secdef cache
+        // Local tracked orders (non-terminal, or genuinely-Inactive and
+        // still reactivatable — ibx#250), enriched from secdef cache
         {
             let orders = self.open_orders.lock().unwrap();
             for (&oid, o) in orders.iter() {
-                if is_open_status(&o.status) {
+                if is_open_status(&o.status) || (o.status == "Inactive" && !o.rejected) {
                     let contract = if o.contract.con_id != 0 {
                         self.get_contract(o.contract.con_id, shared).unwrap_or_else(|| o.contract.clone())
                     } else {
@@ -832,6 +864,7 @@ impl ClientCore {
                         filled: o.filled,
                         remaining: o.remaining,
                         instrument: o.instrument,
+                        rejected: o.rejected,
                     }));
                 }
             }
@@ -839,7 +872,7 @@ impl ClientCore {
 
         // Add shared-only entries not already present from local
         for (oid, info) in shared_orders {
-            if !is_open_status(&info.order_state.status) {
+            if !is_open_or_reactivatable(&info.order_state.status, &info.order_state.completed_status) {
                 continue;
             }
             if !result.iter().any(|(id, _)| *id == oid) {
@@ -855,6 +888,7 @@ impl ClientCore {
                     filled: 0.0,
                     remaining: 0.0,
                     instrument: 0,
+                    rejected: false,
                 }));
             }
         }
@@ -1633,6 +1667,79 @@ impl ClientCore {
 mod tests {
     use super::*;
     use crate::types::SmartComponent;
+    use crate::bridge::RichOrderInfo;
+    use crate::api::types::OrderState as ApiOrderState;
+
+    // ── Rejected/Inactive snapshot admission (ibx#250) ──
+
+    #[test]
+    fn is_open_or_reactivatable_admits_genuine_inactive() {
+        assert!(is_open_or_reactivatable("Inactive", ""));
+    }
+
+    #[test]
+    fn is_open_or_reactivatable_excludes_rejected_shaped_inactive() {
+        // A rejected order also stringifies to "Inactive", but always carries
+        // a non-empty completed_status — that is what must exclude it.
+        assert!(!is_open_or_reactivatable("Inactive", "No valid bid/ask"));
+    }
+
+    #[test]
+    fn is_open_or_reactivatable_still_admits_ordinary_open_status() {
+        assert!(is_open_or_reactivatable("Submitted", ""));
+    }
+
+    #[test]
+    fn is_open_or_reactivatable_still_excludes_terminal_status() {
+        assert!(!is_open_or_reactivatable("Filled", ""));
+        assert!(!is_open_or_reactivatable("Cancelled", ""));
+    }
+
+    #[test]
+    fn collect_open_orders_admits_inactive_but_excludes_rejected_locally_tracked() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.track_order(80, ApiContract::default(), ApiOrder { order_id: 80, ..Default::default() }, 0);
+        core.track_order(81, ApiContract::default(), ApiOrder { order_id: 81, ..Default::default() }, 0);
+
+        core.update_order_status(80, OrderStatus::Inactive, 0.0, 100.0);
+        core.update_order_status(81, OrderStatus::Rejected, 0.0, 100.0);
+
+        let result = core.collect_open_orders(&shared);
+        assert!(result.iter().any(|(id, _)| *id == 80),
+            "genuinely-inactive order must remain in the open-order snapshot");
+        assert!(!result.iter().any(|(id, _)| *id == 81),
+            "rejected order must not resurrect into the open-order snapshot");
+    }
+
+    #[test]
+    fn collect_open_orders_shared_only_admits_inactive_but_excludes_rejected() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+
+        shared.orders.push_order_info(90, RichOrderInfo {
+            contract: ApiContract::default(),
+            order: ApiOrder { order_id: 90, ..Default::default() },
+            order_state: ApiOrderState { status: "Inactive".into(), ..Default::default() },
+            last_exec: Default::default(),
+        });
+        shared.orders.push_order_info(91, RichOrderInfo {
+            contract: ApiContract::default(),
+            order: ApiOrder { order_id: 91, ..Default::default() },
+            order_state: ApiOrderState {
+                status: "Inactive".into(),
+                completed_status: "No valid bid/ask".into(),
+                ..Default::default()
+            },
+            last_exec: Default::default(),
+        });
+
+        let result = core.collect_open_orders(&shared);
+        assert!(result.iter().any(|(id, _)| *id == 90),
+            "genuinely-inactive shared-only order must be admitted to the open-order snapshot");
+        assert!(!result.iter().any(|(id, _)| *id == 91),
+            "rejected shared-only order must not resurrect into the open-order snapshot");
+    }
 
     fn shared_with_components(comps: Vec<(i32, &str)>) -> SharedState {
         let s = SharedState::new();
