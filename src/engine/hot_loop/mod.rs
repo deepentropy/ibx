@@ -361,6 +361,17 @@ impl HotLoop {
 
             // 6. Wake any waiting consumers (e.g. Python event loop)
             self.shared.notify();
+
+            // 7. With every transport down there is no socket to poll and no
+            //    socket to be quick for, so the spin above buys nothing and
+            //    costs a core — on a laptop that is the battery and the fans,
+            //    which is how this gets noticed (ibx#399). Parking only in that
+            //    state leaves the connected path exactly as it was; a reconnect
+            //    is scheduled on a backoff measured in seconds, so a millisecond
+            //    here delays nothing, including shutdown.
+            if self.farm.disconnected && self.ccp.disconnected && self.hmds.disconnected {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
 
@@ -1610,6 +1621,38 @@ mod tests {
         engine.poll_once();
 
         assert!(shared.take_connection_lost());
+    }
+
+    /// A fully disconnected engine used to run the loop flat out: every poll
+    /// returns immediately with nothing, so the iteration count was bounded
+    /// only by clock speed and one core sat at 100% until the process was
+    /// killed (ibx#399).
+    ///
+    /// Counted in iterations rather than CPU time, because that is what tells a
+    /// parked loop from a spinning one on any machine. A free spin manages tens
+    /// of thousands in this window; parked it is one per millisecond.
+    #[test]
+    fn a_loop_with_every_transport_down_does_not_spin() {
+        let shared = Arc::new(SharedState::new());
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let mut engine = HotLoop::new(shared, None, None);
+        engine.set_control_rx(rx);
+        engine.farm.disconnected = true;
+        engine.ccp.disconnected = true;
+        engine.hmds.disconnected = true;
+
+        let handle = std::thread::spawn(move || {
+            engine.run();
+            engine.context.loop_iterations
+        });
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        tx.send(ControlCommand::Shutdown).unwrap();
+        let iterations = handle.join().expect("the loop must exit on Shutdown");
+
+        assert!(
+            iterations < 10_000,
+            "a parked loop runs on the order of 60 iterations in 60ms; got {iterations}",
+        );
     }
 
     #[test]
