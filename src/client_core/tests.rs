@@ -342,8 +342,8 @@ fn a_move_says_whether_anything_is_watching_what_it_moved_onto() {
     // onto.
     core.instrument_to_req.lock().unwrap().insert(from, 5);
     core.req_to_instrument.lock().unwrap().insert(5, from);
-    assert!(
-        core.move_watchers(&shared, from, into),
+    assert_eq!(
+        core.move_watchers(&shared, from, into), None,
         "the caller that moved is watching the slot it moved onto",
     );
     assert_eq!(core.watching(5), Some(into), "and is recorded there");
@@ -351,8 +351,8 @@ fn a_move_says_whether_anything_is_watching_what_it_moved_onto() {
     // And a move whose caller has gone leaves nothing watching.
     core.instrument_to_req.lock().unwrap().insert(3, 9);
     assert!(
-        !core.move_watchers(&shared, 3, 4),
-        "nobody arrived, so nothing is watching what was held up for them",
+        core.move_watchers(&shared, 3, 4).is_some(),
+        "nobody arrived, so the subscription held up for them is withdrawn",
     );
 
     // The move is on its way from the moment it is stated until it is
@@ -369,6 +369,31 @@ fn a_move_says_whether_anything_is_watching_what_it_moved_onto() {
         !shared.market.a_move_is_on_its_way_into(into),
         "and arrived once it is installed",
     );
+}
+
+/// A session keeps no figure for a subscription it is not holding.
+///
+/// The figure that tells one subscription under a number from the next is kept
+/// per number, and a session that ends holds none of them. Carried over, the
+/// next session's first withdrawal under a number read a figure from the
+/// session before it — and the record grew for as long as the client lived.
+#[test]
+fn a_session_keeps_no_figure_for_a_subscription_it_is_not_holding() {
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    let iid: InstrumentId = 3;
+
+    core.instrument_to_req.lock().unwrap().insert(iid, 5);
+    core.req_to_instrument.lock().unwrap().insert(5, iid);
+    core.stamp_registration(5);
+    assert!(core.registration_of(5).is_some(), "it is holding one");
+
+    let _ = core.unregister_mkt_data(&shared, 5);
+    assert!(core.registration_of(5).is_none(), "and holds none once it has given it up");
+
+    core.stamp_registration(6);
+    core.reset();
+    assert!(core.registration_of(6).is_none(), "nor does the session that ended");
 }
 
 /// A registration the engine never took gives back what it bought.

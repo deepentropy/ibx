@@ -795,7 +795,7 @@ impl EClient {
         // the second slot read the first — otherwise their quotes arrive on a
         // slot nothing is watching.
         for (from, into) in self.shared.market.drain_subscription_moves() {
-            let watched = self.core.move_watchers(&self.shared, from, into);
+            let nobody_arrived = self.core.move_watchers(&self.shared, from, into);
             // Said once the move is installed, because the subscription on the
             // slot moved onto is held up until then.
             self.shared.market.note_a_move_is_read(into);
@@ -803,11 +803,11 @@ impl EClient {
             // before it read the move — the subscription it was held up for is
             // nobody's. Left, it ran for the rest of the session against an
             // allowance that is counted, with no request able to withdraw it.
-            if !watched {
+            if let Some(issued) = nobody_arrived {
                 let _ = self.send(ControlCommand::Unsubscribe {
                     instrument: into,
                     series: Vec::new(),
-                    issued: self.core.in_order(),
+                    issued,
                 });
             }
         }

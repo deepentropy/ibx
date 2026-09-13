@@ -532,8 +532,14 @@ impl MarketDataState {
         from: crate::types::InstrumentId,
         into: crate::types::InstrumentId,
     ) {
-        self.subscription_moves.lock().unwrap().push((from, into));
+        // Both under one acquisition, the count first. Published apart, a
+        // surface could take the move off the queue and say it had been read
+        // before the count existed — and the count created afterwards was
+        // discharged by no move, so the subscription on the slot it named was
+        // held up for the rest of the session with nobody watching it.
+        let mut moves = self.subscription_moves.lock().unwrap();
         *self.moves_unread.lock().unwrap().entry(into).or_insert(0) += 1;
+        moves.push((from, into));
     }
 
     /// Whether a caller is on its way onto this slot and has not arrived yet.

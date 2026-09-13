@@ -1622,6 +1622,10 @@ impl ClientCore {
         // last one named.
         self.series_by_req.lock().unwrap().clear();
         self.slot_taken_on.lock().unwrap().clear();
+        // And which subscription each number was holding. Kept, the next
+        // session's first withdrawal under a number reads a figure from the
+        // session before it.
+        self.registration_epoch.lock().unwrap().clear();
         *self.pnl_req_id.lock().unwrap() = None;
         self.pnl_single_reqs.lock().unwrap().clear();
         *self.last_pnl.lock().unwrap() = [0; 3];
@@ -1809,13 +1813,20 @@ impl ClientCore {
     /// callers given the second slot have to read the first, or their quotes
     /// arrive on a slot nothing is watching.
     ///
-    /// Answers whether anything is watching the destination once the move is
-    /// read. Nothing may be: the subscription there is held up while a caller
-    /// is on its way onto it, and that caller can withdraw before it arrives —
-    /// so the answer is what says the subscription is nobody's now.
+    /// Answers with the number to withdraw the destination under where nothing
+    /// is watching it once the move is read. Nothing may be: the subscription
+    /// there is held up while a caller is on its way onto it, and that caller
+    /// can withdraw before it arrives — so this is what says the subscription
+    /// is nobody's now.
+    ///
+    /// The number comes from the same acquisition that finds nobody watching,
+    /// not from the moment the withdrawal is sent: taken at the send, a caller
+    /// that asked for the contract in between had asked first and this
+    /// withdrawal still read as the later of the two, so its brand-new
+    /// subscription was taken down under it.
     pub(crate) fn move_watchers(
         &self, shared: &SharedState, from: InstrumentId, into: InstrumentId,
-    ) -> bool {
+    ) -> Option<u64> {
         {
             let mut modes = self.mdt_by_instrument.lock().unwrap();
             if let Some(mode) = modes.remove(&from) {
@@ -1873,7 +1884,16 @@ impl ClientCore {
         // Whether anything is being served off the destination now. Nothing
         // may be: the request this move was for can withdraw before the move
         // is read, and the subscription was kept up for it.
-        !self.watchers_of(into).is_empty()
+        // Both under one acquisition: a caller that asks for the contract after
+        // this answer is numbered later than the withdrawal the answer calls
+        // for, which is what keeps its subscription standing.
+        let own = self.ownership();
+        let watched = own.holders.contains_key(&into)
+            || own.following.get(&into).is_some_and(|watchers| !watchers.is_empty());
+        if watched {
+            return None;
+        }
+        Some(self.in_order())
     }
 
     /// What a request that joins a subscription somebody else opened is owed.
@@ -1949,6 +1969,7 @@ impl ClientCore {
                 }
                 own.one_shot.remove(req_id);
                 own.series.remove(req_id);
+                own.epoch.remove(req_id);
             }
             watching
         };
@@ -1963,7 +1984,7 @@ impl ClientCore {
             // every later join, or counted as still asking for a series its
             // caller has no subscription to hear.
             self.snapshot_reqs.lock().unwrap().remove(&req_id);
-            self.registration_epoch.lock().unwrap().remove(&req_id);
+
         }
         self.last_quotes.lock().unwrap().remove(&instrument);
         true
@@ -2664,7 +2685,6 @@ impl ClientCore {
         // stream reads as a snapshot and is withdrawn as soon as it has both
         // sides of a quote.
         self.snapshot_reqs.lock().unwrap().remove(&req_id);
-        self.registration_epoch.lock().unwrap().remove(&req_id);
         // Which contract this number was watching, whether it held the
         // subscription, who takes it over and whether it was the venue's
         // one-shot are one question, answered under one acquisition. Answered
@@ -2679,6 +2699,12 @@ impl ClientCore {
             // number than the withdrawal that would take it down.
             let decided_at = self.in_order();
             own.one_shot.remove(&req_id);
+            // Which subscription it was holding goes with the record of what it
+            // was watching. Removed before the maps were taken, a move running
+            // in between wrote a fresh one for a request this withdrawal then
+            // removed, and the number was left standing for a request watching
+            // nothing at all.
+            own.epoch.remove(&req_id);
             let Some(instrument) = own.by_req.remove(&req_id) else {
                 own.series.remove(&req_id);
                 return WhatAWithdrawalLeaves {

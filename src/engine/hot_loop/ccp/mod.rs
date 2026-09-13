@@ -3233,14 +3233,13 @@ impl CcpState {
         match sent {
             Ok(()) => {
                 hb.last_ccp_sent = Instant::now();
-                // A new question, so a new answer. The records the answer
-                // before it left behind go with it: the venue states every
-                // event in an order's life again, so a half-built record from
-                // the answer before is nothing this one needs — and carried
-                // over, those records counted against this answer's bound and
-                // an account with enough of them could not take a single order
-                // the venue stated.
-                self.finished_orders.clear();
+                // A new question, so a new answer: this one takes its own
+                // orders up to its own bound. The half-built records the answer
+                // before it left stay, because a report states what changed and
+                // leaves the rest out and those records are what a later report
+                // about the same order is read against — but they are not this
+                // answer's orders, so they are not counted against its bound
+                // and are given up, oldest first, if it needs the room.
                 self.orders_in_this_answer.clear();
                 self.the_answer_is_full = false;
                 self.completed_orders_open = true;

@@ -965,6 +965,23 @@ impl CcpState {
             );
             self.deliver_finished_orders(shared, super::Handover::Final);
         }
+        // And where that freed nothing, the oldest record the answer before
+        // this one left behind makes room. It belongs to no answer now: this
+        // one has not taken that order, and nothing is finishing it. Kept
+        // instead, the records an answer leaves behind hold the room the next
+        // answer needs and it cannot take an order the venue states at all.
+        while self.finished_orders.len() >= super::FINISHED_ORDERS_HELD
+            && let Some(at) = self.finished_orders
+                .iter()
+                .position(|held| !self.orders_in_this_answer.contains(&held.order_id))
+        {
+            let given_up = self.finished_orders.remove(at);
+            log::debug!(
+                "order {} was left half-stated by an earlier answer and makes room for \
+                 what the venue is stating now",
+                given_up.order_id,
+            );
+        }
         self.orders_in_this_answer.insert(clord_id);
         self.finished_orders.push(merged);
     }

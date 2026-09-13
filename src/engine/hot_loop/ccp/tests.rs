@@ -3537,16 +3537,15 @@ fn the_bound_is_on_the_answer_not_on_what_waits_to_be_handed_over() {
     );
 }
 
-/// A new answer starts with nothing the answer before it left behind.
+/// A new answer takes its own orders up to its own bound.
 ///
-/// An answer keeps the records the venue never finished stating, because every
-/// later report in that answer is read against what is held. The next question
-/// is answered from the start — the venue states every event in each order's
-/// life again — so those records are nothing this answer needs, and kept they
-/// are counted against its bound: an account with enough of them could not take
-/// a single order the venue stated.
+/// An answer keeps the records the venue never finished stating, because a
+/// report states what changed and leaves the rest out — so those records are
+/// what a later report about the same order is read against. They are not this
+/// answer's orders though: counted against its bound, an account with enough of
+/// them could not take a single order the venue stated.
 #[test]
-fn a_new_answer_starts_with_nothing_the_one_before_it_left() {
+fn a_new_answer_takes_its_own_orders_up_to_its_own_bound() {
     let (mut ccp, _context, shared) = ord_status_test_state();
     let mut hb = HeartbeatState::new();
     let (conn, _peer) = Connection::for_test();
@@ -3560,12 +3559,49 @@ fn a_new_answer_starts_with_nothing_the_one_before_it_left() {
     ccp.send_completed_orders_request(1, &mut conn, &mut hb, &shared);
 
     assert!(
-        ccp.finished_orders.is_empty(),
-        "the half-built records of the answer before it are gone",
-    );
-    assert!(
         ccp.orders_in_this_answer.is_empty(),
-        "so this answer can take every order the venue states, up to its own bound",
+        "this answer can take every order the venue states, up to its own bound",
+    );
+    assert_eq!(
+        ccp.finished_orders.len(), super::FINISHED_ORDERS_HELD,
+        "and the half-built records stay, because a report states only what changed",
+    );
+}
+
+/// And the records an earlier answer left behind make room for it.
+///
+/// They belong to no answer now: this one has not taken those orders, and
+/// nothing is finishing them. Kept all the same, they hold the room this answer
+/// needs and it cannot take an order the venue states at all.
+#[test]
+fn the_records_an_earlier_answer_left_make_room_for_this_one() {
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    let mut hb = HeartbeatState::new();
+    let (conn, _peer) = Connection::for_test();
+    let mut conn = Some(conn);
+    shared.orders.set_replay_done();
+    // An answer's worth of orders the venue never finished stating.
+    for order_id in 0..super::FINISHED_ORDERS_HELD as u64 {
+        ccp.hold_a_finished_order_for_test(order_id, crate::types::OrderStatus::Submitted);
+    }
+    ccp.send_completed_orders_request(1, &mut conn, &mut hb, &shared);
+
+    // And an order the venue states in this answer.
+    let mut frame = exec_report_frame(&[
+        (39, "2"), (150, "F"), (32, "100"), (31, "150.00"), (14, "100"), (151, "0"),
+        (54, "1"), (38, "100"), (55, "IBM"), (167, "CS"), (15, "USD"), (6008, "8314"),
+        (40, "2"), (44, "150.00"), (1, "DU111111"),
+    ]);
+    frame.insert(11, "424242".to_string());
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+
+    assert!(
+        ccp.finished_orders.iter().any(|held| held.order_id == 424_242),
+        "this answer takes the order the venue stated",
+    );
+    assert_eq!(
+        ccp.finished_orders.len(), super::FINISHED_ORDERS_HELD,
+        "and holds no more records than it can",
     );
 }
 
