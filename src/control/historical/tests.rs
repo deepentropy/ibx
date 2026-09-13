@@ -554,7 +554,7 @@ fn a_fractional_historical_size_is_read_as_the_fraction_it_states() {
         <eoq>true</eoq>
         <tz>US/Eastern</tz>
         <Events>
-            <Tick><time>20260312-14:30:01</time><price>150.25</price><size>0.5</size><exchange>NASDAQ</exchange></Tick>
+            <Tick><time>20260312-14:30:01</time><price>150.25</price><size>0.5</size><exch>NASDAQ</exch></Tick>
         </Events>
     </ResultSetTick>"#;
     let (_qid, data, _done) = parse_tick_response(xml, "TRADES").unwrap();
@@ -574,8 +574,8 @@ fn parse_tick_response_trades() {
         <eoq>true</eoq>
         <tz>US/Eastern</tz>
         <Events>
-            <Tick><time>20260312-14:30:01</time><price>150.25</price><size>100</size><exchange>NASDAQ</exchange><specialConditions></specialConditions></Tick>
-            <Tick><time>20260312-14:30:02</time><price>150.30</price><size>200</size><exchange>NYSE</exchange><specialConditions>I</specialConditions></Tick>
+            <Tick><time>20260312-14:30:01</time><price>150.25</price><size>100</size><exch>NASDAQ</exch><cond></cond></Tick>
+            <Tick><time>20260312-14:30:02</time><price>150.30</price><size>200</size><exch>NYSE</exch><cond>I</cond></Tick>
         </Events>
     </ResultSetTick>"#;
     let (qid, data, done) = parse_tick_response(xml, "TRADES").unwrap();
@@ -611,6 +611,40 @@ fn parse_tick_response_bid_ask() {
         }
         _ => panic!("Expected BidAsk variant"),
     }
+}
+
+/// A print series is read under the names the answer writes, and carries what
+/// the venue marked each print with.
+///
+/// The answer names the venue and the note it makes about a print more shortly
+/// than the fields they fill. Read for the field names, both came back empty on
+/// every row — which is what an unattributed print looks like, so nothing said
+/// they had never been read. The marks were read nowhere at all, so a print the
+/// venue said was past its limit, or one it said the tape does not carry,
+/// reached the caller as neither.
+#[test]
+fn a_print_series_is_read_under_the_names_the_answer_writes() {
+    let xml = "<ResultSetTick><id>q</id><eoq>true</eoq><Events>\
+         <Tick><time>20260312-14:30:01</time><price>150.25</price><size>100</size>\
+         <exch>ARCA</exch><cond>odd lot</cond><flags>H U</flags></Tick>\
+         </Events></ResultSetTick>";
+    let (_, data, _) = parse_tick_response(xml, "TRADES").expect("the reply reads");
+    let crate::types::HistoricalTickData::Last(prints) = data else {
+        panic!("a series of prints");
+    };
+    assert_eq!(prints.len(), 1, "the row is read");
+    assert_eq!(prints[0].exchange, "ARCA", "the venue that printed it");
+    assert_eq!(prints[0].special_conditions, "odd lot", "and what it noted");
+    assert!(prints[0].past_limit, "and that it was past the limit");
+    assert!(prints[0].unreported, "and that the tape does not carry it");
+
+    // A print the venue marked with nothing is marked with nothing.
+    let plain = "<ResultSetTick><id>q</id><eoq>true</eoq><Events>\
+         <Tick><time>20260312-14:30:02</time><price>150.25</price><size>100</size>\
+         <exch>ARCA</exch></Tick></Events></ResultSetTick>";
+    let (_, data, _) = parse_tick_response(plain, "TRADES").expect("the reply reads");
+    let crate::types::HistoricalTickData::Last(prints) = data else { panic!("prints") };
+    assert!(!prints[0].past_limit && !prints[0].unreported, "nothing is claimed for it");
 }
 
 /// A quote series is read under the names the answer writes.

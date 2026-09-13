@@ -235,7 +235,13 @@ impl FormingBar {
             return self.bar;
         }
         self.bar.high = self.bar.high.max(five.high);
-        self.bar.low = if self.bar.low == 0.0 { five.low } else { self.bar.low.min(five.low) };
+        // The lowest of them, whatever it is. Read as absence, a low of nought
+        // — which a spread prints, and which this client's own bar reader is
+        // built to carry — was replaced by the next five seconds' low instead
+        // of kept, so the bar the caller was handed had a low above a price the
+        // venue had stated inside it. The branch above seeds a real low, so
+        // there is nothing here to stand in for.
+        self.bar.low = self.bar.low.min(five.low);
         self.bar.close = five.close;
         self.bar.volume += five.volume;
         self.bar.count = self.bar.count.saturating_add(five.count);
@@ -774,7 +780,12 @@ impl HmdsState {
                                 }
                             }
                             if is_complete && !self.keep_up_to_date_reqs.contains(&req_id) {
-                                self.pending_historical.remove(pos);
+                                // By the number rather than by where it was
+                                // when this began: holding the series can end
+                                // the request on its own — a fold that fails
+                                // drops the entry there — and the position is
+                                // then somebody else's or nobody's.
+                                self.pending_historical.retain(|(_, r)| *r != req_id);
                             }
                         } else {
                             // A parsed response whose query_id matches no
@@ -1640,9 +1651,9 @@ impl HmdsState {
 /// The query that opens one tick stream.
 ///
 /// Every element is named for the field the venue's own query holds it in,
-/// without its prefix. It states no filter: the venue carries one and this
-/// client has not settled how to make it apply, which is why `ignore_size` is
-/// refused rather than sent.
+/// without its prefix. The prelude and the size filter are stated as the caller
+/// asked for them, and neither is written where the caller asked for the
+/// venue's own default.
 fn build_tbt_query(
     req_id: u32,
     con_id: i64,
@@ -2190,6 +2201,11 @@ fn build_tbt_query(
                 if self.keep_up_to_date_reqs.remove(&entry.req_id) {
                     self.withdraw_the_stream_half(entry.req_id, hmds_conn, hb);
                 }
+                // And the entry that holds the number, as the two other ways a
+                // request ends here already drop it. Left standing, every later
+                // request under that number was refused as a duplicate of one
+                // that is not running, for the rest of the session.
+                self.pending_historical.retain(|(_, r)| *r != entry.req_id);
                 super::push_hmds_error(shared, entry.req_id, why, true);
             }
         }

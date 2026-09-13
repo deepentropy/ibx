@@ -6732,12 +6732,14 @@ fn process_msgs_routes_historical_tick_variants() {
         HistoricalTickLast {
             time: "2026-01-15 09:30:00".into(), price: 150.5, size: 100.0,
             exchange: "ARCA".into(), special_conditions: "".into(),
+            past_limit: false, unreported: false,
         },
     ]), "TRADES".into(), true);
     shared.reference.push_historical_ticks(11, HistoricalTickData::BidAsk(vec![
         HistoricalTickBidAsk {
             time: "2026-01-15 09:30:01".into(), bid_price: 150.4, ask_price: 150.6,
             bid_size: 200.0, ask_size: 300.0,
+            bid_past_low: false, ask_past_high: false,
         },
     ]), "BID_ASK".into(), true);
     let mut w = RecordingWrapper::default();

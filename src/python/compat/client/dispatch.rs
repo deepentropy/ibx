@@ -1217,7 +1217,12 @@ impl EClient {
                 crate::types::HistoricalTickData::Last(ticks) => {
                     let py_ticks: Vec<crate::python::compat::tick_types::HistoricalTickLast> = ticks.iter().filter_map(|t| Some(crate::python::compat::tick_types::HistoricalTickLast {
                         time: at(&t.time).or_else(|| { dropped.set(dropped.get() + 1); None })?,
-                        tick_attrib_last: Default::default(),
+                        // What the venue marked the print with, rather than a
+                        // default that says it marked it with nothing.
+                        tick_attrib_last: crate::python::compat::tick_types::TickAttribLast {
+                            past_limit: t.past_limit,
+                            unreported: t.unreported,
+                        },
                         price: t.price,
                         size: t.size,
                         exchange: t.exchange.clone(),
@@ -1229,7 +1234,11 @@ impl EClient {
                 crate::types::HistoricalTickData::BidAsk(ticks) => {
                     let py_ticks: Vec<crate::python::compat::tick_types::HistoricalTickBidAsk> = ticks.iter().filter_map(|t| Some(crate::python::compat::tick_types::HistoricalTickBidAsk {
                         time: at(&t.time).or_else(|| { dropped.set(dropped.get() + 1); None })?,
-                        tick_attrib_bid_ask: Default::default(),
+                        // The same, on the two sides of a quote.
+                        tick_attrib_bid_ask: crate::python::compat::tick_types::TickAttribBidAsk {
+                            bid_past_low: t.bid_past_low,
+                            ask_past_high: t.ask_past_high,
+                        },
                         price_bid: t.bid_price,
                         price_ask: t.ask_price,
                         size_bid: t.bid_size,

@@ -276,7 +276,15 @@ pub fn decode_frame(
     if body.len() < 2 {
         return None;
     }
-    let bits_stated = ((body[0] as usize) << 8) | body[1] as usize;
+    // The count is two bytes and wraps at sixty-five thousand bits, which is
+    // eight kilobytes of records — a batch that size states nought. Recovered
+    // against how much arrived, the way every other bit-counted section of this
+    // wire is: read as stated, a frame at the wrap decoded as no records at
+    // all, and one past it as its own first eight kilobytes.
+    let bits_stated = crate::protocol::tick_decoder::bits_carried(
+        u16::from_be_bytes([body[0], body[1]]),
+        body.len(),
+    );
     let bytes_stated = bits_stated.div_ceil(8);
     // A length the bytes do not satisfy is a frame cut short: refused rather
     // than read as the shorter frame it is not, which would deliver part of
@@ -317,7 +325,12 @@ pub fn frame_ticker_id(body: &[u8]) -> Option<u64> {
     if body.len() < 2 {
         return None;
     }
-    let bits_stated = ((body[0] as usize) << 8) | body[1] as usize;
+    // Read the way the frame itself reads it, or the two disagree about where
+    // one frame's records end.
+    let bits_stated = crate::protocol::tick_decoder::bits_carried(
+        u16::from_be_bytes([body[0], body[1]]),
+        body.len(),
+    );
     let payload = body.get(2..2 + bits_stated.div_ceil(8))?;
     Bits::new(payload).unsigned()
 }
@@ -421,6 +434,7 @@ pub(crate) const A_CAPTURED_QUOTE_FRAME: &str = "383d4f01393d303130380133353d450
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     /// Write the wire encodings, so a test frame is built the way a
@@ -574,6 +588,42 @@ mod tests {
         let mut out = ((payload.len() * 8) as u16).to_be_bytes().to_vec();
         out.extend_from_slice(&payload);
         out
+    }
+
+    /// A batch at the wrap of the bit count is read whole.
+    ///
+    /// The count is two bytes, so eight kilobytes of records state nought and a
+    /// batch past that states only what is left over. Read as stated, such a
+    /// batch decoded as no records at all, or as its own first eight
+    /// kilobytes, with every record after that gone and nothing saying so.
+    /// Every other bit-counted section of this wire recovers it against how
+    /// much arrived.
+    #[test]
+    fn a_batch_at_the_wrap_of_the_bit_count_is_read_whole() {
+        let one = quote(23_102, 23_103, 1, 1);
+        let mut payload = Vec::new();
+        while payload.len() + one.len() <= 8192 {
+            payload.extend_from_slice(&one);
+        }
+        payload.resize(8192, 0);
+        // Exactly sixty-five thousand five hundred and thirty-six bits, which
+        // the count states as nought.
+        let mut body = vec![0x00, 0x00];
+        body.extend_from_slice(&payload);
+        assert_eq!(&body[..2], &[0x00, 0x00], "the count wrapped");
+
+        let mut running = RunningPrice::default();
+        let frame = decode_frame(&body, TbtKind::BidAsk, 0.00005, &mut running)
+            .expect("a frame at the wrap is read");
+        assert!(
+            frame.records.len() > 1,
+            "every record in it is read, not nought of them: {}",
+            frame.records.len(),
+        );
+        assert_eq!(
+            frame_ticker_id(&body), Some(frame.ticker_id),
+            "and the two readers of the count agree where the records end",
+        );
     }
 
     /// One quote record, headed by its subscription and its moment.

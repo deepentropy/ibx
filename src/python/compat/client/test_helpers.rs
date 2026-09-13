@@ -721,6 +721,8 @@ impl EClient {
             size: 1.0,
             exchange: "NYSE".into(),
             special_conditions: String::new(),
+            past_limit: false,
+            unreported: false,
         }).collect();
         shared.reference.push_historical_ticks(
             req_id, crate::types::HistoricalTickData::Last(ticks), "TRADES".into(), true,

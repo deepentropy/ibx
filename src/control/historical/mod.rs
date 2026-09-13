@@ -903,6 +903,17 @@ pub fn no_ticks_of_the_kind(what_to_show: &str) -> crate::types::HistoricalTickD
     }
 }
 
+/// Whether a row's marks carry one of the venue's codes.
+///
+/// The venue states them as a set of letters in one element, and a caller is
+/// owed what they say: read nowhere, a print the venue marked unreported, or a
+/// quote it marked past the limit, reached the caller marked as neither — which
+/// is a statement about the print, not the absence of one.
+fn flagged(tick_xml: &str, code: &str) -> bool {
+    tag(tick_xml, "flags")
+        .is_some_and(|flags| flags.split(|c: char| !c.is_ascii_alphabetic()).any(|f| f == code))
+}
+
 /// Parse a ResultSetTick XML response into historical tick data.
 pub fn parse_tick_response(xml: &str, what_to_show: &str) -> Option<(String, crate::types::HistoricalTickData, bool)> {
     if !xml.contains("<ResultSetTick>") {
@@ -959,6 +970,9 @@ pub fn parse_tick_response(xml: &str, what_to_show: &str) -> Option<(String, cra
                     ask_price,
                     bid_size,
                     ask_size,
+                    // The same marks, on the two sides of a quote.
+                    bid_past_low: flagged(t, "BH"),
+                    ask_past_high: flagged(t, "AH"),
                 });
                 search_start = end;
             }
@@ -1006,12 +1020,30 @@ pub fn parse_tick_response(xml: &str, what_to_show: &str) -> Option<(String, cra
                     xml[abs..].find("</Tick>")? + abs + 7
                 };
                 let t = &xml[abs..end];
+                // Named the way the answer names them, which is shorter than
+                // the field each one fills. Read for the field names, the venue
+                // that printed a trade and what it noted about it came back
+                // empty on every row of every series — and empty is what a
+                // print the venue left unattributed looks like, so nothing said
+                // the fields had never been read.
+                let stated = |name: &str| -> Option<f64> {
+                    tag(t, name).and_then(|s| s.parse().ok())
+                };
+                let (Some(price), Some(size)) = (stated("price"), stated("size")) else {
+                    log::warn!("a print states no price or size, so the series is not read");
+                    return None;
+                };
                 ticks.push(crate::types::HistoricalTickLast {
                     time: tag(t, "time").unwrap_or("").to_string(),
-                    price: tag(t, "price").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                    size: tag(t, "size").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                    exchange: tag(t, "exchange").unwrap_or("").to_string(),
-                    special_conditions: tag(t, "specialConditions").unwrap_or("").to_string(),
+                    price,
+                    size,
+                    exchange: tag(t, "exch").unwrap_or("").to_string(),
+                    special_conditions: tag(t, "cond").unwrap_or("").to_string(),
+                    // What the venue marked the print with. Published as all
+                    // false where it was never read, which is a statement about
+                    // the print rather than the absence of one.
+                    past_limit: flagged(t, "H"),
+                    unreported: flagged(t, "U"),
                 });
                 search_start = end;
             }

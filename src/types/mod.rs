@@ -718,6 +718,11 @@ pub struct HistoricalTickLast {
     pub exchange: String,
     /// What the venue notes about it.
     pub special_conditions: String,
+    /// Whether the venue marked the print as past the limit it states for the
+    /// contract.
+    pub past_limit: bool,
+    /// And whether it marked it as one the tape does not carry.
+    pub unreported: bool,
 }
 
 /// A historical tick (bid/ask).
@@ -733,6 +738,11 @@ pub struct HistoricalTickBidAsk {
     pub bid_size: f64,
     /// How much at the ask.
     pub ask_size: f64,
+    /// Whether the venue marked the bid as past the low it states for the
+    /// contract.
+    pub bid_past_low: bool,
+    /// And the ask as past the high.
+    pub ask_past_high: bool,
 }
 
 /// Historical tick data (one of three types based on whatToShow).
