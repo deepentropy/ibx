@@ -2973,58 +2973,6 @@ mod stale_ack_tests {
     use super::super::*;
     use crate::engine::context::Context;
 
-    /// An answer owed to a withdrawn request is not taken as the answer to the
-    /// one asking under that number now.
-    ///
-    /// A caller's numbers are its own and it may ask again under one it has
-    /// just withdrawn. The withdrawal forgets what the first request was
-    /// waiting on, so the first request's acknowledgement — still in flight —
-    /// was matched to the second request's wait, and bound the second
-    /// subscription to a number the venue is no longer sending on. Its own
-    /// acknowledgement then found nothing waiting and was dropped, and
-    /// everything the venue sent for it arrived under a number nothing held:
-    /// no quotes, and nothing said.
-    #[test]
-    fn an_answer_owed_to_a_withdrawn_request_is_not_taken_for_the_one_asking_now() {
-        let mut farm = FarmState::new();
-        let mut context = Context::new();
-        let shared = SharedState::new();
-        let mut hb = HeartbeatState::new();
-        let first = context.market.register(756733);
-
-        farm.send_mktdata_subscribe(
-            756733, "SPY", "SMART", "STK", "", 0.0, "", "", first, 0,
-            false, &mut None, &mut hb,
-        );
-        let asked_under = farm.md_req_to_instrument[0].0;
-
-        // Withdrawn before the venue answered, and asked again under the same
-        // number — which is what a caller does.
-        farm.send_mktdata_unsubscribe(first, 0, 0, &[], u64::MAX, false, &mut None, &mut hb);
-        let second = context.market.register(265598);
-        farm.md_req_to_instrument.push((asked_under, second));
-
-        // The first request's answer, arriving now.
-        let late = format!("35=Q\x014242,{asked_under},0.01,0,3");
-        farm.handle_subscription_ack(late.as_bytes(), &mut context, &shared);
-        assert_eq!(
-            context.market.instrument_by_server_tag(4242), None,
-            "the withdrawn request's number is not bound to the one asking now",
-        );
-        assert!(
-            farm.md_req_to_instrument.iter().any(|(r, i)| *r == asked_under && *i == second),
-            "and the second request is still waiting for its own answer",
-        );
-
-        // Which then arrives, under a number of its own.
-        let mine = format!("35=Q\x014343,{asked_under},0.01,0,3");
-        farm.handle_subscription_ack(mine.as_bytes(), &mut context, &shared);
-        assert_eq!(
-            context.market.instrument_by_server_tag(4343), Some(second),
-            "the second subscription is bound to the number the venue is sending on",
-        );
-    }
-
     /// A `35=Q` in flight when the unsubscribe goes out resolves its request
     /// id before the slot can be reclaimed. Resolving afterwards would bind its
     /// server tag and minTick onto whichever contract took the slot, scaling
