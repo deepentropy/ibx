@@ -463,6 +463,50 @@ fn a_cancel_waits_for_the_recovery_to_say_what_the_broker_holds() {
     assert!(String::from_utf8_lossy(&buf[..n]).contains("35=F"), "and then it is sent",);
 }
 
+/// Every leg a bracket writes is recorded as this client's own.
+///
+/// Recorded under the id the request is addressed by alone, the two children
+/// read afterwards as orders nobody here placed: a bust or a correction for one
+/// of them, arriving while a caller was asking what the venue has finished, was
+/// filed as history — it took nothing back, and the position it was undoing
+/// stayed where it was.
+#[test]
+fn every_leg_a_bracket_writes_is_recorded_as_this_client_s_own() {
+    let (client, peer) = crate::protocol::connection::Connection::for_test();
+    let mut conn = Some(client);
+    let _peer = peer;
+    let mut context = Context::new();
+    let instrument = context.register_instrument(756733);
+    context.set_symbol(instrument, "SPY".to_string());
+    context.pending_orders.push(crate::types::OrderRequest::SubmitBracket { con_id: 0,
+        parent_id: 10,
+        tp_id: 11,
+        sl_id: 12,
+        instrument,
+        side: Side::Buy,
+        qty: 100 * crate::types::QTY_SCALE,
+        entry_price: 150 * crate::types::PRICE_SCALE,
+        take_profit: 155 * crate::types::PRICE_SCALE,
+        stop_loss: 145 * crate::types::PRICE_SCALE,
+    });
+
+    let mut hb = crate::engine::hot_loop::HeartbeatState::new();
+    let shared = std::sync::Arc::new(SharedState::new());
+    let (tx, rx) = std::sync::mpsc::sync_channel(4096);
+    let _rx = rx;
+    drain_and_send_orders(
+        &mut conn, &mut context, "DU1", &mut hb, false, &shared, false,
+        &Some(crate::engine::hot_loop::EventSink::new(tx, Default::default())),
+    );
+
+    for id in [10u64, 11, 12] {
+        assert!(
+            shared.orders.the_order_went_out(id),
+            "leg {id} went out from here, so a report about it is not history",
+        );
+    }
+}
+
 /// A bracket is three messages and one outcome. All three are written
 /// whatever any one of them returns, so a failure leaves every leg in a
 /// state the wire never confirmed — and a child still reported as working

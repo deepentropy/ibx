@@ -599,7 +599,7 @@ fn parse_tick_response_bid_ask() {
             <id>tk_2</id>
         <eoq>true</eoq>
         <Events>
-            <Tick><time>20260312-14:30:01</time><priceBid>150.24</priceBid><priceAsk>150.26</priceAsk><sizeBid>500</sizeBid><sizeAsk>600</sizeAsk></Tick>
+            <Tick><time>20260312-14:30:01</time><bidPrice>150.24</bidPrice><askPrice>150.26</askPrice><bidSize>500</bidSize><askSize>600</askSize></Tick>
         </Events>
     </ResultSetTick>"#;
     let (_, data, _) = parse_tick_response(xml, "BID_ASK").unwrap();
@@ -611,6 +611,40 @@ fn parse_tick_response_bid_ask() {
         }
         _ => panic!("Expected BidAsk variant"),
     }
+}
+
+/// A quote series is read under the names the answer writes.
+///
+/// The caller-facing message for one of these rows spells its fields the other
+/// way round — priceBid beside bidPrice — and read for those spellings every
+/// row of every series arrived with a bid, an ask and two sizes of nought: a
+/// full run of quotes at zero, timed correctly and marked complete, that the
+/// venue never stated. A row that states none of them is refused rather than
+/// published as a quote at zero, the way a bar with no open, high, low or
+/// close is.
+#[test]
+fn a_quote_series_is_read_under_the_names_the_answer_writes() {
+    let xml = "<ResultSetTick><id>q</id><eoq>true</eoq><Events>\
+         <Tick><time>20260312-14:30:01</time><bidPrice>150.24</bidPrice>\
+         <askPrice>150.26</askPrice><bidSize>500</bidSize><askSize>600</askSize></Tick>\
+         </Events></ResultSetTick>";
+    let (_, data, _) = parse_tick_response(xml, "BID_ASK").expect("the reply reads");
+    let crate::types::HistoricalTickData::BidAsk(quotes) = data else {
+        panic!("a bid and ask series");
+    };
+    assert_eq!(quotes.len(), 1, "the row is read");
+    assert_eq!(quotes[0].bid_price, 150.24, "the bid the venue stated");
+    assert_eq!(quotes[0].ask_price, 150.26, "and the ask");
+    assert_eq!(quotes[0].bid_size, 500.0, "and the size on each side");
+    assert_eq!(quotes[0].ask_size, 600.0);
+
+    // A row stating none of them is not a quote at zero.
+    let empty = "<ResultSetTick><id>q</id><eoq>true</eoq><Events>\
+         <Tick><time>20260312-14:30:01</time></Tick></Events></ResultSetTick>";
+    assert!(
+        parse_tick_response(empty, "BID_ASK").is_none(),
+        "a series with nothing in its rows is refused rather than published as zeros",
+    );
 }
 
 #[test]
@@ -1291,8 +1325,8 @@ fn an_ended_series_is_the_kind_the_reply_would_have_been() {
     for what in ["TRADES", "MIDPOINT", "BID_ASK", "OPTION_EXERCISE_INTEREST_RATE"] {
         let xml = "<ResultSetTick><id>q</id><eoq>true</eoq><tz>UTC</tz><Events>\
              <Tick><time>20260714-13:30:00</time><price>1.0</price><size>1</size>\
-             <priceBid>1.0</priceBid><priceAsk>1.0</priceAsk><sizeBid>1</sizeBid>\
-             <sizeAsk>1</sizeAsk></Tick></Events></ResultSetTick>";
+             <bidPrice>1.0</bidPrice><askPrice>1.0</askPrice><bidSize>1</bidSize>\
+             <askSize>1</askSize></Tick></Events></ResultSetTick>";
         let filled = parse_tick_response(xml, what).expect("the reply reads");
         assert_eq!(
             kind(&filled.1),

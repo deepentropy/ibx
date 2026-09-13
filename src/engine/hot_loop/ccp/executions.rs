@@ -1237,9 +1237,14 @@ impl CcpState {
                 },
                 order: api::Order {
                     order_id: clord_id as i64,
+                    // Named the way every other report about an order names
+                    // it. A short sale read out as a plain sale is a different
+                    // order to a caller reading it back, and the venue said
+                    // which one it was.
                     action: match side {
                         Side::Buy => "BUY".to_string(),
-                        _ => "SELL".to_string(),
+                        Side::Sell => "SELL".to_string(),
+                        Side::ShortSell => "SSHORT".to_string(),
                     },
                     total_quantity: qty_to_f64(qty),
                     order_type: crate::types::ord_type_api_name(

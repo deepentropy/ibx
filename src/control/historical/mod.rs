@@ -931,12 +931,34 @@ pub fn parse_tick_response(xml: &str, what_to_show: &str) -> Option<(String, cra
                     xml[abs..].find("</Tick>")? + abs + 7
                 };
                 let t = &xml[abs..end];
+                // Named the way the answer names them. The caller-facing
+                // message for one of these rows spells its fields the other
+                // way round, and read for those spellings every row of every
+                // series arrived with a bid, an ask and two sizes of nought —
+                // a full run of quotes at zero, timed correctly and marked
+                // complete, that the venue never stated.
+                //
+                // And a row that states none of them is not a quote at zero
+                // either: the series is refused, the way a bar with no open,
+                // high, low or close is.
+                let stated = |name: &str| -> Option<f64> {
+                    tag(t, name).and_then(|s| s.parse().ok())
+                };
+                let (Some(bid_price), Some(ask_price), Some(bid_size), Some(ask_size)) = (
+                    stated("bidPrice"), stated("askPrice"),
+                    stated("bidSize"), stated("askSize"),
+                ) else {
+                    log::warn!(
+                        "a quote states no bid, ask or size, so the series is not read",
+                    );
+                    return None;
+                };
                 ticks.push(crate::types::HistoricalTickBidAsk {
                     time: tag(t, "time").unwrap_or("").to_string(),
-                    bid_price: tag(t, "priceBid").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                    ask_price: tag(t, "priceAsk").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                    bid_size: tag(t, "sizeBid").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                    ask_size: tag(t, "sizeAsk").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    bid_price,
+                    ask_price,
+                    bid_size,
+                    ask_size,
                 });
                 search_start = end;
             }

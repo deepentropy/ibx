@@ -891,7 +891,16 @@ pub(crate) fn drain_and_send_orders(
                 // Recorded because silence has two causes and they look the
                 // same from outside: the venue answering nothing, and this
                 // client never having asked.
-                shared.orders.note_the_order_went_out(oid);
+                //
+                // Every id this request put on the wire, not the one it is
+                // addressed by: a bracket writes three, and the two that were
+                // not recorded read afterwards as orders nobody here placed —
+                // so a bust or a correction for one of them was filed as
+                // history, took nothing back, and left the position it was
+                // undoing where it was.
+                for id in &written {
+                    shared.orders.note_the_order_went_out(*id);
+                }
             }
             Err(e) => {
                 // The caller is told, which is the whole of — it was

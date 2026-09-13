@@ -1074,6 +1074,34 @@ fn a_full_instrument_table_does_not_abort_the_recovery_path() {
          for the whole account",
     );
 }
+/// A short sale the venue replays is published as a short sale.
+///
+/// The venue states which of the three it is, and read out as a plain sale a
+/// caller asking what it already has on is answered with a different order from
+/// the one resting at the venue — one it can neither recognise nor replace.
+#[test]
+fn a_replayed_short_sale_is_published_as_one() {
+    let mut context = Context::new();
+    let mut ccp = CcpState::new();
+    let shared = SharedState::new();
+
+    let mut frame = std::collections::HashMap::new();
+    for (tag, val) in [
+        (11u32, "77"), (150, "0"), (39, "0"), (6008, "756733"),
+        (38, "100"), (55, "SPY"), (54, "5"), (40, "2"), (44, "150.00"),
+    ] {
+        frame.insert(tag, val.to_string());
+    }
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+
+    let recovered = shared.orders.drain_open_orders();
+    let (_, short) = recovered.iter().find(|(id, _)| *id == 77).expect("the order is recovered");
+    assert_eq!(
+        short.order.action, "SSHORT",
+        "the venue said which of the three it is",
+    );
+}
+
 /// Build a fill report for order 42. `extra` adds or overrides tags.
 fn fill_frame(extra: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
     let mut m = std::collections::HashMap::new();
