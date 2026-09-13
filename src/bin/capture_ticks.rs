@@ -29,6 +29,15 @@ fn subjects() -> Vec<(&'static str, &'static str, Contract)> {
             ..Default::default()
         })];
     }
+    if let Ok(kind) = std::env::var("IBX_LAST_PROBE") {
+        let kind: &'static str = if kind == "Last" { "Last" } else { "AllLast" };
+        return vec![(kind, kind, Contract {
+            symbol: "MES".to_string(), sec_type: "FUT".to_string(),
+            exchange: "CME".to_string(), currency: "USD".to_string(),
+            last_trade_date_or_contract_month: "202612".to_string(),
+            ..Default::default()
+        })];
+    }
     if std::env::var("IBX_TRADES_ONLY").is_ok() {
         return vec![("a busy listing", "AllLast", Contract {
             symbol: "SPY".to_string(),
@@ -197,6 +206,12 @@ fn main() {
                 q.ask_size as f64 / ibx::types::QTY_SCALE as f64
             );
         }
+        println!(
+            "        of {} trade(s): {} marked unreported, {} past the limit",
+            trades.len(),
+            trades.iter().filter(|t| t.unreported).count(),
+            trades.iter().filter(|t| t.past_limit).count(),
+        );
         for t in trades.iter().take(3) {
             println!(
                 "        traded {:.2} x {:.4} on {:<6} past_limit={} unreported={}",

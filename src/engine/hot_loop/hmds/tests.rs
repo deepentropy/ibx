@@ -1164,16 +1164,20 @@ mod withdrawing_one_stream_tests {
         );
     }
 
-    /// Every trade includes the prints that never reached the tape; the
-    /// exchange's own trades are the same stream without them. Sent as two
-    /// requests, the venue acknowledged the second and answered it with
-    /// silence — on a future, which has no off-exchange tape at all.
+    /// A trade stream is asked for by the name the caller used.
+    ///
+    /// The venue serves each of the three as a query of its own. Both trade
+    /// streams went out under one name and the other was made here, by
+    /// dropping the prints the venue marks as not reported to the tape — which
+    /// is not what the venue means by it: that stream, asked for by name,
+    /// carries those prints too. What was handed to a caller as the narrower
+    /// stream was a series the venue does not serve.
     #[test]
-    fn the_narrower_stream_is_the_wider_one_without_the_unreported() {
-        assert!(belongs_on(TbtType::AllLast, true), "every trade means every trade");
-        assert!(belongs_on(TbtType::AllLast, false));
-        assert!(!belongs_on(TbtType::Last, true), "that one never reached the tape");
-        assert!(belongs_on(TbtType::Last, false));
+    fn a_trade_stream_is_asked_for_by_the_name_the_caller_used() {
+        assert_eq!(HmdsState::tbt_wire_kind(TbtType::Last), "Last");
+        assert_eq!(HmdsState::tbt_wire_kind(TbtType::AllLast), "AllLast");
+        assert_eq!(HmdsState::tbt_wire_kind(TbtType::BidAsk), "BidAsk");
+        assert_eq!(HmdsState::tbt_wire_kind(TbtType::MidPoint), "MidPoint");
     }
 
     /// A withdrawal reaches the stream it names and no other. Where the name
@@ -1192,9 +1196,12 @@ mod withdrawing_one_stream_tests {
     fn withdrawal_while_a_sibling_is_unnumbered(deferred: bool) {
         for (gone_kind, kept_kind, kept_instrument, shares) in [
             (TbtType::Last, TbtType::Last, 7, true),
-            (TbtType::Last, TbtType::AllLast, 7, true),
-            (TbtType::AllLast, TbtType::Last, 7, true),
             (TbtType::BidAsk, TbtType::BidAsk, 7, true),
+            // The venue answers each name as a query of its own, so two
+            // callers who asked by different names hold two streams and
+            // neither withdrawal touches the other's.
+            (TbtType::Last, TbtType::AllLast, 7, false),
+            (TbtType::AllLast, TbtType::Last, 7, false),
             (TbtType::Last, TbtType::BidAsk, 7, false),
             (TbtType::Last, TbtType::Last, 8, false),
         ] {

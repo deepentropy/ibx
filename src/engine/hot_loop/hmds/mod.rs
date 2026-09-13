@@ -189,15 +189,6 @@ fn hist_exchange(exchange: &str) -> String {
     crate::control::contracts::exchange_to_fix(exchange).to_string()
 }
 
-/// Whether a trade belongs on the stream a caller asked for.
-///
-/// The venue serves one trade stream and marks the prints that were not
-/// reported to the tape; the exchange's own trades are that stream without
-/// them.
-fn belongs_on(asked_for: TbtType, unreported: bool) -> bool {
-    !(asked_for == TbtType::Last && unreported)
-}
-
 /// A bar still forming, folded from the five-second bars the venue streams.
 ///
 /// The venue answers a request to keep bars up to date with the bars so far
@@ -1544,13 +1535,6 @@ impl HmdsState {
             // What sizes move in for this contract. Stated once, when the venue
             // took the subscription on.
             let size_tick = self.tbt_subscriptions[at].size_tick;
-            // Whether this subscription wants only what the exchange itself
-            // printed. The venue serves one trade stream — a future, which has no
-            // off-exchange tape at all, streams on AllLast and stays silent on
-            // Last — and marks the prints that were not reported to the tape. So
-            // the narrower stream is the wider one without those.
-            let kind_asked_for = self.tbt_subscriptions[at].kind;
-
             // Decoded in whole increments and scaled by whole numbers afterwards,
             // so a session of moves cannot drift the way adding fractions would.
             let running = &mut self.tbt_subscriptions[at].running;
@@ -1561,9 +1545,6 @@ impl HmdsState {
             for stamped in &frame.records {
                 match &stamped.record {
                     TbtRecord::Trade(t) => {
-                        if !belongs_on(kind_asked_for, t.unreported) {
-                            continue;
-                        }
                         let trade = crate::types::TbtTrade {
                             instrument,
                             req_id: caller_req_id,
@@ -1698,21 +1679,23 @@ fn build_tbt_query(
 }
 
     fn tbt_wire_kind(tbt_type: TbtType) -> &'static str {
-        // KNOWN TO DIVERGE. The vendor build states these apart — `Last`,
-        // `AllLast` and `BidAsk` are three distinct values it writes — and
-        // both trade streams are asked for here under one of them, with the
-        // other made afterwards by dropping the prints the venue marks as not
-        // reported to the tape. That rule is this client's reading of what
-        // belongs on a tape, not the venue's.
+        // The name the caller asked for. The venue serves each of the three
+        // as a query of its own and answers all three, so which trades are on
+        // which stream is the venue's to say.
         //
-        // The note this replaced said the venue acknowledges the other name
-        // and sends nothing. That may still be so — the vendor's own query
-        // carries fields this one omits, any of which could be why — but it
-        // was not re-checked, and a contract thin enough to trade nothing in
-        // twenty seconds cannot check it. Settle it on a liquid name in a
-        // session, by asking for `Last` and seeing whether trades arrive.
+        // Both trade streams were asked for here under one name, and the other
+        // was made afterwards by dropping the prints the venue marks as not
+        // reported to the tape. Measured on a liquid future over two windows
+        // of the same length, that rule is not what the venue means: asking
+        // for the narrower stream by name is answered, and what comes back
+        // carries those prints too — 27 of 104 on one window, against 42 of
+        // 139 on the wider stream. So the filter was not narrowing the
+        // venue's stream, it was making a third series the venue does not
+        // serve, and a caller comparing what this client called a tape
+        // against the venue's own would not have found the same trades on it.
         match tbt_type {
-            TbtType::AllLast | TbtType::Last => "AllLast",
+            TbtType::AllLast => "AllLast",
+            TbtType::Last => "Last",
             TbtType::BidAsk => "BidAsk",
             TbtType::MidPoint => "MidPoint",
         }
