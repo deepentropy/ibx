@@ -166,6 +166,31 @@ fn a_frame_without_an_average_cost_keeps_the_stored_one() {
     );
 }
 
+/// The key a holding is filed under is not the contract's multiplier.
+///
+/// The position frame carries no multiplier at all, and the tag that was being
+/// read for one is the row's second key. Read as a multiplier it reached a caller as the contract's own,
+/// and made a plain share read as multiplied: the holding was then counted
+/// unpriceable and dropped out of the account's totals altogether.
+#[test]
+fn the_key_a_holding_is_filed_under_is_not_its_multiplier() {
+    let mut context = Context::new();
+    let shared = SharedState::new();
+    let mut frame = std::collections::HashMap::new();
+    for (t, v) in [
+        (6008u32, "756733"), (6064, "100"), (6101, "150.00"), (6068, "SPY"),
+        (167, "STK"), (15, "USD"), (8002, "100"),
+    ] {
+        frame.insert(t, v.to_string());
+    }
+
+    positions::handle_position_update(&frame, &mut context, &shared, &None);
+
+    let row = shared.portfolio.position_info(756733).expect("the holding is recorded");
+    assert_eq!(row.multiplier, "", "nothing is claimed about a multiplier");
+    assert_eq!(row.position, 100.0, "and the holding itself is what the venue stated");
+}
+
 #[test]
 fn marks_only_frame_does_not_flatten_a_live_position() {
     let mut context = Context::new();
@@ -1028,6 +1053,82 @@ fn ord_status_test_state() -> (CcpState, Context, SharedState) {
         42, instrument, Side::Buy, crate::types::QTY_SCALE, 100 * PRICE_SCALE, b'2', b'0', 0,
     )); // starts at PendingSubmit
     (CcpState::new(), context, SharedState::new())
+}
+
+/// An order the venue replays is published under the state that report states.
+///
+/// Named as working regardless, a caller was told an order was at an exchange
+/// the venue had just said it had not reached — and the book then stood above
+/// every later unrouted echo of it, so nothing could put it right.
+#[test]
+fn a_replayed_order_is_published_under_the_state_its_report_states() {
+    let mut context = Context::new();
+    let mut ccp = CcpState::new();
+    let shared = SharedState::new();
+
+    // Accepted and not yet routed: no venue named on the report, and no
+    // reason given for a rejection.
+    let mut frame = std::collections::HashMap::new();
+    for (tag, val) in [
+        (11u32, "88"), (150, "0"), (39, "0"), (6008, "756733"),
+        (38, "100"), (55, "SPY"), (54, "1"), (40, "2"), (44, "150.00"),
+    ] {
+        frame.insert(tag, val.to_string());
+    }
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+
+    let recovered = shared.orders.drain_open_orders();
+    let (_, row) = recovered.iter().find(|(id, _)| *id == 88).expect("the order is recovered");
+    assert_eq!(
+        row.order_state.status, "PreSubmitted",
+        "what the report says, not what this client would like it to be",
+    );
+    assert_eq!(
+        context.order(88).map(|o| o.status),
+        Some(crate::types::OrderStatus::PreSubmitted),
+        "and the book agrees with what was published",
+    );
+}
+
+/// A finished option order's right is published as the letter every other path
+/// publishes it as.
+///
+/// The wire states it as a number, and passed through as the code one venue
+/// statement reached callers in two spellings — and a contract handed back for
+/// a definition lookup lost the field altogether, because the lookup takes only
+/// the letters.
+#[test]
+fn a_finished_option_order_names_its_right_as_a_letter() {
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    ccp.completed_orders_open = true;
+    let mut frame = exec_report_frame(&[
+        (39, "2"), (150, "F"), (32, "1"), (31, "5.00"), (14, "1"), (151, "0"),
+        (54, "1"), (38, "1"), (55, "SPY"), (167, "OPT"), (15, "USD"), (6008, "9999"),
+        (40, "2"), (44, "5.00"), (1, "DU111111"), (201, "1"), (202, "500"),
+    ]);
+    frame.insert(11, "555".to_string());
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    ccp.deliver_finished_orders(&shared, super::Handover::Final);
+
+    let filed = shared.orders.drain_completed_orders();
+    assert!(filed.iter().any(|o| o.order_id == 555), "the order is filed as finished");
+    let row = shared.orders.get_order_info(555).expect("the record a caller reads back");
+    assert_eq!(row.contract.right, "C", "a call is published as one");
+}
+
+/// The price an adjustable stop converts at is read back.
+///
+/// This client writes the whole group and read every field of it but this one,
+/// so an order read back from the venue and placed again converted at nought.
+#[test]
+fn the_price_an_adjustable_stop_converts_at_is_read_back() {
+    let mut order = crate::types::model::Order::default();
+    let mut parsed = std::collections::HashMap::new();
+    parsed.insert(6258u32, "142.50".to_string());
+    parsed.insert(6259u32, "141.00".to_string());
+    super::executions::read_stated_attributes(&mut order, &parsed);
+    assert_eq!(order.trigger_price, 142.50, "the price the adjustment hinges on");
+    assert_eq!(order.adjusted_stop_price, 141.00, "beside the one it converts to");
 }
 
 /// A recovery record arriving with the instrument table already full used
@@ -2295,22 +2396,38 @@ fn a_report_without_a_group_still_has_no_parent() {
     assert_eq!(updates[0].parent_id, 0);
 }
 
-/// Tag 6107 is what the bracket path *sends* a parent on. Whether the
-/// gateway ever echoes it on a report has not been established here, and
-/// the engine does not read it either way; this pins that, so wiring it up
-/// becomes a deliberate change with evidence behind it rather than a
-/// silent one. It passes on the old implementation too — it guards a
-/// different invariant from the rest of this change.
+/// Tag 6107 is what the bracket path sends a parent on, and a report states a
+/// parent there in the same shape — a whole number with a fraction.
+///
+/// A bare number on the same tag is the other thing it has been seen carrying:
+/// one value shared by every order in the account. Read as a parent, each of
+/// them is given a parent that does not exist, and a caller re-placing a leg
+/// from that record links it to an order that is not its own. A parent that is
+/// missing is recoverable; one that is invented is not.
 #[test]
-fn tag_6107_is_not_read_back_as_a_parent() {
+fn a_parent_is_read_back_only_in_the_shape_a_parent_is_written_in() {
     let (mut ccp, mut context, shared) = ord_status_test_state();
-    let frame = exec_report_frame(&[
+    let stated = exec_report_frame(&[
+        (39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1"), (6107, "4242.0"),
+    ]);
+    ccp.handle_exec_report(&stated, b"", &mut context, &shared, &None, "");
+    let updates = shared.orders.drain_order_updates();
+    assert_eq!(
+        updates[0].parent_id, 4242,
+        "the parent the venue restated reaches the caller",
+    );
+
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    let shared_across_the_account = exec_report_frame(&[
         (39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1"), (6107, "4242"),
     ]);
-    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    ccp.handle_exec_report(&shared_across_the_account, b"", &mut context, &shared, &None, "");
     let updates = shared.orders.drain_order_updates();
-    assert_eq!(updates[0].parent_id, 0, "6107 is a client id, not a parent order");
-    }
+    assert_eq!(
+        updates[0].parent_id, 0,
+        "and a bare number is not made into one",
+    );
+}
 
 /// A refused revision arrives on the same message as an accepted one and
 /// was read as the acceptance, so a modify the gateway would not make was
@@ -2463,12 +2580,14 @@ fn a_pending_status_does_not_retire_the_order() {
     assert_ne!(updates[0].status, crate::types::OrderStatus::Cancelled);
 }
 
-/// The venue names the state of an order whose change it has not made yet
-/// (39=E), and its own word for it is what reaches the caller. Read as a
-/// pending cancel, a caller watching its order saw a withdrawal under way
-/// while a modification was — and its cancel logic fired on a change.
+/// The venue treats 39=E as a pending cancel, so that is what reaches the
+/// caller.
+///
+/// Published under a word of its own, it was in neither the working set nor the
+/// finished set of a program written against the vocabulary this client answers
+/// in.
 #[test]
-fn a_pending_replace_is_reported_as_one_not_as_a_cancel() {
+fn a_pending_change_is_reported_as_the_venue_treats_it() {
     let (mut ccp, mut context, shared) = ord_status_test_state();
     // The order is working before the change is asked of the venue.
     let working = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1")]);
@@ -2480,13 +2599,13 @@ fn a_pending_replace_is_reported_as_one_not_as_a_cancel() {
 
     let updates = shared.orders.drain_order_updates();
     assert_eq!(
-        updates[0].status, crate::types::OrderStatus::PendingReplace,
-        "the change is what is in flight: {updates:?}",
+        updates[0].status, crate::types::OrderStatus::PendingCancel,
+        "read as the venue treats it: {updates:?}",
     );
     let info = shared.orders.get_order_info(42).expect("the record a caller reads back");
     assert_eq!(
-        info.order_state.status, "PendingReplace",
-        "the venue's word for the state, not a withdrawal",
+        info.order_state.status, "PendingCancel",
+        "and the record a caller reads back says the same",
     );
     assert!(
         shared.orders.drain_open_orders().iter().any(|(id, _)| *id == 42),

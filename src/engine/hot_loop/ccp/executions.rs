@@ -95,6 +95,10 @@ pub(crate) fn read_stated_attributes(
     if let Some(v) = parsed.get(&6153).and_then(|v| v.parse::<f64>().ok()) { order.stock_range_upper = v; }
     if let Some(v) = parsed.get(&6154).and_then(|v| v.parse::<f64>().ok()) { order.delta = v; }
     if let Some(v) = parsed.get(&6207) { order.customer_account = v.clone(); }
+    // The price the whole adjustment hinges on, read beside the three fields
+    // that go with it. The venue states all four together and this read all but
+    // this one, so an order read back and placed again converted at nought.
+    if let Some(v) = parsed.get(&6258).and_then(|v| v.parse::<f64>().ok()) { order.trigger_price = v; }
     if let Some(v) = parsed.get(&6259).and_then(|v| v.parse::<f64>().ok()) { order.adjusted_stop_price = v; }
     if let Some(v) = parsed.get(&6260).and_then(|v| v.parse::<f64>().ok()) { order.adjusted_trailing_amount = v; }
     if let Some(v) = parsed.get(&6261) { order.adjusted_order_type = v.clone(); }
@@ -504,7 +508,12 @@ fn status_of(
         }
         "5" => crate::types::OrderStatus::Submitted,
         "A" => crate::types::OrderStatus::PreSubmitted,
-        "E" => crate::types::OrderStatus::PendingReplace,
+        // The venue treats this one as a pending cancel, and says so: a report
+        // carrying it is answered the same way a pending cancel is. Published
+        // as a word of its own, it was in neither the working set nor the
+        // finished set of any program written against the vocabulary this
+        // client answers in.
+        "E" => crate::types::OrderStatus::PendingCancel,
         "6" => crate::types::OrderStatus::PendingCancel,
         "1" => crate::types::OrderStatus::PartiallyFilled,
         "2" => crate::types::OrderStatus::Filled,
@@ -718,7 +727,18 @@ impl CcpState {
                 .and_then(|s| s.parse().ok())
                 .or_else(|| was.map(|w| w.contract.strike).filter(|k| *k != 0.0))
                 .unwrap_or(0.0),
-            right: kept(parsed.get(&201), was.map(|w| w.contract.right.as_str())),
+            // Stated as a number on this wire — one for a call, nought for a
+            // put — and published as the letter, the way the definition path
+            // and every other publisher of it do. Passed through as the code,
+            // one venue statement reached callers in two spellings, and a
+            // contract handed back for a definition lookup lost the field
+            // altogether: the lookup takes only the letters, so an exact option
+            // became an ambiguous one.
+            right: match kept(parsed.get(&201), was.map(|w| w.contract.right.as_str())).as_str() {
+                "1" | "C" | "CALL" => "C".to_string(),
+                "0" | "P" | "PUT" => "P".to_string(),
+                _ => String::new(),
+            },
             ..Default::default()
         };
         // A buy only where something said so. Read as "a sell if it says
@@ -1077,6 +1097,12 @@ impl CcpState {
         context: &mut Context,
         shared: &SharedState,
     ) {
+        // What this report says the order is, read the way every other report
+        // is read. Named as working here regardless, a caller was told an order
+        // was at an exchange the venue had just said it had not reached.
+        let recovered_as = status_of(
+            parsed.get(&39).map(String::as_str).unwrap_or(""), clord_id, parsed,
+        );
         let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
         // The side has to be stated. A guess does not stay in the recovered
         // record: every later fill for the order books through the tracked
@@ -1206,10 +1232,16 @@ impl CcpState {
                 // not known here, so the status this very message carries
                 // moves it, and the caller who was told it was unknown is
                 // told what it is.
+                // And where it was not known, what this very report says it
+                // is. Recorded as working at an exchange, an order the venue
+                // had said was accepted and not yet routed was published as
+                // something the venue had not said — and the book then stood
+                // above every later unrouted echo of it, so nothing could put
+                // it right.
                 status: if prior.is_some() {
                     crate::types::OrderStatus::Uncertain
                 } else {
-                    crate::types::OrderStatus::Submitted
+                    recovered_as
                 },
                 ord_type: ord_type_byte,
                 tif: tif_byte,
@@ -1266,7 +1298,7 @@ impl CcpState {
                     ..Default::default()
                 },
                 order_state: api::OrderState {
-                    status: "Submitted".to_string(),
+                    status: crate::types::order_status::order_status_str(recovered_as).to_string(),
                     ..Default::default()
                 },
                 last_exec: Default::default(),
@@ -2045,15 +2077,25 @@ impl CcpState {
                 // shared by every order in a group, none of which has a parent,
                 // and nothing distinguished it from a real link.
                 //
-                // 6107 is not the way to recover one either, though an order
-                // *sends* its parent there: the tag is message-scoped, and the
-                // vendor's own audit renderer names the inbound one
-                // ParentClientId. That is what the shared non-zero value above
-                // was — one client id echoed to every order in the account.
-                // Reading it back as a parent gives each of them a parent that
-                // does not exist. Nothing on this report carries a parent order
-                // id, so report none.
-                let parent_id: i64 = 0;
+                // 6107 is where an order states its parent, and the venue
+                // restates it here: it is the tag the parent link travels on in
+                // both directions. Reported as none, a caller reading back the
+                // two exits of a bracket was told neither had a parent, and
+                // placing them again from that record broke the bracket.
+                //
+                // Read only in the shape a parent is written in — a whole
+                // number with a fraction, which is how this client states one.
+                // A bare number on this tag is the other thing it has been seen
+                // carrying: one value shared by every order in the account,
+                // which read as a parent gives each of them a parent that does
+                // not exist. A parent that is missing is recoverable; one that
+                // is invented is not.
+                let parent_id: i64 = parsed
+                    .get(&6107)
+                    .and_then(|stated| stated.split_once('.'))
+                    .and_then(|(whole, _)| whole.parse().ok())
+                    .filter(|named: &i64| *named != 0 && *named as u64 != clord_id)
+                    .unwrap_or(0);
                 let update = crate::types::OrderUpdate {
                     order_id: clord_id,
                     instrument: order.instrument,
@@ -2108,13 +2150,20 @@ impl CcpState {
         {
             let account = parsed.get(&1).cloned().unwrap_or_default();
             let symbol = parsed.get(&55).cloned().unwrap_or_default();
-            // Where the order is working. The report states it on 207 when it
-            // says so at all, and on 6004 as the destination it was routed to;
-            // failing both, this client knows where it sent the order and says
-            // that. An empty exchange on a completed order is a contract a
-            // caller cannot re-place, and the reference client never returns one.
-            let exchange = parsed.get(&207).cloned()
+            // Where the order is working, taken in the order the venue states
+            // it: tag 100 first, then 207, then 6004 as the destination it was
+            // routed to; failing all three, this client
+            // knows where it sent the order and says that. An empty exchange on
+            // a completed order is a contract a caller cannot re-place, and the
+            // reference client never returns one.
+            //
+            // Read without 100 here and from 100 alone where a finished order
+            // is filed, the two paths answered the same question differently
+            // and whichever touched an order last decided which venue the
+            // caller was told it was working on.
+            let exchange = parsed.get(&100).cloned()
                 .filter(|e| !e.is_empty())
+                .or_else(|| parsed.get(&207).cloned().filter(|e| !e.is_empty()))
                 .or_else(|| parsed.get(&6004).cloned().filter(|e| !e.is_empty()))
                 .or_else(|| {
                     context.order(clord_id).copied()

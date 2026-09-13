@@ -402,7 +402,15 @@ pub(crate) fn handle_position_update(
     let symbol = parsed.get(&6068).map(|s| s.trim_end().to_string()).unwrap_or_default();
     let sec_type = parsed.get(&167).cloned().unwrap_or_default();
     let currency = parsed.get(&15).cloned().unwrap_or_default();
-    let multiplier = parsed.get(&8002).cloned().unwrap_or_default();
+    // Not taken off this frame, which carries no multiplier at all. The tag
+    // that was being read for it is the
+    // row's second key — the name the venue files the holding under — and read
+    // as a multiplier it reached a caller as the contract's own, and made a
+    // plain share read as multiplied: the holding was then counted unpriceable
+    // and dropped out of the account's totals altogether. The contract's
+    // definition is where a multiplier comes from, and fills it in when it
+    // arrives.
+    let multiplier = String::new();
 
     let Some(position) = position else {
         // Marks-only frame. Apply the marks to a row that already exists, but do
