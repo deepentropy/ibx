@@ -6344,6 +6344,26 @@ mod tests {
             .filter(|e| matches!(e, Event::Disconnected))
             .count();
         assert_eq!(said, 1, "one loss, said once");
+
+        // And the same where the worker goes without answering at all, which
+        // is the other way that poller reaches the same notice.
+        let shared = Arc::new(SharedState::new());
+        let (events, heard) = std::sync::mpsc::sync_channel(8);
+        let mut hl = HotLoop::new(
+            shared, Some(EventSink::new(events, Default::default())), None,
+        );
+        hl.ccp.disconnected = true;
+        hl.ccp_reconnect_attempt = 3;
+        let (worker, rx) = std::sync::mpsc::sync_channel::<Result<Connection, std::io::Error>>(1);
+        hl.pending_ccp_reconnect = Some(rx);
+        hl.halt_recovery(retry::DisconnectReason::AuthorizationFailed);
+        drop(worker);
+        hl.poll_ccp_reconnect();
+
+        let said = heard.try_iter()
+            .filter(|e| matches!(e, Event::Disconnected))
+            .count();
+        assert_eq!(said, 1, "and once where the worker answered nothing at all");
     }
 
     /// The trading connection's return is announced whether or not a quote

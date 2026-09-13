@@ -1608,13 +1608,13 @@ impl FarmState {
                 None => {
                     // Said once for the number rather than once for the quote:
                     // a stream sends as fast held or not, and a line each would
-                    // be the whole log. A number this session gave up is the
-                    // ordinary case — what was in flight when the withdrawal
-                    // went out — and is not worth saying at all.
+                    // be the whole log. The ordinary case is what was in flight
+                    // when a withdrawal went out, which arrives for a moment
+                    // and stops.
                     if self.quotes_for_no_one.insert(tick.server_tag) {
                         log::warn!(
                             "quotes are arriving under venue number {}, which no contract \
-                             in this session holds and which it never gave up; dropped",
+                             in this session holds; dropped",
                             tick.server_tag,
                         );
                     }
