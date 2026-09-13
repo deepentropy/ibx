@@ -794,26 +794,15 @@ impl EClient {
         // subscription per contract exists on the wire, so the callers given
         // the second slot read the first — otherwise their quotes arrive on a
         // slot nothing is watching.
-        for (from, into, held_under) in self.shared.market.drain_subscription_moves() {
-            let nobody_arrived = self.core.move_watchers(&self.shared, from, into, held_under);
-            // Said once the move is installed, because the subscription on the
-            // slot moved onto is held up until then.
-            self.shared.market.note_a_move_is_read(from, into);
-            // And where nobody arrived — the caller this move was for withdrew
-            // before it read the move — the subscription it was held up for is
-            // nobody's. Left, it ran for the rest of the session against an
-            // allowance that is counted, with no request able to withdraw it.
-            if let Some((con_id, issued)) = nobody_arrived {
-                let _ = self.send(ControlCommand::Unsubscribe {
-                    instrument: into,
-                    con_id,
-                    // Nobody arrived to take it, so no occupancy of this
-                    // client's is being named.
-                    took_it: 0,
-                    series: Vec::new(),
-                    issued,
-                });
-            }
+        for (from, into, _) in self.shared.market.drain_subscription_moves() {
+            // Said on the engine's own queue once the move is installed: the
+            // subscription on the slot moved onto is held up until then, and a
+            // withdrawal already decided against the occupancy before this one
+            // is ordered against this rather than against a flag. Zero says
+            // nobody arrived — the caller this move was for withdrew on the
+            // way — and the subscription held up for them is withdrawn there.
+            let took_it = self.core.move_watchers(&self.shared, from, into);
+            let _ = self.send(ControlCommand::MoveInstalled { from, into, took_it });
         }
         // Everyone watching the contract, not only whoever asked first. A
         // refusal is a fact about the contract, and a caller sharing somebody

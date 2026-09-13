@@ -2610,7 +2610,15 @@ impl FarmState {
         if !self.instrument_md_reqs.iter().any(|(id, _)| *id == instrument)
             && let Some(into) = self.where_its_callers_went(instrument)
         {
-            self.stop_asking_for_series(into, con_id, 0, series, issued, farm_conn, hb);
+            // Under whatever holds the slot they were sent to: the caller
+            // that named this withdrawal never took that slot, and the series
+            // it gave up are entries of the subscription now on it. Named with
+            // nothing, the withdrawal was applied wherever the walk ended
+            // whether or not that subscription was the one its caller joined.
+            let held_under = self.what_took_it(into);
+            self.stop_asking_for_series(
+                into, self.what_contract_holds_it(into), held_under, series, issued, farm_conn, hb,
+            );
             return;
         }
         // Nor while a caller is on its way onto this slot and has not read it
@@ -2643,7 +2651,10 @@ impl FarmState {
             return;
         }
         self.subscription_asked_on.remove(&instrument);
-        self.subscription_began_under.remove(&instrument);
+        // The occupancy stays until the slot itself goes back: the release that
+        // follows names it, and cleared here that release named nothing —
+        // which the client reads as "forget whatever is on that slot now",
+        // including a subscription that had just been given it.
         self.series_asked_on.retain(|(watched, _), _| *watched != instrument);
         // Drop the resubscribe record first. The lookup below early-returns
         // when the instrument has no active requests, which is always the case
@@ -3207,7 +3218,38 @@ impl FarmState {
     /// Name this occupancy of a slot by the number the request that took it
     /// asked under.
     pub(crate) fn note_subscription_began_under(&mut self, instrument: InstrumentId, took_it: u64) {
+        // Only where the slot holds no occupancy yet. A request that joins what
+        // is already there — the venue's one-shot beside a stream, a second
+        // caller on the same contract — did not begin it, and renaming it left
+        // the caller that did unable to take its own subscription down.
+        self.subscription_began_under.entry(instrument).or_insert(took_it);
+    }
+
+    /// Say that a slot's occupancy has changed hands, whatever it was before.
+    ///
+    /// The callers of another slot have been moved onto this one and hold a
+    /// number of their own now: what could withdraw it before cannot any more,
+    /// and what arrived can.
+    pub(crate) fn note_it_changed_hands(&mut self, instrument: InstrumentId, took_it: u64) {
         self.subscription_began_under.insert(instrument, took_it);
+    }
+
+    /// Whether a slot is held by an occupancy, or a contract, other than the
+    /// one a caller named. Asked before anything is recorded against it.
+    pub(crate) fn another_occupancy_holds_it_now(
+        &self, instrument: InstrumentId, took_it: u64, con_id: i64,
+    ) -> bool {
+        self.another_occupancy_holds_it(instrument, took_it)
+            || self.another_contract_holds_it(instrument, con_id)
+    }
+
+    /// Which contract a slot's subscription went out under, as far as this
+    /// engine's record of it says. Zero where it holds none.
+    fn what_contract_holds_it(&self, instrument: InstrumentId) -> i64 {
+        self.instrument_md_reqs
+            .iter()
+            .find(|(id, _)| *id == instrument)
+            .map_or(0, |(_, record)| record.con_id)
     }
 
     /// Which occupancy of a slot holds it, as the number the request that took

@@ -63,6 +63,15 @@ const KNOWN_CONTROL_COMMAND_GAPS: &[(&str, &str)] = &[
          subscription — is settled offline against the bytes it writes",
     ),
     (
+        "MoveInstalled",
+        "Said once a caller whose contract turned out to live in another slot \
+         has been moved onto it. A phase here watches each contract once and \
+         names it by id, so no lookup ever resolves onto a slot another caller \
+         holds: what the command does — telling the engine who holds that slot \
+         now, and withdrawing it where nobody arrived — is settled offline \
+         against the state it changes",
+    ),
+    (
         "StopAskingForSeries",
         "The other half of the pair above, sent where such a joiner withdraws \
          and the subscription stays up for whoever opened it. Nothing joins in \

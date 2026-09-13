@@ -859,6 +859,8 @@ struct Ownership<'a> {
     /// When each slot was taken, in the order of what this client has asked
     /// for.
     taken_on: std::sync::MutexGuard<'a, HashMap<InstrumentId, u64>>,
+    /// And which contract the request that took it named.
+    took_contract: std::sync::MutexGuard<'a, HashMap<InstrumentId, i64>>,
     /// Which subscription each request is holding, as a figure that changes
     /// every time it takes a new one.
     epoch: std::sync::MutexGuard<'a, HashMap<i64, u64>>,
@@ -886,6 +888,7 @@ impl Ownership<'_> {
     /// asked for the one-shot was sent nothing at all.
     fn take_or_follow(
         &mut self, instrument: InstrumentId, req_id: i64, series: &[u32], taken_on: u64,
+        con_id: i64,
     ) -> Joined {
         // What this request asked for, written down as it becomes one of the
         // watchers rather than before. Written first, a withdrawal deciding
@@ -902,6 +905,7 @@ impl Ownership<'_> {
         {
             self.holders.insert(instrument, req_id);
             self.taken_on.insert(instrument, taken_on);
+            self.took_contract.insert(instrument, con_id);
             if let Some(displaced) = held {
                 self.watches(instrument, displaced);
             }
@@ -917,6 +921,7 @@ impl Ownership<'_> {
             _ => {
                 self.holders.insert(instrument, req_id);
                 self.taken_on.insert(instrument, taken_on);
+                self.took_contract.insert(instrument, con_id);
                 // Under the same acquisition as the holder map, not after it.
                 // Written by the caller once this returned, a slot given back
                 // in between was forgotten while this request pointed at
@@ -1048,6 +1053,14 @@ pub struct ClientCore {
     /// of the contract now on it was forgotten, the venue went on streaming
     /// it, and no request could be found to deliver it to or to withdraw it.
     slot_taken_on: Mutex<HashMap<InstrumentId, u64>>,
+    /// And which contract the request that took each slot named.
+    ///
+    /// Written down as the slot is taken, because it is the caller's own and
+    /// does not change. Looked up in the contract cache instead, the answer was
+    /// whichever entry happened to point at that slot — an earlier contract's,
+    /// where a release had not been read yet — and a withdrawal carrying it was
+    /// refused as being about another contract.
+    slot_took_contract: Mutex<HashMap<InstrumentId, i64>>,
 
     // PnL subscription state
     /// The request a running profit is reported under.
@@ -1255,6 +1268,7 @@ impl ClientCore {
             chargeable_snapshot_reqs: Mutex::new(std::collections::HashSet::new()),
             series_by_req: Mutex::new(HashMap::new()),
             slot_taken_on: Mutex::new(HashMap::new()),
+            slot_took_contract: Mutex::new(HashMap::new()),
             pnl_req_id: Mutex::new(None),
             pnl_single_reqs: Mutex::new(HashMap::new()),
             last_pnl: Mutex::new([0; 3]),
@@ -1635,6 +1649,7 @@ impl ClientCore {
         // last one named.
         self.series_by_req.lock().unwrap().clear();
         self.slot_taken_on.lock().unwrap().clear();
+        self.slot_took_contract.lock().unwrap().clear();
         // And which subscription each number was holding. Kept, the next
         // session's first withdrawal under a number reads a figure from the
         // session before it.
@@ -1793,6 +1808,7 @@ impl ClientCore {
             one_shot: self.chargeable_snapshot_reqs.lock().unwrap(),
             series: self.series_by_req.lock().unwrap(),
             taken_on: self.slot_taken_on.lock().unwrap(),
+            took_contract: self.slot_took_contract.lock().unwrap(),
             epoch: self.registration_epoch.lock().unwrap(),
         }
     }
@@ -1807,9 +1823,10 @@ impl ClientCore {
     ///
     /// Answers whether this request ended up a follower.
     pub(crate) fn take_or_follow(
-        &self, instrument: InstrumentId, req_id: i64, series: &[u32], asked_on: u64,
+        &self, instrument: InstrumentId, req_id: i64, series: &[u32], asked_on: u64, con_id: i64,
     ) -> bool {
-        let joined = self.ownership().take_or_follow(instrument, req_id, series, asked_on);
+        let joined =
+            self.ownership().take_or_follow(instrument, req_id, series, asked_on, con_id);
         // The request that takes a slot nobody held is written down by whoever
         // asked for it, once the venue has answered; the other two are already
         // watching something and are stamped here.
@@ -1826,20 +1843,19 @@ impl ClientCore {
     /// callers given the second slot have to read the first, or their quotes
     /// arrive on a slot nothing is watching.
     ///
-    /// Answers with the contract on the destination and the number to withdraw
-    /// it under, where nothing is watching it once the move is read. Nothing may be: the subscription
-    /// there is held up while a caller is on its way onto it, and that caller
-    /// can withdraw before it arrives — so this is what says the subscription
-    /// is nobody's now.
+    /// Answers with the number the arriving callers hold that slot under —
+    /// theirs from this moment, and one that nothing deciding against the
+    /// occupancy before it can name. Zero says nobody arrived: the caller
+    /// this move was for withdrew on the way, and the subscription held up
+    /// for it is nobody's.
     ///
-    /// The number comes from the same acquisition that finds nobody watching,
-    /// not from the moment the withdrawal is sent: taken at the send, a caller
-    /// that asked for the contract in between had asked first and this
-    /// withdrawal still read as the later of the two, so its brand-new
-    /// subscription was taken down under it.
+    /// The number is taken in the same acquisition that installs the move,
+    /// and the engine is told on its own queue. Told by a flag the surface
+    /// clears instead, a withdrawal already decided against the occupancy
+    /// before this one became valid again simply by arriving late.
     pub(crate) fn move_watchers(
-        &self, shared: &SharedState, from: InstrumentId, into: InstrumentId, held_under: u64,
-    ) -> Option<(i64, u64)> {
+        &self, shared: &SharedState, from: InstrumentId, into: InstrumentId,
+    ) -> u64 {
         {
             let mut modes = self.mdt_by_instrument.lock().unwrap();
             if let Some(mode) = modes.remove(&from) {
@@ -1853,11 +1869,14 @@ impl ClientCore {
         // put back on the new slot, live again under a number its caller had
         // given up.
         let mut moved: Vec<i64> = Vec::new();
-        // The occupancy the slot they are moving onto is already held under,
-        // not a number of this client's own: a caller that arrives holding a
-        // number the engine never heard of could never withdraw what it is
-        // being served off.
-        let taken_on = if held_under != 0 { held_under } else { self.in_order() };
+        // A number of their own: what could withdraw that subscription before
+        // they arrived cannot any more, and they can. The engine is told it on
+        // its own queue, so a withdrawal already decided against the occupancy
+        // before this one cannot become valid again by arriving late.
+        let taken_on = self.in_order();
+        // And the contract that slot holds, as far as this client knows: the
+        // callers arriving are being served off it whatever they named.
+        let moved_contract = self.cached_con_id_of(into);
         {
             let mut own = self.ownership();
             let held = own.holders.remove(&from);
@@ -1869,7 +1888,7 @@ impl ClientCore {
                 if own.by_req.get(&req_id) != Some(&from) {
                     continue;
                 }
-                own.take_or_follow(into, req_id, &[], taken_on);
+                own.take_or_follow(into, req_id, &[], taken_on, moved_contract);
                 own.taken_on.insert(into, taken_on);
                 own.by_req.insert(req_id, into);
                 // Under the same acquisition that moves it: a number stamped
@@ -1902,17 +1921,10 @@ impl ClientCore {
         // Whether anything is being served off the destination now. Nothing
         // may be: the request this move was for can withdraw before the move
         // is read, and the subscription was kept up for it.
-        // Both under one acquisition: a caller that asks for the contract after
-        // this answer is numbered later than the withdrawal the answer calls
-        // for, which is what keeps its subscription standing.
-        let on_the_slot = self.cached_con_id_of(into);
         let own = self.ownership();
         let watched = own.holders.contains_key(&into)
             || own.following.get(&into).is_some_and(|watchers| !watchers.is_empty());
-        if watched {
-            return None;
-        }
-        Some((on_the_slot, self.in_order()))
+        if watched { taken_on } else { 0 }
     }
 
     /// What a request that joins a subscription somebody else opened is owed.
@@ -1970,7 +1982,7 @@ impl ClientCore {
     /// keeps its slot — and forgetting on the refusal would strand it.
     fn forget_watchers_of(&self, instrument: InstrumentId, released_at: u64) -> bool {
         // One acquisition for the lot. See `ownership`.
-        let forgotten: Vec<i64> = {
+        {
             let mut own = self.ownership();
             // Not a slot this client has since been given again. The release
             // names the occupancy that ended, so what is compared is which
@@ -1978,9 +1990,7 @@ impl ClientCore {
             // Where the release names none — a slot given back for a reason
             // that never reached a subscription — there is nothing to hold on
             // to and the records go.
-            if released_at != 0
-                && own.taken_on.get(&instrument).is_some_and(|taken| *taken != released_at)
-            {
+            if own.taken_on.get(&instrument).is_some_and(|taken| *taken != released_at) {
                 return false;
             }
             own.taken_on.remove(&instrument);
@@ -1997,22 +2007,29 @@ impl ClientCore {
                 own.series.remove(req_id);
                 own.epoch.remove(req_id);
             }
-            watching
+            own.took_contract.remove(&instrument);
+            // And everything else filed under the slot or under the numbers
+            // that were watching it, under this same acquisition. Cleared
+            // after it was released, a registration that took the slot in
+            // between had its own mode, its own snapshot and its own cache
+            // entry removed by a release that had already decided it did not
+            // cover them — and a snapshot so removed never ended and was never
+            // withdrawn.
+            self.mdt_by_instrument.lock().unwrap().remove(&instrument);
+            self.last_quotes.lock().unwrap().remove(&instrument);
+            self.con_id_to_instrument.lock().unwrap().retain(|_, held| *held != instrument);
+            for req_id in &watching {
+                self.mdt_sent.lock().unwrap().remove(req_id);
+                // The slot going back ends the request, and a number that
+                // outlives its request with its marks still standing is read as
+                // the request it was: reused for an ordinary stream it was
+                // withdrawn as a snapshot the moment it had both sides of a
+                // quote, or read as the venue's one-shot by every later join,
+                // or counted as still asking for a series its caller has no
+                // subscription to hear.
+                self.snapshot_reqs.lock().unwrap().remove(req_id);
+            }
         };
-        self.mdt_by_instrument.lock().unwrap().remove(&instrument);
-        for req_id in forgotten {
-            self.mdt_sent.lock().unwrap().remove(&req_id);
-            // And everything else filed under that number. The slot going back
-            // ends the request, and a number that outlives its request with
-            // its marks still standing is read as the request it was: reused
-            // for an ordinary stream it was withdrawn as a snapshot the moment
-            // it had both sides of a quote, or read as the venue's one-shot by
-            // every later join, or counted as still asking for a series its
-            // caller has no subscription to hear.
-            self.snapshot_reqs.lock().unwrap().remove(&req_id);
-
-        }
-        self.last_quotes.lock().unwrap().remove(&instrument);
         true
     }
 
@@ -2066,19 +2083,9 @@ impl ClientCore {
         // release read after that named a slot this client had just been given
         // again. Forgotten then, the contract now on it was streaming with no
         // request able to hear it or withdraw it.
-        let mut forgotten: Vec<InstrumentId> = Vec::new();
         for (slot, released_at) in released {
-            if self.forget_watchers_of(slot, released_at) {
-                forgotten.push(slot);
-            }
+            self.forget_watchers_of(slot, released_at);
         }
-        if forgotten.is_empty() {
-            return;
-        }
-        // By the slot, so a contract the venue has not named — which holds a
-        // slot under no id at all — is forgotten with the rest.
-        let mut cache = self.con_id_to_instrument.lock().unwrap();
-        cache.retain(|_, held| !forgotten.contains(held));
     }
 
     /// Find instrument ID for a contract, registering if needed.
@@ -2355,6 +2362,7 @@ impl ClientCore {
                     instrument,
                     con_id,
                     generic_ticks: generic_ticks.clone(),
+                    took_it: self.what_took(instrument),
                     issued: self.in_order(),
                 });
             }
@@ -2470,6 +2478,7 @@ impl ClientCore {
                     instrument: instrument_id,
                     con_id,
                     generic_ticks: generic_ticks.clone(),
+                    took_it: self.what_took(instrument_id),
                     issued: self.in_order(),
                 });
             }
@@ -2479,7 +2488,7 @@ impl ClientCore {
         // registered, in which case this one watches theirs. Either way the
         // record of what it is watching is written there, under the maps that
         // decide it.
-        let _ = self.take_or_follow(instrument_id, req_id, &generic_ticks, asked_on);
+        let _ = self.take_or_follow(instrument_id, req_id, &generic_ticks, asked_on, con_id);
         self.stamp_registration(req_id);
         // A concurrent registration may already hold the subscription. Its
         // mode still describes the feed everyone on this instrument receives.
@@ -2726,7 +2735,7 @@ impl ClientCore {
         // holding it was halfway through its withdrawal read the one-shot as
         // an ordinary stream: it was recorded as watching, sent nothing of its
         // own, and served off a burst that was already over.
-        let (instrument, take_it_down, series_gone, took_it, decided_at) = {
+        let (instrument, take_it_down, series_gone, took_it, con_id, decided_at) = {
             let mut own = self.ownership();
             // Taken here, under the maps that decide, so that a subscription
             // taken by another caller after this decision carries a later
@@ -2771,9 +2780,13 @@ impl ClientCore {
             // Which occupancy of the slot this withdrawal is about, read here
             // rather than left to the engine to work out from the slot number.
             let took_it = own.taken_on.get(&instrument).copied().unwrap_or(0);
+            // The contract its caller named, not whatever the cache happens to
+            // point at this slot with.
+            let con_id = own.took_contract.get(&instrument).copied().unwrap_or(0);
             if take_it_down {
                 own.holders.remove(&instrument);
                 own.taken_on.remove(&instrument);
+                own.took_contract.remove(&instrument);
             }
             // What this caller brought with it goes with it. Only the series
             // nobody else watching the contract named: the subscription stays
@@ -2796,13 +2809,10 @@ impl ClientCore {
                         .any(|other| own.series.get(other).is_some_and(|s| s.contains(tick)))
                 })
                 .collect();
-            (instrument, take_it_down, series_gone, took_it, decided_at)
+            (instrument, take_it_down, series_gone, took_it, con_id, decided_at)
         };
         self.mdt_sent.lock().unwrap().remove(&req_id);
         let series = (!series_gone.is_empty()).then_some((instrument, series_gone));
-        // Read before the cache is forgotten below, because that is where it
-        // comes from.
-        let con_id = self.cached_con_id_of(instrument);
         if !take_it_down {
             return WhatAWithdrawalLeaves {
                 subscription: None,
@@ -2827,6 +2837,12 @@ impl ClientCore {
             took_it,
             decided_at,
         }
+    }
+
+    /// Which occupancy of a slot this client is watching, as the number the
+    /// request that took it asked under. Zero where it is watching none.
+    pub(crate) fn what_took(&self, instrument: InstrumentId) -> u64 {
+        self.slot_taken_on.lock().unwrap().get(&instrument).copied().unwrap_or(0)
     }
 
     /// Which contract this client believes holds a slot, as far as its own

@@ -185,6 +185,9 @@ pub enum ControlCommand {
         con_id: i64,
         /// The series the joining caller named, by the venue's number for each.
         generic_ticks: Vec<u32>,
+        /// The number the request that took that slot asked under, as every
+        /// other command about a subscription states it.
+        took_it: u64,
         /// Where this falls in the order of everything the client has asked
         /// for.
         ///
@@ -240,6 +243,24 @@ pub enum ControlCommand {
         /// that had just asked for the contract, published as watching it,
         /// with nothing on the wire.
         issued: u64,
+    },
+    /// A move has been installed: the callers of one slot are watching another.
+    ///
+    /// The engine holds the subscription on the slot they moved onto up until
+    /// this arrives, because until then nothing on the client side is recorded
+    /// as watching it and a withdrawal decided in the meantime cannot see them.
+    /// Said on the engine's own queue rather than by a flag the surface clears,
+    /// so it is ordered against the withdrawals already in flight.
+    MoveInstalled {
+        /// The slot whose callers moved.
+        from: InstrumentId,
+        /// The slot they moved onto.
+        into: InstrumentId,
+        /// The number they hold it under now, which nothing that decided
+        /// against the occupancy before it can name. Zero where nobody
+        /// arrived — the caller the move was for withdrew on the way — and
+        /// then the subscription that was held up for them is withdrawn.
+        took_it: u64,
     },
     /// Unsubscribe from market data for an instrument.
     Unsubscribe {

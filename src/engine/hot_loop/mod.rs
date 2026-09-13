@@ -1600,8 +1600,19 @@ impl HotLoop {
                         }
                     }
                 }
-                ControlCommand::AlsoAskForSeries { instrument, con_id, generic_ticks, issued, } => {
+                ControlCommand::AlsoAskForSeries {
+                    instrument, con_id, generic_ticks, took_it, issued,
+                } => {
                     self.heard_up_to = self.heard_up_to.max(issued);
+                    // Not this subscription's caller. The caller that asked can
+                    // be gone by the time this is read, and the slot given to
+                    // another contract: asked for anyway, the series was served
+                    // to a subscription nobody had named it on, and recorded
+                    // against it so that a later withdrawal of that series was
+                    // refused.
+                    if self.farm.another_occupancy_holds_it_now(instrument, took_it, con_id) {
+                        continue;
+                    }
                     // A caller asking for more on a contract is asking for
                     // that contract, so the subscription it is served off is
                     // one it asked for.
@@ -1629,6 +1640,32 @@ impl HotLoop {
                         &mut self.farm_conn,
                         &mut self.hb,
                     );
+                }
+                ControlCommand::MoveInstalled { from, into, took_it } => {
+                    // The callers are recorded as watching it now, so the hold
+                    // that kept it up for them is over.
+                    self.shared.market.note_a_move_is_read(from, into);
+                    if took_it != 0 {
+                        // And they hold it under a number of their own: what
+                        // could withdraw it before cannot any more.
+                        self.farm.note_it_changed_hands(into, took_it);
+                    } else {
+                        // Nobody arrived. The subscription held up for them is
+                        // nobody's, and goes under the number it is held by
+                        // here rather than one the client would have to guess.
+                        let held_under = self.farm.what_took_it(into);
+                        self.farm.send_mktdata_unsubscribe(
+                            into,
+                            0,
+                            held_under,
+                            &[],
+                            self.heard_up_to,
+                            false,
+                            &mut self.farm_conn,
+                            &mut self.hb,
+                        );
+                        self.try_reclaim_instrument(into);
+                    }
                 }
                 ControlCommand::Unsubscribe { instrument, con_id, took_it, series, issued, } => {
                     self.heard_up_to = self.heard_up_to.max(issued);
@@ -8476,6 +8513,117 @@ mod tests {
         assert!(
             !hl.farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
             "the answer to a lookup nobody is waiting on opens nothing",
+        );
+    }
+
+    /// A move installed by the surface changes who can withdraw the slot.
+    ///
+    /// The subscription on a slot a caller is moving onto is held up until the
+    /// move is installed, and the callers that arrive hold it under a number of
+    /// their own from then on. Said by a flag the surface clears rather than on
+    /// this queue, a withdrawal already decided against the occupancy before
+    /// them became valid again simply by arriving late, and it took the
+    /// subscription down underneath them.
+    #[test]
+    fn a_move_installed_changes_who_can_withdraw_the_slot() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+        tx.send(ControlCommand::Subscribe {
+            filters: Default::default(),
+            contract: ContractRef {
+                con_id: 756733,
+                symbol: "SPY".into(),
+                exchange: "SMART".into(),
+                sec_type: "STK".into(),
+                currency: "USD".into(),
+                ..Default::default()
+            },
+            mode_9887: 0,
+            regulatory_snapshot: false,
+            reply_tx: None,
+            generic_ticks: Vec::new(),
+            issued: 5,
+        })
+        .expect("the engine is holding the other end");
+        hl.poll_control_commands();
+        let instrument = hl.context.market.instrument_by_con_id(756733)
+            .expect("the contract holds a slot");
+
+        // Callers of another slot are moved onto it and hold it under 9.
+        tx.send(ControlCommand::MoveInstalled { from: instrument + 1, into: instrument, took_it: 9 })
+            .expect("the engine is holding the other end");
+        hl.poll_control_commands();
+
+        // The caller that held it before them cannot take it down.
+        tx.send(ControlCommand::Unsubscribe {
+            instrument, con_id: 0, took_it: 5, series: Vec::new(), issued: 20,
+        })
+        .expect("the engine is holding the other end");
+        hl.poll_control_commands();
+        assert!(
+            hl.farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
+            "the subscription the arriving callers are being served off stands",
+        );
+
+        // And the callers that arrived can.
+        tx.send(ControlCommand::Unsubscribe {
+            instrument, con_id: 0, took_it: 9, series: Vec::new(), issued: 21,
+        })
+        .expect("the engine is holding the other end");
+        hl.poll_control_commands();
+        assert!(
+            !hl.farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
+            "the callers that hold it can withdraw it",
+        );
+    }
+
+    /// A series is not asked for on a subscription its caller never joined.
+    ///
+    /// The caller that asked can be gone by the time the request is read here,
+    /// and the slot given to another contract: asked for anyway, the series was
+    /// served to a subscription nobody had named it on, and recorded against it
+    /// so that a later withdrawal of that series was refused.
+    #[test]
+    fn a_series_is_not_asked_for_on_a_subscription_its_caller_never_joined() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+        tx.send(ControlCommand::Subscribe {
+            filters: Default::default(),
+            contract: ContractRef {
+                con_id: 756733,
+                symbol: "SPY".into(),
+                exchange: "SMART".into(),
+                sec_type: "STK".into(),
+                currency: "USD".into(),
+                ..Default::default()
+            },
+            mode_9887: 0,
+            regulatory_snapshot: false,
+            reply_tx: None,
+            generic_ticks: Vec::new(),
+            issued: 5,
+        })
+        .expect("the engine is holding the other end");
+        hl.poll_control_commands();
+        let instrument = hl.context.market.instrument_by_con_id(756733)
+            .expect("the contract holds a slot");
+
+        // A joiner of the occupancy before this one.
+        tx.send(ControlCommand::AlsoAskForSeries {
+            instrument,
+            con_id: 756733,
+            generic_ticks: vec![236],
+            took_it: 2,
+            issued: 30,
+        })
+        .expect("the engine is holding the other end");
+        hl.poll_control_commands();
+
+        assert!(
+            !hl.farm.asked_generic_ticks.get(&instrument).is_some_and(|a| a.contains(&236)),
+            "nothing is asked for a caller that never joined this subscription",
         );
     }
 

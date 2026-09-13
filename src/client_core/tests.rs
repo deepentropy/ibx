@@ -55,7 +55,7 @@ fn a_stream_is_never_served_off_the_one_shot() {
     core.instrument_to_req.lock().unwrap().insert(instrument, 30);
     core.chargeable_snapshot_reqs.lock().unwrap().insert(31);
     assert!(
-        core.take_or_follow(instrument, 31, &[], 0),
+        core.take_or_follow(instrument, 31, &[], 0, 0),
         "the one-shot watches the slot the stream holds",
     );
     assert!(
@@ -69,7 +69,7 @@ fn a_stream_is_never_served_off_the_one_shot() {
     other.instrument_to_req.lock().unwrap().insert(instrument, 40);
     other.chargeable_snapshot_reqs.lock().unwrap().insert(40);
     assert!(
-        !other.take_or_follow(instrument, 41, &[], 0),
+        !other.take_or_follow(instrument, 41, &[], 0, 0),
         "the stream is sent rather than served off the one-shot",
     );
     assert_eq!(
@@ -222,7 +222,7 @@ fn a_request_watches_the_slot_it_took_from_the_moment_it_takes_it() {
     let core = ClientCore::new();
     let iid: InstrumentId = 4;
 
-    assert!(!core.take_or_follow(iid, 9, &[], 0), "nobody held it, so this one does");
+    assert!(!core.take_or_follow(iid, 9, &[], 0, 0), "nobody held it, so this one does");
     assert_eq!(
         core.watching(9), Some(iid),
         "and it is watching it without anything else being said",
@@ -305,7 +305,7 @@ fn a_slot_given_again_is_not_forgotten_by_the_release_that_freed_it() {
     let iid: InstrumentId = 1;
 
     // The request that takes the slot asked for it under a number of its own.
-    assert!(!core.take_or_follow(iid, 77, &[], 7), "the contract now on it holds it");
+    assert!(!core.take_or_follow(iid, 77, &[], 7, 0), "the contract now on it holds it");
 
     // A release decided before that is not about this occupancy.
     shared.market.note_released_slot(iid, 6);
@@ -341,17 +341,17 @@ fn a_move_says_whether_anything_is_watching_what_it_moved_onto() {
     // onto.
     core.instrument_to_req.lock().unwrap().insert(from, 5);
     core.req_to_instrument.lock().unwrap().insert(5, from);
-    assert_eq!(
-        core.move_watchers(&shared, from, into, 0), None,
-        "the caller that moved is watching the slot it moved onto",
+    assert!(
+        core.move_watchers(&shared, from, into) != 0,
+        "the caller that moved is watching the slot it moved onto, under a number of its own",
     );
     assert_eq!(core.watching(5), Some(into), "and is recorded there");
 
     // And a move whose caller has gone leaves nothing watching.
     core.instrument_to_req.lock().unwrap().insert(3, 9);
-    assert!(
-        core.move_watchers(&shared, 3, 4, 0).is_some(),
-        "nobody arrived, so the subscription held up for them is withdrawn",
+    assert_eq!(
+        core.move_watchers(&shared, 3, 4), 0,
+        "nobody arrived, so the subscription held up for them is nobody's",
     );
 
     // The move is on its way from the moment it is stated until it is
@@ -374,6 +374,30 @@ fn a_move_says_whether_anything_is_watching_what_it_moved_onto() {
         "and arrived once it is installed",
     );
     assert!(!shared.market.a_move_is_pending_from(from), "with the slot it left free");
+}
+
+/// A withdrawal names the contract its caller stated, not whatever the cache
+/// points at that slot with.
+///
+/// The cache holds one entry per contract and a release that has not been read
+/// yet leaves an earlier contract's entry pointing at the slot. Looked up
+/// there, a withdrawal carried a contract its caller never named and the engine
+/// refused it as being about another contract: the subscription could not be
+/// taken down at all.
+#[test]
+fn a_withdrawal_names_the_contract_its_caller_stated() {
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    let iid: InstrumentId = 0;
+
+    // The caller states its contract as it takes the slot.
+    assert!(!core.take_or_follow(iid, 4, &[], 9, 756_733), "it holds the slot");
+    // And an earlier contract's cache entry still points at the same slot.
+    core.con_id_to_instrument.lock().unwrap().insert(265_598, iid);
+
+    let withdrawn = core.unregister_mkt_data(&shared, 4);
+    assert_eq!(withdrawn.con_id, 756_733, "the contract its caller named");
+    assert_eq!(withdrawn.took_it, 9, "and the occupancy it took");
 }
 
 /// A session keeps no figure for a subscription it is not holding.
@@ -3447,7 +3471,7 @@ fn a_caller_moved_onto_another_slot_is_paid_like_a_joiner() {
     let _ = shared.market.drain_subscription_failures();
     core.last_quotes.lock().unwrap().insert(into, [7i64; 16]);
 
-    core.move_watchers(&shared, from, into, 0);
+    core.move_watchers(&shared, from, into);
 
     assert!(
         shared.market.drain_tick_req_params_direct().iter().any(|(at, _)| *at == 7),
@@ -3696,12 +3720,12 @@ fn moved_watchers_report_the_destination_subscriptions_type() {
         ).unwrap();
     }
     assert_eq!(core.check_mdt_needed(20, true), Some(MDT_DELAYED));
-    core.move_watchers(&shared, 2, 1, 0);
+    core.move_watchers(&shared, 2, 1);
     assert_eq!(core.watching(20), Some(1));
     assert_eq!(core.check_mdt_needed(20, true), Some(MDT_REALTIME));
 
     core.set_market_data_type(MDT_DELAYED);
-    core.move_watchers(&shared, 1, 3, 0);
+    core.move_watchers(&shared, 1, 3);
     for req_id in [10, 20] {
         assert_eq!(core.watching(req_id), Some(3));
         assert_eq!(core.check_mdt_needed(req_id, true), Some(MDT_REALTIME), "the feed moves with its slot");
@@ -3721,7 +3745,7 @@ fn moved_watchers_report_the_destination_subscriptions_type() {
 fn a_refused_subscription_does_not_go_on_holding_the_slot_it_was_given() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    assert!(!core.take_or_follow(7, 100, &[], 5), "the first request held the slot");
+    assert!(!core.take_or_follow(7, 100, &[], 5, 0), "the first request held the slot");
 
     // The engine gives the slot back, naming the occupancy that is ending.
     shared.market.note_released_slot(7, 5);
@@ -3729,7 +3753,7 @@ fn a_refused_subscription_does_not_go_on_holding_the_slot_it_was_given() {
 
     assert_eq!(core.watching(100), None, "it is not watching anything now");
     assert!(
-        !core.take_or_follow(7, 200, &[], 6),
+        !core.take_or_follow(7, 200, &[], 6, 0),
         "the contract that took the slot next holds it outright, rather than following a \
          request the venue already refused",
     );

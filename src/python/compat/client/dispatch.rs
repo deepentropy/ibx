@@ -586,33 +586,18 @@ impl EClient {
         // subscription per contract exists on the wire, so the callers given
         // the second slot read the first — otherwise their quotes arrive on a
         // slot nothing is watching.
-        for (from, into, held_under) in shared.market.drain_subscription_moves() {
-            let nobody_arrived = self.core.move_watchers(shared, from, into, held_under);
-            // Said once the move is installed, because the subscription on the
-            // slot moved onto is held up until then.
-            shared.market.note_a_move_is_read(from, into);
-            // And where nobody arrived — the caller this move was for withdrew
-            // before it read the move — the subscription it was held up for is
-            // nobody's. Left, it ran for the rest of the session against an
-            // allowance that is counted, with no request able to withdraw it.
-            if let Some((con_id, issued)) = nobody_arrived
-                && let Some(tx) = self.control_tx.lock().unwrap().clone()
-            {
-                // Sent the way every other command is, not offered once: this
-                // is the only thing that can take that subscription down, and
-                // a queue that happens to be full is ordinary backpressure.
-                // Dropped on a full queue, the venue served a contract nobody
-                // was watching for the rest of the session and its slot never
-                // went back.
-                let _ = Self::send_control(py, &tx, ControlCommand::Unsubscribe {
-                    instrument: into,
-                    con_id,
-                    // Nobody arrived to take it, so no occupancy of this
-                    // client's is being named.
-                    took_it: 0,
-                    series: Vec::new(),
-                    issued,
-                });
+        for (from, into, _) in shared.market.drain_subscription_moves() {
+            // Said on the engine's own queue once the move is installed. See
+            // the Rust surface for why it is a command and not a flag.
+            let took_it = self.core.move_watchers(shared, from, into);
+            if let Some(tx) = self.control_tx.lock().unwrap().clone() {
+                // Sent the way every other command is, not offered once: a
+                // queue that happens to be full is ordinary backpressure, and
+                // dropped, the slot the callers moved onto is held up for the
+                // rest of the session.
+                let _ = Self::send_control(
+                    py, &tx, ControlCommand::MoveInstalled { from, into, took_it },
+                );
             }
         }
         // Everyone watching the contract, not only whoever asked first. A

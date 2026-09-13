@@ -1708,6 +1708,25 @@ mod news_tests {
         );
     }
 
+    /// A request that joins what is already on a slot does not rename it.
+    ///
+    /// The venue's one-shot asked for beside a live stream, or a second caller
+    /// on the same contract, did not begin that subscription. Renaming it left
+    /// the caller that did begin it unable to take its own subscription down:
+    /// the slot, the stream and the allowance stayed held for the session.
+    #[test]
+    fn a_request_that_joins_a_slot_does_not_rename_the_occupancy() {
+        let mut farm = FarmState::new();
+
+        farm.note_subscription_began_under(3, 10);
+        farm.note_subscription_began_under(3, 11);
+        assert_eq!(farm.what_took_it(3), 10, "the one that began it still holds it");
+
+        // Its callers being moved onto it is the one thing that changes hands.
+        farm.note_it_changed_hands(3, 12);
+        assert_eq!(farm.what_took_it(3), 12, "and the callers that arrived hold it now");
+    }
+
     /// The total a running series was read against goes with the series.
     ///
     /// A running series states a cumulative total and what is published is the

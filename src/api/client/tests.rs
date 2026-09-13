@@ -7855,7 +7855,7 @@ fn one_contract_has_one_owner_however_many_ask_at_once() {
             let claimed = Arc::clone(&claimed);
             scope.spawn(move || {
                 barrier.wait();
-                if !core.core.take_or_follow(instrument, req_id, &[], 0) {
+                if !core.core.take_or_follow(instrument, req_id, &[], 0, 0) {
                     claimed.lock().unwrap().push(req_id);
                 }
             });
