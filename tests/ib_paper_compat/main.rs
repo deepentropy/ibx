@@ -2699,7 +2699,7 @@ fn reclaim_and_symbol_search_phase_live() {
     let id1 = subscribe("first subscribe");
     println!("  first subscribe: instrument id {id1}");
     std::thread::sleep(Duration::from_secs(2));
-    control_tx.send(ControlCommand::Unsubscribe { instrument: id1, series: Vec::new(), issued: 0 }).expect("send unsubscribe failed");
+    control_tx.send(ControlCommand::Unsubscribe { instrument: id1, con_id: 0, series: Vec::new(), issued: 0 }).expect("send unsubscribe failed");
     std::thread::sleep(Duration::from_secs(2));
     let id2 = subscribe("re-subscribe");
     println!("  re-subscribe: instrument id {id2}");

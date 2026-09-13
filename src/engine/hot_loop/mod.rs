@@ -1598,21 +1598,25 @@ impl HotLoop {
                         &mut self.hb,
                     );
                 }
-                ControlCommand::StopAskingForSeries { instrument, generic_ticks, issued, } => {
+                ControlCommand::StopAskingForSeries {
+                    instrument, con_id, generic_ticks, issued,
+                } => {
                     self.heard_up_to = self.heard_up_to.max(issued);
                     self.farm.stop_asking_for_series(
                         instrument,
+                        con_id,
                         &generic_ticks,
                         issued,
                         &mut self.farm_conn,
                         &mut self.hb,
                     );
                 }
-                ControlCommand::Unsubscribe { instrument, series, issued, } => {
+                ControlCommand::Unsubscribe { instrument, con_id, series, issued, } => {
                     self.heard_up_to = self.heard_up_to.max(issued);
                     let moving_in = self.shared.market.a_move_is_on_its_way_into(instrument);
                     self.farm.send_mktdata_unsubscribe(
                         instrument,
+                        con_id,
                         &series,
                         issued,
                         moving_in,
@@ -2342,6 +2346,9 @@ impl HotLoop {
                         // whatever it was asked for under.
                         self.farm.send_mktdata_unsubscribe(
                             instrument,
+                            // The session is closing, so every subscription
+                            // goes whatever contract it went out under.
+                            0,
                             &[],
                             u64::MAX,
                             false,
@@ -4680,7 +4687,7 @@ mod tests {
             assert!(hl.is_running(), "existing subscriptions keep running");
 
             if !sec_type.is_empty() {
-                tx.send(ControlCommand::Unsubscribe { instrument: first, series: Vec::new(), issued: 0 }).unwrap();
+                tx.send(ControlCommand::Unsubscribe { instrument: first, con_id: 0, series: Vec::new(), issued: 0 }).unwrap();
                 hl.poll_once();
                 subscribe(&mut hl, past).expect("a withdrawn subscription gives its line back");
             }
@@ -7870,7 +7877,7 @@ mod tests {
             running: Default::default(),
         });
 
-        tx.send(ControlCommand::Unsubscribe { instrument: id, series: Vec::new(), issued: 0 }).unwrap();
+        tx.send(ControlCommand::Unsubscribe { instrument: id, con_id: 0, series: Vec::new(), issued: 0 }).unwrap();
         hl.poll_once();
 
         assert_eq!(
@@ -7902,7 +7909,7 @@ mod tests {
         }));
         hl.farm.news_subscriptions.push((id, 55, "BRFG".to_string(), 756733, "STK".to_string()));
 
-        tx.send(ControlCommand::Unsubscribe { instrument: id, series: Vec::new(), issued: 0 }).unwrap();
+        tx.send(ControlCommand::Unsubscribe { instrument: id, con_id: 0, series: Vec::new(), issued: 0 }).unwrap();
         hl.poll_once();
 
         assert_eq!(

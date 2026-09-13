@@ -180,12 +180,14 @@ impl EClient {
         if let Some(instrument) = withdrawn.subscription {
             self.send(ControlCommand::Unsubscribe {
                 instrument,
+                con_id: withdrawn.con_id,
                 series: series.map(|(_, ticks)| ticks).unwrap_or_default(),
                 issued: withdrawn.decided_at,
             })?;
         } else if let Some((instrument, generic_ticks)) = series {
             self.send(ControlCommand::StopAskingForSeries {
                 instrument,
+                con_id: withdrawn.con_id,
                 generic_ticks,
                 issued: withdrawn.decided_at,
             })?;

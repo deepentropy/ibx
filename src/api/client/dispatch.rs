@@ -803,9 +803,10 @@ impl EClient {
             // before it read the move — the subscription it was held up for is
             // nobody's. Left, it ran for the rest of the session against an
             // allowance that is counted, with no request able to withdraw it.
-            if let Some(issued) = nobody_arrived {
+            if let Some((con_id, issued)) = nobody_arrived {
                 let _ = self.send(ControlCommand::Unsubscribe {
                     instrument: into,
+                    con_id,
                     series: Vec::new(),
                     issued,
                 });

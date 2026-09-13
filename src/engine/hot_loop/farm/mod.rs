@@ -2565,12 +2565,27 @@ impl FarmState {
     pub(crate) fn send_mktdata_unsubscribe(
         &mut self,
         instrument: InstrumentId,
+        con_id: i64,
         series: &[u32],
         issued: u64,
         moving_in: bool,
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
+        // Not a subscription this withdrawal is about. A slot is reusable, so
+        // its number says nothing about which occupancy ended: the caller names
+        // the contract it believed was there and the subscription says which
+        // contract it went out under. Where they differ, the slot has been
+        // given to another contract since the withdrawal was decided, and
+        // sending it would take down a subscription that caller never asked
+        // for.
+        if self.another_contract_holds_it(instrument, con_id) {
+            log::debug!(
+                "a withdrawal of slot {instrument} named contract {con_id}, which is not the \
+                 contract the subscription now on it went out under; the subscription stands",
+            );
+            return;
+        }
         // A slot whose callers were sent elsewhere holds nothing, and what they
         // asked for beyond the quote went with them: the withdrawal of those
         // series belongs to the slot they were sent to. Applied here, it found
@@ -2578,7 +2593,7 @@ impl FarmState {
         if !self.instrument_md_reqs.iter().any(|(id, _)| *id == instrument)
             && let Some(&into) = self.moved_to.get(&instrument)
         {
-            self.stop_asking_for_series(into, series, issued, farm_conn, hb);
+            self.stop_asking_for_series(into, con_id, series, issued, farm_conn, hb);
             return;
         }
         // Nor while a caller is on its way onto this slot and has not read it
@@ -2590,7 +2605,7 @@ impl FarmState {
                 "a withdrawal of slot {instrument} was decided while a caller was on its \
                  way onto it; the subscription stands",
             );
-            self.stop_asking_for_series(instrument, series, issued, farm_conn, hb);
+            self.stop_asking_for_series(instrument, con_id, series, issued, farm_conn, hb);
             return;
         }
         // Not a subscription this withdrawal is about. The client decides to
@@ -2607,7 +2622,7 @@ impl FarmState {
             // What that caller asked for beyond the quote is still its own to
             // give up, and each series answers for itself: one another caller
             // has since asked for stays, and one nobody else named goes.
-            self.stop_asking_for_series(instrument, series, issued, farm_conn, hb);
+            self.stop_asking_for_series(instrument, con_id, series, issued, farm_conn, hb);
             return;
         }
         self.subscription_asked_on.remove(&instrument);
@@ -3143,6 +3158,23 @@ impl FarmState {
         }
     }
 
+    /// Whether the subscription on a slot went out under a different contract
+    /// from the one a caller named.
+    ///
+    /// The contract is the identity of an occupancy and the slot is not: the
+    /// slot goes to the next contract that needs one. A caller that named no
+    /// contract — every contract the venue has not identified yet — states
+    /// zero, and then there is nothing to compare and the numbers decide.
+    fn another_contract_holds_it(&self, instrument: InstrumentId, con_id: i64) -> bool {
+        if con_id == 0 {
+            return false;
+        }
+        self.instrument_md_reqs
+            .iter()
+            .find(|(id, _)| *id == instrument)
+            .is_some_and(|(_, record)| record.con_id != con_id)
+    }
+
     /// Whether the subscription on a slot was asked for after a decision was
     /// taken.
     fn began_after(&self, instrument: InstrumentId, issued: u64) -> bool {
@@ -3165,11 +3197,17 @@ impl FarmState {
     pub(crate) fn stop_asking_for_series(
         &mut self,
         instrument: InstrumentId,
+        con_id: i64,
         unwanted: &[u32],
         issued: u64,
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
+        // Nor are these that subscription's series. See
+        // `send_mktdata_unsubscribe`.
+        if self.another_contract_holds_it(instrument, con_id) {
+            return;
+        }
         // The headlines are asked for under a request of their own and
         // withdrawn under it, so they are not this withdrawal's to take. Nor
         // are the entries every subscription opens for itself — the trading

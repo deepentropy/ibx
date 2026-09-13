@@ -208,6 +208,16 @@ pub enum ControlCommand {
     StopAskingForSeries {
         /// The engine's own slot for the contract.
         instrument: InstrumentId,
+        /// The contract the caller believed that slot held.
+        ///
+        /// A slot is reusable, so its number alone cannot say which occupancy a
+        /// withdrawal was about: the slot goes to the next contract that needs
+        /// one, and a withdrawal decided against the contract that left took
+        /// down the subscription of the one that arrived. The engine keeps the
+        /// contract each subscription went out under and compares it here.
+        /// Zero where the caller named no contract of its own, which is every
+        /// contract the venue has not identified yet.
+        con_id: i64,
         /// The series nobody watching that contract asks for any more, by the
         /// venue's number for each.
         generic_ticks: Vec<u32>,
@@ -227,6 +237,16 @@ pub enum ControlCommand {
     Unsubscribe {
         /// The engine's own slot for the contract.
         instrument: InstrumentId,
+        /// The contract the caller believed that slot held.
+        ///
+        /// A slot is reusable, so its number alone cannot say which occupancy a
+        /// withdrawal was about: the slot goes to the next contract that needs
+        /// one, and a withdrawal decided against the contract that left took
+        /// down the subscription of the one that arrived. The engine keeps the
+        /// contract each subscription went out under and compares it here.
+        /// Zero where the caller named no contract of its own, which is every
+        /// contract the venue has not identified yet.
+        con_id: i64,
         /// The series this caller asked for and nobody else watching the
         /// contract did.
         ///

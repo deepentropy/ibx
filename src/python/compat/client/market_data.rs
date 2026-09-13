@@ -580,6 +580,7 @@ impl EClient {
                 py, tx,
                 ControlCommand::Unsubscribe {
                     instrument,
+                    con_id: withdrawn.con_id,
                     series: series.map(|(_, ticks)| ticks).unwrap_or_default(),
                     issued: withdrawn.decided_at,
                 },
@@ -590,7 +591,10 @@ impl EClient {
             && let Err(why) = Self::send_control(
                 py, tx,
                 ControlCommand::StopAskingForSeries {
-                    instrument, generic_ticks, issued: withdrawn.decided_at,
+                    instrument,
+                    con_id: withdrawn.con_id,
+                    generic_ticks,
+                    issued: withdrawn.decided_at,
                 },
             )
         {

@@ -803,6 +803,13 @@ pub struct WhatAWithdrawalLeaves {
     /// one this was decided against — and then these are the only part of the
     /// withdrawal that is still about what the caller asked for.
     pub series: Option<(InstrumentId, Vec<u32>)>,
+    /// The contract this client believed that slot held.
+    ///
+    /// What makes the withdrawal about one occupancy of a reusable slot rather
+    /// than about the slot: the engine keeps the contract each subscription
+    /// went out under and compares them. Zero where the venue has not
+    /// identified the contract yet, and then the number below is all there is.
+    pub con_id: i64,
     /// Where this decision falls in the order of everything this client has
     /// asked for.
     ///
@@ -1813,8 +1820,8 @@ impl ClientCore {
     /// callers given the second slot have to read the first, or their quotes
     /// arrive on a slot nothing is watching.
     ///
-    /// Answers with the number to withdraw the destination under where nothing
-    /// is watching it once the move is read. Nothing may be: the subscription
+    /// Answers with the contract on the destination and the number to withdraw
+    /// it under, where nothing is watching it once the move is read. Nothing may be: the subscription
     /// there is held up while a caller is on its way onto it, and that caller
     /// can withdraw before it arrives — so this is what says the subscription
     /// is nobody's now.
@@ -1826,7 +1833,7 @@ impl ClientCore {
     /// subscription was taken down under it.
     pub(crate) fn move_watchers(
         &self, shared: &SharedState, from: InstrumentId, into: InstrumentId,
-    ) -> Option<u64> {
+    ) -> Option<(i64, u64)> {
         {
             let mut modes = self.mdt_by_instrument.lock().unwrap();
             if let Some(mode) = modes.remove(&from) {
@@ -1887,13 +1894,14 @@ impl ClientCore {
         // Both under one acquisition: a caller that asks for the contract after
         // this answer is numbered later than the withdrawal the answer calls
         // for, which is what keeps its subscription standing.
+        let on_the_slot = self.cached_con_id_of(into);
         let own = self.ownership();
         let watched = own.holders.contains_key(&into)
             || own.following.get(&into).is_some_and(|watchers| !watchers.is_empty());
         if watched {
             return None;
         }
-        Some(self.in_order())
+        Some((on_the_slot, self.in_order()))
     }
 
     /// What a request that joins a subscription somebody else opened is owed.
@@ -2507,12 +2515,14 @@ impl ClientCore {
         if let Some(subscription) = withdrawn.subscription {
             let _ = control_tx.send(ControlCommand::Unsubscribe {
                 instrument: subscription,
+                con_id: withdrawn.con_id,
                 series: series.map(|(_, ticks)| ticks).unwrap_or_default(),
                 issued: withdrawn.decided_at,
             });
         } else if let Some((slot, generic_ticks)) = series {
             let _ = control_tx.send(ControlCommand::StopAskingForSeries {
                 instrument: slot,
+                con_id: withdrawn.con_id,
                 generic_ticks,
                 issued: withdrawn.decided_at,
             });
@@ -2708,7 +2718,8 @@ impl ClientCore {
             let Some(instrument) = own.by_req.remove(&req_id) else {
                 own.series.remove(&req_id);
                 return WhatAWithdrawalLeaves {
-                    subscription: None, headlines: None, series: None, decided_at,
+                    subscription: None, headlines: None, series: None,
+                    con_id: 0, decided_at,
                 };
             };
             // A caller that was watching someone else's subscription stops
@@ -2762,11 +2773,15 @@ impl ClientCore {
         };
         self.mdt_sent.lock().unwrap().remove(&req_id);
         let series = (!series_gone.is_empty()).then_some((instrument, series_gone));
+        // Read before the cache is forgotten below, because that is where it
+        // comes from.
+        let con_id = self.cached_con_id_of(instrument);
         if !take_it_down {
             return WhatAWithdrawalLeaves {
                 subscription: None,
                 headlines: self.release_news(shared, req_id),
                 series,
+                con_id,
                 decided_at,
             };
         }
@@ -2780,8 +2795,21 @@ impl ClientCore {
             subscription: Some(instrument),
             headlines: stop_news,
             series,
+            con_id,
             decided_at,
         }
+    }
+
+    /// Which contract this client believes holds a slot, as far as its own
+    /// cache says. Zero where the venue has not named one.
+    fn cached_con_id_of(&self, instrument: InstrumentId) -> i64 {
+        self.con_id_to_instrument
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, held)| **held == instrument)
+            .map(|(con_id, _)| *con_id)
+            .unwrap_or(0)
     }
 
     /// Drop the client-side conId cache entries for an instrument id. The

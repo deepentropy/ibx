@@ -218,7 +218,7 @@ pub(super) fn phase_subscribe_unsubscribe(conns: Conns) -> Conns {
     }
 
     control_tx
-        .send(ControlCommand::Unsubscribe { instrument, series: Vec::new(), issued: 0 })
+        .send(ControlCommand::Unsubscribe { instrument, con_id: 0, series: Vec::new(), issued: 0 })
         .unwrap();
     // Ticks already in flight when the withdrawal is sent are absorbed rather
     // than counted.
