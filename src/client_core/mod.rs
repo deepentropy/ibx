@@ -4678,10 +4678,18 @@ impl ClientCore {
             // this; with a multiplier on the row and no value stated for it,
             // there is nothing here that can be used, and the arm below holds
             // what was last reported.
+            //
+            // Nothing held overnight is the exception, and it is not a
+            // rounding one: a position opened today was worth nothing at
+            // midnight whatever it is worth a unit of, and no multiplier can
+            // change that. Refused along with the rest, every intraday option
+            // and future reported no day's profit at all — and reported it for
+            // as long as the session ran, because what the arm below holds is
+            // then that nought.
             let midnight_value = stated_midnight.or_else(|| {
-                (!position_is_multiplied(&pi))
-                    .then(|| qty_midnight.map(|q| q * prev_close as f64 / PRICE_SCALE_F))
-                    .flatten()
+                qty_midnight
+                    .filter(|&q| q == 0.0 || !position_is_multiplied(&pi))
+                    .map(|q| q * prev_close as f64 / PRICE_SCALE_F)
             });
             // A position with no seed row and no cost is in the same case as an
             // unknown overnight size: the opening cash synthesized above is

@@ -2962,6 +2962,13 @@ impl HotLoop {
         }
         self.shared.set_connection_lost();
         emit(&self.event_tx, Event::Disconnected);
+        // Said, and recorded as said. The attempt this halt gives up on is
+        // left to land on its own thread rather than waited out here, so its
+        // poller runs again afterwards — and an answer that is not final
+        // reaches the branch that announces a loss once. Without this the one
+        // loss was announced twice, which is the thing this whole notice is
+        // written to do exactly once.
+        self.loss_announced = true;
         // And nothing is left to take an answer from. A worker already dialling
         // still finishes, and its answer would otherwise be installed on the
         // next lap — a session coming back after the caller had been told it
@@ -6304,6 +6311,39 @@ mod tests {
         hl.maybe_spawn_ccp_reconnect();
         assert!(shared.reference.session_over().is_none(), "the session stands");
         assert!(hl.ccp_next_attempt_at.is_some(), "and the trading connection gets its attempt");
+    }
+
+    /// One loss is announced once, including when the halt announces it.
+    ///
+    /// The attempt a halt gives up on is left to land on its own thread rather
+    /// than waited out on the loop's, so the poller that reads it runs again
+    /// afterwards — and an answer that is not final reaches the branch that
+    /// announces a loss. The halt has already announced it; unrecorded, the
+    /// one loss went out twice, and a caller counting them saw two.
+    #[test]
+    fn a_loss_the_halt_announced_is_not_announced_again() {
+        let shared = Arc::new(SharedState::new());
+        let (events, heard) = std::sync::mpsc::sync_channel(8);
+        let mut hl = HotLoop::new(
+            shared, Some(EventSink::new(events, Default::default())), None,
+        );
+        hl.ccp.disconnected = true;
+        // Two attempts already spent, which is what puts the branch below
+        // within reach of the third.
+        hl.ccp_reconnect_attempt = 3;
+
+        let (worker, rx) = std::sync::mpsc::sync_channel(1);
+        hl.pending_ccp_reconnect = Some(rx);
+        hl.halt_recovery(retry::DisconnectReason::AuthorizationFailed);
+
+        // The attempt lands, having failed for a reason that is not final.
+        worker.send(Err(std::io::Error::other("the connection broke"))).unwrap();
+        hl.poll_ccp_reconnect();
+
+        let said = heard.try_iter()
+            .filter(|e| matches!(e, Event::Disconnected))
+            .count();
+        assert_eq!(said, 1, "one loss, said once");
     }
 
     /// The trading connection's return is announced whether or not a quote

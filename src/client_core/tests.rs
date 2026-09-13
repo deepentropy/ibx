@@ -1310,6 +1310,59 @@ fn poll_pnl_single_overnight_position_with_seed() {
     assert!((u.realized_pnl - 12.34).abs() < 1e-6);
 }
 
+/// A multiplied contract opened today has a day's profit, and it is the whole
+/// of what it has made.
+///
+/// Nothing was held overnight, so the overnight leg is worth nothing — which
+/// is exact whatever a contract is worth a unit of, and the one case the
+/// multiplier cannot spoil. Refused along with the rest, every intraday option
+/// and future reported no day's profit at all, and went on reporting it for
+/// the rest of the session because the arm that holds the last figure then
+/// holds that nought.
+#[test]
+fn a_multiplied_position_opened_today_reports_the_day_it_has_made() {
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    shared.portfolio.account_download_is_settled();
+    core.subscribe_pnl_single(32, 4002);
+
+    // Ten option contracts bought today at 7.00 a unit — 7,000 paid — and
+    // marked by the venue at 7,350 for the position.
+    shared.portfolio.set_position_info(PositionInfo {
+        con_id: 4002,
+        position: 10.0,
+        avg_cost: (700.0 * PRICE_SCALE_F) as i64,
+        symbol: "SPY   260320C00600000".into(),
+        sec_type: "OPT".into(),
+        currency: "USD".into(),
+        multiplier: "100".into(),
+        ..Default::default()
+    });
+    shared.portfolio.set_position_marks(
+        4002,
+        Some((7.35 * PRICE_SCALE_F) as i64),
+        Some((7350.0 * PRICE_SCALE_F) as i64),
+        None,
+        None,
+    );
+    // No midnight row at all, which is what the venue sends for a position
+    // that did not exist at midnight.
+    core.con_id_to_instrument.lock().unwrap().insert(4002, 0);
+    shared.market.push_quote(0, &Quote {
+        last: (7.35 * PRICE_SCALE_F) as i64,
+        close: (7.30 * PRICE_SCALE_F) as i64,
+        ..Default::default()
+    });
+
+    let updates = core.poll_pnl_single(&shared);
+    let update = updates.first().expect("callback must fire");
+    assert!(
+        (update.daily_pnl - 350.0).abs() < 1e-6,
+        "worth 7,350 and bought for 7,000 today: {}",
+        update.daily_pnl,
+    );
+}
+
 /// A multiplied contract's overnight leg is valued the way today's leg is, or
 /// not at all.
 ///
