@@ -697,6 +697,20 @@ pub(crate) struct FarmState {
     /// subscription's venue because both were numbered 2.
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
+    /// Requests withdrawn before the venue had acknowledged them, once per
+    /// acknowledgement still owed.
+    ///
+    /// A caller's numbers are its own and it may ask again under one it has
+    /// just withdrawn. The withdrawal forgets what the first request was
+    /// waiting on, so the first request's acknowledgement — still in flight —
+    /// was matched to the second request's wait and bound the second
+    /// subscription to a number the venue is no longer sending on. Everything
+    /// the venue then sent for it arrived under a number nothing held and was
+    /// dropped, and the second subscription was silent with nothing said.
+    ///
+    /// One entry per acknowledgement owed, so the answer that is owed is the
+    /// one consumed and a later request's own answer is left alone.
+    pub(crate) md_withdrawn_unacknowledged: Vec<u32>,
     pub(crate) instrument_md_reqs: Vec<(InstrumentId, MdReqRecord)>,
     /// Venue numbers whose quotes this session has no contract for, each said
     /// once. A quote naming one is dropped, and dropped silently there is no
@@ -1371,6 +1385,7 @@ impl FarmState {
             replay_not_before: None,
             next_md_req_id: 1,
             md_req_to_instrument: Vec::new(),
+            md_withdrawn_unacknowledged: Vec::new(),
             instrument_md_reqs: Vec::new(),
             quotes_for_no_one: std::collections::HashSet::new(),
             depth_subs: Vec::new(),
@@ -1920,6 +1935,18 @@ impl FarmState {
         // The request is the whole of it. An answer to a request nothing is
         // waiting on falls out below, where the wait is looked up and there is
         // none.
+        // An answer owed to a request that is over is that request's, not the
+        // one asking under the same number now. Taken here, one for one, so a
+        // second withdrawal owes a second answer and no more.
+        if let Some(at) = self.md_withdrawn_unacknowledged.iter().position(|id| *id == req_id) {
+            self.md_withdrawn_unacknowledged.remove(at);
+            log::info!(
+                "venue number {server_tag} answers request {req_id}, which was withdrawn \
+                 before it was answered; it is not taken as the answer to the request \
+                 asking under that number now",
+            );
+            return;
+        }
         let instrument = match self.md_req_to_instrument.iter()
             .position(|(id, _)| *id == req_id)
         {
@@ -2658,6 +2685,15 @@ impl FarmState {
         // server_tag AND its minTick onto whatever contract now holds the
         // slot — prices for the new contract then scale by the old one's tick
         // size, which reads as plausible rather than broken.
+        // An acknowledgement already on its way is still owed, and the caller
+        // may ask again under the same number before it lands. Noted here so
+        // that answer is matched to the request that is over rather than to
+        // the one that replaced it.
+        for (req_id, _) in self.md_req_to_instrument.iter() {
+            if reqs.contains(req_id) {
+                self.md_withdrawn_unacknowledged.push(*req_id);
+            }
+        }
         self.md_req_to_instrument.retain(|(req_id, _)| !reqs.contains(req_id));
         // And what was asked for under those requests, for the same reason: a
         // number the venue hands to the next subscription would otherwise
@@ -3374,7 +3410,13 @@ impl FarmState {
         // And everything filed under those numbers, the way the withdrawal of
         // a whole subscription forgets them: a number the venue hands to the
         // next subscription would otherwise still be read as the series this
-        // one asked for.
+        // one asked for — and an answer still owed to one of them is owed, as
+        // it is there.
+        for (req_id, _) in self.md_req_to_instrument.iter() {
+            if reqs.contains(req_id) {
+                self.md_withdrawn_unacknowledged.push(*req_id);
+            }
+        }
         self.md_req_to_instrument.retain(|(req_id, _)| !reqs.contains(req_id));
         self.generic_tick_reqs.retain(|(req_id, _)| !reqs.contains(req_id));
         self.generic_tick_tags
@@ -3836,6 +3878,9 @@ impl FarmState {
         }
         self.replay_not_before = None;
         self.md_req_to_instrument.clear();
+        // A connection that has gone owes no answers: what was in flight went
+        // with it, and the numbers start again on the next one.
+        self.md_withdrawn_unacknowledged.clear();
         self.instrument_md_reqs.clear();
         // Clear depth wire-state (server_tags become invalid after disconnect).
         // depth_resub_info is preserved for resubscription on reconnect.
@@ -3930,6 +3975,9 @@ impl FarmState {
         // reconnect runs.
         let active = self.take_resub_targets(&context.market);
         self.md_req_to_instrument.clear();
+        // A connection that has gone owes no answers: what was in flight went
+        // with it, and the numbers start again on the next one.
+        self.md_withdrawn_unacknowledged.clear();
         self.instrument_md_reqs.clear();
         // The headline subscriptions belonged to the dead session and are not
         // part of what the venue pushes back. Left alone they went quiet for
