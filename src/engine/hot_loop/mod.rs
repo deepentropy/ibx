@@ -595,7 +595,11 @@ impl HotLoop {
                 } else {
                     match self.context.market.instrument_by_con_id(con_id) {
                         Some(owner) if owner != p.instrument => {
-                            self.shared.market.push_subscription_move(p.instrument, owner);
+                            // With the occupancy the slot they are moving
+                            // onto is held under, so the caller that arrives
+                            // holds what the engine holds and can withdraw it.
+                            let held_under = self.farm.what_took_it(owner);
+                            self.shared.market.push_subscription_move(p.instrument, owner, held_under);
                             carried = self.farm
                                 .asked_generic_ticks
                                 .remove(&p.instrument)
@@ -877,7 +881,13 @@ impl HotLoop {
             // goes to the next contract that needs one: an order placed on the
             // cached number was recorded against the new occupant, and its
             // fill moved that contract's position.
-            self.shared.market.note_released_slot(instrument, self.heard_up_to);
+            // Named by the occupancy that is ending, not by how far this engine
+            // had read: a slot goes to the next contract that needs one, and
+            // two requests numbered before they are sent can reach here in
+            // either order, so a watermark can be higher than the occupancy
+            // that followed it.
+            let ending = self.farm.what_took_it(instrument);
+            self.shared.market.note_released_slot(instrument, ending);
             // Zero the shared-side quote so a reused slot cannot serve the
             // previous contract's prices before its first tick.
             self.shared.market.push_quote(instrument, &crate::types::Quote::default());
@@ -1628,8 +1638,18 @@ impl HotLoop {
                     // and opens the stream anyway: nothing is left that can
                     // withdraw it, so the venue serves it and holds its slot
                     // for the rest of the session.
+                    // The lookup this caller is waiting on and no other. A
+                    // second caller on the same description has a lookup of its
+                    // own on the same slot, and retiring that one left it told
+                    // it owned a subscription the venue would never be asked
+                    // for.
                     let waiting_on_a_name = |p: &crate::engine::hot_loop::ccp::PendingSubscribe| {
-                        p.instrument == instrument && (con_id == 0 || p.con_id == con_id || p.con_id == 0)
+                        p.instrument == instrument
+                            && if took_it != 0 {
+                                p.issued == took_it
+                            } else {
+                                con_id == 0 || p.con_id == con_id || p.con_id == 0
+                            }
                     };
                     self.ccp.pending_md_subscribe.retain(|(_, p, _)| !waiting_on_a_name(p));
                     self.ccp.resolved_md_subscribe.retain(|(_, p)| !waiting_on_a_name(p));
@@ -5145,7 +5165,7 @@ mod tests {
 
         let moves = shared.market.drain_subscription_moves();
         assert!(
-            moves.iter().any(|(from, to)| *from == followed && *to == holds_it),
+            moves.iter().any(|(from, to, _)| *from == followed && *to == holds_it),
             "the watchers are sent to the slot the contract lives in: {moves:?}",
         );
         assert!(
@@ -5172,7 +5192,7 @@ mod tests {
         let mut hl = HotLoop::new(shared.clone(), None, None);
         let destination = hl.context.register_instrument(756733);
         let source = hl.context.register_instrument(0);
-        shared.market.push_subscription_move(source, destination);
+        shared.market.push_subscription_move(source, destination, 0);
         hl.context.insert_order(crate::types::Order::new(
             7, source, crate::types::Side::Buy, crate::types::QTY_SCALE,
             PRICE_SCALE, b'2', b'0', 0,
@@ -5183,7 +5203,7 @@ mod tests {
 
         assert_eq!(hl.context.market.con_id(source), Some(0), "the source still holds its slot");
         assert_eq!(hl.slots_awaiting_their_word, vec![source], "queued once for release after the move");
-        assert_eq!(shared.market.drain_subscription_moves(), vec![(source, destination)]);
+        assert_eq!(shared.market.drain_subscription_moves(), vec![(source, destination, 0)]);
         shared.market.note_a_move_is_read(source, destination);
         hl.give_back_slots_their_word_has_left();
         assert!(hl.slots_awaiting_their_word.is_empty());
@@ -7233,7 +7253,7 @@ mod tests {
 
         assert_eq!(
             shared.market.drain_subscription_moves(),
-            vec![(by_name, by_id)],
+            vec![(by_name, by_id, 0)],
             "the caller given the second slot is told to read the first",
         );
     }

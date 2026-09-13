@@ -146,7 +146,7 @@ pub struct MarketDataState {
     tick_req_params_direct: Mutex<Vec<(i64, f64)>>,
     /// Lookups that named a contract another slot already holds: the slot the
     /// caller was given, and the one the contract lives in.
-    subscription_moves: Mutex<Vec<(crate::types::InstrumentId, crate::types::InstrumentId)>>,
+    subscription_moves: Mutex<Vec<(crate::types::InstrumentId, crate::types::InstrumentId, u64)>>,
     /// What the venue has said went wrong, in its own words.
     venue_errors: Mutex<Vec<String>>,
     series_ticks: Mutex<std::collections::HashMap<crate::types::InstrumentId, Vec<SeriesTick>>>,
@@ -243,10 +243,10 @@ impl MarketDataState {
         let mut moves = self.subscription_moves.lock().unwrap();
         let dropped: Vec<(crate::types::InstrumentId, crate::types::InstrumentId)> = moves
             .iter()
-            .filter(|(from, to)| *from == instrument || *to == instrument)
-            .copied()
+            .filter(|(from, to, _)| *from == instrument || *to == instrument)
+            .map(|(from, to, _)| (*from, *to))
             .collect();
-        moves.retain(|(from, to)| *from != instrument && *to != instrument);
+        moves.retain(|(from, to, _)| *from != instrument && *to != instrument);
         drop(moves);
         // A move nobody will read is no longer on its way: counted still, it
         // held the subscription on the slot it named up for the rest of the
@@ -530,7 +530,7 @@ impl MarketDataState {
     /// already held by another. Read the way a refusal is.
     pub fn drain_subscription_moves(
         &self,
-    ) -> Vec<(crate::types::InstrumentId, crate::types::InstrumentId)> {
+    ) -> Vec<(crate::types::InstrumentId, crate::types::InstrumentId, u64)> {
         self.subscription_moves.lock().unwrap().drain(..).collect()
     }
 
@@ -539,6 +539,7 @@ impl MarketDataState {
         &self,
         from: crate::types::InstrumentId,
         into: crate::types::InstrumentId,
+        took_it: u64,
     ) {
         // Both under one acquisition, the count first. Published apart, a
         // surface could take the move off the queue and say it had been read
@@ -548,7 +549,7 @@ impl MarketDataState {
         let mut moves = self.subscription_moves.lock().unwrap();
         *self.moves_unread.lock().unwrap().entry(into).or_insert(0) += 1;
         *self.moves_unread_from.lock().unwrap().entry(from).or_insert(0) += 1;
-        moves.push((from, into));
+        moves.push((from, into, took_it));
     }
 
     /// Whether a caller is on its way onto this slot and has not arrived yet.

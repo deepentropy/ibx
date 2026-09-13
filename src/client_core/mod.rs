@@ -1838,7 +1838,7 @@ impl ClientCore {
     /// withdrawal still read as the later of the two, so its brand-new
     /// subscription was taken down under it.
     pub(crate) fn move_watchers(
-        &self, shared: &SharedState, from: InstrumentId, into: InstrumentId,
+        &self, shared: &SharedState, from: InstrumentId, into: InstrumentId, held_under: u64,
     ) -> Option<(i64, u64)> {
         {
             let mut modes = self.mdt_by_instrument.lock().unwrap();
@@ -1853,7 +1853,11 @@ impl ClientCore {
         // put back on the new slot, live again under a number its caller had
         // given up.
         let mut moved: Vec<i64> = Vec::new();
-        let taken_on = self.in_order();
+        // The occupancy the slot they are moving onto is already held under,
+        // not a number of this client's own: a caller that arrives holding a
+        // number the engine never heard of could never withdraw what it is
+        // being served off.
+        let taken_on = if held_under != 0 { held_under } else { self.in_order() };
         {
             let mut own = self.ownership();
             let held = own.holders.remove(&from);
@@ -1866,6 +1870,7 @@ impl ClientCore {
                     continue;
                 }
                 own.take_or_follow(into, req_id, &[], taken_on);
+                own.taken_on.insert(into, taken_on);
                 own.by_req.insert(req_id, into);
                 // Under the same acquisition that moves it: a number stamped
                 // after the maps were released was stamped for a request that
@@ -1967,8 +1972,15 @@ impl ClientCore {
         // One acquisition for the lot. See `ownership`.
         let forgotten: Vec<i64> = {
             let mut own = self.ownership();
-            // Not a slot this client has since been given again.
-            if own.taken_on.get(&instrument).is_some_and(|taken| *taken > released_at) {
+            // Not a slot this client has since been given again. The release
+            // names the occupancy that ended, so what is compared is which
+            // occupancy this is and not which of two decisions came first.
+            // Where the release names none — a slot given back for a reason
+            // that never reached a subscription — there is nothing to hold on
+            // to and the records go.
+            if released_at != 0
+                && own.taken_on.get(&instrument).is_some_and(|taken| *taken != released_at)
+            {
                 return false;
             }
             own.taken_on.remove(&instrument);
@@ -2672,7 +2684,11 @@ impl ClientCore {
     /// began under and reads it again on a withdrawal: a withdrawal decided
     /// before that subscription began is not about it.
     pub(crate) fn in_order(&self) -> u64 {
-        self.epochs.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        // From one, because zero is what a command says when it names no
+        // occupancy at all — a withdrawal carried through a move, or a session
+        // closing. Counted from zero, the first subscription of every session
+        // was the one occupancy that could not be named.
+        self.epochs.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
     }
 
     /// Which subscription a number is holding, as a figure that changes every

@@ -586,8 +586,8 @@ impl EClient {
         // subscription per contract exists on the wire, so the callers given
         // the second slot read the first — otherwise their quotes arrive on a
         // slot nothing is watching.
-        for (from, into) in shared.market.drain_subscription_moves() {
-            let nobody_arrived = self.core.move_watchers(shared, from, into);
+        for (from, into, held_under) in shared.market.drain_subscription_moves() {
+            let nobody_arrived = self.core.move_watchers(shared, from, into, held_under);
             // Said once the move is installed, because the subscription on the
             // slot moved onto is held up until then.
             shared.market.note_a_move_is_read(from, into);

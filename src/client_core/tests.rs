@@ -315,9 +315,8 @@ fn a_slot_given_again_is_not_forgotten_by_the_release_that_freed_it() {
         "the record of the contract now on the slot stands",
     );
 
-    // And one of this very occupancy is: the engine gave the slot back under
-    // the number the request asked for it with, which is the same number the
-    // record here was written under.
+    // And the release of this very occupancy is: the engine names the
+    // occupancy that ended, which is the number this record was written under.
     shared.market.note_released_slot(iid, 7);
     core.forget_released_slots(&shared);
     assert_eq!(core.watching(77), None, "the slot it named has gone back");
@@ -343,7 +342,7 @@ fn a_move_says_whether_anything_is_watching_what_it_moved_onto() {
     core.instrument_to_req.lock().unwrap().insert(from, 5);
     core.req_to_instrument.lock().unwrap().insert(5, from);
     assert_eq!(
-        core.move_watchers(&shared, from, into), None,
+        core.move_watchers(&shared, from, into, 0), None,
         "the caller that moved is watching the slot it moved onto",
     );
     assert_eq!(core.watching(5), Some(into), "and is recorded there");
@@ -351,14 +350,14 @@ fn a_move_says_whether_anything_is_watching_what_it_moved_onto() {
     // And a move whose caller has gone leaves nothing watching.
     core.instrument_to_req.lock().unwrap().insert(3, 9);
     assert!(
-        core.move_watchers(&shared, 3, 4).is_some(),
+        core.move_watchers(&shared, 3, 4, 0).is_some(),
         "nobody arrived, so the subscription held up for them is withdrawn",
     );
 
     // The move is on its way from the moment it is stated until it is
     // installed, not until it is taken off the queue: read off the queue, the
     // answer turned false in exactly the window it is there for.
-    shared.market.push_subscription_move(from, into);
+    shared.market.push_subscription_move(from, into, 0);
     let _ = shared.market.drain_subscription_moves();
     assert!(
         shared.market.a_move_is_on_its_way_into(into),
@@ -3144,7 +3143,7 @@ fn a_released_slot_leaves_nothing_queued_under_it() {
     let slot: InstrumentId = 3;
 
     shared.market.push_tick_req_params(slot, 0.01);
-    shared.market.push_subscription_move(slot, 9);
+    shared.market.push_subscription_move(slot, 9, 0);
     shared.market.push_tick_news(crate::types::TickNews {
         instrument: slot,
         provider_code: "BRFG".into(),
@@ -3163,7 +3162,7 @@ fn a_released_slot_leaves_nothing_queued_under_it() {
         "no increment is delivered for the contract that left",
     );
     assert!(
-        shared.market.drain_subscription_moves().iter().all(|(a, b)| *a != slot && *b != slot),
+        shared.market.drain_subscription_moves().iter().all(|(a, b, _)| *a != slot && *b != slot),
         "and no move naming its slot",
     );
     assert!(
@@ -3448,7 +3447,7 @@ fn a_caller_moved_onto_another_slot_is_paid_like_a_joiner() {
     let _ = shared.market.drain_subscription_failures();
     core.last_quotes.lock().unwrap().insert(into, [7i64; 16]);
 
-    core.move_watchers(&shared, from, into);
+    core.move_watchers(&shared, from, into, 0);
 
     assert!(
         shared.market.drain_tick_req_params_direct().iter().any(|(at, _)| *at == 7),
@@ -3697,12 +3696,12 @@ fn moved_watchers_report_the_destination_subscriptions_type() {
         ).unwrap();
     }
     assert_eq!(core.check_mdt_needed(20, true), Some(MDT_DELAYED));
-    core.move_watchers(&shared, 2, 1);
+    core.move_watchers(&shared, 2, 1, 0);
     assert_eq!(core.watching(20), Some(1));
     assert_eq!(core.check_mdt_needed(20, true), Some(MDT_REALTIME));
 
     core.set_market_data_type(MDT_DELAYED);
-    core.move_watchers(&shared, 1, 3);
+    core.move_watchers(&shared, 1, 3, 0);
     for req_id in [10, 20] {
         assert_eq!(core.watching(req_id), Some(3));
         assert_eq!(core.check_mdt_needed(req_id, true), Some(MDT_REALTIME), "the feed moves with its slot");
@@ -3722,14 +3721,15 @@ fn moved_watchers_report_the_destination_subscriptions_type() {
 fn a_refused_subscription_does_not_go_on_holding_the_slot_it_was_given() {
     let core = ClientCore::new();
     let shared = SharedState::new();
-    assert!(!core.take_or_follow(7, 100, &[], 0), "the first request held the slot");
+    assert!(!core.take_or_follow(7, 100, &[], 5), "the first request held the slot");
 
-    shared.market.note_released_slot(7, u64::MAX);
+    // The engine gives the slot back, naming the occupancy that is ending.
+    shared.market.note_released_slot(7, 5);
     core.forget_released_slots(&shared);
 
     assert_eq!(core.watching(100), None, "it is not watching anything now");
     assert!(
-        !core.take_or_follow(7, 200, &[], 0),
+        !core.take_or_follow(7, 200, &[], 6),
         "the contract that took the slot next holds it outright, rather than following a \
          request the venue already refused",
     );

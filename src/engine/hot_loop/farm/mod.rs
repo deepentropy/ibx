@@ -3159,9 +3159,20 @@ impl FarmState {
         self.series_asked_on.retain(|(watched, _), _| *watched != instrument);
         // The route this slot's callers were sent along is kept: a withdrawal
         // decided against the occupancy that left is still on its way, and the
-        // route is the only thing that can carry it to where they went. What
-        // is dropped is a route *into* this slot, which now holds nothing.
-        self.moved_to.retain(|_, into| *into != instrument);
+        // route is the only thing that can carry it to where they went.
+        //
+        // A route *into* this slot is not dropped either — it is pointed past
+        // it, at where the callers went from here. Dropped, a withdrawal
+        // decided against the slot at the head of a route lost its way the
+        // moment a slot in the middle of it went back to the table.
+        match self.where_its_callers_went(instrument) {
+            Some(end) if end != instrument => {
+                for (_, into) in self.moved_to.iter_mut().filter(|(_, into)| **into == instrument) {
+                    *into = end;
+                }
+            }
+            _ => self.moved_to.retain(|_, into| *into != instrument),
+        }
     }
 
     /// Where a slot's callers ended up, following as many moves as they were
@@ -3173,15 +3184,16 @@ impl FarmState {
     /// first slot reached the second and did nothing there.
     fn where_its_callers_went(&self, from: InstrumentId) -> Option<InstrumentId> {
         let mut at = *self.moved_to.get(&from)?;
-        let mut walked = 0;
-        // A slot cannot be moved through more times than there are slots, and
-        // a cycle would spin here for ever.
+        // Every step is a slot, and each is stepped through once: a slot seen
+        // twice means the routes lead in a circle, and there is no end to
+        // deliver the withdrawal to.
+        let mut walked = std::collections::HashSet::from([from, at]);
         while let Some(&next) = self.moved_to.get(&at) {
-            if next == at || walked >= 8 {
-                break;
+            if !walked.insert(next) {
+                log::warn!("the moves off slot {from} lead in a circle; nothing is withdrawn");
+                return None;
             }
             at = next;
-            walked += 1;
         }
         Some(at)
     }
@@ -3196,6 +3208,12 @@ impl FarmState {
     /// asked under.
     pub(crate) fn note_subscription_began_under(&mut self, instrument: InstrumentId, took_it: u64) {
         self.subscription_began_under.insert(instrument, took_it);
+    }
+
+    /// Which occupancy of a slot holds it, as the number the request that took
+    /// it asked under. Zero where nothing here has one for it.
+    pub(crate) fn what_took_it(&self, instrument: InstrumentId) -> u64 {
+        self.subscription_began_under.get(&instrument).copied().unwrap_or(0)
     }
 
     /// Whether a slot's subscription is a different occupancy from the one a
