@@ -202,7 +202,7 @@ fn recv_8eq1_preserves_coalesced_tail() {
 
 #[test]
 fn hw_info_format() {
-    let info = get_hw_info(None, None);
+    let info = get_hw_info(None, None).expect("this machine answers with a card");
     assert!(info.contains('|'));
     let parts: Vec<&str> = info.split('|').collect();
     assert_eq!(parts.len(), 2);
@@ -215,8 +215,8 @@ fn hw_info_format() {
 // behavior (random id per call) and failed once a hwid file existed.
 #[test]
 fn hw_info_machine_id_is_stable_across_calls() {
-    let info1 = get_hw_info(None, None);
-    let info2 = get_hw_info(None, None);
+    let info1 = get_hw_info(None, None).expect("this machine answers with a card");
+    let info2 = get_hw_info(None, None).expect("this machine answers with a card");
     let machine1 = info1.split('|').next().unwrap();
     let machine2 = info2.split('|').next().unwrap();
     assert_eq!(machine1, machine2, "Persistent machine ID must not change between calls");
@@ -272,7 +272,7 @@ fn a_stated_card_and_address_are_the_ones_presented() {
     for spelling in ["aa:bb:cc:dd:ee:ff", "AA-BB-CC-DD-EE-FF", "aabbccddeeff"] {
         assert_eq!(
             get_hw_info(Some("abc123"), Some(spelling)),
-            "00abc123|AA:BB:CC:DD:EE:FF",
+            Some("00abc123|AA:BB:CC:DD:EE:FF".to_string()),
             "{spelling} did not reach the identity as the card it names",
         );
     }
@@ -301,8 +301,10 @@ fn a_stated_card_and_address_are_the_ones_presented() {
 #[test]
 fn a_stated_machine_identity_is_the_one_presented() {
     assert!(
-        get_hw_info(Some("abc123"), None).starts_with("00abc123|"),
-        "got {}",
+        get_hw_info(Some("abc123"), None)
+            .expect("this machine answers with a card")
+            .starts_with("00abc123|"),
+        "got {:?}",
         get_hw_info(Some("abc123"), None),
     );
     // Anything the field cannot carry is not an identity to present, so the
@@ -312,7 +314,7 @@ fn a_stated_machine_identity_is_the_one_presented() {
 
 #[test]
 fn hw_info_mac_format_is_six_hex_octets() {
-    let info = get_hw_info(None, None);
+    let info = get_hw_info(None, None).expect("this machine answers with a card");
     let mac = info.split('|').nth(1).unwrap();
     let octets: Vec<&str> = mac.split(':').collect();
     assert_eq!(octets.len(), 6, "MAC must be 6 colon-separated octets, got {mac:?}");

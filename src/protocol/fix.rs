@@ -140,6 +140,31 @@ pub fn fix_checksum(data: &[u8]) -> String {
     format!("{:03}", sum % 256)
 }
 
+/// Write one field's value, in the characters this wire carries.
+///
+/// A value is written character by character up to the first one outside
+/// ASCII, and every character from there on that is outside it is written as a
+/// single star. That is what the venue's own frames carry: no field value on
+/// this wire holds a byte of 0x80 or above, and a name a caller gave in its own
+/// script — an order reference, a group name, a model — went out as two or
+/// three bytes where the venue reads one character, so the field the venue read
+/// was not the field the caller stated and the length in front of it counted
+/// bytes the venue does not count.
+fn push_value(body: &mut Vec<u8>, val: &str) {
+    if val.is_ascii() {
+        body.extend_from_slice(val.as_bytes());
+        return;
+    }
+    for c in val.chars() {
+        if c.is_ascii() {
+            let mut one = [0u8; 1];
+            body.extend_from_slice(c.encode_utf8(&mut one).as_bytes());
+        } else {
+            body.push(b'*');
+        }
+    }
+}
+
 /// Build a complete FIX message matching IB Gateway format.
 ///
 /// `fields` should NOT include tags 8, 9, 34, or 10 (auto-generated).
@@ -155,7 +180,7 @@ pub fn fix_build(fields: &[(u32, &str)], seq: u32) -> Vec<u8> {
         }
         push_u32(&mut body, tag);
         body.push(b'=');
-        body.extend_from_slice(val.as_bytes());
+        push_value(&mut body, val);
         body.push(SOH);
     }
     if fields.len() == 1 {
@@ -722,6 +747,24 @@ pub fn fix_read_deadline<R: Read>(
 
 #[cfg(test)]
 mod tests {
+    /// A field value carries the characters this wire carries.
+    ///
+    /// A name a caller gave in its own script went out as the two or three
+    /// bytes its script needs, where the venue reads one character and no field
+    /// value on this wire holds a byte above ASCII at all — so the field the
+    /// venue read was not the field the caller stated, and the length written
+    /// in front of it counted bytes the venue does not count.
+    #[test]
+    fn a_field_value_carries_the_characters_this_wire_carries() {
+        let msg = super::fix_build(&[(super::TAG_MSG_TYPE, "D"), (6010, "Caf\u{e9} x")], 1);
+        let text = String::from_utf8_lossy(&msg);
+        assert!(text.contains("6010=Caf* x\u{1}"), "one star for the one character: {text}");
+        assert!(
+            msg.iter().all(|b| *b < 0x80),
+            "and nothing above ASCII reaches the wire",
+        );
+    }
+
     use super::*;
 
     // A reader that fails `blocks_left` times with `kind` before yielding its

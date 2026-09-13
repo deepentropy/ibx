@@ -680,16 +680,18 @@ pub(super) fn holds_a_routing_reply(buf: &[u8]) -> bool {
 
 /// Compute token short hash for farm logon (FIX tag 8483).
 ///
-/// gateway always emits this as **8 hex chars padded with
-/// leading zeros**. `format!("{:x}", n)` is wrong when `hash_int`'s high
-/// nibble is zero — server silently rejects the FIX 35=A logon in that case.
+/// Written in its shortest form, with no leading zeros: that is the only form
+/// the venue is ever sent, so it is the form the venue takes. Padded to eight
+/// characters, one session in sixteen — the ones whose hash begins with a zero
+/// nibble — stated a value in a shape nothing else on this wire writes, and
+/// this client had no way to know whether the farm behind the logon took it.
 pub fn token_short_hash(session_token: &BigUint) -> String {
     let token_bytes = session_token.to_bytes_be();
     let stripped = strip_leading_zeros(&token_bytes);
     let digest = Sha1::digest(stripped);
     // Take last 4 bytes as u32 (Java BigInteger.intValue() truncates to low 32 bits)
     let hash_int = u32::from_be_bytes([digest[16], digest[17], digest[18], digest[19]]);
-    format!("{hash_int:08x}")
+    format!("{hash_int:x}")
 }
 
 /// Build auth server logon message.

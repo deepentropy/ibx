@@ -171,7 +171,11 @@ fn read_or_create_hwid() -> String {
 /// Generate hardware info string: `{machine_id}|{MAC}`.
 ///
 /// Live data farms validate the MAC field; an all-zero MAC causes the FIX
-/// 35=A logon to be silently rejected (paper farms don't validate).
+/// 35=A logon to be silently rejected (paper farms don't validate). So a host
+/// that answers with no card at all is told so here rather than handed six
+/// bytes of nothing: this client refuses that value when a caller states it,
+/// and composing it here left the farm behind the logon refusing in silence
+/// with nothing to say why. A caller on such a host states a card of its own.
 /// Where the session actually opened from, once it has.
 ///
 /// The venue's own client takes the local address off the socket it connected
@@ -196,7 +200,7 @@ pub fn note_the_socket_we_opened(local: std::net::IpAddr) {
 /// `machine_id` is the persistent 8-hex value from `~/hwid`, and
 /// `stated_mac` the card to name where the machine's own is not the one to
 /// name.
-pub fn get_hw_info(stated: Option<&str>, stated_mac: Option<&str>) -> String {
+pub fn get_hw_info(stated: Option<&str>, stated_mac: Option<&str>) -> Option<String> {
     let machine_id = match stated.map(str::trim).filter(|v| {
         !v.is_empty() && v.chars().all(|c| c.is_ascii_hexdigit())
     }) {
@@ -206,9 +210,8 @@ pub fn get_hw_info(stated: Option<&str>, stated_mac: Option<&str>) -> String {
     let mac = stated_mac
         .and_then(stated_card)
         .or_else(card_on_the_socket_we_opened)
-        .or_else(first_real_mac)
-        .unwrap_or_else(|| "00:00:00:00:00:00".to_string());
-    format!("{machine_id}|{mac}")
+        .or_else(first_real_mac)?;
+    Some(format!("{machine_id}|{mac}"))
 }
 
 /// A card a caller named, in the shape this identity is written in.
@@ -1056,7 +1059,22 @@ const IB_KEY_PROVIDER_FAST_PATH_GRACE: std::time::Duration =
     std::time::Duration::from_secs(1);
 
 /// Put the Challenge/Response code on the wire as `XYZ 775` state=3.
+///
+/// Trimmed, and an empty one refused, because the code is single-use and the
+/// server has no retry loop: whitespace a provider left around it — a file, a
+/// command's output, a vault answer that ends in a newline — reaches the server
+/// as part of the code, and spends the one attempt the operator has. The other
+/// gate on the same callback already refuses an empty code and trims for this
+/// reason; one provider serves both.
 fn submit_swcr_code<S: Write>(stream: &mut S, code: &str) -> io::Result<()> {
+    let code = code.trim();
+    if code.is_empty() {
+        return Err(ib_key_err(
+            io::ErrorKind::InvalidInput,
+            "security-code gate: the code provider answered with nothing, and an empty code \
+             would spend the one attempt",
+        ));
+    }
     let framed = xyz::xyz_wrap(&xyz::xyz_build_swcr_token_code_submission(code));
     stream.write_all(&framed)?;
     log::info!(

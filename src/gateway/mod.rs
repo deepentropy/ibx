@@ -1900,7 +1900,17 @@ impl Gateway {
             None => session::get_hw_info(
                 config.settings.hardware_id.as_deref(),
                 config.settings.mac_address.as_deref(),
-            ),
+            )
+            .ok_or_else(|| {
+                // A host with no hardware address of its own cannot name
+                // itself, and the farm behind the logon refuses an identity
+                // without one in silence. Said here instead, with the way out.
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "this machine answers with no hardware address, which the data farms \
+                     refuse without saying so: state one for it (IBX_MAC) and connect again",
+                )
+            })?,
         };
 
         // Send CONNECT_REQUEST (encrypted)

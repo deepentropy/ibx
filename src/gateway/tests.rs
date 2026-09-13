@@ -339,6 +339,23 @@ fn token_short_hash_deterministic() {
     assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
+/// The hash is written in its shortest form, with no leading zeros.
+///
+/// That is the only form the venue is ever sent, so it is the form the venue
+/// takes. Padded to a fixed eight characters, one session in sixteen stated a
+/// value in a shape nothing else on this wire writes.
+#[test]
+fn the_token_hash_is_written_in_its_shortest_form() {
+    // A token whose hash begins with a zero nibble, found by trying tokens in
+    // order rather than by assuming one.
+    let short = (1u64..4096)
+        .map(|n| token_short_hash(&BigUint::from(n)))
+        .find(|h| h.len() < 8)
+        .expect("a hash with a leading zero nibble inside the first few thousand tokens");
+    assert!(!short.starts_with('0'), "no leading zero is written: {short}");
+    assert!(short.chars().all(|c| c.is_ascii_hexdigit()), "and it is hex: {short}");
+}
+
 #[test]
 fn token_short_hash_different_tokens() {
     let t1 = BigUint::from(111u64);
@@ -404,19 +421,6 @@ fn parse_farm_route_rejects_empty_and_malformed() {
     assert_eq!(parse_farm_route("host/"), None);
 }
 
-#[test]
-fn token_short_hash_always_8_chars() {
-    // gateway pads to 8 hex chars. Brute-force search
-    // over small inputs to find one whose SHA1 ends in a high-nibble
-    // zero, then assert padding kicks in.
-    for n in 0u64..10_000 {
-        let token = BigUint::from(n);
-        let h = token_short_hash(&token);
-        assert_eq!(h.len(), 8,
-            "token_short_hash must always be 8 chars; n={n} produced {h:?}");
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-}
 
 #[test]
 fn build_ccp_logon_structure() {
