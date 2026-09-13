@@ -475,7 +475,7 @@ impl EClient {
         // surface refuses to anyone else.
         let _answering = super::Answering::begin();
         if contract.con_id == 0 {
-            return Err(Refusal::no_answer(
+            return Err(Refusal::validation(
                 "corporate actions are asked for by the venue's id for the contract, \
                  which this one does not carry: qualify it first".to_string(),
             ));

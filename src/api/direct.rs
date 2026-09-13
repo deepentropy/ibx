@@ -104,7 +104,7 @@ pub struct Client {
 /// thing, and what they answer instead.
 ///
 /// Named rather than left out. Every one of them can be called: a program
-/// moved across compiles and runs, and the two that cannot be answered say so
+/// moved across compiles and runs, and the ones that cannot be answered say so
 /// on the spot rather than by not existing.
 pub const NO_COUNTERPART: &[(&str, &str)] = &[
     ("verify_message", "part of a handshake between a client and a local process, and there is no local process"),

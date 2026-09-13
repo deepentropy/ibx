@@ -19,6 +19,17 @@ const MATCHING_SYMBOLS_TIMEOUT: Duration =
 const OPTION_CHAIN_TIMEOUT: Duration =
     Duration::from_secs(crate::config::ANSWER_TIMEOUT_SECS - 3);
 
+/// The same, for a question or a replacement put to the advisor
+/// configuration.
+///
+/// It had none: a request the venue took and never answered was given up on
+/// only when the connection next went, which on a session that stays up is
+/// never. A caller reading a partition waited for as long as the process ran,
+/// and one replacing a partition was never told whether its document had been
+/// taken.
+const ADVISOR_TIMEOUT: Duration =
+    Duration::from_secs(crate::config::ANSWER_TIMEOUT_SECS - 3);
+
 /// Whether an answer being handed over is the whole of it.
 ///
 /// The window can outlive the caller's patience: it is shut by the wire and
@@ -436,6 +447,8 @@ pub(crate) struct PendingAdvisor {
     /// Whether the caller was writing rather than reading. A question is
     /// answered with the configuration; a replacement with its end.
     pub(crate) replacing: bool,
+    /// When this client stops waiting for the venue to answer it.
+    pub(crate) deadline: Instant,
 }
 
 /// A market data subscription held back until the venue names its contract.
@@ -2225,43 +2238,63 @@ impl CcpState {
         document: Option<&str>,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
+        shared: &SharedState,
     ) {
-        if let Some(conn) = ccp_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let command = command.to_string();
-            // Which partition, and which request. The partition rides 6906 and
-            // 6158 is the request's own number, counted from one for the
-            // session and sent as a string, which the reply carries back so an
-            // answer can be matched to its question. Writing the partition
-            // into 6158 and omitting 6906 leaves every advisor request naming
-            // no partition, so a replacement carries a document for a partition
-            // none of them named. The two are written in this order.
-            let key = self.next_advisor_request.to_string();
-            self.next_advisor_request = self.next_advisor_request.wrapping_add(1);
-            let mut fields: Vec<(u32, &str)> = vec![
-                (fix::TAG_MSG_TYPE, "U"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6040, "116"),
-                (6905, &command),
-                (6158, &key),
-                (6906, partition),
-            ];
-            // Only a replacement carries a document; asking for one that states
-            // a document would be asking and telling at once.
-            if let Some(xml) = document {
-                fields.push((6118, xml));
-            }
-            let _ = conn.send_fix(&fields);
-            // Held before the frame is called sent: the reply states only this
-            // number, so a question nobody remembers asking is a reply nobody
-            // can be given.
-            self.pending_advisor.insert(
-                key.clone(),
-                PendingAdvisor { req_id, fa_data_type, replacing: document.is_some() },
+        // Refused where it cannot be sent, as every sibling request on this
+        // connection is. Nothing is recorded for a request that never went
+        // out, and the connection that replaces this one is asked nothing
+        // this one was — so there is no later moment at which an answer
+        // arrives. Silent, a caller reading a partition waited for ever, and
+        // one replacing a partition held a document it believed the venue had
+        // taken.
+        let Some(conn) = ccp_conn.as_mut() else {
+            log::warn!("Advisor configuration request req_id={req_id} not sent: no CCP transport");
+            shared.reference.push_advisor_refused(
+                req_id, ADVISOR_SAVE_REFUSED,
+                "the advisor configuration request could not be sent: no connection to the \
+                 venue".to_string(),
             );
-            hb.last_ccp_sent = Instant::now();
-            log::info!("Sent advisor configuration request: command={command} partition={partition}");
+            return;
+        };
+        let ts = chrono_free_timestamp();
+        let command = command.to_string();
+        // Which partition, and which request. The partition rides 6906 and
+        // 6158 is the request's own number, counted from one for the
+        // session and sent as a string, which the reply carries back so an
+        // answer can be matched to its question. Writing the partition
+        // into 6158 and omitting 6906 leaves every advisor request naming
+        // no partition, so a replacement carries a document for a partition
+        // none of them named. The two are written in this order.
+        let key = self.next_advisor_request.to_string();
+        self.next_advisor_request = self.next_advisor_request.wrapping_add(1);
+        let mut fields: Vec<(u32, &str)> = vec![
+            (fix::TAG_MSG_TYPE, "U"),
+            (fix::TAG_SENDING_TIME, &ts),
+            (6040, "116"),
+            (6905, &command),
+            (6158, &key),
+            (6906, partition),
+        ];
+        // Only a replacement carries a document; asking for one that states
+        // a document would be asking and telling at once.
+        if let Some(xml) = document {
+            fields.push((6118, xml));
         }
+        let _ = conn.send_fix(&fields);
+        // Held before the frame is called sent: the reply states only this
+        // number, so a question nobody remembers asking is a reply nobody
+        // can be given.
+        self.pending_advisor.insert(
+            key.clone(),
+            PendingAdvisor {
+                req_id,
+                fa_data_type,
+                replacing: document.is_some(),
+                deadline: Instant::now() + ADVISOR_TIMEOUT,
+            },
+        );
+        hb.last_ccp_sent = Instant::now();
+        log::info!("Sent advisor configuration request: command={command} partition={partition}");
     }
 
     /// Ask the venue to state the account's figures now.
@@ -2852,6 +2885,35 @@ impl CcpState {
                 shared.reference.push_historical_error(
                     *req_id, crate::error_codes::Refusal::NO_ANSWER,
                     "matching symbols request timed out — no reply from the gateway".to_string(),
+                );
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    /// Give up on an advisor request the venue never answered.
+    ///
+    /// The reply states only this client's own number for the question, so a
+    /// question given up on is a reply nobody can be given — the entry goes
+    /// with the refusal rather than staying behind to match a late one onto a
+    /// caller who has already been told.
+    pub(crate) fn sweep_pending_advisor(&mut self, shared: &SharedState) {
+        if self.pending_advisor.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        self.pending_advisor.retain(|key, asked| {
+            if now >= asked.deadline {
+                log::warn!(
+                    "Advisor configuration request {key} unanswered after {ADVISOR_TIMEOUT:?} \
+                     — giving up",
+                );
+                shared.reference.push_advisor_refused(
+                    asked.req_id, crate::error_codes::Refusal::NO_ANSWER,
+                    "the advisor configuration request timed out — no reply from the venue"
+                        .to_string(),
                 );
                 false
             } else {

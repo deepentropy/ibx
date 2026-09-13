@@ -570,7 +570,7 @@ class LiveState(EWrapper):
     def tickString(self, reqId, tickType, value):
         from .ibx import TickTypeEnum as T
 
-        if tickType == T.LAST_TIMESTAMP:
+        if tickType in (T.LAST_TIMESTAMP, T.DELAYED_LAST_TIMESTAMP):
             with self._lock:
                 self._updates += 1
                 self._ticker(reqId).time = value
@@ -646,6 +646,8 @@ class TradingSession:
 
 @dataclass
 class HistoricalSchedule:
+    startDateTime: str
+    endDateTime: str
     timeZone: str
     sessions: list[TradingSession]
 
@@ -725,6 +727,22 @@ def _tick_fields():
         T.LOW: ("low", None),
         T.CLOSE: ("close", None),
         T.HALTED: ("halted", None),
+        # A delayed reading is the same figure under a number of its own, and
+        # the venue sends nothing else to an account without the realtime
+        # entitlement. Filed nowhere, every field of the quote stayed empty on
+        # such a feed — which reads exactly like a market that is not trading.
+        T.DELAYED_BID: ("bid", "prevBid"),
+        T.DELAYED_ASK: ("ask", "prevAsk"),
+        T.DELAYED_LAST: ("last", "prevLast"),
+        T.DELAYED_BID_SIZE: ("bidSize", None),
+        T.DELAYED_ASK_SIZE: ("askSize", None),
+        T.DELAYED_LAST_SIZE: ("lastSize", None),
+        T.DELAYED_VOLUME: ("volume", None),
+        T.DELAYED_OPEN: ("open", None),
+        T.DELAYED_HIGH: ("high", None),
+        T.DELAYED_LOW: ("low", None),
+        T.DELAYED_CLOSE: ("close", None),
+        T.DELAYED_HALTED: ("halted", None),
     }
 
 

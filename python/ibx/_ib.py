@@ -308,7 +308,14 @@ class Client:
         """The quote for a contract already subscribed to, or nothing."""
         req_id = self._recall("quote", contract)
         if req_id is None:
-            for rid, c in self._subscribed.items():
+            # Under the same guard as everything else the registry holds. The
+            # wheel is free-threaded, so a subscription opened or withdrawn on
+            # another thread really does resize this map mid-scan, and the
+            # scan is a plain quote read that would have raised on the
+            # caller's own thread.
+            with self._registry:
+                pairs = list(self._subscribed.items())
+            for rid, c in pairs:
                 if getattr(c, "conId", None) and getattr(c, "conId", None) == getattr(contract, "conId", None):
                     req_id = rid
                     break
@@ -366,7 +373,8 @@ class Client:
         whichever came first.
         """
         req_id = self._next_req_id()
-        self._subscribed[req_id] = contract
+        with self._registry:
+            self._subscribed[req_id] = contract
         ticker = self.wrapper.bind_ticker(req_id, contract)
         self.client.req_mkt_data(
             req_id, contract, genericTickList, snapshot, regulatory, []
@@ -381,7 +389,8 @@ class Client:
             req_id = self._forget("snapshot", contract)
         if req_id is None:
             return
-        self._subscribed.pop(req_id, None)
+        with self._registry:
+            self._subscribed.pop(req_id, None)
         self.client.cancel_mkt_data(req_id)
 
 
@@ -516,7 +525,8 @@ class Client:
                 break
             time.sleep(0.01)
         for req_id, _ in started:
-            self._subscribed.pop(req_id, None)
+            with self._registry:
+                self._subscribed.pop(req_id, None)
             self.client.cancel_mkt_data(req_id)
         return tickers
 
@@ -882,12 +892,16 @@ class Client:
         """When a contract trades over a stretch of days.
 
         Each session is its opening, its close, and the day it belongs to, in
-        the time zone the venue states them in.
+        the time zone the venue states them in, and the schedule states the
+        window it actually covered — which is not the one asked for, since the
+        venue answers a duration in its own trading days.
         """
-        timezone, sessions = self.client.trading_schedule(
+        start, end, timezone, sessions = self.client.trading_schedule(
             contract, endDateTime, durationStr, useRTH
         )
         return HistoricalSchedule(
+            startDateTime=start,
+            endDateTime=end,
             timeZone=timezone,
             sessions=[TradingSession(*row) for row in sessions],
         )

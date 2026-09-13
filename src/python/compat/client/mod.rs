@@ -2615,6 +2615,94 @@ assert [(c[1], c[2]) for c in w.calls if c[0] in ('tickOptionComputation', 'tick
         });
     }
 
+    /// A symbol match answered to the caller states what the same match
+    /// states on the callback.
+    ///
+    /// The venue's own words for a contract, and the id it gives an issuer,
+    /// are the whole of what a match naming an issuer rather than a contract
+    /// carries — a lookup for that issuer's fixed income is made under it.
+    /// Dropped from the answer, a caller that read the return value was handed
+    /// a match it could not follow, while the same match delivered through the
+    /// wrapper carried both.
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn a_symbol_match_answered_to_the_caller_states_the_words_and_the_issuer() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, shared, _w) = wired_client(py);
+            // Seeded before the question is asked, which is the only way to
+            // exercise the waiting with no venue on the other end.
+            let req_id = super::ask::peek_ask_id(&shared) as u32;
+            shared.reference.push_matching_symbols(req_id, vec![
+                crate::control::contracts::SymbolMatch {
+                    con_id: 0, symbol: "APPLE".into(),
+                    sec_type: crate::control::contracts::SecurityType::Bond,
+                    currency: "USD".into(), primary_exchange: String::new(),
+                    description: "Apple Inc".into(), derivative_types: Vec::new(),
+                    issuer_id: "e1234567".into(),
+                },
+            ]);
+
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("client", &client).unwrap();
+            let found = py
+                .eval(c"client.matching_symbols('APPLE')[0].contract", Some(&g), None)
+                .unwrap();
+
+            let words: String = found.getattr("description").unwrap().extract().unwrap();
+            assert_eq!(words, "Apple Inc", "the venue's own words for what it found");
+            let issuer: String = found.getattr("issuerId").unwrap().extract().unwrap();
+            assert_eq!(issuer, "e1234567", "and the id a bond lookup is made under");
+        });
+    }
+
+    /// A schedule states the window it covers as well as the sessions in it.
+    ///
+    /// The venue answers a duration counted in its own trading days, so what
+    /// an answer covers is not what was asked for, and the answer says so.
+    /// Handed back as the zone and the sessions alone, a program reading the
+    /// stretch it was given found no such field, while the same answer
+    /// delivered through the wrapper carried both ends of it.
+    #[cfg(feature = "test-helpers")]
+    #[test]
+    fn a_schedule_answered_to_the_caller_states_the_window_it_covers() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (client, _rx, shared, _w) = wired_client(py);
+            // Seeded before the question is asked, which is the only way to
+            // exercise the waiting with no venue on the other end.
+            let req_id = super::ask::peek_ask_id(&shared) as u32;
+            shared.reference.push_historical_schedule(req_id, crate::types::HistoricalScheduleResponse {
+                query_id: String::new(),
+                timezone: "US/Eastern".into(),
+                start_date_time: "20260907-00:00:00".into(),
+                end_date_time: "20260911-23:59:59".into(),
+                sessions: vec![crate::types::ScheduleSession {
+                    ref_date: "20260908".into(),
+                    open_time: "20260908-09:30:00".into(),
+                    close_time: "20260908-16:00:00".into(),
+                }],
+            });
+
+            let g = pyo3::types::PyDict::new(py);
+            g.set_item("client", &client).unwrap();
+            g.set_item("spy", Py::new(py, crate::python::compat::contract::Contract {
+                symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+                currency: "USD".into(), ..Default::default()
+            }).unwrap()).unwrap();
+            let answered: (String, String, String, Vec<(String, String, String)>) = py
+                .eval(c"client.trading_schedule(spy, '', '1 W', True)", Some(&g), None)
+                .unwrap()
+                .extract()
+                .unwrap();
+
+            assert_eq!(answered.0, "20260907-00:00:00", "where the stretch the venue answered begins");
+            assert_eq!(answered.1, "20260911-23:59:59", "and where it ends");
+            assert_eq!(answered.2, "US/Eastern", "the zone the times are stated in");
+            assert_eq!(answered.3.len(), 1, "and the sessions in it");
+        });
+    }
+
     /// `permId` is what survives a restart; the local order id does not.
     #[test]
     fn an_order_can_be_cancelled_by_its_perm_id() {

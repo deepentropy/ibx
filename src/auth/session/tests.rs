@@ -1564,6 +1564,31 @@ fn a_second_factor_wait_ends_when_the_client_takes_it_back() {
     );
 }
 
+/// Nothing in the finish body is taken for the token the farm logons hash.
+///
+/// The body carries no token, so a field read out of it by its shape can only
+/// ever be something else — and a farm that logged on under it would have
+/// signed with a value no reconnect uses, leaving the live connections and
+/// every rebuild of them on different tokens. The token is the SRP-derived
+/// key, which this client already holds.
+#[test]
+fn nothing_in_the_finish_body_is_read_as_a_token_by_its_shape() {
+    // A field of the shape the extraction looked for, in a body that is
+    // otherwise the no-second-factor fast path.
+    let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 5, "user", &[
+        "e7429fde5b4c26f81fff956be6749908a8653558e7429fde5b4c26f81fff956b",
+        "PASSED",
+    ]);
+    let mut stream = ScriptedStream::new(frame_xyz(&auth_finish));
+
+    let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap();
+
+    assert_eq!(
+        outcome, IbKeyOutcome::Skipped { unread: None },
+        "a body naming no approval and no session is the fast path, whatever else is in it",
+    );
+}
+
 #[test]
 fn ib_key_2fa_approved_after_state_2_and_passed() {
     // Server sends SWCR_TOKEN(state=2) carrying the approval URL, then
@@ -1580,10 +1605,9 @@ fn ib_key_2fa_approved_after_state_2_and_passed() {
 
     let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None, None).unwrap();
     match outcome {
-        IbKeyOutcome::Approved { approval_url, session_id, soft_token_hex } => {
+        IbKeyOutcome::Approved { approval_url, session_id } => {
             assert_eq!(approval_url, "https://www.example.com/seamless?S=YWJjZA==");
             assert_eq!(session_id, "580 820");
-            let _ = soft_token_hex;
         }
         other => panic!("expected Approved, got {other:?}"),
     }

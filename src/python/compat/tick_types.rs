@@ -23,7 +23,8 @@ pub static TICK_TYPE_NAMES: [&str; 112] = [
     "INDEX_FUTURE_PREMIUM", "BID_EXCH", "ASK_EXCH", "AUCTION_VOLUME", "AUCTION_PRICE",
     "AUCTION_IMBALANCE", "MARK_PRICE", "BID_EFP_COMPUTATION", "ASK_EFP_COMPUTATION",
     "LAST_EFP_COMPUTATION", "OPEN_EFP_COMPUTATION", "HIGH_EFP_COMPUTATION",
-    "LOW_EFP_COMPUTATION", "CLOSE_EFP_COMPUTATION", "LAST_TIMESTAMP", "SHORTABLE", "NOT_USED",
+    "LOW_EFP_COMPUTATION", "CLOSE_EFP_COMPUTATION", "LAST_TIMESTAMP", "SHORTABLE",
+    "FUNDAMENTAL_RATIOS",
     "RT_VOLUME", "HALTED", "BID_YIELD", "ASK_YIELD", "LAST_YIELD", "CUST_OPTION_COMPUTATION",
     "TRADE_COUNT", "TRADE_RATE", "VOLUME_RATE", "LAST_RTH_TRADE", "RT_HISTORICAL_VOL",
     "IB_DIVIDENDS", "BOND_FACTOR_MULTIPLIER", "REGULATORY_IMBALANCE", "NEWS_TICK",
@@ -222,6 +223,17 @@ mod tests {
         assert_eq!(TickTypeEnum::to_str(111), "NOT_SET");
         assert_eq!(TickTypeEnum::to_str(112), "NOTFOUND");
         assert_eq!(TickTypeEnum::to_str(-1), "NOTFOUND");
+    }
+
+    /// The tick between the shortable one and the running volume has a name.
+    ///
+    /// A program reads a tick back by looking its number up in this table.
+    /// Held as a placeholder, the fundamentals figures arrived under a name
+    /// saying the number is unused, and a caller had no way to tell them from
+    /// a number the venue does not send at all.
+    #[test]
+    fn the_fundamentals_tick_is_named() {
+        assert_eq!(TickTypeEnum::to_str(47), "FUNDAMENTAL_RATIOS");
     }
 
     #[test]

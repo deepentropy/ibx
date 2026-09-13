@@ -10654,3 +10654,28 @@ fn a_quote_withdrawal_during_registration_takes_the_subscription_back_down() {
         "the subscription it opened was never taken back down: {sent:?}",
     );
 }
+
+/// A request this client will not send is refused under the number for a
+/// request that is wrong, not the one that means nothing was said.
+///
+/// Silence carries this client's own number, negative and one the venue can
+/// never state, so a caller can tell a deadline that ran out from an answer.
+/// A contract carrying no id is neither: the request is malformed, the same
+/// way the chain of an unnamed underlying is, and it is refused before it is
+/// sent. Under the number for silence a caller retried it, waiting the whole
+/// deadline again for a request that will never leave.
+#[test]
+fn corporate_actions_about_an_unnumbered_contract_is_a_bad_request() {
+    let (client, _rx, _shared) = test_client();
+    let bare = Contract {
+        symbol: "NVDA".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+        currency: "USD".into(), ..Default::default()
+    };
+
+    let why = client
+        .corporate_actions(&bare, "20240101", "20241231")
+        .expect_err("a contract with no id cannot be asked about");
+
+    assert_eq!(why.code, Refusal::VALIDATION, "the number for a request that is wrong");
+    assert_ne!(why.code, Refusal::NO_ANSWER, "nothing was waited for, so nothing stayed silent");
+}

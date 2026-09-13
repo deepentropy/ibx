@@ -984,11 +984,6 @@ pub enum IbKeyOutcome {
         approval_url: String,
         /// Per-session 6-digit identifier the user can verify visually.
         session_id: String,
-        /// SOFT session token issued by `XYZ AUTH_FINISH(771) state=5 PASSED`,
-        /// hex-encoded. This is the token that downstream farm logons must
-        /// hash for tag 8483 (NOT the SRP-derived `session_key`). Empty if the
-        /// AUTH_FINISH body didn't carry an extractable token.
-        soft_token_hex: String,
     },
 }
 
@@ -1366,7 +1361,6 @@ pub fn do_security_code_2fa<S: Read + Write>(
                     return Ok(IbKeyOutcome::Approved {
                         approval_url: String::new(),
                         session_id: String::new(),
-                        soft_token_hex: String::new(),
                     });
                 }
                 // Only a status this client recognises is echoed. The reply's fields are
@@ -1386,7 +1380,6 @@ pub fn do_security_code_2fa<S: Read + Write>(
                     return Ok(IbKeyOutcome::Approved {
                         approval_url: String::new(),
                         session_id: String::new(),
-                        soft_token_hex: String::new(),
                     });
                 }
                 // A rejection arriving this way is still a rejection. Falling
@@ -1627,17 +1620,19 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                 }
             }
             RecvMsg::Xyz { msg_id, state, fields, .. } if msg_id == xyz::XYZ_MSG_TOKEN_AUTH && (state == 3 || state == 5) => {
-                // Look for "PASSED" sentinel and the SOFT token (long hex string).
-                let mut passed = false;
-                let mut soft_token_hex = String::new();
-                for f in &fields {
-                    if f.eq_ignore_ascii_case("PASSED") { passed = true; }
-                    else if f.len() >= 32 && f.chars().all(|c| c.is_ascii_hexdigit())
-                        && soft_token_hex.is_empty()
-                    {
-                        soft_token_hex = f.clone();
-                    }
-                }
+                // The sentinel, and nothing taken by its shape.
+                //
+                // A field of thirty-two hex characters was read out of this
+                // body as the token the farm logons hash. The body carries no
+                // token — it is `["", "PASSED"]` — so that could only ever
+                // fire on something which is not one, and a farm would then
+                // have authenticated under a value the reconnects do not use:
+                // the live connections and every rebuild of them signed with
+                // different tokens. The token a farm logon hashes is the
+                // SRP-derived key, which this client already computes. If a
+                // slot for one is ever seen, it is read from its stated
+                // position, as the timestamp below is.
+                let passed = fields.iter().any(|f| f.eq_ignore_ascii_case("PASSED"));
                 if passed {
                     log::info!("2FA gate: approved");
                     // AUTH_FINISH carries no token — body is
@@ -1645,14 +1640,10 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                     // farm logons (tag 8483) is the SRP-derived K_soft, which
                     // ibx already computes correctly via `srp_compute_k`
                     // (= SHA1(strip_leading_zeros(S))). No extraction needed.
-                    if approval_url.is_empty() && session_id.is_empty()
-                        && soft_token_hex.is_empty()
-                    {
+                    if approval_url.is_empty() && session_id.is_empty() {
                         return Ok(IbKeyOutcome::Skipped { unread: None });
                     }
-                    return Ok(IbKeyOutcome::Approved {
-                        approval_url, session_id, soft_token_hex,
-                    });
+                    return Ok(IbKeyOutcome::Approved { approval_url, session_id });
                 }
                 return Err(ib_key_err(
                     io::ErrorKind::PermissionDenied,

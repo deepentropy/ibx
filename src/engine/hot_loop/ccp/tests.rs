@@ -1501,6 +1501,11 @@ fn the_per_currency_figures_are_read_off_their_bucket() {
         read("CashBalance", "EUR").as_deref(), Some("5250.00"),
         "the cash balance with the insured deposit in it, which is where the venue puts it",
     );
+    assert_eq!(
+        read("Currency", "EUR").as_deref(), Some("EUR"),
+        "the bucket's currency is one of the figures the venue keeps per currency",
+    );
+    assert_eq!(read("Currency", "BASE").as_deref(), Some("BASE"), "and so is the next one's");
     assert_eq!(read("ExchangeRate", "EUR").as_deref(), Some("1.08"));
     assert_eq!(read("RealizedPnL", "EUR").as_deref(), Some("12.50"), "at least two places");
     assert_eq!(read("CashBalance", "BASE").as_deref(), Some("7500.00"), "the second bucket");
@@ -2037,7 +2042,7 @@ fn an_advisor_request_names_the_partition_on_the_tag_that_carries_it() {
     };
 
     // Asking for one partition: the whole of it, under command five.
-    ccp.send_advisor_config(-1, 5, "Profile", 2, None, &mut conn, &mut hb);
+    ccp.send_advisor_config(-1, 5, "Profile", 2, None, &mut conn, &mut hb, &SharedState::new());
     let fields = sent(&mut peer, &mut buf);
     let names: Vec<&str> = fields.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(names, ["6040", "6905", "6158", "6906"], "{fields:?}");
@@ -2047,7 +2052,7 @@ fn an_advisor_request_names_the_partition_on_the_tag_that_carries_it() {
     assert_eq!(fields[3].1, "Profile", "the partition, on the tag that carries it");
 
     // Replacing one carries the document beside it, and the next number.
-    ccp.send_advisor_config(77, 3, "Group", 1, Some("<xml/>"), &mut conn, &mut hb);
+    ccp.send_advisor_config(77, 3, "Group", 1, Some("<xml/>"), &mut conn, &mut hb, &SharedState::new());
     let fields = sent(&mut peer, &mut buf);
     let names: Vec<&str> = fields.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(names, ["6040", "6905", "6158", "6906", "6118"], "{fields:?}");
@@ -2076,9 +2081,9 @@ fn an_advisor_answer_reaches_the_caller_who_asked_for_it() {
     let mut buf = [0u8; 4096];
 
     // Two questions and a replacement, each under a number of its own.
-    ccp.send_advisor_config(-1, 5, "Group", 1, None, &mut conn, &mut hb);
-    ccp.send_advisor_config(-1, 5, "Profile", 2, None, &mut conn, &mut hb);
-    ccp.send_advisor_config(88, 3, "Group", 1, Some("<Groups/>"), &mut conn, &mut hb);
+    ccp.send_advisor_config(-1, 5, "Group", 1, None, &mut conn, &mut hb, &shared);
+    ccp.send_advisor_config(-1, 5, "Profile", 2, None, &mut conn, &mut hb, &shared);
+    ccp.send_advisor_config(88, 3, "Group", 1, Some("<Groups/>"), &mut conn, &mut hb, &shared);
     let _ = peer.read(&mut buf);
 
     let reply = |key: &str, text: &str, xml: &str| {
@@ -2128,7 +2133,7 @@ fn an_advisor_replacement_the_venue_refuses_is_reported_as_trouble() {
     let mut context = Context::new();
     let shared = SharedState::new();
 
-    ccp.send_advisor_config(51, 3, "Group", 1, Some("<Groups/>"), &mut conn, &mut hb);
+    ccp.send_advisor_config(51, 3, "Group", 1, Some("<Groups/>"), &mut conn, &mut hb, &shared);
     let refused = crate::protocol::fix::fix_build(&[
         (fix::TAG_MSG_TYPE, "U"), (6040, "117"), (6158, "1"),
         (58, "group DU1 is not yours"), (6118, ""),
@@ -2161,7 +2166,7 @@ fn an_advisor_request_the_connection_outlives_is_refused() {
     let mut context = Context::new();
     let shared = SharedState::new();
 
-    ccp.send_advisor_config(51, 3, "Group", 1, Some("<Groups/>"), &mut conn, &mut hb);
+    ccp.send_advisor_config(51, 3, "Group", 1, Some("<Groups/>"), &mut conn, &mut hb, &shared);
     ccp.handle_disconnect(&mut conn, &mut context, &shared, &None);
 
     let refused = shared.reference.drain_advisor_refused();
@@ -2171,6 +2176,65 @@ fn an_advisor_request_the_connection_outlives_is_refused() {
         shared.reference.drain_advisor_replaced().is_empty(),
         "and not told its document stands",
     );
+}
+
+/// An advisor request made with no connection is refused, not dropped.
+///
+/// Every sibling request on this connection refuses at once in the same
+/// state. This one sent nothing, recorded nothing and said nothing, and the
+/// connection that replaces it is asked nothing this one was — so there was
+/// no later moment at which an answer arrived. A caller reading a partition
+/// waited for ever; one replacing a partition held a document it believed the
+/// venue had taken.
+#[test]
+fn an_advisor_request_with_no_connection_is_refused_rather_than_dropped() {
+    let mut ccp = CcpState::new();
+    let mut hb = HeartbeatState::new();
+    let shared = SharedState::new();
+
+    ccp.send_advisor_config(51, 3, "Group", 1, Some("<Groups/>"), &mut None, &mut hb, &shared);
+
+    let refused = shared.reference.drain_advisor_refused();
+    assert_eq!(refused.len(), 1, "the caller is told, rather than waiting: {refused:?}");
+    assert_eq!(refused[0].0, 51, "under the number it asked with");
+    assert!(
+        shared.reference.drain_advisor_replaced().is_empty(),
+        "and not told its document stands",
+    );
+}
+
+/// An advisor request the venue never answers is given up on by its own clock.
+///
+/// Nothing else releases it: the entry was cleared only when the connection
+/// next went, which on a session that stays up never happens. A caller
+/// reading a partition waited for as long as the process ran.
+#[test]
+fn an_advisor_request_the_venue_never_answers_is_given_up_on() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (_peer, _) = listener.accept().unwrap();
+    let mut conn = Some(crate::protocol::connection::Connection::new_raw(stream).unwrap());
+    let mut ccp = CcpState::new();
+    let mut hb = HeartbeatState::new();
+    let shared = SharedState::new();
+
+    ccp.send_advisor_config(51, 3, "Group", 1, Some("<Groups/>"), &mut conn, &mut hb, &shared);
+    ccp.sweep_pending_advisor(&shared);
+    assert!(
+        shared.reference.drain_advisor_refused().is_empty(),
+        "while the wait is still inside its window, nothing is said",
+    );
+
+    // The window shut, which is the only thing that changes.
+    for asked in ccp.pending_advisor.values_mut() {
+        asked.deadline = std::time::Instant::now();
+    }
+    ccp.sweep_pending_advisor(&shared);
+
+    let refused = shared.reference.drain_advisor_refused();
+    assert_eq!(refused.len(), 1, "the caller is told: {refused:?}");
+    assert_eq!(refused[0].0, 51, "under the number it asked with");
+    assert!(ccp.pending_advisor.is_empty(), "and the question is not kept to match a late reply");
 }
 
 /// The venue reads a chain request positionally, so the tags have to be

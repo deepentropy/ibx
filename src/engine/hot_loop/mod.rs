@@ -1065,6 +1065,7 @@ impl HotLoop {
             self.ccp.sweep_recovery(&mut self.context, &self.shared, &self.event_tx);
             self.ccp.sweep_pending_matching_symbols(&self.shared);
             self.ccp.sweep_pending_option_params(&self.shared);
+            self.ccp.sweep_pending_advisor(&self.shared);
             self.ccp.sweep_pending_schedule_pairs(&self.shared, &self.event_tx);
             self.ccp.sweep_scanner_enrichments(&self.shared);
             self.ccp.sweep_contract_details(&self.shared, &self.event_tx);
@@ -2327,7 +2328,7 @@ impl HotLoop {
                 ControlCommand::AdvisorConfig { req_id, command, partition, fa_data_type, document } => {
                     self.ccp.send_advisor_config(
                         req_id, command, &partition, fa_data_type, document.as_deref(),
-                        &mut self.ccp_conn, &mut self.hb,
+                        &mut self.ccp_conn, &mut self.hb, &self.shared,
                     );
                 }
                 ControlCommand::CancelPnl { req_id } => {
@@ -2966,7 +2967,38 @@ impl HotLoop {
         // next lap — a session coming back after the caller had been told it
         // would not, with nothing said. The cancellation above ends the worker;
         // this ends what it could still be believed for.
-        self.take_back_the_recovery_still_in_flight();
+        self.stop_dialling_without_waiting();
+    }
+
+    /// Take back whatever recovery is still in flight, without waiting on it.
+    ///
+    /// For the halts raised from inside the loop. A worker reads the flag
+    /// between the phases of a handshake, and one past the last of those
+    /// reads is inside a dial, a key exchange or a logon poll, each bounded
+    /// in tens of seconds and none of them interruptible. Waited out here,
+    /// that is the thread that polls every other transport, answers the
+    /// venue's own test requests, sends every heartbeat and drains every
+    /// command — so transports with nothing wrong with them are pushed toward
+    /// the venue's own silence reset by the wait for one that is already
+    /// being given up on. The guard that raises this halt exists because a
+    /// caller should not be made to wait out an attempt; waiting out that
+    /// attempt to raise it is the same wait under another name.
+    ///
+    /// What lands after this is not lost. The trading worker and the receiver
+    /// it hands its session to are left standing, and `poll_ccp_reconnect`
+    /// reads them on a later lap: recovery is halted by then, so the session
+    /// is told it is going and dropped — which is what the wait did, a lap
+    /// later and off the loop's own thread. Dropping the receiver here
+    /// instead would drop that session in silence, and the venue holds one
+    /// session per account and has to time out one that just goes.
+    ///
+    /// The other three return sockets that close when the receiver is gone,
+    /// so those are given up here, as they are at the loop's exit.
+    fn stop_dialling_without_waiting(&mut self) {
+        self.reconnect_cancel.store(true, Ordering::Relaxed);
+        self.pending_farm_reconnect = None;
+        self.pending_hmds_reconnect = None;
+        self.pending_secdef_reconnect = None;
     }
 
     /// Give up recovery that has outrun the time the caller allowed it, while
@@ -5772,18 +5804,33 @@ mod tests {
 
         let t = Instant::now();
         hl.budget.record_attempt(t);
-        let (_worker, worker_rx) = std::sync::mpsc::sync_channel(1);
+        let (worker, worker_rx) = std::sync::mpsc::sync_channel(1);
         hl.pending_ccp_reconnect = Some(worker_rx);
 
         // The limit runs out while the worker is still dialling.
         hl.abandon_recovery_past_its_deadline(t + Duration::from_secs(31));
-
         assert!(hl.reconnect_halted.is_some(), "recovery is over");
+
+        // And then it lands, which is what it was still doing. Waiting for it
+        // here is the wait this halt exists to spare the caller, so it is left
+        // to arrive on its own thread and read on a later lap.
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        worker.send(Ok(conn)).unwrap();
+        hl.poll_ccp_reconnect();
+
         assert!(
-            hl.pending_ccp_reconnect.is_none(),
-            "and nothing is left to take an answer from, so a connection that lands \
-             after the caller gave up cannot be installed behind their back",
+            hl.ccp_conn.is_none(),
+            "a connection that lands after the caller gave up is not installed behind \
+             their back",
         );
+        // Told it is going rather than dropped in silence: the venue holds one
+        // session per account and has to time out one that just goes, so the
+        // next connection would race a session it still believes is live.
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        let said = String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|");
+        assert!(said.contains("35=5|"), "and it is told the session is going: {said}");
     }
 
     /// The time the caller allowed recovery bounds the attempt being spent on
@@ -6576,6 +6623,62 @@ mod tests {
         let started = std::time::Instant::now();
         hl.halt_recovery(retry::DisconnectReason::Transport);
         assert!(started.elapsed() < std::time::Duration::from_secs(1), "the data farm's dial is not waited on");
+    }
+
+    /// Giving recovery up does not wait on the trading connection's handshake
+    /// either.
+    ///
+    /// The guard that raises this halt fires only while a trading handshake is
+    /// in flight — that is what it is for: a caller who bounded recovery to
+    /// thirty seconds should not wait out an attempt that outlasts it. Waited
+    /// out here, the wait is on the thread that polls every other transport,
+    /// answers the venue's own test requests and sends every heartbeat, so
+    /// raising the halt cost exactly what the halt exists to avoid, and
+    /// charged it to the connections that were still healthy.
+    #[test]
+    fn giving_up_does_not_wait_on_a_trading_handshake_still_dialling() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        hl.own_reconnect_worker(true, std::thread::Builder::new().spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }).ok());
+        let started = std::time::Instant::now();
+        hl.halt_recovery(retry::DisconnectReason::AuthorizationFailed);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the trading dial is waited out on the loop's own thread",
+        );
+    }
+
+    /// A trading session that lands after recovery was given up is told it is
+    /// going, rather than dropped in silence.
+    ///
+    /// The halt no longer waits for the worker, so the session arrives on a
+    /// later lap. The venue holds one session per account and has to time out
+    /// one that just goes, so the next connection would race a session it
+    /// still believes is live.
+    #[test]
+    fn a_trading_session_landing_after_the_halt_is_told_it_is_going() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (conn, mut peer) = crate::protocol::connection::Connection::for_test();
+        let (worker, rx) = std::sync::mpsc::sync_channel(1);
+        hl.pending_ccp_reconnect = Some(rx);
+
+        hl.halt_recovery(retry::DisconnectReason::AuthorizationFailed);
+        assert!(
+            hl.pending_ccp_reconnect.is_some(),
+            "the attempt is left somewhere to land",
+        );
+
+        // The attempt lands, the way it does on its own thread.
+        worker.send(Ok(conn)).unwrap();
+        hl.poll_ccp_reconnect();
+
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        let n = peer.read(&mut buf).unwrap();
+        let said = String::from_utf8_lossy(&buf[..n]).replace('\u{1}', "|");
+        assert!(said.contains("35=5|"), "the session is told it is going: {said}");
+        assert!(hl.ccp_conn.is_none(), "and nothing is installed on a session that is over");
     }
 
     /// The calendar connection's loss and recovery are announced as the other

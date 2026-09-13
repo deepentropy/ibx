@@ -322,6 +322,18 @@ def api_surface() -> dict[str, int]:
     }
 
 
+def calls_with_no_counterpart() -> int:
+    """How many `Client` calls answer with a refusal rather than a result.
+
+    Typed into the page as a figure and counted nowhere, it stood at three
+    while the table in the source listed five — so a reader picking this
+    surface for a profit-driven program was told the call is served.
+    """
+    text = (ROOT / "src/api/direct.rs").read_text()
+    table = text.split("pub const NO_COUNTERPART", 1)[1].split("];", 1)[0]
+    return len(re.findall(r'^\s*\("', table, re.M))
+
+
 def api_surface_published() -> dict[str, int]:
     """The same measures as the engineering notes state them."""
     said = {}
@@ -359,6 +371,15 @@ def main() -> int:
         )
     else:
         print(f"capabilities: {verified} of {total} verified")
+
+    refuse = calls_with_no_counterpart()
+    if f"{refuse} return an error saying why" not in matrix_text:
+        wrong.append(
+            f"docs/capabilities.md does not say {refuse} calls return an error saying "
+            f"why, which is what src/api/direct.rs names"
+        )
+    else:
+        print(f"calls with no counterpart: {refuse}")
 
     types = order_types()
     if f"| {types} order types |" not in matrix_text:

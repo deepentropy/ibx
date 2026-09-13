@@ -153,6 +153,11 @@ pub(crate) fn handle_ledger_update(msg: &[u8], shared: &SharedState) {
             stated.clear();
             return;
         }
+        // The bucket's currency is itself one of the figures the venue keeps
+        // per currency, and it is the first of them. A caller that asked for
+        // the ledger and reads the rows by name has no other way to be told
+        // which currency a bucket is in when it asked for all of them.
+        shared.portfolio.note_account_value("Currency", currency, currency);
         if let Some(balance) = cash {
             // The insured deposit is part of what is held in cash unless the
             // session splits them, and it is stated apart either way.

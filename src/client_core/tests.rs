@@ -1310,6 +1310,70 @@ fn poll_pnl_single_overnight_position_with_seed() {
     assert!((u.realized_pnl - 12.34).abs() < 1e-6);
 }
 
+/// A multiplied contract's overnight leg is valued the way today's leg is, or
+/// not at all.
+///
+/// What today's leg is worth comes from the venue, and that figure already
+/// carries the contract's multiplier. The overnight leg has no such figure on
+/// every row, and sized from the overnight quantity times a previous close it
+/// carries no multiplier at all — so subtracting one from the other reported
+/// the day's change short by the multiplier, a hundredfold on an equity
+/// option. With nothing this arithmetic can use, the last reported figure
+/// stands rather than a wrong one going out.
+#[test]
+fn a_multiplied_position_does_not_size_its_overnight_leg_from_a_unit_price() {
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    shared.portfolio.account_download_is_settled();
+    core.subscribe_pnl_single(31, 4001);
+
+    // An option: ten contracts on a hundred units each, marked by the venue at
+    // 7.35 a unit — 7,350 for the position, which is what the venue states.
+    shared.portfolio.set_position_info(PositionInfo {
+        con_id: 4001,
+        position: 10.0,
+        avg_cost: (700.0 * PRICE_SCALE_F) as i64,
+        symbol: "SPY   260320C00600000".into(),
+        sec_type: "OPT".into(),
+        currency: "USD".into(),
+        multiplier: "100".into(),
+        ..Default::default()
+    });
+    shared.portfolio.set_position_marks(
+        4001,
+        Some((7.35 * PRICE_SCALE_F) as i64),
+        Some((7350.0 * PRICE_SCALE_F) as i64),
+        None,
+        None,
+    );
+    // The venue's row states what was held overnight and not what it was
+    // worth, which is the case this is about.
+    shared.portfolio.set_midnight_seeds(String::new(), vec![MidnightSeed {
+        con_id: 4001,
+        qty_midnight: Some(10.0),
+        cost_midnight: None,
+        qty_traded: None,
+        money_traded: 0.0,
+        realized_pnl: 0.0,
+    }]);
+    core.con_id_to_instrument.lock().unwrap().insert(4001, 0);
+    shared.market.push_quote(0, &Quote {
+        last: (7.35 * PRICE_SCALE_F) as i64,
+        close: (7.30 * PRICE_SCALE_F) as i64,
+        ..Default::default()
+    });
+
+    let updates = core.poll_pnl_single(&shared);
+    let update = updates.first().expect("callback must fire");
+    // Sized per unit the day's change reads as 7,350 less 73 — the whole
+    // position's value against one unit's.
+    assert_eq!(
+        update.daily_pnl, 0.0,
+        "nothing here can value the overnight leg the way the venue values today's",
+    );
+    assert!((update.value - 7350.0).abs() < 1e-6, "and the value is still the venue's");
+}
+
 #[test]
 fn poll_pnl_single_change_detection_suppresses_duplicate() {
     let core = ClientCore::new();

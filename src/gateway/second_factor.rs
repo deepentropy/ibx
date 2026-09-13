@@ -170,7 +170,6 @@ pub(super) fn run_second_factor(
     tls: &mut native_tls::TlsStream<TcpStream>,
     sf: SecondFactor<'_>,
 ) -> io::Result<SecondFactorOutcome> {
-    let mut soft_token: Option<BigUint> = None;
     let mut unread: Option<Vec<u8>> = None;
     // An advertised type this client cannot perform is worth saying out
     // loud: sending 775 at it gets the socket closed before any challenge,
@@ -271,31 +270,25 @@ pub(super) fn run_second_factor(
                 log::info!("2FA gate: skipped (no second factor)");
                 unread = carried;
             }
-            session::IbKeyOutcome::Approved { approval_url, session_id, soft_token_hex } => {
+            session::IbKeyOutcome::Approved { approval_url, session_id } => {
                 log::info!(
-                    "2FA gate: approved (session_id={}, approval_url={}, token_hex_len={})",
+                    "2FA gate: approved (session_id={}, approval_url={})",
                     if session_id.is_empty() { "<none>" } else { &session_id },
                     if approval_url.is_empty() { "<none>" } else { &approval_url },
-                    soft_token_hex.len(),
                 );
-                if !soft_token_hex.is_empty() {
-                    if let Some(tok) = BigUint::parse_bytes(soft_token_hex.as_bytes(), 16) {
-                        soft_token = Some(tok);
-                    } else {
-                        log::warn!("2FA gate: SOFT token hex did not parse — falling back to session_key");
-                    }
-                }
             }
         }
     }
-    Ok(SecondFactorOutcome { soft_token, unread })
+    Ok(SecondFactorOutcome { unread })
 }
 
-/// What the second factor left behind: the token a farm logon hashes, and any
-/// message the gate read that belongs to what follows it.
+/// What the second factor left behind: any message the gate read that belongs
+/// to what follows it.
+///
+/// Not a token. The gate issues none — the body that would carry one is
+/// `["", "PASSED"]` — and the token a farm logon hashes is the SRP-derived
+/// key, the same one every reconnect hashes.
 pub(super) struct SecondFactorOutcome {
-    /// SOFT session token, where the gate issued one.
-    pub soft_token: Option<BigUint>,
     /// A message already taken off the socket for the post-auth loop, which
     /// cannot ask for it again.
     pub unread: Option<Vec<u8>>,

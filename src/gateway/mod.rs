@@ -1755,7 +1755,7 @@ fn authenticate(
     config: &GatewayConfig,
     auth_start: &[u8],
     resume_key: Option<BigUint>,
-) -> io::Result<(BigUint, Option<BigUint>, Option<Vec<u8>>)> {
+) -> io::Result<(BigUint, Option<Vec<u8>>)> {
     // AUTH_START field 4 names the second-factor token type and its
     // per-session subtype, e.g. "5.2i" = tokenType 5 (IBKey), subtype "2i".
     // The subtype is account- and session-specific, so the compiled-in
@@ -1788,7 +1788,7 @@ fn authenticate(
             // The stored token is the session key, so the farm logons that
             // follow have what they need without a second factor: the
             // approval that made this session is the one being resumed.
-            (key, None, unread)
+            (key, unread)
         }
         (resume_key, _) => {
             if resume_key.is_some() {
@@ -1816,7 +1816,7 @@ fn authenticate(
                 default_sub_type: &config.ib_key_token_sub_type,
                 cancel: None,
             })?;
-            (session_key, gate.soft_token, gate.unread)
+            (session_key, gate.unread)
         }
     };
     Ok(key)
@@ -1972,7 +1972,7 @@ impl Gateway {
             Err(e) => return Err(e),
         };
 
-        let (session_key, soft_token, mut post_auth_unread) =
+        let (session_key, mut post_auth_unread) =
             authenticate(&mut tls, config, &auth_start, resume_key)?;
 
         let competing = match wait_for_data_start(
@@ -2119,7 +2119,7 @@ impl Gateway {
         // session key IS the token and is not hashed again here. The
         // per-channel SHA1 on tag 8483 is added where the logon is built. Tag
         // 6386 is an object key, not a token source.
-        let farm_token: BigUint = soft_token.clone().unwrap_or_else(|| session_key.clone());
+        let farm_token: BigUint = session_key.clone();
         // read the farm names from the auth-server's
         // routing tags rather than hardcoding `usfarm`/`ushmds`. EU accounts
         // are routed to `eufarm`/`euhmds`/`secdefeu`, US to `usfarm`/`ushmds`,

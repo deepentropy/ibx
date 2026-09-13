@@ -521,11 +521,17 @@ impl EClient {
             let flag = |name: &str| -> bool {
                 asked.getattr(name).ok().and_then(|v| v.extract::<bool>().ok()).unwrap_or(false)
             };
+            // The number the reference client leaves in a field nobody set.
+            // It reaches here as an ordinary integer, so a request built the
+            // way that client builds one — construct the object, set the
+            // filter, send it — arrives naming contract 2147483647 and asking
+            // for that many rows. Both are the caller saying nothing.
+            const UNSET: i64 = i32::MAX as i64;
             let con_id = asked
                 .getattr("conId")
                 .ok()
                 .and_then(|v| v.extract::<i64>().ok())
-                .filter(|id| *id > 0);
+                .filter(|id| *id > 0 && *id != UNSET);
             query.con_id = con_id;
             query.filter = text("filter");
             query.start_date = text("startDate");
@@ -537,7 +543,7 @@ impl EClient {
                 .getattr("totalLimit")
                 .ok()
                 .and_then(|v| v.extract::<i64>().ok())
-                .filter(|n| *n > 0 && *n < i64::MAX);
+                .filter(|n| *n > 0 && *n < i64::MAX && *n != UNSET);
         }
         let Some(tx) = self.tx_or_report(req_id)? else { return Ok(()) };
         Self::send_control(py, &tx, ControlCommand::FetchCalendarEvents {
@@ -1000,6 +1006,54 @@ mod option_model_watch_tests {
                 assert!(client.pending_option_calcs.lock().unwrap().is_empty());
                 assert_eq!(client.core.watching(ids[1]), None);
             }
+        });
+    }
+}
+
+#[cfg(test)]
+mod calendar_request_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use crate::bridge::SharedState;
+
+    /// A field the caller never set names no contract and caps nothing.
+    ///
+    /// The reference client fills an unset whole number with the largest one
+    /// there is, and a caller builds the object, writes the one field it cares
+    /// about and sends it. Read as stated, the request asked the calendar
+    /// about contract 2147483647 — which is nobody's — instead of the portfolio
+    /// or competitors it was scoped by, and asked for that many rows.
+    #[test]
+    fn a_calendar_field_the_caller_never_set_states_nothing() {
+        Python::initialize();
+        Python::attach(|py| {
+            let client = EClient::__new__(&pyo3::types::PyTuple::empty(py), None);
+            let (tx, rx) = std::sync::mpsc::sync_channel(4);
+            *client.shared.lock().unwrap() = Some(Arc::new(SharedState::new()));
+            *client.control_tx.lock().unwrap() = Some(tx);
+            client.connected.store(true, Ordering::Release);
+
+            // The object as that client leaves it: every whole number unset,
+            // one field written.
+            let asked = py
+                .eval(
+                    c"__import__('builtins').type('W', (), {})()",
+                    None, None,
+                )
+                .unwrap();
+            asked.setattr("conId", i32::MAX).unwrap();
+            asked.setattr("totalLimit", i32::MAX).unwrap();
+            asked.setattr("filter", "").unwrap();
+
+            client.req_wsh_event_data(py, 11, Some(asked.unbind())).unwrap();
+
+            let Some(ControlCommand::FetchCalendarEvents { query, .. }) = rx.try_iter().next()
+            else {
+                panic!("the request reaches the engine");
+            };
+            assert_eq!(query.con_id, None, "no contract was named");
+            assert_eq!(query.total_limit, None, "no number of rows was asked for");
         });
     }
 }

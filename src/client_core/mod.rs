@@ -4668,8 +4668,21 @@ impl ClientCore {
             // wrong in a specific direction: treating the absence as flat
             // reports the whole holding as sold, and treating it as no seed at
             // all reports the day's move as the position's entire unrealized.
-            let midnight_value = stated_midnight
-                .or_else(|| qty_midnight.map(|q| q * prev_close as f64 / PRICE_SCALE_F));
+            //
+            // And sized only where a price can size it. What is subtracted
+            // here is a value the venue stated, which already carries the
+            // contract's multiplier; the overnight quantity times a previous
+            // close does not, so on an option or a future the day's change
+            // came out wrong by the multiplier — a hundredfold on an equity
+            // option. The two neighbours that do the same arithmetic test for
+            // this; with a multiplier on the row and no value stated for it,
+            // there is nothing here that can be used, and the arm below holds
+            // what was last reported.
+            let midnight_value = stated_midnight.or_else(|| {
+                (!position_is_multiplied(&pi))
+                    .then(|| qty_midnight.map(|q| q * prev_close as f64 / PRICE_SCALE_F))
+                    .flatten()
+            });
             // A position with no seed row and no cost is in the same case as an
             // unknown overnight size: the opening cash synthesized above is
             // nought where the cost is unknown, and the midnight value is

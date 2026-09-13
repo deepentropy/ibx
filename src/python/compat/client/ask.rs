@@ -246,9 +246,14 @@ impl EClient {
     }
 }
 
-/// The time zone a venue states its hours in, and each session as its
-/// opening, its close, and the day it belongs to.
-type TradingSchedule = (String, Vec<(String, String, String)>);
+/// The window the answer covers, the time zone a venue states its hours in,
+/// and each session as its opening, its close, and the day it belongs to.
+///
+/// The window is stated: the venue answers a duration from an end, and what it
+/// actually covered is the first two, which the callback path states and the
+/// shape this facade follows declares. Dropped here, a program reading the
+/// start of the stretch it asked about found no such field.
+type TradingSchedule = (String, String, String, Vec<(String, String, String)>);
 
 #[pymethods]
 impl EClient {
@@ -442,6 +447,14 @@ impl EClient {
                     sec_type: m.sec_type.to_api_str().to_string(),
                     currency: m.currency.clone(),
                     primary_exchange: m.primary_exchange.clone(),
+                    // The venue's own words, and the id it gives an issuer —
+                    // which is all a match naming an issuer rather than a
+                    // contract carries, and what a lookup for that issuer's
+                    // fixed income is made under. The callback path states
+                    // both, and a match read off the return value is the same
+                    // match.
+                    description: m.description.clone(),
+                    issuer_id: m.issuer_id.clone(),
                     ..Default::default()
                 })?,
                 derivative_sec_types: crate::python::compat::class_contracts::ListField::of(py, m.derivative_types.clone()).unwrap_or_default(),
@@ -521,6 +534,8 @@ impl EClient {
             sh.reference.take_historical_schedule_for(req_id as u32)
         })?;
         Ok((
+            schedule.start_date_time,
+            schedule.end_date_time,
             schedule.timezone,
             schedule
                 .sessions

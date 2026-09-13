@@ -4888,3 +4888,39 @@ fn an_order_for_the_default_sleeve_names_no_model() {
         "and the cancel states none either: {msg}",
     );
 }
+
+/// A replace keeps the regulatory attribution the caller stated at placement.
+///
+/// A replace goes out as a full statement of the order, so a field the caller
+/// does not restate is a field the venue is told the order no longer carries.
+/// The four MiFID II fields are one set — stated once, at placement — and a
+/// caller repricing an order restates none of them.
+#[test]
+fn a_replace_keeps_the_regulatory_attribution_it_was_placed_with() {
+    let bare = || crate::types::OrderSpec {
+        kind: crate::types::OrderKind::Market,
+        attrs: crate::types::OrderAttrs::default(),
+    };
+    let mut resting = bare();
+    resting.attrs.order_ref = "mine".into();
+    resting.attrs.mifid2_decision_maker = "DM1".into();
+    resting.attrs.mifid2_decision_algo = "DA1".into();
+    resting.attrs.mifid2_execution_trader = "ET1".into();
+    resting.attrs.mifid2_execution_algo = "EA1".into();
+
+    // What a caller building a fresh object to reprice states: the price, and
+    // nothing about who is answerable for the order.
+    merge_statement(&mut resting, bare());
+
+    assert_eq!(resting.attrs.mifid2_decision_maker, "DM1");
+    assert_eq!(resting.attrs.mifid2_decision_algo, "DA1");
+    assert_eq!(resting.attrs.mifid2_execution_trader, "ET1");
+    assert_eq!(resting.attrs.mifid2_execution_algo, "EA1", "the fourth of the same set");
+    assert_eq!(resting.attrs.order_ref, "mine", "and the caller's own name for it");
+
+    // Stated, it is what the caller stated.
+    let mut restated = bare();
+    restated.attrs.mifid2_execution_algo = "EA2".into();
+    merge_statement(&mut resting, restated);
+    assert_eq!(resting.attrs.mifid2_execution_algo, "EA2");
+}

@@ -58,6 +58,7 @@ fn merge_statement(resting: &mut crate::types::OrderSpec, stated: crate::types::
         (std::mem::take(&mut resting.attrs.mifid2_decision_maker), &stated.attrs.mifid2_decision_maker),
         (std::mem::take(&mut resting.attrs.mifid2_decision_algo), &stated.attrs.mifid2_decision_algo),
         (std::mem::take(&mut resting.attrs.mifid2_execution_trader), &stated.attrs.mifid2_execution_trader),
+        (std::mem::take(&mut resting.attrs.mifid2_execution_algo), &stated.attrs.mifid2_execution_algo),
     ]
     .map(|(held, asked)| if asked.is_empty() { held } else { asked.clone() });
 
@@ -67,12 +68,18 @@ fn merge_statement(resting: &mut crate::types::OrderSpec, stated: crate::types::
     resting.attrs.oca_group_str = keep_oca_str;
     resting.attrs.outside_rth = keep_outside_rth;
     resting.attrs.allow_pre_open = keep_allow_pre_open;
-    let [order_ref, algo_id, decision_maker, decision_algo, execution_trader] = kept_where_unstated;
+    let [order_ref, algo_id, decision_maker, decision_algo, execution_trader, execution_algo] =
+        kept_where_unstated;
     resting.attrs.order_ref = order_ref;
     resting.attrs.algo_id = algo_id;
     resting.attrs.mifid2_decision_maker = decision_maker;
     resting.attrs.mifid2_decision_algo = decision_algo;
     resting.attrs.mifid2_execution_trader = execution_trader;
+    // The fourth of the same set. Left out, a replace of an order placed with
+    // one told the venue the order no longer carries it, while the three
+    // beside it were restated — and every later replace of that order said so
+    // again.
+    resting.attrs.mifid2_execution_algo = execution_algo;
 }
 
 /// Say that a change did not go, on the channel a refusal already travels on.
