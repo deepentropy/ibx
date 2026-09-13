@@ -218,6 +218,14 @@ pub enum ControlCommand {
         /// Zero where the caller named no contract of its own, which is every
         /// contract the venue has not identified yet.
         con_id: i64,
+        /// The number the request that took the slot asked under.
+        ///
+        /// The name of one occupancy of a reusable slot: the request wrote it
+        /// down as it took the slot and states it again as it gives it up, so
+        /// the engine can tell the subscription this withdrawal was decided
+        /// against from the one that replaced it. Zero where the withdrawal is
+        /// carried through a move, or where the session itself is closing.
+        took_it: u64,
         /// The series nobody watching that contract asks for any more, by the
         /// venue's number for each.
         generic_ticks: Vec<u32>,
@@ -247,6 +255,14 @@ pub enum ControlCommand {
         /// Zero where the caller named no contract of its own, which is every
         /// contract the venue has not identified yet.
         con_id: i64,
+        /// The number the request that took the slot asked under.
+        ///
+        /// The name of one occupancy of a reusable slot: the request wrote it
+        /// down as it took the slot and states it again as it gives it up, so
+        /// the engine can tell the subscription this withdrawal was decided
+        /// against from the one that replaced it. Zero where the withdrawal is
+        /// carried through a move, or where the session itself is closing.
+        took_it: u64,
         /// The series this caller asked for and nobody else watching the
         /// contract did.
         ///

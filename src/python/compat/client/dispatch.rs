@@ -590,7 +590,7 @@ impl EClient {
             let nobody_arrived = self.core.move_watchers(shared, from, into);
             // Said once the move is installed, because the subscription on the
             // slot moved onto is held up until then.
-            shared.market.note_a_move_is_read(into);
+            shared.market.note_a_move_is_read(from, into);
             // And where nobody arrived — the caller this move was for withdrew
             // before it read the move — the subscription it was held up for is
             // nobody's. Left, it ran for the rest of the session against an
@@ -598,9 +598,18 @@ impl EClient {
             if let Some((con_id, issued)) = nobody_arrived
                 && let Some(tx) = self.control_tx.lock().unwrap().clone()
             {
-                let _ = tx.try_send(ControlCommand::Unsubscribe {
+                // Sent the way every other command is, not offered once: this
+                // is the only thing that can take that subscription down, and
+                // a queue that happens to be full is ordinary backpressure.
+                // Dropped on a full queue, the venue served a contract nobody
+                // was watching for the rest of the session and its slot never
+                // went back.
+                let _ = Self::send_control(py, &tx, ControlCommand::Unsubscribe {
                     instrument: into,
                     con_id,
+                    // Nobody arrived to take it, so no occupancy of this
+                    // client's is being named.
+                    took_it: 0,
                     series: Vec::new(),
                     issued,
                 });

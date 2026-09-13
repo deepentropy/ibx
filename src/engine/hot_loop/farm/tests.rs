@@ -163,7 +163,7 @@ mod news_tests {
         farm.send_news_subscribe(756733, instrument, "STK", "BRFG", 7, &mut None, &mut hb);
         farm.handle_subscription_ack(b"35=Q\x0133082,7,0.01,0,3", &mut context, &shared);
 
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], u64::MAX, false, &mut None, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut None, &mut hb);
 
         farm.handle_generic_tick(&framed_news(33082, &one_article()), &mut context, &shared, &None);
         assert_eq!(
@@ -266,7 +266,7 @@ mod news_tests {
 
         // And they go with the subscription rather than outliving it, which is
         // where the caller's asking actually ends.
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
         assert!(
             !farm.asked_generic_ticks.contains_key(&instrument),
             "what was asked for on this contract is released with it",
@@ -1107,7 +1107,7 @@ mod news_tests {
         );
         let _ = shared.market.drain_series_ticks(instrument);
 
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], u64::MAX, false, &mut None, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut None, &mut hb);
         // Watched again, the venue starts its totals over.
         farm.generic_tick_tags.push((61, 233, instrument));
         farm.handle_generic_tick(
@@ -1416,7 +1416,7 @@ mod news_tests {
         farm.also_ask_for_series(instrument, 756733, &[236], &context, &mut conn, &mut hb);
         let _ = super::drain_inner(&mut peer);
 
-        farm.stop_asking_for_series(instrument, 0, &[236], u64::MAX, &mut conn, &mut hb);
+        farm.stop_asking_for_series(instrument, 0, 0, &[236], u64::MAX, &mut conn, &mut hb);
 
         let stated = |msg: &[u8], tag: u32| -> Vec<String> {
             let prefix = format!("{tag}=");
@@ -1481,7 +1481,7 @@ mod news_tests {
         let _ = super::drain_inner(&mut peer);
 
         // A caller that named the trading status withdraws.
-        farm.stop_asking_for_series(instrument, 0, &[TRADING_STATUS_REQUEST_TYPE], u64::MAX, &mut conn, &mut hb,
+        farm.stop_asking_for_series(instrument, 0, 0, &[TRADING_STATUS_REQUEST_TYPE], u64::MAX, &mut conn, &mut hb,
         );
 
         let record = farm.instrument_md_reqs.iter()
@@ -1523,7 +1523,7 @@ mod news_tests {
         farm.also_ask_for_series(instrument, 756733, &[236], &context, &mut conn, &mut hb);
         farm.note_series_asked_on(instrument, &[236], 4);
 
-        farm.stop_asking_for_series(instrument, 0, &[236], 5, &mut conn, &mut hb);
+        farm.stop_asking_for_series(instrument, 0, 0, &[236], 5, &mut conn, &mut hb);
 
         assert!(
             !farm.asked_generic_ticks.get(&instrument).is_some_and(|a| a.contains(&236)),
@@ -1566,7 +1566,7 @@ mod news_tests {
 
         // Its withdrawal names the slot it was given, not the one it was sent
         // to.
-        farm.send_mktdata_unsubscribe(from, 0, &[236], 5, false, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(from, 0, 0, &[236], 5, false, &mut conn, &mut hb);
 
         assert!(
             !farm.asked_generic_ticks.get(&into).is_some_and(|a| a.contains(&236)),
@@ -1605,7 +1605,7 @@ mod news_tests {
         // A withdrawal decided against the contract that held the slot before
         // it, with a number later than anything this subscription was asked
         // under.
-        farm.send_mktdata_unsubscribe(instrument, 265_598, &[], u64::MAX, false, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 265_598, 0, &[], u64::MAX, false, &mut conn, &mut hb);
         assert!(
             farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
             "the subscription for the contract now on the slot stands",
@@ -1616,10 +1616,95 @@ mod news_tests {
         );
 
         // The caller that named this contract withdraws it.
-        farm.send_mktdata_unsubscribe(instrument, 756_733, &[], u64::MAX, false, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 756_733, 0, &[], u64::MAX, false, &mut conn, &mut hb);
         assert!(
             !farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
             "the contract's own caller can withdraw it",
+        );
+    }
+
+    /// A withdrawal follows every move its callers were sent through.
+    ///
+    /// A contract can be moved more than once: the slot a caller was sent to
+    /// can itself turn out to hold a contract that lives somewhere else again.
+    /// Followed one hop, a withdrawal decided against the first slot reached
+    /// the second and did nothing there, and the venue went on serving the
+    /// series where the caller had finally been sent.
+    #[test]
+    fn a_withdrawal_follows_every_move_its_callers_were_sent_through() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let last = context.market.register(756733);
+        let first: InstrumentId = last + 1;
+        let middle: InstrumentId = last + 2;
+        let (conn, peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
+
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", last, 0,
+            false, &mut conn, &mut hb,
+        );
+        farm.also_ask_for_series(last, 756733, &[236], &context, &mut conn, &mut hb);
+        farm.note_series_asked_on(last, &[236], 4);
+        farm.note_moved(first, middle);
+        farm.note_moved(middle, last);
+        let _ = super::drain_inner(&mut peer);
+
+        // The withdrawal names the slot its caller was given at the start.
+        farm.send_mktdata_unsubscribe(first, 0, 0, &[236], 5, false, &mut conn, &mut hb);
+
+        assert!(
+            !farm.asked_generic_ticks.get(&last).is_some_and(|a| a.contains(&236)),
+            "the series is given up where its caller was finally sent",
+        );
+    }
+
+    /// A withdrawal names which occupancy of the slot it was about, even where
+    /// the venue never identified the contract.
+    ///
+    /// A slot is reusable and a contract stated by description has no id, so
+    /// neither the slot nor the contract says which occupancy ended. The
+    /// request that took the slot states the number it took it under: a
+    /// withdrawal decided against the occupancy before this one leaves the
+    /// subscription standing, whatever order the two decisions were made in.
+    #[test]
+    fn a_withdrawal_names_which_occupancy_of_the_slot_it_was_about() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let instrument = context.market.register(756733);
+        let (conn, peer) = Connection::for_test();
+        let mut conn = Some(conn);
+        let mut peer = Connection::new_raw(peer).expect("a connection over the test pair");
+
+        // The subscription on the slot was asked for by the request that took
+        // it under 20.
+        farm.note_subscription_began_under(instrument, 20);
+        farm.send_mktdata_subscribe(
+            756733, "SPY", "SMART", "STK", "", 0.0, "", "", instrument, 0,
+            false, &mut conn, &mut hb,
+        );
+        let _ = super::drain_inner(&mut peer);
+
+        // A withdrawal from the request that held the slot before it, deciding
+        // later than 20 and naming no contract of its own.
+        farm.send_mktdata_unsubscribe(instrument, 0, 11, &[], u64::MAX, false, &mut conn, &mut hb);
+        assert!(
+            farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
+            "the subscription of the occupancy that holds the slot stands",
+        );
+        assert!(
+            super::drain_inner(&mut peer).is_empty(),
+            "and nothing was withdrawn on the wire",
+        );
+
+        // And the request that took it can give it up.
+        farm.send_mktdata_unsubscribe(instrument, 0, 20, &[], u64::MAX, false, &mut conn, &mut hb);
+        assert!(
+            !farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
+            "the occupancy that took the slot can withdraw it",
         );
     }
 
@@ -1650,7 +1735,7 @@ mod news_tests {
         // against.
         farm.rt_volume_totals.insert((instrument, 48), (1.0, 100, 3));
 
-        farm.stop_asking_for_series(instrument, 0, &[233], u64::MAX, &mut conn, &mut hb);
+        farm.stop_asking_for_series(instrument, 0, 0, &[233], u64::MAX, &mut conn, &mut hb);
 
         assert!(
             !farm.rt_volume_totals.contains_key(&(instrument, 48)),
@@ -1717,7 +1802,7 @@ mod news_tests {
         let _ = super::drain_inner(&mut peer);
 
         // A withdrawal decided before that request was made.
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], 5, false, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], 5, false, &mut conn, &mut hb);
         assert!(
             farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
             "the subscription that was asked for after it stands",
@@ -1728,7 +1813,7 @@ mod news_tests {
         );
 
         // And one decided after it takes it down.
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], 11, false, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], 11, false, &mut conn, &mut hb);
         assert!(
             !farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
             "the caller that asked for this subscription can withdraw it",
@@ -1762,7 +1847,7 @@ mod news_tests {
         farm.note_series_asked_on(instrument, &[236], 9);
         let _ = super::drain_inner(&mut peer);
 
-        farm.stop_asking_for_series(instrument, 0, &[233, 236], 5, &mut conn, &mut hb);
+        farm.stop_asking_for_series(instrument, 0, 0, &[233, 236], 5, &mut conn, &mut hb);
 
         let stated = |msg: &[u8], tag: u32| -> Vec<String> {
             let prefix = format!("{tag}=");
@@ -1815,7 +1900,7 @@ mod news_tests {
         farm.note_subscription_asked_on(instrument, 10);
         let _ = super::drain_inner(&mut peer);
 
-        farm.send_mktdata_unsubscribe(instrument, 0, &[236], 5, false, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[236], 5, false, &mut conn, &mut hb);
 
         assert!(
             farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
@@ -1851,7 +1936,7 @@ mod news_tests {
         );
         let _ = super::drain_inner(&mut peer);
 
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], u64::MAX, true, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, true, &mut conn, &mut hb);
 
         assert!(
             farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
@@ -2375,7 +2460,7 @@ mod resub_tests {
             false, &mut None, &mut hb,
         );
         farm.handle_disconnect(&mut None, &mut context, &None, &crate::bridge::SharedState::new());
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], u64::MAX, false, &mut None, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut None, &mut hb);
 
         assert!(
             farm.take_resub_targets(&context.market).is_empty(),
@@ -2409,7 +2494,7 @@ mod resub_tests {
                 assert!(farm.holds_market_data(instrument), "disconnected: still held");
             }
 
-            farm.send_mktdata_unsubscribe(instrument, 0, &[], u64::MAX, false, &mut None, &mut hb);
+            farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut None, &mut hb);
             assert!(
                 !farm.holds_market_data(instrument),
                 "unsubscribed (farm down: {down}): the slot must be releasable",
@@ -2589,7 +2674,7 @@ mod resub_tests {
         // cancel can go out, which is the case an unsubscribe during an outage
         // already relies on.
         let mut hb = HeartbeatState::new();
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], u64::MAX, false, &mut None, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut None, &mut hb);
 
         assert!(
             farm.replay_queue.is_empty(),
@@ -2887,7 +2972,7 @@ mod stale_ack_tests {
         let pending: Vec<u32> = farm.md_req_to_instrument.iter().map(|(r, _)| *r).collect();
         assert!(!pending.is_empty(), "the subscribe must register at least one request");
 
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], u64::MAX, false, &mut None, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut None, &mut hb);
 
         for req_id in pending {
             assert!(
@@ -3066,7 +3151,7 @@ mod price_scaling_tests {
             "and the model is one of them, so a cancel finds it",
         );
 
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
         assert!(farm.greeks_subs.is_empty(), "withdrawn with the rest");
         assert!(farm.instrument_md_reqs.iter().all(|(id, _)| *id != instrument));
     }
@@ -3740,7 +3825,7 @@ mod withdrawal_wire_tests {
         }
         assert_eq!(asked.len(), 4, "a realtime stock is asked for under four numbers");
 
-        farm.send_mktdata_unsubscribe(instrument, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(instrument, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
         let withdrawals: Vec<Vec<u8>> = super::drain_inner(&mut peer)
             .into_iter()
             .filter(|msg| values_of(msg, 263).first().map(String::as_str) == Some("2"))
@@ -4359,7 +4444,7 @@ fn a_stream_beside_snapshots_is_withdrawn_with_its_own_selector() {
             756733, "SPY", "SMART", "STK", "", 0.0, "", "", 0, 4 - mode, true, &mut conn, &mut hb,
         );
         drain_inner(&mut peer);
-        farm.send_mktdata_unsubscribe(0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
+        farm.send_mktdata_unsubscribe(0, 0, 0, &[], u64::MAX, false, &mut conn, &mut hb);
         let withdrawn = drain_inner(&mut peer).into_iter().find(|msg| {
             let tags = fix::fix_parse(msg);
             tags.get(&263).is_some_and(|v| v == "2")

@@ -798,7 +798,7 @@ impl EClient {
             let nobody_arrived = self.core.move_watchers(&self.shared, from, into);
             // Said once the move is installed, because the subscription on the
             // slot moved onto is held up until then.
-            self.shared.market.note_a_move_is_read(into);
+            self.shared.market.note_a_move_is_read(from, into);
             // And where nobody arrived — the caller this move was for withdrew
             // before it read the move — the subscription it was held up for is
             // nobody's. Left, it ran for the rest of the session against an
@@ -807,6 +807,9 @@ impl EClient {
                 let _ = self.send(ControlCommand::Unsubscribe {
                     instrument: into,
                     con_id,
+                    // Nobody arrived to take it, so no occupancy of this
+                    // client's is being named.
+                    took_it: 0,
                     series: Vec::new(),
                     issued,
                 });

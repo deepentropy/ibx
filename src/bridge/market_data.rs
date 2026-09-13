@@ -76,6 +76,13 @@ pub struct MarketDataState {
     /// move. A withdrawal decided in between cannot see it, so the
     /// subscription is held up while this says somebody is coming.
     moves_unread: Mutex<std::collections::HashMap<crate::types::InstrumentId, u32>>,
+    /// And how many are on their way off each slot.
+    ///
+    /// The slot a caller is moving off cannot go back to the table until the
+    /// move is installed: the move is the only thing that says where that
+    /// caller went, and read off the queue the answer turned false the moment
+    /// the queue was emptied — before anything had been moved.
+    moves_unread_from: Mutex<std::collections::HashMap<crate::types::InstrumentId, u32>>,
     tbt_trades: Mutex<Vec<TbtTrade>>,
     tbt_quotes: Mutex<Vec<TbtQuote>>,
     /// The point between the two, each time it moved.
@@ -167,6 +174,7 @@ impl MarketDataState {
             instrument_count: AtomicU64::new(0),
             released_slots: Mutex::new(Vec::new()),
             moves_unread: Mutex::new(std::collections::HashMap::new()),
+            moves_unread_from: Mutex::new(std::collections::HashMap::new()),
             tbt_trades: Mutex::new(Vec::with_capacity(256)),
             tbt_quotes: Mutex::new(Vec::with_capacity(256)),
             tbt_mids: Mutex::new(Vec::with_capacity(256)),
@@ -233,18 +241,18 @@ impl MarketDataState {
         // callback is all it takes for the release to land in between.
         self.tick_req_params.lock().unwrap().retain(|(at, _)| *at != instrument);
         let mut moves = self.subscription_moves.lock().unwrap();
-        let dropped: Vec<crate::types::InstrumentId> = moves
+        let dropped: Vec<(crate::types::InstrumentId, crate::types::InstrumentId)> = moves
             .iter()
             .filter(|(from, to)| *from == instrument || *to == instrument)
-            .map(|(_, to)| *to)
+            .copied()
             .collect();
         moves.retain(|(from, to)| *from != instrument && *to != instrument);
         drop(moves);
         // A move nobody will read is no longer on its way: counted still, it
         // held the subscription on the slot it named up for the rest of the
-        // session.
-        for into in dropped {
-            self.note_a_move_is_read(into);
+        // session, and the slot it moved off out of the table.
+        for (from, into) in dropped {
+            self.note_a_move_is_read(from, into);
         }
         // And the two streams that carry a slot of their own. A headline is
         // about the contract that was named when it arrived, and a model was
@@ -507,7 +515,7 @@ impl MarketDataState {
     /// the only thing telling this slot's watchers where their contract went.
     /// Given back afterwards, once the move has been read, both hold.
     pub fn a_move_is_pending_from(&self, instrument: crate::types::InstrumentId) -> bool {
-        self.subscription_moves.lock().unwrap().iter().any(|(from, _)| *from == instrument)
+        self.moves_unread_from.lock().unwrap().get(&instrument).is_some_and(|w| *w > 0)
     }
 
     /// Whether a reason this slot's subscription could not be made is still
@@ -539,6 +547,7 @@ impl MarketDataState {
         // held up for the rest of the session with nobody watching it.
         let mut moves = self.subscription_moves.lock().unwrap();
         *self.moves_unread.lock().unwrap().entry(into).or_insert(0) += 1;
+        *self.moves_unread_from.lock().unwrap().entry(from).or_insert(0) += 1;
         moves.push((from, into));
     }
 
@@ -560,12 +569,16 @@ impl MarketDataState {
 
     /// Say that a move has been installed, whatever became of the requests it
     /// named.
-    #[doc(hidden)] pub fn note_a_move_is_read(&self, into: crate::types::InstrumentId) {
-        let mut waiting = self.moves_unread.lock().unwrap();
-        if let Some(left) = waiting.get_mut(&into) {
-            *left = left.saturating_sub(1);
-            if *left == 0 {
-                waiting.remove(&into);
+    #[doc(hidden)] pub fn note_a_move_is_read(
+        &self, from: crate::types::InstrumentId, into: crate::types::InstrumentId,
+    ) {
+        for (map, slot) in [(&self.moves_unread, into), (&self.moves_unread_from, from)] {
+            let mut waiting = map.lock().unwrap();
+            if let Some(left) = waiting.get_mut(&slot) {
+                *left = left.saturating_sub(1);
+                if *left == 0 {
+                    waiting.remove(&slot);
+                }
             }
         }
     }

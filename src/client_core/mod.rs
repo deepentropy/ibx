@@ -803,6 +803,12 @@ pub struct WhatAWithdrawalLeaves {
     /// one this was decided against — and then these are the only part of the
     /// withdrawal that is still about what the caller asked for.
     pub series: Option<(InstrumentId, Vec<u32>)>,
+    /// The number the request that took that slot asked under.
+    ///
+    /// What names one occupancy of a reusable slot. Read under the maps that
+    /// decide the withdrawal, so it is the occupancy this decision was about
+    /// and not whichever one holds the slot by the time the engine reads it.
+    pub took_it: u64,
     /// The contract this client believed that slot held.
     ///
     /// What makes the withdrawal about one occupancy of a reusable slot rather
@@ -2516,6 +2522,7 @@ impl ClientCore {
             let _ = control_tx.send(ControlCommand::Unsubscribe {
                 instrument: subscription,
                 con_id: withdrawn.con_id,
+                took_it: withdrawn.took_it,
                 series: series.map(|(_, ticks)| ticks).unwrap_or_default(),
                 issued: withdrawn.decided_at,
             });
@@ -2523,6 +2530,7 @@ impl ClientCore {
             let _ = control_tx.send(ControlCommand::StopAskingForSeries {
                 instrument: slot,
                 con_id: withdrawn.con_id,
+                took_it: withdrawn.took_it,
                 generic_ticks,
                 issued: withdrawn.decided_at,
             });
@@ -2702,7 +2710,7 @@ impl ClientCore {
         // holding it was halfway through its withdrawal read the one-shot as
         // an ordinary stream: it was recorded as watching, sent nothing of its
         // own, and served off a burst that was already over.
-        let (instrument, take_it_down, series_gone, decided_at) = {
+        let (instrument, take_it_down, series_gone, took_it, decided_at) = {
             let mut own = self.ownership();
             // Taken here, under the maps that decide, so that a subscription
             // taken by another caller after this decision carries a later
@@ -2719,7 +2727,7 @@ impl ClientCore {
                 own.series.remove(&req_id);
                 return WhatAWithdrawalLeaves {
                     subscription: None, headlines: None, series: None,
-                    con_id: 0, decided_at,
+                    con_id: 0, took_it: 0, decided_at,
                 };
             };
             // A caller that was watching someone else's subscription stops
@@ -2744,6 +2752,9 @@ impl ClientCore {
                     take_it_down = false;
                 }
             }
+            // Which occupancy of the slot this withdrawal is about, read here
+            // rather than left to the engine to work out from the slot number.
+            let took_it = own.taken_on.get(&instrument).copied().unwrap_or(0);
             if take_it_down {
                 own.holders.remove(&instrument);
                 own.taken_on.remove(&instrument);
@@ -2769,7 +2780,7 @@ impl ClientCore {
                         .any(|other| own.series.get(other).is_some_and(|s| s.contains(tick)))
                 })
                 .collect();
-            (instrument, take_it_down, series_gone, decided_at)
+            (instrument, take_it_down, series_gone, took_it, decided_at)
         };
         self.mdt_sent.lock().unwrap().remove(&req_id);
         let series = (!series_gone.is_empty()).then_some((instrument, series_gone));
@@ -2782,6 +2793,7 @@ impl ClientCore {
                 headlines: self.release_news(shared, req_id),
                 series,
                 con_id,
+                took_it,
                 decided_at,
             };
         }
@@ -2796,6 +2808,7 @@ impl ClientCore {
             headlines: stop_news,
             series,
             con_id,
+            took_it,
             decided_at,
         }
     }

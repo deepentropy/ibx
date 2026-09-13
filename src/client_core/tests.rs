@@ -364,11 +364,17 @@ fn a_move_says_whether_anything_is_watching_what_it_moved_onto() {
         shared.market.a_move_is_on_its_way_into(into),
         "still on its way once the queue is empty",
     );
-    shared.market.note_a_move_is_read(into);
+    assert!(
+        shared.market.a_move_is_pending_from(from),
+        "and the slot it moves off is not free either: the move is the only \
+         thing that says where its callers went",
+    );
+    shared.market.note_a_move_is_read(from, into);
     assert!(
         !shared.market.a_move_is_on_its_way_into(into),
         "and arrived once it is installed",
     );
+    assert!(!shared.market.a_move_is_pending_from(from), "with the slot it left free");
 }
 
 /// A session keeps no figure for a subscription it is not holding.

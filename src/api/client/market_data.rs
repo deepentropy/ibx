@@ -181,6 +181,7 @@ impl EClient {
             self.send(ControlCommand::Unsubscribe {
                 instrument,
                 con_id: withdrawn.con_id,
+                took_it: withdrawn.took_it,
                 series: series.map(|(_, ticks)| ticks).unwrap_or_default(),
                 issued: withdrawn.decided_at,
             })?;
@@ -188,6 +189,7 @@ impl EClient {
             self.send(ControlCommand::StopAskingForSeries {
                 instrument,
                 con_id: withdrawn.con_id,
+                took_it: withdrawn.took_it,
                 generic_ticks,
                 issued: withdrawn.decided_at,
             })?;

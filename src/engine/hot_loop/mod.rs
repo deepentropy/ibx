@@ -634,6 +634,13 @@ impl HotLoop {
                 // The subscription that answers this request, whichever slot
                 // it turns out to live in.
                 self.farm.note_subscription_asked_on(instrument, p.issued);
+                // Where this request is the one the subscription goes out for,
+                // the occupancy is its own. Where the contract lives in another
+                // slot the callers are moved onto it, and that slot's occupancy
+                // belongs to whoever took it.
+                if !self.farm.holds_a_stream(instrument) {
+                    self.farm.note_subscription_began_under(instrument, p.issued);
+                }
                 // What this request named, on whichever slot it lands on: the
                 // list it carried off the slot it was given, or the one
                 // recorded against the slot it keeps.
@@ -1465,6 +1472,7 @@ impl HotLoop {
                         }
                         Some(id) => {
                             self.farm.note_subscription_asked_on(id, issued);
+                            self.farm.note_subscription_began_under(id, issued);
                             self.farm.note_series_asked_on(id, &generic_ticks, issued);
                             // The venue states it on the logon. Count streams
                             // waiting on a definition or a reconnect too: they
@@ -1599,24 +1607,37 @@ impl HotLoop {
                     );
                 }
                 ControlCommand::StopAskingForSeries {
-                    instrument, con_id, generic_ticks, issued,
+                    instrument, con_id, took_it, generic_ticks, issued,
                 } => {
                     self.heard_up_to = self.heard_up_to.max(issued);
                     self.farm.stop_asking_for_series(
                         instrument,
                         con_id,
+                        took_it,
                         &generic_ticks,
                         issued,
                         &mut self.farm_conn,
                         &mut self.hb,
                     );
                 }
-                ControlCommand::Unsubscribe { instrument, con_id, series, issued, } => {
+                ControlCommand::Unsubscribe { instrument, con_id, took_it, series, issued, } => {
                     self.heard_up_to = self.heard_up_to.max(issued);
+                    // A subscription this caller is still waiting on the
+                    // contract's name for. Left queued, the answer to that
+                    // lookup arrives after the caller's record here has gone
+                    // and opens the stream anyway: nothing is left that can
+                    // withdraw it, so the venue serves it and holds its slot
+                    // for the rest of the session.
+                    let waiting_on_a_name = |p: &crate::engine::hot_loop::ccp::PendingSubscribe| {
+                        p.instrument == instrument && (con_id == 0 || p.con_id == con_id || p.con_id == 0)
+                    };
+                    self.ccp.pending_md_subscribe.retain(|(_, p, _)| !waiting_on_a_name(p));
+                    self.ccp.resolved_md_subscribe.retain(|(_, p)| !waiting_on_a_name(p));
                     let moving_in = self.shared.market.a_move_is_on_its_way_into(instrument);
                     self.farm.send_mktdata_unsubscribe(
                         instrument,
                         con_id,
+                        took_it,
                         &series,
                         issued,
                         moving_in,
@@ -2347,7 +2368,9 @@ impl HotLoop {
                         self.farm.send_mktdata_unsubscribe(
                             instrument,
                             // The session is closing, so every subscription
-                            // goes whatever contract it went out under.
+                            // goes whatever contract it went out under and
+                            // whoever took it.
+                            0,
                             0,
                             &[],
                             u64::MAX,
@@ -4687,7 +4710,7 @@ mod tests {
             assert!(hl.is_running(), "existing subscriptions keep running");
 
             if !sec_type.is_empty() {
-                tx.send(ControlCommand::Unsubscribe { instrument: first, con_id: 0, series: Vec::new(), issued: 0 }).unwrap();
+                tx.send(ControlCommand::Unsubscribe { instrument: first, con_id: 0, took_it: 0, series: Vec::new(), issued: 0 }).unwrap();
                 hl.poll_once();
                 subscribe(&mut hl, past).expect("a withdrawn subscription gives its line back");
             }
@@ -5130,7 +5153,10 @@ mod tests {
             "and the slot they left is owed back rather than dropped",
         );
 
-        // Read, so the watchers know where to follow. Only now is it safe.
+        // Installed, so the watchers know where to follow. Reading the move off
+        // the queue is not enough: the surface says when it has been installed,
+        // and only then is the slot they left safe to give back.
+        shared.market.note_a_move_is_read(followed, holds_it);
         hl.send_resolved_subscriptions();
         assert!(
             hl.slots_awaiting_their_word.is_empty(),
@@ -5138,8 +5164,8 @@ mod tests {
         );
     }
 
-    /// Every reclamation path leaves an unread move intact. Once the caller
-    /// drains it, the deferred sweep gives the otherwise unused slot back.
+    /// Every reclamation path leaves an unread move intact. Once the caller has
+    /// installed it, the deferred sweep gives the otherwise unused slot back.
     #[test]
     fn a_slot_with_an_unread_move_survives_reclamation() {
         let shared = Arc::new(SharedState::new());
@@ -5158,6 +5184,7 @@ mod tests {
         assert_eq!(hl.context.market.con_id(source), Some(0), "the source still holds its slot");
         assert_eq!(hl.slots_awaiting_their_word, vec![source], "queued once for release after the move");
         assert_eq!(shared.market.drain_subscription_moves(), vec![(source, destination)]);
+        shared.market.note_a_move_is_read(source, destination);
         hl.give_back_slots_their_word_has_left();
         assert!(hl.slots_awaiting_their_word.is_empty());
         assert!(hl.context.market.con_id(source).is_none());
@@ -7877,7 +7904,7 @@ mod tests {
             running: Default::default(),
         });
 
-        tx.send(ControlCommand::Unsubscribe { instrument: id, con_id: 0, series: Vec::new(), issued: 0 }).unwrap();
+        tx.send(ControlCommand::Unsubscribe { instrument: id, con_id: 0, took_it: 0, series: Vec::new(), issued: 0 }).unwrap();
         hl.poll_once();
 
         assert_eq!(
@@ -7909,7 +7936,7 @@ mod tests {
         }));
         hl.farm.news_subscriptions.push((id, 55, "BRFG".to_string(), 756733, "STK".to_string()));
 
-        tx.send(ControlCommand::Unsubscribe { instrument: id, con_id: 0, series: Vec::new(), issued: 0 }).unwrap();
+        tx.send(ControlCommand::Unsubscribe { instrument: id, con_id: 0, took_it: 0, series: Vec::new(), issued: 0 }).unwrap();
         hl.poll_once();
 
         assert_eq!(
@@ -8384,6 +8411,52 @@ mod tests {
                 "{series} is an entry of the subscription: {asked:?}",
             );
         }
+    }
+
+    /// A lookup whose caller has withdrawn does not open a subscription.
+    ///
+    /// A contract stated by description is registered before the venue has
+    /// named it, so a caller can withdraw while the lookup is still out. The
+    /// answer to that lookup opened the stream anyway, after the caller's
+    /// record here had gone: nothing was left that could withdraw it, so the
+    /// venue served it and held its slot for the rest of the session.
+    #[test]
+    fn a_lookup_whose_caller_withdrew_does_not_open_a_subscription() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        hl.set_control_rx(rx);
+        let instrument = hl.context.market
+            .try_register_contract(0, "SPY", "STK", "SMART", "")
+            .expect("a slot for the contract named by symbol");
+        hl.ccp.resolved_md_subscribe.push((756733, crate::engine::hot_loop::ccp::PendingSubscribe {
+            issued: 0,
+            filters: Default::default(),
+            instrument,
+            con_id: 0,
+            symbol: "SPY".into(),
+            exchange: "SMART".into(),
+            sec_type: "STK".into(),
+            currency: "USD".into(),
+            mode_9887: 0,
+            regulatory_snapshot: false,
+        }));
+
+        // The caller gives up before the venue names the contract.
+        tx.send(ControlCommand::Unsubscribe {
+            instrument,
+            con_id: 0,
+            took_it: 0,
+            series: Vec::new(),
+            issued: 1,
+        })
+        .expect("the engine is holding the other end");
+        hl.poll_control_commands();
+        hl.send_resolved_subscriptions();
+
+        assert!(
+            !hl.farm.instrument_md_reqs.iter().any(|(id, _)| *id == instrument),
+            "the answer to a lookup nobody is waiting on opens nothing",
+        );
     }
 
     /// Nothing is asked for on behalf of a caller that has stopped waiting.
