@@ -64,8 +64,6 @@ pub struct MarketState {
     /// with several requests holds several; entries are dropped on unregister
     /// and cleared wholesale on farm disconnect.
     server_tag_to_instrument: HashMap<u32, InstrumentId>,
-    /// Numbers this session has withdrawn: see `retired_server_tags`.
-    retired_server_tags: std::collections::HashSet<u32>,
     /// Per-instrument minTick (from 35=Q). Used to scale tick magnitudes to prices.
     min_ticks: Box<[f64]>,
     /// Pre-computed min_tick * PRICE_SCALE as integer for hot-path price conversion.
@@ -118,7 +116,6 @@ impl MarketState {
             con_id_to_instrument: HashMap::new(),
             instrument_to_con_id: vec![0; MAX_INSTRUMENTS].into(),
             server_tag_to_instrument: HashMap::new(),
-            retired_server_tags: std::collections::HashSet::new(),
             min_ticks: vec![0.0; MAX_INSTRUMENTS].into(),
             min_tick_scaled: vec![0; MAX_INSTRUMENTS].into(),
             size_ticks: vec![0.0; MAX_INSTRUMENTS].into(),
@@ -335,35 +332,17 @@ impl MarketState {
     /// routing — and only tick and news routing read them back, so this is
     /// safe where the instrument is going away and where its L1 subscription
     /// ends with no news subscription left on it.
-    pub fn clear_server_tags_for(&mut self, instrument: InstrumentId) {
-        // Given up rather than just forgotten: an answer naming one of these
-        // arrives after the subscription it belonged to is over, and taken as
-        // the answer to a later request it points that one at a number nothing
-        // comes on. See `retired_server_tags`.
-        for (tag, id) in self.server_tag_to_instrument.iter() {
-            if *id == instrument {
-                self.retired_server_tags.insert(*tag);
-            }
-        }
-        self.server_tag_to_instrument.retain(|_, id| *id != instrument);
-    }
-
-    /// The venue's numbers this session has given up, newest first.
     ///
-    /// A subscription is answered with a number and a request id, and the
-    /// request id is the caller's own. A caller that withdraws one and asks
-    /// again under the same id can be answered by the first request, still in
-    /// flight: the number it names belongs to a subscription that is over, and
-    /// taken as the answer to the second the new one is pointed at a number
-    /// nothing arrives on. Everything the venue then sends is dropped, quietly,
-    /// for as long as the caller keeps asking.
-    pub fn retired_server_tags(&self) -> &std::collections::HashSet<u32> {
-        &self.retired_server_tags
-    }
-
-    /// Give up a number, so an answer naming it later is known for a late one.
-    pub fn retire_server_tag(&mut self, server_tag: u32) {
-        self.retired_server_tags.insert(server_tag);
+    /// Forgotten, not held against the venue. These numbers were kept in a set
+    /// of ones this session had given up, and an answer naming any of them was
+    /// refused wherever it arrived. The venue hands its numbers out again: a
+    /// subscription opened after another was withdrawn is routinely answered
+    /// under the number the withdrawn one held, and every one of those was
+    /// acknowledged, bound to nothing and left silent — no quotes, no refusal,
+    /// for the rest of the session. What says an answer is a late one is the
+    /// request it names, which the paths that read these already look up.
+    pub fn clear_server_tags_for(&mut self, instrument: InstrumentId) {
+        self.server_tag_to_instrument.retain(|_, id| *id != instrument);
     }
 
     /// Map an IB server_tag (from 35=Q subscription ack) to an InstrumentId.
@@ -606,7 +585,6 @@ impl MarketState {
     /// Kept, the set also only ever grew.
     pub fn clear_server_tags(&mut self) {
         self.server_tag_to_instrument.clear();
-        self.retired_server_tags.clear();
     }
 
     /// Zero all quote data to prevent stale price trading after farm disconnect.
@@ -624,27 +602,28 @@ impl MarketState {
 mod tests {
     use super::*;
 
-    /// A number given up on one connection is not held against the next.
+    /// A number the venue hands out again names whatever it now names.
     ///
-    /// Numbers are given up so that an answer arriving after its subscription
-    /// is over does not point a later request at a number nothing comes on —
-    /// which is a question about one connection. The venue's numbers start
-    /// again on a new one, so a number it issues again was refused, and the
-    /// subscription it belonged to was silently dead for the rest of the
-    /// session on a connection reporting healthy. Kept, the set also only grew.
+    /// These numbers were kept in a set of ones this session had given up, and
+    /// an answer naming any of them was refused. The venue reuses them: a
+    /// subscription opened after another was withdrawn is routinely answered
+    /// under the number the withdrawn one held, and refusing it left that
+    /// subscription bound to nothing and silent — no quotes and no refusal —
+    /// for the rest of the session.
     #[test]
-    fn a_number_given_up_is_forgotten_with_the_connection() {
+    fn a_number_the_venue_hands_out_again_names_what_it_now_names() {
         let mut ms = MarketState::new();
-        let id = ms.register(1);
-        ms.register_server_tag(274555, id);
-        ms.clear_server_tags_for(id);
-        assert!(ms.retired_server_tags().contains(&274555), "given up on this one");
+        let first = ms.register(1);
+        ms.register_server_tag(274555, first);
+        ms.clear_server_tags_for(first);
+        assert_eq!(ms.instrument_by_server_tag(274555), None, "the old mapping is gone");
 
-        ms.clear_server_tags();
-        assert!(
-            ms.retired_server_tags().is_empty(),
-            "and not held against the next: {:?}",
-            ms.retired_server_tags(),
+        // The same number, on the next subscription.
+        let next = ms.register(2);
+        ms.register_server_tag(274555, next);
+        assert_eq!(
+            ms.instrument_by_server_tag(274555), Some(next),
+            "and the number routes to the contract holding it now",
         );
     }
     use crate::types::PRICE_SCALE;
@@ -1142,15 +1121,10 @@ mod tests {
         assert_eq!(ms.instrument_by_server_tag(20), None);
     }
 
-    /// A number withdrawn is a number given up, so an answer naming it later
-    /// is known for the late one it is.
-    ///
-    /// The request ids on these answers are the caller's own and it may ask
-    /// again under one it has used. Without this the first request's answer,
-    /// arriving after the second went out, points the second subscription at a
-    /// number nothing comes on, and everything the venue sends is dropped.
+    /// A withdrawn subscription's number routes to nothing, and its neighbour
+    /// is untouched.
     #[test]
-    fn a_withdrawn_number_is_given_up_and_not_reused() {
+    fn a_withdrawn_number_routes_to_nothing_and_leaves_the_others_alone() {
         let mut ms = MarketState::new();
         let a = ms.register(265598);
         let b = ms.register(272093);
@@ -1159,9 +1133,7 @@ mod tests {
 
         ms.clear_server_tags_for(a);
 
-        assert!(ms.retired_server_tags().contains(&10), "the withdrawn one was given up");
-        assert!(!ms.retired_server_tags().contains(&20), "and the one still held was not");
-        assert_eq!(ms.instrument_by_server_tag(10), None, "and it routes to nothing");
+        assert_eq!(ms.instrument_by_server_tag(10), None, "the withdrawn one routes to nothing");
         assert_eq!(ms.instrument_by_server_tag(20), Some(b), "while the other still does");
     }
 

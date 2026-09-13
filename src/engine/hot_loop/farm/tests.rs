@@ -4322,35 +4322,32 @@ mod depth_bit_tests {
         assert_eq!(got, [1], "{got:?}");
     }
 
-/// A number this session gave up is refused whatever shape the answer arrives
-/// in.
+/// A number the venue hands out again is taken for the contract it now names.
 ///
-/// The price acknowledgement refuses one and says why: a caller's numbers are
-/// its own and it may ask again under one it used before, so the first
-/// request's answer arriving second would point the second at a number nothing
-/// comes on. That reasoning does not depend on which message the venue chose
-/// to answer in — and two of the three paths did not keep it, so the same
-/// number was refused or taken according to the shape, and the mapping the
-/// retirement exists to prevent was written by one path while another was
-/// refusing it.
+/// A set of numbers this session had withdrawn was held, and an answer naming
+/// any of them was refused wherever it arrived. The venue reuses its numbers:
+/// a subscription opened after another was withdrawn is routinely answered
+/// under the number the withdrawn one held. Refused, it was acknowledged,
+/// bound to nothing and left silent — no quotes, and no refusal to say so —
+/// on any contract whose number came round again, for the rest of the session.
 #[test]
-fn a_given_up_number_is_refused_on_the_ticker_setup_too() {
+fn a_number_the_venue_hands_out_again_is_taken_for_what_it_now_names() {
     let mut farm = FarmState::new();
     let mut context = Context::new();
     let shared = SharedState::new();
-    let instrument = context.market.register(756733);
 
-    // The subscription ends, which gives its number up.
-    context.market.register_server_tag(4242, instrument);
-    context.market.clear_server_tags_for(instrument);
-    assert!(context.market.retired_server_tags().contains(&4242));
+    // A subscription that ends, and the number it held.
+    let gone = context.market.register(265598);
+    context.market.register_server_tag(4242, gone);
+    context.market.clear_server_tags_for(gone);
 
-    // The venue answers under that number in the other shape.
+    // The next subscription, which the venue answers under the same number.
+    let now = context.market.register(756733);
     farm.handle_ticker_setup(b"35=L\x01756733,0.01,4242", &mut context, &shared);
 
-    assert!(
-        context.market.instrument_by_server_tag(4242).is_none(),
-        "a number given up is not mapped again by an answer in another shape",
+    assert_eq!(
+        context.market.instrument_by_server_tag(4242), Some(now),
+        "the answer names the contract that holds the number now",
     );
 }
 
