@@ -180,13 +180,20 @@ behaviour will still be wrong, which is why they are here.
 
 ## Callbacks nothing fires
 
-Two callbacks exist so a program written against the reference client compiles
-and runs. No message reaches either of them.
+One callback exists so a program written against the reference client compiles
+and runs. No message reaches it.
 
 | Callback | Why |
 | --- | --- |
-| `order_bound` | It follows asking for the open orders, and what it carries is an order the caller did not place becoming reachable under a number of its own. The protocol makes that an alias rather than a change of ownership, so it costs the venue nothing — and this client already assigns such orders a number when the venue names them at connect. What is missing is telling the caller, and that is work rather than an impossibility |
 | `delta_neutral_validation` | Nothing produces it. Not "nothing on this client's connections": nothing in the protocol at all reaches the sender, neither a market-data request nor a placed order carrying a hedge, so there is no first request after which it could honestly be fired |
+
+`order_bound` was the other, and the reason given for it was that the work had
+not been done rather than that it could not be: an order the caller did not
+place is given a number here when the venue replays it at connect, and the
+pairing of that number with the permanent id the venue keeps is exactly what
+the callback carries. It is stated now, once per pairing — the venue replays
+the same orders on every reconnect, and a caller counting them would be
+counting reconnects.
 
 Every other call in the reference client's surface is served on both languages.
 The call-by-call matrix is [generated from the source](./coverage.md).

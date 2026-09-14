@@ -138,7 +138,7 @@ What the venue says back. `ib_async` delivers these as events as well as methods
 | Orders | `order_status` | ● | ● | ● | ● | ● | ● |
 |  | `open_order` | ● | ● | ● | ● | ● | ● |
 |  | `open_order_end` | ● | ● | ● | ● | ● | ● |
-|  | `order_bound` | ● | ● | ● | ● | ◐ | ◐ |
+|  | `order_bound` | ● | ● | ● | ● | ● | ● |
 | Executions | `exec_details` | ● | ● | ● | ● | ● | ● |
 |  | `exec_details_end` | ● | ● | ● | ● | ● | ● |
 |  | `commission_and_fees_report` | ● | ● | ● | ● | ● | ● |

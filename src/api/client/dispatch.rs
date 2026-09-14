@@ -865,6 +865,13 @@ impl EClient {
             }
         }
 
+        // Orders the venue replayed → order_bound. The pairing of the
+        // permanent id it keeps with the number a caller reaches the order
+        // under here, which this client worked out at connect and never said.
+        for (perm_id, client_id, order_id) in self.shared.reference.drain_orders_bound() {
+            wrapper.order_bound(perm_id, client_id, order_id);
+        }
+
         // Head timestamps → head_timestamp
         for (req_id, response) in self.shared.reference.drain_head_timestamps() {
             // Returned in the form `format_date` asked for. The wire carries one

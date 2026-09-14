@@ -985,6 +985,12 @@ impl EClient {
             }
         }
 
+        // Orders the venue replayed -> orderBound, under the reference
+        // client's own spelling.
+        for (perm_id, client_id, order_id) in shared.reference.drain_orders_bound() {
+            call_wrapper!(self, py, shared, "order_bound", (perm_id, client_id, order_id));
+        }
+
         // Drain head timestamps -> headTimestamp
         let head_ts = shared.reference.drain_head_timestamps_for_dispatch();
         for (req_id, response) in head_ts {

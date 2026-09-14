@@ -68,6 +68,9 @@ pub struct ReferenceState {
     contract_details: Mutex<Vec<(u32, ContractDefinition)>>,
     contract_details_end: Mutex<Vec<u32>>,
     matching_symbols: Mutex<Vec<(u32, Vec<SymbolMatch>)>>,
+    /// Orders this session did not place, paired with the number it reaches
+    /// them under. Drained to `order_bound` on each surface.
+    orders_bound: Mutex<Vec<(i64, i64, i64)>>,
     /// The calendar's answers, as the venue wrote them. Two shapes on one
     /// envelope — what event types exist, and the events themselves — kept
     /// apart so a caller waiting on one is not handed the other.
@@ -189,6 +192,7 @@ impl ReferenceState {
             contract_details: Mutex::new(Vec::with_capacity(16)),
             contract_details_end: Mutex::new(Vec::with_capacity(8)),
             matching_symbols: Mutex::new(Vec::with_capacity(8)),
+            orders_bound: Mutex::new(Vec::new()),
             calendar_meta_data: Mutex::new(Vec::new()),
             calendar_events: Mutex::new(Vec::new()),
             option_params: Mutex::new(Vec::with_capacity(4)),
@@ -901,6 +905,30 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn push_calendar_events(&self, req_id: u32, json: String) {
         self.calendar_events.lock().unwrap().push((req_id, json));
+    }
+
+    /// Say that an order this session did not place is reachable here.
+    ///
+    /// The venue replays what the account is working when a session opens, and
+    /// this client gives each of those a number of its own. That pairing —
+    /// the permanent id the venue keeps and the number a caller uses here — is
+    /// what `order_bound` carries, and it was worked out and never said.
+    #[doc(hidden)] pub fn push_order_bound(&self, perm_id: i64, client_id: i64, order_id: i64) {
+        if perm_id == 0 || order_id == 0 {
+            return;
+        }
+        let mut held = self.orders_bound.lock().unwrap();
+        // Once per pairing. The venue replays the same order on every
+        // reconnect, and a caller counting them would count reconnects.
+        if held.iter().any(|(p, _, o)| *p == perm_id && *o == order_id) {
+            return;
+        }
+        held.push((perm_id, client_id, order_id));
+    }
+
+    /// The pairings not yet handed over.
+    pub fn drain_orders_bound(&self) -> Vec<(i64, i64, i64)> {
+        self.orders_bound.lock().unwrap().drain(..).collect()
     }
 
     #[doc(hidden)] pub fn push_matching_symbols(&self, req_id: u32, matches: Vec<SymbolMatch>) {

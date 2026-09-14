@@ -1266,8 +1266,10 @@ STUB_METHODS: set[str] = set()
 #: message this client fails to read: they name state the venue does not send
 #: here.
 STUB_CALLBACKS = {
+    # Nothing in this protocol reaches the sender of one: not a market-data
+    # request, not an order carrying a hedge. There is no first request after
+    # which it could honestly be fired.
     "delta_neutral_validation",
-    "order_bound",
 }
 
 

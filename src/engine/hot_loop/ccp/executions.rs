@@ -1249,6 +1249,23 @@ impl CcpState {
             });
             self.hydrated_any = true;
             shared.orders.note_naming_began();
+            // And said to the caller, which is the half that was missing. This
+            // order was not placed here: the venue replayed it when the
+            // session opened, and this client gave it a number of its own. A
+            // caller cannot pair that number with the permanent id the venue
+            // keeps unless it is told, and being told is what `order_bound`
+            // is. Nought for the client that placed it — no session here owns
+            // an order to the exclusion of another, so the one it is claimed
+            // for is the one the reference claims unowned orders for.
+            shared.reference.push_order_bound(
+                parsed
+                    .get(&37)
+                    .map(|stated| perm_id_from_fix_order_id(stated))
+                    .filter(|id| *id != 0)
+                    .unwrap_or(0),
+                0,
+                clord_id as i64,
+            );
             log::info!("CCP recovery: inserted orderId={} sym={:?} side={:?} qty={} px={}",
                 clord_id, parsed.get(&55), side, qty,
                 limit_price_i64 as f64 / PRICE_SCALE as f64);

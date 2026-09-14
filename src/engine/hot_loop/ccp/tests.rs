@@ -3070,6 +3070,49 @@ fn an_unknown_time_in_force_falls_back_to_the_one_that_was_submitted() {
     assert_eq!(tracked(&mut ccp, &mut context, &shared, Some("5")), "5");
 }
 
+/// An order the venue replayed is paired with the number it is reachable under
+/// here, and the caller is told.
+///
+/// The venue replays what the account is working when a session opens, and this
+/// client gives each of those a number of its own. It worked that pairing out
+/// and never said it: a caller holding the permanent id the venue keeps had no
+/// way to reach the order here, and the callback that carries the pairing was
+/// one nothing fired.
+///
+/// Said once. The same orders come back on every reconnect, and a caller
+/// counting them would be counting reconnects.
+#[test]
+fn a_replayed_order_is_paired_with_the_number_it_is_reachable_under() {
+    let mut ccp = CcpState::new();
+    let mut context = Context::new();
+    let shared = SharedState::new();
+
+    let mut frame = std::collections::HashMap::new();
+    for (tag, val) in [
+        (11u32, "91"), (150u32, "0"), (39u32, "0"), (6008u32, "756733"),
+        (38u32, "100"), (55u32, "SPY"), (54u32, "1"), (40u32, "2"),
+        (37u32, "1234567890"),
+    ] {
+        frame.insert(tag, val.to_string());
+    }
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+
+    let bound = shared.reference.drain_orders_bound();
+    assert_eq!(bound.len(), 1, "the pairing is stated: {bound:?}");
+    let (perm_id, client_id, order_id) = bound[0];
+    assert_eq!(order_id, 91, "the number this client reaches it under");
+    assert_ne!(perm_id, 0, "and the permanent id the venue keeps");
+    assert_eq!(client_id, 0, "claimed for no client in particular, as it is owned by none");
+
+    // The venue replays it again on the next reconnect, and a caller hears
+    // about it once.
+    ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
+    assert!(
+        shared.reference.drain_orders_bound().is_empty(),
+        "one pairing, however many times the venue states it",
+    );
+}
+
 /// The case the test above cannot reach: an order this session never
 /// placed, arriving on the session-start recovery push with no tag 59.
 ///

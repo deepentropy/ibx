@@ -23,7 +23,7 @@ that did not run.
 | | IB API | Rust | Python |
 |---|:---:|:---:|:---:|
 | **EClient methods** | 78 | 78 impl, 0 stub | 78 impl, 0 stub |
-| **EWrapper callbacks** | 85 | 80 impl, 2 stub | 80 impl, 2 stub |
+| **EWrapper callbacks** | 85 | 81 impl, 1 stub | 81 impl, 1 stub |
 
 ## EClient Methods
 
@@ -129,7 +129,7 @@ that did not run.
 | Orders | `order_status` | Y | Y |
 |  | `open_order` | Y | Y |
 |  | `open_order_end` | Y | Y |
-|  | `order_bound` | STUB | STUB |
+|  | `order_bound` | Y | Y |
 | Executions | `exec_details` | Y | Y |
 |  | `exec_details_end` | Y | Y |
 |  | `commission_and_fees_report` | Y | Y |
