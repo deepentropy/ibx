@@ -35,6 +35,15 @@ import ibx as _ibx
 from ._ib import _refuse_options
 
 
+#: The widest number this protocol carries on a request.
+#:
+#: A request id is four billion wide and the top quarter of that range is this
+#: client's own, for the calls it numbers on a caller's behalf. An order id is
+#: not held to it: the venue numbers orders as wide as it likes, and an account
+#: whose orders have outgrown a request id is ordinary rather than broken.
+WIDEST_REQUEST_ID = 0xC000_0000 - 1
+
+
 class IbxClient:
     """What `ib_async.IB` talks to, answered by this engine.
 
@@ -238,6 +247,24 @@ class IbxClient:
         return new_id
 
     def updateReqId(self, minReqId):
+        # Their wrapper raises this counter past every order id it sees, so
+        # that the next order their client numbers is not one the account is
+        # already working. Their client numbers orders and requests out of it
+        # alike, because the client it stands in for carries both as one signed
+        # 32-bit number.
+        #
+        # Here they are two. An order id goes as wide as the venue lets it, a
+        # request id is four billion wide with the top of that reserved, and
+        # `placeOrder` below numbers an order from the account's own counter
+        # rather than from this one — so a raise past what a request can carry
+        # buys nothing and costs everything: on an account whose orders are
+        # numbered above it, every request afterwards was refused as a number
+        # this protocol cannot carry, and an unmodified program could not so
+        # much as name a contract. Such a raise is let go of rather than taken
+        # to the top of the range, which saturates and steps over the edge on
+        # the next request.
+        if minReqId > WIDEST_REQUEST_ID:
+            return
         self._reqIdSeq = max(self._reqIdSeq, minReqId)
 
     def connectionStats(self):
