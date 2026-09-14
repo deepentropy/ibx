@@ -4322,6 +4322,65 @@ mod depth_bit_tests {
         assert_eq!(got, [1], "{got:?}");
     }
 
+/// A subscription opened after another was withdrawn is answered, whatever
+/// number the venue puts on it — end to end, on the path that carries prices.
+///
+/// The venue hands its numbers out again. Every withdrawn one was kept in a set
+/// and any answer naming one was refused, so a subscription that drew a
+/// recycled number was acknowledged, bound to nothing and left silent: no
+/// quotes, no refusal, for the rest of the session. Measured on a live feed, a
+/// caller that subscribed, withdrew and subscribed again received 36 ticks and
+/// then nothing at all, twice over, with no error raised.
+///
+/// The neighbours of this check cover the mapping and the ticker setup. This
+/// one drives the acknowledgement that carries prices, which is where the feed
+/// actually died.
+#[test]
+fn a_subscription_after_a_withdrawal_is_answered_under_a_recycled_number() {
+    let mut farm = FarmState::new();
+    let mut context = Context::new();
+    let shared = SharedState::new();
+    let mut hb = HeartbeatState::new();
+
+    // One contract, subscribed and acknowledged under the venue's number.
+    let first = context.market.register(265_598);
+    farm.send_mktdata_subscribe(
+        265_598, "AAPL", "SMART", "STK", "", 0.0, "", "", first, 0,
+        false, &mut None, &mut hb,
+    );
+    let asked_under = farm.md_req_to_instrument[0].0;
+    farm.handle_subscription_ack(
+        format!("35=Q\x014242,{asked_under},0.01,0,3").as_bytes(), &mut context, &shared,
+    );
+    assert_eq!(
+        context.market.instrument_by_server_tag(4242), Some(first),
+        "the first subscription is bound to the number it was given",
+    );
+
+    // Withdrawn, and the slot given up — which is what frees the number at the
+    // venue for the next caller.
+    farm.send_mktdata_unsubscribe(first, 0, 0, &[], u64::MAX, false, &mut None, &mut hb);
+    context.market.unregister(first);
+
+    // The next contract, and the venue answers it under the number the last one
+    // held.
+    let next = context.market.register(756_733);
+    farm.send_mktdata_subscribe(
+        756_733, "SPY", "SMART", "STK", "", 0.0, "", "", next, 0,
+        false, &mut None, &mut hb,
+    );
+    let asked_again = farm.md_req_to_instrument.last().expect("a request is waiting").0;
+    farm.handle_subscription_ack(
+        format!("35=Q\x014242,{asked_again},0.01,0,3").as_bytes(), &mut context, &shared,
+    );
+
+    assert_eq!(
+        context.market.instrument_by_server_tag(4242), Some(next),
+        "the subscription that holds the number now is the one it routes to; \
+         refused for having been given up, it received nothing and was told nothing",
+    );
+}
+
 /// A number the venue hands out again is taken for the contract it now names.
 ///
 /// A set of numbers this session had withdrawn was held, and an answer naming

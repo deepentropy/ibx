@@ -24,13 +24,26 @@ from ibx import Contract, Order
 #: The front month of the smaller S&P future, which trades nearly around the
 #: clock. Rolled by hand: a contract that has expired is refused by name, which
 #: is a clear failure rather than a quiet one.
-SYMBOL, EXPIRY = "MES", "202612"
+#:
+#: A share can be named instead, which is worth doing during a session or in the
+#: hours either side of one — the order path is the same and the venues are not:
+#:
+#:     IBX_RT_SYMBOL=SPY IBX_RT_SEC_TYPE=STK IBX_RT_EXCHANGE=SMART \
+#:     IBX_RT_PRICE=400 IBX_RT_OUTSIDE_RTH=1 python scripts/order_round_trip.py
+SYMBOL = os.environ.get("IBX_RT_SYMBOL", "MES")
+SEC_TYPE = os.environ.get("IBX_RT_SEC_TYPE", "FUT")
+EXCHANGE = os.environ.get("IBX_RT_EXCHANGE", "CME")
+EXPIRY = os.environ.get("IBX_RT_EXPIRY", "202612")
 
 #: Far enough under the market that it cannot trade whatever the market is
-#: doing, and on the contract's own quarter-point increment. Stated rather than
-#: read off a quote: this check is about the order path, and asking for a quote
-#: makes it need an entitlement it does not otherwise use.
-RESTS_AT = 6000.0
+#: doing, and on the contract's own increment. Stated rather than read off a
+#: quote: this check is about the order path, and asking for a quote makes it
+#: need an entitlement it does not otherwise use.
+RESTS_AT = float(os.environ.get("IBX_RT_PRICE", "6000"))
+
+#: Whether the order may work outside the regular session. A share resting
+#: before the bell needs this said; a future does not have the distinction.
+OUTSIDE_RTH = os.environ.get("IBX_RT_OUTSIDE_RTH", "") not in ("", "0")
 
 #: How long the venue is given to answer each step.
 ANSWER = 20
@@ -63,14 +76,17 @@ def main() -> int:
     )
 
     contract = Contract()
-    contract.symbol, contract.secType, contract.exchange = SYMBOL, "FUT", "CME"
-    contract.currency, contract.lastTradeDateOrContractMonth = "USD", EXPIRY
+    contract.symbol, contract.secType, contract.exchange = SYMBOL, SEC_TYPE, EXCHANGE
+    contract.currency = "USD"
+    if SEC_TYPE == "FUT":
+        contract.lastTradeDateOrContractMonth = EXPIRY
     (contract,) = ib.qualifyContracts(contract)
     print(f"contract: conId={contract.conId} {contract.localSymbol}", flush=True)
 
     order = Order()
     order.action, order.orderType, order.totalQuantity = "BUY", "LMT", 1
     order.lmtPrice, order.tif = RESTS_AT, "GTC"
+    order.outsideRth = OUTSIDE_RTH
     trade = ib.placeOrder(contract, order)
 
     placed = settle(trade, "placed   ", {"Submitted", "PreSubmitted"})
