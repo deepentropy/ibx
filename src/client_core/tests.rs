@@ -2275,6 +2275,50 @@ fn an_adjustable_stop_carries_what_the_contract_states() {
     assert_eq!(attrs.primary_exchange, "CBOE", "the listing exchange it names");
 }
 
+/// A price stated for a leg the combination does not have is refused.
+///
+/// The prices travel as their own list, in leg order, and are put on the legs
+/// one by one. Two lists paired the wrong way round ran past each other: the
+/// extra prices were dropped without a word and the order went out priced on
+/// whichever legs happened to line up, reported back to the caller as placed
+/// exactly as they had written it.
+#[test]
+fn a_price_for_a_leg_the_combination_does_not_have_is_refused() {
+    let leg = |con_id: i64, action: &str| crate::types::model::ComboLeg {
+        con_id, ratio: 1, action: action.into(), exchange: "SMART".into(),
+        ..Default::default()
+    };
+    let contract = crate::types::model::Contract {
+        symbol: "SPX".into(), sec_type: "BAG".into(), exchange: "SMART".into(),
+        currency: "USD".into(), combo_legs: vec![leg(111, "BUY"), leg(222, "SELL")],
+        ..Default::default()
+    };
+    let priced = |prices: Vec<f64>| ApiOrder {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 1.0, tif: "DAY".into(), order_combo_legs: prices, ..Default::default()
+    };
+
+    assert!(
+        ClientCore::build_order_request(&priced(vec![1.0, 2.0]), 7, 0, Some(&contract)).is_ok(),
+        "one price per leg goes",
+    );
+    assert!(
+        ClientCore::build_order_request(&priced(vec![1.0]), 7, 0, Some(&contract)).is_ok(),
+        "pricing fewer than the legs leaves the rest to the combination's own price",
+    );
+    let why = ClientCore::build_order_request(&priced(vec![1.0, 2.0, 3.0]), 7, 0, Some(&contract))
+        .expect_err("a third price on a two-legged combination has nowhere to go");
+    assert!(why.message.contains("3 legs"), "{why}");
+    assert!(why.message.contains("has 2"), "{why}");
+
+    // A contract with no legs at all states nothing with this list, and the
+    // reference client sends none for one either.
+    assert!(
+        ClientCore::build_order_request(&priced(vec![1.0, 2.0]), 7, 0, None).is_ok(),
+        "a price list on a contract that is not a combination is not a refusal",
+    );
+}
+
 /// A passive relative order is taken as the caller states it: the offset on
 /// the auxiliary price, the cap on the limit price, which is the pair the
 /// venue's own shape for the type is built from.
@@ -2464,9 +2508,11 @@ fn a_family_send_that_stops_partway_forgets_what_it_did_not_send() {
 /// and a midprice cap used to be refused as numbers the replace had nowhere to
 /// put. Measured on a paper session, each shape placed and replaced, the venue
 /// takes them on the tags the submit states them on, so the replace carries
-/// them; the percent is neither a price nor a trigger and is still refused.
+/// them. What it cannot do is change which of the two forms a trail is stated
+/// in: one trail goes out, and for an order placed by percentage that is the
+/// percentage.
 #[test]
-fn a_replace_carries_every_number_but_a_trailing_percent() {
+fn a_replace_carries_every_number_a_trail_is_stated_in() {
     let core = ClientCore::new();
     let placed = ApiOrder {
         order_id: 42, action: "BUY".into(), total_quantity: 1.0,
@@ -2489,8 +2535,14 @@ fn a_replace_carries_every_number_but_a_trailing_percent() {
         order_type: "TRAIL".into(), trailing_percent: 1.0, tif: "DAY".into(), ..Default::default()
     };
     core.track_order(43, ApiContract::default(), pct.clone(), 0);
-    let why = core.modify_refusal(43, &ApiOrder { trailing_percent: 2.0, ..pct }, None).expect("a percent has nowhere to go");
-    assert!(why.message.contains("the trailing percent"), "{why}");
+    assert!(
+        core.modify_refusal(43, &ApiOrder { trailing_percent: 2.0, ..pct.clone() }, None).is_none(),
+        "a percent travels on the trail tag with its unit beside it",
+    );
+    let why = core
+        .modify_refusal(43, &ApiOrder { aux_price: 2.0, ..pct }, None)
+        .expect("one trail is stated, and it is the percentage the order has");
+    assert!(why.message.contains("the trail amount"), "{why}");
 }
 
 /// A field the caller never mentioned is not a field stated wrongly.

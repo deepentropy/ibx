@@ -1071,7 +1071,15 @@ impl Order {
             stock_ref_price: a.stock_ref_price,
             submitter: a.submitter.clone(),
             trail_stop_price: a.trail_stop_price,
-            use_price_mgmt_algo: a.use_price_mgmt_algo,
+            // Stated, whether or not the venue's report named it. The record
+            // holds "not stated" apart from "stated as off" so that a report
+            // omitting the field does not wipe what an earlier one said —
+            // but an order handed back to a caller has been reported on, and
+            // the reference reads this off every report it decodes. Passed
+            // through as held, an order that never mentioned the algorithm
+            // reached a caller saying nothing about it where the reference
+            // says it is off.
+            use_price_mgmt_algo: Some(a.use_price_mgmt_algo.unwrap_or(0)),
             volatility: a.volatility,
             volatility_type: a.volatility_type,
             what_if_type: a.what_if_type,
@@ -1746,6 +1754,30 @@ order.algoParams.append(TagValue('allowPastEndTime', int(True)))
                 stated,
                 "what was placed is what comes back, an unstated price included",
             );
+        });
+    }
+
+    /// An order read back says whether it uses the price-management algorithm.
+    ///
+    /// The record tells "not stated" apart from "stated as off" so that a
+    /// report which omits the field leaves what an earlier one said alone.
+    /// Handed to a caller that way, an order the venue never mentioned it for
+    /// said nothing about it, where the reference reads the field off every
+    /// report and hands back a plain no.
+    #[test]
+    fn an_order_read_back_says_whether_it_uses_the_price_management_algorithm() {
+        Python::initialize();
+        Python::attach(|py| {
+            let unmentioned = crate::types::model::Order::default();
+            assert_eq!(unmentioned.use_price_mgmt_algo, None, "the record states nothing");
+            let back = Order::from_api(py, &unmentioned).expect("the order comes back");
+            assert_eq!(back.use_price_mgmt_algo, Some(0), "and the caller is told no");
+
+            let asked = crate::types::model::Order {
+                use_price_mgmt_algo: Some(1), ..Default::default()
+            };
+            let back = Order::from_api(py, &asked).expect("the order comes back");
+            assert_eq!(back.use_price_mgmt_algo, Some(1), "and a yes is still a yes");
         });
     }
 

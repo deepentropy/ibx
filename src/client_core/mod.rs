@@ -1093,6 +1093,13 @@ pub struct ClientCore {
     /// What has already been delivered of what the venue stated, by figure and
     /// currency, so each is delivered once and again when it changes.
     pub last_stated_account: Mutex<HashMap<(String, String), String>>,
+    /// The same record for the multi-account subscription, which is a
+    /// subscription of its own and answers on its own callback.
+    ///
+    /// Kept apart from the one above: the two are asked for and withdrawn
+    /// separately, and sharing the record let whichever ran first take a
+    /// figure's change and leave the other with nothing to report.
+    pub last_stated_account_multi: Mutex<HashMap<(String, String), String>>,
     /// Whether the caller has been told the account is fully stated.
     pub account_end_sent: AtomicBool,
     /// Its positions as last stated.
@@ -1279,6 +1286,7 @@ impl ClientCore {
             bulletin_subscribed: AtomicBool::new(false),
             account_updates_subscribed: AtomicBool::new(false),
             last_stated_account: Mutex::new(HashMap::new()),
+            last_stated_account_multi: Mutex::new(HashMap::new()),
             account_end_sent: AtomicBool::new(false),
             last_portfolio: Mutex::new(None),
             executions: Mutex::new(ExecutionStore::default()),
@@ -1664,6 +1672,7 @@ impl ClientCore {
         self.bulletin_subscribed.store(false, Ordering::Relaxed);
         self.account_updates_subscribed.store(false, Ordering::Relaxed);
         self.last_stated_account.lock().unwrap().clear();
+        self.last_stated_account_multi.lock().unwrap().clear();
         self.account_end_sent.store(false, Ordering::Release);
         *self.last_portfolio.lock().unwrap() = None;
         *self.executions.lock().unwrap() = ExecutionStore::default();
@@ -3601,9 +3610,16 @@ impl ClientCore {
     /// A shape that holds its defining price in the form the submit sent — a
     /// trail, a peg or snap offset, a cap, a limit offset — has it restated
     /// from the record, with whatever the replace names written into it: each
-    /// was measured on a paper session, placed, replaced and read back. The
-    /// trailing percent is the one number left with nowhere to go: the
-    /// replace carries a price and a trigger, and a percent is neither.
+    /// was measured on a paper session, placed, replaced and read back. A
+    /// trailing percent is restated the same way, on the trail tag with the
+    /// unit beside it: a stop placed trailing by one per cent and replaced
+    /// naming one and a half was read back on a second session trailing by one
+    /// and a half per cent.
+    ///
+    /// What a replace still cannot do is change which of the two a trail is
+    /// stated in. The replacement states one trail, and a percentage order
+    /// asked for an amount states the percentage the order already had while
+    /// this session records the amount.
     ///
     /// A replacement that names none of them still goes: a zero and an unset
     /// value both leave the placed number in force, which is how a caller
@@ -3613,9 +3629,6 @@ impl ClientCore {
         let moved = |placed: f64, asked: f64| named(asked) && asked != placed;
         let by_percent = named(tracked.trailing_percent);
         Some(match tracked.order_type.to_uppercase().as_str() {
-            "TRAIL" if moved(tracked.trailing_percent, incoming.trailing_percent) => {
-                "the trailing percent"
-            }
             "TRAIL" if by_percent && moved(tracked.aux_price, incoming.aux_price) => {
                 "the trail amount"
             }
@@ -4807,6 +4820,46 @@ impl ClientCore {
         Some(AccountUpdateBatch { fields, finished })
     }
 
+    /// What has changed of the account's figures since the multi-account
+    /// subscription last heard, in the currency the venue states each in.
+    ///
+    /// The reference client keeps this request open: a figure that moves after
+    /// the first batch is reported again under the same request, until the
+    /// caller withdraws it. Answered with the first batch alone, a caller
+    /// watching its balance sheet through this request watched a still
+    /// picture — and every one of them was written against a client that keeps
+    /// it moving.
+    ///
+    /// `watching` says whether anyone still holds the request. Nothing is
+    /// taken off the record while nobody does, so the first batch after a new
+    /// ask states the account whole rather than only what moved while no one
+    /// was listening.
+    pub fn account_figures_that_moved(
+        &self, shared: &SharedState, watching: bool,
+    ) -> Vec<AccountFieldUpdate> {
+        if !watching {
+            return Vec::new();
+        }
+        let mut already = self.last_stated_account_multi.lock().unwrap();
+        let mut moved = Vec::new();
+        for (key, value, currency) in shared.portfolio.stated_account_values() {
+            if already.get(&(key.clone(), currency.clone())).map(String::as_str)
+                == Some(value.as_str())
+            {
+                continue;
+            }
+            already.insert((key.clone(), currency.clone()), value.clone());
+            moved.push(AccountFieldUpdate { key, value, currency });
+        }
+        moved
+    }
+
+    /// Forget what the multi-account subscription has been told, so the next
+    /// ask is answered with the account whole.
+    pub fn forget_account_figures_stated(&self) {
+        self.last_stated_account_multi.lock().unwrap().clear();
+    }
+
     /// Prepare portfolio updates (position entries) for account streaming.
     /// Returns changed/new position infos when account updates are subscribed.
     pub fn prepare_portfolio_updates(&self, shared: &SharedState) -> Vec<PortfolioUpdateEntry> {
@@ -5820,6 +5873,21 @@ impl ClientCore {
         // so each is put on the leg it belongs to here — kept apart, one would
         // go out against another leg the moment the legs were reordered.
         let leg_prices = order.order_combo_legs.as_slice();
+        // A price stated for a leg the combination does not have has nowhere
+        // to go. Dropped where the lists ran past each other, the order went
+        // out priced on the legs that happened to line up and the caller was
+        // told it had been placed as written — which for two lists paired the
+        // wrong way round is every leg priced as its neighbour. Only where the
+        // contract is a combination at all: a price list on a contract with no
+        // legs states nothing, and the reference client sends none either.
+        let legs = contract.map_or(0, |c| c.combo_legs.len());
+        if legs > 0 && leg_prices.len() > legs {
+            return Err(Refusal::validation(format!(
+                "the order prices {} legs and the combination has {legs}: a price stated \
+                 for a leg that is not there cannot be sent",
+                leg_prices.len(),
+            )));
+        }
         let leg_specs: Vec<crate::types::ComboLegSpec> =
             contract.map(|c| c.combo_legs.as_slice()).unwrap_or(&[]).iter().enumerate().map(|(at, l)| {
             crate::types::ComboLegSpec {

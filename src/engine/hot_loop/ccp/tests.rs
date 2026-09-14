@@ -1131,6 +1131,31 @@ fn the_price_an_adjustable_stop_converts_at_is_read_back() {
     assert_eq!(order.adjusted_stop_price, 141.00, "beside the one it converts to");
 }
 
+/// A trail the venue states as a percentage is read back as one.
+///
+/// The trail rides on the tag every other order states its trigger on, and the
+/// unit beside it is the whole of what says which of the two it is. Read
+/// without it, a stop the venue said trails by one per cent came back trailing
+/// by one dollar, and the percentage it was placed with came back as nothing.
+#[test]
+fn a_trail_the_venue_states_as_a_percentage_is_read_back_as_one() {
+    let mut order = crate::types::model::Order { aux_price: 1.0, ..Default::default() };
+    let mut parsed = std::collections::HashMap::new();
+    parsed.insert(99u32, "1".to_string());
+    parsed.insert(6268u32, "100".to_string());
+    super::executions::read_stated_attributes(&mut order, &parsed);
+    assert_eq!(order.trailing_percent, 1.0, "one per cent, as the venue said");
+    assert_eq!(order.aux_price, f64::MAX, "and no trail amount, which it did not");
+
+    // The same trail without the unit is an amount, and stays where it is.
+    let mut amount = crate::types::model::Order { aux_price: 1.0, ..Default::default() };
+    let mut stated = std::collections::HashMap::new();
+    stated.insert(99u32, "1".to_string());
+    super::executions::read_stated_attributes(&mut amount, &stated);
+    assert_eq!(amount.aux_price, 1.0, "a dollar is a dollar");
+    assert_eq!(amount.trailing_percent, 0.0, "and no percentage");
+}
+
 /// A recovery record arriving with the instrument table already full used
 /// to take the engine down. A missing order beats a dead hot loop, and the
 /// conversion to the fallible register is what makes that true — nothing

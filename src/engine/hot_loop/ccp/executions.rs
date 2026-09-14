@@ -88,6 +88,19 @@ pub(crate) fn read_stated_attributes(
         }
     }
     if let Some(v) = parsed.get(&3055) { order.account = v.clone(); }
+    // Tag 6268 carries the unit a trail is expressed in, and a hundred means
+    // per cent. The trail itself is on tag 99, which every other order states
+    // its trigger price on. Read without the unit beside it, a trailing stop
+    // the venue had said trails by one per cent came back trailing by one
+    // dollar, and the percentage the caller placed it with came back as
+    // nothing at all.
+    if parsed.contains_key(&99)
+        && parsed.get(&6268).and_then(|v| v.parse::<u32>().ok())
+            == Some(crate::engine::hot_loop::order_builder::TRAIL_UNIT_PERCENT)
+    {
+        order.trailing_percent = order.aux_price;
+        order.aux_price = f64::MAX;
+    }
     if let Some(v) = parsed.get(&6102) { order.sweep_to_fill = flag(v); }
     if let Some(v) = parsed.get(&6115).and_then(|v| v.parse::<i32>().ok()) { order.trigger_method = v; }
     if let Some(v) = parsed.get(&6135) { order.hidden = flag(v); }

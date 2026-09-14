@@ -1200,7 +1200,7 @@ fn synthesize_pending_cancel(
 /// out-of-range coerce to 3 (ReduceOnFillNonBlock), the protocol default.
 /// Unit a trailing amount is expressed in, on tag 6268: percent, as against
 /// an absolute amount (0) or ticks (1).
-const TRAIL_UNIT_PERCENT: u32 = 100;
+pub(crate) const TRAIL_UNIT_PERCENT: u32 = 100;
 
 /// SecurityIDSource (tag 22) for a SecurityID carrying IB's local symbol
 /// rather than a public identifier. Not one of the published sources, which

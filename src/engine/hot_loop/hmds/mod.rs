@@ -1367,11 +1367,30 @@ impl HmdsState {
                                             .iter()
                                             .position(|(q, _, _)| q == qid)
                                     });
-                                    let (contract, actions) =
+                                    let (mut contract, actions) =
                                         crate::control::adjustments::parse_adjustments(body);
                                     match waiting {
                                         Some(pos) => {
                                             let (qid, answers, asked_about) = self.pending_adjustments[pos].clone();
+                                            // The venue states a contract only
+                                            // where it has an action to state
+                                            // against it, so a contract that
+                                            // has never had one — a future, or
+                                            // a young listing — is answered
+                                            // with the echoed id and nothing
+                                            // else. That is this query's
+                                            // answer, and the contract it is
+                                            // about is the one it was asked
+                                            // about. Held to the test below as
+                                            // it stands, the answer was read as
+                                            // naming the wrong contract: the
+                                            // series waiting to be folded by it
+                                            // was never filed, and a caller
+                                            // asking for a future's trades was
+                                            // never told its bars had ended.
+                                            if contract.con_id.is_empty() {
+                                                contract.con_id = asked_about.to_string();
+                                            }
                                             // The body names its own contract.
                                             // One naming a different contract
                                             // from the one asked about is not

@@ -551,6 +551,64 @@ fn an_adjusted_request_folds_its_raw_trades_before_it_files_them() {
     assert!(hmds.held.is_empty(), "the hold is released once folded");
 }
 
+/// A contract with no corporate action to its name is answered with the echoed
+/// query and nothing else, and that answer completes the series waiting on it.
+///
+/// The venue states a contract only where it has a record against it, so a
+/// future is answered with an empty reply. Read as naming the wrong contract,
+/// the answer was dropped and the series it was asked for was never filed: a
+/// caller asking a future for its trades got every bar and was never told the
+/// series had ended.
+#[test]
+fn a_contract_with_no_actions_is_answered_and_its_series_filed() {
+    use crate::protocol::connection::Connection;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let sock = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    let mut conn = Some(Connection::new_raw(sock).unwrap());
+
+    let mut hmds = HmdsState::new();
+    let shared = SharedState::new();
+    let mut hb = HeartbeatState::new();
+
+    hmds.pending_historical.push(("hist_1".to_string(), 42));
+    hmds.held.push(HeldSeries {
+        req_id: 42, con_id: 649180671, sec_type: "FUT".into(), exchange: "CME".into(),
+        bars: Vec::new(), timezone: String::new(), actions_asked: false, actions_query: None,
+        fold: Fold::Adjusted, actions: None, complete: false,
+    });
+    hmds.process_hmds_message(
+        &adj_bar_msg("hist_1", "20240607", 5000.0, true), &mut conn, &shared, &None, &mut hb,
+    );
+    assert!(
+        shared.reference.drain_historical_data().is_empty(),
+        "nothing is filed before the actions are in hand",
+    );
+    let _ = read_frame(&mut peer);
+    let qid = hmds.pending_adjustments.iter().find(|(_, rid, _)| *rid == 42)
+        .map(|(q, _, _)| q.clone())
+        .expect("the actions query is outstanding under this request");
+
+    // The answer a live session was given for a future: the query echoed, and
+    // a body naming no contract and no action.
+    let echoed = format!("<ConAdjResponse>\n\t<id>{qid}</id>\n</ConAdjResponse>\n");
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"35=U\x016040=10022\x016118=");
+    msg.extend_from_slice(echoed.as_bytes());
+    msg.extend_from_slice(b"\x0196=200\n\n");
+    msg.push(0x01);
+    hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+
+    let filed = shared.reference.drain_historical_data();
+    assert_eq!(filed.len(), 1, "the series is filed on an answer that states no action");
+    assert_eq!(filed[0].0, 42);
+    assert!(filed[0].1.is_complete, "and it says it is the whole answer");
+    assert!(hmds.held.is_empty(), "the hold is released");
+    assert!(hmds.pending_adjustments.is_empty(), "and the query is no longer outstanding");
+}
+
 /// When the venue refuses the actions the adjusted series needs, the request is
 /// a bar request that failed: it is answered on the bar channels — the error
 /// and the terminal sentinel — rather than handed back unadjusted or left
