@@ -1265,18 +1265,18 @@ fn decode_greeks(payload: &[u8]) -> Option<crate::types::OptionComputation> {
     let delta = next(flags & DELTA != 0);
     let gamma = next(flags & GAMMA != 0);
     let vega = next(flags & VEGA != 0);
-    let _rho = next(flags & RHO != 0);
+    let rho = next(flags & RHO != 0);
     let theta = next(flags & THETA != 0);
-    let _fugit = next(flags & FUGIT != 0);
-    let _boundary = next(flags & BOUNDARY != 0);
-    let _forward_coeff = next(flags & FORWARD_COEFF != 0);
+    let fugit = next(flags & FUGIT != 0);
+    let exercise_boundary = next(flags & BOUNDARY != 0);
+    let forward_coeff = next(flags & FORWARD_COEFF != 0);
     let und_price = next(flags & UNDERLYING_PRICE != 0);
     let implied_vol = next(flags & IMPLIED_VOL != 0);
     let cal_days = next(flags & CALENDAR_DAYS != 0);
     let daily_rate = next(flags & DAILY_RATE != 0);
-    let _model_yield = next(flags & MODEL_YIELD != 0);
-    let _bridge_yield = next(flags & BRIDGE_YIELD != 0);
-    let _time_value = next(flags & TIME_VALUE != 0);
+    let model_yield = next(flags & MODEL_YIELD != 0);
+    let bridge_yield = next(flags & BRIDGE_YIELD != 0);
+    let time_value = next(flags & TIME_VALUE != 0);
 
     // Below the walk, so nothing here can be mistaken for a field and step the
     // read position. Both figures are stated over one of the days counted
@@ -1307,6 +1307,17 @@ fn decode_greeks(payload: &[u8]) -> Option<crate::types::OptionComputation> {
         und_price,
         cal_days,
         rate,
+        // Stated on the same tick as the greeks beside them, read to step the
+        // cursor past and then dropped on the floor. None of them has a field
+        // anywhere in the documented API, and the venue sends every one of
+        // them to anybody who asks for a model.
+        rho,
+        fugit,
+        exercise_boundary,
+        forward_coeff,
+        model_yield,
+        bridge_yield,
+        time_value,
         price_based_vol: flags & PRICE_BASED_VOL != 0,
     })
 }
@@ -4127,7 +4138,30 @@ impl FarmState {
                     // Published with the quote it belongs to, so a caller
                     // reads the halt against the prices it applies to rather
                     // than a moment either side of them.
-                    context.quote_mut(instrument).halted = i64::from(status.is_halted());
+                    //
+                    // The reason as well as the fact. Read off the mask, not
+                    // off the one status the venue names beside it: the name
+                    // can say nothing while the mask says trading has stopped,
+                    // and a live listing in the premarket names a regulatory
+                    // halt with a mask of nothing. A regulator's halt outranks
+                    // a volatility pause where both are set, because it is the
+                    // one that does not lift on a clock.
+                    let quote = context.quote_mut(instrument);
+                    quote.halted = if !status.is_halted() {
+                        0
+                    } else if status.mask
+                        & crate::protocol::trading_status::TradingStatus::RegulatoryHalt.mask()
+                        != 0
+                    {
+                        1
+                    } else {
+                        2
+                    };
+                    // Kept beside the quote rather than on it: that record is
+                    // two cache lines exactly, on every slot in the table.
+                    shared.market.note_short_sale_restriction(
+                        instrument, status.short_sales_restricted(),
+                    );
                     shared.market.push_quote(instrument, context.quote(instrument));
                     emit(event_tx, Event::Tick(instrument));
                 }

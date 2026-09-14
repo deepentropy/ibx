@@ -151,6 +151,12 @@ pub struct MarketDataState {
     venue_errors: Mutex<Vec<String>>,
     series_ticks: Mutex<std::collections::HashMap<crate::types::InstrumentId, Vec<SeriesTick>>>,
     quote_attribute_masks: Mutex<std::collections::HashMap<crate::types::InstrumentId, (i64, i64)>>,
+    /// Which contracts the venue is restricting short sales in.
+    ///
+    /// Stated on the same record as the halt, and kept here rather than on the
+    /// quote: that record is two cache lines exactly, on every slot in the
+    /// table, and one more field costs a third.
+    short_sale_restricted: Mutex<std::collections::HashSet<crate::types::InstrumentId>>,
     /// How far the venue's clock runs from this machine's, in milliseconds.
     ///
     /// Nothing here ever asks the venue what time it is — this wire carries no
@@ -198,6 +204,7 @@ impl MarketDataState {
             venue_errors: Mutex::new(Vec::new()),
             series_ticks: Mutex::new(std::collections::HashMap::new()),
             quote_attribute_masks: Mutex::new(std::collections::HashMap::new()),
+            short_sale_restricted: Mutex::new(std::collections::HashSet::new()),
             clock_skew_millis: AtomicI64::new(0),
             unread_wire: Mutex::new(Vec::new()),
         }
@@ -300,6 +307,10 @@ impl MarketDataState {
     /// wrong.
     #[doc(hidden)] pub fn forget_option_model(&self, instrument: crate::types::InstrumentId) {
         self.last_option_model.lock().unwrap().remove(&instrument);
+        // A restriction belongs to the contract that was in the slot, not to
+        // the slot: left behind, the next contract to take it reads as
+        // restricted on the strength of the last one.
+        self.short_sale_restricted.lock().unwrap().remove(&instrument);
     }
 
     /// Number of registered instruments.
@@ -859,6 +870,35 @@ impl MarketDataState {
             held.remove(0);
         }
         held.push(bulletin);
+    }
+
+    /// Whether the venue is restricting short sales in this contract.
+    ///
+    /// The circuit breaker a venue puts on a contract that has fallen far
+    /// enough in a day, which stops a short from resting below the bid. Stated
+    /// on the same record as the halt, decoded, and read by nobody: a program
+    /// routing a short into such a contract had the order bounced rather than
+    /// knowing not to send it.
+    ///
+    /// Not the same question as whether the contract can be borrowed, which
+    /// this client already answers beside it — a contract can be freely
+    /// borrowable and still restricted.
+    pub fn short_sale_restricted(&self, instrument: crate::types::InstrumentId) -> bool {
+        self.short_sale_restricted.lock().unwrap().contains(&instrument)
+    }
+
+    /// Say what the venue's status record said about short sales in a
+    /// contract.
+    #[doc(hidden)]
+    pub fn note_short_sale_restriction(
+        &self, instrument: crate::types::InstrumentId, restricted: bool,
+    ) {
+        let mut held = self.short_sale_restricted.lock().unwrap();
+        if restricted {
+            held.insert(instrument);
+        } else {
+            held.remove(&instrument);
+        }
     }
 
     /// What the venue last said its own model made of a contract.

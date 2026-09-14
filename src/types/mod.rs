@@ -258,13 +258,22 @@ pub struct Quote {
     pub ask_exch_mask: i64,
     /// Which venue the last trade was on.
     pub last_exch_mask: i64,
-    /// Whether the venue has halted trading in this contract.
+    /// Whether the venue has halted trading in this contract, and why.
     ///
-    /// 0 not halted, 1 halted, 2 halted for news pending. The venue states it
-    /// and it was decoded and dropped, so a halted contract read as a live
-    /// market: every surface kept presenting the last price before the halt as
-    /// a current one, and a program pricing against it is pricing against a
-    /// book that is not there.
+    /// 0 not halted, 1 stopped by a regulator, 2 stopped because the price
+    /// moved too far. The venue states it and it was decoded and dropped, so a
+    /// halted contract read as a live market: every surface kept presenting the
+    /// last price before the halt as a current one, and a program pricing
+    /// against it is pricing against a book that is not there.
+    ///
+    /// The two reasons are the venue's own, and they call for opposite
+    /// handling: a volatility pause lifts on a clock, and a regulator's halt
+    /// lifts when the regulator says so. Folded to a yes or no, this field
+    /// could only ever be 0 or 1 and the second reason was unreachable.
+    /// The restriction the venue states on the same record is not here: this
+    /// record is two cache lines exactly and one more field costs a third, on
+    /// every slot in the table. It is read by
+    /// [`crate::bridge::MarketDataState::short_sale_restricted`] instead.
     pub halted: i64,
 }
 
@@ -378,6 +387,47 @@ pub struct OptionComputation {
     ///
     /// `f64::MAX` where the venue stated none.
     pub rate: f64,
+    /// How much the option moves with the interest rate, over a year.
+    ///
+    /// The one first-order greek the documented callback has no field for, and
+    /// the venue states it on the same tick as the four that do. A rates desk,
+    /// and any long-dated or bond-like option book, prices against it.
+    ///
+    /// `f64::MAX` where the venue stated none.
+    pub rho: f64,
+    /// How long the venue's model expects the option to run before it is
+    /// exercised, in the days it counts.
+    ///
+    /// An American option can be exercised early and a European one cannot,
+    /// which is the whole of the difference between their prices; this is what
+    /// the venue's model makes of that for this contract. `f64::MAX` where the
+    /// venue stated none.
+    pub fugit: f64,
+    /// The underlying price at which the venue's model says exercising early
+    /// becomes worth more than holding.
+    ///
+    /// `f64::MAX` where the venue stated none.
+    pub exercise_boundary: f64,
+    /// The coefficient the venue's model carries the underlying forward by.
+    ///
+    /// `f64::MAX` where the venue stated none.
+    pub forward_coeff: f64,
+    /// The yield the venue's own model discounted this contract at.
+    ///
+    /// `f64::MAX` where the venue stated none.
+    pub model_yield: f64,
+    /// The yield the venue carried across from the contract this one is
+    /// bridged to, where it priced one from the other.
+    ///
+    /// `f64::MAX` where the venue stated none.
+    pub bridge_yield: f64,
+    /// What the venue's model says the option is worth beyond its intrinsic
+    /// value.
+    ///
+    /// The model's own figure, not the difference a caller works out from the
+    /// model price and the strike — those disagree wherever the model prices
+    /// early exercise. `f64::MAX` where the venue stated none.
+    pub time_value: f64,
     /// Whether the venue priced this contract on a volatility stated in the
     /// contract's own price units rather than as a fraction of the underlying.
     ///
@@ -395,16 +445,33 @@ impl OptionComputation {
     /// Solving states a volatility against a price, and no greek. Left at
     /// zero, a greek nobody computed reads as a real one — an option with no
     /// delta — where an unstated figure reads as the nothing it is.
+    ///
+    /// Every field is named rather than filled in from the default, so a
+    /// figure added to this record fails to compile here instead of arriving
+    /// from a solve as a real zero. That is the fault this constructor exists
+    /// to prevent, and a default would reintroduce it silently.
     pub fn solved(answers: i64) -> Self {
         Self {
             answers: Some(answers),
+            instrument: 0,
+            implied_vol: 0.0,
+            opt_price: 0.0,
+            und_price: 0.0,
             delta: f64::MAX,
             gamma: f64::MAX,
             vega: f64::MAX,
             theta: f64::MAX,
             pv_dividend: f64::MAX,
             cal_days: f64::MAX,
-            ..Default::default()
+            rate: f64::MAX,
+            rho: f64::MAX,
+            fugit: f64::MAX,
+            exercise_boundary: f64::MAX,
+            forward_coeff: f64::MAX,
+            model_yield: f64::MAX,
+            bridge_yield: f64::MAX,
+            time_value: f64::MAX,
+            price_based_vol: false,
         }
     }
 }

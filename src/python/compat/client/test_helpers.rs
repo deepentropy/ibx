@@ -29,8 +29,10 @@ impl EClient {
     /// Seed the venue's model for a contract, as a market-data subscription
     /// does when it publishes tick 13.
     #[doc(hidden)]
+    #[pyo3(signature = (instrument, implied_vol, opt_price, und_price, rho=f64::MAX, fugit=f64::MAX))]
     fn _test_push_option_model(
         &self, instrument: u32, implied_vol: f64, opt_price: f64, und_price: f64,
+        rho: f64, fugit: f64,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
         shared.market.push_option_computation(crate::types::OptionComputation {
@@ -39,6 +41,8 @@ impl EClient {
             implied_vol,
             opt_price,
             und_price,
+            rho,
+            fugit,
             ..Default::default()
         });
         Ok(())
@@ -282,7 +286,7 @@ impl EClient {
             low: (low * ps) as i64, close: (close * ps) as i64,
             bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0,
             timestamp_ns: 1,
-                    halted: 0,
+            halted: 0,
         };
         shared.market.push_quote(instrument, &q);
         Ok(())

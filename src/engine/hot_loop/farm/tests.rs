@@ -1231,6 +1231,83 @@ mod news_tests {
         );
     }
 
+    /// The venue says whether it has stopped a contract, why, and whether it is
+    /// restricting short sales in it. All three reach a caller.
+    ///
+    /// Folded to a yes or no, the reason was unreachable — the field could only
+    /// ever hold 0 or 1 where its own contract names three values — and the
+    /// restriction reached nobody at all. The two reasons call for opposite
+    /// handling: a volatility pause lifts on a clock and a regulator's halt
+    /// does not, and a program routing a short into a restricted contract had
+    /// the order bounced rather than knowing not to send it.
+    #[test]
+    fn a_halt_states_its_reason_and_a_short_sale_restriction_reaches_a_caller() {
+        use crate::protocol::trading_status::TradingStatus;
+
+        // A status record is three big-endian words: the mask, a stamp, and
+        // the one status the venue names beside it.
+        let record = |mask: u32, named: u32| {
+            let mut body = Vec::new();
+            body.extend_from_slice(&mask.to_be_bytes());
+            body.extend_from_slice(&0u32.to_be_bytes());
+            body.extend_from_slice(&named.to_be_bytes());
+            body
+        };
+        let read = |mask: u32, named: u32| {
+            let mut farm = FarmState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            let id = context.market.register(756733);
+            context.market.register_server_tag(7, id);
+            farm.generic_tick_tags.push((7, TRADING_STATUS_REQUEST_TYPE, 0));
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[(7, TRADING_STATUS_REQUEST_TYPE, &record(mask, named))]),
+                &mut context, &shared, &None,
+            );
+            (context.quote(id).halted, shared.market.short_sale_restricted(id))
+        };
+
+        assert_eq!(
+            read(TradingStatus::ExchangeOpen.mask(), TradingStatus::ExchangeOpen.index()),
+            (0, false),
+            "an open contract is not halted and not restricted",
+        );
+        assert_eq!(
+            read(TradingStatus::RegulatoryHalt.mask(), TradingStatus::RegulatoryHalt.index()),
+            (1, false),
+            "a regulator's halt",
+        );
+        assert_eq!(
+            read(TradingStatus::VolatilityHalt.mask(), TradingStatus::VolatilityHalt.index()),
+            (2, false),
+            "a volatility pause, which is the value a yes-or-no field could never reach",
+        );
+        assert_eq!(
+            read(TradingStatus::ShortSaleRestriction.mask(), TradingStatus::None.index()),
+            (0, true),
+            "a restriction is not a halt, and the contract still trades",
+        );
+        // Read off the mask, not off the name beside it: the venue can stop a
+        // contract and name nothing.
+        assert_eq!(
+            read(TradingStatus::VolatilityHalt.mask(), TradingStatus::None.index()),
+            (2, false),
+            "a halt the venue did not name is still a halt, and still has a reason",
+        );
+        // And both at once, which the venue does state: a regulator's halt
+        // outranks, because it is the one that does not lift on a clock.
+        assert_eq!(
+            read(
+                TradingStatus::RegulatoryHalt.mask()
+                    | TradingStatus::VolatilityHalt.mask()
+                    | TradingStatus::ShortSaleRestriction.mask(),
+                TradingStatus::None.index(),
+            ),
+            (1, true),
+            "more than one status is in force at once",
+        );
+    }
+
     /// A message carries one record after another, and each is delivered. Read
     /// as a single record, everything after the first went unread.
     #[test]
@@ -3108,12 +3185,13 @@ mod price_scaling_tests {
         assert_eq!(rx.try_iter().count(), 0, "the refused one is not");
     }
 
+    const FRAME: &[u8] = &[0x7e, 0xf7, 0x20, 0x01, 0x40, 0x57, 0x04, 0x41, 0xc8, 0xf2, 0xf3, 0x45, 0x3f, 0xef, 0xfc, 0x3a, 0xab, 0x98, 0x37, 0xb3, 0x3f, 0x12, 0xf3, 0x0c, 0x1b, 0xcf, 0xac, 0xe7, 0x3f, 0x53, 0x13, 0xaf, 0x03, 0xfc, 0x00, 0x00, 0xbf, 0xa0, 0x60, 0x85, 0xf4, 0x8d, 0x38, 0x00, 0x40, 0x0d, 0x23, 0xdb, 0x03, 0xb8, 0xf5, 0x14, 0x40, 0x71, 0x7c, 0xb2, 0x05, 0x82, 0x74, 0xf0, 0x3f, 0xf0, 0x07, 0x27, 0xcf, 0x01, 0x13, 0xef, 0x40, 0x73, 0x7f, 0x52, 0x20, 0x00, 0x00, 0x00, 0x3f, 0x9f, 0xf2, 0x61, 0x35, 0xdd, 0x42, 0xd9, 0x40, 0x2e, 0x2b, 0xd8, 0x8e, 0x99, 0xfa, 0xb0, 0x3f, 0x1e, 0x54, 0x91, 0xb1, 0x1c, 0x9a, 0x6c, 0xbe, 0xf5, 0x34, 0xf6, 0xa2, 0xc8, 0x61, 0xb4, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0xb5, 0x32, 0x2a, 0x5c, 0xf4, 0xd4];
+
     /// A frame the venue sent for a deep in-the-money call, byte for byte.
     /// Nothing here is constructed: a wrong alignment does not produce a price
     /// that decomposes into the other two fields by accident.
     #[test]
     fn the_venue_states_an_option_model() {
-        const FRAME: &[u8] = &[0x7e, 0xf7, 0x20, 0x01, 0x40, 0x57, 0x04, 0x41, 0xc8, 0xf2, 0xf3, 0x45, 0x3f, 0xef, 0xfc, 0x3a, 0xab, 0x98, 0x37, 0xb3, 0x3f, 0x12, 0xf3, 0x0c, 0x1b, 0xcf, 0xac, 0xe7, 0x3f, 0x53, 0x13, 0xaf, 0x03, 0xfc, 0x00, 0x00, 0xbf, 0xa0, 0x60, 0x85, 0xf4, 0x8d, 0x38, 0x00, 0x40, 0x0d, 0x23, 0xdb, 0x03, 0xb8, 0xf5, 0x14, 0x40, 0x71, 0x7c, 0xb2, 0x05, 0x82, 0x74, 0xf0, 0x3f, 0xf0, 0x07, 0x27, 0xcf, 0x01, 0x13, 0xef, 0x40, 0x73, 0x7f, 0x52, 0x20, 0x00, 0x00, 0x00, 0x3f, 0x9f, 0xf2, 0x61, 0x35, 0xdd, 0x42, 0xd9, 0x40, 0x2e, 0x2b, 0xd8, 0x8e, 0x99, 0xfa, 0xb0, 0x3f, 0x1e, 0x54, 0x91, 0xb1, 0x1c, 0x9a, 0x6c, 0xbe, 0xf5, 0x34, 0xf6, 0xa2, 0xc8, 0x61, 0xb4, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0xb5, 0x32, 0x2a, 0x5c, 0xf4, 0xd4];
         let c = super::super::decode_greeks(FRAME).expect("the payload is stated valid");
         assert!((c.opt_price - 92.066_515_195_137_14).abs() < 1e-9, "{c:?}");
         assert!((c.delta - 0.999_539_694_925_024_9).abs() < 1e-12, "deep in the money: {c:?}");
@@ -3137,6 +3215,47 @@ mod price_scaling_tests {
         assert!(c.opt_price > intrinsic, "worth at least its intrinsic: {c:?}");
         assert!(c.opt_price - intrinsic < 1.0, "and barely more, this close to expiry: {c:?}");
         assert_eq!(c.pv_dividend, f64::MAX, "not stated on this tick");
+    }
+
+    /// The same frame, read for the figures the documented callback has no
+    /// room for.
+    ///
+    /// Eight fields reach a caller through `tickOptionComputation` and the
+    /// venue states eighteen on this tick. The rest were read only to step the
+    /// cursor past them and then dropped on the floor — the one first-order
+    /// greek the reference cannot answer among them.
+    ///
+    /// The cross-checks are what make this a reading rather than a
+    /// transcription: a call this deep in the money is expected to be
+    /// exercised long before it expires, and the price at which exercising
+    /// beats holding sits between the strike and the underlying.
+    #[test]
+    fn the_venue_states_more_of_its_model_than_the_callback_carries() {
+        let c = super::super::decode_greeks(FRAME).expect("the payload is stated valid");
+
+        assert!((c.fugit - 3.642_507_580_835_294_7).abs() < 1e-12, "{c:?}");
+        assert!(
+            c.fugit < c.cal_days,
+            "a call at a delta of {} is exercised before it expires: {c:?}", c.delta,
+        );
+
+        assert!((c.exercise_boundary - 279.793_462_285_611).abs() < 1e-9, "{c:?}");
+        assert!(
+            220.0 < c.exercise_boundary && c.exercise_boundary < c.und_price,
+            "the price that makes exercising worth more than holding sits between \
+             the strike and the underlying: {c:?}",
+        );
+
+        assert!((c.forward_coeff - 1.001_746_948_824_116_6).abs() < 1e-12, "{c:?}");
+        assert!((c.model_yield - -2.022_446_476_432_496_8e-5).abs() < 1e-18, "{c:?}");
+        assert_eq!(c.bridge_yield, 0.0, "stated, and stated as nothing");
+
+        // The venue left the rate greek off this frame: its flag is clear, and
+        // a figure nobody stated is not a figure of nought.
+        assert_eq!(c.rho, f64::MAX, "not stated on this tick");
+        // And this body ends before the last figure its flags name, which the
+        // walk marks unstated rather than reading past the end.
+        assert_eq!(c.time_value, f64::MAX, "the body ends before it");
     }
 
     /// A payload the venue did not mark valid carries no numbers.

@@ -1302,6 +1302,70 @@ pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Option<Quote>
 
 ---
 
+#### `option_model`
+
+What the venue's own model last made of an option, whole. [`Wrapper::tick_option_computation`] carries eight figures, which is what the documented callback has room for; the venue states eighteen on the same tick. The ten it has no room for — the rate greek, the expected time to exercise and the price that triggers it, the forward coefficient, two yields, the time value, the days the model counted, the rate it discounted at, and which kind of volatility it priced on — were decoded and dropped. They are on the record this returns. A figure the venue did not state is `f64::MAX`, as everywhere else on this record; zero is a real greek. `None` where the request names no subscription, or the venue has not stated a model for it yet. [`Wrapper::tick_option_computation`]: crate::api::Wrapper::tick_option_computation
+
+```rust
+pub fn option_model(&self, req_id: i64) -> Option<crate::types::OptionComputation>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+**Returns:** `Option<crate::types::OptionComputation>`
+
+---
+
+#### `short_sale_restricted`
+
+Whether the venue is restricting short sales in the contract a request is watching. The circuit breaker a venue puts on a contract that has fallen far enough in a day, which stops a short from resting below the bid. The venue states it on the same record as the halt, and it has no field anywhere in the documented API. Not the same question as whether the contract can be borrowed, which [`Wrapper::tick_generic`] already answers beside it: a contract can be freely borrowable and still restricted. `false` where the request names no subscription, as it is for a contract the venue has not restricted. [`Wrapper::tick_generic`]: crate::api::Wrapper::tick_generic
+
+```rust
+pub fn short_sale_restricted(&self, req_id: i64) -> bool
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+**Returns:** `bool`
+
+---
+
+#### `short_sale_restricted_by_instrument`
+
+The same, by InstrumentId, for callers who track them themselves.
+
+```rust
+pub fn short_sale_restricted_by_instrument(&self, instrument: InstrumentId) -> bool
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
+
+**Returns:** `bool`
+
+---
+
+#### `option_model_by_instrument`
+
+The same, by InstrumentId, for callers who track them themselves.
+
+```rust
+pub fn option_model_by_instrument( &self, instrument: InstrumentId, ) -> Option<crate::types::OptionComputation>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
+
+**Returns:** `Option<crate::types::OptionComputation>`
+
+---
+
 ## Reference Data
 
 #### `req_historical_data`

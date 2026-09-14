@@ -1064,10 +1064,66 @@ def quote(req_id)
 
 #### `quote_by_instrument`
 
-Zero-copy SeqLock quote read by InstrumentId. Returns a dict with bid, ask, last, bid_size, ask_size, last_size, volume, high, low, open, close, or None if not connected.
+Zero-copy SeqLock quote read by InstrumentId. Returns a dict with bid, ask, last, bid_size, ask_size, last_size, volume, high, low, open, close, and whether the venue has halted the contract and why — or None if not connected. Whether it is restricting short sales in it is `shortSaleRestrictedByInstrument`, which is stated on the same record and kept off this one.
 
 ```python
 def quote_by_instrument(instrument)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `instrument` | `int` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
+
+---
+
+#### `option_model`
+
+What the venue's own model last made of an option, whole.  `tickOptionComputation` carries eight figures, which is what the documented callback has room for; the venue states eighteen on the same tick. The ten it has no room for are in this dict beside them. A figure the venue did not state is this API's own unset double; zero is a real greek.  `None` where the request names no subscription, or the venue has not stated a model for it yet.
+
+```python
+def option_model(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+
+---
+
+#### `short_sale_restricted`
+
+Whether the venue is restricting short sales in the contract a request is watching.  The circuit breaker a venue puts on a contract that has fallen far enough in a day, which stops a short from resting below the bid. Stated on the same record as the halt, and with no field anywhere in the documented API. Not the same question as whether the contract can be borrowed, which ticks 46 and 89 already answer beside it.
+
+```python
+def short_sale_restricted(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+
+---
+
+#### `short_sale_restricted_by_instrument`
+
+The same, by InstrumentId, for callers who track them themselves.
+
+```python
+def short_sale_restricted_by_instrument(instrument)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `instrument` | `int` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
+
+---
+
+#### `option_model_by_instrument`
+
+The same, by InstrumentId, for callers who track them themselves.
+
+```python
+def option_model_by_instrument(instrument)
 ```
 
 | Parameter | Type | Description |

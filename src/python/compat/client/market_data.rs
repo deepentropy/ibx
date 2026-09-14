@@ -509,13 +509,21 @@ impl EClient {
             dict.set_item("low", q.low as f64 / ps)?;
             dict.set_item("open", q.open as f64 / ps)?;
             dict.set_item("close", q.close as f64 / ps)?;
+            // What the venue says about dealing in this contract at all, which
+            // is what every price above means or does not mean. Left out, a
+            // caller reading a quote through this surface read the last price
+            // before a halt as a market it could deal on.
+            dict.set_item("halted", q.halted)?;
             Ok(Some(dict.into_any().unbind()))
         })
     }
 
     /// Zero-copy SeqLock quote read by InstrumentId.
-    /// Returns a dict with bid, ask, last, bid_size, ask_size, last_size, volume,
-    /// high, low, open, close, or None if not connected.
+    /// Returns a dict with bid, ask, last, bid_size, ask_size, last_size,
+    /// volume, high, low, open, close, and whether the venue has halted the
+    /// contract and why — or None if not connected. Whether it is restricting
+    /// short sales in it is `shortSaleRestrictedByInstrument`, which is stated
+    /// on the same record and kept off this one.
     fn quote_by_instrument(&self, instrument: u32) -> PyResult<Option<Py<PyAny>>> {
         let shared = match self.shared.lock().unwrap().clone() {
             Some(s) => s,
@@ -540,6 +548,99 @@ impl EClient {
             dict.set_item("low", q.low as f64 / ps)?;
             dict.set_item("open", q.open as f64 / ps)?;
             dict.set_item("close", q.close as f64 / ps)?;
+            // What the venue says about dealing in this contract at all, which
+            // is what every price above means or does not mean. Left out, a
+            // caller reading a quote through this surface read the last price
+            // before a halt as a market it could deal on.
+            dict.set_item("halted", q.halted)?;
+            Ok(Some(dict.into_any().unbind()))
+        })
+    }
+
+    /// What the venue's own model last made of an option, whole.
+    ///
+    /// `tickOptionComputation` carries eight figures, which is what the
+    /// documented callback has room for; the venue states eighteen on the same
+    /// tick. The ten it has no room for are in this dict beside them. A figure
+    /// the venue did not state is this API's own unset double; zero is a real
+    /// greek.
+    ///
+    /// `None` where the request names no subscription, or the venue has not
+    /// stated a model for it yet.
+    #[pyo3(signature = (req_id))]
+    fn option_model(&self, req_id: i64) -> PyResult<Option<Py<PyAny>>> {
+        let Ok(shared) = self.shared_state() else { return Ok(None) };
+        let Some(instrument) =
+            self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Ok(None);
+        };
+        self.option_model_dict(&shared, instrument)
+    }
+
+    /// Whether the venue is restricting short sales in the contract a request
+    /// is watching.
+    ///
+    /// The circuit breaker a venue puts on a contract that has fallen far
+    /// enough in a day, which stops a short from resting below the bid. Stated
+    /// on the same record as the halt, and with no field anywhere in the
+    /// documented API. Not the same question as whether the contract can be
+    /// borrowed, which ticks 46 and 89 already answer beside it.
+    #[pyo3(signature = (req_id))]
+    fn short_sale_restricted(&self, req_id: i64) -> PyResult<bool> {
+        let Ok(shared) = self.shared_state() else { return Ok(false) };
+        let held = self.core.req_to_instrument.lock().unwrap();
+        Ok(held.get(&req_id).is_some_and(|&iid| shared.market.short_sale_restricted(iid)))
+    }
+
+    /// The same, by InstrumentId, for callers who track them themselves.
+    #[pyo3(signature = (instrument))]
+    fn short_sale_restricted_by_instrument(&self, instrument: u32) -> PyResult<bool> {
+        let Ok(shared) = self.shared_state() else { return Ok(false) };
+        Ok(shared.market.short_sale_restricted(instrument))
+    }
+
+    /// The same, by InstrumentId, for callers who track them themselves.
+    #[pyo3(signature = (instrument))]
+    fn option_model_by_instrument(&self, instrument: u32) -> PyResult<Option<Py<PyAny>>> {
+        let Ok(shared) = self.shared_state() else { return Ok(None) };
+        self.option_model_dict(&shared, instrument)
+    }
+}
+
+impl EClient {
+    /// One statement of the record, so the two readers above cannot publish
+    /// different halves of it.
+    fn option_model_dict(
+        &self,
+        shared: &std::sync::Arc<crate::bridge::SharedState>,
+        instrument: crate::types::InstrumentId,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let Some(m) = shared.market.option_model(instrument) else { return Ok(None) };
+        Python::attach(|py| {
+            let dict = pyo3::types::PyDict::new(py);
+            for (name, value) in [
+                ("impliedVol", m.implied_vol),
+                ("delta", m.delta),
+                ("optPrice", m.opt_price),
+                ("pvDividend", m.pv_dividend),
+                ("gamma", m.gamma),
+                ("vega", m.vega),
+                ("theta", m.theta),
+                ("undPrice", m.und_price),
+                ("rho", m.rho),
+                ("fugit", m.fugit),
+                ("exerciseBoundary", m.exercise_boundary),
+                ("forwardCoeff", m.forward_coeff),
+                ("modelYield", m.model_yield),
+                ("bridgeYield", m.bridge_yield),
+                ("timeValue", m.time_value),
+                ("calDays", m.cal_days),
+                ("rate", m.rate),
+            ] {
+                dict.set_item(name, value)?;
+            }
+            dict.set_item("priceBasedVol", m.price_based_vol)?;
             Ok(Some(dict.into_any().unbind()))
         })
     }

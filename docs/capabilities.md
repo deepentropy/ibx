@@ -257,6 +257,8 @@ same thing, not that the documented API does.
 | `nextSharedId` | ● | · | · | · | · | ● |
 | `option_chain` | ● | · | · | · | ● | · |
 | `optionChains` | ● | · | · | · | · | ● |
+| `optionModel` | ● | · | · | · | ● | ● |
+| `optionModelByInstrument` | ● | · | · | · | ● | ● |
 | `orderPermissions` | ● | · | · | · | ● | ● |
 | `orderPresets` | ● | · | · | · | ● | ● |
 | `parse_algo_params` | ● | · | · | · | ● | · |
@@ -279,6 +281,8 @@ same thing, not that the documented API does.
 | `setConnectOptions` | ● | ● | · | ● | · | ◐ |
 | `setNewsProviders` | ● | · | · | · | ● | ● |
 | `shared_state` | ● | · | · | · | ● | · |
+| `shortSaleRestricted` | ● | · | · | · | ● | ● |
+| `shortSaleRestrictedByInstrument` | ● | · | · | · | ● | ● |
 | `startApi` | ● | ● | ● | ● | · | ● |
 | `tradingSchedule` | ● | · | · | · | · | ● |
 | `twsConnectionTime` | ● | ● | ● | · | · | ● |
