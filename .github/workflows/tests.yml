@@ -240,6 +240,7 @@ jobs:
       - name: Regenerate and compare
         run: |
           python scripts/gen_api_docs.py
+          python scripts/gen_parity_matrix.py
           python scripts/gen_wire_coverage.py
           # Fails on its own if a request returns as though it acted and did
           # not, so that kind of call cannot be added without someone deciding
