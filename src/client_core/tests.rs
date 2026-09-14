@@ -376,6 +376,43 @@ fn a_move_says_whether_anything_is_watching_what_it_moved_onto() {
     assert!(!shared.market.a_move_is_pending_from(from), "with the slot it left free");
 }
 
+/// A move that arrives with nobody left to move leaves the slot named after
+/// whoever was already watching it.
+///
+/// Two endings were modelled and there are three. Callers arrive and hold the
+/// slot under a number of their own; nobody arrives and nothing is watching,
+/// so the subscription is nobody's; or nobody arrives and somebody else has
+/// been watching all along — and then nothing renamed the occupancy, so the
+/// slot goes on being held under the number it already had.
+///
+/// Answered with the minted number in that third case, the engine renamed the
+/// occupancy to one this client never wrote down, and the caller that had been
+/// watching could no longer withdraw its own subscription: the call returned
+/// success, the venue went on streaming, and nothing could take it down again.
+#[test]
+fn a_move_with_nobody_left_to_move_keeps_the_number_the_slot_already_had() {
+    let core = ClientCore::new();
+    let shared = SharedState::new();
+    let (from, into): (InstrumentId, InstrumentId) = (7, 8);
+
+    // Somebody already watching the destination, under its own number.
+    let held = core.in_order();
+    {
+        let mut own = core.ownership();
+        own.take_or_follow(into, 11, &[], held, 265_598);
+    }
+
+    // A move whose caller withdrew on the way: nothing is on the slot that is
+    // moving.
+    let answered = core.move_watchers(&shared, from, into);
+
+    assert_eq!(
+        answered, held,
+        "nobody arrived, so the slot is still held under the number it had",
+    );
+    assert_eq!(core.watching(11), Some(into), "and its caller is still watching it");
+}
+
 /// A withdrawal names the contract its caller stated, not whatever the cache
 /// points at that slot with.
 ///

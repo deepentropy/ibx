@@ -1843,11 +1843,22 @@ impl ClientCore {
     /// callers given the second slot have to read the first, or their quotes
     /// arrive on a slot nothing is watching.
     ///
-    /// Answers with the number the arriving callers hold that slot under —
-    /// theirs from this moment, and one that nothing deciding against the
-    /// occupancy before it can name. Zero says nobody arrived: the caller
-    /// this move was for withdrew on the way, and the subscription held up
-    /// for it is nobody's.
+    /// Answers with the number that slot is held under once the move is done.
+    /// Where callers arrived it is theirs from this moment, and one that
+    /// nothing deciding against the occupancy before it can name. Zero says
+    /// the slot is nobody's: the caller this move was for withdrew on the way
+    /// and nothing else was watching, so the subscription held up for it is
+    /// held up for no one.
+    ///
+    /// Those are not the only two endings, which is what this answered wrongly.
+    /// A move can arrive with nobody left to move — its caller withdrew on the
+    /// way — onto a slot somebody else is already watching. Nothing arrived, so
+    /// nothing renamed the occupancy, and the slot goes on being held under the
+    /// number it already had. Answered with the minted number anyway, the
+    /// engine renamed the occupancy to one this client never wrote down, and
+    /// the caller that had been watching all along could no longer withdraw its
+    /// own subscription: the call returned success, the venue went on
+    /// streaming, and nothing could take it down again.
     ///
     /// The number is taken in the same acquisition that installs the move,
     /// and the engine is told on its own queue. Told by a flag the surface
@@ -1874,11 +1885,13 @@ impl ClientCore {
         // its own queue, so a withdrawal already decided against the occupancy
         // before this one cannot become valid again by arriving late.
         let taken_on = self.in_order();
-        // And the contract that slot holds, as far as this client knows: the
-        // callers arriving are being served off it whatever they named.
-        let moved_contract = self.cached_con_id_of(into);
-        {
+        let held_under = {
             let mut own = self.ownership();
+            // And the contract that slot holds, as this client recorded it
+            // taking it — not whatever a cache happens to point at the slot
+            // with, which is the lookup the record beside it exists to
+            // replace, and read under the same acquisition as the move.
+            let moved_contract = own.took_contract.get(&into).copied().unwrap_or(0);
             let held = own.holders.remove(&from);
             own.taken_on.remove(&from);
             let watchers = own.following.remove(&from).unwrap_or_default();
@@ -1897,7 +1910,21 @@ impl ClientCore {
                 own.epoch.insert(req_id, self.epochs.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
                 moved.push(req_id);
             }
-        }
+            // What the slot is held under now, decided here rather than after
+            // the maps are let go: whether anything is watching it and which
+            // occupancy that is are one question, and asked separately a
+            // withdrawal in between answered the first yes and the second
+            // about a number that had gone.
+            let watched = own.holders.contains_key(&into)
+                || own.following.get(&into).is_some_and(|watchers| !watchers.is_empty());
+            if watched {
+                // The number this move installed where callers arrived, and
+                // the one the slot already had where none did.
+                own.taken_on.get(&into).copied().unwrap_or(taken_on)
+            } else {
+                0
+            }
+        };
         for req_id in moved {
             // Only where it is still watching what it was moved onto. A
             // withdrawal running since the move was recorded leaves a number
@@ -1918,13 +1945,7 @@ impl ClientCore {
             self.pay_a_joiner(shared, into, req_id);
         }
         self.last_quotes.lock().unwrap().remove(&from);
-        // Whether anything is being served off the destination now. Nothing
-        // may be: the request this move was for can withdraw before the move
-        // is read, and the subscription was kept up for it.
-        let own = self.ownership();
-        let watched = own.holders.contains_key(&into)
-            || own.following.get(&into).is_some_and(|watchers| !watchers.is_empty());
-        if watched { taken_on } else { 0 }
+        held_under
     }
 
     /// What a request that joins a subscription somebody else opened is owed.
@@ -2787,6 +2808,18 @@ impl ClientCore {
                 own.holders.remove(&instrument);
                 own.taken_on.remove(&instrument);
                 own.took_contract.remove(&instrument);
+                // And everything else the slot leaves behind, under the same
+                // acquisition that decided it goes. Cleared after the maps
+                // were let go, a registration taking this slot in between had
+                // its own record wiped by this one: the feed it was admitted
+                // under was forgotten, and its delayed readings were then
+                // published under the numbers that mean a live market. The
+                // slot's own release already keeps these under its guard for
+                // the same reason.
+                self.last_quotes.lock().unwrap().remove(&instrument);
+                self.mdt_by_instrument.lock().unwrap().remove(&instrument);
+                self.con_id_to_instrument.lock().unwrap()
+                    .retain(|_, iid| *iid != instrument);
             }
             // What this caller brought with it goes with it. Only the series
             // nobody else watching the contract named: the subscription stays
@@ -2823,10 +2856,9 @@ impl ClientCore {
                 decided_at,
             };
         }
-        self.last_quotes.lock().unwrap().remove(&instrument);
-        self.mdt_by_instrument.lock().unwrap().remove(&instrument);
+        // The news half stays outside: it takes these maps again itself, and
+        // taking them twice on one thread is a deadlock rather than a race.
         let stop_news = self.release_news(shared, req_id);
-        self.forget_instrument(instrument);
         // The subscription goes whole, and its series with it: there is
         // nothing left for them to be entries of.
         WhatAWithdrawalLeaves {
@@ -2843,18 +2875,6 @@ impl ClientCore {
     /// request that took it asked under. Zero where it is watching none.
     pub(crate) fn what_took(&self, instrument: InstrumentId) -> u64 {
         self.slot_taken_on.lock().unwrap().get(&instrument).copied().unwrap_or(0)
-    }
-
-    /// Which contract this client believes holds a slot, as far as its own
-    /// cache says. Zero where the venue has not named one.
-    fn cached_con_id_of(&self, instrument: InstrumentId) -> i64 {
-        self.con_id_to_instrument
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(_, held)| **held == instrument)
-            .map(|(con_id, _)| *con_id)
-            .unwrap_or(0)
     }
 
     /// Drop the client-side conId cache entries for an instrument id. The
