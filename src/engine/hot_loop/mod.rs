@@ -643,7 +643,16 @@ impl HotLoop {
                 // slot the callers are moved onto it, and that slot's occupancy
                 // belongs to whoever took it.
                 if !self.farm.holds_a_stream(instrument) {
-                    self.farm.note_subscription_began_under(instrument, p.issued);
+                    // This request begins the stream, so the occupancy is its
+                    // own whatever the slot held before. Kept at the first
+                    // number ever written, a slot that cannot be handed back —
+                    // one pinned by a holding, a working order, a tick-by-tick
+                    // stream or news — stayed named after the caller that had
+                    // already gone, and every withdrawal after that named a
+                    // number the engine did not hold and was refused. The
+                    // venue went on streaming a contract nothing could take
+                    // down, for the life of the session.
+                    self.farm.note_it_changed_hands(instrument, p.issued);
                 }
                 // What this request named, on whichever slot it lands on: the
                 // list it carried off the slot it was given, or the one
@@ -1483,7 +1492,15 @@ impl HotLoop {
                         }
                         Some(id) => {
                             self.farm.note_subscription_asked_on(id, issued);
-                            self.farm.note_subscription_began_under(id, issued);
+                            // The same rule as the definition path beside it:
+                            // a request that begins the stream owns the
+                            // occupancy, and one that joins what is already
+                            // there did not begin it and must not rename it.
+                            if self.farm.holds_a_stream(id) {
+                                self.farm.note_subscription_began_under(id, issued);
+                            } else {
+                                self.farm.note_it_changed_hands(id, issued);
+                            }
                             self.farm.note_series_asked_on(id, &generic_ticks, issued);
                             // The venue states it on the logon. Count streams
                             // waiting on a definition or a reconnect too: they
@@ -8221,6 +8238,79 @@ mod tests {
         assert_eq!(
             hl.context.market.con_id(id), Some(4001),
             "and the tick-by-tick subscription still pins the slot itself",
+        );
+    }
+
+    /// A slot that cannot be handed back is named after whoever holds it now,
+    /// not after the caller that first took it.
+    ///
+    /// The occupancy number is what tells a withdrawal of a dead subscription
+    /// from one of the live subscription on the same slot, and a slot is
+    /// reusable, so it has to name the occupancy that is there. It was written
+    /// once and never replaced: on a slot the engine can hand back, the number
+    /// goes with the slot and the next caller gets a fresh one — but a slot
+    /// pinned by a holding, a working order, a tick-by-tick stream or news is
+    /// never handed back, so it kept the number of a caller that had already
+    /// gone.
+    ///
+    /// Every withdrawal after the first then named a number the engine did not
+    /// hold, was read as belonging to some other occupancy, and was refused
+    /// with the subscription left standing. `cancel_mkt_data` returned
+    /// success, the venue went on streaming, and nothing could ever take it
+    /// down again.
+    #[test]
+    fn a_pinned_slot_is_named_after_the_subscription_now_on_it() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (tx, rx) = sync_channel(8);
+        hl.set_control_rx(rx);
+        let id = hl.context.market.register(4004);
+        // What pins it: a tick-by-tick stream, which outlives the quote.
+        hl.hmds.tbt_subscriptions.push(crate::engine::hot_loop::hmds::TbtSubscription {
+            ignore_size: false,
+            instrument: id,
+            query_id: "tbt_1".to_string(),
+            kind: TbtType::AllLast,
+            caller_req_id: 0,
+            venue_id: 0,
+            min_tick: 0,
+            size_tick: 0.0,
+            running: Default::default(),
+        });
+
+        // The first caller takes the slot under its own number and gives it up.
+        hl.farm.note_it_changed_hands(id, 1);
+        hl.farm.instrument_md_reqs.push((id, crate::engine::hot_loop::farm::MdReqRecord {
+            con_id: 4004,
+            sec_type: "CS".into(),
+            mode_9887: 0,
+            entries: vec![crate::engine::hot_loop::farm::MdReqEntry {
+                req_id: 7, request_type: 442, venue: "BEST".into(),
+            }],
+        }));
+        tx.send(ControlCommand::Unsubscribe {
+            instrument: id, con_id: 4004, took_it: 1, series: Vec::new(), issued: 2,
+        }).unwrap();
+        hl.poll_once();
+        assert!(!hl.farm.holds_market_data(id), "the first subscription went");
+
+        // The next caller takes the same slot, which was never handed back.
+        tx.send(ControlCommand::Subscribe {
+            contract: crate::types::ContractRef {
+                con_id: 4004, symbol: "AAPL".into(), sec_type: "STK".into(),
+                exchange: "SMART".into(), ..Default::default()
+            },
+            filters: Default::default(),
+            mode_9887: 0,
+            regulatory_snapshot: false,
+            generic_ticks: Vec::new(),
+            issued: 3,
+            reply_tx: None,
+        }).unwrap();
+        hl.poll_once();
+
+        assert_eq!(
+            hl.farm.what_took_it(id), 3,
+            "the slot names the occupancy now on it, not the one that has gone",
         );
     }
 
