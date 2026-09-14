@@ -21,7 +21,7 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 80. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 154. 118 are sent; 29 have no field in the protocol to carry them and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | the same request produces the same call on both, compared against live responses |
-| Tests | 3,609 offline, and 197 more that live in the suites run against a broker session |
+| Tests | 3,610 offline, and 197 more that live in the suites run against a broker session |
 
 ## API surface
 
@@ -68,7 +68,7 @@ and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 2,713 | No |
+| Rust unit and integration | 2,714 | No |
 | Rust, live | 9 | Yes |
 | Python | 896 | No |
 | Python, live | 137 | Yes |
@@ -117,7 +117,7 @@ test fails the same way against any server.
 | Tick-by-tick trades | ✅ Supported | 67,785 trades over a 20-minute session; 327 in the first twenty seconds of one subscription. A stream is asked for by the venue's id for the contract, which is resolved first when the caller states a description, and by the name the caller used: `Last` and `AllLast` are two queries the venue answers apart, and which trades are on which is the venue's to say — measured on a liquid future, 104 and 139 records over two windows of the same length |
 | Real-time bars | ✅ Supported | Five-second bars streaming during regular hours, each carrying open, high, low, close and volume, alongside a book on the same session and through ib_async's own `reqRealTimeBars` |
 | Trading halt status | ✅ Supported | Tick 437 decoded from status mask and status index; `src/bin/capture_status.rs` |
-| Tick attributes | ✅ Supported | Per-trade `unreported` and `pastLimit` observed to vary within one stream |
+| Tick attributes | ✅ Supported | Per-trade `unreported` and `pastLimit`, read from the marks the venue writes beside a print. They were read from the size for a long time, and varied because sizes vary; a frame the venue sent is now kept in the tests, and on it no mark is set and the sizes are 1, 2, 1, 4, 1 |
 | Venue map behind the exchange mask | ✅ Supported | Asked for beside the quote and answered at regular trading hours with 18 venues, each with the letter the mask's bits refer to. Outside those hours the server states none, and a venue's letter is empty until it does |
 
 **Depth entitlements.** On this account IEX answers — its Level II is fee-waived

@@ -369,14 +369,26 @@ fn read_record(
             // belonging to a record nobody could read.
             let last_ticks = running.last_ticks.checked_add(first_move)?;
             let price = last_ticks as f64 * min_tick;
-            let plain_size = bits.unsigned()?;
+            // The flags, then the size — the order the quote beside this one
+            // is read in, and the order a frame the venue sent is written in.
+            //
+            // Read the other way round every trade came back sized nought,
+            // with the marks taken off the low bits of the size: a tape where
+            // nothing traded and a quarter of the prints were away from the
+            // exchange, on a contract whose prints are ones and twos. Six
+            // frames the venue sent, decoded both ways: this way the sizes are
+            // 2, 1, 1, 2, 1, 4, 1, 1, 1, 6, 1, 1, 1 and no mark is set, which
+            // is what that tape was; the other way all thirteen are nought.
+            // The prices and the seconds are the same either way — they are
+            // read before this — and they were right all along, which is why
+            // nothing looked wrong.
             let flags = bits.unsigned()?;
             // Bit five says the size is stated again, at greater width; bit
             // four says that restatement comes in two numbers.
             let size = if flags & (1 << 5) != 0 {
                 size(bits, flags & (1 << 4) != 0)?
             } else {
-                plain_size
+                bits.unsigned()?
             };
             let record = TbtRecord::Trade(TbtTradeRecord {
                 price,
@@ -427,6 +439,23 @@ fn read_record(
 /// A quote frame the venue sent on the tenth of August 2026, on a currency
 /// pair that was 1.15510 bid at 1.15515: five records under one stream number.
 #[cfg(test)]
+/// A trade frame the venue sent, byte for byte.
+///
+/// Five prints on the smaller S&P future, taken at 22:03 UTC on the thirteenth
+/// of September 2026, when it was trading either side of 7,687. The contract
+/// moves in a quarter point and its sizes are counted in whole contracts.
+///
+/// The quote frame below it is what found the last fault in this module. This
+/// is the same kind of evidence for the other kind of record, and it is here
+/// because a made-up trade frame cannot tell the size from the marks: both are
+/// whole numbers, written the same way, one after the other. Every check on
+/// this arm was written against frames this file made up, and they all passed
+/// while every size the venue sent came back as nought.
+pub(crate) const A_CAPTURED_TRADE_FRAME: &str = "383d4f01393d303037370133353d450101b8\
+    8106551c3ba580808180808106551c3ba5ff808280808106551c3ba5ff8081808081\
+    06551c3ba582808480808106551c3ba6818081808001383334393d41383537313034\
+    3501";
+
 pub(crate) const A_CAPTURED_QUOTE_FRAME: &str = "383d4f01393d303130380133353d450102b08106536549c40134be0134bf80\
     0e1765f03d04c08106536549c48080800f4e73b03d04c08106536549c48080\
     800e1765f03d04c08106536549c48081800e1765f00d5a61b08106536549c4\
@@ -497,6 +526,47 @@ mod tests {
             self
         }
 
+    }
+
+    /// The sizes and the marks on a trade frame the venue actually sent.
+    ///
+    /// Both are whole numbers written the same way, one after the other, so a
+    /// frame this file makes up cannot tell which order they come in — it is
+    /// written in whatever order the reader expects and read back the same
+    /// way. Only a frame the venue sent can say, and read the wrong way round
+    /// this one gives five prints of nought size with marks on four of them,
+    /// on a contract whose prints are ones and twos and which had no
+    /// off-exchange tape at all.
+    #[test]
+    fn a_trade_frame_the_venue_sent_states_sizes_and_no_marks() {
+        let message: String = A_CAPTURED_TRADE_FRAME.split_whitespace().collect();
+        let bytes: Vec<u8> = (0..message.len() / 2)
+            .map(|i| u8::from_str_radix(&message[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        let start = bytes.windows(5).position(|w| w == b"35=E\x01").unwrap() + 5;
+        let end = bytes.windows(6).position(|w| w == b"\x018349=").unwrap();
+        let body = &bytes[start..end];
+
+        let mut running = RunningPrice::default();
+        let frame = decode_frame(body, TbtKind::AllLast, 0.25, &mut running)
+            .expect("the frame decodes");
+        assert_eq!(frame.records.len(), 5, "five prints in the frame");
+
+        let mut sizes = Vec::new();
+        for stamped in &frame.records {
+            match &stamped.record {
+                TbtRecord::Trade(t) => {
+                    sizes.push(t.size);
+                    assert!(!t.past_limit, "a future has no print away from its exchange");
+                    assert!(!t.unreported, "nor one kept off the tape");
+                }
+                other => panic!("a trade subscription carried {other:?}"),
+            }
+        }
+        assert_eq!(
+            sizes, vec![1, 2, 1, 4, 1],
+            "the sizes the venue stated, not the low bits of its marks",
+        );
     }
 
     /// A frame captured from the venue, byte for byte.
