@@ -38,12 +38,28 @@ from ibx import Contract, EClient, EWrapper
 #: The smart destination has no book for a share at all.
 BOOK_EXCHANGE = "IEX"
 
+#: Where a book is asked for when New York is shut.
+#:
+#: A book and a trade stream are held to arriving once before a run ends, and
+#: both were asked for on the shares alone — so outside the session neither
+#: could arrive, and the run ended saying so whatever the client had done. A
+#: currency pair serves a book at any hour this account can reach it: measured,
+#: 245 rows in half a minute on a Sunday evening. A crypto pair does not serve
+#: one at all, and says nothing rather than refusing; a future's is refused by
+#: name, which is the venue's answer for that account and not a fault.
+FX_BOOK_EXCHANGE = "IDEALPRO"
+
 SUBJECTS = [
     ("SPY", "STK", "SMART"),
     ("TSLA", "STK", "SMART"),
     ("AAPL", "STK", "SMART"),
     ("QQQ", "STK", "SMART"),
     ("EUR", "CASH", "IDEALPRO"),
+    # Trades at every hour, which is the other half of what a shut session
+    # cannot answer. Asked for its trades and nothing else: the venue serves
+    # this pair no book and no bars, and says nothing rather than refusing, so
+    # asking would spend a cycle's silence on a question with no answer.
+    ("BTC", "CRYPTO", "PAXOS"),
 ]
 
 #: What the venue says when a currency pair is asked for trades it does not
@@ -202,6 +218,16 @@ def main():
         for n, (symbol, sec_type, exchange) in enumerate(SUBJECTS):
             what = contract(symbol, sec_type, exchange)
             client.req_mkt_data(base + n, what, "", False, False)
+            if sec_type == "CRYPTO":
+                # Its trades, and nothing the venue does not serve for it.
+                client.req_tick_by_tick_data(base + 70 + n, what, "AllLast", 0, False)
+                continue
+            if sec_type == "CASH":
+                # The book this pair serves at any hour, which is what makes
+                # that check mean something outside the New York session.
+                client.req_mkt_depth(
+                    base + 50 + n, contract(symbol, sec_type, FX_BOOK_EXCHANGE), 10, False,
+                )
             if sec_type == "STK":
                 # A book is asked for on the exchange the contract trades on.
                 # The venue serves no book on its smart destination for a
@@ -219,6 +245,11 @@ def main():
         time.sleep(60)
         for n, (symbol, sec_type, _) in enumerate(SUBJECTS):
             client.cancel_mkt_data(base + n)
+            if sec_type == "CRYPTO":
+                client.cancel_tick_by_tick_data(base + 70 + n)
+                continue
+            if sec_type == "CASH":
+                client.cancel_mkt_depth(base + 50 + n, True)
             if sec_type == "STK":
                 client.cancel_mkt_depth(base + 50 + n, True)
                 client.cancel_tick_by_tick_data(base + 70 + n)
