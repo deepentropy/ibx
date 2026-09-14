@@ -466,6 +466,50 @@ impl EWrapper {
     /// The contract the venue paired with a delta-neutral order.
     fn delta_neutral_validation(&self, _req_id: i64, _delta_neutral_contract: Py<PyAny>) {}
 
+    // ── Tier 3: defined by the reference client, and never fired here ──
+    //
+    // Each exists so a program written against that client runs against this
+    // one unchanged, and each says why it stays silent.
+
+    /// The contract a market-data request should be asked for under instead.
+    ///
+    /// The reference client answers a request on a contract the venue reroutes
+    /// — a contract for difference standing for a share — with the contract and
+    /// venue to ask again under. Nothing on this connection has been seen to
+    /// state one, so nothing here fires this.
+    fn reroute_mkt_data_req(&self, _req_id: i64, _con_id: i64, _exchange: &str) {}
+
+    /// The same, for a request for the book rather than the quote.
+    fn reroute_mkt_depth_req(&self, _req_id: i64, _con_id: i64, _exchange: &str) {}
+
+    /// An exchange-for-physical quote, which the reference client reports on a
+    /// callback of its own rather than as a price. This client carries the tick
+    /// types such a quote is numbered under and does not assemble them into
+    /// this record.
+    #[allow(clippy::too_many_arguments)]
+    fn tick_efp(
+        &self, _req_id: i64, _tick_type: i32, _basis_points: f64,
+        _formatted_basis_points: &str, _implied_future: f64, _hold_days: i32,
+        _future_last_trade_date: &str, _dividend_impact: f64,
+        _dividends_to_last_trade_date: f64,
+    ) {}
+
+    /// A step in the handshake a third-party program makes with a terminal
+    /// before that terminal will carry its requests. There is no terminal
+    /// between this client and the venue, so nothing here fires these four.
+    fn verify_message_api(&self, _api_data: &str) {}
+    /// Whether that handshake was accepted.
+    fn verify_completed(&self, _is_successful: bool, _error_text: &str) {}
+    /// The same handshake, where the terminal also authenticates the program.
+    fn verify_and_auth_message_api(&self, _api_data: &str, _xyz_challenge: &str) {}
+    /// Whether that one was accepted.
+    fn verify_and_auth_completed(&self, _is_successful: bool, _error_text: &str) {}
+
+    /// What the reference client reports when its own socket layer fails on
+    /// Windows. This client has no such layer: trouble on a connection reaches
+    /// a caller on the error callback.
+    fn win_error(&self, _text: &str, _last_error: i32) {}
+
     // ── Tier 3: Historical Schedule ──
 
     /// When a contract's venue was open over a window, session by

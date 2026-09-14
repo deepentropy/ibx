@@ -23,7 +23,7 @@ that did not run.
 | | IB API | Rust | Python |
 |---|:---:|:---:|:---:|
 | **EClient methods** | 78 | 78 impl, 0 stub | 78 impl, 0 stub |
-| **EWrapper callbacks** | 85 | 81 impl, 1 stub | 81 impl, 1 stub |
+| **EWrapper callbacks** | 90 | 81 impl, 9 stub | 81 impl, 9 stub |
 
 ## EClient Methods
 
@@ -194,6 +194,11 @@ that did not run.
 | Other | `delta_neutral_validation` | STUB | STUB |
 | WSH | `wsh_meta_data` | Y | Y |
 |  | `wsh_event_data` | Y | Y |
-| Market Data | `reroute_mkt_data_req` | - | - |
-|  | `reroute_mkt_depth_req` | - | - |
-| Connection | `config` | - | - |
+| Market Data | `reroute_mkt_data_req` | STUB | STUB |
+|  | `reroute_mkt_depth_req` | STUB | STUB |
+|  | `tick_efp` | STUB | STUB |
+| Connection | `verify_message_api` | STUB | STUB |
+|  | `verify_completed` | STUB | STUB |
+|  | `verify_and_auth_message_api` | STUB | STUB |
+|  | `verify_and_auth_completed` | STUB | STUB |
+|  | `win_error` | STUB | STUB |

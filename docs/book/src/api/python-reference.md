@@ -2886,6 +2886,102 @@ The contract the venue paired with a delta-neutral order.
 
 ---
 
+#### `reroute_mkt_data_req`
+
+The contract a market-data request should be asked for under instead.  The reference client answers a request on a contract the venue reroutes — a contract for difference standing for a share — with the contract and venue to ask again under. Nothing on this connection has been seen to state one, so nothing here fires this.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `con_id` | `int` | Contract ID. Unique per instrument. |
+| `exchange` | `str` | Exchange name. |
+
+---
+
+#### `reroute_mkt_depth_req`
+
+The same, for a request for the book rather than the quote.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `con_id` | `int` | Contract ID. Unique per instrument. |
+| `exchange` | `str` | Exchange name. |
+
+---
+
+#### `tick_efp`
+
+An exchange-for-physical quote, which the reference client reports on a callback of its own rather than as a price. This client carries the tick types such a quote is numbered under and does not assemble them into this record.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `tick_type` | `int` | Tick type ID or tick-by-tick type string. |
+| `basis_points` | `float` |  |
+| `formatted_basis_points` | `str` |  |
+| `implied_future` | `float` |  |
+| `hold_days` | `int` |  |
+| `future_last_trade_date` | `str` |  |
+| `dividend_impact` | `float` |  |
+| `dividends_to_last_trade_date` | `float` |  |
+
+---
+
+#### `verify_message_api`
+
+A step in the handshake a third-party program makes with a terminal before that terminal will carry its requests. There is no terminal between this client and the venue, so nothing here fires these four.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `api_data` | `str` |  |
+
+---
+
+#### `verify_completed`
+
+Whether that handshake was accepted.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `is_successful` | `bool` |  |
+| `error_text` | `str` |  |
+
+---
+
+#### `verify_and_auth_message_api`
+
+The same handshake, where the terminal also authenticates the program.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `api_data` | `str` |  |
+| `xyz_challenge` | `str` |  |
+
+---
+
+#### `verify_and_auth_completed`
+
+Whether that one was accepted.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `is_successful` | `bool` |  |
+| `error_text` | `str` |  |
+
+---
+
+#### `win_error`
+
+What the reference client reports when its own socket layer fails on Windows. This client has no such layer: trouble on a connection reaches a caller on the error callback.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `text` | `str` | Informational text. |
+| `last_error` | `int` |  |
+
+---
+
 #### `historical_schedule`
 
 When a contract's venue was open over a window, session by session, in the zone the venue keeps.

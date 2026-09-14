@@ -294,6 +294,72 @@ pub trait Wrapper {
     ) {
     }
 
+    // ── Defined by the reference client, and never fired here ──
+    //
+    // Each exists so a program written against that client compiles and runs
+    // against this one, and each says why it stays silent. Left undeclared, a
+    // port that implements one does not build; declared and undocumented, it
+    // waits for a call that is never coming.
+
+    /// The contract a market-data request should be asked for under instead.
+    ///
+    /// The reference client answers a request on a contract the venue reroutes
+    /// — a contract for difference standing for a share — with the contract
+    /// and venue to ask again under. Nothing on this connection has been seen
+    /// to state one, so nothing here fires this; a request that cannot be
+    /// served is refused in the venue's own words instead.
+    fn reroute_mkt_data_req(&mut self, req_id: i64, con_id: i64, exchange: &str) {
+        let _ = (req_id, con_id, exchange);
+    }
+
+    /// The same, for a request for the book rather than the quote.
+    fn reroute_mkt_depth_req(&mut self, req_id: i64, con_id: i64, exchange: &str) {
+        let _ = (req_id, con_id, exchange);
+    }
+
+    /// An exchange-for-physical quote, which the reference client reports on a
+    /// callback of its own rather than as a price.
+    ///
+    /// This client carries the tick types such a quote is numbered under and
+    /// does not assemble them into this record, so a program written against
+    /// this callback hears nothing where the reference client speaks.
+    #[allow(clippy::too_many_arguments)]
+    fn tick_efp(
+        &mut self, req_id: i64, tick_type: i32, basis_points: f64,
+        formatted_basis_points: &str, implied_future: f64, hold_days: i32,
+        future_last_trade_date: &str, dividend_impact: f64, dividends_to_last_trade_date: f64,
+    ) {
+        let _ = (req_id, tick_type, basis_points, formatted_basis_points, implied_future,
+                 hold_days, future_last_trade_date, dividend_impact,
+                 dividends_to_last_trade_date);
+    }
+
+    /// A step in the handshake a third-party program makes with a terminal
+    /// before that terminal will carry its requests.
+    ///
+    /// There is no terminal between this client and the venue, so there is no
+    /// handshake to make and nothing here fires these four.
+    fn verify_message_api(&mut self, api_data: &str) { let _ = api_data; }
+    /// Whether that handshake was accepted.
+    fn verify_completed(&mut self, is_successful: bool, error_text: &str) {
+        let _ = (is_successful, error_text);
+    }
+    /// The same handshake, where the terminal also authenticates the program.
+    fn verify_and_auth_message_api(&mut self, api_data: &str, xyz_challenge: &str) {
+        let _ = (api_data, xyz_challenge);
+    }
+    /// Whether that one was accepted.
+    fn verify_and_auth_completed(&mut self, is_successful: bool, error_text: &str) {
+        let _ = (is_successful, error_text);
+    }
+
+    /// What the reference client reports when its own socket layer fails on
+    /// Windows.
+    ///
+    /// This client has no such layer: trouble on a connection reaches a caller
+    /// on the error callback, with the reason the transport gave.
+    fn win_error(&mut self, text: &str, last_error: i32) { let _ = (text, last_error); }
+
     // ── Histogram ──
 
     /// How much traded at each price over a window.
@@ -668,6 +734,42 @@ impl<A: Wrapper + ?Sized, B: Wrapper + ?Sized> Wrapper for Tee<'_, A, B> {
     fn delta_neutral_validation(&mut self, req_id: i64, con_id: i64, delta: f64, price: f64) {
         self.asked.delta_neutral_validation(req_id, con_id, delta, price);
         self.kept.delta_neutral_validation(req_id, con_id, delta, price);
+    }
+    fn reroute_mkt_data_req(&mut self, req_id: i64, con_id: i64, exchange: &str) {
+        self.asked.reroute_mkt_data_req(req_id, con_id, exchange);
+        self.kept.reroute_mkt_data_req(req_id, con_id, exchange);
+    }
+    fn reroute_mkt_depth_req(&mut self, req_id: i64, con_id: i64, exchange: &str) {
+        self.asked.reroute_mkt_depth_req(req_id, con_id, exchange);
+        self.kept.reroute_mkt_depth_req(req_id, con_id, exchange);
+    }
+    fn tick_efp(
+        &mut self, req_id: i64, tick_type: i32, basis_points: f64,
+        formatted_basis_points: &str, implied_future: f64, hold_days: i32,
+        future_last_trade_date: &str, dividend_impact: f64, dividends_to_last_trade_date: f64,
+    ) {
+        self.asked.tick_efp(req_id, tick_type, basis_points, formatted_basis_points, implied_future, hold_days, future_last_trade_date, dividend_impact, dividends_to_last_trade_date);
+        self.kept.tick_efp(req_id, tick_type, basis_points, formatted_basis_points, implied_future, hold_days, future_last_trade_date, dividend_impact, dividends_to_last_trade_date);
+    }
+    fn verify_message_api(&mut self, api_data: &str) {
+        self.asked.verify_message_api(api_data);
+        self.kept.verify_message_api(api_data);
+    }
+    fn verify_completed(&mut self, is_successful: bool, error_text: &str) {
+        self.asked.verify_completed(is_successful, error_text);
+        self.kept.verify_completed(is_successful, error_text);
+    }
+    fn verify_and_auth_message_api(&mut self, api_data: &str, xyz_challenge: &str) {
+        self.asked.verify_and_auth_message_api(api_data, xyz_challenge);
+        self.kept.verify_and_auth_message_api(api_data, xyz_challenge);
+    }
+    fn verify_and_auth_completed(&mut self, is_successful: bool, error_text: &str) {
+        self.asked.verify_and_auth_completed(is_successful, error_text);
+        self.kept.verify_and_auth_completed(is_successful, error_text);
+    }
+    fn win_error(&mut self, text: &str, last_error: i32) {
+        self.asked.win_error(text, last_error);
+        self.kept.win_error(text, last_error);
     }
     fn histogram_data(&mut self, req_id: i64, items: &[(f64, i64)]) {
         self.asked.histogram_data(req_id, items);

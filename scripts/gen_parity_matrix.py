@@ -29,6 +29,14 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 COVERAGE = ROOT / "docs" / "book" / "src" / "reference" / "coverage-data.md"
 OUT = ROOT / "docs" / "capabilities.md"
+README = ROOT / "README.md"
+
+#: Where the README carries the same answer. Written between these, so the
+#: page a reader lands on cannot drift from the one this script generates —
+#: a comparison somebody keeps by hand is a comparison that is wrong by the
+#: second release.
+README_OPEN = "<!-- capabilities:begin — written by scripts/gen_parity_matrix.py -->"
+README_SHUT = "<!-- capabilities:end -->"
 
 #: Where a reference client lives when it is not on the import path. The
 #: official client is not a dependency of this repository — it is what this
@@ -260,6 +268,142 @@ def table(rows, columns, title, intro):
     return [f"## {title}", "", intro, ""] + head + body + [""]
 
 
+def counted(rows, columns):
+    """Carried, taken and absent per client, over one table's rows."""
+    for name, fn in columns:
+        served = sum(1 for r in rows if fn(r) == SERVED)
+        taken = sum(1 for r in rows if fn(r) == TAKEN)
+        yield name, served, taken, len(rows) - served - taken
+
+
+def write_readme(page, calls, backs, columns, back_columns, beyond):
+    """Put the same answer on the page a reader lands on.
+
+    Somebody deciding whether to put this client where their gateway is has
+    one question — is anything I already use missing — and sending them to
+    another file to find out is sending most of them away. The whole page goes
+    in, behind a fold so it does not bury the rest of the readme, under a
+    summary that answers the question on its own.
+
+    Written rather than kept: a comparison table maintained by hand is a
+    comparison table that is wrong by the second release, and this one is read
+    from the clients themselves on every commit.
+    """
+    if not README.is_file():
+        return
+    text = README.read_text()
+    if README_OPEN not in text or README_SHUT not in text:
+        return
+
+    calls_by = {n: (s, t, a) for n, s, t, a in counted(calls, columns)}
+    backs_by = {n: (s, t, a) for n, s, t, a in counted(backs, back_columns)}
+    # One line per client, and this client's two surfaces last, because they
+    # are the answer and the rest is what the answer is measured against.
+    ours = [n for n in calls_by if n.startswith("ibx")]
+    theirs = [n for n in calls_by if not n.startswith("ibx") and n != "Gateway wire"]
+
+    def row(name):
+        served, taken, absent = calls_by.get(name, (0, 0, 0))
+        b_served, b_taken, b_absent = backs_by.get(name, (0, 0, 0))
+        of_calls = f"{served} / {len(calls)}"
+        of_backs = f"{b_served} / {len(backs)}" if name in backs_by else "—"
+        missing = []
+        if absent:
+            missing.append(f"{absent} absent")
+        if taken:
+            missing.append(f"{taken} taken, not applied")
+        if b_taken:
+            missing.append(f"{b_taken} callback taken, not applied"
+                           if b_taken == 1 else
+                           f"{b_taken} callbacks taken, not applied")
+        if b_absent:
+            missing.append(f"{b_absent} callbacks absent")
+        note = ", ".join(missing) or "nothing missing"
+        mine = name.startswith("ibx")
+        cells = [f"**{name}**" if mine else name,
+                 f"**{of_calls}**" if mine else of_calls,
+                 f"**{of_backs}**" if mine else of_backs,
+                 note]
+        return "| " + " | ".join(cells) + " |"
+
+    summary = [
+        "| Client | Calls carried | Callbacks carried | |",
+        "| --- | ---: | ---: | --- |",
+    ] + [row(n) for n in theirs + ours]
+
+    # Said from the figures, not asserted: if a gap ever opens this line
+    # reports it instead of claiming there is none.
+    gone = sum(calls_by.get(n, (0, 0, 0))[2] + backs_by.get(n, (0, 0, 0))[2] for n in ours)
+    held = sum(calls_by.get(n, (0, 0, 0))[1] + backs_by.get(n, (0, 0, 0))[1] for n in ours)
+    if gone:
+        verdict = (
+            f"**{gone} of them are absent here**, counted rather than left out of "
+            "the denominator. The table below says which."
+        )
+    else:
+        verdict = (
+            "**Nothing on that list is absent here.** "
+            + (f"{held // max(len(ours), 1)} exist and never fire — there is no terminal "
+               "between this client and the venue to make a verification handshake with, "
+               "and no socket layer of the reference client's own to report an error from "
+               "— and each says so where it is declared, so a program that implements one "
+               "still compiles and runs. " if held else "")
+            + "Everything else is carried."
+        )
+
+    block = [
+        README_OPEN,
+        "",
+        "## Capabilities",
+        "",
+        f"One row per capability, one column per client — every one of the "
+        f"{len(calls)} calls and {len(backs)} callbacks the documented API names, "
+        "read from each client rather than recalled.",
+        "",
+    ] + summary + [
+        "",
+        verdict,
+    ] + ([
+        "",
+        f"**And {len(beyond)} things the documented API never named.** The connection a "
+        "terminal opens carries more than the API describes — what the venue permits "
+        "this account, which algorithms it offers, the order defaults it fills an "
+        "order's blanks from, what it says about an issuer, which session holds the "
+        "account — and a client that speaks that connection can answer them. They are "
+        "in the table below, under *Beyond the canonical list*.",
+    ] if beyond else []) + [
+        "",
+        "Every figure here is read from the client it names, on the machine that "
+        "generated it. A client that is not installed is left out rather than "
+        "filled in from memory.",
+        "",
+        "<details>",
+        "<summary><b>The whole table — every call, every callback, and what the "
+        "gateway connection carries beyond them</b></summary>",
+        "",
+    ]
+    # The page itself, minus its own title and the note about where it comes
+    # from, which the readme has said already.
+    body = [ln for ln in page if ln.strip() != "# Capabilities"]
+    while body and not body[0].strip():
+        body.pop(0)
+    if body and body[0].startswith("*Generated by"):
+        body.pop(0)
+    block += body + [
+        "</details>",
+        "",
+        "The same table stands on its own in "
+        "[docs/capabilities.md](docs/capabilities.md), and what each claim rests "
+        "on is in [docs/evidence.md](docs/evidence.md).",
+        "",
+        README_SHUT,
+    ]
+
+    head, _, rest = text.partition(README_OPEN)
+    _, _, tail = rest.partition(README_SHUT)
+    README.write_text(head + "\n".join(block) + tail)
+
+
 def main() -> int:
     if not COVERAGE.is_file():
         print(f"{COVERAGE} is not there; run scripts/gen_api_docs.py first")
@@ -365,6 +509,7 @@ def main() -> int:
     # is read from its own surface: taking the Python binding's methods and
     # marking both surfaces carried invented a Rust column, and calls that
     # exist only in the binding were published as Rust's too.
+    beyond: list[str] = []
     ours_extra, _ = surface_of("ibx", "EClient")
     rust_extra = surface_from_reference("rust-reference.md")
     if ours_extra is not None:
@@ -393,6 +538,7 @@ def main() -> int:
                 continue
             seen.add(plain(name))
             extra.append(name)
+        beyond = extra
         if extra:
             # A call that exists and states why it cannot be served is not
             # carried, and the canonical table already tells the two apart.
@@ -442,6 +588,7 @@ def main() -> int:
     ] + totals + [""]
 
     OUT.write_text("\n".join(out) + "\n")
+    write_readme(out, calls, backs, columns, back_columns, beyond)
     print(f"{OUT.relative_to(ROOT)} — {len(calls)} calls, {len(backs)} callbacks, "
           f"{len(columns)} columns")
     for line in totals:

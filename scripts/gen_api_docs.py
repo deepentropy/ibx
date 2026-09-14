@@ -1101,11 +1101,33 @@ IBAPI_EWRAPPER: list[tuple[str, str]] = [
     ("WSH", "wsh_event_data"),
     # Defined by the reference API and not fired here, which is a difference
     # worth counting rather than one worth leaving out of the denominator: the
-    # notes state all three and why, and a total that omitted them would say
-    # this client answers everything there is.
+    # notes state each and why, and a total that omitted them would say this
+    # client answers everything there is.
+    #
+    # `config` used to sit here and does not belong: it is this client's own
+    # connection record, and no reference client has a callback of that name.
+    # Counted as one the documented API names, it put a row in the comparison
+    # that nothing was measured against.
     ("Market Data", "reroute_mkt_data_req"),
     ("Market Data", "reroute_mkt_depth_req"),
-    ("Connection", "config"),
+    # An exchange-for-physical quote, which the reference client reports on a
+    # callback of its own. This client reads the tick types it is carried
+    # under and fires nothing, so a program written against that callback
+    # hears nothing where the reference client speaks.
+    ("Market Data", "tick_efp"),
+    # The handshake a third-party program makes with a terminal before that
+    # terminal will carry its requests. There is no terminal between this
+    # client and the venue to make it with, so nothing here can fire them —
+    # which is a real difference to a program that implements them, and is
+    # counted as one.
+    ("Connection", "verify_message_api"),
+    ("Connection", "verify_completed"),
+    ("Connection", "verify_and_auth_message_api"),
+    ("Connection", "verify_and_auth_completed"),
+    # What the reference client reports when its own socket layer fails on
+    # Windows. This client has no such layer and reports transport trouble on
+    # the error callback like everything else.
+    ("Connection", "win_error"),
 ]
 
 
@@ -1287,6 +1309,23 @@ STUB_CALLBACKS = {
     # request, not an order carrying a hedge. There is no first request after
     # which it could honestly be fired.
     "delta_neutral_validation",
+    # The contract a request should be asked for under instead, where the venue
+    # reroutes one. Nothing on this connection has been seen to state one.
+    "reroute_mkt_data_req",
+    "reroute_mkt_depth_req",
+    # An exchange-for-physical quote. The tick types it is numbered under are
+    # carried; they are not assembled into the record this reports.
+    "tick_efp",
+    # The handshake a third-party program makes with a terminal before that
+    # terminal will carry its requests. There is no terminal here to make it
+    # with, so these four can never fire.
+    "verify_message_api",
+    "verify_completed",
+    "verify_and_auth_message_api",
+    "verify_and_auth_completed",
+    # What the reference client reports when its own socket layer fails on
+    # Windows. This client has no such layer.
+    "win_error",
 }
 
 

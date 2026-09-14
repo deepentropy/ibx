@@ -203,9 +203,14 @@ What the venue says back. `ib_async` delivers these as events as well as methods
 | Other | `delta_neutral_validation` | ● | ● | ● | ● | ◐ | ◐ |
 | WSH | `wsh_meta_data` | ● | ● | · | ● | ● | ● |
 |  | `wsh_event_data` | ● | ● | · | ● | ● | ● |
-| Market Data | `reroute_mkt_data_req` | ● | ● | ● | · | · | · |
-|  | `reroute_mkt_depth_req` | ● | ● | ● | · | · | · |
-| Connection | `config` | ● | ● | · | · | · | · |
+| Market Data | `reroute_mkt_data_req` | ● | ● | ● | · | ◐ | ◐ |
+|  | `reroute_mkt_depth_req` | ● | ● | ● | · | ◐ | ◐ |
+|  | `tick_efp` | ● | ● | ● | ● | ◐ | ◐ |
+| Connection | `verify_message_api` | ● | ● | ● | · | ◐ | ◐ |
+|  | `verify_completed` | ● | ● | ● | · | ◐ | ◐ |
+|  | `verify_and_auth_message_api` | ● | ● | ● | · | ◐ | ◐ |
+|  | `verify_and_auth_completed` | ● | ● | ● | · | ◐ | ◐ |
+|  | `win_error` | ● | ● | ● | · | ◐ | ◐ |
 
 ## Beyond the canonical list
 
