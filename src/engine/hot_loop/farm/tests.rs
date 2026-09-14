@@ -1308,6 +1308,78 @@ mod news_tests {
         );
     }
 
+    /// The tick-165 payload a live AAPL subscription was sent, byte for byte.
+    const A_CAPTURED_165_PAYLOAD: &str = "\
+        00000001000003000338e7e60000000a000000c943ac48f6000000ca4388e000\
+        000000cb43ac48f6000000cc43754831000000cd43ac48f6000000ce436a5be7\
+        000000d043a81c29000000d143977831000000d2436492b000000198466408cd";
+
+    /// The tick that carries a contract's price extremes carries two figures
+    /// about the company as well, and both reached nobody.
+    ///
+    /// The payload is the one a live AAPL subscription was sent, byte for byte:
+    /// one whole-number entry and ten fractional ones. How many shares are on
+    /// issue is the multiplier that turns a price into a market
+    /// capitalisation, and the documented API reaches it only through a
+    /// fundamentals request of its own; what the contract opened at a year ago
+    /// has no call there at all. Both were read past to step the cursor.
+    ///
+    /// The share count is stated in millions. Settled on two live contracts
+    /// three orders of magnitude apart — this one, whose company has about
+    /// fourteen and a half billion shares, and one with about four billion —
+    /// and nothing else in the table is within three orders of magnitude of
+    /// either, which is what makes it a reading rather than a guess.
+    #[test]
+    fn the_tick_that_carries_the_extremes_carries_the_company_too() {
+        // 96 bytes, as the venue sent them.
+        let payload: Vec<u8> = (0..)
+            .step_by(2)
+            .take(96)
+            .map(|i| u8::from_str_radix(&A_CAPTURED_165_PAYLOAD[i..i + 2], 16).unwrap())
+            .collect();
+
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let id = context.market.register(265598);
+        context.market.register_server_tag(7, id);
+        farm.generic_tick_tags.push((7, 165, 0));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(7, 165, &payload)]), &mut context, &shared, &None,
+        );
+
+        let figures = shared.market.contract_figures(id).expect("the venue stated them");
+        assert!(
+            (figures.shares_outstanding - 14_594_200_195.312_5).abs() < 1.0,
+            "fourteen and a half billion shares, not fourteen thousand: {figures:?}",
+        );
+        assert!(
+            (figures.open_a_year_ago - 228.572_998_046_875).abs() < 1e-9,
+            "{figures:?}",
+        );
+
+        // The extremes beside them still go out as the ticks they always did.
+        let ticks = shared.market.drain_series_ticks(id);
+        let at = |tick: i32| ticks.iter().find(|t| t.tick_type == tick).map(|t| match t.value {
+            crate::types::SeriesValue::Price(v)
+            | crate::types::SeriesValue::Size(v)
+            | crate::types::SeriesValue::Generic(v) => v,
+            crate::types::SeriesValue::Text(_) => f64::NAN,
+        });
+        assert_eq!(at(16), Some(344.570_007_324_218_75), "the thirteen-week high");
+        assert_eq!(at(19), Some(234.358_993_530_273_44), "and the fifty-two week low");
+
+        // And the two the venue states that this cannot name are written down
+        // under their own numbers rather than passing unseen.
+        let unread = shared.market.unread_wire();
+        for kind in [208, 209] {
+            assert!(
+                unread.iter().any(|(_, what)| what.contains(&format!("kind {kind}"))),
+                "a figure of kind {kind} went unrecorded: {unread:?}",
+            );
+        }
+    }
+
     /// A message carries one record after another, and each is delivered. Read
     /// as a single record, everything after the first went unread.
     #[test]
@@ -3657,12 +3729,28 @@ mod depth_position_tests {
             .expect("the trading status is asked for beside the quote");
         farm.handle_subscription_reject(&refused(companion), &context, &shared);
         assert!(shared.market.drain_subscription_failures().is_empty(), "a companion's refusal is the companion's");
+        // And it is told, not only logged. The venue names the request it is
+        // refusing and says why — the one refusal channel on this wire that
+        // does — and a caller that asked for the halt state or the option model
+        // watched an acknowledged subscription that could never answer, with
+        // the reason sitting in a log line. The kind is named, because "a
+        // request beside the quote" is nothing a caller can act on.
+        let told = shared.market.drain_companion_refusals();
+        assert_eq!(told.len(), 1, "the companion's refusal reached nobody");
+        assert_eq!(told[0].0, instrument);
+        assert_eq!(told[0].1, TRADING_STATUS_REQUEST_TYPE);
+        assert!(told[0].2.contains("whether the contract is halted"), "{:?}", told[0].2);
+        assert!(told[0].2.contains("not available"), "the venue's own words: {:?}", told[0].2);
         let quote = farm.md_req_to_instrument.iter()
             .map(|(id, _)| *id)
             .find(|id| !farm.generic_tick_reqs.iter().any(|(g, _)| g == id))
             .expect("the quote's own request");
         farm.handle_subscription_reject(&refused(quote), &context, &shared);
         assert_eq!(shared.market.drain_subscription_failures().len(), 1, "the quote's own refusal reaches the caller");
+        assert!(
+            shared.market.drain_companion_refusals().is_empty(),
+            "and the quote's own refusal is not a companion's",
+        );
     }
 
     /// The quote a caller reads is zeroed at a drop, not only the engine's own.

@@ -815,6 +815,20 @@ impl EClient {
             }
         }
 
+        // A request riding beside the quote that the venue refused. Told to
+        // everyone watching the contract, as the failures above are and for the
+        // same reason: a caller sharing somebody else's subscription holds no
+        // request of its own for the venue to refuse, and is exactly the caller
+        // left waiting on a series that cannot arrive. Under the code that
+        // means the venue said something went wrong and stated none — which is
+        // what it did — rather than the one that means the contract could not
+        // be named, because the contract is fine.
+        for (instrument, _kind, reason) in self.shared.market.drain_companion_refusals() {
+            for req_id in self.core.watchers_of(instrument) {
+                wrapper.error(req_id, VENUE_REPORTED, &reason, "");
+            }
+        }
+
         // A news subscription the venue refused: the engine released its side,
         // so the client forgets whoever asked, leaving a later ask free to
         // send anew. The quote it rode beside is untouched and unreported.

@@ -476,6 +476,35 @@ impl OptionComputation {
     }
 }
 
+/// What the venue states about a contract itself on the tick that carries its
+/// price extremes, beyond the extremes.
+///
+/// The documented API has no tick for either of these: the reference client
+/// reaches share count through a separate fundamentals request and never
+/// reports a year-ago open at all. The venue states both on the quote feed of
+/// every subscription that asks for the extremes, and they were read past.
+///
+/// `f64::MAX` where the venue stated none.
+#[derive(Debug, Clone, Copy)]
+pub struct ContractFigures {
+    /// How many shares the company has on issue.
+    ///
+    /// The multiplier that turns a price into a market capitalisation. The
+    /// venue states it in millions; it is carried here as a count of shares,
+    /// which is the figure it stands for — read against two live contracts
+    /// three orders of magnitude apart, and both matched.
+    pub shares_outstanding: f64,
+    /// What the contract opened at a year ago, which gives a trailing return
+    /// without asking for a year of history.
+    pub open_a_year_ago: f64,
+}
+
+impl Default for ContractFigures {
+    fn default() -> Self {
+        Self { shares_outstanding: f64::MAX, open_a_year_ago: f64::MAX }
+    }
+}
+
 /// Tick-by-tick data type for subscription requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TbtType {

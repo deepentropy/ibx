@@ -1118,6 +1118,34 @@ def short_sale_restricted_by_instrument(instrument)
 
 ---
 
+#### `contract_figures`
+
+What the venue says about the contract itself, beside its prices: how many shares are on issue, and what it opened at a year ago.  Both arrive on the tick carrying the price extremes and neither has a tick of its own in the documented API — a share count is a fundamentals request there, and a year-ago open has no call at all.
+
+```python
+def contract_figures(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+
+---
+
+#### `contract_figures_by_instrument`
+
+The same, by InstrumentId, for callers who track them themselves.
+
+```python
+def contract_figures_by_instrument(instrument)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `instrument` | `int` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
+
+---
+
 #### `option_model_by_instrument`
 
 The same, by InstrumentId, for callers who track them themselves.

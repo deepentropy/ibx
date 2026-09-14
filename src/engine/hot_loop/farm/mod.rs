@@ -376,9 +376,30 @@ fn deliver_series(
                 };
                 at += 8;
                 // The high above the low in each pair, and the venue numbers
-                // the high first. What it opened at a year ago and how many
-                // shares are on issue are stated here and published to no
-                // caller, so they are read past rather than handed over.
+                // the high first.
+                //
+                // Two more the venue states here have no tick of their own in
+                // the documented API — how many shares are on issue, which is
+                // the multiplier that turns a price into a market
+                // capitalisation, and what the contract opened at a year ago.
+                // They are kept against the contract rather than sent as ticks,
+                // because inventing a number for them would put a figure of
+                // this client's own choosing where a caller reads the venue's.
+                //
+                // Measured on two live contracts three orders of magnitude
+                // apart: the share count is stated in millions, and both
+                // matched the company's own.
+                if named == A_SHARE_COUNT || named == AN_OPEN_A_YEAR_AGO {
+                    if value.is_finite() && value != f32::MAX {
+                        let stated = f64::from(value);
+                        shared.market.note_contract_figures(
+                            instrument,
+                            (named == A_SHARE_COUNT).then_some(stated * 1e6),
+                            (named == AN_OPEN_A_YEAR_AGO).then_some(stated),
+                        );
+                    }
+                    continue;
+                }
                 let tick = match named {
                     201 => 16,
                     202 => 15,
@@ -386,7 +407,17 @@ fn deliver_series(
                     204 => 17,
                     205 => 20,
                     206 => 19,
-                    _ => continue,
+                    // A figure the venue states and this cannot name. Recorded
+                    // under its own number — once, whatever it holds — so that
+                    // what is not read is written down and can be settled
+                    // later, rather than passing unseen.
+                    other => {
+                        shared.market.note_unread_wire(
+                            "farm",
+                            format!("a contract figure of kind {other} on tick 165"),
+                        );
+                        continue;
+                    }
                 };
                 // And a fractional figure it does not hold, the same way.
                 if value.is_finite() && value != f32::MAX {
@@ -993,6 +1024,34 @@ const GREEKS_REQUEST_TYPE: u32 = 732;
 
 /// The news tick's own number, in place of a request type.
 const NEWS_REQUEST_TYPE: u32 = 292;
+
+/// How many shares a company has on issue, as the venue numbers the figure on
+/// the tick that carries a contract's price extremes. Stated in millions.
+const A_SHARE_COUNT: i32 = 408;
+
+/// What the contract opened at a year ago, numbered on the same tick.
+const AN_OPEN_A_YEAR_AGO: i32 = 210;
+
+/// What a companion request rides beside the quote for, in words a caller can
+/// act on.
+///
+/// "A request beside the quote" names nothing anyone can do anything about;
+/// "the venue's option model" says to stop waiting for a computation. The
+/// venue states which request it refused, so the answer says which.
+fn companion_named(kind: u32) -> &'static str {
+    match kind {
+        TRADING_STATUS_REQUEST_TYPE => "whether the contract is halted",
+        BBO_EXCHANGE_MAP_REQUEST_TYPE => "which venues its best bid and offer are on",
+        GREEKS_REQUEST_TYPE => "the venue's option model",
+        NEWS_REQUEST_TYPE => "the news on the contract",
+        REALTIME_BID_ASK_REQUEST_TYPE => "every quote change",
+        REALTIME_LAST_REQUEST_TYPE => "every trade",
+        REGULATORY_SNAPSHOT_REQUEST_TYPE => "the chargeable snapshot",
+        // The venue refused something this does not name. Its own reason
+        // still carries, which is the part a caller reads.
+        _ => "a series asked for beside the quote",
+    }
+}
 
 /// The venue a headline subscription names.
 const NEWS_VENUE: &str = "NEWS";
@@ -2028,6 +2087,17 @@ impl FarmState {
                         // already refused and no fresh subscription is sent.
                         shared.market.push_news_rejection(con_id);
                     }
+                    // Told, not only logged. The venue names the request it is
+                    // refusing and says why — the one refusal channel on this
+                    // wire that does — and a caller that asked for the option
+                    // model on a class the venue has no model for watched an
+                    // acknowledged subscription that could never produce a
+                    // computation, with the reason sitting in a log line.
+                    shared.market.push_companion_refusal(
+                        instrument,
+                        kind,
+                        format!("the venue refused {} on {named}: {reason}", companion_named(kind)),
+                    );
                     log::warn!("The venue refused a request beside the quote on {named}: {reason}");
                     return;
                 }

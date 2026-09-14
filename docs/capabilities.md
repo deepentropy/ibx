@@ -243,6 +243,8 @@ same thing, not that the documented API does.
 | `companyDataSeries` | ● | · | · | · | · | ● |
 | `competingSession` | ● | · | · | · | · | ● |
 | `connect_with_events` | ● | · | · | · | ● | · |
+| `contractFigures` | ● | · | · | · | ● | ● |
+| `contractFiguresByInstrument` | ● | · | · | · | ● | ● |
 | `corporateActions` | ● | · | · | · | ● | ● |
 | `enabledFeatures` | ● | · | · | · | ● | ● |
 | `eventsLost` | ● | · | · | · | ● | ● |

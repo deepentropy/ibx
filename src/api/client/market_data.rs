@@ -493,6 +493,34 @@ impl EClient {
         self.shared.market.short_sale_restricted(instrument)
     }
 
+    /// What the venue says about the contract itself, beside its prices.
+    ///
+    /// How many shares the company has on issue — the multiplier that turns a
+    /// price into a market capitalisation — and what the contract opened at a
+    /// year ago, which gives a trailing return without asking for a year of
+    /// history. Both arrive on the tick that carries the price extremes, on
+    /// every subscription that asks for them, and both were read past.
+    ///
+    /// The documented API reaches neither from a quote: a share count is a
+    /// fundamentals request of its own there, and a year-ago open has no call
+    /// at all. So they are read here rather than sent as ticks — a tick number
+    /// of this client's own choosing, where a caller reads the venue's, is not
+    /// something this client invents.
+    ///
+    /// `None` where the request names no subscription, or the venue has stated
+    /// neither figure for it yet; `f64::MAX` for a figure it has not stated.
+    pub fn contract_figures(&self, req_id: i64) -> Option<crate::types::ContractFigures> {
+        let instrument = *self.core.req_to_instrument.lock().unwrap().get(&req_id)?;
+        self.shared.market.contract_figures(instrument)
+    }
+
+    /// The same, by InstrumentId, for callers who track them themselves.
+    pub fn contract_figures_by_instrument(
+        &self, instrument: InstrumentId,
+    ) -> Option<crate::types::ContractFigures> {
+        self.shared.market.contract_figures(instrument)
+    }
+
     /// The same, by InstrumentId, for callers who track them themselves.
     pub fn option_model_by_instrument(
         &self, instrument: InstrumentId,

@@ -600,6 +600,29 @@ impl EClient {
         Ok(shared.market.short_sale_restricted(instrument))
     }
 
+    /// What the venue says about the contract itself, beside its prices: how
+    /// many shares are on issue, and what it opened at a year ago.
+    ///
+    /// Both arrive on the tick carrying the price extremes and neither has a
+    /// tick of its own in the documented API — a share count is a fundamentals
+    /// request there, and a year-ago open has no call at all.
+    #[pyo3(signature = (req_id))]
+    fn contract_figures(&self, req_id: i64) -> PyResult<Option<Py<PyAny>>> {
+        let Ok(shared) = self.shared_state() else { return Ok(None) };
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Ok(None);
+        };
+        Self::contract_figures_dict(&shared, instrument)
+    }
+
+    /// The same, by InstrumentId, for callers who track them themselves.
+    #[pyo3(signature = (instrument))]
+    fn contract_figures_by_instrument(&self, instrument: u32) -> PyResult<Option<Py<PyAny>>> {
+        let Ok(shared) = self.shared_state() else { return Ok(None) };
+        Self::contract_figures_dict(&shared, instrument)
+    }
+
     /// The same, by InstrumentId, for callers who track them themselves.
     #[pyo3(signature = (instrument))]
     fn option_model_by_instrument(&self, instrument: u32) -> PyResult<Option<Py<PyAny>>> {
@@ -609,6 +632,21 @@ impl EClient {
 }
 
 impl EClient {
+    /// One statement of what the venue says about a contract, so the two
+    /// readers above cannot publish different halves of it.
+    fn contract_figures_dict(
+        shared: &std::sync::Arc<crate::bridge::SharedState>,
+        instrument: crate::types::InstrumentId,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let Some(f) = shared.market.contract_figures(instrument) else { return Ok(None) };
+        Python::attach(|py| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("sharesOutstanding", f.shares_outstanding)?;
+            dict.set_item("openAYearAgo", f.open_a_year_ago)?;
+            Ok(Some(dict.into_any().unbind()))
+        })
+    }
+
     /// One statement of the record, so the two readers above cannot publish
     /// different halves of it.
     fn option_model_dict(

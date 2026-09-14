@@ -113,6 +113,14 @@ pub struct MarketDataState {
     last_option_model: Mutex<std::collections::HashMap<crate::types::InstrumentId, crate::types::OptionComputation>>,
     /// Subscriptions the venue was never able to be asked for, and why.
     subscription_failures: Mutex<Vec<(crate::types::InstrumentId, String)>>,
+    /// Refusals of the requests that ride beside a quote: the contract, which
+    /// companion was refused, and the venue's own reason.
+    ///
+    /// Held apart from the failures above, which mean the quote itself was
+    /// refused. A companion is refused on its own and the quote goes on
+    /// ticking, so a caller told on that channel withdrew a subscription that
+    /// was working.
+    companion_refusals: Mutex<Vec<(crate::types::InstrumentId, u32, String)>>,
     /// Contracts whose per-contract news the venue refused. The engine has
     /// released its own side; the client clears its record of who asked, so a
     /// fresh subscription is sent anew rather than deduped against a claim the
@@ -151,6 +159,9 @@ pub struct MarketDataState {
     venue_errors: Mutex<Vec<String>>,
     series_ticks: Mutex<std::collections::HashMap<crate::types::InstrumentId, Vec<SeriesTick>>>,
     quote_attribute_masks: Mutex<std::collections::HashMap<crate::types::InstrumentId, (i64, i64)>>,
+    /// What the venue last said about a contract itself, beside its prices.
+    contract_figures:
+        Mutex<std::collections::HashMap<crate::types::InstrumentId, crate::types::ContractFigures>>,
     /// Which contracts the venue is restricting short sales in.
     ///
     /// Stated on the same record as the halt, and kept here rather than on the
@@ -193,6 +204,7 @@ impl MarketDataState {
             option_computations: Mutex::new(Vec::with_capacity(16)),
             last_option_model: Mutex::new(std::collections::HashMap::new()),
             subscription_failures: Mutex::new(Vec::new()),
+            companion_refusals: Mutex::new(Vec::new()),
             news_rejections: Mutex::new(Vec::new()),
             tick_req_params: Mutex::new(Vec::new()),
             last_min_tick: Mutex::new(std::collections::HashMap::new()),
@@ -204,6 +216,7 @@ impl MarketDataState {
             venue_errors: Mutex::new(Vec::new()),
             series_ticks: Mutex::new(std::collections::HashMap::new()),
             quote_attribute_masks: Mutex::new(std::collections::HashMap::new()),
+            contract_figures: Mutex::new(std::collections::HashMap::new()),
             short_sale_restricted: Mutex::new(std::collections::HashSet::new()),
             clock_skew_millis: AtomicI64::new(0),
             unread_wire: Mutex::new(Vec::new()),
@@ -295,6 +308,10 @@ impl MarketDataState {
     /// watching this one.
     #[doc(hidden)] pub fn forget_subscription_failures(&self, id: crate::types::InstrumentId) {
         self.subscription_failures.lock().unwrap().retain(|(at, _)| *at != id);
+        // A refusal belongs to the contract that was in the slot, not to the
+        // slot: left behind, the next contract to take it is answered with the
+        // last one's refusal.
+        self.companion_refusals.lock().unwrap().retain(|(at, ..)| *at != id);
         self.last_subscription_failure.lock().unwrap().remove(&id);
     }
 
@@ -307,6 +324,8 @@ impl MarketDataState {
     /// wrong.
     #[doc(hidden)] pub fn forget_option_model(&self, instrument: crate::types::InstrumentId) {
         self.last_option_model.lock().unwrap().remove(&instrument);
+        // These belong to the contract that was in the slot, not to the slot.
+        self.contract_figures.lock().unwrap().remove(&instrument);
         // A restriction belongs to the contract that was in the slot, not to
         // the slot: left behind, the next contract to take it reads as
         // restricted on the strength of the last one.
@@ -476,6 +495,18 @@ impl MarketDataState {
     /// Take every subscription failures waiting, leaving none.
     pub fn drain_subscription_failures(&self) -> Vec<(crate::types::InstrumentId, String)> {
         self.subscription_failures.lock().unwrap().drain(..).collect()
+    }
+
+    /// Take every companion refusal waiting, leaving none.
+    ///
+    /// The venue names the request it is refusing and says why — the one
+    /// refusal channel on this wire that names its request. Logged and dropped,
+    /// a caller that asked for the option model on a class the venue has no
+    /// model for watched an acknowledged subscription that could never produce
+    /// a computation, and was told nothing while the venue had said why at
+    /// once.
+    pub fn drain_companion_refusals(&self) -> Vec<(crate::types::InstrumentId, u32, String)> {
+        self.companion_refusals.lock().unwrap().drain(..).collect()
     }
 
     /// Take every con_id whose news the venue refused, leaving none. The
@@ -901,6 +932,38 @@ impl MarketDataState {
         }
     }
 
+    /// What the venue last said about a contract itself: how many shares are on
+    /// issue and what it opened at a year ago.
+    ///
+    /// Stated on the tick that carries the price extremes, and read past. The
+    /// documented API reaches neither from a quote subscription — share count
+    /// is a fundamentals request of its own there, and a year-ago open has no
+    /// call at all.
+    pub fn contract_figures(
+        &self, instrument: crate::types::InstrumentId,
+    ) -> Option<crate::types::ContractFigures> {
+        self.contract_figures.lock().unwrap().get(&instrument).copied()
+    }
+
+    /// Keep what the venue stated about a contract, merging with what it said
+    /// before: the two figures arrive on the same tick but either may be
+    /// absent from a given one, and a figure left out is not a figure withdrawn.
+    #[doc(hidden)] pub fn note_contract_figures(
+        &self,
+        instrument: crate::types::InstrumentId,
+        shares_outstanding: Option<f64>,
+        open_a_year_ago: Option<f64>,
+    ) {
+        let mut held = self.contract_figures.lock().unwrap();
+        let entry = held.entry(instrument).or_default();
+        if let Some(v) = shares_outstanding {
+            entry.shares_outstanding = v;
+        }
+        if let Some(v) = open_a_year_ago {
+            entry.open_a_year_ago = v;
+        }
+    }
+
     /// What the venue last said its own model made of a contract.
     ///
     /// Kept as well as delivered. Delivered alone it is gone the moment a
@@ -923,6 +986,12 @@ impl MarketDataState {
             self.last_option_model.lock().unwrap().insert(comp.instrument, comp);
         }
         push_bounded(&self.option_computations, comp, STREAM_BACKLOG_LIMIT, "option_computations");
+    }
+
+    #[doc(hidden)] pub fn push_companion_refusal(
+        &self, instrument: crate::types::InstrumentId, kind: u32, reason: String,
+    ) {
+        self.companion_refusals.lock().unwrap().push((instrument, kind, reason));
     }
 
     #[doc(hidden)] pub fn push_subscription_failure(&self, instrument: crate::types::InstrumentId, reason: String) {
