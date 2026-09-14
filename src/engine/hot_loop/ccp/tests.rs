@@ -3104,12 +3104,17 @@ fn a_replayed_order_is_paired_with_the_number_it_is_reachable_under() {
     assert_ne!(perm_id, 0, "and the permanent id the venue keeps");
     assert_eq!(client_id, 0, "claimed for no client in particular, as it is owned by none");
 
-    // The venue replays it again on the next reconnect, and a caller hears
-    // about it once.
+    // And the connection goes. Every working order is marked uncertain by
+    // that, and an uncertain order is recovered again when the venue replays
+    // it — which is the path that states the pairing a second time, and the
+    // one a check against the queue alone cannot see, because the queue was
+    // just emptied by the drain above.
+    ccp.handle_disconnect(&mut None, &mut context, &shared, &None);
     ccp.handle_exec_report(&frame, b"", &mut context, &shared, &None, "");
     assert!(
         shared.reference.drain_orders_bound().is_empty(),
-        "one pairing, however many times the venue states it",
+        "one pairing, however many times the venue states it and however many \
+         times the connection goes",
     );
 }
 

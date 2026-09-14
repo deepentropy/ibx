@@ -454,8 +454,23 @@ impl EClient {
                 format!("set_server_log_level: {log_level} is not a log level; it is 1 to 5"),
             )),
         };
-        log::info!("set_server_log_level: {level} (level {log_level})");
-        Ok(())
+        // The logger this client installed, as on the other surface. Nothing
+        // goes to the venue: this protocol carries no message asking one to
+        // change how loudly it talks, and a level a caller states is about the
+        // thing serving that caller — which, in a library, is this.
+        if crate::logging::set_level(level) {
+            log::info!("set_server_log_level: logging at {level} (level {log_level})");
+            return Ok(());
+        }
+        // A program that installed its own logger keeps it, and saying the
+        // level moved when it did not is worse than saying it did not.
+        self.report_refusal(py, -1, crate::error_codes::Refusal::stated(
+            crate::error_codes::LOG_LEVEL_INVALID,
+            format!(
+                "set_server_log_level: {level} was not applied because this session did \
+                 not install the logger; whoever did holds the level"
+            ),
+        ))
     }
 
     // ── User Info ──

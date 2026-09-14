@@ -71,6 +71,11 @@ pub struct ReferenceState {
     /// Orders this session did not place, paired with the number it reaches
     /// them under. Drained to `order_bound` on each surface.
     orders_bound: Mutex<Vec<(i64, i64, i64)>>,
+    /// Which of those pairings have been stated, for as long as the session
+    /// lasts. Kept apart from the queue above because the queue is emptied
+    /// every time a caller reads it, and a set that forgets on being read
+    /// cannot say whether something was said before.
+    orders_bound_said: Mutex<std::collections::HashSet<i64>>,
     /// The calendar's answers, as the venue wrote them. Two shapes on one
     /// envelope — what event types exist, and the events themselves — kept
     /// apart so a caller waiting on one is not handed the other.
@@ -193,6 +198,7 @@ impl ReferenceState {
             contract_details_end: Mutex::new(Vec::with_capacity(8)),
             matching_symbols: Mutex::new(Vec::with_capacity(8)),
             orders_bound: Mutex::new(Vec::new()),
+            orders_bound_said: Mutex::new(std::collections::HashSet::new()),
             calendar_meta_data: Mutex::new(Vec::new()),
             calendar_events: Mutex::new(Vec::new()),
             option_params: Mutex::new(Vec::with_capacity(4)),
@@ -917,13 +923,17 @@ impl ReferenceState {
         if perm_id == 0 || order_id == 0 {
             return;
         }
-        let mut held = self.orders_bound.lock().unwrap();
-        // Once per pairing. The venue replays the same order on every
-        // reconnect, and a caller counting them would count reconnects.
-        if held.iter().any(|(p, _, o)| *p == perm_id && *o == order_id) {
+        // Once per pairing, for the life of the session. Checked against what
+        // has been said rather than against what is waiting to be said: the
+        // queue is emptied every time a caller reads it, so a check against it
+        // only covers pairings nobody has read yet — and the venue replays
+        // these orders on every reconnect, and on a drop each is marked
+        // uncertain and recovered again. A caller counting them would have
+        // been counting reconnects.
+        if !self.orders_bound_said.lock().unwrap().insert(perm_id) {
             return;
         }
-        held.push((perm_id, client_id, order_id));
+        self.orders_bound.lock().unwrap().push((perm_id, client_id, order_id));
     }
 
     /// The pairings not yet handed over.
