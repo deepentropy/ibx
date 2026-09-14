@@ -183,6 +183,22 @@ impl RecoveryBudget {
         }
         !self.out_of_time(cfg, now)
     }
+
+    /// Whether what the caller allowed has actually run out.
+    ///
+    /// Not the same question as whether to dial, and the difference is the
+    /// whole of this: a caller who asked to do the reconnecting itself has
+    /// allowed no attempts and spent none. Read off `may_retry`, that caller's
+    /// first dropped connection was reported as limits running out — limits it
+    /// never set — and the session was declared over for good on it, with the
+    /// words "the recovery limits the caller set are spent" handed to every
+    /// reader. What that caller asked for was to be told and left alone.
+    pub fn is_spent(&self, cfg: &ReconnectConfig, now: std::time::Instant) -> bool {
+        if cfg.max_attempts.is_some_and(|max| self.attempts >= max) {
+            return true;
+        }
+        self.out_of_time(cfg, now)
+    }
 }
 
 #[cfg(test)]

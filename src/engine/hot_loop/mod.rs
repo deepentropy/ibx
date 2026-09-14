@@ -3199,7 +3199,15 @@ impl HotLoop {
             return;
         }
         if !self.farm_budget.may_retry(&self.reconnect_cfg, Instant::now()) {
-            self.report_recovery_exhausted("farm");
+            // Only where they ran out. A caller that asked to do the
+            // reconnecting itself allowed no attempts and spent none, and its
+            // first dropped feed was reported as limits running out — and the
+            // feed declared over for the session on it. The loss itself is
+            // announced where the connection went, which is where that caller
+            // reads it.
+            if self.farm_budget.is_spent(&self.reconnect_cfg, Instant::now()) {
+                self.report_recovery_exhausted("farm");
+            }
             return;
         }
         // Given back before the delay below is read off it, and only by a
@@ -3244,7 +3252,23 @@ impl HotLoop {
             return;
         }
         if !self.budget.may_retry(&self.reconnect_cfg, Instant::now()) {
-            self.report_recovery_exhausted("ccp");
+            if self.budget.is_spent(&self.reconnect_cfg, Instant::now()) {
+                self.report_recovery_exhausted("ccp");
+                return;
+            }
+            // Nothing ran out: this caller asked to be told and to reconnect
+            // itself. Told once, then left alone — the session stands, because
+            // it is the caller's to rebuild and nothing here has decided
+            // otherwise.
+            if !self.loss_announced {
+                log::error!(
+                    "the trading connection went and this client was asked not to \
+                     rebuild it; the caller is told once and nothing is dialled",
+                );
+                self.loss_announced = true;
+                self.shared.set_connection_lost();
+                emit(&self.event_tx, Event::Disconnected);
+            }
             return;
         }
         // Given back before the delay below is read off it, and only by a
@@ -6381,6 +6405,51 @@ mod tests {
         assert_eq!(said, 1, "and once where the worker answered nothing at all");
     }
 
+    /// A caller who asked to do the reconnecting is told, and left with a
+    /// session.
+    ///
+    /// "Never recover on its own. The client reports the loss and waits; the
+    /// caller decides whether and when to reconnect" is what the policy says.
+    /// What that caller got was a session declared over for good on its first
+    /// dropped connection, under the words "the recovery limits the caller set
+    /// are spent" — for limits it had never set, off a predicate that answers
+    /// "no" both to a budget that ran out and to a caller who allowed no
+    /// attempts at all.
+    #[test]
+    fn a_manual_policy_is_told_of_a_loss_and_keeps_its_session() {
+        let shared = Arc::new(SharedState::new());
+        let (events, heard) = std::sync::mpsc::sync_channel(8);
+        let mut hl = HotLoop::new(
+            shared.clone(), Some(EventSink::new(events, Default::default())), None,
+        );
+        hl.set_reconnect_config(crate::reliability::ReconnectConfig::manual());
+
+        // The feed goes first, then the trading connection — the order the run
+        // loop polls them in.
+        hl.farm.disconnected = true;
+        hl.maybe_spawn_farm_reconnect();
+        assert!(hl.farm_halted.is_none(), "a feed nobody was asked to rebuild is not given up on");
+        assert!(
+            shared.market.market_data_over().is_none(),
+            "and market data is not declared over for the session",
+        );
+
+        hl.ccp.disconnected = true;
+        hl.maybe_spawn_ccp_reconnect();
+        assert!(hl.reconnect_halted.is_none(), "nor is the session");
+        assert!(shared.reference.session_over().is_none(), "which every request reads");
+        assert!(shared.reference.trading_over().is_none());
+        assert!(hl.pending_ccp_reconnect.is_none(), "and nothing is dialled, as asked");
+
+        // Told once, which is the other half of what that policy promises.
+        let said = heard.try_iter().filter(|e| matches!(e, Event::Disconnected)).count();
+        assert_eq!(said, 1, "the loss is reported");
+
+        hl.maybe_spawn_ccp_reconnect();
+        let again = heard.try_iter().filter(|e| matches!(e, Event::Disconnected)).count();
+        assert_eq!(again, 0, "and reported once, not every lap");
+    }
+
     /// The trading connection's return is announced whether or not a quote
     /// feed given up on for the session is still down: that feed's loss was
     /// said under its own numbers.
@@ -6626,7 +6695,10 @@ mod tests {
     fn a_market_data_farm_out_of_recovery_does_not_end_the_session() {
         let shared = Arc::new(SharedState::new());
         let mut hl = HotLoop::new(shared.clone(), None, None);
-        hl.reconnect_cfg = crate::reliability::ReconnectConfig::manual();
+        // Limits that are genuinely spent, which is what this is about. Asking
+        // for no recovery at all is a different answer and says so elsewhere:
+        // a caller who allowed no attempts has spent none.
+        hl.reconnect_cfg = crate::reliability::ReconnectConfig::default().with_max_attempts(0);
         hl.farm.disconnected = true;
         hl.maybe_spawn_farm_reconnect();
         assert!(shared.reference.session_over().is_none(), "the session stands");
