@@ -496,10 +496,18 @@ def parse_rust_methods(path: Path) -> list[dict]:
     text = eclient_impls(path.read_text(encoding="utf-8"))
     results = []
     for m in re.finditer(
-        r'((?:\s*///[^\n]*\n)*)(?:\s*#\[[^\]]*\]\s*\n)*\s*pub fn (\w+)\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)([^{;]*)',
+        r'((?:\s*///[^\n]*\n)*)((?:\s*#\[[^\]]*\]\s*\n)*)\s*pub fn (\w+)\s*\(([^)]*(?:\([^)]*\)[^)]*)*)\)([^{;]*)',
         text,
     ):
-        doc_block, name, args_str, ret_str = m.group(1), m.group(2), m.group(3), m.group(4)
+        doc_block, attrs = m.group(1), m.group(2)
+        name, args_str, ret_str = m.group(3), m.group(4), m.group(5)
+        # What the compiler's own documentation leaves out. These are hooks a
+        # test reaches for, callable and not part of the surface — published
+        # here, they read as capabilities this client offers and a page built
+        # from this one listed them beside the calls a program is written
+        # against.
+        if "doc(hidden)" in attrs:
+            continue
         doc_lines = []
         for line in doc_block.strip().splitlines():
             line = line.strip().removeprefix("///").strip()
@@ -1255,12 +1263,21 @@ def _status_icon(name: str, impl_set: set[str], stub_names: set[str]) -> str:
 #: nothing, and a call whose answer goes unread is not one of them.
 #: Empty, and kept so the next one has somewhere to go.
 #:
-#: `set_server_log_level` was the last of them. The protocol carries no message
-#: asking the venue to change how loudly it talks, and the counterpart sends
-#: none either — it keeps what a caller states and logs by it. A drop-in
+#: `set_server_log_level` was the last of them to leave. The protocol carries no
+#: message asking the venue to change how loudly it talks, and the counterpart
+#: sends none either — it keeps what a caller states and logs by it. A drop-in
 #: replacement is the thing serving the caller, so the level a caller states is
 #: this client's own, and it is applied rather than written down.
-STUB_METHODS: set[str] = set()
+STUB_METHODS: set[str] = {
+    # The options a reference client hands its gateway on the greeting, for the
+    # gateway to read. There is no gateway between this client and the venue,
+    # so there is nothing to hand them to and nothing that would read them. An
+    # option a caller states is answered on the error callback rather than
+    # swallowed: each of them changes how the session behaves, and a caller who
+    # set one and heard nothing has a session that is not the one they asked
+    # for and no way to learn it.
+    "set_connect_options",
+}
 
 #: Callbacks nothing fires. Each for its own reason, and none of them a
 #: message this client fails to read: they name state the venue does not send

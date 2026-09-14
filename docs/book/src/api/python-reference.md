@@ -155,7 +155,7 @@ def tws_connection_time()
 
 #### `set_connect_options`
 
-`opts` is taken and not applied. The reference client carries these on its greeting to its gateway, which reads them; there is no gateway between this client and the venue to read them.
+The reference client carries these on its greeting to its gateway, which reads them; there is no gateway between this client and the venue to read them, so an option a caller states cannot be carried.  Said rather than swallowed. Every one of these options changes how the session behaves — how fast it may ask, what it is told — and a caller who set one and heard nothing has a session that is not the one they asked for and no way to know it. Stating none is stating nothing, which is what the reference client's own is on an ordinary call.
 
 ```python
 def set_connect_options(opts)
@@ -601,7 +601,7 @@ def req_managed_accts()
 
 #### `req_account_updates_multi`
 
-Request account updates for multiple accounts/models.  `ledger_and_nlv` is taken and not applied. The account figures arrive as the venue states them, and it states the ledger and the net liquidation among them without being asked.
+Request account updates for multiple accounts/models.  `ledger_and_nlv` is taken and not applied. The account figures arrive as the venue states them, and it states the ledger and the net liquidation among them without being asked. The request is held open. A figure that moves after the first batch is reported again under the same number, until `cancelAccountUpdatesMulti` withdraws it — which is what the reference client does, and what a caller watching a balance sheet through this request is written for.
 
 ```python
 def req_account_updates_multi(req_id, account, model_code, ledger_and_nlv=False)
@@ -618,7 +618,7 @@ def req_account_updates_multi(req_id, account, model_code, ledger_and_nlv=False)
 
 #### `cancel_account_updates_multi`
 
-Cancel multi-account updates.  `req_id` reaches nothing, because there is nothing to withdraw: account values arrive with the session rather than by subscription.
+Cancel multi-account updates.  The request stops being reported to. The venue keeps the account current whether or not anyone is listening; what stops is the reporting — a figure that moves after this is no longer delivered on `accountUpdateMulti` for this request.
 
 ```python
 def cancel_account_updates_multi(req_id)

@@ -48,71 +48,6 @@ pub fn connect_with_events( config: &EClientConfig, capacity: usize, ) -> Result
 
 ---
 
-#### `from_parts`
-
-Construct from pre-built components (for testing or custom setups).
-
-```rust
-pub fn from_parts( shared: Arc<SharedState>, control_tx: SyncSender<ControlCommand>, handle: thread::JoinHandle<()>, account_id: String, ) -> Self
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `shared` | `Arc<SharedState>` | Shared state handle. |
-| `control_tx` | `SyncSender<ControlCommand>` | Control channel sender. |
-| `handle` | `thread::JoinHandle<(` | Background thread handle. |
-
-**Returns:** `Self`
-
----
-
-#### `map_req_instrument`
-
-Map a reqId to an InstrumentId (for testing without a live engine).
-
-```rust
-pub fn map_req_instrument(&self, req_id: i64, instrument: InstrumentId)
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
-| `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
-
----
-
-#### `track_order_for_test`
-
-Pre-populate the order tracker (for testing the dispatcher path without going through the engine's place-order flow).
-
-```rust
-pub fn track_order_for_test( &self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId, )
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `order_id` | `u64` | Order identifier. Must be unique per session. |
-| `contract` | `ApiContract` | Contract specification (symbol, secType, exchange, currency, etc.). |
-| `order` | `ApiOrder` | Order parameters (action, quantity, type, price, TIF, etc.). |
-| `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
-
----
-
-#### `seed_instrument`
-
-Pre-seed a con_id → InstrumentId mapping (for testing without a live engine).
-
-```rust
-pub fn seed_instrument(&self, con_id: i64, instrument: InstrumentId)
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `con_id` | `i64` | Contract ID. Unique per instrument. |
-| `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
-
----
-
 #### `events_lost`
 
 How many events the channel from `connect_with_events` discarded. The engine never waits on a reader — a session that stalled on one would stop carrying market data — so an event arriving at a full channel is dropped. A program that acted on every fill it saw needs to know the difference between that and every fill there was. Zero for a session with no channel attached, and for one whose reader kept up.
@@ -735,7 +670,7 @@ pub fn req_managed_accts(&self, wrapper: &mut impl Wrapper)
 
 #### `req_account_updates_multi`
 
-Request account updates for multiple accounts/models. Account values for one account or model, answered on `account_update_multi`. The reference client answers this request on its own callbacks, not on the ones `req_account_updates` uses, and a caller written against it implements those and hears nothing otherwise. `ledger_and_nlv` is taken and not applied. The account figures arrive as the venue states them, and it states the ledger and the net liquidation among them without being asked. The figures are the ones the venue states for the account this session opened under, and they are labelled with that account. A login holding several is answered for that one; naming another here does not fetch the other's figures, and is said in the log rather than answered with this account's under the other's name.
+Request account updates for multiple accounts/models. Account values for one account or model, answered on `account_update_multi`. The reference client answers this request on its own callbacks, not on the ones `req_account_updates` uses, and a caller written against it implements those and hears nothing otherwise. `ledger_and_nlv` is taken and not applied. The account figures arrive as the venue states them, and it states the ledger and the net liquidation among them without being asked. The figures are the ones the venue states for the account this session opened under, and they are labelled with that account. A login holding several is answered for that one; naming another here does not fetch the other's figures, and is said in the log rather than answered with this account's under the other's name. A model names a slice of the account, and the venue states the account whole. Naming one is said the same way and the figures are labelled with no model, rather than the account's whole balance sheet reaching a caller as one model's. The request is held open. A figure that moves after the batch below is reported again under the same number, until [`EClient::cancel_account_updates_multi`] withdraws it — which is what the reference client does, and what a caller watching a balance sheet through this request is written for.
 
 ```rust
 pub fn req_account_updates_multi( &self, req_id: i64, account: &str, model_code: &str, _ledger_and_nlv: bool, wrapper: &mut impl Wrapper, )
@@ -753,10 +688,10 @@ pub fn req_account_updates_multi( &self, req_id: i64, account: &str, model_code:
 
 #### `cancel_account_updates_multi`
 
-Cancel multi-account updates. `_req_id` reaches nothing, because there is nothing to withdraw: the request it would name is answered from what this session already holds, before a caller has this to cancel it with.
+Cancel multi-account updates. The request stops being reported to. The venue keeps the account current whether or not anyone is listening, as for `cancel_account_updates`; what stops is the reporting — a figure that moves after this is no longer delivered on `account_update_multi` for this request.
 
 ```rust
-pub fn cancel_account_updates_multi(&self, _req_id: i64)
+pub fn cancel_account_updates_multi(&self, req_id: i64)
 ```
 
 | Parameter | Type | Description |

@@ -207,7 +207,7 @@ What the venue says back. `ib_async` delivers these as events as well as methods
 |  | `reroute_mkt_depth_req` | ● | ● | ● | · | · | · |
 | Connection | `config` | ● | ● | · | · | · | · |
 
-## Beyond the documented API
+## Beyond the canonical list
 
 The terminal's own connection carries more than the documented
 surface names, and this client speaks that connection — so some of
@@ -225,47 +225,66 @@ same thing, not that the documented API does.
 
 | Call | Gateway wire | TWS API | ibapi | ib_async | ibx Rust | ibx Python |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `accountSnapshot` | ● | · | · | · | ● | ● |
+| `account` | ● | · | · | · | ● | · |
+| `accountSnapshot` | ● | · | · | · | · | ● |
+| `adjustments` | ● | · | · | · | ● | · |
+| `algorithms` | ● | · | · | · | ● | · |
 | `algorithmsFor` | ● | · | · | · | ● | ● |
-| `cancelOrderByPermId` | ● | · | · | · | ● | ● |
-| `cancelWshEventData` | ● | · | · | ● | ● | ● |
-| `cancelWshMetaData` | ● | · | · | ● | ● | ● |
+| `await_order` | ● | · | · | · | ● | · |
+| `calendar_events` | ● | · | · | · | ● | · |
+| `calendar_schema` | ● | · | · | · | ● | · |
+| `cancel_historical_news` | ● | · | · | · | ● | · |
+| `cancel_order_by_perm_id` | ● | · | · | · | ● | ● |
+| `cancel_wsh_event_data` | ● | ● | · | ● | ● | ● |
+| `cancel_wsh_meta_data` | ● | ● | · | ● | ● | ● |
 | `ccpSessionId` | ● | · | · | · | ● | ● |
-| `checkConnected` | ● | · | · | · | ● | ● |
-| `companyData` | ● | · | · | · | ● | ● |
-| `companyDataSeries` | ● | · | · | · | ● | ● |
-| `competingSession` | ● | · | · | · | ● | ● |
-| `contractDetails` | ● | · | · | · | ● | ● |
-| `corporateActions` | ● | · | · | · | ● | ● |
+| `checkConnected` | ● | · | · | · | · | ● |
+| `companyData` | ● | · | · | · | · | ● |
+| `companyDataSeries` | ● | · | · | · | · | ● |
+| `competingSession` | ● | · | · | · | · | ● |
+| `connect_with_events` | ● | · | · | · | ● | · |
+| `corporate_actions` | ● | · | · | · | ● | ● |
 | `enabledFeatures` | ● | · | · | · | ● | ● |
 | `eventsLost` | ● | · | · | · | ● | ● |
-| `fundamentalData` | ● | · | · | · | ● | ● |
-| `getAccountId` | ● | · | · | · | ● | ● |
-| `headTimestamp` | ● | · | · | · | ● | ● |
-| `histogramData` | ● | · | · | · | ● | ● |
-| `historicalData` | ● | · | · | · | ● | ● |
-| `lastRttMs` | ● | · | · | · | ● | ● |
-| `matchingSymbols` | ● | · | · | · | ● | ● |
+| `getAccountId` | ● | · | · | · | · | ● |
+| `instrument_of` | ● | · | · | · | ● | · |
+| `last_rtt` | ● | · | · | · | ● | · |
+| `lastRttMs` | ● | · | · | · | · | ● |
+| `matching_symbols` | ● | · | · | · | ● | ● |
 | `miscUrl` | ● | · | · | · | ● | ● |
-| `newsHeadlines` | ● | · | · | · | ● | ● |
-| `nextOrderId` | ● | · | · | · | ● | ● |
-| `nextSharedId` | ● | · | · | · | ● | ● |
-| `optionChains` | ● | · | · | · | ● | ● |
+| `news_headlines` | ● | · | · | · | ● | ● |
+| `next_order_id` | ● | · | · | · | ● | ● |
+| `nextSharedId` | ● | · | · | · | · | ● |
+| `option_chain` | ● | · | · | · | ● | · |
+| `optionChains` | ● | · | · | · | · | ● |
 | `orderPermissions` | ● | · | · | · | ● | ● |
-| `orderPresets` | ● | · | · | · | ● | ● |
+| `order_presets` | ● | · | · | · | ● | ● |
+| `parse_algo_params` | ● | · | · | · | ● | · |
 | `permittedOrderTypes` | ● | · | · | · | ● | ● |
-| `qualifyContract` | ● | · | · | · | ● | ● |
-| `qualifyContracts` | ● | · | · | ● | ● | ● |
-| `quoteByInstrument` | ● | · | · | · | ● | ● |
+| `positions` | ● | ● | · | ● | ● | · |
+| `positions_elsewhere` | ● | · | · | · | ● | · |
+| `qualify_contract` | ● | · | · | · | ● | ● |
+| `qualify_contracts` | ● | ● | · | ● | ● | ● |
+| `quote` | ● | · | · | · | ● | · |
+| `quote_by_instrument` | ● | · | · | · | ● | ● |
 | `reqAdjustments` | ● | · | · | · | ● | ● |
-| `reqMktDataEx` | ● | · | · | · | ● | ● |
+| `req_mkt_data_ex` | ● | · | · | · | ● | ● |
 | `reqPing` | ● | · | · | · | ● | ● |
-| `serverVersion` | ● | · | ● | ● | ● | ● |
-| `setConnectOptions` | ● | · | · | ● | ● | ● |
+| `scan` | ● | · | · | · | ● | · |
+| `schedule` | ● | ● | · | ● | ● | · |
+| `serverVersion` | ● | ● | ● | ● | · | ● |
+| `session` | ● | · | · | · | ● | · |
+| `session_over` | ● | · | · | · | ● | · |
+| `session_token_bytes` | ● | · | · | · | ● | · |
+| `setConnectOptions` | ● | ● | · | ● | · | ◐ |
 | `setNewsProviders` | ● | · | · | · | ● | ● |
-| `startApi` | ● | · | ● | ● | ● | ● |
-| `tradingSchedule` | ● | · | · | · | ● | ● |
-| `twsConnectionTime` | ● | · | ● | · | ● | ● |
+| `shared_state` | ● | · | · | · | ● | · |
+| `startApi` | ● | ● | ● | ● | · | ● |
+| `tradingSchedule` | ● | · | · | · | · | ● |
+| `twsConnectionTime` | ● | ● | ● | · | · | ● |
+| `unread_wire` | ● | · | · | · | ● | · |
+| `values_elsewhere` | ● | · | · | · | ● | · |
+| `what_if_order` | ● | ● | · | ● | ● | · |
 
 ## Calls, counted
 

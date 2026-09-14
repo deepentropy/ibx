@@ -104,6 +104,38 @@ def rows_from_coverage():
     return calls, backs
 
 
+def stub_methods():
+    """Calls that exist and state why they cannot be served.
+
+    Read from the generator that already keeps the list, so the two pages
+    cannot disagree about which a call is.
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import gen_api_docs
+
+        return set(gen_api_docs.STUB_METHODS)
+    except Exception:
+        return set()
+    finally:
+        sys.path.pop(0)
+
+
+def surface_from_reference(page: str):
+    """Every method a generated reference page names, or None where absent.
+
+    The Rust surface cannot be imported and enumerated the way a Python one
+    can, and guessing it from the binding is how this page came to mark calls
+    as carried in Rust that exist only in Python. The reference pages are
+    produced from the source on every commit, so they are the surface.
+    """
+    path = ROOT / "docs" / "book" / "src" / "api" / page
+    if not path.is_file():
+        return None
+    names = set(re.findall(r"^#### `([A-Za-z_][A-Za-z_0-9]*)", path.read_text(), re.M))
+    return names or None
+
+
 def surface_of(module_name, *attr_paths):
     """Every public method a client's classes define, or None where absent.
 
@@ -329,18 +361,55 @@ def main() -> int:
         "that the information is unavailable by another route.",
     )
 
-    # What this client has that the documented surface does not name. Read
-    # from the binding itself, so it cannot be a list somebody keeps up.
+    # What each surface has that the canonical list does not name. Each column
+    # is read from its own surface: taking the Python binding's methods and
+    # marking both surfaces carried invented a Rust column, and calls that
+    # exist only in the binding were published as Rust's too.
     ours_extra, _ = surface_of("ibx", "EClient")
+    rust_extra = surface_from_reference("rust-reference.md")
     if ours_extra is not None:
-        canon = {plain(r["snake"]) for r in calls} | {plain(r["camel"]) for r in calls}
-        extra = sorted(n for n in ours_extra if plain(n) not in canon)
+        # Both tables above, not only the calls. The Rust surface is read off
+        # its reference page, which names the callbacks beside the calls — so
+        # measured against the calls alone, every documented callback this
+        # client implements was published here as something beyond the
+        # canonical list, in a table whose first column says "Call".
+        canon = {plain(r[spelling]) for r in calls + backs for spelling in ("snake", "camel")}
+        rust_plain = {plain(n) for n in (rust_extra or set())}
+        both = sorted(
+            {n for n in ours_extra if plain(n) not in canon}
+            | {n for n in (rust_extra or set()) if plain(n) not in canon},
+            key=plain,
+        )
+        # One row per capability, not one per spelling: the two surfaces name
+        # the same thing in their own cases.
+        seen, extra = set(), []
+        for name in both:
+            if plain(name) in seen:
+                continue
+            seen.add(plain(name))
+            extra.append(name)
         if extra:
-            rows = [{"category": "", "snake": n, "camel": n, "cpp": n,
-                     "rust": "Y", "python": "Y", "documented": False}
-                    for n in extra]
+            # A call that exists and states why it cannot be served is not
+            # carried, and the canonical table already tells the two apart.
+            # Told apart only there, a call in this table read as carried while
+            # the page's own key said otherwise.
+            stubs = {plain(n) for n in stub_methods()}
+            rows = [{
+                "category": "", "snake": n, "camel": n, "cpp": n,
+                "rust": ("STUB" if plain(n) in stubs else "Y")
+                        if plain(n) in rust_plain else "-",
+                "python": ("STUB" if plain(n) in stubs else "Y")
+                          if plain(n) in {plain(m) for m in ours_extra} else "-",
+                # The documented surface names it after all where a reference
+                # client does: the canonical list this page is built from is
+                # not the whole of what that client publishes.
+                "documented": bool(
+                    (ibapi_calls and known({"snake": n, "camel": n, "cpp": n}, ibapi_calls))
+                    or (async_calls and known({"snake": n, "camel": n, "cpp": n}, async_calls))
+                ),
+            } for n in extra]
             out += table(
-                rows, columns, "Beyond the documented API",
+                rows, columns, "Beyond the canonical list",
                 "The terminal's own connection carries more than the documented\n"
                 "surface names, and this client speaks that connection — so some of\n"
                 "what it answers has no call in the API at all. These fall into three\n"
