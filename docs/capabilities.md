@@ -259,8 +259,12 @@ That check takes every subscription out and puts it back each cycle, which no
 other check here does, and it is the only one that sees what a long-running
 program sees. Run it before believing a change to the quote path — at any hour:
 a book is asked for on a currency pair and trades on a crypto pair, both of
-which the venue serves when New York is shut, so the two streams it holds to
-arriving are answerable outside the session as well as inside it.
+which answer when New York is shut, so the two streams it holds to arriving are
+answerable outside the session as well as inside it. Which of them answer is a
+question about what the account subscribes to rather than about this client: a
+book nobody subscribes to is answered with nothing at all on some venues and
+refused by name on others, and both read from here as a stream that did not
+arrive.
 
 An order's round trip can be checked at any hour: `scripts/order_round_trip.py`
 places a limit far under the market on a contract that trades nearly around the

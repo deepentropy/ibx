@@ -42,11 +42,18 @@ BOOK_EXCHANGE = "IEX"
 #:
 #: A book and a trade stream are held to arriving once before a run ends, and
 #: both were asked for on the shares alone — so outside the session neither
-#: could arrive, and the run ended saying so whatever the client had done. A
-#: currency pair serves a book at any hour this account can reach it: measured,
-#: 245 rows in half a minute on a Sunday evening. A crypto pair does not serve
-#: one at all, and says nothing rather than refusing; a future's is refused by
-#: name, which is the venue's answer for that account and not a fault.
+#: could arrive, and the run ended saying so whatever the client had done.
+#:
+#: Which book can be asked for is a question about what the account is
+#: subscribed to, not about what this client can read. On the account these
+#: numbers were taken from, the currency pair's book is subscribed and answers
+#: at any hour: 245 rows in half a minute on a Sunday evening. The crypto pair
+#: is subscribed for its quotes and trades and not for a book, and an
+#: unsubscribed book is answered with nothing rather than with a refusal; a
+#: future's book is refused by name because no futures depth is subscribed
+#: either. Neither is a fault, and neither would hold on an account that
+#: subscribes differently — so a run that finds no book should read the
+#: subscriptions before reading the code.
 FX_BOOK_EXCHANGE = "IDEALPRO"
 
 SUBJECTS = [
