@@ -1709,7 +1709,22 @@ impl HotLoop {
                     // one reader that outlives the L1 request: ticker setup
                     // registers into the same map and news routes on it, so a
                     // live news subscription keeps them.
-                    if !self.farm.news_subscriptions.iter().any(|(id, ..)| *id == instrument) {
+                    //
+                    // And only where the withdrawal went. Four of them do not:
+                    // the slot has been given to another contract, its callers
+                    // were sent elsewhere, a caller is on its way onto it, or
+                    // the subscription now on it began after this withdrawal
+                    // was decided. On each the subscription stays up and the
+                    // venue goes on sending, and the tags were handed back
+                    // anyway — so every record after it named a number no
+                    // contract here held and was dropped with one line in the
+                    // log, while the caller that joined was told it was
+                    // watching. Nothing recovered it either: a slot with a
+                    // subscription on it is never reclaimed, so nothing asked
+                    // the venue again and nothing bound the number back.
+                    if !self.farm.holds_market_data(instrument)
+                        && !self.farm.news_subscriptions.iter().any(|(id, ..)| *id == instrument)
+                    {
                         self.context.market.clear_server_tags_for(instrument);
                     }
                     self.try_reclaim_instrument(instrument);
@@ -8137,7 +8152,60 @@ mod tests {
         );
     }
 
+    /// A withdrawal that leaves the subscription standing leaves its tags
+    /// standing too.
+    ///
+    /// Four withdrawals do not go: the slot has been given to another contract,
+    /// its callers were sent elsewhere, a caller is on its way onto it, or the
+    /// subscription now on it began after the withdrawal was decided. On each
+    /// of those the subscription stays up and the venue goes on sending — and
+    /// the tags were handed back anyway, so every record that followed named a
+    /// number no contract in this session held and was dropped with one line in
+    /// the log.
+    ///
+    /// The caller that joined that subscription was told it was watching, and
+    /// received nothing at all for the rest of the session: the slot is never
+    /// reclaimed while a subscription stands on it, so nothing ever asks the
+    /// venue again and nothing ever binds the number back.
+    #[test]
+    fn a_withdrawal_that_does_not_go_leaves_the_tags_it_routes_on() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (tx, rx) = sync_channel(4);
+        hl.set_control_rx(rx);
+
+        let id = hl.context.market.register(4003);
+        hl.context.market.register_server_tag(910_003, id);
+        hl.farm.instrument_md_reqs.push((id, crate::engine::hot_loop::farm::MdReqRecord {
+            con_id: 4003,
+            sec_type: "CS".into(),
+            mode_9887: 0,
+            entries: vec![crate::engine::hot_loop::farm::MdReqEntry {
+                req_id: 7, request_type: 442, venue: "BEST".into(),
+            }],
+        }));
+
+        // The subscription now on the slot was asked for after this withdrawal
+        // was decided — a caller asked for the same contract in between and was
+        // answered off the subscription that is up.
+        hl.farm.note_subscription_asked_on(id, 10);
+        tx.send(ControlCommand::Unsubscribe {
+            instrument: id, con_id: 4003, took_it: 0, series: Vec::new(), issued: 5,
+        }).unwrap();
+        hl.poll_once();
+
+        assert!(
+            hl.farm.holds_market_data(id),
+            "the withdrawal did not go, which is what this case is about",
+        );
+        assert_eq!(
+            hl.context.market.instrument_by_server_tag(910_003), Some(id),
+            "so the number the venue is still sending on still names the contract",
+        );
+    }
+
     /// The map is not L1-only: `35=L` ticker setup registers into it too and
+    /// news resolves against it, so an unsubscribe that clears an instrument's
+    /// tags while its news subscription is live ends the news feed silently.    /// The map is not L1-only: `35=L` ticker setup registers into it too and
     /// news resolves against it, so an unsubscribe that clears an instrument's
     /// tags while its news subscription is live ends the news feed silently.
     #[test]
