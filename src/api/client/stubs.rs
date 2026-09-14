@@ -400,7 +400,24 @@ impl EClient {
                 ));
             }
         };
-        log::info!("set_server_log_level: {level} (level {log_level})");
+        // The level of the logger this client installed, moved where there is
+        // one to move. Nothing goes to the venue: this protocol carries no
+        // message asking one to change how loudly it talks, and a level a
+        // caller states is about the thing serving that caller — which, on a
+        // client that runs in the caller's own process, is this library.
+        if crate::logging::set_level(level) {
+            log::info!("set_server_log_level: logging at {level} (level {log_level})");
+            return;
+        }
+        // A program that installed its own logger keeps it, and saying the
+        // level moved when it did not is worse than saying it did not.
+        self.report_reason(crate::bridge::ReferenceState::NO_REQUEST as i64, &Refusal::stated(
+            LOG_LEVEL_INVALID,
+            format!(
+                "set_server_log_level: {level} was not applied because this session did \
+                 not install the logger; whoever did holds the level"
+            ),
+        ));
     }
 
     // ── User Info ──

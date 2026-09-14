@@ -22,7 +22,7 @@ that did not run.
 
 | | IB API | Rust | Python |
 |---|:---:|:---:|:---:|
-| **EClient methods** | 78 | 77 impl, 1 stub | 77 impl, 1 stub |
+| **EClient methods** | 78 | 78 impl, 0 stub | 78 impl, 0 stub |
 | **EWrapper callbacks** | 85 | 80 impl, 2 stub | 80 impl, 2 stub |
 
 ## EClient Methods
@@ -32,7 +32,7 @@ that did not run.
 | Connection | `connect` | `eConnect` | Y | Y | Live session |
 |  | `disconnect` | `eDisconnect` | Y | Y | Live session |
 |  | `is_connected` | `isConnected` | Y | Y | Live session |
-|  | `set_server_log_level` | `setServerLogLevel` | STUB | STUB | States why it cannot be served |
+|  | `set_server_log_level` | `setServerLogLevel` | Y | Y | Live session |
 |  | `req_current_time` | `reqCurrentTime` | Y | Y | Live session |
 |  | `req_current_time_in_millis` | `reqCurrentTimeInMillis` | Y | Y | Live session |
 | Market Data | `req_mkt_data` | `reqMktData` | Y | Y | Live session |

@@ -131,14 +131,45 @@ pub fn redacted(identifier: &str) -> String {
 ///
 /// `default_level` applies only when `RUST_LOG` says nothing.
 pub fn try_init_from_env(default_level: &str) -> bool {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(default_level));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_timer(NanoTimestamp)
-        .with_writer(std::io::stderr)
+    let (filter, handle) = tracing_subscriber::reload::Layer::new(filter);
+    let installed = tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_timer(NanoTimestamp)
+                .with_writer(std::io::stderr),
+        )
         .try_init()
-        .is_ok()
+        .is_ok();
+    if installed {
+        let _ = LEVEL.set(handle);
+    }
+    installed
+}
+
+/// The filter this client installed, where it installed one.
+///
+/// Held so a caller can move the level while the session runs, which is what
+/// asking the thing serving you to log more loudly means when the thing
+/// serving you is a library. Empty where a program installed its own logger:
+/// that one is not this client's to move.
+static LEVEL: std::sync::OnceLock<
+    tracing_subscriber::reload::Handle<EnvFilter, tracing_subscriber::Registry>,
+> = std::sync::OnceLock::new();
+
+/// Move the level of the logger this client installed.
+///
+/// `false` where there is none to move — a program that installed its own
+/// logger keeps it, and saying otherwise would tell a caller the level changed
+/// when it did not.
+pub fn set_level(level: &str) -> bool {
+    let Some(handle) = LEVEL.get() else { return false };
+    let Ok(filter) = EnvFilter::try_new(level) else { return false };
+    handle.reload(filter).is_ok()
 }
 
 /// Install the logger the environment asks for, when there may already be one.
@@ -176,14 +207,25 @@ pub fn try_init(config: &LogConfig) -> Option<LogGuard> {
         None => buffered.finish(std::io::stdout()),
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_timer(NanoTimestamp)
-        .with_writer(writer)
-        .with_ansi(config.log_dir.is_none())
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    // Installed behind a handle this client keeps, so the level can be moved
+    // while the session runs rather than only as it opens.
+    let (filter, handle) = tracing_subscriber::reload::Layer::new(filter);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_timer(NanoTimestamp)
+                .with_writer(writer)
+                .with_ansi(config.log_dir.is_none()),
+        )
         .try_init()
         .ok()
-        .map(|()| LogGuard { _guard: guard })
+        .map(|()| {
+            let _ = LEVEL.set(handle);
+            LogGuard { _guard: guard }
+        })
 }
 
 /// Install the logger a session's settings ask for, as the session opens.
@@ -230,5 +272,37 @@ impl LogGuard {
     pub fn keep_for_the_process(self) {
         static KEPT: std::sync::OnceLock<LogGuard> = std::sync::OnceLock::new();
         let _ = KEPT.set(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A level moves the logger this client installed, and nothing else.
+    ///
+    /// This call was taken and not applied for as long as it existed: what a
+    /// caller stated was written to the log rather than applied to it. The
+    /// venue has no message for it at all, so a level a caller states is about
+    /// the thing serving that caller rather than about the venue — and on a
+    /// client that runs in the caller's own process, that is this library.
+    ///
+    /// A program that installed its own logger keeps it, and this must say so
+    /// rather than report a level it did not move.
+    #[test]
+    fn a_level_moves_the_logger_this_client_installed() {
+        // Whether this process already has one is not this test's to decide:
+        // it shares a process with every other test, and whoever got there
+        // first holds it.
+        let _ = try_init_from_env("info");
+        match LEVEL.get() {
+            Some(_) => {
+                assert!(set_level("debug"), "the level this client holds is its own to move");
+                assert!(set_level("info"), "and moves back");
+            }
+            // Somebody else's logger. The call answers that it did not move it,
+            // which is the whole of what this guards.
+            None => assert!(!set_level("debug"), "a logger this client did not install is not moved"),
+        }
     }
 }

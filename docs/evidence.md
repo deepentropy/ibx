@@ -21,17 +21,17 @@ Verification runs against a paper account on IBKR production servers, and the or
 | Requests | 80. Every one either does what it says or reports why it cannot — none returns success having sent nothing |
 | Order fields | 154. 118 are sent; 29 have no field in the protocol to carry them and the call says so rather than dropping them; 6 are what the venue fills on the way back, which an order does not carry out; 1 is acted on here rather than sent |
 | Rust and Python | the same request produces the same call on both, compared against live responses |
-| Tests | 3,610 offline, and 197 more that live in the suites run against a broker session |
+| Tests | 3,611 offline, and 197 more that live in the suites run against a broker session |
 
 ## API surface
 
 | Measure | Count |
 | --- | --- |
 | Canonical calls | 78 |
-| Served, Rust | 77 |
-| Served, Python | 77 |
-| Taken and not applied, Rust | 1 |
-| Taken and not applied, Python | 1 |
+| Served, Rust | 78 |
+| Served, Python | 78 |
+| Taken and not applied, Rust | 0 |
+| Taken and not applied, Python | 0 |
 | Canonical callbacks | 85 |
 | Calls where the two surfaces differ | 0 |
 | Callbacks where the two surfaces differ | 0 |
@@ -48,14 +48,16 @@ Every call that exists with the expected signature and reports, through the
 error callback, that it cannot be served. Taken from the generated coverage
 matrix, which CI checks against the source.
 
-None report through the error callback. One is taken and not applied:
-`set_server_log_level`. The session holds no log level of its own and the
-protocol carries no message asking the venue to change one, so what a caller
-states is written to this client's log and reaches nothing else. It is counted
-with the calls that are not served, because a caller who set one and expected
-the venue to act on it got neither — and it says so in its own documentation
-rather than on the error callback, which a program calling it as a matter of
-course would hear on every call.
+None, and none taken and not applied either.
+
+`set_server_log_level` was the last of those. The protocol carries no message
+asking the venue to change how loudly it talks, and the counterpart sends none
+either: it keeps the level a caller states and logs by it. A drop-in
+replacement is the thing serving the caller, so the level a caller states is
+this client's own — it is applied to the logger this client installed, while
+the session runs. Where a program installed its own logger, that one is not
+this client's to move and the call says so rather than reporting a level it did
+not change.
 
 The two that stood here before it — the advisor configuration request and its
 replacement — are not among them, and neither is their answer: the request goes
@@ -68,7 +70,7 @@ and the status row below says so.
 
 | Suite | Count | Requires credentials |
 | --- | ---: | :---: |
-| Rust unit and integration | 2,714 | No |
+| Rust unit and integration | 2,715 | No |
 | Rust, live | 9 | Yes |
 | Python | 896 | No |
 | Python, live | 137 | Yes |

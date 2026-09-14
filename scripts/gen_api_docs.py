@@ -1253,15 +1253,14 @@ def _status_icon(name: str, impl_set: set[str], stub_names: set[str]) -> str:
 #: replies are read, which is a callback that does not fire and is recorded as
 #: one below. Anything added here has to be a call that genuinely sends
 #: nothing, and a call whose answer goes unread is not one of them.
-STUB_METHODS: set[str] = {
-    # Taken and not applied. The session holds no log level of its own and the
-    # protocol carries no message asking the venue to change one, so what a
-    # caller states is written to this client's log and reaches nothing. That
-    # is the definition on the matrix's own first page, and it was published as
-    # implemented because the gate that catches a silent request reads only
-    # names beginning `req_`, `cancel_` and their siblings.
-    "set_server_log_level",
-}
+#: Empty, and kept so the next one has somewhere to go.
+#:
+#: `set_server_log_level` was the last of them. The protocol carries no message
+#: asking the venue to change how loudly it talks, and the counterpart sends
+#: none either — it keeps what a caller states and logs by it. A drop-in
+#: replacement is the thing serving the caller, so the level a caller states is
+#: this client's own, and it is applied rather than written down.
+STUB_METHODS: set[str] = set()
 
 #: Callbacks nothing fires. Each for its own reason, and none of them a
 #: message this client fails to read: they name state the venue does not send

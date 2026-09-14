@@ -39,7 +39,7 @@ What a program asks the venue for.
 | Connection | `connect` | ● | ● | ● | ● | ● | ● |
 |  | `disconnect` | ● | ● | ● | ● | ● | ● |
 |  | `is_connected` | ● | ● | ● | ● | ● | ● |
-|  | `set_server_log_level` | ● | ● | ● | ● | ◐ | ◐ |
+|  | `set_server_log_level` | ● | ● | ● | ● | ● | ● |
 |  | `req_current_time` | ● | ● | ● | ● | ● | ● |
 |  | `req_current_time_in_millis` | ● | ● | · | · | ● | ● |
 | Market Data | `req_mkt_data` | ● | ● | ● | ● | ● | ● |
@@ -275,6 +275,6 @@ same thing, not that the documented API does.
 | TWS API | 78 | 0 | 0 |
 | ibapi | 73 | 0 | 5 |
 | ib_async | 77 | 0 | 1 |
-| ibx Rust | 77 | 1 | 0 |
-| ibx Python | 77 | 1 | 0 |
+| ibx Rust | 78 | 0 | 0 |
+| ibx Python | 78 | 0 | 0 |
 

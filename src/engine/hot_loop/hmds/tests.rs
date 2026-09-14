@@ -1824,9 +1824,6 @@ mod hmds_correlation_tests {
         );
     }
 
-    /// A head timestamp goes out under an id its response names, and is
-    /// matched on it. Two can be in flight at once.
-    #[test]
     /// Two callers asking the same question of the same contract are two
     /// requests, and each is answered.
     ///
@@ -1860,6 +1857,9 @@ mod hmds_correlation_tests {
         assert!(ask("tk_1000").starts_with("tk_1000;;"), "led by the query's own name");
     }
 
+    /// A head timestamp goes out under an id its response names, and is
+    /// matched on it. Two can be in flight at once.
+    #[test]
     fn a_head_timestamp_answers_the_request_the_reply_names() {
         let mut hmds = HmdsState::new();
         let shared = SharedState::new();
