@@ -55,7 +55,7 @@ def published(pattern: str) -> list[list[int]]:
     committed by the same commit that moves the figure, so it never failed.
     Compare against the published prose instead.
     """
-    text = (ROOT / "docs/capabilities.md").read_text()
+    text = (ROOT / "docs/evidence.md").read_text()
     found = [
         [int(g.replace(",", "")) for g in m.groups()]
         for m in re.finditer(pattern, text)
@@ -65,7 +65,7 @@ def published(pattern: str) -> list[list[int]]:
         # "nothing published", this skipped silently and the figure it was
         # written to hold drifted anyway.
         raise SystemExit(
-            f"docs/capabilities.md states nothing matching {pattern!r}, so the "
+            f"docs/evidence.md states nothing matching {pattern!r}, so the "
             f"figure it publishes is measured by nobody"
         )
     return found

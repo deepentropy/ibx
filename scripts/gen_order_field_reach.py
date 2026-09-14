@@ -392,7 +392,7 @@ def main() -> int:
     ):
         for stated in published(pattern):
             if stated != want:
-                print(f"docs/capabilities.md publishes {stated} where {want} is "
+                print(f"docs/evidence.md publishes {stated} where {want} is "
                       f"what exists ({pattern})")
                 return 1
     both = sorted(set(echoed) & set(refuses))

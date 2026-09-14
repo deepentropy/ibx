@@ -189,7 +189,7 @@ def main() -> int:
                     r"\| ([\d,]+) requests, none silent \|"):
         for stated in published(pattern):
             if any(n != len(calls) for n in stated):
-                print(f"docs/capabilities.md publishes {stated} where "
+                print(f"docs/evidence.md publishes {stated} where "
                       f"{len(calls)} requests exist ({pattern})")
                 return 1
     print(f"{len(calls)} requests: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))

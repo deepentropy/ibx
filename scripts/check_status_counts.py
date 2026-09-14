@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the counts docs/capabilities.md publishes against what exists.
+"""Check the counts docs/evidence.md publishes against what exists.
 
 A number in a shipped document is a claim. Typed in once and left, it is a
 claim that goes quietly wrong: the suites grow, the figure does not, and a
@@ -21,8 +21,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # The inventory sits with the engineering notes: it is a fact about this
 # repository rather than about what the client can do, and the compatibility
 # matrix is the latter.
-STATUS = ROOT / "docs" / "capabilities.md"
-MATRIX = ROOT / "docs/capabilities.md"
+STATUS = ROOT / "docs" / "evidence.md"
+MATRIX = ROOT / "docs/evidence.md"
 
 #: Row label in the table, and how to count what it describes.
 ROWS = {
@@ -203,7 +203,7 @@ def capabilities() -> tuple[int, int]:
     totals stay self-consistent while the matrix quietly says less than it
     lists. Every mark is collected first and checked against the legend.
     """
-    text = (ROOT / "docs/capabilities.md").read_text()
+    text = (ROOT / "docs/evidence.md").read_text()
     # From the first capability section, so the table defining the marks is
     # not counted as capabilities carrying them.
     rows = text[text.index("## Client surfaces"):].splitlines()
@@ -217,7 +217,7 @@ def capabilities() -> tuple[int, int]:
     unknown = sorted(set(marks) - STATUSES)
     if unknown:
         raise SystemExit(
-            "docs/capabilities.md carries a status its legend does not define: "
+            "docs/evidence.md carries a status its legend does not define: "
             + ", ".join(unknown)
         )
     verified = sum(1 for m in marks if m == "\u2705 Supported")
@@ -366,7 +366,7 @@ def main() -> int:
     matrix_text = MATRIX.read_text()
     if f"{verified} of the {total} capabilities" not in matrix_text:
         wrong.append(
-            f"docs/capabilities.md does not say {verified} of {total} "
+            f"docs/evidence.md does not say {verified} of {total} "
             f"capabilities, which is what its own matrix lists"
         )
     else:
@@ -375,7 +375,7 @@ def main() -> int:
     refuse = calls_with_no_counterpart()
     if f"{refuse} return an error saying why" not in matrix_text:
         wrong.append(
-            f"docs/capabilities.md does not say {refuse} calls return an error saying "
+            f"docs/evidence.md does not say {refuse} calls return an error saying "
             f"why, which is what src/api/direct.rs names"
         )
     else:
@@ -384,7 +384,7 @@ def main() -> int:
     types = order_types()
     if f"| {types} order types |" not in matrix_text:
         wrong.append(
-            f"docs/capabilities.md does not say {types} order types, which is what "
+            f"docs/evidence.md does not say {types} order types, which is what "
             f"the check every placement passes accepts"
         )
     else:
@@ -392,10 +392,10 @@ def main() -> int:
 
     stated = readme_says()
     if stated is None:
-        wrong.append("docs/capabilities.md states no test counts")
+        wrong.append("docs/evidence.md states no test counts")
     elif stated != (offline, live):
         wrong.append(
-            f"docs/capabilities.md says {stated[0]:,} offline and {stated[1]:,} live, "
+            f"docs/evidence.md says {stated[0]:,} offline and {stated[1]:,} live, "
             f"{offline:,} and {live:,} exist"
         )
     else:
@@ -410,16 +410,16 @@ def main() -> int:
         if key not in said:
             wrong.append(f"{key}: nothing published, {n} exist")
         elif said[key] != n:
-            wrong.append(f"{key}: docs/capabilities.md says {said[key]:,}, {n:,} exist")
+            wrong.append(f"{key}: docs/evidence.md says {said[key]:,}, {n:,} exist")
         else:
             print(f"{key}: {n:,}")
     surface, surface_said = api_surface(), api_surface_published()
     for key, n in surface.items():
         if key not in surface_said:
-            wrong.append(f"docs/capabilities.md publishes no {key!r}")
+            wrong.append(f"docs/evidence.md publishes no {key!r}")
         elif surface_said[key] != n:
             wrong.append(
-                f"{key}: docs/capabilities.md says {surface_said[key]}, "
+                f"{key}: docs/evidence.md says {surface_said[key]}, "
                 f"the generated matrix lists {n}"
             )
     if not any("surfaces differ" in w or "Served" in w or "Canonical" in w for w in wrong):
