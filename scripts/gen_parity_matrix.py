@@ -378,7 +378,12 @@ def main() -> int:
         both = sorted(
             {n for n in ours_extra if plain(n) not in canon}
             | {n for n in (rust_extra or set()) if plain(n) not in canon},
-            key=plain,
+            # The spelling breaks the tie, so the same one is picked every
+            # time. Sorted on the comparison key alone, which of the two
+            # surfaces' spellings a row was written under came out of a set's
+            # iteration order and changed from one run of this script to the
+            # next, for a page that is checked against what is committed.
+            key=lambda name: (plain(name), name),
         )
         # One row per capability, not one per spelling: the two surfaces name
         # the same thing in their own cases.
