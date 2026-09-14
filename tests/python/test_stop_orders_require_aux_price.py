@@ -11,6 +11,7 @@ Run with: pytest tests/python/test_stop_orders_require_aux_price.py -v --timeout
 import os, threading, time
 import pytest
 from ibx import EClient, EWrapper, Contract, Order
+from conftest import wait_for
 
 
 live_only = pytest.mark.skipif(
@@ -263,7 +264,9 @@ class TestStopOrderLive:
         order.outside_rth = True
 
         client.place_order(oid, make_spy(), order)
-        assert wrapper.got_order_status.wait(timeout=30), "No order_status for STP order"
+        assert wait_for(
+            lambda: any(e[1] == oid for e in wrapper._get_events("order_status")), 30
+        ), "No order_status for STP order"
 
         # Verify it was acknowledged (not rejected)
         statuses = [e[2] for e in wrapper._get_events("order_status") if e[1] == oid]
@@ -291,7 +294,9 @@ class TestStopOrderLive:
         order.outside_rth = True
 
         client.place_order(oid, make_spy(), order)
-        assert wrapper.got_order_status.wait(timeout=30), "No order_status for STP LMT order"
+        assert wait_for(
+            lambda: any(e[1] == oid for e in wrapper._get_events("order_status")), 30
+        ), "No order_status for STP LMT order"
 
         statuses = [e[2] for e in wrapper._get_events("order_status") if e[1] == oid]
         assert any(s in ("Submitted", "PreSubmitted") for s in statuses), \
@@ -318,7 +323,9 @@ class TestStopOrderLive:
         order.outside_rth = True
 
         client.place_order(oid, make_spy(), order)
-        assert wrapper.got_order_status.wait(timeout=30), "No order_status for TRAIL order"
+        assert wait_for(
+            lambda: any(e[1] == oid for e in wrapper._get_events("order_status")), 30
+        ), "No order_status for TRAIL order"
 
         statuses = _assert_processed(wrapper, oid, "TRAIL order")
 
@@ -343,7 +350,9 @@ class TestStopOrderLive:
         order.outside_rth = True
 
         client.place_order(oid, make_spy(), order)
-        assert wrapper.got_order_status.wait(timeout=30), "No order_status for TRAIL (amount) order"
+        assert wait_for(
+            lambda: any(e[1] == oid for e in wrapper._get_events("order_status")), 30
+        ), "No order_status for TRAIL (amount) order"
 
         statuses = _assert_processed(wrapper, oid, "TRAIL (amount) order")
 

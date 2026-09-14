@@ -93,7 +93,13 @@ def test_an_order_lives_its_whole_life_through_their_api():
 
         state = ib.whatIfOrder(spy, ib_async.LimitOrder("BUY", 1, 1.00))
         assert state.status, "the venue prices it without placing it"
-        assert state.commission < 1e300, "their unset is not a commission"
+        # The venue prices some orders to a figure and others to a range, and
+        # states only what it has: a preview it can only bound carries the two
+        # bounds and leaves the figure at their unset. Read as a figure alone,
+        # a priced preview looked unpriced.
+        priced = [v for v in (state.commission, state.minCommission, state.maxCommission)
+                  if v < 1e300]
+        assert priced, "their unset is not a commission"
 
         order = ib_async.LimitOrder("BUY", 10, 100.00)
         trade = ib.placeOrder(spy, order)

@@ -10,6 +10,7 @@ Run: pytest tests/python/test_multi_client_session.py -v -s
 import os, threading, time
 import pytest
 from ibx import EWrapper, EClient, Contract, Order
+from conftest import wait_for
 
 pytestmark = pytest.mark.skipif(
     not (os.environ.get("IB_USERNAME") and os.environ.get("IB_PASSWORD")),
@@ -132,7 +133,7 @@ class TestMultiClientVisibility:
         order.outside_rth = True
 
         client_a.place_order(oid, make_spy(), order)
-        assert wrapper.got_order_status.wait(timeout=15), "Order not acked"
+        assert wait_for(lambda: wrapper.order_statuses.get(oid), 15), "Order not acked"
         print(f"  Session A: placed order oid={oid}")
 
         # reqOpenOrders should show own order

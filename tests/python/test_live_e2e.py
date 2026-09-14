@@ -12,6 +12,7 @@ import time
 import pytest
 import threading
 from ibx import EWrapper, EClient, Contract, Order
+from conftest import wait_for
 
 
 # Skip entire module if credentials not set
@@ -179,7 +180,9 @@ class TestLiveE2E:
         self.client.place_order(oid, contract, order)
 
         # Wait for order acknowledgement
-        assert self.wrapper.got_order_status.wait(timeout=30), "No order status received"
+        assert wait_for(
+            lambda: any(e[0] == "order_status" and e[1] == oid for e in self.wrapper.events), 30
+        ), "No order status received"
 
         status_events = [e for e in self.wrapper.events if e[0] == "order_status" and e[1] == oid]
         assert len(status_events) > 0, "the placed order should have an order_status"

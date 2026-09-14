@@ -11,6 +11,7 @@ import time
 import pytest
 import threading
 from ibx import EWrapper, EClient, Contract, Order
+from conftest import wait_for
 
 
 pytestmark = pytest.mark.skipif(
@@ -175,7 +176,10 @@ class TestBracketOrder:
         self.client.place_order(sl_id, qqq, sl)
 
         # Wait for statuses
-        assert self.wrapper.got_status.wait(timeout=30), "No order status received"
+        assert wait_for(
+            lambda: all(self.wrapper.order_statuses.get(i)
+                       for i in (parent_id, tp_id, sl_id)), 30
+        ), "No order status received"
         time.sleep(3)
 
         # Verify parent got a status
@@ -203,10 +207,12 @@ class TestBracketOrder:
         # it whole, so a leg replaced without its group and its parent stands
         # alone afterwards: a stop that no longer cancels its take-profit. The
         # open-order read below is what proves both survived.
-        self.wrapper.got_status.clear()
+        seen = len(self.wrapper.order_statuses.get(sl_id, []))
         sl.trailing_percent = 1.5
         self.client.place_order(sl_id, qqq, sl)
-        assert self.wrapper.got_status.wait(timeout=30), "the replace was not acknowledged"
+        assert wait_for(
+            lambda: len(self.wrapper.order_statuses.get(sl_id, [])) > seen, 30
+        ), "the replace was not acknowledged"
         time.sleep(2)
 
         # Verify via reqOpenOrders
@@ -367,7 +373,8 @@ class TestBracketOrder:
         self.client.place_order(tp_id, qqq, tp)
         self.client.place_order(sl_id, qqq, sl)
 
-        self.wrapper.got_status.wait(timeout=30)
+        wait_for(lambda: all(self.wrapper.order_statuses.get(i)
+                            for i in (parent_id, tp_id, sl_id)), 30)
         time.sleep(3)
 
         # Cancel everything (parent cancellation should cascade)

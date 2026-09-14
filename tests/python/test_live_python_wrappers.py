@@ -12,6 +12,7 @@ import time
 import threading
 import pytest
 from ibx import EWrapper, EClient, Contract, Order, TagValue
+from conftest import wait_for
 
 
 # Skip entire module if credentials not set
@@ -425,7 +426,9 @@ class TestOrders:
         order.outside_rth = True
 
         client.place_order(oid, make_spy_contract(), order)
-        assert wrapper.got_order_status.wait(timeout=30), "No order status"
+        assert wait_for(
+            lambda: any(e[1] == oid for e in wrapper._get_events("order_status")), 30
+        ), "No order status"
 
         client.cancel_order(oid, "")
         got_cancel = wrapper.got_order_cancelled.wait(timeout=15)
@@ -449,7 +452,9 @@ class TestOrders:
         order.outside_rth = True
 
         client.place_order(oid, make_spy_contract(), order)
-        assert wrapper.got_order_status.wait(timeout=30), "No order status"
+        assert wait_for(
+            lambda: any(e[1] == oid for e in wrapper._get_events("order_status")), 30
+        ), "No order status"
 
         client.cancel_order(oid, "")
         wrapper.got_order_cancelled.wait(timeout=15)
@@ -473,7 +478,9 @@ class TestOrders:
         order.outside_rth = True
 
         client.place_order(oid, make_spy_contract(), order)
-        assert wrapper.got_order_status.wait(timeout=30), "No order status"
+        assert wait_for(
+            lambda: any(e[1] == oid for e in wrapper._get_events("order_status")), 30
+        ), "No order status"
 
         client.cancel_order(oid, "")
         wrapper.got_order_cancelled.wait(timeout=15)
@@ -498,7 +505,9 @@ class TestOrders:
         order.algo_params = [TagValue("adaptivePriority", "Patient")]
 
         client.place_order(oid, make_spy_contract(), order)
-        assert wrapper.got_order_status.wait(timeout=30), "No order status"
+        assert wait_for(
+            lambda: any(e[1] == oid for e in wrapper._get_events("order_status")), 30
+        ), "No order status"
 
         client.cancel_order(oid, "")
         wrapper.got_order_cancelled.wait(timeout=15)

@@ -11,6 +11,7 @@ import time
 import pytest
 import threading
 from ibx import EWrapper, EClient, Contract, Order
+from conftest import wait_for
 
 
 pytestmark = pytest.mark.skipif(
@@ -128,7 +129,9 @@ class TestOrderLifecycle:
         self.client.place_order(oid, spy, order)
 
         # Wait for order acknowledgement
-        assert self.wrapper.got_status.wait(timeout=30), "No order status received"
+        assert wait_for(
+            lambda: any(s[0] == oid for s in self.wrapper.order_statuses), 30
+        ), "No order status received"
         statuses = [s for s in self.wrapper.order_statuses if s[0] == oid]
         assert len(statuses) > 0, "the placed order should have a status"
         # permId should be assigned
@@ -161,15 +164,17 @@ class TestOrderLifecycle:
 
         oid = self.wrapper.next_id
         self.client.place_order(oid, spy, order)
-        assert self.wrapper.got_status.wait(timeout=30), "No status on place"
+        assert wait_for(lambda: oid in self.wrapper.perm_ids, 30), "No status on place"
         perm_id_before = self.wrapper.perm_ids[oid]
         assert perm_id_before > 0
 
         # Modify: same orderId, new price
-        self.wrapper.got_status.clear()
+        seen = len(self.wrapper.order_statuses)
         order.lmt_price = 2.00
         self.client.place_order(oid, spy, order)
-        assert self.wrapper.got_status.wait(timeout=15), "No status on modify"
+        assert wait_for(
+            lambda: any(s[0] == oid for s in self.wrapper.order_statuses[seen:]), 15
+        ), "No status on modify"
         perm_id_after = self.wrapper.perm_ids[oid]
 
         assert perm_id_before == perm_id_after, \

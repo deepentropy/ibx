@@ -37,3 +37,22 @@ def next_option_expiry(at_least_days=2) -> str:
     day = datetime.date.today() + datetime.timedelta(days=at_least_days)
     day += datetime.timedelta(days=(4 - day.weekday()) % 7)   # 4 is Friday
     return day.strftime("%Y%m%d")
+
+
+def wait_for(held, timeout=30.0):
+    """True once `held()` is true, False if it never is inside `timeout`.
+
+    An account with anything working at all replays those orders the moment a
+    session opens, and every one of them is an order status. A test that waits
+    on "a status arrived" is therefore released before its own order has even
+    reached the venue, and reads an empty list under its own order id. What a
+    test is waiting for is its own order, so that is what it waits on.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if held():
+            return True
+        time.sleep(0.05)
+    return bool(held())

@@ -10,6 +10,7 @@ Run: pytest tests/python/test_conditional_orders.py -v -s
 import os, threading, time
 import pytest
 from ibx import EWrapper, EClient, Contract, Order, PriceCondition
+from conftest import wait_for
 
 pytestmark = pytest.mark.skipif(
     not (os.environ.get("IB_USERNAME") and os.environ.get("IB_PASSWORD")),
@@ -149,7 +150,7 @@ class TestConditionalOrder:
         order.conditions_cancel_order = False
 
         self.client.place_order(oid, make_contract(IWM_CON_ID, "IWM"), order)
-        assert self.wrapper.got_order_status.wait(timeout=15), "No order status"
+        assert wait_for(lambda: self.wrapper.order_statuses.get(oid), 15), "No order status"
 
         time.sleep(3)
         statuses = self.wrapper.order_statuses.get(oid, [])

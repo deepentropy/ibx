@@ -10,6 +10,7 @@ Run: pytest tests/python/test_reconnect_stress.py -v --timeout=120
 import os, threading, time
 import pytest
 from ibx import EClient, EWrapper, Contract, Order
+from conftest import wait_for
 
 pytestmark = pytest.mark.skipif(
     not (os.environ.get("IB_USERNAME") and os.environ.get("IB_PASSWORD")),
@@ -160,7 +161,7 @@ class TestConnectionStress:
         order.outside_rth = True
 
         client.place_order(oid, make_spy(), order)
-        assert wrapper.got_order_status.wait(timeout=15), "Order not acknowledged"
+        assert wait_for(lambda: wrapper.order_statuses.get(oid), 15), "Order not acknowledged"
         statuses = wrapper.order_statuses.get(oid, [])
         assert len(statuses) > 0, f"No status for order {oid}"
         perm_id = statuses[-1][3]
