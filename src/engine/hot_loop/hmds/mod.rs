@@ -1254,23 +1254,27 @@ impl HmdsState {
                                         .position(|(qid, _)| answers(xml, qid))
                                     {
                                         let (_, req_id) = self.pending_articles.remove(pos);
-                                        match raw_bytes.as_deref()
-                                            .and_then(crate::control::news::parse_article_payload)
-                                        {
-                                            Some((atype, text)) => {
+                                        let read = raw_bytes.as_deref().map_or_else(
+                                            || Err("the news article reply carried no \
+                                                    readable article".to_string()),
+                                            crate::control::news::parse_article_payload,
+                                        );
+                                        match read {
+                                            Ok((atype, text)) => {
                                                 shared.reference.push_news_article(req_id, atype, text)
                                             }
                                             // The response consumes the
                                             // pending request whether or not
                                             // the payload reads, so an
-                                            // unreadable one is reported.
-                                            None => super::push_hmds_error(
-                                                shared,
-                                                req_id,
-                                                "the news article reply carried no readable article"
-                                                    .to_string(),
-                                                false,
-                                            ),
+                                            // unreadable one is reported — in
+                                            // the venue's own words where it
+                                            // gave any, because a provider a
+                                            // caller is not entitled to is
+                                            // permanent and a reply that did
+                                            // not parse is worth asking again.
+                                            Err(why) => {
+                                                super::push_hmds_error(shared, req_id, why, false)
+                                            }
                                         }
                                     }
                                 // Matched on the id the venue echoes, as the

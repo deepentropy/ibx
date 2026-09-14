@@ -60,7 +60,8 @@ impl EClient {
         self.shared.reference.algorithms_for(sec_type)
     }
 
-    /// The sets of order defaults this account holds, as `(key, version)`.
+    /// The sets of order defaults this account holds, as
+    /// `(key, version, when it last changed)`.
     ///
     /// The venue keeps one per security type and fills parts of an order the
     /// caller left unstated from them: the size a compete order competes with
@@ -71,7 +72,12 @@ impl EClient {
     /// The key is the venue's own — `s=STK`, or `s=CASH&tc=EUR` where a
     /// currency splits it — and the version is what that set is on. The values
     /// in a set are asked for separately and are not carried here.
-    pub fn order_presets(&self) -> Vec<(String, String)> {
+    ///
+    /// The version says *that* a set changed; the moment says *when*, which is
+    /// what tells a caller whether an order it sent at a given time was filled
+    /// in from the old defaults or the new. Empty where the venue stated
+    /// none.
+    pub fn order_presets(&self) -> Vec<(String, String, String)> {
         self.shared.reference.order_presets()
     }
 

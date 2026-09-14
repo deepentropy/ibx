@@ -841,13 +841,13 @@ pub fn algorithms_for(&self, sec_type: &str) -> Vec<String>
 
 #### `order_presets`
 
-The sets of order defaults this account holds, as `(key, version)`. The venue keeps one per security type and fills parts of an order the caller left unstated from them: the size a compete order competes with and the offset it competes by, where neither was named. So the same call on two accounts is not the same order, and the reference client's surface has no way to say which sets are in force. The key is the venue's own — `s=STK`, or `s=CASH&tc=EUR` where a currency splits it — and the version is what that set is on. The values in a set are asked for separately and are not carried here.
+The sets of order defaults this account holds, as `(key, version, when it last changed)`. The venue keeps one per security type and fills parts of an order the caller left unstated from them: the size a compete order competes with and the offset it competes by, where neither was named. So the same call on two accounts is not the same order, and the reference client's surface has no way to say which sets are in force. The key is the venue's own — `s=STK`, or `s=CASH&tc=EUR` where a currency splits it — and the version is what that set is on. The values in a set are asked for separately and are not carried here. The version says *that* a set changed; the moment says *when*, which is what tells a caller whether an order it sent at a given time was filled in from the old defaults or the new. Empty where the venue stated none.
 
 ```rust
-pub fn order_presets(&self) -> Vec<(String, String)>
+pub fn order_presets(&self) -> Vec<(String, String, String)>
 ```
 
-**Returns:** `Vec<(String, String)>`
+**Returns:** `Vec<(String, String, String)>`
 
 ---
 

@@ -1518,7 +1518,7 @@ def algorithms_for(sec_type)
 
 #### `order_presets`
 
-The sets of order defaults this account holds, as `(key, version)`.  The venue keeps one per security type and fills parts of an order the caller left unstated from them, so the same call on two accounts is not the same order. The key is the venue's own and the version is what that set is on; the values in a set are asked for separately.
+The sets of order defaults this account holds, as `(key, version, when it last changed)`.  The venue keeps one per security type and fills parts of an order the caller left unstated from them, so the same call on two accounts is not the same order. The key is the venue's own and the version is what that set is on; the values in a set are asked for separately.  The version says *that* a set changed and the moment says *when*, which is what tells a caller whether an order it sent at a given time was filled in from the old defaults or the new. Empty where the venue stated none.
 
 ```python
 def order_presets()

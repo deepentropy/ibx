@@ -5773,6 +5773,72 @@ fn the_venue_states_which_algorithms_it_offers() {
     );
 }
 
+/// A message the venue addresses to the account holder says which account.
+///
+/// A login holds more than one, and a margin notice or a corporate-action
+/// notice that does not say which account it concerns is close to useless to
+/// the person it was written for. The venue names it; this dropped it.
+#[test]
+fn a_message_to_the_account_holder_names_the_account_it_concerns() {
+    let shared = SharedState::new();
+    let parsed = std::collections::HashMap::from([
+        (1u32, "DU999888".to_string()),
+        (58u32, "your account is approaching a margin call".to_string()),
+        (149u32, "MARGIN".to_string()),
+    ]);
+    super::handle_venue_error(&parsed, &shared);
+
+    let told = shared.market.drain_venue_errors();
+    assert_eq!(told.len(), 1);
+    assert!(told[0].contains("DU999888"), "the account the venue named: {told:?}");
+    assert!(told[0].contains("margin call"), "beside what it said: {told:?}");
+    assert!(told[0].contains("MARGIN"), "and the identifier beside that: {told:?}");
+
+    // One naming no account still reaches a caller, without an empty label.
+    let unaddressed = std::collections::HashMap::from([
+        (58u32, "the venue is going down for maintenance".to_string()),
+    ]);
+    super::handle_venue_error(&unaddressed, &shared);
+    let told = shared.market.drain_venue_errors();
+    assert_eq!(told, vec!["the venue is going down for maintenance".to_string()]);
+}
+
+/// A figure whose kind is not established is recorded with its number.
+///
+/// The venue states one figure and a selector saying which figure it is.
+/// Which one the selector names is not established, and nothing is written
+/// from here on the strength of a guess — the number was read as a net
+/// liquidation whatever the selector said, and an account holding the better
+/// part of a million in cash reported a net liquidation of minus fourteen
+/// hundred.
+///
+/// But the record said only that a frame of kind N had arrived. Without the
+/// number it carried, nobody can reconcile it against the figures the account
+/// states under names, so the kind stays unestablished for ever.
+#[test]
+fn an_account_figure_of_an_unestablished_kind_is_recorded_with_its_number() {
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    let msg = crate::protocol::fix::fix_build(
+        &[(35, "U"), (6040, "77"), (6566, "5"), (9806, "-1400.25")],
+        1,
+    );
+    ccp.process_ccp_message(&msg, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU123");
+
+    let unread = shared.market.unread_wire();
+    let about = unread.iter().find(|(kind, _)| *kind == "trading")
+        .map(|(_, what)| what.clone())
+        .unwrap_or_default();
+    assert!(about.contains("kind 5"), "the selector the venue stated: {unread:?}");
+    assert!(about.contains("-1400.25"), "and the number beside it: {unread:?}");
+
+    // And nothing was written as an account figure, because nothing here
+    // knows which figure it is.
+    assert!(
+        shared.portfolio.stated_account_values().is_empty(),
+        "a figure nobody can name is not published under a name",
+    );
+}
+
 /// The order defaults the account holds are read, not discarded.
 ///
 /// This session asks for them at logon and threw the answer away. The venue
@@ -5780,8 +5846,12 @@ fn the_venue_states_which_algorithms_it_offers() {
 /// the caller left unstated from them, so which sets exist is a fact about
 /// every order placed from here.
 ///
-/// The answer repeats three fields per set, so it is read by walking the tags
-/// in order. Read by looking each up, five sets would answer as one.
+/// The answer repeats three fields per set — the key, the version, and when
+/// the set last changed — so it is read by walking the tags in order. Read by
+/// looking each up, five sets would answer as one.
+///
+/// The moment is the one that says whether an order already sent was filled in
+/// from the old defaults or the new. It was parsed past.
 #[test]
 fn the_order_defaults_the_account_holds_are_read() {
     let msg = crate::protocol::fix::fix_build(
@@ -5798,11 +5868,32 @@ fn the_order_defaults_the_account_holds_are_read() {
     assert_eq!(
         held,
         Some(vec![
-            ("s=CASH".to_string(), "v=1&a=1".to_string()),
-            ("s=FUT".to_string(), "v=1&a=1".to_string()),
-            ("s=STK".to_string(), "v=2".to_string()),
+            ("s=CASH".to_string(), "v=1&a=1".to_string(), "1782492079.182".to_string()),
+            ("s=FUT".to_string(), "v=1&a=1".to_string(), "1782488506.813".to_string()),
+            ("s=STK".to_string(), "v=2".to_string(), "1782488429.956".to_string()),
         ]),
-        "every set, in the order the venue states them",
+        "every set, in the order the venue states them, and when each last changed",
+    );
+
+    // A set the venue states no moment for keeps none of its own rather than
+    // taking the moment of the set before it, which is the fault a read that
+    // carried the last value forward would have.
+    let partly = crate::protocol::fix::fix_build(
+        &[
+            (35, "U"), (6040, "194"), (6556, "OPR.2"), (8166, "L"),
+            (8167, "2"),
+            (8168, "s=CASH"), (8169, "v=1"), (8170, "1782492079.182"),
+            (8168, "s=STK"), (8169, "v=2"),
+        ],
+        1,
+    );
+    assert_eq!(
+        super::parse_order_presets(&partly),
+        Some(vec![
+            ("s=CASH".to_string(), "v=1".to_string(), "1782492079.182".to_string()),
+            ("s=STK".to_string(), "v=2".to_string(), String::new()),
+        ]),
+        "a set with no moment stated carries none",
     );
 
     // An account that holds none says so, and that is an answer.
@@ -6954,6 +7045,37 @@ fn a_bulletin_is_reported_as_the_kind_a_caller_reads_not_the_urgency_stated() {
         assert_eq!(sent[0].msg_type, kind, "urgency {urgency} names {what}");
         assert_eq!(sent[0].msg_id, 4242, "the venue numbers its own bulletins");
     }
+}
+
+/// A bulletin whose urgency this does not name is still delivered.
+///
+/// The text is the only part a person reads, and dropping the bulletin for
+/// want of a number nobody could read threw the text away with it. It goes out
+/// under the kind that claims least — text, meant to be read — and the urgency
+/// stays in the unread record, so what could not be read is still written down.
+#[test]
+fn a_bulletin_whose_urgency_is_unnamed_still_carries_its_text() {
+    let mut ccp = CcpState::new();
+    let shared = SharedState::new();
+    let parsed = std::collections::HashMap::from([
+        (crate::protocol::fix::TAG_URGENCY, "77".to_string()),
+        (crate::protocol::fix::TAG_HEADLINE, "the exchange will close early".to_string()),
+        (crate::protocol::fix::TAG_SECURITY_EXCHANGE, "NASDAQ".to_string()),
+        (crate::protocol::fix::TAG_BULLETIN_ID, "9".to_string()),
+    ]);
+    ccp.handle_news_bulletin(&parsed, &shared);
+
+    let sent = shared.market.drain_news_bulletins();
+    assert_eq!(sent.len(), 1, "the bulletin was dropped with its text");
+    assert_eq!(sent[0].message, "the exchange will close early");
+    assert_eq!(sent[0].exchange, "NASDAQ");
+    assert_eq!(sent[0].msg_id, 9, "the venue's own number for it");
+    assert_eq!(sent[0].msg_type, 4, "the kind that claims least about what it is");
+
+    assert!(
+        shared.market.unread_wire().iter().any(|(_, what)| what.contains("77")),
+        "and the urgency nobody could read is still written down",
+    );
 }
 
 /// A bulletin the venue did not number stands at the widest number one is

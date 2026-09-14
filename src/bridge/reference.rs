@@ -163,7 +163,7 @@ pub struct ReferenceState {
     algorithms: Mutex<HashMap<String, Vec<String>>>,
     /// The order presets the account holds, by the key the venue names each
     /// set under, with the version it is on.
-    order_presets: Mutex<Vec<(String, String)>>,
+    order_presets: Mutex<Vec<(String, String, String)>>,
     /// What a derivative's underlying is, by the venue's id for the
     /// derivative.
     ///
@@ -1199,11 +1199,11 @@ impl ReferenceState {
     /// The key is the venue's own, `s=STK` or `s=CASH&tc=EUR`. The version is
     /// what that set is on; the values behind it are asked for separately and
     /// are not carried here.
-    pub fn order_presets(&self) -> Vec<(String, String)> {
+    pub fn order_presets(&self) -> Vec<(String, String, String)> {
         self.order_presets.lock().unwrap().clone()
     }
 
-    #[doc(hidden)] pub fn set_order_presets(&self, presets: Vec<(String, String)>) {
+    #[doc(hidden)] pub fn set_order_presets(&self, presets: Vec<(String, String, String)>) {
         *self.order_presets.lock().unwrap() = presets;
     }
 

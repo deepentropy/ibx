@@ -256,6 +256,15 @@ fn handle_venue_error(parsed: &std::collections::HashMap<u32, String>, shared: &
         Some(id) => format!("{text} ({id})"),
         None => text.to_string(),
     };
+    // And the account it is about, where the venue named one. A login holding
+    // several is told about each of them on this channel, and a margin notice
+    // or a corporate-action notice that does not say which account it concerns
+    // is close to useless to the person it was written for. The venue said
+    // which one; this dropped it.
+    let told = match parsed.get(&1).map(String::as_str).filter(|a| !a.is_empty()) {
+        Some(account) => format!("{account}: {told}"),
+        None => told,
+    };
     log::warn!("The venue reported: {told}");
     shared.market.push_venue_error(told);
 }
@@ -344,12 +353,19 @@ fn known_unread(subtype: &str) -> Option<&'static str> {
     }
 }
 
-/// The order presets a session is told about, as `(key, version)`.
+/// The order presets a session is told about, as `(key, version, changed at)`.
 ///
 /// The venue states how many follow on 8167 and then repeats three fields for
 /// each: the key it names the set by on 8168, the version on 8169, and the
 /// moment it last changed on 8170. The values in a set are not here; asking
 /// for those is a request of its own.
+///
+/// The moment is carried. The version says *that* a set changed and the moment
+/// says *when*, which is what tells a caller whether an order it sent at a
+/// given time was filled in from the old defaults or the new — and these
+/// defaults fill in terms the caller left unstated on orders already placed.
+/// Read past, the question could not be asked. A set the venue states no
+/// moment for carries none rather than being dropped for want of it.
 ///
 /// Read by walking the tags in the order the message states them rather than
 /// by looking each up, because three of them repeat and a keyed read answers
@@ -361,7 +377,7 @@ fn known_unread(subtype: &str) -> Option<&'static str> {
 /// published however many pairs happened to parse — as the account's defaults,
 /// beside a number the venue itself said was larger — and one carrying neither
 /// count nor pairs cleared what the account holds.
-fn parse_order_presets(msg: &[u8]) -> Option<Vec<(String, String)>> {
+fn parse_order_presets(msg: &[u8]) -> Option<Vec<(String, String, String)>> {
     let mut out = Vec::new();
     let mut key: Option<String> = None;
     let mut stated: Option<usize> = None;
@@ -371,7 +387,15 @@ fn parse_order_presets(msg: &[u8]) -> Option<Vec<(String, String)>> {
             8168 => key = Some(value),
             8169 => {
                 if let Some(k) = key.take() {
-                    out.push((k, value));
+                    out.push((k, value, String::new()));
+                }
+            }
+            // Written onto the set the version just opened, because it follows
+            // it. A set the venue states no moment for keeps the empty one it
+            // was pushed with rather than taking the previous set's.
+            8170 => {
+                if let Some(held) = out.last_mut() {
+                    held.2 = value;
                 }
             }
             _ => {}
@@ -1801,6 +1825,9 @@ impl CcpState {
         static BULLETIN_TYPE_MAP: &[(i32, i32)] = &[
             (1, 1), (2, 3), (3, 2), (8, 4), (9, 5), (10, 6),
         ];
+        /// The kind that claims least about what a bulletin is: text, meant to
+        /// be read. What an urgency this does not name goes out under.
+        const BULLETIN_PLAIN_TEXT: i32 = 4;
         let fix_type: i32 = parsed.get(&fix::TAG_URGENCY)
             .and_then(|s| s.parse().ok()).unwrap_or(0);
         let api_type = BULLETIN_TYPE_MAP.iter()
@@ -1809,18 +1836,22 @@ impl CcpState {
         let api_type = match api_type {
             Some(t) => t,
             None => {
-                // Dropped, and said so. A bulletin whose urgency this does not
-                // name is still a bulletin the venue sent, and returning here in
-                // silence left no callback, no log and nothing in the unread
-                // record to say a message had arrived and gone nowhere.
+                // Delivered as plain text, and the urgency recorded. A bulletin
+                // whose urgency this does not name is still a bulletin the
+                // venue sent, and dropping it here threw away the headline with
+                // the number nobody could read — which is the only part a
+                // person reads. The kind it goes out under is the one that
+                // claims least: the venue said something, and this does not
+                // know what sort of something.
                 shared.market.note_unread_wire(
                     "trading",
                     format!("news bulletin urgency {fix_type}"),
                 );
                 log::warn!(
-                    "news bulletin states urgency {fix_type}, which names no bulletin type here — dropped",
+                    "news bulletin states urgency {fix_type}, which names no bulletin type \
+                     here — delivered as plain text",
                 );
-                return;
+                BULLETIN_PLAIN_TEXT
             }
         };
         let message = parsed.get(&fix::TAG_HEADLINE).cloned().unwrap_or_default();
@@ -1858,9 +1889,18 @@ impl CcpState {
     /// here. The selector is recorded as an unread wire rather than guessed at.
     fn handle_account_summary(&mut self, parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
         if let Some(selector) = parsed.get(&6566) {
+            // The number as well as the kind. The kind is not established and
+            // this refuses to name it — but the record said a frame of kind N
+            // had arrived and could not say what number it carried, which
+            // leaves nobody able to reconcile it against the figures the
+            // account states under names, and so leaves the kind unestablished
+            // for ever.
+            let stated = parsed.get(&9806).map(String::as_str).unwrap_or("nothing");
             shared.market.note_unread_wire(
                 "trading",
-                format!("account figure of kind {selector} (6040=77), kind not established"),
+                format!(
+                    "account figure of kind {selector} (6040=77) is {stated}, kind not established",
+                ),
             );
         }
         // Nothing is written from here, so nothing is published from here

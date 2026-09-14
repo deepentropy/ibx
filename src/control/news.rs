@@ -558,7 +558,7 @@ fn decode_byte_array(s: &str) -> Vec<u8> {
 }
 
 /// Parse a news article body from the binary payload in tag 96.
-/// Returns (article_type, article_text).
+/// Returns (article_type, article_text), or why there is no article.
 ///
 /// The answer says which of the three it is. `error_code` is the venue
 /// declining to serve the article; `cmd="pdf"` beside a `pdf` value is the
@@ -567,10 +567,17 @@ fn decode_byte_array(s: &str) -> Vec<u8> {
 /// document itself, handed to the caller as a successful answer under the
 /// type that means a PDF — nothing a caller could write to a file, and no
 /// error under the request for a caller waiting on one.
-pub fn parse_article_payload(raw: &[u8]) -> Option<(i32, String)> {
+///
+/// The refusal carries the venue's own reason out. Reported as one fixed
+/// sentence about an unreadable reply, a caller could not tell a provider it is
+/// not entitled to — which is permanent, and worth telling a person about —
+/// from a reply that did not parse, which is worth asking again for.
+pub fn parse_article_payload(raw: &[u8]) -> Result<(i32, String), String> {
     let after_status = if raw.starts_with(b"200\n") { &raw[4..] } else { raw };
     let decoded = jc_decode(after_status);
-    let entry = extract_zip_entry(&decoded)?;
+    let Some(entry) = extract_zip_entry(&decoded) else {
+        return Err("the news article reply carried no readable article".to_string());
+    };
     let text = String::from_utf8_lossy(&entry);
 
     let mut cmd = String::new();
@@ -586,7 +593,7 @@ pub fn parse_article_payload(raw: &[u8]) -> Option<(i32, String)> {
             // article, so there is no article to look for further down.
             "error_code" => {
                 log::warn!("news: the venue would not serve the article: {value}");
-                return None;
+                return Err(format!("the venue would not serve the article: {value}"));
             }
             "cmd" => cmd = value,
             "pdf" => pdf_encoded = Some(value),
@@ -600,7 +607,7 @@ pub fn parse_article_payload(raw: &[u8]) -> Option<(i32, String)> {
     if cmd == "pdf"
         && let Some(encoded) = &pdf_encoded
     {
-        return Some((1, B64.encode(decode_byte_array(encoded))));
+        return Ok((1, B64.encode(decode_byte_array(encoded))));
     }
 
     if let Some(encoded) = &body_encoded {
@@ -614,14 +621,14 @@ pub fn parse_article_payload(raw: &[u8]) -> Option<(i32, String)> {
         if decoder.read_to_string(&mut article).is_ok()
             && article.len() as u64 <= crate::protocol::fixcomp::MAX_INFLATED
         {
-            return Some((0, article));
+            return Ok((0, article));
         }
     }
 
     // An answer with no article in it this can read. Said so, the request is
     // answered by the error beside this call rather than by the properties
     // document dressed as an article.
-    None
+    Err("the news article reply carried no readable article".to_string())
 }
 
 #[cfg(test)]
@@ -922,7 +929,7 @@ mod tests {
         raw.extend_from_slice(&zip);
 
         assert!(
-            parse_article_payload(&raw).is_none(),
+            parse_article_payload(&raw).is_err(),
             "an answer with no readable article in it is not delivered as one",
         );
     }
@@ -953,7 +960,7 @@ mod tests {
         let body = encoder.finish().unwrap();
         assert_eq!(
             answer(format!("cmd=details\nh=BRFG$100\nb={}\n", encode_byte_array(&body))),
-            Some((0, "Shares rose.".to_string())),
+            Ok((0, "Shares rose.".to_string())),
             "a text article reads as one",
         );
 
@@ -961,20 +968,26 @@ mod tests {
         let pdf = b"%PDF-1.4\n\xff\xfe";
         assert_eq!(
             answer(format!("cmd=pdf\npdf={}\n", encode_byte_array(pdf))),
-            Some((1, B64.encode(pdf))),
+            Ok((1, B64.encode(pdf))),
             "a PDF article reads as its bytes, not as the document naming them",
         );
 
         // The venue declining, which is the error beside this call and not an
-        // article at all.
-        assert_eq!(
-            answer("error_code=NEWS_NOT_ALLOWED\ncmd=details\nh=BRFG$100\n".to_string()),
-            None,
-            "a refusal is not an article",
-        );
+        // article at all — in the venue's own words. Reported as one fixed
+        // sentence about an unreadable reply, a caller could not tell a
+        // provider it is not entitled to, which is permanent and worth telling
+        // a person about, from a reply that did not parse, which is worth
+        // asking again for.
+        let refused = answer("error_code=NEWS_NOT_ALLOWED\ncmd=details\nh=BRFG$100\n".to_string())
+            .expect_err("a refusal is not an article");
+        assert!(refused.contains("NEWS_NOT_ALLOWED"), "{refused}");
 
-        // Nothing this can read is nothing, not the document saying so.
-        assert_eq!(answer("cmd=details\n".to_string()), None, "no body is no article");
+        // Nothing this can read is nothing, not the document saying so — and
+        // it does not borrow the venue's words, because the venue said none.
+        let unreadable = answer("cmd=details\n".to_string())
+            .expect_err("no body is no article");
+        assert!(!unreadable.contains("NEWS_NOT_ALLOWED"), "{unreadable}");
+        assert!(unreadable.contains("no readable article"), "{unreadable}");
     }
 }
 

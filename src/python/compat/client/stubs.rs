@@ -41,13 +41,19 @@ impl EClient {
         Ok(self.shared_state().map(|s| s.reference.algorithms_for(sec_type)).unwrap_or_default())
     }
 
-    /// The sets of order defaults this account holds, as `(key, version)`.
+    /// The sets of order defaults this account holds, as
+    /// `(key, version, when it last changed)`.
     ///
     /// The venue keeps one per security type and fills parts of an order the
     /// caller left unstated from them, so the same call on two accounts is not
     /// the same order. The key is the venue's own and the version is what that
     /// set is on; the values in a set are asked for separately.
-    fn order_presets(&self) -> PyResult<Vec<(String, String)>> {
+    ///
+    /// The version says *that* a set changed and the moment says *when*, which
+    /// is what tells a caller whether an order it sent at a given time was
+    /// filled in from the old defaults or the new. Empty where the venue
+    /// stated none.
+    fn order_presets(&self) -> PyResult<Vec<(String, String, String)>> {
         Ok(self.shared_state().map(|s| s.reference.order_presets()).unwrap_or_default())
     }
 
