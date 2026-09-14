@@ -108,6 +108,14 @@ pub struct EClient {
     /// request id and withdrawn under it. Held apart from that flag because
     /// both may be watching at once and each is answered on its own callback.
     pub(crate) positions_multi_requested: Mutex<std::collections::HashSet<i64>>,
+    /// The requests watching the account's figures per account or model.
+    ///
+    /// `accountUpdateMulti` is a subscription, not a question: a figure that
+    /// moves after the first batch is reported again under the same request
+    /// until the caller withdraws it. Held apart from the plain account
+    /// subscription beside it, because both may be open at once and each is
+    /// answered on its own callback.
+    pub(crate) account_updates_multi_requested: Mutex<std::collections::HashSet<i64>>,
     /// Whether this session is finished rather than merely disconnected.
     ///
     /// The engine announces a loss it is still working on and a loss it has
@@ -346,6 +354,7 @@ impl EClient {
             positions_requested: AtomicBool::new(false),
             deferred_evictions: Mutex::new(std::collections::HashSet::new()),
             positions_multi_requested: Mutex::new(std::collections::HashSet::new()),
+            account_updates_multi_requested: Mutex::new(std::collections::HashSet::new()),
             session_ended: AtomicBool::new(false),
             close_notified: AtomicBool::new(false),
             waiting_answers: Mutex::new(std::collections::VecDeque::new()),
@@ -850,11 +859,24 @@ impl EClient {
         if self.is_connected() { self.logged_in_at.lock().unwrap().clone() } else { None }
     }
 
-    /// `opts` is taken and not applied. The reference client carries these on
-    /// its greeting to its gateway, which reads them; there is no gateway
-    /// between this client and the venue to read them.
-    fn set_connect_options(&self, opts: &str) {
-        let _ = opts;
+    /// The reference client carries these on its greeting to its gateway,
+    /// which reads them; there is no gateway between this client and the venue
+    /// to read them, so an option a caller states cannot be carried.
+    ///
+    /// Said rather than swallowed. Every one of these options changes how the
+    /// session behaves — how fast it may ask, what it is told — and a caller
+    /// who set one and heard nothing has a session that is not the one they
+    /// asked for and no way to know it. Stating none is stating nothing, which
+    /// is what the reference client's own is on an ordinary call.
+    fn set_connect_options(&self, py: Python<'_>, opts: &str) -> PyResult<()> {
+        if opts.is_empty() {
+            return Ok(());
+        }
+        self.report_refusal(py, -1, crate::error_codes::Refusal::validation(format!(
+            "connect options {opts:?} were stated and cannot be carried: the reference \
+             client hands these to a gateway to read, and there is no gateway between \
+             this client and the venue",
+        )))
     }
 
     /// Nothing to start, once there is a session. The reference client sends

@@ -245,6 +245,14 @@ pub struct EClient {
     /// request id and withdrawn under it. Held apart from that flag because
     /// both may be watching at once and each is answered on its own callback.
     pub(crate) positions_multi_requested: Mutex<std::collections::HashSet<i64>>,
+    /// The requests watching the account's figures per account or model.
+    ///
+    /// `accountUpdateMulti` is a subscription, not a question: a figure that
+    /// moves after the first batch is reported again under the same request
+    /// until the caller withdraws it. Held apart from the plain account
+    /// subscription beside it, because both may be open at once and each is
+    /// answered on its own callback.
+    pub(crate) account_updates_multi_requested: Mutex<std::collections::HashSet<i64>>,
     /// Option calculations waiting on the venue to state a model.
     ///
     /// The calculation is answered from the venue's model for the contract,
@@ -640,6 +648,7 @@ impl EClient {
             positions_requested: AtomicBool::new(false),
             deferred_evictions: Mutex::new(std::collections::HashSet::new()),
             positions_multi_requested: Mutex::new(std::collections::HashSet::new()),
+            account_updates_multi_requested: Mutex::new(std::collections::HashSet::new()),
             pending_option_calcs: Mutex::new(std::collections::HashMap::new()),
             next_order_id: AtomicU64::new(0),
             asking: Mutex::new(()),
@@ -673,6 +682,7 @@ impl EClient {
             positions_requested: AtomicBool::new(false),
             deferred_evictions: Mutex::new(std::collections::HashSet::new()),
             positions_multi_requested: Mutex::new(std::collections::HashSet::new()),
+            account_updates_multi_requested: Mutex::new(std::collections::HashSet::new()),
             pending_option_calcs: Mutex::new(std::collections::HashMap::new()),
             next_order_id: AtomicU64::new(0),
             asking: Mutex::new(()),

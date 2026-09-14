@@ -1105,6 +1105,31 @@ impl EClient {
             }
         }
 
+        // The multi-account subscription, which is a live feed of its own:
+        // every figure that has moved since it last heard, under each request
+        // still watching. Answered with its first batch alone, a caller
+        // watching its balance sheet through this request watched a still
+        // picture.
+        let watching: Vec<i64> = {
+            let asked = self.account_updates_multi_requested.lock().unwrap();
+            let mut ids: Vec<i64> = asked.iter().copied().collect();
+            ids.sort_unstable();
+            ids
+        };
+        if !watching.is_empty() {
+            // Taken once and given to everyone watching. Taken per watcher,
+            // the first would take the move and the rest would never hear it.
+            let moved = self.core.account_figures_that_moved(&self.shared, true);
+            for field in &moved {
+                for req_id in &watching {
+                    wrapper.account_update_multi(
+                        *req_id, &self.account_id, "",
+                        &field.key, &field.value, &field.currency,
+                    );
+                }
+            }
+        }
+
         // Account summary → account_summary + account_summary_end (one-shot via
         // ClientCore)
         if let Some(batch) = self.core.prepare_account_summary(&self.shared, &self.account_id) {

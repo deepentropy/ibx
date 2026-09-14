@@ -1350,6 +1350,34 @@ impl EClient {
             }
         }
 
+        // The multi-account subscription, which is a live feed of its own:
+        // every figure that has moved since it last heard, under each request
+        // still watching. Answered with its first batch alone, a caller
+        // watching its balance sheet through this request watched a still
+        // picture.
+        {
+            let watching: Vec<i64> = {
+                let asked = self.account_updates_multi_requested.lock().unwrap();
+                let mut ids: Vec<i64> = asked.iter().copied().collect();
+                ids.sort_unstable();
+                ids
+            };
+            if !watching.is_empty() {
+                let on = self.account();
+                // Taken once and given to everyone watching. Taken per
+                // watcher, the first would take the move and the rest would
+                // never hear it.
+                let moved = self.core.account_figures_that_moved(shared, true);
+                for field in &moved {
+                    for req_id in &watching {
+                        call_wrapper!(self, py, shared, "account_update_multi",
+                            (*req_id, on.as_str(), "",
+                             field.key.as_str(), field.value.as_str(), field.currency.as_str()));
+                    }
+                }
+            }
+        }
+
         // P&L dispatch (via ClientCore)
         if let Some(update) = self.core.poll_pnl(shared) {
             call_wrapper!(self, py, shared, "pnl", (update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl));

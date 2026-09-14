@@ -311,6 +311,11 @@ impl EClient {
     /// `ledger_and_nlv` is taken and not applied. The account figures arrive as
     /// the venue states them, and it states the ledger and the net liquidation
     /// among them without being asked.
+    /// The request is held open. A figure that moves after the first batch is
+    /// reported again under the same number, until
+    /// `cancelAccountUpdatesMulti` withdraws it — which is what the reference
+    /// client does, and what a caller watching a balance sheet through this
+    /// request is written for.
     #[pyo3(signature = (req_id, account, model_code, ledger_and_nlv=false))]
     fn req_account_updates_multi(
         &self, py: Python<'_>, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
@@ -351,13 +356,33 @@ impl EClient {
         // keeping a book per account files as that account's balance sheet.
         // The holdings answer beside this already says so.
         let acct_name = self.account();
+        // Held open from here. The reference client keeps this request alive
+        // and reports each figure again as it moves; answered with one batch
+        // and nothing after, a caller watching its balance sheet through it
+        // watched a still picture.
+        self.account_updates_multi_requested.lock().unwrap().insert(req_id);
+        self.core.forget_account_figures_stated();
+        // A model is a slice of the account; the figures below are the whole
+        // of it. Echoed onto the label, every one of them read as that model's
+        // — and a caller keeping a book per model files the account's net
+        // liquidation and buying power as one model's.
+        let model_code = if model_code.is_empty() { model_code } else {
+            let why = format!(
+                "model {model_code} was named and the figures that follow are the whole \
+                 account's, which is what this session is told",
+            );
+            log::warn!("{why}");
+            self.report_refusal(py, req_id, Refusal::validation(why))?;
+            ""
+        };
         // Every figure the venue stated, in the currency it stated it in.
         // Rebuilding from this client's typed copy reports an account held in
         // any other currency as dollars, and drops every figure outside the
         // handful that copy carries.
-        for (key, value, currency) in shared.portfolio.stated_account_values() {
+        for field in self.core.account_figures_that_moved(&shared, true) {
             self.deliver(py, "account_update_multi",
-                (req_id, acct_name.as_str(), model_code, key.as_str(), value.as_str(), currency.as_str()))?;
+                (req_id, acct_name.as_str(), model_code,
+                 field.key.as_str(), field.value.as_str(), field.currency.as_str()))?;
         }
         self.deliver(py, "account_update_multi_end", (req_id,))?;
         Ok(())
@@ -365,11 +390,13 @@ impl EClient {
 
     /// Cancel multi-account updates.
     ///
-    /// `req_id` reaches nothing, because there is nothing to withdraw: account
-    /// values arrive with the session rather than by subscription.
+    /// The request stops being reported to. The venue keeps the account current
+    /// whether or not anyone is listening; what stops is the reporting — a
+    /// figure that moves after this is no longer delivered on
+    /// `accountUpdateMulti` for this request.
     fn cancel_account_updates_multi(&self, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
-        let _ = req_id;
+        self.account_updates_multi_requested.lock().unwrap().remove(&req_id);
         Ok(())
     }
 
@@ -427,6 +454,17 @@ impl EClient {
         // opened under, and echoing the caller's own put another account's
         // name on them.
         let on = self.account();
+        // A model is a slice of the account, and these are the whole of what
+        // it holds. Echoed onto the label, every holding read as that model's.
+        let model_code = if model_code.is_empty() { model_code } else {
+            let why = format!(
+                "model {model_code} was named and the holdings that follow are the whole \
+                 account's, which is what this session is told",
+            );
+            log::warn!("{why}");
+            self.report_refusal(py, req_id, Refusal::validation(why))?;
+            ""
+        };
         for pi in &held {
             let c_py = Py::new(py, self.position_contract(py, pi, &shared)?)?.into_any();
             let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;

@@ -5425,6 +5425,109 @@ fn holdings_are_labelled_with_the_account_that_holds_them() {
     );
 }
 
+/// The account's figures keep arriving under the request that asked for them,
+/// and stop when it is withdrawn.
+///
+/// The reference client holds this request open: a figure that moves after the
+/// first batch is reported again under the same request. Answered with the
+/// first batch and nothing after, a caller watching its balance sheet through
+/// this request watched a still picture — and every one of them is written
+/// against a client that keeps it moving.
+#[test]
+fn the_account_figures_keep_arriving_under_the_request_that_asked() {
+    #[derive(Default)]
+    struct Rows(Vec<(i64, String, String)>);
+    impl crate::api::wrapper::Wrapper for Rows {
+        fn account_update_multi(
+            &mut self, req_id: i64, _account: &str, _model: &str,
+            key: &str, value: &str, _currency: &str,
+        ) {
+            self.0.push((req_id, key.to_string(), value.to_string()));
+        }
+    }
+
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.account_download_is_settled();
+    shared.portfolio.note_account_value("NetLiquidation", "100.00", "USD");
+
+    let mut rows = Rows::default();
+    client.req_account_updates_multi(7, "", "", false, &mut rows);
+    assert!(
+        rows.0.iter().any(|(req, key, value)| *req == 7 && key == "NetLiquidation" && value == "100.00"),
+        "the first batch states the account: {:?}", rows.0,
+    );
+
+    // A figure moves, and the request that asked hears about it.
+    rows.0.clear();
+    shared.portfolio.note_account_value("NetLiquidation", "101.00", "USD");
+    client.process_msgs(&mut rows);
+    assert_eq!(
+        rows.0, vec![(7, "NetLiquidation".to_string(), "101.00".to_string())],
+        "the move was not reported under the request watching for it",
+    );
+
+    // Withdrawn, and the next move reaches nobody.
+    rows.0.clear();
+    client.cancel_account_updates_multi(7);
+    shared.portfolio.note_account_value("NetLiquidation", "102.00", "USD");
+    client.process_msgs(&mut rows);
+    assert!(rows.0.is_empty(), "a withdrawn request went on being reported to: {:?}", rows.0);
+}
+
+/// A model names a slice of the account, and a slice is not what this session
+/// is told about.
+///
+/// The venue states the account whole. Echoing the caller's model onto every
+/// row labelled the whole account's figures and holdings as that model's, and
+/// a caller keeping a book per model files one model as holding everything the
+/// account holds.
+#[test]
+fn a_model_that_was_asked_about_does_not_label_the_whole_account() {
+    #[derive(Default)]
+    struct Labels { models: Vec<String>, said: Vec<String> }
+    impl crate::api::wrapper::Wrapper for Labels {
+        fn account_update_multi(
+            &mut self, _req_id: i64, _account: &str, model: &str,
+            _key: &str, _value: &str, _currency: &str,
+        ) {
+            self.models.push(model.to_string());
+        }
+        fn position_multi(
+            &mut self, _req_id: i64, _account: &str, model: &str,
+            _contract: &Contract, _position: f64, _avg_cost: f64,
+        ) {
+            self.models.push(model.to_string());
+        }
+        fn error(&mut self, _req_id: i64, _code: i64, message: &str, _json: &str) {
+            self.said.push(message.to_string());
+        }
+    }
+
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.account_download_is_settled();
+    shared.portfolio.note_account_value("NetLiquidation", "12345.678", "CHF");
+    shared.portfolio.set_position_info(PositionInfo {
+        con_id: 756733, position: 100.0, avg_cost: 400 * PRICE_SCALE, ..Default::default()
+    });
+
+    let mut heard = Labels::default();
+    client.req_account_updates_multi(1, "", "TECH", false, &mut heard);
+    client.req_positions_multi(2, "", "TECH", &mut heard);
+
+    assert!(!heard.models.is_empty(), "the account answered at all");
+    assert!(
+        heard.models.iter().all(|model| model.is_empty()),
+        "the whole account's figures came back labelled with a model: {:?}",
+        heard.models,
+    );
+    let about_the_model: Vec<&String> =
+        heard.said.iter().filter(|why| why.contains("TECH")).collect();
+    assert_eq!(
+        about_the_model.len(), 2,
+        "the caller is told once per request: {:?}", heard.said,
+    );
+}
+
 #[test]
 fn req_positions_empty_still_calls_position_end() {
     let (client, _rx, shared) = test_client();

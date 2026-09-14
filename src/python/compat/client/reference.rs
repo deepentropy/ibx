@@ -696,6 +696,24 @@ fn scanner_filters(py: Python<'_>, sub: &Py<PyAny>, filter_options: &[Py<PyAny>]
         }
     }
 
+    // The pairs a caller sets the scan's own controls with — the sort column
+    // and its direction among them. This protocol's scan carries a filter list
+    // and no free-form settings field, so a pair stated here cannot be sent.
+    // Dropped in silence, a scan asked for sorted one way came back sorted
+    // another and the caller had nothing to tell them apart by.
+    match sub.getattr(py, "scannerSettingPairs") {
+        Err(_) => {}
+        Ok(v) if v.is_none(py) => {}
+        Ok(v) => match v.extract::<String>(py) {
+            Ok(pairs) if pairs.is_empty() => {}
+            Ok(pairs) => return Err(crate::error_codes::Refusal::validation(format!(
+                "the scan states settings {pairs:?}, which this request cannot carry: a scan \
+                 run without them is not the scan that was asked for",
+            ))),
+            Err(_) => return Err(unreadable_filter("scannerSettingPairs")),
+        },
+    }
+
     for (at, option) in filter_options.iter().enumerate() {
         let what = format!("filter tag at position {at}");
         let Ok(tag) = option.getattr(py, "tag") else {
@@ -797,6 +815,27 @@ mod tests {
                 ("priceAbove".to_string(), "20".to_string()),
                 ("usdMarketCapAbove".to_string(), "10000".to_string()),
             ]);
+        });
+    }
+
+    /// A setting this request cannot carry is refused, not dropped.
+    ///
+    /// The pairs set the scan's own controls — the sort column and its
+    /// direction among them. Dropped in silence, a scan asked for sorted one
+    /// way came back sorted another, with nothing to tell the two apart by.
+    #[test]
+    fn a_scanner_setting_that_cannot_be_sent_refuses_the_scan() {
+        Python::initialize();
+        Python::attach(|py| {
+            let sub = namespace(py, "scannerSettingPairs='Annual,true'");
+            let why = scanner_filters(py, &sub, &[])
+                .expect_err("a stated setting is not dropped");
+            assert!(why.message.contains("Annual,true"), "{}", why.message);
+
+            // What the reference client's own subscription holds when nobody
+            // set it, which states nothing and is no refusal.
+            let sub = namespace(py, "scannerSettingPairs=''");
+            assert!(scanner_filters(py, &sub, &[]).is_ok(), "an unset setting is not a refusal");
         });
     }
 

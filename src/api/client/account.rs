@@ -298,6 +298,17 @@ impl EClient {
     /// several is answered for that one; naming another here does not fetch
     /// the other's figures, and is said in the log rather than answered with
     /// this account's under the other's name.
+    ///
+    /// A model names a slice of the account, and the venue states the account
+    /// whole. Naming one is said the same way and the figures are labelled
+    /// with no model, rather than the account's whole balance sheet reaching a
+    /// caller as one model's.
+    ///
+    /// The request is held open. A figure that moves after the batch below is
+    /// reported again under the same number, until
+    /// [`EClient::cancel_account_updates_multi`] withdraws it — which is what
+    /// the reference client does, and what a caller watching a balance sheet
+    /// through this request is written for.
     pub fn req_account_updates_multi(
         &self, req_id: i64, account: &str, model_code: &str, _ledger_and_nlv: bool,
         wrapper: &mut impl Wrapper,
@@ -327,14 +338,37 @@ impl EClient {
             log::warn!("{why}");
             wrapper.error(req_id, Refusal::NO_ANSWER as i64, why, "");
         }
+        // Held open from here. The reference client keeps this request alive
+        // and reports each figure again as it moves, and a caller watching its
+        // balance sheet through it was given one still picture and nothing
+        // after. Registered before the batch below so a figure that moves
+        // while it is being assembled is not lost between the two.
+        self.account_updates_multi_requested.lock().unwrap().insert(req_id);
+        self.core.forget_account_figures_stated();
+        // A model is a slice of the account; the figures below are the whole
+        // of it. Echoed onto the label, every one of them read as that model's
+        // — and a caller keeping a book per model files the account's net
+        // liquidation and buying power as one model's. Said, and labelled with
+        // no model, as the account is labelled with the one this session
+        // opened under rather than the one that was asked about.
+        let model_code = if model_code.is_empty() { model_code } else {
+            let why = format!(
+                "model {model_code} was named and the figures that follow are the whole \
+                 account's, which is what this session is told",
+            );
+            log::warn!("{why}");
+            wrapper.error(req_id, Refusal::VALIDATION as i64, &why, "");
+            ""
+        };
         // As the venue stated them, in the currency it stated them in. Eight
         // of them were worked out here instead, rounded to two decimals and
         // labelled US dollars whatever the account is held in: an account in
         // another currency read as a dollar account, and every figure the
         // venue states beyond those eight was not reported at all.
-        for (key, value, currency) in self.shared.portfolio.stated_account_values() {
+        for field in self.core.account_figures_that_moved(&self.shared, true) {
             wrapper.account_update_multi(
-                req_id, &self.account_id, model_code, &key, &value, &currency,
+                req_id, &self.account_id, model_code,
+                &field.key, &field.value, &field.currency,
             );
         }
         wrapper.account_update_multi_end(req_id);
@@ -342,11 +376,14 @@ impl EClient {
 
     /// Cancel multi-account updates. Matches `cancelAccountUpdatesMulti` in C++.
     ///
-    /// `_req_id` reaches nothing, because there is nothing to withdraw: the
-    /// request it would name is answered from what this session already holds,
-    /// before a caller has this to cancel it with.
-    pub fn cancel_account_updates_multi(&self, _req_id: i64) {
-        if self.session_over() { self.report_reason(-1, &Refusal::not_connected("Not connected")); }
+    /// The request stops being reported to. The venue keeps the account
+    /// current whether or not anyone is listening, as for
+    /// `cancel_account_updates`; what stops is the reporting — a figure that
+    /// moves after this is no longer delivered on `account_update_multi` for
+    /// this request.
+    pub fn cancel_account_updates_multi(&self, req_id: i64) {
+        if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
+        self.account_updates_multi_requested.lock().unwrap().remove(&req_id);
     }
 
     /// Request positions for multiple accounts/models. Matches `reqPositionsMulti` in
@@ -411,6 +448,17 @@ impl EClient {
             log::warn!("{why}");
             wrapper.error(req_id, Refusal::VALIDATION as i64, &why, "");
         }
+        // A model is a slice of the account, and these are the whole of what
+        // it holds. Echoed onto the label, every holding read as that model's.
+        let model_code = if model_code.is_empty() { model_code } else {
+            let why = format!(
+                "model {model_code} was named and the holdings that follow are the whole \
+                 account's, which is what this session is told",
+            );
+            log::warn!("{why}");
+            wrapper.error(req_id, Refusal::VALIDATION as i64, &why, "");
+            ""
+        };
         // Labelled with the account they are on, not with the one that was
         // asked about: these are the holdings of the account this session
         // opened under, and echoing the caller's own put another account's
