@@ -506,14 +506,14 @@ pub fn scale_historical_bars(
         .map(|b| crate::types::model::BarData {
             date: b.time, open: b.open, high: b.high, low: b.low, close: b.close,
             volume: b.volume, wap: b.wap, bar_count: b.count,
-            timezone: zone.to_string(),
+            timezone: zone.to_string(), end: b.end,
         })
         .collect();
     Ok(scale_bars(model, actions)?
         .into_iter()
         .map(|b| crate::control::historical::HistoricalBar {
             time: b.date, open: b.open, high: b.high, low: b.low, close: b.close,
-            volume: b.volume, wap: b.wap, count: b.bar_count,
+            volume: b.volume, wap: b.wap, count: b.bar_count, end: b.end,
         })
         .collect())
 }
@@ -547,14 +547,14 @@ mod tests {
         let sydney_morning = crate::types::model::BarData {
             date: "20240609-23:00:00".to_string(), open: 100.0, high: 100.0,
             low: 100.0, close: 100.0, volume: 10, wap: 100.0, bar_count: 1,
-            timezone: "Australia/Sydney".to_string(),
+            timezone: "Australia/Sydney".to_string(), end: String::new(),
         };
         // New York, 20:30 on the ninth — the evening before, so this price is
         // the old one and is divided by the ratio. UTC had turned the tenth.
         let new_york_evening = crate::types::model::BarData {
             date: "20240610-00:30:00".to_string(), open: 1000.0, high: 1000.0,
             low: 1000.0, close: 1000.0, volume: 10, wap: 1000.0, bar_count: 1,
-            timezone: "US/Eastern".to_string(),
+            timezone: "US/Eastern".to_string(), end: String::new(),
         };
 
         let out = scale_bars(vec![sydney_morning, new_york_evening], &split)
@@ -821,7 +821,7 @@ mod tests {
         let bar = |time: &str, close: f64, volume: i64| HistoricalBar {
             time: time.into(),
             open: close, high: close, low: close, close, wap: close,
-            volume, count: 7,
+            volume, count: 7, end: String::new(),
         };
         let out = scale_historical_bars(
             vec![bar("20240607", 1208.88, 100), bar("20240610", 121.79, 100)], &split, "",

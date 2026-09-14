@@ -379,7 +379,7 @@ impl EClient {
             .map(|b| {
                 BarData::new(
                     b.time, b.open, b.high, b.low, b.close, b.volume, b.wap,
-                    b.count, zone.clone(),
+                    b.count, zone.clone(), b.end,
                 )
             })
             .collect())

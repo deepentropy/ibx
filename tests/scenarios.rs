@@ -584,8 +584,8 @@ fn historical_data_multi_bar_complete() {
     shared.reference.push_historical_data(5, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![
-            HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50 },
-            HistoricalBar { time: "20260102".into(), open: 103.0, high: 108.0, low: 102.0, close: 107.0, volume: 1200, wap: 105.0, count: 60 },
+            HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50, end: String::new() },
+            HistoricalBar { time: "20260102".into(), open: 103.0, high: 108.0, low: 102.0, close: 107.0, volume: 1200, wap: 105.0, count: 60, end: String::new() },
         ],
         is_complete: false,
     });
@@ -599,7 +599,7 @@ fn historical_data_multi_bar_complete() {
     shared.reference.push_historical_data(5, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![
-            HistoricalBar { time: "20260103".into(), open: 107.0, high: 110.0, low: 106.0, close: 109.0, volume: 800, wap: 108.0, count: 40 },
+            HistoricalBar { time: "20260103".into(), open: 107.0, high: 110.0, low: 106.0, close: 109.0, volume: 800, wap: 108.0, count: 40, end: String::new() },
         ],
         is_complete: true,
     });
@@ -648,7 +648,7 @@ fn historical_head_timestamp_then_bars() {
     shared.reference.push_historical_data(11, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![
-            HistoricalBar { time: "20050101".into(), open: 50.0, high: 55.0, low: 49.0, close: 53.0, volume: 5000, wap: 52.0, count: 100 },
+            HistoricalBar { time: "20050101".into(), open: 50.0, high: 55.0, low: 49.0, close: 53.0, volume: 5000, wap: 52.0, count: 100, end: String::new() },
         ],
         is_complete: true,
     });
@@ -937,8 +937,7 @@ fn mixed_all_data_types_single_process() {
         query_id: String::new(), timezone: String::new(),
         bars: vec![HistoricalBar {
             time: "20260101".into(), open: 100.0, high: 105.0,
-            low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50,
-        }],
+            low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50, end: String::new() }],
         is_complete: true,
     });
 

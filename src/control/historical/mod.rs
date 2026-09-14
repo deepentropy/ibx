@@ -419,6 +419,23 @@ pub struct HistoricalBar {
     /// minus two billion trades. A stated count that will not fit is not one
     /// this client can carry, and is read as a bar that states none.
     pub count: i32,
+    /// When the bar closed, as the venue states it.
+    ///
+    /// A bar the venue aggregated states its own bounds — a week runs Monday
+    /// to Friday and a month the first to the last — and those bounds are not
+    /// derivable from the start. This client already reasons from their
+    /// existence: it refuses to keep a week or a month up to date precisely
+    /// because a bar folded locally opens on a Thursday and runs thirty days
+    /// from 1970, where the venue's does not. And then it read the start under
+    /// both spellings and the end under neither.
+    ///
+    /// The last bar of any series is normally partial. Stated, this says where
+    /// the bar actually ends, so a caller can tell a finished week from a
+    /// running one rather than inferring it from the calendar and the clock.
+    ///
+    /// Empty where the venue stated none, which is every size shorter than a
+    /// week.
+    pub end: String,
 }
 
 /// Parsed historical data response.
@@ -629,6 +646,13 @@ pub fn parse_bar_response(xml: &str) -> Option<HistoricalResponse> {
             // they reached the caller with no date at all.
             time: tag(bar_xml, "time")
                 .or_else(|| tag(bar_xml, "date"))
+                .unwrap_or("")
+                .to_string(),
+            // And where it ends, under the same two spellings. Read under
+            // neither, the bounds this client reasons about when it decides a
+            // week cannot be kept up to date were thrown away unread.
+            end: tag(bar_xml, "endTime")
+                .or_else(|| tag(bar_xml, "endDate"))
                 .unwrap_or("")
                 .to_string(),
             open,

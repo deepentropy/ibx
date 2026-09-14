@@ -848,6 +848,7 @@ impl EClient {
                     wap: bar.wap,
                     bar_count: bar.count,
                     timezone: response.timezone.clone(),
+                    end: bar.end.clone(),
                 };
                 if is_update {
                     wrapper.historical_data_update(req_id as i64, &bd);
@@ -1046,6 +1047,9 @@ impl EClient {
                     wap: bar.wap,
                     bar_count: bar.count,
                     timezone: String::new(),
+                    // A forming bar has not ended, and the stream states no
+                    // end for one.
+                    end: String::new(),
                 };
                 wrapper.historical_data_update(req_id as i64, &bd);
             } else {

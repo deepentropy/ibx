@@ -331,6 +331,32 @@ fn a_bar_the_venue_aggregated_is_read_from_the_date_it_states() {
     assert_eq!(resp.bars.len(), 1);
     assert_eq!(resp.bars[0].time, "20260309", "the week it covers");
     assert_eq!(resp.bars[0].close, 662.29);
+    // And where it ends. This client already reasons that the venue's bounds
+    // are Monday to Friday — it refuses to keep a week up to date on the
+    // strength of it — and then read the start under both spellings and the
+    // end under neither, so the bound it reasoned from reached no caller. The
+    // last bar of a series is normally partial, and this is what tells a
+    // finished week from a running one.
+    assert_eq!(resp.bars[0].end, "20260314", "and the day it closes on");
+}
+
+/// A bar shorter than a week states its end under the other spelling, and a
+/// bar that states none carries none.
+#[test]
+fn a_bar_states_its_end_under_the_spelling_its_size_uses() {
+    let bar = |inner: &str| {
+        let xml = format!(
+            "<ResultSetBar><id>q4</id><eoq>true</eoq><Events><Bar>{inner}             <open>1</open><close>2</close><high>3</high><low>1</low>             </Bar></Events></ResultSetBar>",
+        );
+        parse_bar_response(&xml).unwrap().bars.remove(0)
+    };
+
+    let minute = bar("<time>20260312-14:30:00</time><endTime>20260312-14:31:00</endTime>");
+    assert_eq!(minute.time, "20260312-14:30:00");
+    assert_eq!(minute.end, "20260312-14:31:00", "the same field, the other spelling");
+
+    let silent = bar("<time>20260312-14:30:00</time>");
+    assert_eq!(silent.end, "", "a bar the venue states no end for carries none");
 }
 
 #[test]

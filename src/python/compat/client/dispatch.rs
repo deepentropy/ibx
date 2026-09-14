@@ -965,6 +965,7 @@ impl EClient {
                     bar.open, bar.high, bar.low, bar.close,
                     bar.volume, bar.wap, bar.count,
                     response.timezone.clone(),
+                    bar.end.clone(),
                 );
                 let bar_py = Py::new(py, bar_obj)?.into_any();
                 if is_update {
@@ -1286,6 +1287,9 @@ impl EClient {
                     bar.open, bar.high, bar.low, bar.close,
                     bar.volume as i64, bar.wap, bar.count,
                     String::new(), // streaming bars carry no timezone
+                    // A forming bar has not ended, and the stream states no
+                    // end for one.
+                    String::new(),
                 );
                 let bar_py = Py::new(py, bar_obj)?.into_any();
                 call_wrapper!(self, py, shared, "historical_data_update", (req_id as i64, &bar_py));

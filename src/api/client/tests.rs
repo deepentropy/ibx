@@ -6494,8 +6494,8 @@ fn process_msgs_dispatches_historical_data() {
     shared.reference.push_historical_data(5, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![
-            HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50 },
-            HistoricalBar { time: "20260102".into(), open: 103.0, high: 108.0, low: 102.0, close: 107.0, volume: 1200, wap: 105.0, count: 60 },
+            HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50, end: String::new() },
+            HistoricalBar { time: "20260102".into(), open: 103.0, high: 108.0, low: 102.0, close: 107.0, volume: 1200, wap: 105.0, count: 60, end: String::new() },
         ],
         is_complete: true,
     });
@@ -6512,7 +6512,7 @@ fn process_msgs_historical_data_incomplete_no_end() {
     shared.reference.push_historical_data(5, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
         bars: vec![
-            HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50 },
+            HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50, end: String::new() },
         ],
         is_complete: false,
     });
@@ -6576,7 +6576,7 @@ fn a_historical_request_under_a_used_id_answers_from_the_beginning() {
         query_id: String::new(), timezone: String::new(),
         bars: vec![HistoricalBar {
             time: "20200101-00:00:00".into(), open: 1.0, high: 1.0, low: 1.0, close: 1.0,
-            volume: 1, wap: 1.0, count: 1,
+            volume: 1, wap: 1.0, count: 1, end: String::new(),
         }],
         is_complete: true,
     });
@@ -7661,7 +7661,7 @@ fn a_kept_up_to_date_request_reports_its_history_then_its_updates() {
     // The initial answer, complete.
     shared.reference.push_historical_data(9, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
-        bars: vec![HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50 }],
+        bars: vec![HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50, end: String::new() }],
         is_complete: true,
     });
     client.process_msgs(&mut heard);
@@ -7673,7 +7673,7 @@ fn a_kept_up_to_date_request_reports_its_history_then_its_updates() {
     // What the venue keeps sending afterwards, on both feeds it can arrive on.
     shared.reference.push_historical_data(9, HistoricalResponse {
         query_id: String::new(), timezone: String::new(),
-        bars: vec![HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50 }],
+        bars: vec![HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50, end: String::new() }],
         is_complete: false,
     });
     shared.market.push_real_time_bar(9, Default::default());
@@ -8514,7 +8514,7 @@ fn a_request_gets_its_bar_times_written_the_way_it_asked() {
 
     let bar = HistoricalBar {
         time: "20260815-12:00:00".into(), open: 1.0, high: 2.0, low: 0.5,
-        close: 1.5, volume: 10, wap: 1.2, count: 3,
+        close: 1.5, volume: 10, wap: 1.2, count: 3, end: String::new(),
     };
     // Format 1 is the wire's own spelling.
     let _ = client.req_historical_data(

@@ -5975,6 +5975,10 @@ fn what_the_venue_says_went_wrong_reaches_the_caller() {
 /// What the venue says to the account holder is said on a subtype of its own,
 /// about no request. It reached nobody: nothing read it, so the one thing the
 /// venue ever addressed to the account was noted as unread wire and dropped.
+///
+/// It carries the account it names, because a login holds more than one and a
+/// notice that does not say which account it concerns is close to useless to
+/// the person it was written for.
 #[test]
 fn what_the_venue_tells_the_account_holder_reaches_the_caller() {
     let (mut ccp, mut context, shared) = u186_test_state();
@@ -5987,7 +5991,7 @@ fn what_the_venue_tells_the_account_holder_reaches_the_caller() {
     );
     assert_eq!(
         shared.market.drain_venue_errors(),
-        ["Trading in this account is restricted from tomorrow"],
+        ["DU1: Trading in this account is restricted from tomorrow"],
     );
     assert!(
         !shared.market.unread_wire().iter().any(|(_, what)| what == "user message 42"),

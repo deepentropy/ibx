@@ -1576,6 +1576,14 @@ pub struct BarData {
     /// it the timestamp says nothing about what the bar times mean. Empty on
     /// streaming updates, which carry no timezone of their own.
     pub timezone: String,
+    /// When the bar closed, as the venue states it.
+    ///
+    /// A bar the venue aggregated states its own bounds — a week runs Monday to
+    /// Friday, a month the first to the last — and those are not derivable from
+    /// the start. The last bar of any series is normally partial, so this is
+    /// what tells a finished week from a running one. Empty where the venue
+    /// stated none, which is every size shorter than a week.
+    pub end: String,
 }
 
 impl Default for BarData {
@@ -1590,6 +1598,7 @@ impl Default for BarData {
             wap: 0.0,
             bar_count: 0,
             timezone: String::new(),
+            end: String::new(),
         }
     }
 }
