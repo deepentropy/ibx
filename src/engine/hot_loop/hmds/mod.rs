@@ -56,6 +56,14 @@ pub(crate) struct HmdsState {
     /// are reported once as what they are rather than once each: a withdrawal
     /// this venue does not act on sends ticks for the rest of the session, and
     /// several hundred identical warnings bury whatever else is in the log.
+    ///
+    /// Read for the wording of that one line and for nothing else. What a tick
+    /// belongs to is decided from the subscriptions this client holds, so a
+    /// number in here refuses nothing: the venue hands its numbers out again,
+    /// and a set of withdrawn ones that decided whether an answer counted
+    /// silently killed every later subscription that drew a number off it.
+    /// This one only chooses which warning to print about ticks already going
+    /// nowhere.
     pub(crate) tbt_withdrawn: std::collections::HashSet<u64>,
     /// Streams withdrawn before the venue had numbered them, by the name this
     /// client asked under. The withdrawal by name is accepted and does

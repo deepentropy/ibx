@@ -255,6 +255,16 @@ One session, held open for 175 minutes across a market open: 106,053 quotes,
 disconnect and no error other than the venue's answer for a series it does
 not hold. `scripts/endurance.py --minutes 175`.
 
+That check takes every subscription out and puts it back each cycle, which no
+other check here does, and it is the only one that sees what a long-running
+program sees. Run it before believing a change to the quote path.
+
+An order's round trip can be checked at any hour: `scripts/order_round_trip.py`
+places a limit far under the market on a contract that trades nearly around the
+clock, changes its price, withdraws it, and reads back what the venue did with
+each step. The paper suite's own order phases name US shares and wait for the
+New York session.
+
 ## Architectural differences from a gateway process
 
 | Gateway | This client |
