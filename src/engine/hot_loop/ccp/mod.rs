@@ -3037,11 +3037,15 @@ impl CcpState {
                 }
             },
         };
-        self.dividends_answered.insert(con_id);
         let Some(body) = parsed.get(&6118) else {
+            // Not marked answered. The mark is what stops this being asked
+            // again, and it is never lifted — so a reply carrying no schedule
+            // at all, set down as an answer, left that underlying without one
+            // for as long as the process ran and nothing asked again.
             log::debug!("the answer for {con_id} states no schedule");
             return;
         };
+        self.dividends_answered.insert(con_id);
         let schedule = crate::control::dividends::parse(body);
         log::info!(
             "{con_id} pays out {} times over the venue's books",

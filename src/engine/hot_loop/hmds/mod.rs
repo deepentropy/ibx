@@ -2699,17 +2699,38 @@ fn build_tbt_query(
             query_id: query_id.clone(),
         };
         let xml = crate::control::fundamental::build_fundamental_request_xml(&req);
-        if let Some(conn) = hmds_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "U"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6040, "10010"),
-                (6118, &xml),
-            ]);
-            hb.last_hmds_sent = Instant::now();
-            log::info!("Sent fundamental data request: req_id={req_id} con_id={con_id}");
+        // Recorded as pending only where it actually went, as the head
+        // timestamp beside it already is. Pushed whatever happened, a request
+        // the connection could not carry — or one with no connection at all —
+        // sat waiting for an answer to something the venue was never asked,
+        // and the caller was told nothing either way.
+        let Some(conn) = hmds_conn.as_mut() else {
+            super::push_hmds_refusal(
+                shared, req_id, crate::error_codes::Refusal::NOT_CONNECTED,
+                format!(
+                    "the fundamentals for {con_id} could not be asked for: the historical \
+                     connection is not up"
+                ),
+                false,
+            );
+            return;
+        };
+        let ts = chrono_free_timestamp();
+        if let Err(e) = conn.send_fix(&[
+            (fix::TAG_MSG_TYPE, "U"),
+            (fix::TAG_SENDING_TIME, &ts),
+            (6040, "10010"),
+            (6118, &xml),
+        ]) {
+            super::push_hmds_refusal(
+                shared, req_id, crate::error_codes::Refusal::NOT_CONNECTED,
+                format!("the fundamentals for {con_id} could not be asked for: {e}"),
+                false,
+            );
+            return;
         }
+        hb.last_hmds_sent = Instant::now();
+        log::info!("Sent fundamental data request: req_id={req_id} con_id={con_id}");
         self.pending_fundamental.push((query_id, req_id));
     }
 

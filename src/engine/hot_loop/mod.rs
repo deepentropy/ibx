@@ -1772,6 +1772,29 @@ impl HotLoop {
                         }
                         continue;
                     }
+                    // One stream per number, as the bar stream beside this
+                    // already insists. Taken twice under one number, the venue
+                    // answers both with the same number of its own: every tick
+                    // is handed to the caller twice, and the withdrawal takes
+                    // one record away, finds the other still naming that
+                    // number, and returns without telling the venue anything —
+                    // so the ticks go on arriving under a stream the caller
+                    // has withdrawn. The surfaces refuse this already; what
+                    // reaches here is a caller driving the channel itself.
+                    if self.hmds.tbt_subscriptions.iter().any(|s| s.caller_req_id == req_id) {
+                        let reason = format!(
+                            "a trade stream is already running under {req_id}; a second one                              would be answered under the same number as the first",
+                        );
+                        log::error!("{reason}");
+                        push_hmds_refusal(
+                            &self.shared, req_id.max(0) as u32,
+                            crate::error_codes::Refusal::VALIDATION, reason.clone(), false,
+                        );
+                        if let Some(tx) = reply_tx.as_ref() {
+                            let _ = tx.try_send(Err(reason));
+                        }
+                        continue;
+                    }
                     // With no data connection the stream is refused now, on
                     // both channels the caller reads, as a scan or a bar
                     // stream is. Accepted, the caller held a stream that would
@@ -8311,6 +8334,53 @@ mod tests {
         assert_eq!(
             hl.farm.what_took_it(id), 3,
             "the slot names the occupancy now on it, not the one that has gone",
+        );
+    }
+
+    /// A trade stream asked for twice under one number is refused.
+    ///
+    /// The venue answers two streams on one contract and kind with one number
+    /// of its own, so both records name it: every tick is handed to the caller
+    /// twice, and the withdrawal removes one record, finds the other still
+    /// naming that number, and returns without telling the venue anything —
+    /// the ticks go on arriving under a stream the caller has withdrawn, for
+    /// the rest of the session. The bar stream beside this already insists on
+    /// one per number.
+    #[test]
+    fn a_second_trade_stream_under_one_number_is_refused() {
+        let mut hl = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (tx, rx) = sync_channel(4);
+        hl.set_control_rx(rx);
+        let (conn, _peer) = crate::protocol::connection::Connection::for_test();
+        hl.hmds_conn = Some(conn);
+        hl.hmds.tbt_subscriptions.push(crate::engine::hot_loop::hmds::TbtSubscription {
+            ignore_size: false,
+            instrument: 0,
+            query_id: "tbt_1".to_string(),
+            kind: TbtType::AllLast,
+            caller_req_id: 5,
+            venue_id: 0,
+            min_tick: 0,
+            size_tick: 0.0,
+            running: Default::default(),
+        });
+
+        tx.send(ControlCommand::SubscribeTbt {
+            contract: crate::types::ContractRef {
+                con_id: 265_598, symbol: "AAPL".into(), sec_type: "STK".into(),
+                exchange: "SMART".into(), ..Default::default()
+            },
+            req_id: 5,
+            tbt_type: TbtType::AllLast,
+            number_of_ticks: 0,
+            ignore_size: false,
+            reply_tx: None,
+        }).unwrap();
+        hl.poll_once();
+
+        assert_eq!(
+            hl.hmds.tbt_subscriptions.len(), 1,
+            "the second stream under that number is not taken",
         );
     }
 
