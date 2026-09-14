@@ -412,6 +412,7 @@ fn a_smart_query_still_routes_to_best() {
 #[test]
 fn head_timestamp_xml_structure() {
     let req = HeadTimestampRequest {
+        query_id: "tk_1".to_string(),
         con_id: 756733,
         sec_type: "STK".to_string(),
         exchange: "SMART".to_string(),
@@ -426,7 +427,11 @@ fn head_timestamp_xml_structure() {
     assert!(xml.contains("<data>Last</data>"));
     assert!(xml.contains("<step>-1</step>"));
     assert!(xml.contains("<useRTH>true</useRTH>"));
-    assert!(xml.contains("TickHeadClient1;;756733@BEST Last;;0;;true;;0;;U"));
+    // Led by the query's own name, so two callers asking the same question of
+    // the same contract are told apart. The venue answers a query named this
+    // way: measured against a live historical connection, which is what a
+    // change to a field the venue echoes back is worth waiting for.
+    assert!(xml.contains("tk_1;;756733@BEST Last;;0;;true;;0;;U"), "{xml}");
 }
 
 #[test]
@@ -1335,6 +1340,7 @@ fn a_bar_is_kept_up_to_date_when_it_folds_from_the_five_second_stream() {
 #[test]
 fn the_head_timestamp_query_states_expired_as_the_bar_query_does() {
     let ask = |include_expired: bool| super::build_head_timestamp_xml(&super::HeadTimestampRequest {
+        query_id: "tk_1".to_string(),
         con_id: 1, sec_type: "FUT".into(), exchange: "CME".into(), data_type: "TRADES", use_rth: false, include_expired,
     });
     assert!(ask(true).contains("<expired>yes</expired>"), "{}", ask(true));

@@ -1827,6 +1827,39 @@ mod hmds_correlation_tests {
     /// A head timestamp goes out under an id its response names, and is
     /// matched on it. Two can be in flight at once.
     #[test]
+    /// Two callers asking the same question of the same contract are two
+    /// requests, and each is answered.
+    ///
+    /// The id a head timestamp went out under was built from what was being
+    /// asked — the contract, the venue, the series, the hours — and nothing
+    /// else. Two callers describing the same request therefore sent the same
+    /// id, and the reply was matched to whichever of them sat first in the
+    /// list: one was handed the other's answer, a pair the venue answered once
+    /// left the second waiting with nothing to release it, and a cancel from
+    /// one stopped the other's query at the venue. The histogram beside it is
+    /// led by its own name for this reason.
+    #[test]
+    fn two_head_timestamps_for_one_contract_are_told_apart() {
+        let ask = |query_id: &str| {
+            crate::control::historical::head_timestamp_query_id(
+                &crate::control::historical::HeadTimestampRequest {
+                    query_id: query_id.to_string(),
+                    con_id: 265_598,
+                    sec_type: "CS".into(),
+                    exchange: "SMART".into(),
+                    data_type: "Last",
+                    use_rth: true,
+                    include_expired: false,
+                },
+            )
+        };
+        assert_ne!(
+            ask("tk_1000"), ask("tk_1001"),
+            "the same question asked twice goes out under two names",
+        );
+        assert!(ask("tk_1000").starts_with("tk_1000;;"), "led by the query's own name");
+    }
+
     fn a_head_timestamp_answers_the_request_the_reply_names() {
         let mut hmds = HmdsState::new();
         let shared = SharedState::new();
@@ -1835,6 +1868,7 @@ mod hmds_correlation_tests {
         let id_of = |con_id: u32| {
             crate::control::historical::head_timestamp_query_id(
                 &crate::control::historical::HeadTimestampRequest {
+                    query_id: format!("tk_{con_id}"),
                     con_id,
                     sec_type: "CS".into(),
                     exchange: "SMART".into(),

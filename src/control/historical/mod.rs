@@ -692,6 +692,16 @@ pub fn head_timestamp_data_type(what_to_show: &str) -> Result<&'static str, Stri
 /// Parameters for a head timestamp request.
 #[derive(Debug, Clone)]
 pub struct HeadTimestampRequest {
+    /// This query's own name, which leads the id it goes out under.
+    ///
+    /// Two callers asking about one contract on one venue for one series
+    /// described the same request, so the id built from that description was
+    /// the same for both — and the answers were matched to whichever of them
+    /// sat first in the list. One got the other's answer, a duplicate answered
+    /// once left the second waiting for ever, and one caller's cancel stopped
+    /// the other's query at the venue. The histogram beside this one is led by
+    /// its own name for exactly this reason.
+    pub query_id: String,
     /// The venue's id for the contract.
     pub con_id: u32,
     /// What kind of contract it is, as the venue names it.
@@ -726,8 +736,8 @@ pub fn head_timestamp_query_id(req: &HeadTimestampRequest) -> String {
         e => e,
     };
     let rth = if req.use_rth { "true" } else { "false" };
-    format!("TickHeadClient1;;{}@{} {};;0;;{};;0;;U",
-        req.con_id, exchange, req.data_type, rth)
+    format!("{};;{}@{} {};;0;;{};;0;;U",
+        req.query_id, req.con_id, exchange, req.data_type, rth)
 }
 
 /// Build the XML query for a head timestamp request.

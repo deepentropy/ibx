@@ -2282,7 +2282,10 @@ fn build_tbt_query(
             super::push_hmds_refusal(shared, req_id, crate::error_codes::Refusal::NO_DEFINITION, told, false);
             return;
         };
+        let qid = self.next_hmds_query_id;
+        self.next_hmds_query_id += 1;
         let req = crate::control::historical::HeadTimestampRequest {
+            query_id: format!("tk_{qid}"),
             con_id: con_id as u32,
             sec_type: described.sec_type.clone(),
             exchange: described.exchange.clone(),
