@@ -52,7 +52,16 @@ jobs:
       # every line the test runner printed. The runner names each test as it
       # finishes, so the last name in that log is the one that did not.
       - name: Test
-        run: timeout 1500 cargo test --lib
+        run: |
+          set +e
+          timeout -k 30 1500 cargo test --lib > test-lib.log 2>&1
+          code=$?
+          # Printed from the file rather than streamed, so a test that
+          # outlives the timeout cannot hold the step's own output open:
+          # killing the runner leaves the binary it spawned behind, and
+          # that orphan inherits the pipe the step is read through.
+          if [ $code -ne 0 ]; then cat test-lib.log; else tail -n 3 test-lib.log; fi
+          exit $code
 
       # The suites outside the library were run by nobody. A break confined to
       # test code compiles nowhere else, so it reached main unseen — and one
@@ -63,16 +72,16 @@ jobs:
       - name: Test the suites that need no session
         env:
           IBX_REGISTRATION_TIMEOUT_MS: "20"
-        run: >
-          timeout 1500
-          cargo test
-          --test control_plane
-          --test depth_wire_test
-          --test error_edge_concurrency
-          --test hot_loop_lifecycle
-          --test malformed_input
-          --test protocol_vectors
-          --test scenarios
+        run: |
+          set +e
+          timeout -k 30 1500 cargo test --test control_plane --test depth_wire_test --test error_edge_concurrency --test hot_loop_lifecycle --test malformed_input --test protocol_vectors --test scenarios > test-suites.log 2>&1
+          code=$?
+          # Printed from the file rather than streamed, so a test that
+          # outlives the timeout cannot hold the step's own output open:
+          # killing the runner leaves the binary it spawned behind, and
+          # that orphan inherits the pipe the step is read through.
+          if [ $code -ne 0 ]; then cat test-suites.log; else tail -n 3 test-suites.log; fi
+          exit $code
 
       # The bindings are behind a non-default feature, so nothing above builds
       # them. The live phases they wrap need a session and are not run here;
@@ -80,10 +89,26 @@ jobs:
       # engine is the failure this catches, and it costs one step to catch it.
       - name: Test the Python bindings
         run: |
-          timeout 1500 cargo test --lib --features python
+          set +e
+          timeout -k 30 1500 cargo test --lib --features python > test-py.log 2>&1
+          code=$?
+          # Printed from the file rather than streamed, so a test that
+          # outlives the timeout cannot hold the step's own output open:
+          # killing the runner leaves the binary it spawned behind, and
+          # that orphan inherits the pipe the step is read through.
+          if [ $code -ne 0 ]; then cat test-py.log; else tail -n 3 test-py.log; fi
+          exit $code
           # And again with the injection methods compiled in, or the tests
           # that drive the client through them run nowhere.
-          timeout 1500 cargo test --lib --features python,test-helpers
+          set +e
+          timeout -k 30 1500 cargo test --lib --features python,test-helpers > test-pyh.log 2>&1
+          code=$?
+          # Printed from the file rather than streamed, so a test that
+          # outlives the timeout cannot hold the step's own output open:
+          # killing the runner leaves the binary it spawned behind, and
+          # that orphan inherits the pipe the step is read through.
+          if [ $code -ne 0 ]; then cat test-pyh.log; else tail -n 3 test-pyh.log; fi
+          exit $code
 
   python:
     name: pytest
@@ -224,7 +249,16 @@ jobs:
       # every line the test runner printed. The runner names each test as it
       # finishes, so the last name in that log is the one that did not.
       - name: Test, asynchronous surface
-        run: timeout 1500 cargo test --lib --features async
+        run: |
+          set +e
+          timeout -k 30 1500 cargo test --lib --features async > test-async.log 2>&1
+          code=$?
+          # Printed from the file rather than streamed, so a test that
+          # outlives the timeout cannot hold the step's own output open:
+          # killing the runner leaves the binary it spawned behind, and
+          # that orphan inherits the pipe the step is read through.
+          if [ $code -ne 0 ]; then cat test-async.log; else tail -n 3 test-async.log; fi
+          exit $code
 
       # `cargo doc` renders an example without compiling it, so a broken one is
       # published looking right. This compiles and runs them.
