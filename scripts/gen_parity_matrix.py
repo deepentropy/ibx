@@ -22,6 +22,7 @@ says which were read and at what version.
 
 import importlib
 import inspect
+import os
 import pathlib
 import re
 import sys
@@ -38,13 +39,21 @@ README = ROOT / "README.md"
 README_OPEN = "<!-- capabilities:begin — written by scripts/gen_parity_matrix.py -->"
 README_SHUT = "<!-- capabilities:end -->"
 
-#: Where a reference client lives when it is not on the import path. The
-#: official client is not a dependency of this repository — it is what this
-#: client replaces — so it is read from wherever it has been unpacked.
+#: Where a reference client lives when it is not on the import path.
+#:
+#: The official client is not a dependency of this repository — it is what this
+#: client replaces — so it is installed beside the tests rather than depended
+#: on, and read from the import path like any other package.
+#:
+#: These are the fallbacks for a copy that was unpacked rather than installed.
+#: A directory under somebody's home used to be named here, which made this
+#: page reproducible on exactly one machine: the check that compares a
+#: generated file against the committed one then failed everywhere else, and
+#: the columns for both reference clients silently vanished from the answer.
+#: `IBX_REFERENCE_CLIENTS` names such a directory where there is one.
 EXTRA_PATHS = [
-    pathlib.Path.home() / ".claude/jobs/9a4be4a5/tmp/pyref",
-    ROOT / "vendor",
-]
+    pathlib.Path(p) for p in os.environ.get("IBX_REFERENCE_CLIENTS", "").split(os.pathsep) if p
+] + [ROOT / "vendor"]
 
 #: What a mark means. Three states, because two would lie: a call that exists
 #: and reports why it cannot be served is not the same as one that is absent,

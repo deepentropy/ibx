@@ -182,6 +182,17 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The comparison page is read from the clients it names, so the machine
+      # that checks it has to be the machine that could generate it. Without
+      # these the generator drops both columns — a client that is not installed
+      # is left out rather than filled in from memory — and the page it
+      # produces here can never match the one that was committed.
+      #
+      # Pinned to the versions the page states. A release of either is a reason
+      # to regenerate the page, not a reason for this to go red on its own.
+      - name: The clients the comparison is measured against
+        run: pip install "ibapi==9.81.1.post1" "ib_async==2.1.0"
+
       # A doc comment is attached by position, so a function inserted under an
       # existing block takes it and leaves the item it was written for bare.
       # `missing_docs` cannot see that: the count does not change, only which
@@ -255,8 +266,11 @@ jobs:
           python scripts/gen_arg_reach.py
           # Staged, so a page a generator has only just started producing
           # counts as a difference rather than as an untracked file nobody sees.
-          git add -A docs/
-          git diff --cached --exit-code docs/ || {
+          # The readme too: a generator writes the capability comparison into
+          # it, and a check that looked only at docs/ would let the page a
+          # reader lands on drift while the one behind it stayed true.
+          git add -A docs/ README.md
+          git diff --cached --exit-code docs/ README.md || {
             echo "::error::a generated file is stale — run the scripts under scripts/ and commit the result"
             exit 1
           }
