@@ -1896,8 +1896,12 @@ impl CcpState {
             // account states under names, and so leaves the kind unestablished
             // for ever.
             let stated = parsed.get(&9806).map(String::as_str).unwrap_or("nothing");
-            shared.market.note_unread_wire(
+            // Under the selector, so the row is replaced as the figure moves
+            // rather than added to. An account held in another currency moves
+            // every one of its figures every time the rate does.
+            shared.market.note_unread_wire_under(
                 "trading",
+                format!("account figure of kind {selector}"),
                 format!(
                     "account figure of kind {selector} (6040=77) is {stated}, kind not established",
                 ),

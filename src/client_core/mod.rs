@@ -4830,10 +4830,15 @@ impl ClientCore {
     /// picture — and every one of them was written against a client that keeps
     /// it moving.
     ///
-    /// `watching` says whether anyone still holds the request. Nothing is
-    /// taken off the record while nobody does, so the first batch after a new
-    /// ask states the account whole rather than only what moved while no one
-    /// was listening.
+    /// `watching` says whether anyone still holds the request. Nothing is taken
+    /// off the record while nobody does.
+    ///
+    /// The record is shared by every watcher and is advanced only here, on the
+    /// dispatch that broadcasts. An ask answers its first batch from the
+    /// account itself instead: clearing or advancing this to build that batch
+    /// hands one request the figures and marks them delivered for all of them,
+    /// and a watcher already standing is never told the move that the new ask
+    /// overtook.
     pub fn account_figures_that_moved(
         &self, shared: &SharedState, watching: bool,
     ) -> Vec<AccountFieldUpdate> {
@@ -4852,12 +4857,6 @@ impl ClientCore {
             moved.push(AccountFieldUpdate { key, value, currency });
         }
         moved
-    }
-
-    /// Forget what the multi-account subscription has been told, so the next
-    /// ask is answered with the account whole.
-    pub fn forget_account_figures_stated(&self) {
-        self.last_stated_account_multi.lock().unwrap().clear();
     }
 
     /// Prepare portfolio updates (position entries) for account streaming.

@@ -5474,6 +5474,52 @@ fn the_account_figures_keep_arriving_under_the_request_that_asked() {
     assert!(rows.0.is_empty(), "a withdrawn request went on being reported to: {:?}", rows.0);
 }
 
+/// A second subscription does not eat the moves the first is owed.
+///
+/// The record of what has been delivered is shared by every watcher and is
+/// advanced by the dispatch that broadcasts. An ask that built its first batch
+/// through that record handed itself the figures and marked them delivered for
+/// everyone — so a figure that moved between one ask and the next reached the
+/// new watcher and never reached the one already standing.
+#[test]
+fn a_second_subscription_does_not_eat_the_first_one_s_moves() {
+    #[derive(Default)]
+    struct Rows(Vec<(i64, String, String)>);
+    impl crate::api::wrapper::Wrapper for Rows {
+        fn account_update_multi(
+            &mut self, req_id: i64, _account: &str, _model: &str,
+            key: &str, value: &str, _currency: &str,
+        ) {
+            self.0.push((req_id, key.to_string(), value.to_string()));
+        }
+    }
+
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.account_download_is_settled();
+    shared.portfolio.note_account_value("NetLiquidation", "100.00", "USD");
+
+    let mut rows = Rows::default();
+    client.req_account_updates_multi(1, "", "", false, &mut rows);
+    assert!(rows.0.iter().any(|(r, ..)| *r == 1), "the first ask is answered");
+
+    // The figure moves, and before anything is dispatched a second caller asks.
+    shared.portfolio.note_account_value("NetLiquidation", "101.00", "USD");
+    rows.0.clear();
+    client.req_account_updates_multi(2, "", "", false, &mut rows);
+    assert!(
+        rows.0.iter().any(|(r, k, v)| *r == 2 && k == "NetLiquidation" && v == "101.00"),
+        "the second ask is answered with the account as it stands: {:?}", rows.0,
+    );
+
+    // And the watcher already standing is still owed that move.
+    rows.0.clear();
+    client.process_msgs(&mut rows);
+    assert!(
+        rows.0.iter().any(|(r, k, v)| *r == 1 && k == "NetLiquidation" && v == "101.00"),
+        "the first watcher was never told the move the second ask overtook: {:?}", rows.0,
+    );
+}
+
 /// A model names a slice of the account, and a slice is not what this session
 /// is told about.
 ///

@@ -374,12 +374,14 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
         verdict,
     ] + ([
         "",
-        f"**And {len(beyond)} things the documented API never named.** The connection a "
-        "terminal opens carries more than the API describes — what the venue permits "
-        "this account, which algorithms it offers, the order defaults it fills an "
-        "order's blanks from, what it says about an issuer, which session holds the "
-        "account — and a client that speaks that connection can answer them. They are "
-        "in the table below, under *Beyond the canonical list*.",
+        f"**And {len(beyond)} more beyond that list.** The connection a terminal opens "
+        "carries more than the documented calls describe — what the venue permits this "
+        "account, which algorithms it offers, the order defaults it fills an order's "
+        "blanks from, what it says about an issuer, which session holds the account — "
+        "and a client that speaks that connection can answer them. Most have no call in "
+        "the documented API at all; a few are one a reference client happens to name "
+        "too, and the table below marks which is which, under *Beyond the canonical "
+        "list*.",
     ] if beyond else []) + [
         "",
         "Every figure here is read from the client it names, on the machine that "

@@ -5839,6 +5839,46 @@ fn an_account_figure_of_an_unestablished_kind_is_recorded_with_its_number() {
     );
 }
 
+/// A figure that moves does not grow the record of what nothing read.
+///
+/// The number is kept beside the kind so the kind can be settled against the
+/// figures the account states under names. Recorded as a fresh row each time,
+/// an account held in another currency grows one every time the rate moves —
+/// and that record is a vector scanned linearly on the trading loop, so it is
+/// unbounded memory and quadratic work from ordinary traffic.
+#[test]
+fn a_figure_that_moves_replaces_its_row_rather_than_adding_one() {
+    let (mut ccp, mut context, shared) = ord_status_test_state();
+    let said = |value: &str| crate::protocol::fix::fix_build(
+        &[(35, "U"), (6040, "77"), (6566, "1"), (9806, value)], 1,
+    );
+    for value in ["1492337.96", "1492341.02", "1492299.55", "1492410.88"] {
+        ccp.process_ccp_message(
+            &said(value), &mut None, &mut context, &shared, &None,
+            &mut HeartbeatState::new(), "DU123",
+        );
+    }
+
+    let rows: Vec<_> = shared.market.unread_wire().into_iter()
+        .filter(|(_, what)| what.contains("kind 1"))
+        .collect();
+    assert_eq!(rows.len(), 1, "one row for the kind, not one per reading: {rows:?}");
+    assert!(rows[0].1.contains("1492410.88"), "and it is the latest: {rows:?}");
+
+    // A different kind is a different row, because it is a different question.
+    ccp.process_ccp_message(
+        &crate::protocol::fix::fix_build(
+            &[(35, "U"), (6040, "77"), (6566, "3"), (9806, "0.00")], 1,
+        ),
+        &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU123",
+    );
+    assert_eq!(
+        shared.market.unread_wire().iter().filter(|(_, w)| w.contains("account figure")).count(),
+        2,
+        "two kinds, two rows",
+    );
+}
+
 /// The order defaults the account holds are read, not discarded.
 ///
 /// This session asks for them at logon and threw the answer away. The venue

@@ -344,7 +344,6 @@ impl EClient {
         // after. Registered before the batch below so a figure that moves
         // while it is being assembled is not lost between the two.
         self.account_updates_multi_requested.lock().unwrap().insert(req_id);
-        self.core.forget_account_figures_stated();
         // A model is a slice of the account; the figures below are the whole
         // of it. Echoed onto the label, every one of them read as that model's
         // — and a caller keeping a book per model files the account's net
@@ -365,10 +364,14 @@ impl EClient {
         // labelled US dollars whatever the account is held in: an account in
         // another currency read as a dollar account, and every figure the
         // venue states beyond those eight was not reported at all.
-        for field in self.core.account_figures_that_moved(&self.shared, true) {
+        // Read from the account, not through the record the stream keeps. That
+        // record says what every watcher has been told; spending it here hands
+        // this request the figures and marks them delivered for everyone, so
+        // the watchers already standing are never told the move that opening
+        // this one happened to overtake.
+        for (key, value, currency) in self.shared.portfolio.stated_account_values() {
             wrapper.account_update_multi(
-                req_id, &self.account_id, model_code,
-                &field.key, &field.value, &field.currency,
+                req_id, &self.account_id, model_code, &key, &value, &currency,
             );
         }
         wrapper.account_update_multi_end(req_id);

@@ -181,7 +181,8 @@ pub struct MarketDataState {
     /// Messages the venue sent that nothing here reads, named once each:
     /// which connection, and what it was. Empty is the claim that this client
     /// reads everything this venue sends it, and the only way to check it.
-    unread_wire: Mutex<Vec<(&'static str, String)>>,
+    /// Connection, what the row is about, and the latest thing said about it.
+    unread_wire: Mutex<Vec<(&'static str, String, String)>>,
 }
 
 impl MarketDataState {
@@ -442,13 +443,33 @@ impl MarketDataState {
 
     /// Everything the venue has sent this session that nothing reads.
     pub fn unread_wire(&self) -> Vec<(&'static str, String)> {
-        self.unread_wire.lock().unwrap().clone()
+        self.unread_wire.lock().unwrap().iter()
+            .map(|(connection, _, what)| (*connection, what.clone()))
+            .collect()
     }
 
     #[doc(hidden)] pub fn note_unread_wire(&self, connection: &'static str, what: String) {
+        // The sentence is its own key, which is what this has always done: one
+        // row per distinct thing said.
+        self.note_unread_wire_under(connection, what.clone(), what);
+    }
+
+    /// The same, where the thing being recorded carries a reading that changes.
+    ///
+    /// Keyed on what it is about rather than on the whole sentence, and the
+    /// latest reading replaces the last. Deduplicating on the sentence, a
+    /// record that names a figure grows a row every time that figure moves —
+    /// which for an account held in another currency is every time the rate
+    /// does. This is a vector scanned linearly on the trading loop, so that is
+    /// unbounded memory and quadratic work, from ordinary traffic and no
+    /// malformed input at all.
+    #[doc(hidden)] pub fn note_unread_wire_under(
+        &self, connection: &'static str, key: String, what: String,
+    ) {
         let mut seen = self.unread_wire.lock().unwrap();
-        if !seen.iter().any(|(c, w)| *c == connection && *w == what) {
-            seen.push((connection, what));
+        match seen.iter().position(|(c, k, _)| *c == connection && *k == key) {
+            Some(at) => seen[at].2 = what,
+            None => seen.push((connection, key, what)),
         }
     }
 

@@ -361,7 +361,6 @@ impl EClient {
         // and nothing after, a caller watching its balance sheet through it
         // watched a still picture.
         self.account_updates_multi_requested.lock().unwrap().insert(req_id);
-        self.core.forget_account_figures_stated();
         // A model is a slice of the account; the figures below are the whole
         // of it. Echoed onto the label, every one of them read as that model's
         // — and a caller keeping a book per model files the account's net
@@ -379,10 +378,13 @@ impl EClient {
         // Rebuilding from this client's typed copy reports an account held in
         // any other currency as dollars, and drops every figure outside the
         // handful that copy carries.
-        for field in self.core.account_figures_that_moved(&shared, true) {
+        // Read from the account, not through the record the stream keeps: that
+        // record says what every watcher has been told, and spending it here
+        // marks these delivered for watchers that never saw them.
+        for (key, value, currency) in shared.portfolio.stated_account_values() {
             self.deliver(py, "account_update_multi",
                 (req_id, acct_name.as_str(), model_code,
-                 field.key.as_str(), field.value.as_str(), field.currency.as_str()))?;
+                 key.as_str(), value.as_str(), currency.as_str()))?;
         }
         self.deliver(py, "account_update_multi_end", (req_id,))?;
         Ok(())

@@ -433,8 +433,9 @@ pub struct HistoricalBar {
     /// the bar actually ends, so a caller can tell a finished week from a
     /// running one rather than inferring it from the calendar and the clock.
     ///
-    /// Empty where the venue stated none, which is every size shorter than a
-    /// week.
+    /// Empty where the venue stated none. It states one under `endTime` on
+    /// the sizes it times and under `endDate` on the two it dates, and this is
+    /// read under both.
     pub end: String,
 }
 

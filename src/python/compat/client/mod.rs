@@ -1172,6 +1172,10 @@ impl EClient {
         *self.logged_in_at.lock().unwrap() = None;
         self.positions_requested.store(false, Ordering::Release);
         self.positions_multi_requested.lock().unwrap().clear();
+        // And the account-figure watchers beside them. Left standing, a second
+        // session on the same client delivers its own figures under a request
+        // number the caller made on a session that has gone.
+        self.account_updates_multi_requested.lock().unwrap().clear();
         self.deferred_evictions.lock().unwrap().clear();
         self.tbt_kind.lock().unwrap().clear();
         self.pending_option_calcs.lock().unwrap().clear();

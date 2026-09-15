@@ -37,7 +37,8 @@ pub struct BarData {
     /// Friday, a month the first to the last — and those are not derivable from
     /// the start. The last bar of any series is normally partial, so this is
     /// what tells a finished week from a running one. Empty where the venue
-    /// stated none, which is every size shorter than a week.
+    /// stated none; it states one under `endTime` on the sizes it times and
+    /// under `endDate` on the two it dates, and both are read.
     #[pyo3(get, set)]
     pub end: String,
 }
