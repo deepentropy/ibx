@@ -1380,12 +1380,11 @@ impl EClient {
             };
             if !watching.is_empty() {
                 let on = self.account();
-                // Taken once and given to everyone watching. Taken per
-                // watcher, the first would take the move and the rest would
-                // never hear it.
-                let moved = self.core.account_figures_that_moved(shared, true);
-                for field in &moved {
-                    for req_id in &watching {
+                // Per watcher, against that watcher's own record: they are not
+                // in step, and one opened later has been told nothing the
+                // first was told.
+                for req_id in &watching {
+                    for field in self.core.account_figures_that_moved(shared, *req_id) {
                         call_wrapper!(self, py, shared, "account_update_multi",
                             (*req_id, on.as_str(), "",
                              field.key.as_str(), field.value.as_str(), field.currency.as_str()));

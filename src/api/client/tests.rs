@@ -5518,6 +5518,24 @@ fn a_second_subscription_does_not_eat_the_first_one_s_moves() {
         rows.0.iter().any(|(r, k, v)| *r == 1 && k == "NetLiquidation" && v == "101.00"),
         "the first watcher was never told the move the second ask overtook: {:?}", rows.0,
     );
+    // And the one just answered is not told again what it was just given. A
+    // first batch read outside the record leaves every figure looking
+    // undelivered, and the next dispatch says the whole account back to a
+    // caller that has it.
+    assert!(
+        !rows.0.iter().any(|(r, ..)| *r == 2),
+        "the new watcher was told its own batch a second time: {:?}", rows.0,
+    );
+
+    // Withdrawn and asked again, the account comes whole rather than as the
+    // nothing that has moved since.
+    client.cancel_account_updates_multi(1);
+    rows.0.clear();
+    client.req_account_updates_multi(1, "", "", false, &mut rows);
+    assert!(
+        rows.0.iter().any(|(r, k, v)| *r == 1 && k == "NetLiquidation" && v == "101.00"),
+        "a fresh ask is answered with the account, not with what moved: {:?}", rows.0,
+    );
 }
 
 /// A model names a slice of the account, and a slice is not what this session

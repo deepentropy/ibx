@@ -364,14 +364,16 @@ impl EClient {
         // labelled US dollars whatever the account is held in: an account in
         // another currency read as a dollar account, and every figure the
         // venue states beyond those eight was not reported at all.
-        // Read from the account, not through the record the stream keeps. That
-        // record says what every watcher has been told; spending it here hands
-        // this request the figures and marks them delivered for everyone, so
-        // the watchers already standing are never told the move that opening
-        // this one happened to overtake.
-        for (key, value, currency) in self.shared.portfolio.stated_account_values() {
+        // Against this request's own record, which a fresh ask starts empty —
+        // so the batch is the account whole, and every batch after it is what
+        // has moved since this request last heard. Answered against a record
+        // shared by every watcher, a second ask marked these delivered for all
+        // of them and the watcher already standing lost the move it overtook.
+        self.core.forget_account_figures_for(req_id);
+        for field in self.core.account_figures_that_moved(&self.shared, req_id) {
             wrapper.account_update_multi(
-                req_id, &self.account_id, model_code, &key, &value, &currency,
+                req_id, &self.account_id, model_code,
+                &field.key, &field.value, &field.currency,
             );
         }
         wrapper.account_update_multi_end(req_id);
@@ -387,6 +389,7 @@ impl EClient {
     pub fn cancel_account_updates_multi(&self, req_id: i64) {
         if self.session_over() { return self.report_reason(-1, &Refusal::not_connected("Not connected")); }
         self.account_updates_multi_requested.lock().unwrap().remove(&req_id);
+        self.core.forget_account_figures_for(req_id);
     }
 
     /// Request positions for multiple accounts/models. Matches `reqPositionsMulti` in

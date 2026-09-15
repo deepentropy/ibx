@@ -378,13 +378,13 @@ impl EClient {
         // Rebuilding from this client's typed copy reports an account held in
         // any other currency as dollars, and drops every figure outside the
         // handful that copy carries.
-        // Read from the account, not through the record the stream keeps: that
-        // record says what every watcher has been told, and spending it here
-        // marks these delivered for watchers that never saw them.
-        for (key, value, currency) in shared.portfolio.stated_account_values() {
+        // Against this request's own record, which a fresh ask starts empty, so
+        // the batch is the account whole and every batch after it is the moves.
+        self.core.forget_account_figures_for(req_id);
+        for field in self.core.account_figures_that_moved(&shared, req_id) {
             self.deliver(py, "account_update_multi",
                 (req_id, acct_name.as_str(), model_code,
-                 key.as_str(), value.as_str(), currency.as_str()))?;
+                 field.key.as_str(), field.value.as_str(), field.currency.as_str()))?;
         }
         self.deliver(py, "account_update_multi_end", (req_id,))?;
         Ok(())
@@ -399,6 +399,7 @@ impl EClient {
     fn cancel_account_updates_multi(&self, req_id: i64) -> PyResult<()> {
         let Some(_tx) = self.tx_or_report(-1)? else { return Ok(()) };
         self.account_updates_multi_requested.lock().unwrap().remove(&req_id);
+        self.core.forget_account_figures_for(req_id);
         Ok(())
     }
 

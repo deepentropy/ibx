@@ -1134,17 +1134,15 @@ impl EClient {
             ids.sort_unstable();
             ids
         };
-        if !watching.is_empty() {
-            // Taken once and given to everyone watching. Taken per watcher,
-            // the first would take the move and the rest would never hear it.
-            let moved = self.core.account_figures_that_moved(&self.shared, true);
-            for field in &moved {
-                for req_id in &watching {
-                    wrapper.account_update_multi(
-                        *req_id, &self.account_id, "",
-                        &field.key, &field.value, &field.currency,
-                    );
-                }
+        // Per watcher, against that watcher's own record: they are not in
+        // step, and one opened a minute after another has been told nothing
+        // the first was told.
+        for req_id in &watching {
+            for field in self.core.account_figures_that_moved(&self.shared, *req_id) {
+                wrapper.account_update_multi(
+                    *req_id, &self.account_id, "",
+                    &field.key, &field.value, &field.currency,
+                );
             }
         }
 

@@ -934,6 +934,9 @@ impl Ownership<'_> {
     }
 }
 
+/// What one request has been told of the account, by figure and currency.
+pub type AccountFiguresTold = HashMap<(String, String), String>;
+
 pub struct ClientCore {
     /// How long a caller waits for the engine to name an instrument.
     ///
@@ -1093,13 +1096,21 @@ pub struct ClientCore {
     /// What has already been delivered of what the venue stated, by figure and
     /// currency, so each is delivered once and again when it changes.
     pub last_stated_account: Mutex<HashMap<(String, String), String>>,
-    /// The same record for the multi-account subscription, which is a
-    /// subscription of its own and answers on its own callback.
+    /// The same record for the multi-account subscription, per request.
     ///
     /// Kept apart from the one above: the two are asked for and withdrawn
     /// separately, and sharing the record let whichever ran first take a
     /// figure's change and leave the other with nothing to report.
-    pub last_stated_account_multi: Mutex<HashMap<(String, String), String>>,
+    ///
+    /// And kept per request rather than once for all of them. Watchers are not
+    /// in step: one opened a minute after another has been told nothing the
+    /// first was told, and a single record cannot be true for both. Shared, a
+    /// second ask marked every figure delivered for everyone and the watcher
+    /// already standing was never told the move that ask overtook — and taking
+    /// the record out of the ask instead only moved the fault, because the
+    /// first dispatch then found every figure undelivered and said it all
+    /// again to a caller that had just been given it.
+    pub last_stated_account_multi: Mutex<HashMap<i64, AccountFiguresTold>>,
     /// Whether the caller has been told the account is fully stated.
     pub account_end_sent: AtomicBool,
     /// Its positions as last stated.
@@ -4830,22 +4841,13 @@ impl ClientCore {
     /// picture — and every one of them was written against a client that keeps
     /// it moving.
     ///
-    /// `watching` says whether anyone still holds the request. Nothing is taken
-    /// off the record while nobody does.
-    ///
-    /// The record is shared by every watcher and is advanced only here, on the
-    /// dispatch that broadcasts. An ask answers its first batch from the
-    /// account itself instead: clearing or advancing this to build that batch
-    /// hands one request the figures and marks them delivered for all of them,
-    /// and a watcher already standing is never told the move that the new ask
-    /// overtook.
+    /// Answered against what this request has been told, which is what makes
+    /// the first batch the account whole and every batch after it the moves.
     pub fn account_figures_that_moved(
-        &self, shared: &SharedState, watching: bool,
+        &self, shared: &SharedState, req_id: i64,
     ) -> Vec<AccountFieldUpdate> {
-        if !watching {
-            return Vec::new();
-        }
-        let mut already = self.last_stated_account_multi.lock().unwrap();
+        let mut held = self.last_stated_account_multi.lock().unwrap();
+        let already = held.entry(req_id).or_default();
         let mut moved = Vec::new();
         for (key, value, currency) in shared.portfolio.stated_account_values() {
             if already.get(&(key.clone(), currency.clone())).map(String::as_str)
@@ -4857,6 +4859,12 @@ impl ClientCore {
             moved.push(AccountFieldUpdate { key, value, currency });
         }
         moved
+    }
+
+    /// Forget what a request has been told, so the next ask under it is
+    /// answered with the account whole, and a withdrawn one keeps nothing.
+    pub fn forget_account_figures_for(&self, req_id: i64) {
+        self.last_stated_account_multi.lock().unwrap().remove(&req_id);
     }
 
     /// Prepare portfolio updates (position entries) for account streaming.
