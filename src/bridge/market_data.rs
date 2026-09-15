@@ -50,6 +50,11 @@ pub(super) fn push_bounded<T>(queue: &Mutex<Vec<T>>, item: T, limit: usize, what
 type NumberedFiguresHeld =
     std::collections::HashMap<(crate::types::InstrumentId, u32, bool), Vec<(i32, f64)>>;
 
+/// What each contract's paired-figure runs hold: the slot and the series,
+/// against the pairs the venue stated in it.
+type PairedFiguresHeld =
+    std::collections::HashMap<(crate::types::InstrumentId, u32), Vec<(f64, f64)>>;
+
 /// Lock-free quotes, TBT streams, real-time bars, depth updates, and news ticks.
 pub struct MarketDataState {
     quotes: Box<[SeqQuote]>,
@@ -181,6 +186,13 @@ pub struct MarketDataState {
     /// venue numbers the two tables separately and a figure is its number and
     /// the table it stood in.
     numbered_figures: Mutex<NumberedFiguresHeld>,
+    /// The venue's option model for a contract as it closed, kept apart from
+    /// the standing one.
+    closing_option_model: Mutex<
+        std::collections::HashMap<crate::types::InstrumentId, crate::types::OptionComputation>,
+    >,
+    /// The runs of paired figures each series has stated for a contract.
+    paired_figures: Mutex<PairedFiguresHeld>,
     /// Which contracts the venue is restricting short sales in.
     ///
     /// Stated on the same record as the halt, and kept here rather than on the
@@ -239,6 +251,8 @@ impl MarketDataState {
             contract_figures: Mutex::new(std::collections::HashMap::new()),
             stated_figures: Mutex::new(std::collections::HashMap::new()),
             numbered_figures: Mutex::new(std::collections::HashMap::new()),
+            paired_figures: Mutex::new(std::collections::HashMap::new()),
+            closing_option_model: Mutex::new(std::collections::HashMap::new()),
             short_sale_restricted: Mutex::new(std::collections::HashSet::new()),
             clock_skew_millis: AtomicI64::new(0),
             unread_wire: Mutex::new(Vec::new()),
@@ -350,6 +364,8 @@ impl MarketDataState {
         self.contract_figures.lock().unwrap().remove(&instrument);
         self.stated_figures.lock().unwrap().retain(|(at, _), _| *at != instrument);
         self.numbered_figures.lock().unwrap().retain(|(at, ..), _| *at != instrument);
+        self.paired_figures.lock().unwrap().retain(|(at, _), _| *at != instrument);
+        self.closing_option_model.lock().unwrap().remove(&instrument);
         // A restriction belongs to the contract that was in the slot, not to
         // the slot: left behind, the next contract to take it reads as
         // restricted on the strength of the last one.
@@ -1043,6 +1059,58 @@ impl MarketDataState {
         series.sort_unstable();
         series.dedup();
         series
+    }
+
+    /// The run of paired figures one series stated for a contract, in the
+    /// order it stated them.
+    ///
+    /// Two series state their figures this way: a count, then that many pairs.
+    /// One holds the volatility the venue's own model puts on each point of a
+    /// curve; the other holds the weight it puts on each price a contract might
+    /// reach. Neither has a documented call to arrive on.
+    ///
+    /// Empty until that series has been asked for and answered.
+    pub fn paired_figures(
+        &self, instrument: crate::types::InstrumentId, series: u32,
+    ) -> Vec<(f64, f64)> {
+        self.paired_figures.lock().unwrap().get(&(instrument, series)).cloned().unwrap_or_default()
+    }
+
+    /// Which series have stated paired figures for a contract, in order.
+    pub fn paired_figures_series(&self, instrument: crate::types::InstrumentId) -> Vec<u32> {
+        let mut series: Vec<u32> = self.paired_figures.lock().unwrap()
+            .keys()
+            .filter(|(at, _)| *at == instrument)
+            .map(|(_, series)| *series)
+            .collect();
+        series.sort_unstable();
+        series
+    }
+
+    /// What the venue's model made of an option as it closed.
+    ///
+    /// The same model as the standing one and in the same shape — every greek
+    /// it states, including the ones the documented API has no field for — but
+    /// worked out as the contract closed rather than as it stands. The
+    /// documented API has no call for it at all.
+    ///
+    /// `None` until the series has been asked for and answered.
+    pub fn closing_option_model(
+        &self, instrument: crate::types::InstrumentId,
+    ) -> Option<crate::types::OptionComputation> {
+        self.closing_option_model.lock().unwrap().get(&instrument).copied()
+    }
+
+    #[doc(hidden)] pub fn note_closing_option_model(
+        &self, comp: crate::types::OptionComputation,
+    ) {
+        self.closing_option_model.lock().unwrap().insert(comp.instrument, comp);
+    }
+
+    #[doc(hidden)] pub fn note_paired_figures(
+        &self, instrument: crate::types::InstrumentId, series: u32, pairs: Vec<(f64, f64)>,
+    ) {
+        self.paired_figures.lock().unwrap().insert((instrument, series), pairs);
     }
 
     #[doc(hidden)] pub fn note_numbered_figures(

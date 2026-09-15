@@ -348,6 +348,16 @@ fn deliver_series(
         // numbers first, then fractional ones — each opening with how many
         // entries it carries, and each entry naming what it is before stating
         // it. The fractional table is four bytes to the figure, not eight.
+        // The two series that state a run of paired figures: the volatility the
+        // venue's model holds against each point of a curve, and the weight it
+        // puts on each price a contract might reach. Both state the pairs the
+        // same way; one states a version in front of the count.
+        490 | 546 => {
+            let pairs = read_paired_figures(payload, tick == 490);
+            if !pairs.is_empty() {
+                shared.market.note_paired_figures(instrument, tick, pairs);
+            }
+        }
         165 | 561 | 562 | 757 => {
             let (whole, fractional) = read_numbered_figures(payload);
             // Kept whole, both tables, under the venue's own numbering. Two of
@@ -1121,6 +1131,9 @@ pub(super) const DEPTH_VENUE_REFUSED: i32 = 354;
 /// The option model's own tick, in place of a request type.
 const GREEKS_REQUEST_TYPE: u32 = 732;
 
+/// The same model as the contract closed, under its own number.
+const CLOSING_GREEKS_REQUEST_TYPE: u32 = 733;
+
 
 /// The news tick's own number, in place of a request type.
 const NEWS_REQUEST_TYPE: u32 = 292;
@@ -1368,6 +1381,29 @@ fn read_generic_ticks<'a>(
 /// first name and the padding joins the last.
 fn length_prefixed_text(payload: &[u8]) -> Option<std::borrow::Cow<'_, str>> {
     Some(String::from_utf8_lossy(length_prefixed_bytes(payload)?))
+}
+
+/// The pairs of figures a series states, and how many of them it carries.
+///
+/// A count, then that many pairs of two eight-byte figures. One of the two
+/// series states a version in front of the count and a figure of its own
+/// behind the pairs; the other begins at the count. A count reaching past what
+/// arrived is held to what the record could carry, and a record that stops
+/// short states the pairs before it.
+fn read_paired_figures(payload: &[u8], versioned: bool) -> Vec<(f64, f64)> {
+    let mut at = if versioned { 4 } else { 0 };
+    let mut out = Vec::new();
+    let Some(count) = series_i32(payload, at) else { return out };
+    at += 4;
+    for _ in 0..count.clamp(0, (payload.len() / 16) as i32) {
+        let (Some(first), Some(second)) = (series_f64(payload, at), series_f64(payload, at + 8))
+        else {
+            return out;
+        };
+        out.push((first, second));
+        at += 16;
+    }
+    out
 }
 
 /// Figures the venue numbers itself: its number for each, and the figure.
@@ -4333,6 +4369,17 @@ impl FarmState {
                         comp.instrument = instrument;
                         shared.market.push_option_computation(comp);
                         emit(event_tx, Event::OptionComputation(comp));
+                    }
+                }
+                // The same model, worked out as the contract closed rather
+                // than as it stands. Stated in the same shape, down to the
+                // flags that say which fields it carries, so it is read by the
+                // same reader — and kept apart from the standing one, which it
+                // would otherwise overwrite with a figure from yesterday.
+                CLOSING_GREEKS_REQUEST_TYPE => {
+                    if let Some(mut comp) = decode_greeks(payload) {
+                        comp.instrument = instrument;
+                        shared.market.note_closing_option_model(comp);
                     }
                 }
                 BBO_EXCHANGE_MAP_REQUEST_TYPE => {

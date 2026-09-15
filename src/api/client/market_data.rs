@@ -565,6 +565,29 @@ impl EClient {
         self.shared.market.numbered_figures(instrument, series, fractional)
     }
 
+    /// The run of paired figures one series last stated for a subscription.
+    ///
+    /// Two series state their figures as a count and then that many pairs: the
+    /// volatility the venue's own model puts on each point of a curve, and the
+    /// weight it puts on each price a contract might reach. Neither has a
+    /// documented call to arrive on.
+    pub fn paired_figures(&self, req_id: i64, series: u32) -> Vec<(f64, f64)> {
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Vec::new();
+        };
+        self.shared.market.paired_figures(instrument, series)
+    }
+
+    /// Which series have stated paired figures for a subscription, in order.
+    pub fn paired_figures_series(&self, req_id: i64) -> Vec<u32> {
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Vec::new();
+        };
+        self.shared.market.paired_figures_series(instrument)
+    }
+
     /// Which series have stated numbered figures for a subscription, in order.
     pub fn numbered_figures_series(&self, req_id: i64) -> Vec<u32> {
         let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
@@ -581,6 +604,25 @@ impl EClient {
             return Vec::new();
         };
         self.shared.market.stated_figures_series(instrument)
+    }
+
+    /// What the venue's model made of an option as it closed.
+    ///
+    /// The same model as [`Self::option_model`] and in the same shape — every
+    /// greek it states, the ones the documented API has no field for included —
+    /// but worked out as the contract closed rather than as it stands. The
+    /// documented API has no call for it at all. Ask for it by the venue's own
+    /// number for the series in the generic tick list.
+    pub fn closing_option_model(&self, req_id: i64) -> Option<crate::types::OptionComputation> {
+        let instrument = *self.core.req_to_instrument.lock().unwrap().get(&req_id)?;
+        self.shared.market.closing_option_model(instrument)
+    }
+
+    /// The same, by InstrumentId, for callers who track them themselves.
+    pub fn closing_option_model_by_instrument(
+        &self, instrument: InstrumentId,
+    ) -> Option<crate::types::OptionComputation> {
+        self.shared.market.closing_option_model(instrument)
     }
 
     /// The same, by InstrumentId, for callers who track them themselves.

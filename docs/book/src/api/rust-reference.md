@@ -1417,6 +1417,39 @@ pub fn numbered_figures( &self, req_id: i64, series: u32, fractional: bool, ) ->
 
 ---
 
+#### `paired_figures`
+
+The run of paired figures one series last stated for a subscription. Two series state their figures as a count and then that many pairs: the volatility the venue's own model puts on each point of a curve, and the weight it puts on each price a contract might reach. Neither has a documented call to arrive on.
+
+```rust
+pub fn paired_figures(&self, req_id: i64, series: u32) -> Vec<(f64, f64)>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `series` | `u32` |  |
+
+**Returns:** `Vec<(f64, f64)>`
+
+---
+
+#### `paired_figures_series`
+
+Which series have stated paired figures for a subscription, in order.
+
+```rust
+pub fn paired_figures_series(&self, req_id: i64) -> Vec<u32>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+**Returns:** `Vec<u32>`
+
+---
+
 #### `numbered_figures_series`
 
 Which series have stated numbered figures for a subscription, in order.
@@ -1446,6 +1479,38 @@ pub fn stated_figures_series(&self, req_id: i64) -> Vec<u32>
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 
 **Returns:** `Vec<u32>`
+
+---
+
+#### `closing_option_model`
+
+What the venue's model made of an option as it closed. The same model as [`Self::option_model`] and in the same shape — every greek it states, the ones the documented API has no field for included — but worked out as the contract closed rather than as it stands. The documented API has no call for it at all. Ask for it by the venue's own number for the series in the generic tick list.
+
+```rust
+pub fn closing_option_model(&self, req_id: i64) -> Option<crate::types::OptionComputation>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+**Returns:** `Option<crate::types::OptionComputation>`
+
+---
+
+#### `closing_option_model_by_instrument`
+
+The same, by InstrumentId, for callers who track them themselves.
+
+```rust
+pub fn closing_option_model_by_instrument( &self, instrument: InstrumentId, ) -> Option<crate::types::OptionComputation>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
+
+**Returns:** `Option<crate::types::OptionComputation>`
 
 ---
 

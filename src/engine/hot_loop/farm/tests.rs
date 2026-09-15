@@ -380,6 +380,119 @@ mod news_tests {
         );
     }
 
+    /// The model the venue works out as a contract closes is kept apart from
+    /// the model it is standing behind now.
+    ///
+    /// Both arrive in the same shape and both are read by the same reader.
+    /// Kept in the same place, a figure worked out at yesterday's close would
+    /// stand where a caller reads what the contract is worth today.
+    #[test]
+    fn the_model_at_the_close_does_not_stand_where_the_standing_model_does() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9005);
+
+        // Valid, with a delta and an underlying price behind the model's own
+        // price for the option.
+        let model = |opt_price: f64, delta: f64, und: f64| {
+            let flags: u32 = 1 | 1 << 16 | 1 << 25;
+            let mut out = flags.to_be_bytes().to_vec();
+            for value in [opt_price, delta, und] {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+            out
+        };
+
+        farm.generic_tick_tags.push((81, 732, instrument));
+        farm.generic_tick_tags.push((82, 733, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[
+                (81, 732, &model(26.0, 0.55, 760.0)),
+                (82, 733, &model(24.5, 0.51, 755.0)),
+            ]),
+            &mut context, &shared, &None,
+        );
+
+        let standing = shared.market.option_model(instrument).expect("the venue stated one");
+        assert_eq!((standing.opt_price, standing.delta), (26.0, 0.55), "{standing:?}");
+        let closing =
+            shared.market.closing_option_model(instrument).expect("the venue stated one");
+        assert_eq!((closing.opt_price, closing.delta), (24.5, 0.51), "{closing:?}");
+        assert_eq!(closing.und_price, 755.0, "the fields behind the flags are read the same");
+
+        // A slot handed back takes the closing model with it, as it does the
+        // standing one.
+        shared.market.forget_option_model(instrument);
+        assert!(
+            shared.market.closing_option_model(instrument).is_none(),
+            "a model outlived the contract it was worked out for",
+        );
+    }
+
+    /// The two series that state a run of paired figures, one of which states
+    /// a version in front of the count and one of which does not.
+    ///
+    /// Read alike, the versioned one takes its version for the count and its
+    /// count for the first half of a pair.
+    #[test]
+    fn a_series_that_pairs_its_figures_is_read_from_where_its_count_stands() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9004);
+
+        let pairs = |lead: &[i32], rows: &[(f64, f64)], tail: &[i32]| {
+            let mut out = Vec::new();
+            for n in lead {
+                out.extend_from_slice(&n.to_be_bytes());
+            }
+            for (first, second) in rows {
+                out.extend_from_slice(&first.to_be_bytes());
+                out.extend_from_slice(&second.to_be_bytes());
+            }
+            for n in tail {
+                out.extend_from_slice(&n.to_be_bytes());
+            }
+            out
+        };
+
+        // The curve: a count, then the pairs.
+        let curve = pairs(&[3], &[(0.25, 0.31), (0.5, 0.28), (1.0, 0.26)], &[]);
+        farm.generic_tick_tags.push((71, 546, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(71, 546, &curve)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.paired_figures(instrument, 546),
+            vec![(0.25, 0.31), (0.5, 0.28), (1.0, 0.26)],
+            "the pairs, in the order the venue states them",
+        );
+
+        // The weights: a version, the count, the pairs, and a figure behind
+        // them that is not a pair.
+        let weights = pairs(&[1, 2], &[(330.0, 0.04), (340.0, 0.02)], &[7]);
+        farm.generic_tick_tags.push((72, 490, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(72, 490, &weights)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.paired_figures(instrument, 490),
+            vec![(330.0, 0.04), (340.0, 0.02)],
+            "the version in front of the count is not read as the count",
+        );
+        assert_eq!(
+            shared.market.paired_figures_series(instrument), vec![490, 546],
+            "both series are named as stated",
+        );
+
+        shared.market.forget_option_model(instrument);
+        assert!(
+            shared.market.paired_figures_series(instrument).is_empty(),
+            "a figure outlived the contract it was stated for",
+        );
+    }
+
     /// The other three series that state two numbered tables, read by the
     /// same reader the extremes are.
     ///

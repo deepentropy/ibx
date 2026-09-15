@@ -244,6 +244,8 @@ same thing, not that the documented API does.
 | `cancelWshMetaData` | ● | ● | · | ● | ● | ● |
 | `ccpSessionId` | ● | · | · | · | ● | ● |
 | `checkConnected` | ● | · | · | · | · | ● |
+| `closingOptionModel` | ● | · | · | · | ● | ● |
+| `closingOptionModelByInstrument` | ● | · | · | · | ● | ● |
 | `companyData` | ● | · | · | · | · | ● |
 | `companyDataSeries` | ● | · | · | · | · | ● |
 | `competingSession` | ● | · | · | · | · | ● |
@@ -270,6 +272,8 @@ same thing, not that the documented API does.
 | `optionModelByInstrument` | ● | · | · | · | ● | ● |
 | `orderPermissions` | ● | · | · | · | ● | ● |
 | `orderPresets` | ● | · | · | · | ● | ● |
+| `pairedFigures` | ● | · | · | · | ● | ● |
+| `pairedFiguresSeries` | ● | · | · | · | ● | ● |
 | `parse_algo_params` | ● | · | · | · | ● | · |
 | `permittedOrderTypes` | ● | · | · | · | ● | ● |
 | `positions` | ● | ● | · | ● | ● | · |
