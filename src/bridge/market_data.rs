@@ -162,6 +162,15 @@ pub struct MarketDataState {
     /// What the venue last said about a contract itself, beside its prices.
     contract_figures:
         Mutex<std::collections::HashMap<crate::types::InstrumentId, crate::types::ContractFigures>>,
+    /// The figures each series has stated for a contract, in the order the
+    /// series states them.
+    ///
+    /// Kept by slot and by series. By slot because a figure belongs to the
+    /// contract that was in it, and by series because the venue runs dozens of
+    /// them side by side and one record per contract would have each series
+    /// overwrite the last.
+    stated_figures:
+        Mutex<std::collections::HashMap<(crate::types::InstrumentId, u32), Vec<f64>>>,
     /// Which contracts the venue is restricting short sales in.
     ///
     /// Stated on the same record as the halt, and kept here rather than on the
@@ -218,6 +227,7 @@ impl MarketDataState {
             series_ticks: Mutex::new(std::collections::HashMap::new()),
             quote_attribute_masks: Mutex::new(std::collections::HashMap::new()),
             contract_figures: Mutex::new(std::collections::HashMap::new()),
+            stated_figures: Mutex::new(std::collections::HashMap::new()),
             short_sale_restricted: Mutex::new(std::collections::HashSet::new()),
             clock_skew_millis: AtomicI64::new(0),
             unread_wire: Mutex::new(Vec::new()),
@@ -327,6 +337,7 @@ impl MarketDataState {
         self.last_option_model.lock().unwrap().remove(&instrument);
         // These belong to the contract that was in the slot, not to the slot.
         self.contract_figures.lock().unwrap().remove(&instrument);
+        self.stated_figures.lock().unwrap().retain(|(at, _), _| *at != instrument);
         // A restriction belongs to the contract that was in the slot, not to
         // the slot: left behind, the next contract to take it reads as
         // restricted on the strength of the last one.
@@ -964,6 +975,36 @@ impl MarketDataState {
         &self, instrument: crate::types::InstrumentId,
     ) -> Option<crate::types::ContractFigures> {
         self.contract_figures.lock().unwrap().get(&instrument).copied()
+    }
+
+    /// What one series last stated for a contract, in the order it states it.
+    ///
+    /// Empty until that series has been asked for and answered. A figure the
+    /// venue holds nothing for arrives as the largest number its field carries,
+    /// which is how the venue says it has nothing rather than saying nothing at
+    /// all, and a record that stopped short states the figures before it and no
+    /// more.
+    pub fn stated_figures(
+        &self, instrument: crate::types::InstrumentId, series: u32,
+    ) -> Vec<f64> {
+        self.stated_figures.lock().unwrap().get(&(instrument, series)).cloned().unwrap_or_default()
+    }
+
+    /// Which series have stated figures for a contract, in order.
+    pub fn stated_figures_series(&self, instrument: crate::types::InstrumentId) -> Vec<u32> {
+        let mut series: Vec<u32> = self.stated_figures.lock().unwrap()
+            .keys()
+            .filter(|(at, _)| *at == instrument)
+            .map(|(_, series)| *series)
+            .collect();
+        series.sort_unstable();
+        series
+    }
+
+    #[doc(hidden)] pub fn note_stated_figures(
+        &self, instrument: crate::types::InstrumentId, series: u32, figures: Vec<f64>,
+    ) {
+        self.stated_figures.lock().unwrap().insert((instrument, series), figures);
     }
 
     /// Keep what the venue stated about a contract, merging with what it said

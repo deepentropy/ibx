@@ -623,6 +623,36 @@ impl EClient {
         Self::contract_figures_dict(&shared, instrument)
     }
 
+    /// What one of the venue's own series last stated for a subscription, in
+    /// the order the series states it.
+    ///
+    /// The venue runs dozens of series the documented API has no call for: a
+    /// bond's analytics, an option's model volatility, the volume a contract
+    /// usually opens on, what margin a future takes. Ask for one by its own
+    /// number in the generic tick list, and read what it stated here. A figure
+    /// the venue holds nothing for comes as the largest number its field
+    /// carries.
+    #[pyo3(signature = (req_id, series))]
+    fn stated_figures(&self, req_id: i64, series: u32) -> PyResult<Vec<f64>> {
+        let Ok(shared) = self.shared_state() else { return Ok(Vec::new()) };
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(shared.market.stated_figures(instrument, series))
+    }
+
+    /// Which series have stated figures for a subscription, in order.
+    #[pyo3(signature = (req_id))]
+    fn stated_figures_series(&self, req_id: i64) -> PyResult<Vec<u32>> {
+        let Ok(shared) = self.shared_state() else { return Ok(Vec::new()) };
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(shared.market.stated_figures_series(instrument))
+    }
+
     /// The same, by InstrumentId, for callers who track them themselves.
     #[pyo3(signature = (instrument))]
     fn option_model_by_instrument(&self, instrument: u32) -> PyResult<Option<Py<PyAny>>> {

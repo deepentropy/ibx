@@ -659,8 +659,95 @@ fn deliver_series(
                 Err(why) => log::debug!("the company ratios did not inflate: {why}"),
             }
         }
-        _ => return false,
+        _ => return note_stated_figures(tick, payload, instrument, shared),
     }
+    true
+}
+
+/// The series that state figures the documented API has no call for, and the
+/// fields each one states, in the order it states them.
+///
+/// `d` is eight bytes of double, `f` four of single and `i` four of signed
+/// integer — the venue's own widths in the venue's own order. Three of these
+/// carry trailing fields only sometimes, and those are read where the bytes for
+/// them arrived rather than guessed at.
+///
+/// | Series | What the venue states on it |
+/// | --- | --- |
+/// | 125 | Five analytic figures for a bond |
+/// | 266 | The two coefficients that fit an index to its future |
+/// | 317, 531 | An underlying's mark once dealing has closed, frozen and delayed-frozen |
+/// | 388 | Four figures about the issuer behind a contract |
+/// | 391 | What a warrant's implied volatility looks like against its competitors |
+/// | 393 | The two figures a beta against the market is worked out from |
+/// | 398 | Whether the venue is serving market data |
+/// | 399 | Whether the contract is exempt from the short-sale rule, and since when |
+/// | 402 | The schedule of average daily volume |
+/// | 407 | What margin a future takes |
+/// | 418 | The interest a bond has accrued |
+/// | 459 | The close the venue keeps through the session |
+/// | 493, 606 | What an option is worth in and out of the money, and what is time |
+/// | 497, 597 | Two of the venue's own volatility figures for an option |
+/// | 504 | What one contract delivers |
+/// | 509 | The two halves of a sentiment reading |
+/// | 527 | Volatility over twenty days |
+/// | 540 | The yield the venue works out from the price |
+/// | 545 | The volatility the venue's own model settles on |
+/// | 584, 585 | The volume a contract usually opens and closes on |
+/// | 613 | What the model makes the contract worth |
+/// | 645 | The close stated in money |
+/// | 647 | How much of the industry's borrowable stock is out on loan |
+/// | 649 | One figure and the number the venue files it under |
+/// | 657 | Two figures of four weeks' trading volume |
+/// | 658 | The volume of an average minute |
+/// | 680 | The venue's own weighted volume figure |
+/// | 689, 736 | The volatility either side of the close, and the model behind it |
+/// | 767 | What a perpetual contract is funding at |
+const STATED_FIGURES: &[(u32, &str)] = &[
+    (125, "fffff"), (266, "dd"), (317, "dii"), (388, "dddd"), (391, "ddiidd"),
+    (393, "dd"), (398, "i"), (399, "iii"), (402, "dddiii"), (407, "dddd"),
+    (418, "d"), (459, "fiii"), (493, "did"), (497, "d"), (504, "di"),
+    (509, "ii"), (527, "d"), (531, "dii"), (540, "di"), (545, "d"),
+    (584, "i"), (585, "i"), (597, "d"), (606, "did"), (613, "iff"),
+    (645, "di"), (647, "d"), (649, "fi"), (657, "dif"), (658, "di"),
+    (680, "d"), (689, "ddii"), (736, "ddi"), (767, "di"),
+];
+
+/// Keep the figures a series states, where the documented API has no call to
+/// hand them over on.
+///
+/// The figures reach a caller as the venue stated them: in its order, at its
+/// widths, and with the number it uses to say it holds nothing left standing.
+/// None of them is renamed into a tick number of this client's own choosing —
+/// a caller reading the venue's numbers would be reading an invention.
+///
+/// Returns whether the series was one this client reads.
+fn note_stated_figures(
+    tick: u32, payload: &[u8], instrument: InstrumentId, shared: &SharedState,
+) -> bool {
+    let Some((_, layout)) = STATED_FIGURES.iter().find(|(series, _)| *series == tick) else {
+        return false;
+    };
+    let mut figures: Vec<f64> = Vec::with_capacity(layout.len());
+    let mut at = 0usize;
+    for field in layout.bytes() {
+        let (width, value) = match field {
+            b'd' => (8, series_f64(payload, at)),
+            b'f' => (4, series_f32(payload, at).map(f64::from)),
+            _ => (4, series_i32(payload, at).map(f64::from)),
+        };
+        // A record that stopped short stated the fields before it. Three of
+        // these series end with fields the venue writes only sometimes, and
+        // the rest simply arrive whole.
+        let Some(value) = value else { break };
+        figures.push(value);
+        at += width;
+    }
+    // A record carrying no field at all is not a statement about the contract.
+    if figures.is_empty() {
+        return true;
+    }
+    shared.market.note_stated_figures(instrument, tick, figures);
     true
 }
 

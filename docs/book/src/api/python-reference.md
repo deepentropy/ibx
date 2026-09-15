@@ -1146,6 +1146,35 @@ def contract_figures_by_instrument(instrument)
 
 ---
 
+#### `stated_figures`
+
+What one of the venue's own series last stated for a subscription, in the order the series states it.  The venue runs dozens of series the documented API has no call for: a bond's analytics, an option's model volatility, the volume a contract usually opens on, what margin a future takes. Ask for one by its own number in the generic tick list, and read what it stated here. A figure the venue holds nothing for comes as the largest number its field carries.
+
+```python
+def stated_figures(req_id, series)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `series` | `int` |  |
+
+---
+
+#### `stated_figures_series`
+
+Which series have stated figures for a subscription, in order.
+
+```python
+def stated_figures_series(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+
+---
+
 #### `option_model_by_instrument`
 
 The same, by InstrumentId, for callers who track them themselves.
@@ -2572,21 +2601,21 @@ Historical trades, in batches, until `done`.
 
 #### `tick_option_computation`
 
-The venue's model for an option: the volatility its price implies, the greeks, and the modelled value of the option and its underlying.
+The venue's model for an option: the volatility its price implies, the greeks, and the modelled value of the option and its underlying.  Every figure is `None` where the venue stated none. The reference client hands a caller `None` for those, so this surface does too, and a wrapper that has not overridden this is handed the same. Declared as a number, the default refused the call and the exception left the caller's reading loop: a caller who watched an option and did not write this method lost the session on the first model the venue did not fill in.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `tick_type` | `int` | Tick type ID or tick-by-tick type string. |
 | `tick_attrib` | `int` |  |
-| `implied_vol` | `float` | Implied volatility. |
-| `delta` | `float` | Option delta. |
-| `opt_price` | `float` | Option theoretical price. |
-| `pv_dividend` | `float` | Present value of dividends. |
-| `gamma` | `float` | Option gamma. |
-| `vega` | `float` | Option vega. |
-| `theta` | `float` | Option theta. |
-| `und_price` | `float` | Underlying price. |
+| `implied_vol` | `float or None` | Implied volatility. |
+| `delta` | `float or None` | Option delta. |
+| `opt_price` | `float or None` | Option theoretical price. |
+| `pv_dividend` | `float or None` | Present value of dividends. |
+| `gamma` | `float or None` | Option gamma. |
+| `vega` | `float or None` | Option vega. |
+| `theta` | `float or None` | Option theta. |
+| `und_price` | `float or None` | Underlying price. |
 
 ---
 

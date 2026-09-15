@@ -291,6 +291,8 @@ same thing, not that the documented API does.
 | `shortSaleRestricted` | ● | · | · | · | ● | ● |
 | `shortSaleRestrictedByInstrument` | ● | · | · | · | ● | ● |
 | `startApi` | ● | ● | ● | ● | · | ● |
+| `statedFigures` | ● | · | · | · | ● | ● |
+| `statedFiguresSeries` | ● | · | · | · | ● | ● |
 | `tradingSchedule` | ● | · | · | · | · | ● |
 | `twsConnectionTime` | ● | ● | ● | · | · | ● |
 | `unread_wire` | ● | · | · | · | ● | · |

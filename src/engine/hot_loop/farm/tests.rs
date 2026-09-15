@@ -380,6 +380,75 @@ mod news_tests {
         );
     }
 
+    /// The series that state figures, read at the venue's own widths and in
+    /// its own order.
+    ///
+    /// A reader taking every field as a double reads a single-precision field
+    /// and the one behind it as one number, and reads an integer and its
+    /// neighbour the same way: the widths are the record, not a detail of it.
+    #[test]
+    fn a_series_that_states_figures_is_read_at_the_widths_it_states_them_in() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(7002);
+
+        let mut in_the_money = 1.5f64.to_be_bytes().to_vec();
+        in_the_money.extend_from_slice(&1i32.to_be_bytes());
+        in_the_money.extend_from_slice(&0.25f64.to_be_bytes());
+        farm.generic_tick_tags.push((51, 493, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(51, 493, &in_the_money)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.stated_figures(instrument, 493), vec![1.5, 1.0, 0.25],
+            "the eight-byte figures and the four-byte one between them",
+        );
+
+        // A record of singles behind an integer: read as doubles, the first
+        // figure swallows the two singles behind it.
+        let mut theoretical = 3i32.to_be_bytes().to_vec();
+        theoretical.extend_from_slice(&0.5f32.to_be_bytes());
+        theoretical.extend_from_slice(&12.25f32.to_be_bytes());
+        farm.generic_tick_tags.push((52, 613, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(52, 613, &theoretical)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.stated_figures(instrument, 613), vec![3.0, 0.5, 12.25],
+            "the single-precision figures are read four bytes wide",
+        );
+
+        // A record that stops before its trailing fields states the ones it
+        // carried, and the series that never carries them is read whole.
+        let mut schedule = Vec::new();
+        for value in [10.0f64, 20.0, 30.0] {
+            schedule.extend_from_slice(&value.to_be_bytes());
+        }
+        schedule.extend_from_slice(&7i32.to_be_bytes());
+        farm.generic_tick_tags.push((53, 402, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(53, 402, &schedule)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.stated_figures(instrument, 402), vec![10.0, 20.0, 30.0, 7.0],
+            "the fields the venue did not write are not read as nothing",
+        );
+
+        assert_eq!(
+            shared.market.stated_figures_series(instrument), vec![402, 493, 613],
+            "every series that stated figures is named",
+        );
+
+        // A slot handed back takes its figures with it: the next contract in
+        // it was never the one these were stated for.
+        shared.market.forget_option_model(instrument);
+        assert!(
+            shared.market.stated_figures_series(instrument).is_empty(),
+            "a figure outlived the contract it was stated for",
+        );
+    }
+
     /// The other thirteen series that carry the venue's own fields as text,
     /// each out from behind what it states in front of it.
     ///

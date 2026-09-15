@@ -1382,6 +1382,39 @@ pub fn contract_figures_by_instrument( &self, instrument: InstrumentId, ) -> Opt
 
 ---
 
+#### `stated_figures`
+
+What one of the venue's own series last stated for a subscription, in the order the series states it. The venue runs dozens of series the documented API has no call for: a bond's analytics, an option's model volatility, the volume a contract usually opens on, what margin a future takes. Ask for one by its own number in the generic tick list, and read what it stated here. The figures come as the venue stated them — its order, its widths — and a figure it holds nothing for comes as the largest number its field carries. Empty where the request names no subscription, or that series has stated nothing for it. Read here rather than sent as ticks for the same reason the contract figures are: a tick number of this client's own choosing, where a caller reads the venue's, is not something this client invents.
+
+```rust
+pub fn stated_figures(&self, req_id: i64, series: u32) -> Vec<f64>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `series` | `u32` |  |
+
+**Returns:** `Vec<f64>`
+
+---
+
+#### `stated_figures_series`
+
+Which series have stated figures for a subscription, in order.
+
+```rust
+pub fn stated_figures_series(&self, req_id: i64) -> Vec<u32>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+**Returns:** `Vec<u32>`
+
+---
+
 #### `option_model_by_instrument`
 
 The same, by InstrumentId, for callers who track them themselves.
