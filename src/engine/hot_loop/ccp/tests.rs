@@ -5803,42 +5803,6 @@ fn a_message_to_the_account_holder_names_the_account_it_concerns() {
     assert_eq!(told, vec!["the venue is going down for maintenance".to_string()]);
 }
 
-/// A figure whose kind is not established is recorded with its number.
-///
-/// The venue states one figure and a selector saying which figure it is.
-/// Which one the selector names is not established, and nothing is written
-/// from here on the strength of a guess — the number was read as a net
-/// liquidation whatever the selector said, and an account holding the better
-/// part of a million in cash reported a net liquidation of minus fourteen
-/// hundred.
-///
-/// But the record said only that a frame of kind N had arrived. Without the
-/// number it carried, nobody can reconcile it against the figures the account
-/// states under names, so the kind stays unestablished for ever.
-#[test]
-fn an_account_figure_of_an_unestablished_kind_is_recorded_with_its_number() {
-    let (mut ccp, mut context, shared) = ord_status_test_state();
-    let msg = crate::protocol::fix::fix_build(
-        &[(35, "U"), (6040, "77"), (6566, "5"), (9806, "-1400.25")],
-        1,
-    );
-    ccp.process_ccp_message(&msg, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU123");
-
-    let unread = shared.market.unread_wire();
-    let about = unread.iter().find(|(kind, _)| *kind == "trading")
-        .map(|(_, what)| what.clone())
-        .unwrap_or_default();
-    assert!(about.contains("kind 5"), "the selector the venue stated: {unread:?}");
-    assert!(about.contains("-1400.25"), "and the number beside it: {unread:?}");
-
-    // And nothing was written as an account figure, because nothing here
-    // knows which figure it is.
-    assert!(
-        shared.portfolio.stated_account_values().is_empty(),
-        "a figure nobody can name is not published under a name",
-    );
-}
-
 /// The account's cash by currency is not a figure of an unknown kind.
 ///
 /// Tag 6566 counts the entries that follow and each is a currency with its

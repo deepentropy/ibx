@@ -608,26 +608,33 @@ fn deliver_series(
             {
                 say(102, SeriesValue::Generic(settled));
             }
-            // The record states up to three prices and two of them reach no
-            // caller. The counterpart keeps all three, in three fields of its
-            // own; the documented API has one number for this and this client
-            // will not pick a second, so what is not handed over is written
-            // down under its position rather than passing unseen.
-            for (at, price) in prices.iter().enumerate() {
-                if at == 1 || *price == f64::MAX {
-                    continue;
+            // Where the estimate stands, the record states three prices and
+            // one of them reaches a caller. The documented API has a single
+            // number for this and this client will not pick a second, so the
+            // two it cannot hand over are written down rather than passing
+            // unseen.
+            //
+            // Only under the flags that make them prices at all. The venue's
+            // own reader takes all three when the estimate stands and position
+            // nought alone when the figure is final; under anything else it
+            // takes none, and a position recorded there is not a price the
+            // venue stated. Nor is one that is not a number: the publishing
+            // path below refuses those and so does this.
+            if flags & 0x03 == 0x03 {
+                for at in [0usize, 2] {
+                    let stated = prices.get(at).copied().filter(|p| p.is_finite() && *p != f64::MAX);
+                    if stated.is_none() {
+                        continue;
+                    }
+                    shared.market.note_unread_wire_under(
+                        "farm",
+                        format!("an estimated opening price at position {at}"),
+                        format!(
+                            "an estimated opening price at position {at} on tick 586, \
+                             which no documented call names",
+                        ),
+                    );
                 }
-                if at == 0 && flags & 0x07 == 0x05 {
-                    continue;
-                }
-                shared.market.note_unread_wire_under(
-                    "farm",
-                    format!("an estimated opening price at position {at}"),
-                    format!(
-                        "an estimated opening price at position {at} on tick 586, \
-                         which no documented call names",
-                    ),
-                );
             }
         }
         // The company ratios, which the venue sends as compressed text behind
@@ -4278,8 +4285,8 @@ impl FarmState {
                 233 => self.deliver_running_volume(instrument, 48, payload, shared),
                 375 => self.deliver_running_volume(instrument, 77, payload, shared),
                 // What the venue holds about the issuer rather than about the
-                // quote: the two analyst ratings, and the insider and
-                // institutional interest a float is stated in.
+                // quote: the two analyst ratings, and what institutions and
+                // insiders hold of the company beside the shares on issue.
                 434 | 454 | 548 => {
                     self.deliver_company_data(instrument, tick, payload, context, shared)
                 }

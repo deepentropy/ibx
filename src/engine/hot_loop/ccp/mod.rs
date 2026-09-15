@@ -1874,19 +1874,19 @@ impl CcpState {
         shared.market.push_news_bulletin(bulletin);
     }
 
-    /// One account figure, and a tag saying which figure it is.
+    /// The account's cash, by currency.
     ///
-    /// The message carries a single number on 9806 and a selector on 6566. The
-    /// number was read as net liquidation whatever the selector said, so a
-    /// figure of another kind replaced a correct net liquidation — the one the
-    /// keyed account values state — and it only showed when that other figure
-    /// happened to be negative: an account holding nothing, with the better
-    /// part of a million in cash, reported a net liquidation of minus fourteen
-    /// hundred.
+    /// Tag 6566 counts the entries that follow and each is a currency on tag 15
+    /// with its balance on 9806. Read as a single number under a selector, this
+    /// took the last balance on the frame — the one belonging to whichever
+    /// currency came last — and published it as net liquidation, so an account
+    /// holding the better part of a million in cash reported a net liquidation
+    /// of minus fourteen hundred.
     ///
-    /// Which selector means net liquidation is not established, and the one
-    /// this session is sent is demonstrably not it, so nothing is written from
-    /// here. The selector is recorded as an unread wire rather than guessed at.
+    /// The account states these balances under names of their own, so there is
+    /// nothing here a caller does not already have. That is what this session
+    /// was sent and read back against the account; it is not a claim that no
+    /// account, in no state, ever states more on this frame.
     fn handle_account_summary(&mut self, parsed: &std::collections::HashMap<u32, String>, _shared: &SharedState) {
         // Tag 6566 counts the entries that follow, and each is a currency on
         // tag 15 with its cash balance on 9806. Captured whole from a live
