@@ -85,6 +85,79 @@ client.last_rtt_ms()                         # 10.96 on the session this was wri
 The API has no notion of this. A program that wants to know whether it is
 close to the venue has to time a request that does something else.
 
+## What the venue states about a contract, beyond its quote
+
+A quote subscription can carry far more than prices. The venue publishes dozens
+of series against a contract, each under a number of its own, and the API
+forwards a handful of them. Ask for one by putting its number in the generic
+tick list, then read what it stated.
+
+Some carry the venue's own named fields as text — analyst ratings, ownership,
+fund terms, screening scores, margin, technical readings, company accounts:
+
+```python
+client.req_mkt_data(1, contract, "454,505,631,678,705", False, False, [])
+client.company_data_series(265598)      # [434, 454, 505, 548, 631, 678, 699, 705, …]
+client.company_data(265598, 454)        # [('IITPCHL', '47.7348'), … ('IISHOS', '14594180000')]
+client.company_data(756733, 505)        # [('EXPRATIO', '0.0945'), ('TOTALASSETVALUE', '811937033817.46'), …]
+client.company_data(265598, 705)        # [('TRESGS', '7.10404'), ('TRESGCS', '3.65619'), …]
+```
+
+The keys are the venue's own and are handed on unchanged, so a field it adds
+arrives with the rest instead of being dropped for not being recognised here.
+One of these series answered with 212 fields on a single contract.
+
+Others carry figures rather than text — a bond's accrued interest, what one
+contract delivers, volatility, the volume a contract usually opens and closes
+on, what margin a future takes:
+
+```python
+client.stated_figures_series(1)         # [398, 399, 402, 459, 493, 504, 527, 584, …]
+client.stated_figures(1, 527)           # [0.0154349]   volatility over twenty days
+client.stated_figures(1, 504)           # [383820.0, 1.0]  what one contract delivers
+client.stated_figures(1, 407)           # [24340.8, 18338.7, 34772.6, 26198.1]
+```
+
+The figures arrive in the venue's order and at its widths, and a figure it holds
+nothing for arrives as the largest number its field carries. Nothing is
+republished under a tick number of this client's own choosing.
+
+Four series number their figures themselves, in two tables — whole numbers and
+fractional ones:
+
+```python
+client.numbered_figures(1, 562, fractional=False)   # [(7, 20260911.0), (30, 20260814.0), … (1826, 20210917.0)]
+client.numbered_figures(1, 562, fractional=True)    # [(7, 765.96), (30, 776.34), … (1826, 419.586)]
+client.numbered_figures(1, 757, fractional=True)    # [(30, 766.106)]  the average close over thirty days
+```
+
+The first of those is a price history: the number is a span of days, the whole
+table holds the date each was taken and the fractional table the price on it,
+back to five years — from a quote subscription, with no historical-data request.
+
+Two more state a run of paired figures, and one carries the venue's option model
+as the contract closed rather than as it stands — every greek it states,
+including several the API has no field for:
+
+```python
+client.paired_figures(1, 546)           # [(coordinate, volatility), …]
+client.closing_option_model(1)          # {'delta': …, 'rho': …, 'fugit': …, …}
+```
+
+### Series a subscription can be refused by silence
+
+Not every series is served to every account. The venue acknowledges the
+subscription, assigns it a tag, and then states nothing — it answers a series an
+account cannot see with silence rather than with a refusal, so there is no error
+to read. On the session this was written from, six behaved that way: 490, 546,
+669, 700, 726 and 733. The same six on the same account, minutes apart, over
+both a paper and a live login.
+
+An empty result from any of the calls above is therefore two things at once: a
+series the venue has nothing to say about for that contract, or one this account
+is not entitled to. The subscription list in account management is what tells
+them apart.
+
 ## Why this is not in the API
 
 The API is a protocol between a gateway and a program on the same machine. What
@@ -114,5 +187,14 @@ Two consequences worth stating plainly:
 | `client.next_order_id()` | `client.next_order_id()` |
 | `client.ccp_session_id()` | `client.ccp_session_id()` |
 | `client.misc_url(key)` | `client.misc_url(key)` |
+| `client.company_data(con_id, series)` | `client.company_data(con_id, series)` |
+| `client.company_data_series(con_id)` | `client.company_data_series(con_id)` |
+| `client.stated_figures(req_id, series)` | `client.stated_figures(req_id, series)` |
+| `client.stated_figures_series(req_id)` | `client.stated_figures_series(req_id)` |
+| `client.numbered_figures(req_id, series, fractional)` | `client.numbered_figures(req_id, series, fractional)` |
+| `client.numbered_figures_series(req_id)` | `client.numbered_figures_series(req_id)` |
+| `client.paired_figures(req_id, series)` | `client.paired_figures(req_id, series)` |
+| `client.paired_figures_series(req_id)` | `client.paired_figures_series(req_id)` |
+| `client.closing_option_model(req_id)` | `client.closing_option_model(req_id)` |
 | `client.req_ping()` | `client.req_ping()` |
 | `client.last_rtt_ms()` | `client.shared_state().last_ccp_rtt()`, a `Duration` |

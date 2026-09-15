@@ -248,6 +248,15 @@ jobs:
       - name: Every callback reaches both sinks
         run: python scripts/check_wrapper_tee.py
 
+      # The dispatcher hands a caller nothing at all for a figure the venue
+      # left out. A wrapper method declaring that figure as a number refuses
+      # the call, and the refusal leaves the reading loop and closes the
+      # session — on every caller that did not write the method itself. The
+      # suite cannot see it: a default nobody overrides is a default nobody
+      # calls, and every test here writes its own.
+      - name: A figure the venue left out reaches a wrapper that took the default
+        run: python scripts/check_wrapper_defaults.py
+
       # These fabricate a connected session, fills and account values. A Rust
       # document attribute does not reach the interpreter and a leading
       # underscore hides nothing from `getattr`, so compiled in they are part
