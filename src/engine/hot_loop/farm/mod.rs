@@ -435,6 +435,14 @@ fn deliver_series(
         // number says the count follows and its figure is that count, read as
         // a whole number, and every pair behind it states its figure to four
         // bytes.
+        //
+        // The number each average is kept under is the days it runs over —
+        // read off a live session, where a share around three hundred and
+        // thirty stated twelve days at three hundred and twenty-three, fifty
+        // at three hundred and fifteen and two hundred at two hundred and
+        // eighty-eight, falling as the window lengthens the way a rising
+        // share's averages do. Two of them are numbered below nought and are
+        // not days; nothing here says what they are.
         608 => {
             if !payload.len().is_multiple_of(8) {
                 log::debug!("the moving averages arrived in a record that is not pairs");

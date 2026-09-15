@@ -1125,6 +1125,17 @@ impl MarketDataState {
     /// | 491 | Which strategy the leg belongs to, the contract it names, and its size |
     /// | 320, 376, 530, 532 | The venue's number for a field of a packed quote, its figure, and how far that figure's decimal point moves |
     ///
+    /// On the packed quotes the venue numbers its fields itself, and what those
+    /// numbers mean was read off a live session rather than guessed: nought and
+    /// one are the two sides of the quote, four and five the size behind each.
+    /// A side the venue is not standing behind reads as minus one hundred.
+    ///
+    /// The figures on those are counted in the contract's own increments, as
+    /// every packed figure is — a quote of 75815 against an increment of a
+    /// hundredth is 758.15 — and the increment is on the contract. No scale is
+    /// put on them here, because which of the numbered fields are prices and
+    /// which are counts is the venue's to change.
+    ///
     /// Neither has a documented call to arrive on. `f64::MAX` stands where a
     /// form states no third figure. Empty until the series has been asked for
     /// and answered.

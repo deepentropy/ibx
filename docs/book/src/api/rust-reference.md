@@ -1436,7 +1436,7 @@ pub fn paired_figures(&self, req_id: i64, series: u32) -> Vec<(f64, f64)>
 
 #### `stated_rows`
 
-The rows of a book one series last stated for a subscription. A quantity, what it is offered at, and a second price where the form the venue used states one — `f64::MAX` where it does not. The venue keeps this for contracts dealt in size rather than on a screen, and the documented API has no call for it.
+The rows of three figures one series last stated for a subscription. What the three are is the series' own: | Series | The three figures | | --- | --- | | 547 | A quantity, what it is offered at, and a second price where the form states one | | 491 | Which strategy the leg belongs to, the contract it names, and its size | | 320, 376, 530, 532 | The venue's number for a field of a packed quote, its figure, and how far that figure's decimal point moves | On the packed quotes the venue numbers its fields itself: nought and one are the two sides of the quote and four and five the size behind each, read off a live session. A side the venue is not standing behind reads as minus one hundred. Those figures are counted in the contract's own increments, as every packed figure is — 75815 against an increment of a hundredth is 758.15 — and no scale is put on them here, because which fields are prices and which are counts is the venue's to change. `f64::MAX` stands where a form states no third figure. The documented API has no call for any of these.
 
 ```rust
 pub fn stated_rows(&self, req_id: i64, series: u32) -> Vec<(f64, f64, f64)>
