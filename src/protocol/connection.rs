@@ -475,10 +475,22 @@ impl Connection {
             let earliest = match earliest {
                 Some(e) => e,
                 None => {
-                    // Dump the full payload, hex and ascii, of anything
-                    // discarded here. A 64-byte prefix is not enough to tell
-                    // a framing error from a genuinely malformed frame.
-                    let full_hex: String = self.buf
+                    // Enough of what is discarded to tell a framing error from
+                    // a genuinely malformed frame, which a 64-byte prefix is
+                    // not — and no more than that.
+                    //
+                    // This buffer holds whatever the socket has delivered and
+                    // not yet been read out of, which runs to megabytes. Every
+                    // byte of it written out as hex is twice that again, built
+                    // as one string and written as one line: a single discard
+                    // of eight megabytes was measured at sixteen million
+                    // characters on one line. That is an allocation and a line
+                    // nobody reads, on the path that is already dealing with
+                    // something unexpected — and enough of them to stall a
+                    // reader that handles output a line at a time.
+                    const MOST_HEX_BYTES: usize = 512;
+                    let shown = self.buf.len().min(MOST_HEX_BYTES);
+                    let full_hex: String = self.buf[..shown]
                         .iter()
                         .map(|b| format!("{b:02x}"))
                         .collect();
@@ -498,7 +510,8 @@ impl Connection {
                     if dropped > 0 {
                         log::warn!(
                             "extract_frames: dropping {dropped}B (no header). \
-                             first {head_n}B ascii={head_ascii:?} full_hex={full_hex}",
+                             first {head_n}B ascii={head_ascii:?} \
+                             hex of the first {shown}B={full_hex}",
                         );
                     }
                     self.buf.drain(..dropped);
