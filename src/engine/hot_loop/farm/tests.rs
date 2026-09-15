@@ -542,6 +542,46 @@ mod news_tests {
         );
     }
 
+    /// The one company series the venue compresses, read out from behind its
+    /// header and inflated.
+    #[test]
+    fn the_company_calendar_is_read_out_from_behind_its_header() {
+        use std::io::Write as _;
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9006);
+
+        let text = b"TZ=America/New_York;ND=20261029;NT=16:30";
+        let mut squeezed = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        squeezed.write_all(text).unwrap();
+        let mut payload = vec![0u8; 8];
+        payload.extend_from_slice(&squeezed.finish().unwrap());
+
+        farm.generic_tick_tags.push((91, 386, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(91, 386, &payload)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.reference.company_data(9006, 386),
+            vec![("TZ".to_string(), "America/New_York".to_string()),
+                 ("ND".to_string(), "20261029".to_string()),
+                 ("NT".to_string(), "16:30".to_string())],
+            "the venue's own fields, out from behind eight bytes and inflated",
+        );
+
+        // Bytes that are not what the venue compressed publish nothing, rather
+        // than publishing whatever they happen to inflate to.
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(91, 386, b"\x00\x00\x00\x00\x00\x00\x00\x00not squeezed")]),
+            &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.reference.company_data(9006, 386).len(), 3,
+            "what would not inflate replaced what the venue had stated",
+        );
+    }
+
     /// The series that state figures, read at the venue's own widths and in
     /// its own order.
     ///

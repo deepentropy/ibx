@@ -1471,12 +1471,13 @@ fn length_prefixed_bytes(payload: &[u8]) -> Option<&[u8]> {
 /// The text a company-data series carries, out from behind what it states in
 /// front of it.
 ///
-/// Two shapes, and which one a series uses is the series' own. Four series
+/// Three shapes, and which one a series uses is the series' own. Four series
 /// state four bytes of their own in front of text that runs to the end of the
-/// record, and those bytes say nothing this client reads. The rest state the
-/// text's length as a count before it, and only that much of what follows is
-/// the text: what comes after is padding to a four-byte boundary and is not
-/// part of what the venue stated.
+/// record, and those bytes say nothing this client reads. One states eight of
+/// its own and compresses what follows. The rest state the text's length as a
+/// count before it, and only that much of what follows is the text: what comes
+/// after is padding to a four-byte boundary and is not part of what the venue
+/// stated.
 ///
 /// The second analyst rating is one of the counted ones, and was read as
 /// though the text began at the first byte. The count's low byte is a letter
@@ -1484,10 +1485,29 @@ fn length_prefixed_bytes(payload: &[u8]) -> Option<&[u8]> {
 /// ninety-seven and a hundred and twenty-two, so that byte joined the record's
 /// first name: three contracts stated the same field under three different
 /// names, each one the length of its own record.
-fn company_text(series: u32, payload: &[u8]) -> Option<&[u8]> {
+fn company_text(series: u32, payload: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
     match series {
-        454 | 505 | 669 | 705 => payload.get(4..),
-        _ => length_prefixed_bytes(payload),
+        454 | 505 | 669 | 705 => payload.get(4..).map(std::borrow::Cow::Borrowed),
+        // The company's calendar is the one of these the venue compresses. It
+        // states eight bytes of its own in front, and what follows becomes the
+        // same runs of `KEY=VALUE` the rest state outright. Held to what one
+        // payload may become, as every other inflate here is: what arrives is
+        // bounded on the wire and what it becomes is not.
+        386 => {
+            use std::io::Read as _;
+            let compressed = payload.get(8..)?;
+            let mut text = Vec::new();
+            flate2::read::ZlibDecoder::new(compressed)
+                .take(crate::protocol::fixcomp::MAX_INFLATED + 1)
+                .read_to_end(&mut text)
+                .ok()?;
+            if text.len() as u64 > crate::protocol::fixcomp::MAX_INFLATED {
+                log::warn!("the company calendar inflated past what one payload may be");
+                return None;
+            }
+            Some(std::borrow::Cow::Owned(text))
+        }
+        _ => length_prefixed_bytes(payload).map(std::borrow::Cow::Borrowed),
     }
 }
 
@@ -4514,8 +4534,8 @@ impl FarmState {
                 // buys in from elsewhere; the lens it publishes over a
                 // company's accounts; and the price it holds a contract
                 // against for reference.
-                434 | 454 | 505 | 548 | 628 | 631 | 633 | 669 | 678 | 699 | 700 | 703 | 705
-                | 726 | 750 | 752 => {
+                386 | 434 | 454 | 505 | 548 | 628 | 631 | 633 | 669 | 678 | 699 | 700 | 703
+                | 705 | 726 | 750 | 752 => {
                     self.deliver_company_data(instrument, tick, payload, context, shared)
                 }
                 other => {
@@ -4557,6 +4577,7 @@ impl FarmState {
             );
             return;
         };
+        let text: &[u8] = &text;
         let text = if company_text_is_one_byte(series) {
             // An alphabet of one byte to the character: what the venue states
             // for these series, and every byte of it stands for something, so
