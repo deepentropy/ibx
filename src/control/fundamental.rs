@@ -11,7 +11,7 @@ pub const TAG_RAW_DATA: u32 = 96;
 
 /// The pairs a company-data series states, as the venue writes them.
 ///
-/// Sixteen series carry what the venue holds about the company behind a
+/// Seventeen series carry what the venue holds about the company behind a
 /// contract, or about the terms of dealing in it, rather than about its quote
 /// — among them the two analyst ratings and the insider and institutional
 /// interest, which states how much of the company institutions and insiders

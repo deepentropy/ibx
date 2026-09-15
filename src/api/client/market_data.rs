@@ -609,10 +609,11 @@ impl EClient {
     /// What the venue states about a contract's company or its terms on one
     /// series, as the pairs it wrote.
     ///
-    /// Sixteen series carry this text, each asked for by the venue's own number
-    /// for it in the generic tick list: the analyst ratings, what institutions
-    /// and insiders hold, the shares on issue and the float, fund terms, the
-    /// screening scores, margin, the technical readings, the company's accounts.
+    /// Seventeen series carry this text, each asked for by the venue's own
+    /// number for it in the generic tick list: the analyst ratings, what
+    /// institutions and insiders hold, the shares on issue and the float, fund
+    /// terms, the screening scores, margin, the technical readings, the
+    /// company's accounts and what it has coming.
     /// The keys are the venue's own and are handed on unchanged.
     ///
     /// Held against the venue's id for the contract rather than the request,

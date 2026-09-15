@@ -1235,11 +1235,12 @@ impl ReferenceState {
     /// What the venue states about a contract's company or its terms on one
     /// series, as the pairs it wrote.
     ///
-    /// Sixteen series carry it, each asked for by the venue's own number for
+    /// Seventeen series carry it, each asked for by the venue's own number for
     /// it on the market data request:
     ///
     /// | Series | What it states |
     /// | --- | --- |
+    /// | 386 | What the company has coming, and when |
     /// | 434, 548 | The two analyst ratings |
     /// | 454 | What institutions and insiders hold, and the shares on issue |
     /// | 505 | What a fund will take part in |

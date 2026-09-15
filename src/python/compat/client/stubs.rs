@@ -61,7 +61,8 @@ impl EClient {
     /// series, as the pairs it wrote.
     ///
     /// Ask for the series on the market data request by the venue's own number
-    /// for it. Sixteen of them carry this text: 434 and 548 are the two analyst
+    /// for it. Seventeen of them carry this text: 386 is what the company has
+    /// coming and when; 434 and 548 are the two analyst
     /// ratings; 454 is how much of the company institutions and insiders hold,
     /// on what date each was counted, and how many shares are on issue, from
     /// which a float is worked out rather than stated; 505 is what a fund will

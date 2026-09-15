@@ -1484,7 +1484,7 @@ pub fn stated_figures_series(&self, req_id: i64) -> Vec<u32>
 
 #### `company_data`
 
-What the venue states about a contract's company or its terms on one series, as the pairs it wrote. Sixteen series carry this text, each asked for by the venue's own number for it in the generic tick list: the analyst ratings, what institutions and insiders hold, the shares on issue and the float, fund terms, the screening scores, margin, the technical readings, the company's accounts. The keys are the venue's own and are handed on unchanged. Held against the venue's id for the contract rather than the request, because it is a fact about the contract and outlives the subscription that fetched it — so it is read by `con_id`, not by request number. Empty where that series has stated nothing for the contract.
+What the venue states about a contract's company or its terms on one series, as the pairs it wrote. Seventeen series carry this text, each asked for by the venue's own number for it in the generic tick list: the analyst ratings, what institutions and insiders hold, the shares on issue and the float, fund terms, the screening scores, margin, the technical readings, the company's accounts and what it has coming. The keys are the venue's own and are handed on unchanged. Held against the venue's id for the contract rather than the request, because it is a fact about the contract and outlives the subscription that fetched it — so it is read by `con_id`, not by request number. Empty where that series has stated nothing for the contract.
 
 ```rust
 pub fn company_data(&self, con_id: u32, series: u32) -> Vec<(String, String)>

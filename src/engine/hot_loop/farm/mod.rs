@@ -4550,7 +4550,7 @@ impl FarmState {
     /// What the venue states about a contract's company and its terms, as its
     /// own text.
     ///
-    /// Sixteen series carry it and every one of them states it the same way:
+    /// Seventeen series carry it and every one states it the same way:
     /// runs of `KEY=VALUE` separated by semicolons or by line breaks, which
     /// are held under the contract for a caller to read. What differs between
     /// them is only what stands in front of the text, and which alphabet the
