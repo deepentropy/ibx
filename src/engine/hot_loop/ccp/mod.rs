@@ -1887,26 +1887,24 @@ impl CcpState {
     /// Which selector means net liquidation is not established, and the one
     /// this session is sent is demonstrably not it, so nothing is written from
     /// here. The selector is recorded as an unread wire rather than guessed at.
-    fn handle_account_summary(&mut self, parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
-        if let Some(selector) = parsed.get(&6566) {
-            // The number as well as the kind. The kind is not established and
-            // this refuses to name it — but the record said a frame of kind N
-            // had arrived and could not say what number it carried, which
-            // leaves nobody able to reconcile it against the figures the
-            // account states under names, and so leaves the kind unestablished
-            // for ever.
-            let stated = parsed.get(&9806).map(String::as_str).unwrap_or("nothing");
-            // Under the selector, so the row is replaced as the figure moves
-            // rather than added to. An account held in another currency moves
-            // every one of its figures every time the rate does.
-            shared.market.note_unread_wire_under(
-                "trading",
-                format!("account figure of kind {selector}"),
-                format!(
-                    "account figure of kind {selector} (6040=77) is {stated}, kind not established",
-                ),
-            );
-        }
+    fn handle_account_summary(&mut self, parsed: &std::collections::HashMap<u32, String>, _shared: &SharedState) {
+        // Tag 6566 counts the entries that follow, and each is a currency on
+        // tag 15 with its cash balance on 9806. Captured whole from a live
+        // session:
+        //
+        //     6040=77 1=DU… 6566=3 15=BASE 9806=1492751.1917
+        //                          15=GBP  9806=1105714.0700
+        //                          15=USD  9806=0.0000
+        //
+        // and the sterling figure is this account's `TotalCashBalance` in
+        // sterling to the penny. So the frame states what the account already
+        // states under names, and there is nothing here a caller does not have.
+        //
+        // Read as a kind rather than a count, it had this client publishing
+        // "an account figure of kind 3" whose value was the last of the three —
+        // a number belonging to whichever currency happened to be last on the
+        // wire, under a label that named nothing.
+        let _ = parsed;
         // Nothing is written from here, so nothing is published from here
         // either. Writing the unchanged snapshot back had one effect: it
         // raised the flag that says this connection has stated the account.

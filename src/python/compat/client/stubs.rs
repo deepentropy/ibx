@@ -62,8 +62,10 @@ impl EClient {
     ///
     /// Ask for the series on the market data request by the venue's own number
     /// for it: 434 and 548 are the two analyst ratings, and 454 is the insider
-    /// and institutional interest, which is where a float and a share count
-    /// are stated. The keys are the venue's own, unchanged.
+    /// and institutional interest: how much of the company institutions and
+    /// insiders hold, on what date each was counted, and how many shares are on
+    /// issue. A float is worked out from those rather than stated. The keys are
+    /// the venue's own, unchanged.
     fn company_data(&self, con_id: u32, series: u32) -> PyResult<Vec<(String, String)>> {
         Ok(self
             .shared_state()

@@ -13,7 +13,9 @@ pub const TAG_RAW_DATA: u32 = 96;
 ///
 /// Three series carry what the venue holds about the issuer rather than about
 /// the quote — the two analyst ratings and the insider and institutional
-/// interest, which is where a float and a share count are stated. All three
+/// interest, which states how much of the company institutions and insiders hold
+/// and how many shares are on issue — a float is worked out from those and is
+/// not itself stated. All three
 /// carry text: one line or several, each a run of `KEY=VALUE` joined by
 /// semicolons.
 ///

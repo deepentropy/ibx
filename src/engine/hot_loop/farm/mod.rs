@@ -608,6 +608,27 @@ fn deliver_series(
             {
                 say(102, SeriesValue::Generic(settled));
             }
+            // The record states up to three prices and two of them reach no
+            // caller. The counterpart keeps all three, in three fields of its
+            // own; the documented API has one number for this and this client
+            // will not pick a second, so what is not handed over is written
+            // down under its position rather than passing unseen.
+            for (at, price) in prices.iter().enumerate() {
+                if at == 1 || *price == f64::MAX {
+                    continue;
+                }
+                if at == 0 && flags & 0x07 == 0x05 {
+                    continue;
+                }
+                shared.market.note_unread_wire_under(
+                    "farm",
+                    format!("an estimated opening price at position {at}"),
+                    format!(
+                        "an estimated opening price at position {at} on tick 586, \
+                         which no documented call names",
+                    ),
+                );
+            }
         }
         // The company ratios, which the venue sends as compressed text behind
         // a header it does not describe. Held to what one inflated payload may

@@ -5839,43 +5839,39 @@ fn an_account_figure_of_an_unestablished_kind_is_recorded_with_its_number() {
     );
 }
 
-/// A figure that moves does not grow the record of what nothing read.
+/// The account's cash by currency is not a figure of an unknown kind.
 ///
-/// The number is kept beside the kind so the kind can be settled against the
-/// figures the account states under names. Recorded as a fresh row each time,
-/// an account held in another currency grows one every time the rate moves —
-/// and that record is a vector scanned linearly on the trading loop, so it is
-/// unbounded memory and quadratic work from ordinary traffic.
+/// Tag 6566 counts the entries that follow and each is a currency with its
+/// balance, which is what a live session sends. Read as a kind, this client
+/// published "a figure of kind 3" carrying the last of the three — a number
+/// belonging to whichever currency came last, under a label naming nothing.
 #[test]
-fn a_figure_that_moves_replaces_its_row_rather_than_adding_one() {
+fn the_account_s_cash_by_currency_is_not_a_figure_of_an_unknown_kind() {
     let (mut ccp, mut context, shared) = ord_status_test_state();
-    let said = |value: &str| crate::protocol::fix::fix_build(
-        &[(35, "U"), (6040, "77"), (6566, "1"), (9806, value)], 1,
+    // The frame as a session was sent it.
+    let msg = crate::protocol::fix::fix_build(
+        &[
+            (35, "U"), (6040, "77"), (1, "DU8571572"), (6566, "3"),
+            (15, "BASE"), (9806, "1492751.1917"),
+            (15, "GBP"), (9806, "1105714.0700"),
+            (15, "USD"), (9806, "0.0000"),
+        ],
+        1,
     );
-    for value in ["1492337.96", "1492341.02", "1492299.55", "1492410.88"] {
-        ccp.process_ccp_message(
-            &said(value), &mut None, &mut context, &shared, &None,
-            &mut HeartbeatState::new(), "DU123",
-        );
-    }
-
-    let rows: Vec<_> = shared.market.unread_wire().into_iter()
-        .filter(|(_, what)| what.contains("kind 1"))
-        .collect();
-    assert_eq!(rows.len(), 1, "one row for the kind, not one per reading: {rows:?}");
-    assert!(rows[0].1.contains("1492410.88"), "and it is the latest: {rows:?}");
-
-    // A different kind is a different row, because it is a different question.
     ccp.process_ccp_message(
-        &crate::protocol::fix::fix_build(
-            &[(35, "U"), (6040, "77"), (6566, "3"), (9806, "0.00")], 1,
-        ),
-        &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU123",
+        &msg, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU8571572",
     );
-    assert_eq!(
-        shared.market.unread_wire().iter().filter(|(_, w)| w.contains("account figure")).count(),
-        2,
-        "two kinds, two rows",
+
+    assert!(
+        !shared.market.unread_wire().iter().any(|(_, what)| what.contains("kind")),
+        "a counted group was published as a figure of a kind: {:?}",
+        shared.market.unread_wire(),
+    );
+    // And nothing is invented from it either: the account states these under
+    // their own names, and this frame adds none of its own.
+    assert!(
+        shared.portfolio.stated_account_values().is_empty(),
+        "a figure was published from a frame that states what the account already does",
     );
 }
 

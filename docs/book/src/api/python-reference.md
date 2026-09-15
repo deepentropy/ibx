@@ -1556,7 +1556,7 @@ def order_presets()
 
 #### `company_data`
 
-What the venue states about a contract's issuer on one series, as the pairs it wrote.  Ask for the series on the market data request by the venue's own number for it: 434 and 548 are the two analyst ratings, and 454 is the insider and institutional interest, which is where a float and a share count are stated. The keys are the venue's own, unchanged.
+What the venue states about a contract's issuer on one series, as the pairs it wrote.  Ask for the series on the market data request by the venue's own number for it: 434 and 548 are the two analyst ratings, and 454 is the insider and institutional interest: how much of the company institutions and insiders hold, on what date each was counted, and how many shares are on issue. A float is worked out from those rather than stated. The keys are the venue's own, unchanged.
 
 ```python
 def company_data(con_id, series)
