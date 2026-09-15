@@ -353,6 +353,85 @@ mod news_tests {
         );
     }
 
+    /// The other thirteen series that carry the venue's own fields as text,
+    /// each out from behind what it states in front of it.
+    ///
+    /// Two of them step over four bytes the way the insider record does. The
+    /// rest state the text's length first and pad what follows to a four-byte
+    /// boundary, so a reader taking the whole remainder takes padding with it,
+    /// and one taking a stated length on trust takes bytes that never arrived.
+    #[test]
+    fn a_series_that_frames_its_text_is_read_out_from_behind_the_frame() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(4001);
+
+        // A length, the text, and padding to the next four-byte boundary.
+        let framed = |text: &[u8]| {
+            let mut out = (text.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(text);
+            out.resize(out.len().next_multiple_of(4), 0);
+            out
+        };
+
+        farm.generic_tick_tags.push((41, 703, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(41, 703, &framed(b"LongInitial=25;MarginUnit=PCT"))]),
+            &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.reference.company_data(4001, 703),
+            vec![("LongInitial".to_string(), "25".to_string()),
+                 ("MarginUnit".to_string(), "PCT".to_string())],
+            "the padding behind the text is not read as part of a value",
+        );
+
+        // Four bytes of its own, then the text, the way the insider record
+        // states it.
+        let mut ratios = vec![0u8, 0, 0, 2];
+        ratios.extend_from_slice(b"TTMREV=1.5;TTMEPS=0.25");
+        farm.generic_tick_tags.push((42, 669, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(42, 669, &ratios)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.reference.company_data(4001, 669),
+            vec![("TTMREV".to_string(), "1.5".to_string()),
+                 ("TTMEPS".to_string(), "0.25".to_string())],
+            "the four bytes before the text are not read as part of a key",
+        );
+
+        // An alphabet of one byte to the character. The same bytes read as the
+        // alphabet this client reads other text in are not text at all, and a
+        // reader holding every series to that would publish nothing here.
+        farm.generic_tick_tags.push((43, 726, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(43, 726, &framed(b"NAME=Nestl\xe9"))]),
+            &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.reference.company_data(4001, 726),
+            vec![("NAME".to_string(), "Nestlé".to_string())],
+            "a byte that stands for a character in the venue's alphabet was dropped",
+        );
+
+        // A length reaching past what arrived states text this record does not
+        // carry, and a length of nothing states none.
+        for (slot, stated) in [(44u32, 64u32), (45, 0)] {
+            let mut short = stated.to_be_bytes().to_vec();
+            short.extend_from_slice(b"PASS=1");
+            farm.generic_tick_tags.push((slot, 752, instrument));
+            farm.handle_generic_tick(
+                &framed_generic_ticks(&[(slot, 752, &short)]), &mut context, &shared, &None,
+            );
+            assert!(
+                shared.reference.company_data(4001, 752).is_empty(),
+                "a length of {stated} against six bytes of text published something anyway",
+            );
+        }
+    }
+
     /// A record stating more estimate points than the series carries is not
     /// that record, and publishes nothing.
     ///

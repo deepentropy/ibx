@@ -1232,16 +1232,31 @@ impl ReferenceState {
         self.dividend_schedules.lock().unwrap().insert(con_id, schedule);
     }
 
-    /// What the venue states about a contract's issuer on one series, as the
-    /// pairs it wrote.
+    /// What the venue states about a contract's company or its terms on one
+    /// series, as the pairs it wrote.
     ///
-    /// Three series carry it, each asked for by the venue's own number for it
-    /// on the market data request: 434 and 548 are the two analyst ratings,
-    /// and 454 is the insider and institutional interest, which is where a
-    /// float and a share count are stated. Empty until one of them has been
-    /// asked for and answered, and empty for a contract whose subscriptions do
-    /// not cover it — the venue answers a series the account cannot see with
-    /// silence rather than with a refusal.
+    /// Sixteen series carry it, each asked for by the venue's own number for
+    /// it on the market data request:
+    ///
+    /// | Series | What it states |
+    /// | --- | --- |
+    /// | 434, 548 | The two analyst ratings |
+    /// | 454 | What institutions and insiders hold, and the shares on issue |
+    /// | 505 | What a fund will take part in |
+    /// | 628, 633 | A fund family's figures, and the same by financial year |
+    /// | 631 | The technical readings taken on the contract |
+    /// | 669 | The ratios the venue keeps a history of |
+    /// | 678, 699 | Two scores worked out from what is written about the company |
+    /// | 700 | How the company scores against the principles an account can screen on |
+    /// | 703 | What margin dealing in the contract takes |
+    /// | 705 | The same screening principles, as the venue's own fields |
+    /// | 726 | The lens the venue publishes over the company's accounts |
+    /// | 750 | The price the venue holds the contract against for reference |
+    /// | 752 | Whether the contract passes a religious screen |
+    ///
+    /// Empty until one of them has been asked for and answered, and empty for
+    /// a contract whose subscriptions do not cover it — the venue answers a
+    /// series the account cannot see with silence rather than with a refusal.
     ///
     /// The keys are the venue's own, unchanged. They are the venue's to add to
     /// and to rename, so nothing here reads them or promises a set of them.

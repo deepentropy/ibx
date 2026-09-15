@@ -11,13 +11,13 @@ pub const TAG_RAW_DATA: u32 = 96;
 
 /// The pairs a company-data series states, as the venue writes them.
 ///
-/// Three series carry what the venue holds about the issuer rather than about
-/// the quote — the two analyst ratings and the insider and institutional
-/// interest, which states how much of the company institutions and insiders hold
-/// and how many shares are on issue — a float is worked out from those and is
-/// not itself stated. All three
-/// carry text: one line or several, each a run of `KEY=VALUE` joined by
-/// semicolons.
+/// Sixteen series carry what the venue holds about the company behind a
+/// contract, or about the terms of dealing in it, rather than about its quote
+/// — among them the two analyst ratings and the insider and institutional
+/// interest, which states how much of the company institutions and insiders
+/// hold and how many shares are on issue: a float is worked out from those and
+/// is not itself stated. Every one of them carries text: one line or several,
+/// each a run of `KEY=VALUE` joined by semicolons.
 ///
 /// The keys are the venue's own and are handed on unchanged. This reads the
 /// shape and not the vocabulary, so a key the venue adds arrives with the rest

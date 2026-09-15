@@ -57,15 +57,24 @@ impl EClient {
         Ok(self.shared_state().map(|s| s.reference.order_presets()).unwrap_or_default())
     }
 
-    /// What the venue states about a contract's issuer on one series, as the
-    /// pairs it wrote.
+    /// What the venue states about a contract's company or its terms on one
+    /// series, as the pairs it wrote.
     ///
     /// Ask for the series on the market data request by the venue's own number
-    /// for it: 434 and 548 are the two analyst ratings, and 454 is the insider
-    /// and institutional interest: how much of the company institutions and
-    /// insiders hold, on what date each was counted, and how many shares are on
-    /// issue. A float is worked out from those rather than stated. The keys are
-    /// the venue's own, unchanged.
+    /// for it. Sixteen of them carry this text: 434 and 548 are the two analyst
+    /// ratings; 454 is how much of the company institutions and insiders hold,
+    /// on what date each was counted, and how many shares are on issue, from
+    /// which a float is worked out rather than stated; 505 is what a fund will
+    /// take part in; 628 and 633 are a fund family's figures and the same by
+    /// financial year; 631 the technical readings taken on the contract; 669
+    /// the ratios the venue keeps a history of; 678 and 699 two scores worked
+    /// out from what is written about the company; 700 and 705 how it scores
+    /// against the principles an account can screen on; 703 what margin dealing
+    /// in it takes; 726 the lens the venue publishes over its accounts; 750 the
+    /// price the venue holds it against for reference; and 752 whether it
+    /// passes a religious screen.
+    ///
+    /// The keys are the venue's own, unchanged.
     fn company_data(&self, con_id: u32, series: u32) -> PyResult<Vec<(String, String)>> {
         Ok(self
             .shared_state()

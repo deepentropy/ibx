@@ -1292,8 +1292,46 @@ fn read_generic_ticks<'a>(
 /// to a four-byte boundary. Read end to end as text, the length bytes join the
 /// first name and the padding joins the last.
 fn length_prefixed_text(payload: &[u8]) -> Option<std::borrow::Cow<'_, str>> {
-    let stated = u32::from_be_bytes(payload.get(..4)?.try_into().ok()?) as usize;
-    Some(String::from_utf8_lossy(payload.get(4..4 + stated)?))
+    Some(String::from_utf8_lossy(length_prefixed_bytes(payload)?))
+}
+
+/// The bytes inside a tick payload that states its own length, as they came.
+///
+/// A length that is nothing or less states no text: the venue's own reader
+/// leaves such a record alone rather than reading what follows it, and a
+/// length reaching past what arrived states text this record does not carry.
+fn length_prefixed_bytes(payload: &[u8]) -> Option<&[u8]> {
+    let stated = i32::from_be_bytes(payload.get(..4)?.try_into().ok()?);
+    let stated = usize::try_from(stated).ok().filter(|stated| *stated > 0)?;
+    payload.get(4..4 + stated)
+}
+
+/// The text a company-data series carries, out from behind what it states in
+/// front of it.
+///
+/// Three shapes, and which one a series uses is the series' own. The two
+/// analyst ratings are text from the first byte. Four series state four bytes
+/// of their own first, which say nothing this client reads and are stepped
+/// over. The rest state the text's length as a count before it, and only that
+/// much of what follows is the text: what comes after is padding to a
+/// four-byte boundary and is not part of what the venue stated.
+fn company_text(series: u32, payload: &[u8]) -> Option<&[u8]> {
+    match series {
+        434 | 548 => Some(payload),
+        454 | 505 | 669 | 705 => payload.get(4..),
+        _ => length_prefixed_bytes(payload),
+    }
+}
+
+/// Whether a series states its text in an alphabet of one byte to the
+/// character.
+///
+/// The venue names the alphabet for some of these series and not for others.
+/// Where it names one it is that alphabet, or the plain seven-bit one in which
+/// the same bytes come out the same way; where it names none, the text is read
+/// the way every other text this client is sent is read.
+fn company_text_is_one_byte(series: u32) -> bool {
+    matches!(series, 669 | 700 | 703 | 705 | 726)
 }
 
 /// What the venue sent of its option model.
@@ -4284,10 +4322,21 @@ impl FarmState {
                 619 => self.deliver_mark(instrument, 79, payload, context, shared),
                 233 => self.deliver_running_volume(instrument, 48, payload, shared),
                 375 => self.deliver_running_volume(instrument, 77, payload, shared),
-                // What the venue holds about the issuer rather than about the
-                // quote: the two analyst ratings, and what institutions and
-                // insiders hold of the company beside the shares on issue.
-                434 | 454 | 548 => {
+                // What the venue holds about the company behind a contract
+                // rather than about its quote, and what it holds about the
+                // terms of dealing in it. Every one of these is text the venue
+                // writes as its own named fields: the two analyst ratings and
+                // what institutions and insiders hold beside the shares on
+                // issue; the ratios it keeps a history of; how a contract
+                // scores against the principles an account can screen on and
+                // whether it passes a religious screen; what margin it takes
+                // and what a fund will take part in; the technical readings,
+                // the fund-family figures and the two news-derived scores it
+                // buys in from elsewhere; the lens it publishes over a
+                // company's accounts; and the price it holds a contract
+                // against for reference.
+                434 | 454 | 505 | 548 | 628 | 631 | 633 | 669 | 678 | 699 | 700 | 703 | 705
+                | 726 | 750 | 752 => {
                     self.deliver_company_data(instrument, tick, payload, context, shared)
                 }
                 other => {
@@ -4299,12 +4348,14 @@ impl FarmState {
         }
     }
 
-    /// What the venue states about a contract's issuer, as its own text.
+    /// What the venue states about a contract's company and its terms, as its
+    /// own text.
     ///
-    /// Three series carry it and all three state it the same way: lines of
-    /// `KEY=VALUE` pairs, which are held under the contract for a caller to
-    /// read. The insider and institutional record states four bytes of its own
-    /// before the text; the two ratings records are text from the first byte.
+    /// Sixteen series carry it and every one of them states it the same way:
+    /// runs of `KEY=VALUE` separated by semicolons or by line breaks, which
+    /// are held under the contract for a caller to read. What differs between
+    /// them is only what stands in front of the text, and which alphabet the
+    /// bytes behind it are read in.
     ///
     /// Held against the venue's id for the contract rather than against the
     /// slot it is watched in, because it is a fact about the contract and
@@ -4320,16 +4371,30 @@ impl FarmState {
         let Some(con_id) = context.market.con_id(instrument).filter(|id| *id > 0) else {
             return;
         };
-        let text = if series == 454 { payload.get(4..).unwrap_or_default() } else { payload };
-        // Read as text or not at all. Read with the bytes it could not make
-        // sense of replaced, a record carrying one such byte was handed to a
-        // caller with a replacement character in it — a character the venue
-        // never sent, in a value a caller reads as the venue's own.
-        let Ok(text) = std::str::from_utf8(text) else {
-            log::debug!("company data on series {series} is not text; nothing is published");
+        let Some(text) = company_text(series, payload) else {
+            log::debug!(
+                "company data on series {series} does not carry the text it \
+                 frames; nothing is published",
+            );
             return;
         };
-        let pairs = crate::control::fundamental::stated_pairs(text);
+        let text = if company_text_is_one_byte(series) {
+            // An alphabet of one byte to the character: what the venue states
+            // for these series, and every byte of it stands for something, so
+            // there is nothing here that can fail to be read.
+            std::borrow::Cow::Owned(text.iter().map(|b| char::from(*b)).collect::<String>())
+        } else {
+            // Read as text or not at all. Read with the bytes it could not make
+            // sense of replaced, a record carrying one such byte was handed to a
+            // caller with a replacement character in it — a character the venue
+            // never sent, in a value a caller reads as the venue's own.
+            let Ok(text) = std::str::from_utf8(text) else {
+                log::debug!("company data on series {series} is not text; nothing is published");
+                return;
+            };
+            std::borrow::Cow::Borrowed(text)
+        };
+        let pairs = crate::control::fundamental::stated_pairs(&text);
         // A record stating no pair states nothing. Written down anyway, a
         // caller reading the series could not tell a contract the venue holds
         // nothing for from one it has not answered yet.
