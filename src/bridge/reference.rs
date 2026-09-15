@@ -1261,6 +1261,16 @@ impl ReferenceState {
     ///
     /// The keys are the venue's own, unchanged. They are the venue's to add to
     /// and to rename, so nothing here reads them or promises a set of them.
+    ///
+    /// What one contract states is kept for as long as the session runs, and
+    /// is not dropped when the subscription that fetched it ends — it is a fact
+    /// about the contract rather than about the watch. That costs memory in
+    /// proportion to the contracts a session has watched, not to the ones it is
+    /// watching now: measured against one ordinary share stating every series,
+    /// about twenty-three kilobytes for it, so a session that has watched ten
+    /// thousand contracts holds a couple of hundred megabytes of this. A
+    /// program watching a few hundred will not notice; one sweeping a scanner
+    /// across thousands should know where the memory went.
     pub fn company_data(&self, con_id: u32, series: u32) -> Vec<(String, String)> {
         self.company_data.lock().unwrap().get(&(con_id, series)).cloned().unwrap_or_default()
     }
