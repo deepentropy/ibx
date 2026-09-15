@@ -246,8 +246,8 @@ same thing, not that the documented API does.
 | `checkConnected` | ● | · | · | · | · | ● |
 | `closingOptionModel` | ● | · | · | · | ● | ● |
 | `closingOptionModelByInstrument` | ● | · | · | · | ● | ● |
-| `companyData` | ● | · | · | · | · | ● |
-| `companyDataSeries` | ● | · | · | · | · | ● |
+| `companyData` | ● | · | · | · | ● | ● |
+| `companyDataSeries` | ● | · | · | · | ● | ● |
 | `competingSession` | ● | · | · | · | · | ● |
 | `connect_with_events` | ● | · | · | · | ● | · |
 | `contractFigures` | ● | · | · | · | ● | ● |

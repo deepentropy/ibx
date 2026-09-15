@@ -1482,6 +1482,39 @@ pub fn stated_figures_series(&self, req_id: i64) -> Vec<u32>
 
 ---
 
+#### `company_data`
+
+What the venue states about a contract's company or its terms on one series, as the pairs it wrote. Sixteen series carry this text, each asked for by the venue's own number for it in the generic tick list: the analyst ratings, what institutions and insiders hold, the shares on issue and the float, fund terms, the screening scores, margin, the technical readings, the company's accounts. The keys are the venue's own and are handed on unchanged. Held against the venue's id for the contract rather than the request, because it is a fact about the contract and outlives the subscription that fetched it — so it is read by `con_id`, not by request number. Empty where that series has stated nothing for the contract.
+
+```rust
+pub fn company_data(&self, con_id: u32, series: u32) -> Vec<(String, String)>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `con_id` | `u32` | Contract ID. Unique per instrument. |
+| `series` | `u32` |  |
+
+**Returns:** `Vec<(String, String)>`
+
+---
+
+#### `company_data_series`
+
+Which of those series have been stated for a contract, in order.
+
+```rust
+pub fn company_data_series(&self, con_id: u32) -> Vec<u32>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `con_id` | `u32` | Contract ID. Unique per instrument. |
+
+**Returns:** `Vec<u32>`
+
+---
+
 #### `closing_option_model`
 
 What the venue's model made of an option as it closed. The same model as [`Self::option_model`] and in the same shape — every greek it states, the ones the documented API has no field for included — but worked out as the contract closed rather than as it stands. The documented API has no call for it at all. Ask for it by the venue's own number for the series in the generic tick list.
