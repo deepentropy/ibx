@@ -542,6 +542,56 @@ mod news_tests {
         );
     }
 
+    /// Every new reader, handed records that stop in the wrong place.
+    ///
+    /// A truncated record, an empty one, a count that overruns and a count
+    /// that is nothing: none of them may panic, and none may publish a figure
+    /// the venue did not state.
+    #[test]
+    fn a_record_that_stops_short_is_read_without_panicking() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9100);
+
+        let nasty: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0],
+            vec![0, 0, 0],
+            vec![0, 0, 0, 1],
+            vec![255, 255, 255, 255],
+            vec![0x7f, 0xff, 0xff, 0xff],
+            vec![0, 0, 0, 200, 1, 2, 3],
+            vec![0xff; 7],
+            vec![0x78, 0x9c, 1, 2, 3],
+        ];
+        // Every series this client now reads on a contract.
+        let series: Vec<u32> = vec![
+            386, 434, 454, 505, 548, 628, 631, 633, 669, 678, 699, 700, 703, 705, 726, 750, 752,
+            125, 266, 317, 388, 391, 393, 398, 399, 402, 407, 418, 459, 493, 497, 504, 509, 527,
+            531, 540, 545, 584, 585, 597, 606, 613, 645, 647, 649, 657, 658, 680, 689, 736, 767,
+            165, 561, 562, 757, 490, 546, 732, 733,
+        ];
+        let mut slot = 200u32;
+        for s in &series {
+            for payload in &nasty {
+                slot += 1;
+                farm.generic_tick_tags.push((slot, *s, instrument));
+                farm.handle_generic_tick(
+                    &framed_generic_ticks(&[(slot, *s, payload)]), &mut context, &shared, &None,
+                );
+            }
+        }
+        // Nothing a truncated record produced may read as a figure the venue
+        // holds nothing for: that number is its way of saying so, and it is
+        // not a reading.
+        for s in &series {
+            for v in shared.market.stated_figures(instrument, *s) {
+                assert!(v.is_finite(), "series {s} published a figure that is not a number");
+            }
+        }
+    }
+
     /// The one company series the venue compresses, read out from behind its
     /// header and inflated.
     #[test]
