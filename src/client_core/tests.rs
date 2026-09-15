@@ -177,6 +177,16 @@ fn the_one_shot_keeps_its_kind_until_the_slot_changes_hands() {
 #[test]
 fn a_caller_takes_the_series_it_brought_with_it() {
     let core = ClientCore::new();
+    // A millisecond is what a test gets by default, and this waits on a reply
+    // from a thread it has just spawned: under a suite running on every core
+    // that thread is not always scheduled inside one, and the wait then ends
+    // in a timeout whose code is not the one the engine refused under.
+    core.set_registration_timeout(std::time::Duration::from_secs(5));
+    // A millisecond is what a test gets by default, and this waits on a reply
+    // from a thread it has just spawned: under a suite running on every core
+    // that thread is not always scheduled inside one, and the wait then ends
+    // in a timeout whose code is not the one the engine refused under.
+    core.set_registration_timeout(std::time::Duration::from_secs(5));
     let shared = SharedState::new();
     let iid: InstrumentId = 0;
 
@@ -3708,6 +3718,11 @@ fn a_caller_moved_onto_another_slot_is_paid_like_a_joiner() {
 #[test]
 fn a_registration_that_fails_withdraws_the_headlines_it_asked_for() {
     let core = ClientCore::new();
+    // A millisecond is what a test gets by default, and this waits on a reply
+    // from a thread it has just spawned: under a suite running on every core
+    // that thread is not always scheduled inside one, and the wait then ends
+    // in a timeout whose code is not the one the engine refused under.
+    core.set_registration_timeout(std::time::Duration::from_secs(5));
     let shared = SharedState::new();
     let (tx, rx) = std::sync::mpsc::sync_channel(64);
     shared.market.set_instrument_count(4);

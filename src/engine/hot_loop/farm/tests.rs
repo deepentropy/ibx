@@ -493,6 +493,101 @@ mod news_tests {
         );
     }
 
+    /// The four series written in the packed record the quote stream itself
+    /// uses, read by the reader that already reads that.
+    #[test]
+    fn a_packed_quote_is_read_by_the_reader_the_quote_stream_uses() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9700);
+
+        // The same record the odd lot and the mark are written in: five bits
+        // of number, a flag saying whether another follows, two bits of width,
+        // then a sign bit and the figure.
+        let mut bits: Vec<u8> = Vec::new();
+        let mut held: u32 = 0;
+        let mut used: u32 = 0;
+        let put = |value: u64, width: u32, bits: &mut Vec<u8>, held: &mut u32, used: &mut u32| {
+            for at in (0..width).rev() {
+                *held = (*held << 1) | ((value >> at) as u32 & 1);
+                *used += 1;
+                if *used == 8 {
+                    bits.push(*held as u8);
+                    *held = 0;
+                    *used = 0;
+                }
+            }
+        };
+        for (id, magnitude, bytes, more) in [(1u64, 12345u64, 2u32, 1u64), (2, 67890, 3, 0)] {
+            put(id, 5, &mut bits, &mut held, &mut used);
+            put(more, 1, &mut bits, &mut held, &mut used);
+            put(u64::from(bytes - 1), 2, &mut bits, &mut held, &mut used);
+            put(0, 1, &mut bits, &mut held, &mut used);
+            put(magnitude, bytes * 8 - 1, &mut bits, &mut held, &mut used);
+        }
+        if used > 0 {
+            bits.push((held << (8 - used)) as u8);
+        }
+        let packed = bits;
+        farm.generic_tick_tags.push((100, 320, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(100, 320, &packed)]), &mut context, &shared, &None,
+        );
+        let rows = shared.market.stated_rows(instrument, 320);
+        assert_eq!(rows.len(), 2, "both fields of the record: {rows:?}");
+        assert_eq!(rows[0].0, 1.0, "the venue's own number for the field");
+        assert_eq!(rows[0].1, 12345.0, "the figure as the record states it");
+        assert_eq!(rows[1].0, 2.0);
+        assert_eq!(rows[1].1, 67890.0);
+
+        shared.market.forget_option_model(instrument);
+        assert!(
+            shared.market.stated_rows(instrument, 320).is_empty(),
+            "a quote outlived the contract it was stated for",
+        );
+    }
+
+    /// The moving averages, whose record is pairs of a number and a figure
+    /// from end to end — the first pair stating how many follow.
+    #[test]
+    fn the_moving_averages_state_how_many_follow_in_their_first_pair() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9600);
+
+        // The count pair, then two figures. Its figure is a whole number where
+        // every pair behind it states one to four bytes.
+        let mut averages = 1i32.to_be_bytes().to_vec();
+        averages.extend_from_slice(&2i32.to_be_bytes());
+        for (named, value) in [(20i32, 331.5f32), (50, 325.25)] {
+            averages.extend_from_slice(&named.to_be_bytes());
+            averages.extend_from_slice(&value.to_be_bytes());
+        }
+        assert_eq!(averages.len() % 8, 0, "the record is pairs from end to end");
+
+        farm.generic_tick_tags.push((99, 608, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(99, 608, &averages)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.numbered_figures(instrument, 608, true),
+            vec![(20, 331.5), (50, 325.25)],
+            "each average under the number the venue keeps it by",
+        );
+
+        // A record that is not pairs is not one of these at all.
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(99, 608, b"\x00\x00\x00\x01\x00\x00")]),
+            &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.numbered_figures(instrument, 608, true).len(), 2,
+            "a record that is not pairs replaced what the venue had stated",
+        );
+    }
+
     /// The other three series that state two numbered tables, read by the
     /// same reader the extremes are.
     ///

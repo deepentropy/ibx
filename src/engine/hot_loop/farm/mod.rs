@@ -402,6 +402,60 @@ fn deliver_series(
                 shared.market.note_paired_figures(instrument, tick, pairs);
             }
         }
+        // The quotes the venue states for a contract that is no longer being
+        // quoted, and for the contract beneath it: frozen, delayed, and the
+        // request-for-quote stream. All four are the packed record the quote
+        // stream itself is written in, so they are read by the reader that
+        // already reads that.
+        //
+        // Kept as the record states them — the venue's own number for each
+        // field, the figure as it stands, and how far that figure's decimal
+        // point moves. Which of those fields are prices and which are sizes is
+        // the one thing the venue's own reader would say and this cannot read,
+        // so no scale is put on them here: a figure whose point does not move
+        // is counted in the contract's own increments, as every packed figure
+        // is, and the increment is on the contract for a caller that wants it.
+        320 | 376 | 530 | 532 => {
+            use crate::protocol::tick_decoder::{BitReader, decode_record};
+            let Some(fields) = decode_record(&mut BitReader::new(payload, 0)) else {
+                log::debug!("a packed quote on series {tick} did not end; nothing is published");
+                return true;
+            };
+            let rows: Vec<(f64, f64, f64)> = fields
+                .iter()
+                .map(|f| (f.id as f64, f.magnitude as f64, f64::from(f.decimal_shift)))
+                .collect();
+            if !rows.is_empty() {
+                shared.market.note_stated_rows(instrument, tick, rows);
+            }
+        }
+        // The moving averages the venue keeps over a contract's close. The
+        // record is pairs of a number and a figure from end to end, which is
+        // why its length is always a multiple of eight: the first pair's
+        // number says the count follows and its figure is that count, read as
+        // a whole number, and every pair behind it states its figure to four
+        // bytes.
+        608 => {
+            if !payload.len().is_multiple_of(8) {
+                log::debug!("the moving averages arrived in a record that is not pairs");
+                return true;
+            }
+            let Some(count) = series_i32(payload, 4) else { return true };
+            let mut figures: NumberedFigures = Vec::new();
+            let mut at = 8usize;
+            for _ in 0..count.clamp(0, (payload.len() / 8) as i32) {
+                let (Some(named), Some(value)) =
+                    (series_i32(payload, at), series_f32(payload, at + 4))
+                else {
+                    break;
+                };
+                figures.push((named, f64::from(value)));
+                at += 8;
+            }
+            if !figures.is_empty() {
+                shared.market.note_numbered_figures(instrument, tick, &[], &figures);
+            }
+        }
         165 | 561 | 562 | 757 => {
             let (whole, fractional) = read_numbered_figures(payload);
             // Kept whole, both tables, under the venue's own numbering. Two of
