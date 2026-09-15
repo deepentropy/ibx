@@ -332,10 +332,18 @@ impl EWrapper {
 
     /// The venue's model for an option: the volatility its price implies, the
     /// greeks, and the modelled value of the option and its underlying.
+    ///
+    /// Every figure is `None` where the venue stated none. The reference
+    /// client hands a caller `None` for those, so this surface does too, and a
+    /// wrapper that has not overridden this is handed the same. Declared as a
+    /// number, the default refused the call and the exception left the caller's
+    /// reading loop: a caller who watched an option and did not write this
+    /// method lost the session on the first model the venue did not fill in.
     fn tick_option_computation(
         &self, _req_id: i64, _tick_type: i32, _tick_attrib: i32,
-        _implied_vol: f64, _delta: f64, _opt_price: f64, _pv_dividend: f64,
-        _gamma: f64, _vega: f64, _theta: f64, _und_price: f64,
+        _implied_vol: Option<f64>, _delta: Option<f64>, _opt_price: Option<f64>,
+        _pv_dividend: Option<f64>, _gamma: Option<f64>, _vega: Option<f64>,
+        _theta: Option<f64>, _und_price: Option<f64>,
     ) {}
 
     /// One venue's option chain for an underlying: the

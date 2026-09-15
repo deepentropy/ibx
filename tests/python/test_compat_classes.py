@@ -623,3 +623,25 @@ def test_an_order_the_transport_refused_is_not_left_working():
     assert trade is not None, "the caller still gets the object to read"
     assert ib.wrapper.trade_for(11) is None, "and it is not a working order"
     assert all(t.order.orderId != 11 for t in ib.openTrades())
+
+
+def test_a_model_the_venue_left_blank_reaches_a_wrapper_that_did_not_write_the_method():
+    """A caller who watches an option and never writes
+    `tick_option_computation` keeps its session.
+
+    The venue leaves figures out of the model it publishes, and this surface
+    hands those on as `None`, which is what the reference client hands on.
+    Declared as numbers, the base class refused the call, and the refusal left
+    the caller's reading loop: one model without a dividend in it ended the
+    session, on every caller that had not written the method itself. Every test
+    here had written one, so nothing saw it.
+    """
+    from ibx import EWrapper
+
+    EWrapper().tick_option_computation(
+        1, 13, 0, None, None, None, None, None, None, None, None,
+    )
+    # And the same call with every figure stated.
+    EWrapper().tick_option_computation(
+        1, 13, 0, 0.21, 0.5, 2.5, 0.0, 0.01, 0.1, -0.02, 330.0,
+    )
