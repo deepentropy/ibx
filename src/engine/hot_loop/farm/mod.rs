@@ -137,9 +137,20 @@ fn build_series_subscribe_tags(
         (146, rows.len().to_string()),
     ];
     for (req_id, tick) in rows {
+        // The model at the close is asked for where the standing model is, not
+        // where the contract trades. The venue treats the two as one kind:
+        // same record, same flags, same reader, the closing one differing only
+        // in which moment it was worked out for — and the standing one is
+        // served only when it is asked for on that venue.
+        //
+        // This does not make the closing model arrive. Asked for either way it
+        // is acknowledged and then never stated, on both a paper and a live
+        // login for this account, so what withholds it is not the venue named
+        // here.
+        let venue = if *tick == CLOSING_GREEKS_REQUEST_TYPE { GREEKS_VENUE } else { fix_exchange };
         tags.push((262, req_id.to_string()));
         tags.push((6008, con_id_str.clone()));
-        tags.push((207, fix_exchange.to_string()));
+        tags.push((207, venue.to_string()));
         tags.push((167, fix_sec_type.to_string()));
         tags.push((264, tick.to_string()));
         tags.push((6088, "Socket".to_string()));
