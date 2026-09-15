@@ -289,9 +289,10 @@ mod news_tests {
     /// What the venue states about an issuer is held under the contract, as
     /// the venue's own pairs.
     ///
-    /// Three series carry it. Two of them are text from the first byte and the
-    /// third states four bytes of its own first, so a reader that treated them
-    /// alike read the length of the insider record as part of its first key.
+    /// Three series carry it. One states four bytes of its own in front of
+    /// text running to the end of the record, and two state the text's length
+    /// as a count, so a reader that treated them alike read one record's
+    /// length as part of the next one's first key.
     #[test]
     fn what_the_venue_states_about_an_issuer_is_held_under_the_contract() {
         let mut farm = FarmState::new();
@@ -299,10 +300,16 @@ mod news_tests {
         let shared = SharedState::new();
         let instrument = context.market.register(756733);
 
-        let rating = b"RATING=2;ANALYSTS=17";
+        // Behind its own count, which is what the record states first.
+        let counted = |text: &[u8]| {
+            let mut out = (text.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(text);
+            out
+        };
+        let rating = counted(b"RATING=2;ANALYSTS=17");
         farm.generic_tick_tags.push((31, 434, instrument));
         farm.handle_generic_tick(
-            &framed_generic_ticks(&[(31, 434, rating)]), &mut context, &shared, &None,
+            &framed_generic_ticks(&[(31, 434, &rating)]), &mut context, &shared, &None,
         );
         assert_eq!(
             shared.reference.company_data(756733, 434),
@@ -334,7 +341,8 @@ mod news_tests {
         // never sent.
         farm.generic_tick_tags.push((33, 548, instrument));
         farm.handle_generic_tick(
-            &framed_generic_ticks(&[(33, 548, b"RATING=\xff")]), &mut context, &shared, &None,
+            &framed_generic_ticks(&[(33, 548, &counted(b"RATING=\xff"))]),
+            &mut context, &shared, &None,
         );
         assert!(
             shared.reference.company_data(756733, 548).is_empty(),
@@ -344,12 +352,31 @@ mod news_tests {
         // Restated, a series replaces what it said rather than adding to it:
         // one message carries the whole set.
         farm.handle_generic_tick(
-            &framed_generic_ticks(&[(31, 434, b"RATING=3")]), &mut context, &shared, &None,
+            &framed_generic_ticks(&[(31, 434, &counted(b"RATING=3"))]),
+            &mut context, &shared, &None,
         );
         assert_eq!(
             shared.reference.company_data(756733, 434),
             vec![("RATING".to_string(), "3".to_string())],
             "the later statement stands alone",
+        );
+
+        // A count whose low byte is a letter, which is what made this visible
+        // on the wire: read as text from the first byte, that letter joins the
+        // record's first name and the contract states its fields under names
+        // no other contract states them under.
+        let mut wide = b"RATING=4;ANALYSTS=9;NOTE=".to_vec();
+        while wide.len() < 0x52 {
+            wide.push(b'z');
+        }
+        assert_eq!(wide.len() as u8 as char, 'R', "the count's low byte is a letter");
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(31, 434, &counted(&wide))]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.reference.company_data(756733, 434).first().map(|(key, _)| key.as_str()),
+            Some("RATING"),
+            "the count in front of the text was read as part of the first name",
         );
     }
 

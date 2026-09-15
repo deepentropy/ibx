@@ -1309,15 +1309,21 @@ fn length_prefixed_bytes(payload: &[u8]) -> Option<&[u8]> {
 /// The text a company-data series carries, out from behind what it states in
 /// front of it.
 ///
-/// Three shapes, and which one a series uses is the series' own. The two
-/// analyst ratings are text from the first byte. Four series state four bytes
-/// of their own first, which say nothing this client reads and are stepped
-/// over. The rest state the text's length as a count before it, and only that
-/// much of what follows is the text: what comes after is padding to a
-/// four-byte boundary and is not part of what the venue stated.
+/// Two shapes, and which one a series uses is the series' own. Four series
+/// state four bytes of their own in front of text that runs to the end of the
+/// record, and those bytes say nothing this client reads. The rest state the
+/// text's length as a count before it, and only that much of what follows is
+/// the text: what comes after is padding to a four-byte boundary and is not
+/// part of what the venue stated.
+///
+/// The second analyst rating is one of the counted ones, and was read as
+/// though the text began at the first byte. The count's low byte is a letter
+/// for any text between sixty-five and ninety characters or between
+/// ninety-seven and a hundred and twenty-two, so that byte joined the record's
+/// first name: three contracts stated the same field under three different
+/// names, each one the length of its own record.
 fn company_text(series: u32, payload: &[u8]) -> Option<&[u8]> {
     match series {
-        434 | 548 => Some(payload),
         454 | 505 | 669 | 705 => payload.get(4..),
         _ => length_prefixed_bytes(payload),
     }
