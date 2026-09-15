@@ -196,6 +196,12 @@ pub struct MarketDataState {
     closing_option_model: Mutex<
         std::collections::HashMap<crate::types::InstrumentId, crate::types::OptionComputation>,
     >,
+    /// The strategies a spread scan has stated for an underlying.
+    scanned_strategies: Mutex<
+        std::collections::HashMap<
+            crate::types::InstrumentId, Vec<crate::types::ScannedStrategy>,
+        >,
+    >,
     /// The rows of three figures each series has stated for a contract.
     stated_rows: Mutex<StatedRowsHeld>,
     /// The runs of paired figures each series has stated for a contract.
@@ -260,6 +266,7 @@ impl MarketDataState {
             numbered_figures: Mutex::new(std::collections::HashMap::new()),
             paired_figures: Mutex::new(std::collections::HashMap::new()),
             stated_rows: Mutex::new(std::collections::HashMap::new()),
+            scanned_strategies: Mutex::new(std::collections::HashMap::new()),
             closing_option_model: Mutex::new(std::collections::HashMap::new()),
             short_sale_restricted: Mutex::new(std::collections::HashSet::new()),
             clock_skew_millis: AtomicI64::new(0),
@@ -374,6 +381,7 @@ impl MarketDataState {
         self.numbered_figures.lock().unwrap().retain(|(at, ..), _| *at != instrument);
         self.paired_figures.lock().unwrap().retain(|(at, _), _| *at != instrument);
         self.stated_rows.lock().unwrap().retain(|(at, _), _| *at != instrument);
+        self.scanned_strategies.lock().unwrap().remove(&instrument);
         self.closing_option_model.lock().unwrap().remove(&instrument);
         // A restriction belongs to the contract that was in the slot, not to
         // the slot: left behind, the next contract to take it reads as
@@ -1143,6 +1151,25 @@ impl MarketDataState {
         &self, instrument: crate::types::InstrumentId, series: u32,
     ) -> Vec<(f64, f64, f64)> {
         self.stated_rows.lock().unwrap().get(&(instrument, series)).cloned().unwrap_or_default()
+    }
+
+    /// The strategies a spread scan last stated for an underlying.
+    ///
+    /// Each carries its legs, which shape of strategy it is and how pressing
+    /// the venue takes it to be, the thirteen figures the venue states about it,
+    /// and where it comes out even. The documented API has no call for any of
+    /// this. Empty until a scan has been asked for and answered.
+    pub fn scanned_strategies(
+        &self, instrument: crate::types::InstrumentId,
+    ) -> Vec<crate::types::ScannedStrategy> {
+        self.scanned_strategies.lock().unwrap().get(&instrument).cloned().unwrap_or_default()
+    }
+
+    #[doc(hidden)] pub fn note_scanned_strategies(
+        &self, instrument: crate::types::InstrumentId,
+        strategies: Vec<crate::types::ScannedStrategy>,
+    ) {
+        self.scanned_strategies.lock().unwrap().insert(instrument, strategies);
     }
 
     #[doc(hidden)] pub fn note_stated_rows(

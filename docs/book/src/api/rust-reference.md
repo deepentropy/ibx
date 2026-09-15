@@ -1054,6 +1054,40 @@ pub fn parse_algo_params(strategy: &str, params: &[TagValue]) -> Result<AlgoPara
 
 ## Market Data
 
+#### `req_spread_scan`
+
+Ask the venue to scan an underlying for strategies worth putting on. The scan goes out beside a subscription for the series the venue states its answer on, because that is how it is asked for: the series carries the answer and the scan tells the venue what to look for. Read the answer with [`Self::scanned_strategies`] under the same request. The documented API has no call for this at all. What the scan states about each strategy is the venue's own, in the venue's own words, and nothing here translates them.
+
+```rust
+pub fn req_spread_scan( &self, req_id: i64, contract: &Contract, scan: &crate::types::SpreadScan, ) -> Result<(), Refusal>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `contract` | `&Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `scan` | `&crate::types::SpreadScan` |  |
+
+**Returns:** `Result<(), Refusal>`
+
+---
+
+#### `scanned_strategies`
+
+The strategies a spread scan stated for a request, as the venue stated them. Empty until a scan has been asked for and answered. A scan the venue refuses answers with nothing rather than with strategies.
+
+```rust
+pub fn scanned_strategies(&self, req_id: i64) -> Vec<crate::types::ScannedStrategy>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+**Returns:** `Vec<crate::types::ScannedStrategy>`
+
+---
+
 #### `req_mkt_data`
 
 Subscribe to market data. When `snapshot` is true, delivers the first available quote then calls `tick_snapshot_end` and auto-cancels the subscription. That is a subscription this client ends, not a request of its own: the venue's own one-shot snapshot is the chargeable one, asked for with `regulatory_snapshot` on `req_mkt_data_ex`. `generic_tick_list` goes out with the subscription, and what comes back reaches the caller on the callback the series belongs to. These are read: * `100`, `101`, `105` — option volume, open interest and the average volume, calls before puts. * `104`, `106`, `411` — volatility: the historical figure, the implied one, and the one the venue restrikes through the session. * `162`, `165` — an index's premium over its future; the extremes of the last quarter, half-year and year with the ordinary day's volume. * `220`, `221`, `232`, `619` — the mark the venue keeps, which is not a trade, under each of the numbers it is asked for by, and the slow one beside it. * `225` — the auction: what is crossing, which way, at what price, and the imbalance the venue must publish. * `233`, `375` — everything that traded, and what traded on a trade report, each stated as a trade rather than as the totals it is read from. * `236` — whether it can be borrowed, and how much of it. * `258` (or `47`) — the company ratios, as the venue writes them. * `292` — news for the contract. * `293`, `294`, `295` — how fast it is trading. * `318` — what last traded in the regular session. * `456` (or `59`) — what it pays out. * `460` — the factor a redemption changes. * `499` — what it costs to borrow. * `577`, `614`, `623` — a fund's value per share: last, the day's extremes, and the frozen one. * `586` — what a share is expected to open at, and what it did. * `588` — a future's open interest. * `595` — what has traded over the last three, five and ten minutes. * `787` — the odd lot: the two prices nobody has to deal in round lots at, their sizes, and where each is quoted. A code outside that list still goes to the venue, and a reading of it arrives and is recorded rather than delivered: the shape it is written in is the series' own, and nothing here can read one it has not been taught. `tick_generic` also fires for the halt the venue states on its own tick: tick 49, 0 while a contract is trading and 1 once it has stopped. Delayed and frozen data are requested, contrary to what this said: name the type on `req_market_data_type` and every subscription after it carries the mode, or state it per request with `req_mkt_data_ex`. The table there gives the wire shape of each.
@@ -3131,7 +3165,7 @@ Every venue's chain has been stated.
 
 #### `delta_neutral_validation`
 
-The contract the venue paired with a delta-neutral order.
+The contract the venue paired with a delta-neutral order.  The venue states no such pairing on this connection — nothing it sends carries one, under any name — so nothing here fires this. A delta-neutral order is sent and answered like any other; what the reference client reports back on this callback has no message behind it here.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -3144,7 +3178,7 @@ The contract the venue paired with a delta-neutral order.
 
 #### `reroute_mkt_data_req`
 
-The contract a market-data request should be asked for under instead.  The reference client answers a request on a contract the venue reroutes — a contract for difference standing for a share — with the contract and venue to ask again under. Nothing on this connection has been seen to state one, so nothing here fires this; a request that cannot be served is refused in the venue's own words instead.
+The contract a market-data request should be asked for under instead.  The reference client answers a request on a contract the venue reroutes — a contract for difference standing for a share — with the contract and venue to ask again under. This connection does not reroute: asked to, it says so and serves nothing, so a request that cannot be served is refused in the venue's own words instead.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

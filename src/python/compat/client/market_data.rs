@@ -676,6 +676,37 @@ impl EClient {
         Ok(shared.market.paired_figures(instrument, series))
     }
 
+    /// The strategies a spread scan stated for a request, as the venue stated
+    /// them.
+    ///
+    /// Each is a dict of its legs, which shape of strategy it is and how
+    /// pressing, the thirteen figures the venue states about it, where it comes
+    /// out even, and one figure behind those. Empty until a scan has been asked
+    /// for and answered. The documented API has no call for this.
+    #[pyo3(signature = (req_id))]
+    fn scanned_strategies(&self, req_id: i64) -> PyResult<Vec<Py<PyAny>>> {
+        let Ok(shared) = self.shared_state() else { return Ok(Vec::new()) };
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Ok(Vec::new());
+        };
+        let found = shared.market.scanned_strategies(instrument);
+        Python::attach(|py| {
+            let mut out = Vec::with_capacity(found.len());
+            for s in found {
+                let dict = pyo3::types::PyDict::new(py);
+                dict.set_item("legs", s.legs.clone())?;
+                dict.set_item("kind", s.kind)?;
+                dict.set_item("aggression", s.aggression)?;
+                dict.set_item("figures", s.figures.clone())?;
+                dict.set_item("breakEvens", s.break_evens.clone())?;
+                dict.set_item("lastFigure", s.last_figure)?;
+                out.push(dict.into_any().unbind());
+            }
+            Ok(out)
+        })
+    }
+
     /// The rows of three figures one series last stated for a subscription.
     ///
     /// What the three are is the series' own:

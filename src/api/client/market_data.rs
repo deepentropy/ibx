@@ -8,6 +8,47 @@ use super::{wire_req_id, Contract, EClient};
 impl EClient {
     // ── Market Data ──
 
+    /// Ask the venue to scan an underlying for strategies worth putting on.
+    ///
+    /// The scan goes out beside a subscription for the series the venue states
+    /// its answer on, because that is how it is asked for: the series carries
+    /// the answer and the scan tells the venue what to look for. Read the
+    /// answer with [`Self::scanned_strategies`] under the same request.
+    ///
+    /// The documented API has no call for this at all. What the scan states
+    /// about each strategy is the venue's own, in the venue's own words, and
+    /// nothing here translates them.
+    pub fn req_spread_scan(
+        &self, req_id: i64, contract: &Contract, scan: &crate::types::SpreadScan,
+    ) -> Result<(), Refusal> {
+        let con_id = if scan.under_con_id > 0 { scan.under_con_id } else { contract.con_id };
+        if con_id <= 0 {
+            return Err(Refusal::stated(
+                321, "a spread scan names the contract to scan by the venue's id for it",
+            ));
+        }
+        let mut scan = scan.clone();
+        scan.under_con_id = con_id;
+        // Written where the subscription can find it before the subscription is
+        // made: the series goes out through the same path every other does, and
+        // that path reads the scan from here rather than carrying it.
+        self.shared.reference.note_spread_scan(con_id as u32, scan.stated());
+        self.req_mkt_data(req_id, contract, "481", false, false)
+    }
+
+    /// The strategies a spread scan stated for a request, as the venue stated
+    /// them.
+    ///
+    /// Empty until a scan has been asked for and answered. A scan the venue
+    /// refuses answers with nothing rather than with strategies.
+    pub fn scanned_strategies(&self, req_id: i64) -> Vec<crate::types::ScannedStrategy> {
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Vec::new();
+        };
+        self.shared.market.scanned_strategies(instrument)
+    }
+
     /// Subscribe to market data. Matches `reqMktData` in C++.
     /// When `snapshot` is true, delivers the first available quote then calls
     /// `tick_snapshot_end` and auto-cancels the subscription. That is a

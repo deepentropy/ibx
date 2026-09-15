@@ -1192,6 +1192,20 @@ def paired_figures(req_id, series)
 
 ---
 
+#### `scanned_strategies`
+
+The strategies a spread scan stated for a request, as the venue stated them.  Each is a dict of its legs, which shape of strategy it is and how pressing, the thirteen figures the venue states about it, where it comes out even, and one figure behind those. Empty until a scan has been asked for and answered. The documented API has no call for this.
+
+```python
+def scanned_strategies(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+
+---
+
 #### `stated_rows`
 
 The rows of three figures one series last stated for a subscription.  What the three are is the series' own:  | Series | The three figures | | --- | --- | | 547 | A quantity, what it is offered at, and a second price where the form states one | | 491 | Which strategy the leg belongs to, the contract it names, and its size | | 320, 376, 530, 532 | The venue's number for a field of a packed quote, its figure, and how far that figure's decimal point moves |  On the packed quotes the venue numbers its fields itself: nought and one are the two sides of the quote and four and five the size behind each, read off a live session. A side the venue is not standing behind reads as minus one hundred. Those figures are counted in the contract's own increments, as every packed figure is — 75815 against an increment of a hundredth is 758.15 — and no scale is put on them here, because which fields are prices and which are counts is the venue's to change.  `f64::MAX` stands where a form states no third figure. The documented API has no call for any of these.

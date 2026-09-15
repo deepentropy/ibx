@@ -289,6 +289,11 @@ pub trait Wrapper {
     // ── Delta-Neutral ──
 
     /// The contract the venue paired with a delta-neutral order.
+    ///
+    /// The venue states no such pairing on this connection — nothing it sends
+    /// carries one, under any name — so nothing here fires this. A delta-neutral
+    /// order is sent and answered like any other; what the reference client
+    /// reports back on this callback has no message behind it here.
     fn delta_neutral_validation(
         &mut self, req_id: i64, con_id: i64, delta: f64, price: f64,
     ) {
@@ -305,9 +310,9 @@ pub trait Wrapper {
     ///
     /// The reference client answers a request on a contract the venue reroutes
     /// — a contract for difference standing for a share — with the contract
-    /// and venue to ask again under. Nothing on this connection has been seen
-    /// to state one, so nothing here fires this; a request that cannot be
-    /// served is refused in the venue's own words instead.
+    /// and venue to ask again under. This connection does not reroute: asked to,
+    /// it says so and serves nothing, so a request that cannot be served is
+    /// refused in the venue's own words instead.
     fn reroute_mkt_data_req(&mut self, req_id: i64, con_id: i64, exchange: &str) {
         let _ = (req_id, con_id, exchange);
     }
@@ -320,9 +325,11 @@ pub trait Wrapper {
     /// An exchange-for-physical quote, which the reference client reports on a
     /// callback of its own rather than as a price.
     ///
-    /// This client carries the tick types such a quote is numbered under and
-    /// does not assemble them into this record, so a program written against
-    /// this callback hears nothing where the reference client speaks.
+    /// The venue states none of it on this connection. The numbers such a quote
+    /// would be stated under are carried here, in the list this client answers
+    /// by name; what never arrives under them is the quote. Read across a
+    /// share, a fund and two futures, the venue stated fifteen kinds of tick
+    /// and not one of them was one of these.
     #[allow(clippy::too_many_arguments)]
     fn tick_efp(
         &mut self, req_id: i64, tick_type: i32, basis_points: f64,

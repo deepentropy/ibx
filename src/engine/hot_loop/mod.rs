@@ -1368,6 +1368,14 @@ impl HotLoop {
                 ControlCommand::Subscribe { contract, filters, mode_9887, regulatory_snapshot, generic_ticks, reply_tx, issued, } => {
                     self.heard_up_to = self.heard_up_to.max(issued);
                     let ContractRef { con_id, symbol, exchange, sec_type, currency, last_trade_date, strike, right, multiplier } = contract;
+                    // The strategies series is asked for the way every other is
+                    // and the scan is what tells the venue what to look for, so
+                    // it is handed to the farm before the subscription goes.
+                    if con_id > 0
+                        && let Some(scan) = self.shared.reference.spread_scan(con_id as u32)
+                    {
+                        self.farm.note_spread_scan(con_id, scan);
+                    }
                     // What tells two conId-less contracts on one underlying apart.
                     // Built by the same function an order uses, or the two
                     // describe one contract differently: the slot a

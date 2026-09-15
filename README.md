@@ -59,9 +59,9 @@ One row per capability, one column per client — every one of the 78 calls and 
 | **ibx Rust** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
 | **ibx Python** | **78 / 78** | **81 / 90** | 9 callbacks taken, not applied |
 
-**Nothing on that list is absent here.** 9 exist and never fire — there is no terminal between this client and the venue to make a verification handshake with, and no socket layer of the reference client's own to report an error from — and each says so where it is declared, so a program that implements one still compiles and runs. Everything else is carried.
+**Nothing on that list is absent here.** 9 exist and never fire, because the venue states nothing on this connection for them to carry: there is no terminal between this client and the venue to make a verification handshake with, no socket layer of the reference client's own to report an error from, this connection does not reroute a request to another contract, and neither an exchange-for-physical quote nor a delta-neutral pairing is stated on it — a share, a fund and two futures were read together and the venue stated fifteen kinds of tick, none of them those. Each says so where it is declared, so a program that implements one still compiles and runs. Everything else is carried.
 
-**And 75 more beyond that list.** The connection a terminal opens carries more than the documented calls describe — what the venue permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and a client that speaks that connection can answer them. Most have no call in the documented API at all; a few are one a reference client happens to name too, and the table below marks which is which, under *Beyond the canonical list*.
+**And 77 more beyond that list.** The connection a terminal opens carries more than the documented calls describe — what the venue permits this account, which algorithms it offers, the order defaults it fills an order's blanks from, what it says about an issuer, which session holds the account — and a client that speaks that connection can answer them. Most have no call in the documented API at all; a few are one a reference client happens to name too, and the table below marks which is which, under *Beyond the canonical list*.
 
 Every figure here is read from the client it names, on the machine that generated it. A client that is not installed is left out rather than filled in from memory.
 
@@ -352,7 +352,9 @@ same thing, not that the documented API does.
 | `reqAdjustments` | ● | · | · | · | ● | ● |
 | `reqMktDataEx` | ● | · | · | · | ● | ● |
 | `reqPing` | ● | · | · | · | ● | ● |
+| `req_spread_scan` | ● | · | · | · | ● | · |
 | `scan` | ● | · | · | · | ● | · |
+| `scannedStrategies` | ● | · | · | · | ● | ● |
 | `schedule` | ● | ● | · | ● | ● | · |
 | `serverVersion` | ● | ● | ● | ● | · | ● |
 | `session` | ● | · | · | · | ● | · |

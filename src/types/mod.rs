@@ -476,6 +476,134 @@ impl OptionComputation {
     }
 }
 
+/// What to scan an underlying for.
+///
+/// The venue takes these as one run of named fields and answers with the
+/// strategies it finds. Every field it does not need is left out: a field
+/// stated as nothing is not sent at all, which is how its own client sends
+/// them, and the venue fills what it is not given.
+///
+/// The words are the venue's own — a date is written the way the venue writes
+/// dates, and the lists are written the way it writes lists — so nothing here
+/// translates them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpreadScan {
+    /// Which shape of the request this is. The venue takes four, five and six;
+    /// what it states back depends on it, and six is the one that carries a
+    /// price in the request.
+    pub version: i32,
+    /// Nought to scan for strategies, one to ask about a named one, two to ask
+    /// what the market makes of it.
+    pub request: i32,
+    /// The contract to scan, by the venue's id for it.
+    pub under_con_id: i64,
+    /// The account the scan is for.
+    pub account: String,
+    /// The window to scan over.
+    pub start_date: Option<String>,
+    /// The end of that window.
+    pub end_date: Option<String>,
+    /// How the move to scan for is expressed.
+    pub move_type: Option<String>,
+    /// The move itself.
+    pub move_by: Option<String>,
+    /// How sure of it to be.
+    pub confidence: Option<String>,
+    /// Which way the premium should run.
+    pub premium: Option<String>,
+    /// Whether a strategy may hold the underlying itself as a leg.
+    pub allow_underlying_leg: Option<bool>,
+    /// The narrowest delta to take.
+    pub min_delta: Option<f64>,
+    /// And the widest.
+    pub max_delta: Option<f64>,
+    /// The expiries to take, as the venue lists them.
+    pub allowed_expirations: Option<String>,
+    /// And the ones to leave out.
+    pub excluded_expirations: Option<String>,
+    /// The strikes to take.
+    pub allowed_strikes: Option<String>,
+    /// And the ones to leave out.
+    pub excluded_strikes: Option<String>,
+    /// Which shapes of strategy to take.
+    pub allowed_strategies: Option<String>,
+    /// One named strategy, where the request is asking about that rather than
+    /// scanning.
+    pub strategy: Option<String>,
+    /// What that strategy is priced at, which the sixth shape of the request
+    /// carries.
+    pub strategy_price: Option<f64>,
+}
+
+impl SpreadScan {
+    /// The scan as the venue takes it: each field written as its own word and
+    /// then its value, one after another, with a break where the venue puts
+    /// one and nothing at all for a field left unstated.
+    pub fn stated(&self) -> String {
+        let mut out = String::new();
+        fn put(out: &mut String, word: &str, value: Option<String>) {
+            if let Some(value) = value {
+                out.push_str(word);
+                out.push_str(&value);
+                out.push('|');
+            }
+        }
+        macro_rules! put {
+            ($word:expr, $value:expr) => { put(&mut out, $word, $value) };
+        }
+        put!("v", Some(self.version.to_string()));
+        put!("r", Some(self.request.to_string()));
+        put!("u", Some(self.under_con_id.to_string()));
+        put!("a", (!self.account.is_empty()).then(|| self.account.clone()));
+        out.push(';');
+        put!("start", self.start_date.clone());
+        put!("end", self.end_date.clone());
+        put!("mvtyp", self.move_type.clone());
+        put!("mv", self.move_by.clone());
+        put!("cnf", self.confidence.clone());
+        out.push(';');
+        put!("prem", self.premium.clone());
+        put!("und", self.allow_underlying_leg.map(|v| i32::from(v).to_string()));
+        put!("mindel", self.min_delta.map(|v| v.to_string()));
+        put!("maxdel", self.max_delta.map(|v| v.to_string()));
+        put!("allowexdt", self.allowed_expirations.clone());
+        put!("excludeexdt", self.excluded_expirations.clone());
+        put!("allowstrk", self.allowed_strikes.clone());
+        put!("excludestrk", self.excluded_strikes.clone());
+        put!("allowstrat", self.allowed_strategies.clone());
+        put!("strategy", self.strategy.clone());
+        put!("prc", self.strategy_price.map(|v| v.to_string()));
+        out.push(';');
+        out
+    }
+}
+/// One strategy a spread scan states, and what the venue makes of it.
+///
+/// The venue scans an underlying for combinations worth putting on and states
+/// each as its legs and a set of figures about it. The documented API has no
+/// call for any of this.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScannedStrategy {
+    /// The legs: the venue's id for each contract, and how much of it to hold.
+    /// A leg sold is a negative size.
+    pub legs: Vec<(i64, i64)>,
+    /// Which shape of strategy this is, as the venue numbers them.
+    pub kind: i32,
+    /// How hard the venue takes this strategy to be pressing, as it numbers it.
+    pub aggression: i32,
+    /// The thirteen figures the venue states about the strategy, in its order.
+    ///
+    /// What each of them is is the venue's, and it names them nowhere this
+    /// client can read, so they are handed over in the order stated rather than
+    /// under names this client made up. A figure it does not hold is the
+    /// largest a double carries.
+    pub figures: Vec<f64>,
+    /// Where the strategy comes out even, at each of the prices it can.
+    pub break_evens: Vec<f64>,
+    /// The figure stated behind those, which the venue does not name either.
+    pub last_figure: f64,
+}
+
 /// What the venue states about a contract itself on the tick that carries its
 /// price extremes, beyond the extremes.
 ///
@@ -504,6 +632,7 @@ impl Default for ContractFigures {
         Self { shares_outstanding: f64::MAX, open_a_year_ago: f64::MAX }
     }
 }
+
 
 /// Tick-by-tick data type for subscription requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

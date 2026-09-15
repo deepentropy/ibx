@@ -352,11 +352,16 @@ def write_readme(page, calls, backs, columns, back_columns, beyond):
     else:
         verdict = (
             "**Nothing on that list is absent here.** "
-            + (f"{held // max(len(ours), 1)} exist and never fire — there is no terminal "
+            + (f"{held // max(len(ours), 1)} exist and never fire, because the venue "
+               "states nothing on this connection for them to carry: there is no terminal "
                "between this client and the venue to make a verification handshake with, "
-               "and no socket layer of the reference client's own to report an error from "
-               "— and each says so where it is declared, so a program that implements one "
-               "still compiles and runs. " if held else "")
+               "no socket layer of the reference client's own to report an error from, "
+               "this connection does not reroute a request to another contract, and "
+               "neither an exchange-for-physical quote nor a delta-neutral pairing is "
+               "stated on it — a share, a fund and two futures were read together and the "
+               "venue stated fifteen kinds of tick, none of them those. Each says so where "
+               "it is declared, so a program that implements one still compiles and runs. "
+               if held else "")
             + "Everything else is carried."
         )
 

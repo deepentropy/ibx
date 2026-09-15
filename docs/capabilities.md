@@ -285,7 +285,9 @@ same thing, not that the documented API does.
 | `reqAdjustments` | ● | · | · | · | ● | ● |
 | `reqMktDataEx` | ● | · | · | · | ● | ● |
 | `reqPing` | ● | · | · | · | ● | ● |
+| `req_spread_scan` | ● | · | · | · | ● | · |
 | `scan` | ● | · | · | · | ● | · |
+| `scannedStrategies` | ● | · | · | · | ● | ● |
 | `schedule` | ● | ● | · | ● | ● | · |
 | `serverVersion` | ● | ● | ● | ● | · | ● |
 | `session` | ● | · | · | · | ● | · |

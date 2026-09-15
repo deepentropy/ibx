@@ -185,6 +185,8 @@ pub struct ReferenceState {
     /// because that is how the venue states it — one message carries the
     /// series' whole set of pairs.
     company_data: Mutex<CompanyData>,
+    /// The scan a caller has asked for on an underlying, as the venue takes it.
+    spread_scans: Mutex<std::collections::HashMap<u32, String>>,
 }
 
 impl ReferenceState {
@@ -239,6 +241,7 @@ impl ReferenceState {
             under_con_ids: Mutex::new(std::collections::HashMap::new()),
             dividend_schedules: Mutex::new(std::collections::HashMap::new()),
             company_data: Mutex::new(CompanyData::new()),
+            spread_scans: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -1284,6 +1287,15 @@ impl ReferenceState {
             .collect();
         series.sort_unstable();
         series
+    }
+
+    /// The scan a caller has asked for on an underlying, as the venue takes it.
+    pub fn spread_scan(&self, con_id: u32) -> Option<String> {
+        self.spread_scans.lock().unwrap().get(&con_id).cloned()
+    }
+
+    #[doc(hidden)] pub fn note_spread_scan(&self, con_id: u32, stated: String) {
+        self.spread_scans.lock().unwrap().insert(con_id, stated);
     }
 
     #[doc(hidden)] pub fn note_company_data(

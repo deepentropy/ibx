@@ -493,6 +493,93 @@ mod news_tests {
         );
     }
 
+    /// A spread scan: what goes out to ask for it, and what comes back.
+    #[test]
+    fn a_spread_scan_states_what_to_look_for_and_reads_what_it_finds() {
+        // What goes out. Every field the caller left unstated is left out
+        // entirely, and the venue's own breaks stand where it puts them.
+        let scan = crate::types::SpreadScan {
+            version: 6,
+            request: 0,
+            under_con_id: 265598,
+            account: "DU1234567".into(),
+            min_delta: Some(0.25),
+            ..Default::default()
+        };
+        assert_eq!(
+            scan.stated(),
+            "v6|r0|u265598|aDU1234567|;;mindel0.25|;",
+            "each word then its value, and nothing for a field left unstated",
+        );
+
+        // And it rides on the subscription for the series that answers it.
+        let tags = build_series_subscribe_tags(
+            265598, "SMART", "STK", 0, "20260916-00:00:00", &[(7, 481)], Some(&scan.stated()),
+        );
+        assert!(
+            tags.iter().any(|(tag, value)| *tag == 6472 && value == &scan.stated()),
+            "the subscription carries what to look for: {tags:?}",
+        );
+        let other = build_series_subscribe_tags(
+            265598, "SMART", "STK", 0, "20260916-00:00:00", &[(7, 236)], Some(&scan.stated()),
+        );
+        assert!(
+            !other.iter().any(|(tag, _)| *tag == 6472),
+            "a series that is not the scan does not carry one",
+        );
+
+        // What comes back: a version, an error, how many it left out, then the
+        // strategies.
+        let mut answer = 4i32.to_be_bytes().to_vec();
+        answer.extend_from_slice(&0i32.to_be_bytes());
+        answer.extend_from_slice(&3i32.to_be_bytes());
+        answer.extend_from_slice(&1i32.to_be_bytes());
+        answer.extend_from_slice(&2i32.to_be_bytes());
+        for (con_id, size) in [(265598i32, 1i32), (265599, -2)] {
+            answer.extend_from_slice(&con_id.to_be_bytes());
+            answer.extend_from_slice(&size.to_be_bytes());
+        }
+        answer.extend_from_slice(&5i32.to_be_bytes());
+        answer.extend_from_slice(&2i32.to_be_bytes());
+        for n in 0..13 {
+            answer.extend_from_slice(&(f64::from(n) + 0.5).to_be_bytes());
+        }
+        answer.extend_from_slice(&2i32.to_be_bytes());
+        for v in [330.0f64, 345.0] {
+            answer.extend_from_slice(&v.to_be_bytes());
+        }
+        answer.extend_from_slice(&1.75f64.to_be_bytes());
+
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(265598);
+        farm.generic_tick_tags.push((7, 481, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(7, 481, &answer)]), &mut context, &shared, &None,
+        );
+        let found = shared.market.scanned_strategies(instrument);
+        assert_eq!(found.len(), 1, "one strategy: {found:?}");
+        assert_eq!(found[0].legs, vec![(265598, 1), (265599, -2)], "a leg sold reads negative");
+        assert_eq!((found[0].kind, found[0].aggression), (5, 2));
+        assert_eq!(found[0].figures.len(), 13, "the thirteen figures the venue states");
+        assert_eq!(found[0].figures[0], 0.5);
+        assert_eq!(found[0].figures[12], 12.5);
+        assert_eq!(found[0].break_evens, vec![330.0, 345.0]);
+        assert_eq!(found[0].last_figure, 1.75);
+
+        // A scan the venue refuses answers with nothing, not with strategies.
+        let mut refused = 4i32.to_be_bytes().to_vec();
+        refused.extend_from_slice(&101i32.to_be_bytes());
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(7, 481, &refused)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.scanned_strategies(instrument).len(), 1,
+            "a refusal replaced what the venue had stated",
+        );
+    }
+
     /// The four series written in the packed record the quote stream itself
     /// uses, read by the reader that already reads that.
     #[test]

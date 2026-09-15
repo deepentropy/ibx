@@ -127,6 +127,7 @@ fn build_series_subscribe_tags(
     mode_9887: i32,
     ts: &str,
     rows: &[(u32, u32)],
+    scan: Option<&str>,
 ) -> Vec<(u32, String)> {
     let con_id_str = (con_id as u32).to_string();
     let (fix_exchange, fix_sec_type) = stated_venue_and_type(sec_type, exchange);
@@ -151,6 +152,13 @@ fn build_series_subscribe_tags(
         tags.push((262, req_id.to_string()));
         tags.push((6008, con_id_str.clone()));
         tags.push((207, venue.to_string()));
+        // The strategies series is the one subscription that carries what to
+        // look for. Without it the venue has a request and nothing to answer.
+        if *tick == SPREAD_SCAN_REQUEST_TYPE
+            && let Some(scan) = scan
+        {
+            tags.push((TAG_SPREAD_SCAN, scan.to_string()));
+        }
         tags.push((167, fix_sec_type.to_string()));
         tags.push((264, tick.to_string()));
         tags.push((6088, "Socket".to_string()));
@@ -363,6 +371,13 @@ fn deliver_series(
         // venue's model holds against each point of a curve, and the weight it
         // puts on each price a contract might reach. Both state the pairs the
         // same way; one states a version in front of the count.
+        // Every strategy a spread scan states for the underlying.
+        481 => {
+            let strategies = read_scanned_strategies(payload);
+            if !strategies.is_empty() {
+                shared.market.note_scanned_strategies(instrument, strategies);
+            }
+        }
         // What a spread scan makes of one strategy: its points, and the
         // figures behind them that the version says are there.
         496 => {
@@ -1070,6 +1085,11 @@ pub(crate) struct FarmState {
     notified: Box<[u64]>,
     /// The instruments those bits stand for, in the order they were touched.
     notified_ids: Vec<crate::types::InstrumentId>,
+    /// The scan to state beside a subscription for the strategies series,
+    /// by the contract it is for. Handed over when the subscription is made,
+    /// because the series is asked for the way every other is and the scan is
+    /// what tells the venue what to look for.
+    spread_scans: std::collections::HashMap<i64, String>,
     pub(crate) farm_msg_buf: Vec<Vec<u8>>,
 }
 
@@ -1236,6 +1256,12 @@ pub(super) const DEPTH_VENUE_REFUSED: i32 = 354;
 
 /// The option model's own tick, in place of a request type.
 const GREEKS_REQUEST_TYPE: u32 = 732;
+
+/// The series the venue states a spread scan's strategies on.
+const SPREAD_SCAN_REQUEST_TYPE: u32 = 481;
+
+/// Where a subscription states what a spread scan is to look for.
+const TAG_SPREAD_SCAN: u32 = 6472;
 
 /// The same model as the contract closed, under its own number.
 const CLOSING_GREEKS_REQUEST_TYPE: u32 = 733;
@@ -1574,6 +1600,78 @@ fn readable_headline(raw: &str) -> String {
         None => raw,
     };
     crate::control::news::unescape_venue_characters(body)
+}
+
+/// The strategies a spread scan states for an underlying.
+///
+/// A version, then what the version says is there: an error the venue refuses
+/// the scan with from the third, and a count of the strategies it left out from
+/// the fourth. Then how many it is stating, and each of them in turn — its legs
+/// as a contract and a size apiece, which shape of strategy it is and how
+/// pressing, thirteen figures about it, where it comes out even at each price
+/// it can, and one figure behind those.
+///
+/// An error above nothing is the venue refusing the scan rather than answering
+/// it, and nothing follows it.
+fn read_scanned_strategies(payload: &[u8]) -> Vec<crate::types::ScannedStrategy> {
+    let mut out = Vec::new();
+    let Some(version) = series_i32(payload, 0) else { return out };
+    let mut at = 4usize;
+    if version >= 3 {
+        let Some(refused) = series_i32(payload, at) else { return out };
+        at += 4;
+        if refused > 0 {
+            log::debug!("the spread scan was refused under {refused}");
+            return out;
+        }
+    }
+    if version >= 4 {
+        // How many it left out. Read to step over it; the ones it kept are
+        // what a caller asked for.
+        if series_i32(payload, at).is_none() {
+            return out;
+        }
+        at += 4;
+    }
+    let Some(strategies) = series_i32(payload, at) else { return out };
+    at += 4;
+    for _ in 0..strategies.clamp(0, (payload.len() / 4) as i32) {
+        let Some(legs) = series_i32(payload, at) else { return out };
+        at += 4;
+        let mut strategy = crate::types::ScannedStrategy::default();
+        for _ in 0..legs.clamp(0, (payload.len() / 8) as i32) {
+            let (Some(con_id), Some(size)) = (series_i32(payload, at), series_i32(payload, at + 4))
+            else {
+                return out;
+            };
+            at += 8;
+            strategy.legs.push((i64::from(con_id), i64::from(size)));
+        }
+        let (Some(kind), Some(aggression)) = (series_i32(payload, at), series_i32(payload, at + 4))
+        else {
+            return out;
+        };
+        at += 8;
+        strategy.kind = kind;
+        strategy.aggression = aggression;
+        for _ in 0..13 {
+            let Some(figure) = series_f64(payload, at) else { return out };
+            at += 8;
+            strategy.figures.push(figure);
+        }
+        let Some(evens) = series_i32(payload, at) else { return out };
+        at += 4;
+        for _ in 0..evens.clamp(0, (payload.len() / 8) as i32) {
+            let Some(even) = series_f64(payload, at) else { return out };
+            at += 8;
+            strategy.break_evens.push(even);
+        }
+        let Some(last) = series_f64(payload, at) else { return out };
+        at += 8;
+        strategy.last_figure = last;
+        out.push(strategy);
+    }
+    out
 }
 
 /// The figures a spread scan states about one strategy's points.
@@ -1941,8 +2039,18 @@ impl FarmState {
             || self.replay_queue.iter().any(|r| r.0 == instrument)
     }
 
+    /// Keep the scan to state beside the strategies series for a contract.
+    ///
+    /// Handed over when the subscription is made rather than read from the
+    /// shared state here, because the series goes out through the same paths
+    /// every other does and those do not carry it.
+    pub(crate) fn note_spread_scan(&mut self, con_id: i64, stated: String) {
+        self.spread_scans.insert(con_id, stated);
+    }
+
     pub(crate) fn new() -> Self {
         Self {
+            spread_scans: std::collections::HashMap::new(),
             replay_queue: Default::default(),
             replay_not_before: None,
             next_md_req_id: 1,
@@ -3689,6 +3797,7 @@ impl FarmState {
             let ts = chrono_free_timestamp();
             let tags = build_series_subscribe_tags(
                 con_id, &exchange, &sec_type, mode_9887, &ts, &rows,
+                self.spread_scans.get(&con_id).map(String::as_str),
             );
             let refs: Vec<(u32, &str)> =
                 tags.iter().map(|(tag, val)| (*tag, val.as_str())).collect();
