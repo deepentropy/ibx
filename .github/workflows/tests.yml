@@ -24,6 +24,9 @@ jobs:
   rust:
     name: cargo test --lib
     runs-on: ubuntu-latest
+    # A hung step otherwise sits until the six-hour ceiling, and a job
+    # killed at that ceiling keeps no log to say where it stopped.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -78,6 +81,9 @@ jobs:
   python:
     name: pytest
     runs-on: ubuntu-latest
+    # A hung step otherwise sits until the six-hour ceiling, and a job
+    # killed at that ceiling keeps no log to say where it stopped.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -174,6 +180,9 @@ jobs:
   clippy:
     name: clippy -D warnings
     runs-on: ubuntu-latest
+    # A hung step otherwise sits until the six-hour ceiling, and a job
+    # killed at that ceiling keeps no log to say where it stopped.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -212,6 +221,9 @@ jobs:
   docs:
     name: generated docs match the source
     runs-on: ubuntu-latest
+    # A hung step otherwise sits until the six-hour ceiling, and a job
+    # killed at that ceiling keeps no log to say where it stopped.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -289,6 +301,9 @@ jobs:
   format:
     name: rustfmt (new files)
     runs-on: ubuntu-latest
+    # A hung step otherwise sits until the six-hour ceiling, and a job
+    # killed at that ceiling keeps no log to say where it stopped.
+    timeout-minutes: 15
     # New files only, and deliberately. The tree is hand-formatted and predates
     # any formatter; no rustfmt configuration comes within a few thousand lines
     # of reproducing it. Checking every file a change *touches* would therefore
@@ -325,6 +340,9 @@ jobs:
   portability:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hung step otherwise sits until the six-hour ceiling, and a job
+    # killed at that ceiling keeps no log to say where it stopped.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -344,6 +362,9 @@ jobs:
   rustdoc:
     name: rustdoc -D warnings
     runs-on: ubuntu-latest
+    # A hung step otherwise sits until the six-hour ceiling, and a job
+    # killed at that ceiling keeps no log to say where it stopped.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -361,6 +382,9 @@ jobs:
   advisories:
     name: cargo audit
     runs-on: ubuntu-latest
+    # A hung step otherwise sits until the six-hour ceiling, and a job
+    # killed at that ceiling keeps no log to say where it stopped.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
