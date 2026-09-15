@@ -1434,6 +1434,23 @@ pub fn paired_figures(&self, req_id: i64, series: u32) -> Vec<(f64, f64)>
 
 ---
 
+#### `stated_rows`
+
+The rows of a book one series last stated for a subscription. A quantity, what it is offered at, and a second price where the form the venue used states one — `f64::MAX` where it does not. The venue keeps this for contracts dealt in size rather than on a screen, and the documented API has no call for it.
+
+```rust
+pub fn stated_rows(&self, req_id: i64, series: u32) -> Vec<(f64, f64, f64)>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `series` | `u32` |  |
+
+**Returns:** `Vec<(f64, f64, f64)>`
+
+---
+
 #### `paired_figures_series`
 
 Which series have stated paired figures for a subscription, in order.

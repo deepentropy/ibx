@@ -299,6 +299,7 @@ same thing, not that the documented API does.
 | `startApi` | ● | ● | ● | ● | · | ● |
 | `statedFigures` | ● | · | · | · | ● | ● |
 | `statedFiguresSeries` | ● | · | · | · | ● | ● |
+| `statedRows` | ● | · | · | · | ● | ● |
 | `tradingSchedule` | ● | · | · | · | · | ● |
 | `twsConnectionTime` | ● | ● | ● | · | · | ● |
 | `unread_wire` | ● | · | · | · | ● | · |

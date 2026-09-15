@@ -50,6 +50,11 @@ pub(super) fn push_bounded<T>(queue: &Mutex<Vec<T>>, item: T, limit: usize, what
 type NumberedFiguresHeld =
     std::collections::HashMap<(crate::types::InstrumentId, u32, bool), Vec<(i32, f64)>>;
 
+/// What each contract's stated rows hold: the slot and the series, against
+/// the three figures of each row the venue stated.
+type StatedRowsHeld =
+    std::collections::HashMap<(crate::types::InstrumentId, u32), Vec<(f64, f64, f64)>>;
+
 /// What each contract's paired-figure runs hold: the slot and the series,
 /// against the pairs the venue stated in it.
 type PairedFiguresHeld =
@@ -191,6 +196,8 @@ pub struct MarketDataState {
     closing_option_model: Mutex<
         std::collections::HashMap<crate::types::InstrumentId, crate::types::OptionComputation>,
     >,
+    /// The rows of three figures each series has stated for a contract.
+    stated_rows: Mutex<StatedRowsHeld>,
     /// The runs of paired figures each series has stated for a contract.
     paired_figures: Mutex<PairedFiguresHeld>,
     /// Which contracts the venue is restricting short sales in.
@@ -252,6 +259,7 @@ impl MarketDataState {
             stated_figures: Mutex::new(std::collections::HashMap::new()),
             numbered_figures: Mutex::new(std::collections::HashMap::new()),
             paired_figures: Mutex::new(std::collections::HashMap::new()),
+            stated_rows: Mutex::new(std::collections::HashMap::new()),
             closing_option_model: Mutex::new(std::collections::HashMap::new()),
             short_sale_restricted: Mutex::new(std::collections::HashSet::new()),
             clock_skew_millis: AtomicI64::new(0),
@@ -365,6 +373,7 @@ impl MarketDataState {
         self.stated_figures.lock().unwrap().retain(|(at, _), _| *at != instrument);
         self.numbered_figures.lock().unwrap().retain(|(at, ..), _| *at != instrument);
         self.paired_figures.lock().unwrap().retain(|(at, _), _| *at != instrument);
+        self.stated_rows.lock().unwrap().retain(|(at, _), _| *at != instrument);
         self.closing_option_model.lock().unwrap().remove(&instrument);
         // A restriction belongs to the contract that was in the slot, not to
         // the slot: left behind, the next contract to take it reads as
@@ -1105,6 +1114,29 @@ impl MarketDataState {
         &self, comp: crate::types::OptionComputation,
     ) {
         self.closing_option_model.lock().unwrap().insert(comp.instrument, comp);
+    }
+
+    /// The rows of three figures one series stated for a contract, in the
+    /// order it stated them. What the three are is the series' own:
+    ///
+    /// | Series | The three figures |
+    /// | --- | --- |
+    /// | 547 | A quantity, what it is offered at, and a second price where the form states one |
+    /// | 491 | Which strategy the leg belongs to, the contract it names, and its size |
+    ///
+    /// Neither has a documented call to arrive on. `f64::MAX` stands where a
+    /// form states no third figure. Empty until the series has been asked for
+    /// and answered.
+    pub fn stated_rows(
+        &self, instrument: crate::types::InstrumentId, series: u32,
+    ) -> Vec<(f64, f64, f64)> {
+        self.stated_rows.lock().unwrap().get(&(instrument, series)).cloned().unwrap_or_default()
+    }
+
+    #[doc(hidden)] pub fn note_stated_rows(
+        &self, instrument: crate::types::InstrumentId, series: u32, rows: Vec<(f64, f64, f64)>,
+    ) {
+        self.stated_rows.lock().unwrap().insert((instrument, series), rows);
     }
 
     #[doc(hidden)] pub fn note_paired_figures(

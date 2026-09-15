@@ -676,6 +676,21 @@ impl EClient {
         Ok(shared.market.paired_figures(instrument, series))
     }
 
+    /// The rows of a book one series last stated for a subscription.
+    ///
+    /// A quantity, what it is offered at, and a second price where the form the
+    /// venue used states one. The venue keeps this for contracts dealt in size
+    /// rather than on a screen.
+    #[pyo3(signature = (req_id, series))]
+    fn stated_rows(&self, req_id: i64, series: u32) -> PyResult<Vec<(f64, f64, f64)>> {
+        let Ok(shared) = self.shared_state() else { return Ok(Vec::new()) };
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(shared.market.stated_rows(instrument, series))
+    }
+
     /// Which series have stated paired figures for a subscription, in order.
     #[pyo3(signature = (req_id))]
     fn paired_figures_series(&self, req_id: i64) -> PyResult<Vec<u32>> {

@@ -592,6 +592,223 @@ mod news_tests {
         }
     }
 
+    /// What a spread scan states about a strategy's points, where the version
+    /// decides how much of the record is there.
+    ///
+    /// A version of nought states no bytes for the six behind it. Read as
+    /// though it did, every figure after them comes from the wrong place.
+    #[test]
+    fn a_scan_states_only_the_points_its_version_says_it_does() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9500);
+
+        let head = |version: i32| {
+            let mut out = 1.5f64.to_be_bytes().to_vec();
+            out.extend_from_slice(&2.5f64.to_be_bytes());
+            out.extend_from_slice(&version.to_be_bytes());
+            out
+        };
+
+        // Version nought states no bytes for the six, so bytes that follow the
+        // version are not those six and are not read as them.
+        let mut none = head(0);
+        for v in [99.0f64; 6] {
+            none.extend_from_slice(&v.to_be_bytes());
+        }
+        farm.generic_tick_tags.push((98, 496, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(98, 496, &none)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.stated_figures(instrument, 496), vec![1.5, 2.5, 0.0],
+            "a version of nought states nothing behind it",
+        );
+
+        // Version one states the six and stops: the three and the count belong
+        // to the second version.
+        let mut one = head(1);
+        for v in [10.0f64, 11.0, 12.0, 13.0, 14.0, 15.0, 77.0, 78.0] {
+            one.extend_from_slice(&v.to_be_bytes());
+        }
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(98, 496, &one)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.stated_figures(instrument, 496),
+            vec![1.5, 2.5, 1.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            "the first version states six figures and no more",
+        );
+
+        // Version two: six figures, then three, then a count and that many.
+        let mut full = head(2);
+        for v in [10.0f64, 11.0, 12.0, 13.0, 14.0, 15.0, 20.0, 21.0, 22.0] {
+            full.extend_from_slice(&v.to_be_bytes());
+        }
+        full.extend_from_slice(&2i32.to_be_bytes());
+        for v in [30.0f64, 31.0] {
+            full.extend_from_slice(&v.to_be_bytes());
+        }
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(98, 496, &full)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.stated_figures(instrument, 496),
+            vec![1.5, 2.5, 2.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 20.0, 21.0, 22.0, 2.0,
+                 30.0, 31.0],
+            "every figure the version says is there, in the order stated",
+        );
+    }
+
+    /// The strategies a scan states, and the legs of each against the strategy
+    /// they belong to.
+    #[test]
+    fn a_scan_states_its_strategies_and_the_legs_of_each() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9400);
+
+        // Version one, two strategies: the first of two legs, the second of
+        // one, and a leg sold reads as a negative size.
+        let mut scan = 1i32.to_be_bytes().to_vec();
+        scan.extend_from_slice(&2i32.to_be_bytes());
+        scan.extend_from_slice(&2i32.to_be_bytes());
+        for (con_id, size) in [(265598i32, 1i32), (265599, -1)] {
+            scan.extend_from_slice(&con_id.to_be_bytes());
+            scan.extend_from_slice(&size.to_be_bytes());
+        }
+        scan.extend_from_slice(&1i32.to_be_bytes());
+        scan.extend_from_slice(&756733i32.to_be_bytes());
+        scan.extend_from_slice(&3i32.to_be_bytes());
+
+        farm.generic_tick_tags.push((97, 491, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(97, 491, &scan)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.stated_rows(instrument, 491),
+            vec![
+                (0.0, 265598.0, 1.0),
+                (0.0, 265599.0, -1.0),
+                (1.0, 756733.0, 3.0),
+            ],
+            "every leg against the strategy it belongs to, in the order stated",
+        );
+
+        shared.market.forget_option_model(instrument);
+        assert!(
+            shared.market.stated_rows(instrument, 491).is_empty(),
+            "a strategy outlived the contract it was stated for",
+        );
+    }
+
+    /// The book the venue states in two forms, told apart by the record itself.
+    #[test]
+    fn a_book_is_read_in_whichever_form_the_record_states_it() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9300);
+
+        let row = |qty: i32, price: f32| {
+            let mut out = qty.to_be_bytes().to_vec();
+            out.extend_from_slice(&price.to_be_bytes());
+            out
+        };
+
+        // The older form: sixteen bytes exactly, two rows of a count and one
+        // price, and no second price stated.
+        let mut old = row(50, 101.5);
+        old.extend_from_slice(&row(25, 101.25));
+        assert_eq!(old.len(), 16);
+        farm.generic_tick_tags.push((96, 547, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(96, 547, &old)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.stated_rows(instrument, 547),
+            vec![(50.0, 101.5, f64::MAX), (25.0, 101.25, f64::MAX)],
+            "two rows, and no second price where the form states none",
+        );
+
+        // The newer form: a one, then rows of a count and two prices. A row of
+        // no quantity and a row whose first price is minus one are not rows the
+        // venue stands behind.
+        let mut new = 1i32.to_be_bytes().to_vec();
+        for (qty, bid, ask) in [(10i32, 99.5f32, 100.5f32), (0, 98.0, 99.0), (5, -1.0, 100.0)] {
+            new.extend_from_slice(&qty.to_be_bytes());
+            new.extend_from_slice(&bid.to_be_bytes());
+            new.extend_from_slice(&ask.to_be_bytes());
+        }
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(96, 547, &new)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.stated_rows(instrument, 547), vec![(10.0, 99.5, 100.5)],
+            "the row with no quantity and the one withdrawn by price are left out",
+        );
+
+        shared.market.forget_option_model(instrument);
+        assert!(
+            shared.market.stated_rows(instrument, 547).is_empty(),
+            "a book outlived the contract it was stated for",
+        );
+    }
+
+    /// The venue's other news series, whose every string stands behind a count
+    /// and is padded out to a multiple of four.
+    ///
+    /// Read without the padding, the count of the next field is taken from the
+    /// middle of this one's tail.
+    #[test]
+    fn the_other_news_series_states_one_story_behind_counts_and_padding() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(9200);
+
+        // A count, the bytes, then padding up to a multiple of four.
+        let padded = |text: &[u8]| {
+            let mut out = (text.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(text);
+            out.resize(4 + text.len().next_multiple_of(4), 0);
+            out
+        };
+        let mut story = padded(b"BRF");
+        story.extend_from_slice(&padded(b"BRF$12345"));
+        story.extend_from_slice(&7i32.to_be_bytes());
+        story.extend_from_slice(&9i32.to_be_bytes());
+        story.extend_from_slice(&1_789_470_000i32.to_be_bytes());
+        // The venue writes a marker in braces in front of some headlines, and
+        // a caller reads what follows it — the same on both news series.
+        story.extend_from_slice(&padded(b"{A:800015:L:en}Apple beats on revenue"));
+
+        farm.generic_tick_tags.push((95, 247, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(95, 247, &story)]), &mut context, &shared, &None,
+        );
+        let got = shared.market.drain_tick_news();
+        assert_eq!(got.len(), 1, "one story, on the callback the other series uses: {got:?}");
+        assert_eq!(got[0].provider_code, "BRF", "three bytes, then one of padding");
+        assert_eq!(got[0].article_id, "BRF$12345", "nine bytes, then three of padding");
+        assert_eq!(got[0].headline, "Apple beats on revenue");
+        assert_eq!(got[0].timestamp, 1_789_470_000_000, "seconds on the wire, milliseconds here");
+
+        // A record naming no story is the venue saying it has none, which is
+        // not a story with nothing in it.
+        let mut empty = padded(b"BRF");
+        empty.extend_from_slice(&padded(b""));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(95, 247, &empty)]), &mut context, &shared, &None,
+        );
+        assert!(
+            shared.market.drain_tick_news().is_empty(),
+            "a record naming no story was published as one",
+        );
+    }
+
     /// The one company series the venue compresses, read out from behind its
     /// header and inflated.
     #[test]

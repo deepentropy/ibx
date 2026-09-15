@@ -1192,6 +1192,21 @@ def paired_figures(req_id, series)
 
 ---
 
+#### `stated_rows`
+
+The rows of a book one series last stated for a subscription.  A quantity, what it is offered at, and a second price where the form the venue used states one. The venue keeps this for contracts dealt in size rather than on a screen.
+
+```python
+def stated_rows(req_id, series)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `series` | `int` |  |
+
+---
+
 #### `paired_figures_series`
 
 Which series have stated paired figures for a subscription, in order.

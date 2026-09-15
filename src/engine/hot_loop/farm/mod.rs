@@ -363,6 +363,39 @@ fn deliver_series(
         // venue's model holds against each point of a curve, and the weight it
         // puts on each price a contract might reach. Both state the pairs the
         // same way; one states a version in front of the count.
+        // What a spread scan makes of one strategy: its points, and the
+        // figures behind them that the version says are there.
+        496 => {
+            let figures = read_scan_points(payload);
+            if !figures.is_empty() {
+                shared.market.note_stated_figures(instrument, tick, figures);
+            }
+        }
+        // The strategies a scan states for the contract, and the legs of each.
+        491 => {
+            let (legs, at) = read_strategy_legs(payload);
+            if !legs.is_empty() {
+                shared.market.note_stated_rows(instrument, tick, legs);
+            }
+            // From the second version a message follows the strategies. The
+            // venue's own reader writes it to a log and hands it to nothing,
+            // so neither does this.
+            if series_i32(payload, 0).is_some_and(|version| version >= 2)
+                && let Some(message_id) = series_i32(payload, at)
+                && let Some((message, _)) = padded_string(payload, at + 4)
+                && !message.is_empty()
+            {
+                log::debug!("the scan states message {message_id}: {message}");
+            }
+        }
+        // The book the venue keeps for a contract that is dealt in size rather
+        // than on a screen: rows of a quantity and what it is offered at.
+        547 => {
+            let rows = read_stated_rows(payload);
+            if !rows.is_empty() {
+                shared.market.note_stated_rows(instrument, tick, rows);
+            }
+        }
         490 | 546 => {
             let pairs = read_paired_figures(payload, tick == 490);
             if !pairs.is_empty() {
@@ -1149,6 +1182,9 @@ const CLOSING_GREEKS_REQUEST_TYPE: u32 = 733;
 /// The news tick's own number, in place of a request type.
 const NEWS_REQUEST_TYPE: u32 = 292;
 
+/// The venue's other news series: one story, each string behind a count.
+const TOP_NEWS_REQUEST_TYPE: u32 = 247;
+
 /// The venue's number for what a contract trades in an ordinary day.
 const AN_ORDINARY_DAY: i32 = 768;
 
@@ -1455,6 +1491,160 @@ fn read_numbered_table(payload: &[u8], at: &mut usize, fractional: bool) -> Numb
         *at += 8;
     }
     out
+}
+
+/// A headline as a caller should read it.
+///
+/// The venue writes a marker in braces in front of some of them — which
+/// article and which language — and the reference client shows what follows it.
+/// Then the characters it escaped are put back: anything outside plain ASCII
+/// goes out as `&#xNN;`.
+///
+/// Shared by both news series, because a story is the same story whichever of
+/// them carried it: written twice, one of them kept the marker and the same
+/// headline reached a caller in two spellings.
+fn readable_headline(raw: &str) -> String {
+    let body = match raw.strip_prefix('{') {
+        Some(rest) => match rest.find('}') {
+            Some(at) => &rest[at + 1..],
+            None => raw,
+        },
+        None => raw,
+    };
+    crate::control::news::unescape_venue_characters(body)
+}
+
+/// The figures a spread scan states about one strategy's points.
+///
+/// Two figures, then a version. The six behind it are stated only where that
+/// version is not nought — where it is, the venue's own reader takes them as
+/// unstated and reads no bytes for them, so a reader stepping over them anyway
+/// would read every figure after them from the wrong place. Three more and a
+/// count follow from the second version, and then that many figures.
+///
+/// The version and the count are kept among the figures, as the flags and
+/// counts of every other series here are: they are what the venue stated.
+fn read_scan_points(payload: &[u8]) -> Vec<f64> {
+    let mut out = Vec::new();
+    let (Some(first), Some(second)) = (series_f64(payload, 0), series_f64(payload, 8)) else {
+        return out;
+    };
+    let Some(version) = series_i32(payload, 16) else { return out };
+    out.push(first);
+    out.push(second);
+    out.push(f64::from(version));
+    let mut at = 20usize;
+    if version != 0 {
+        for _ in 0..6 {
+            let Some(value) = series_f64(payload, at) else { return out };
+            out.push(value);
+            at += 8;
+        }
+    }
+    if version >= 2 {
+        for _ in 0..3 {
+            let Some(value) = series_f64(payload, at) else { return out };
+            out.push(value);
+            at += 8;
+        }
+        let Some(count) = series_i32(payload, at) else { return out };
+        at += 4;
+        out.push(f64::from(count));
+        for _ in 0..count.clamp(0, (payload.len() / 8) as i32) {
+            let Some(value) = series_f64(payload, at) else { return out };
+            out.push(value);
+            at += 8;
+        }
+    }
+    out
+}
+
+/// The legs of every strategy a scan states, and which strategy each belongs
+/// to.
+///
+/// A version, then how many strategies follow. Each states how many legs it
+/// has and then that many pairs of a contract and a size, the size signed so a
+/// leg sold reads as a negative. From the second version there is a message
+/// behind them, which the venue's own reader writes to its log and hands on to
+/// nothing; this does the same.
+///
+/// Flattened, because a caller reading legs wants them against the strategy
+/// they belong to and the venue numbers neither: the strategy's place in the
+/// record is what names it.
+fn read_strategy_legs(payload: &[u8]) -> (Vec<(f64, f64, f64)>, usize) {
+    let mut legs = Vec::new();
+    let Some(strategies) = series_i32(payload, 4) else { return (legs, 0) };
+    let mut at = 8usize;
+    for strategy in 0..strategies.clamp(0, (payload.len() / 4) as i32) {
+        let Some(count) = series_i32(payload, at) else { return (legs, at) };
+        at += 4;
+        for _ in 0..count.clamp(0, (payload.len() / 8) as i32) {
+            let (Some(con_id), Some(size)) = (series_i32(payload, at), series_i32(payload, at + 4))
+            else {
+                return (legs, at);
+            };
+            at += 8;
+            legs.push((f64::from(strategy), f64::from(con_id), f64::from(size)));
+        }
+    }
+    (legs, at)
+}
+
+/// The rows of a book the venue states as quantities and prices.
+///
+/// Three shapes in one series. An empty record is an empty book. A record of
+/// exactly sixteen bytes is the older form: two rows of a count and one price.
+/// Anything else whose first figure is a one is the newer form: that figure,
+/// then rows of a count and two prices to the end of the record.
+///
+/// A row of no quantity, or whose first price is minus one, is one the venue
+/// is not standing behind, and is left out. The second price is `f64::MAX`
+/// where the form does not state one.
+fn read_stated_rows(payload: &[u8]) -> Vec<(f64, f64, f64)> {
+    let mut rows = Vec::new();
+    if payload.is_empty() {
+        return rows;
+    }
+    let (mut at, width, two_prices) = if payload.len() == 16 {
+        (0usize, 8usize, false)
+    } else if series_i32(payload, 0) == Some(1) {
+        (4usize, 12usize, true)
+    } else {
+        return rows;
+    };
+    while at + width <= payload.len() {
+        let (Some(quantity), Some(price)) = (series_i32(payload, at), series_f32(payload, at + 4))
+        else {
+            break;
+        };
+        let second = if two_prices {
+            match series_f32(payload, at + 8) {
+                Some(v) => f64::from(v),
+                None => break,
+            }
+        } else {
+            f64::MAX
+        };
+        at += width;
+        if quantity == 0 || price == -1.0 {
+            continue;
+        }
+        rows.push((f64::from(quantity), f64::from(price), second));
+    }
+    rows
+}
+
+/// One of the venue's padded strings, and where the next field begins.
+///
+/// A count of the bytes, that many bytes with one byte standing for one
+/// character, then as many bytes as it takes to bring the count to a multiple
+/// of four. The padding belongs to the field, not to the one behind it.
+fn padded_string(payload: &[u8], at: usize) -> Option<(String, usize)> {
+    let stated = i32::from_be_bytes(payload.get(at..at + 4)?.try_into().ok()?);
+    let stated = usize::try_from(stated).ok()?;
+    let body = payload.get(at + 4..at + 4 + stated)?;
+    let text: String = body.iter().map(|b| char::from(*b)).collect();
+    Some((text, at + 4 + stated + (4 - stated % 4) % 4))
 }
 
 /// The bytes inside a tick payload that states its own length, as they came.
@@ -4501,6 +4691,14 @@ impl FarmState {
                     emit(event_tx, Event::Tick(instrument));
                 }
                 NEWS_REQUEST_TYPE => self.deliver_news(instrument, payload, shared, event_tx),
+                // The venue's other news series, which states one story rather
+                // than a batch of them and frames every string of it with a
+                // count and padding. It reaches a caller on the same callback:
+                // it is news about the contract, and which of the venue's two
+                // series carried it is not something a caller asked about.
+                TOP_NEWS_REQUEST_TYPE => {
+                    self.deliver_top_news(instrument, payload, shared, event_tx)
+                }
                 // The running volume states totals, and what a caller is owed
                 // is the trade between two of them — so it is read here, where
                 // the totals this contract last stated are held.
@@ -4602,6 +4800,51 @@ impl FarmState {
             return;
         }
         shared.reference.note_company_data(con_id as u32, series, pairs);
+    }
+
+    /// One story off the venue's other news series.
+    ///
+    /// The provider and the story's own id come first, each behind a count of
+    /// its bytes and padded out to a multiple of four. The rest of the record
+    /// is written only where the venue has a story to name: two figures it does
+    /// not state the meaning of, the moment it was filed, and the headline.
+    ///
+    /// A record naming no story is the venue saying it has none for this
+    /// contract, which is not a story with an empty headline — nothing is
+    /// published for it.
+    fn deliver_top_news(
+        &self,
+        instrument: InstrumentId,
+        body: &[u8],
+        shared: &SharedState,
+        event_tx: &Option<EventSink>,
+    ) {
+        let Some((provider, at)) = padded_string(body, 0) else { return };
+        let Some((article_id, at)) = padded_string(body, at) else { return };
+        if article_id.is_empty() {
+            return;
+        }
+        // Two figures before the moment, which the venue states and this does
+        // not read: nothing documented carries them and naming them here would
+        // be naming them for it.
+        let Some(stated_secs) = series_i32(body, at + 8) else { return };
+        let Some((headline, _)) = padded_string(body, at + 12) else { return };
+        if headline.is_empty() {
+            return;
+        }
+        // Seconds on the wire, and a caller is handed milliseconds — the same
+        // as on the series beside this one.
+        let timestamp = u64::try_from(stated_secs).unwrap_or_default().saturating_mul(1_000);
+        let headline = readable_headline(&headline);
+        let news = crate::types::TickNews {
+            instrument,
+            provider_code: provider,
+            article_id,
+            headline,
+            timestamp,
+        };
+        shared.market.push_tick_news(news.clone());
+        emit(event_tx, Event::News(news));
     }
 
     /// The odd lot, off a record of the venue's own fields.
@@ -4851,19 +5094,7 @@ impl FarmState {
             let raw_headline = String::from_utf8_lossy(&body[pos..pos+hl_len]).to_string();
             pos += hl_len;
 
-            let headline = if raw_headline.starts_with('{') {
-                match raw_headline.find('}') {
-                    Some(i) => raw_headline[i+1..].to_string(),
-                    None => raw_headline,
-                }
-            } else {
-                raw_headline
-            };
-            // With the characters the venue escaped put back, the same as on a
-            // headline out of the archive: it writes anything outside plain
-            // ASCII as `&#xNN;`, and the reference client reads those back
-            // here too.
-            let headline = crate::control::news::unescape_venue_characters(&headline);
+            let headline = readable_headline(&raw_headline);
 
             let news = crate::types::TickNews {
                 instrument,

@@ -579,6 +579,20 @@ impl EClient {
         self.shared.market.paired_figures(instrument, series)
     }
 
+    /// The rows of a book one series last stated for a subscription.
+    ///
+    /// A quantity, what it is offered at, and a second price where the form the
+    /// venue used states one — `f64::MAX` where it does not. The venue keeps
+    /// this for contracts dealt in size rather than on a screen, and the
+    /// documented API has no call for it.
+    pub fn stated_rows(&self, req_id: i64, series: u32) -> Vec<(f64, f64, f64)> {
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Vec::new();
+        };
+        self.shared.market.stated_rows(instrument, series)
+    }
+
     /// Which series have stated paired figures for a subscription, in order.
     pub fn paired_figures_series(&self, req_id: i64) -> Vec<u32> {
         let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
