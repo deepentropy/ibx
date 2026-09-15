@@ -348,33 +348,26 @@ fn deliver_series(
         // numbers first, then fractional ones — each opening with how many
         // entries it carries, and each entry naming what it is before stating
         // it. The fractional table is four bytes to the figure, not eight.
-        165 => {
-            let Some(whole) = series_i32(payload, 0) else { return true };
-            let mut at = 4;
-            for _ in 0..whole.clamp(0, (payload.len() / 8) as i32) {
-                let (Some(named), Some(value)) =
-                    (series_i32(payload, at), series_i32(payload, at + 4))
-                else {
-                    return true;
-                };
-                at += 8;
-                // What trades in an ordinary day. The rest of this table is
-                // the venue's own and reaches no caller. A figure it does not
+        165 | 561 | 562 | 757 => {
+            let (whole, fractional) = read_numbered_figures(payload);
+            // Kept whole, both tables, under the venue's own numbering. Two of
+            // these figures have a documented call and the rest have none, and
+            // the ones that have none are the venue's to add to: read for the
+            // two and dropped otherwise, every figure the venue started
+            // stating went unseen until someone here wrote its number down.
+            shared.market.note_numbered_figures(instrument, tick, &whole, &fractional);
+            if tick != 165 {
+                return true;
+            }
+            for (named, value) in whole {
+                // What trades in an ordinary day. A figure the venue does not
                 // hold is stated as the largest the type carries, which is not
                 // two billion shares.
-                if named == 768 && value != i32::MAX {
-                    say(21, SeriesValue::Size(f64::from(value)));
+                if named == AN_ORDINARY_DAY && value != f64::from(i32::MAX) {
+                    say(21, SeriesValue::Size(value));
                 }
             }
-            let Some(fractional) = series_i32(payload, at) else { return true };
-            at += 4;
-            for _ in 0..fractional.clamp(0, (payload.len() / 8) as i32) {
-                let (Some(named), Some(value)) =
-                    (series_i32(payload, at), series_f32(payload, at + 4))
-                else {
-                    return true;
-                };
-                at += 8;
+            for (named, value) in fractional {
                 // The high above the low in each pair, and the venue numbers
                 // the high first.
                 //
@@ -390,12 +383,11 @@ fn deliver_series(
                 // apart: the share count is stated in millions, and both
                 // matched the company's own.
                 if named == A_SHARE_COUNT || named == AN_OPEN_A_YEAR_AGO {
-                    if value.is_finite() && value != f32::MAX {
-                        let stated = f64::from(value);
+                    if value.is_finite() && value != f64::from(f32::MAX) {
                         shared.market.note_contract_figures(
                             instrument,
-                            (named == A_SHARE_COUNT).then_some(stated * 1e6),
-                            (named == AN_OPEN_A_YEAR_AGO).then_some(stated),
+                            (named == A_SHARE_COUNT).then_some(value * 1e6),
+                            (named == AN_OPEN_A_YEAR_AGO).then_some(value),
                         );
                     }
                     continue;
@@ -407,21 +399,14 @@ fn deliver_series(
                     204 => 17,
                     205 => 20,
                     206 => 19,
-                    // A figure the venue states and this cannot name. Recorded
-                    // under its own number — once, whatever it holds — so that
-                    // what is not read is written down and can be settled
-                    // later, rather than passing unseen.
-                    other => {
-                        shared.market.note_unread_wire(
-                            "farm",
-                            format!("a contract figure of kind {other} on tick 165"),
-                        );
-                        continue;
-                    }
+                    // The rest have no documented call. They are kept above
+                    // under the venue's own number rather than sent as a tick
+                    // number of this client's own choosing.
+                    _ => continue,
                 };
                 // And a fractional figure it does not hold, the same way.
-                if value.is_finite() && value != f32::MAX {
-                    say(tick, SeriesValue::Price(f64::from(value)));
+                if value.is_finite() && value != f64::from(f32::MAX) {
+                    say(tick, SeriesValue::Price(value));
                 }
             }
         }
@@ -1140,6 +1125,9 @@ const GREEKS_REQUEST_TYPE: u32 = 732;
 /// The news tick's own number, in place of a request type.
 const NEWS_REQUEST_TYPE: u32 = 292;
 
+/// The venue's number for what a contract trades in an ordinary day.
+const AN_ORDINARY_DAY: i32 = 768;
+
 /// How many shares a company has on issue, as the venue numbers the figure on
 /// the tick that carries a contract's price extremes. Stated in millions.
 const A_SHARE_COUNT: i32 = 408;
@@ -1380,6 +1368,46 @@ fn read_generic_ticks<'a>(
 /// first name and the padding joins the last.
 fn length_prefixed_text(payload: &[u8]) -> Option<std::borrow::Cow<'_, str>> {
     Some(String::from_utf8_lossy(length_prefixed_bytes(payload)?))
+}
+
+/// Figures the venue numbers itself: its number for each, and the figure.
+pub(crate) type NumberedFigures = Vec<(i32, f64)>;
+
+/// The two tables of numbered figures a series states.
+///
+/// A count of whole-number figures, that many pairs of a number and its
+/// figure, then a count of fractional ones and that many pairs again. The
+/// fractional table is four bytes to the figure where the whole one is four to
+/// an integer, and the venue numbers the two tables separately — a figure is
+/// its number and the table it stood in, not its number alone.
+///
+/// Four series state their figures this way and this reads all four. A count
+/// reaching past what arrived is held to what the record could carry, and a
+/// table that stops short states the pairs before it.
+fn read_numbered_figures(payload: &[u8]) -> (NumberedFigures, NumberedFigures) {
+    let mut at = 0usize;
+    let whole = read_numbered_table(payload, &mut at, false);
+    let fractional = read_numbered_table(payload, &mut at, true);
+    (whole, fractional)
+}
+
+/// One of those tables, leaving `at` on the byte after it.
+fn read_numbered_table(payload: &[u8], at: &mut usize, fractional: bool) -> NumberedFigures {
+    let mut out = Vec::new();
+    let Some(count) = series_i32(payload, *at) else { return out };
+    *at += 4;
+    for _ in 0..count.clamp(0, (payload.len() / 8) as i32) {
+        let Some(named) = series_i32(payload, *at) else { return out };
+        let stated = if fractional {
+            series_f32(payload, *at + 4).map(f64::from)
+        } else {
+            series_i32(payload, *at + 4).map(f64::from)
+        };
+        let Some(stated) = stated else { return out };
+        out.push((named, stated));
+        *at += 8;
+    }
+    out
 }
 
 /// The bytes inside a tick payload that states its own length, as they came.

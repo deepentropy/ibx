@@ -1399,6 +1399,40 @@ pub fn stated_figures(&self, req_id: i64, series: u32) -> Vec<f64>
 
 ---
 
+#### `numbered_figures`
+
+What one of the venue's numbered-table series last stated for a subscription: its figures under the venue's own numbering. Four series state their figures as two tables, whole numbers and fractional ones, each entry naming what it is before stating it. Two of those numbers have a documented call to arrive on and the rest have none; the rest are here, under the number the venue gave them. `fractional` picks the table. The venue numbers the two separately, so the same number in each is not the same figure.
+
+```rust
+pub fn numbered_figures( &self, req_id: i64, series: u32, fractional: bool, ) -> Vec<(i32, f64)>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `series` | `u32` |  |
+| `fractional` | `bool` |  |
+
+**Returns:** `Vec<(i32, f64)>`
+
+---
+
+#### `numbered_figures_series`
+
+Which series have stated numbered figures for a subscription, in order.
+
+```rust
+pub fn numbered_figures_series(&self, req_id: i64) -> Vec<u32>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+**Returns:** `Vec<u32>`
+
+---
+
 #### `stated_figures_series`
 
 Which series have stated figures for a subscription, in order.

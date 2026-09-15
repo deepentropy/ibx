@@ -1161,6 +1161,36 @@ def stated_figures(req_id, series)
 
 ---
 
+#### `numbered_figures`
+
+What one of the venue's numbered-table series last stated for a subscription: its figures under the venue's own numbering.  Four series state their figures as two tables, whole numbers and fractional ones, each entry naming what it is before stating it. `fractional` picks the table; the venue numbers the two separately, so the same number in each is not the same figure.
+
+```python
+def numbered_figures(req_id, series, fractional=False)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `series` | `int` |  |
+| `fractional` | `bool` |  |
+
+---
+
+#### `numbered_figures_series`
+
+Which series have stated numbered figures for a subscription, in order.
+
+```python
+def numbered_figures_series(req_id)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+
+---
+
 #### `stated_figures_series`
 
 Which series have stated figures for a subscription, in order.

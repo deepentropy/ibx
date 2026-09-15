@@ -380,6 +380,55 @@ mod news_tests {
         );
     }
 
+    /// The other three series that state two numbered tables, read by the
+    /// same reader the extremes are.
+    ///
+    /// The whole table states four bytes to the figure as an integer and the
+    /// fractional one four bytes as a fraction, so a reader holding both to
+    /// one width reads one table's figures as the other's.
+    #[test]
+    fn the_other_series_that_number_their_figures_are_read_the_same_way() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.register(8003);
+
+        let mut payload = 2i32.to_be_bytes().to_vec();
+        for (named, value) in [(11i32, 4200i32), (12, -3)] {
+            payload.extend_from_slice(&named.to_be_bytes());
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        payload.extend_from_slice(&1i32.to_be_bytes());
+        payload.extend_from_slice(&30i32.to_be_bytes());
+        payload.extend_from_slice(&225.5f32.to_be_bytes());
+
+        farm.generic_tick_tags.push((61, 757, instrument));
+        farm.handle_generic_tick(
+            &framed_generic_ticks(&[(61, 757, &payload)]), &mut context, &shared, &None,
+        );
+        assert_eq!(
+            shared.market.numbered_figures(instrument, 757, false),
+            vec![(11, 4200.0), (12, -3.0)],
+            "the whole table, under the venue's own numbering",
+        );
+        assert_eq!(
+            shared.market.numbered_figures(instrument, 757, true), vec![(30, 225.5)],
+            "and the fractional one, four bytes to the figure",
+        );
+        // These carry no documented call, so nothing goes out as a tick.
+        assert!(
+            shared.market.drain_series_ticks(instrument).is_empty(),
+            "a figure with no documented call was sent under a number anyway",
+        );
+
+        // A slot handed back takes them with it.
+        shared.market.forget_option_model(instrument);
+        assert!(
+            shared.market.numbered_figures_series(instrument).is_empty(),
+            "a figure outlived the contract it was stated for",
+        );
+    }
+
     /// The series that state figures, read at the venue's own widths and in
     /// its own order.
     ///
@@ -1544,15 +1593,27 @@ mod news_tests {
         assert_eq!(at(16), Some(344.570_007_324_218_75), "the thirteen-week high");
         assert_eq!(at(19), Some(234.358_993_530_273_44), "and the fifty-two week low");
 
-        // And the two the venue states that this cannot name are written down
-        // under their own numbers rather than passing unseen.
-        let unread = shared.market.unread_wire();
+        // And every figure in the table is kept under the venue's own number,
+        // including the ones with no documented call to arrive on. Read for
+        // the two that have one and dropped otherwise, a figure the venue
+        // started stating would go unseen until someone here wrote its number
+        // down.
+        let fractional = shared.market.numbered_figures(id, 165, true);
         for kind in [208, 209] {
             assert!(
-                unread.iter().any(|(_, what)| what.contains(&format!("kind {kind}"))),
-                "a figure of kind {kind} went unrecorded: {unread:?}",
+                fractional.iter().any(|(named, _)| *named == kind),
+                "a figure of kind {kind} was not kept: {fractional:?}",
             );
         }
+        assert_eq!(
+            fractional.iter().find(|(named, _)| *named == 201).map(|(_, v)| *v),
+            Some(344.570_007_324_218_75),
+            "the figure a documented call carries is kept beside the rest",
+        );
+        assert_eq!(
+            shared.market.numbered_figures_series(id), vec![165],
+            "the series that stated them is named",
+        );
     }
 
     /// A message carries one record after another, and each is delivered. Read

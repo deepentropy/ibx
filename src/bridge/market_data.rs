@@ -45,6 +45,11 @@ pub(super) fn push_bounded<T>(queue: &Mutex<Vec<T>>, item: T, limit: usize, what
     held.push(item);
 }
 
+/// What each contract's numbered-figure tables hold: the slot, the series and
+/// which of the two tables, against the figures the venue numbered in it.
+type NumberedFiguresHeld =
+    std::collections::HashMap<(crate::types::InstrumentId, u32, bool), Vec<(i32, f64)>>;
+
 /// Lock-free quotes, TBT streams, real-time bars, depth updates, and news ticks.
 pub struct MarketDataState {
     quotes: Box<[SeqQuote]>,
@@ -171,6 +176,11 @@ pub struct MarketDataState {
     /// overwrite the last.
     stated_figures:
         Mutex<std::collections::HashMap<(crate::types::InstrumentId, u32), Vec<f64>>>,
+    /// The numbered figures each series has stated for a contract: the whole
+    /// ones under `false` and the fractional ones under `true`, because the
+    /// venue numbers the two tables separately and a figure is its number and
+    /// the table it stood in.
+    numbered_figures: Mutex<NumberedFiguresHeld>,
     /// Which contracts the venue is restricting short sales in.
     ///
     /// Stated on the same record as the halt, and kept here rather than on the
@@ -228,6 +238,7 @@ impl MarketDataState {
             quote_attribute_masks: Mutex::new(std::collections::HashMap::new()),
             contract_figures: Mutex::new(std::collections::HashMap::new()),
             stated_figures: Mutex::new(std::collections::HashMap::new()),
+            numbered_figures: Mutex::new(std::collections::HashMap::new()),
             short_sale_restricted: Mutex::new(std::collections::HashSet::new()),
             clock_skew_millis: AtomicI64::new(0),
             unread_wire: Mutex::new(Vec::new()),
@@ -338,6 +349,7 @@ impl MarketDataState {
         // These belong to the contract that was in the slot, not to the slot.
         self.contract_figures.lock().unwrap().remove(&instrument);
         self.stated_figures.lock().unwrap().retain(|(at, _), _| *at != instrument);
+        self.numbered_figures.lock().unwrap().retain(|(at, ..), _| *at != instrument);
         // A restriction belongs to the contract that was in the slot, not to
         // the slot: left behind, the next contract to take it reads as
         // restricted on the strength of the last one.
@@ -999,6 +1011,52 @@ impl MarketDataState {
             .collect();
         series.sort_unstable();
         series
+    }
+
+    /// The figures one series stated for a contract under the venue's own
+    /// numbering, whole or fractional.
+    ///
+    /// Four series state their figures as two numbered tables. Two of the
+    /// numbers have a documented call to reach a caller on and the rest have
+    /// none, so the rest are kept here under the number the venue gave them
+    /// rather than sent as a tick number of this client's own choosing.
+    ///
+    /// Empty until that series has been asked for and answered.
+    pub fn numbered_figures(
+        &self, instrument: crate::types::InstrumentId, series: u32, fractional: bool,
+    ) -> Vec<(i32, f64)> {
+        self.numbered_figures
+            .lock()
+            .unwrap()
+            .get(&(instrument, series, fractional))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Which series have stated numbered figures for a contract, in order.
+    pub fn numbered_figures_series(&self, instrument: crate::types::InstrumentId) -> Vec<u32> {
+        let mut series: Vec<u32> = self.numbered_figures.lock().unwrap()
+            .keys()
+            .filter(|(at, ..)| *at == instrument)
+            .map(|(_, series, _)| *series)
+            .collect();
+        series.sort_unstable();
+        series.dedup();
+        series
+    }
+
+    #[doc(hidden)] pub fn note_numbered_figures(
+        &self, instrument: crate::types::InstrumentId, series: u32,
+        whole: &[(i32, f64)], fractional: &[(i32, f64)],
+    ) {
+        // A table the record did not carry is not a table the venue emptied:
+        // left out of one message, what it last stated still stands.
+        let mut held = self.numbered_figures.lock().unwrap();
+        for (table, stated) in [(false, whole), (true, fractional)] {
+            if !stated.is_empty() {
+                held.insert((instrument, series, table), stated.to_vec());
+            }
+        }
     }
 
     #[doc(hidden)] pub fn note_stated_figures(

@@ -262,6 +262,8 @@ same thing, not that the documented API does.
 | `newsHeadlines` | ● | · | · | · | ● | ● |
 | `nextOrderId` | ● | · | · | · | ● | ● |
 | `nextSharedId` | ● | · | · | · | · | ● |
+| `numberedFigures` | ● | · | · | · | ● | ● |
+| `numberedFiguresSeries` | ● | · | · | · | ● | ● |
 | `option_chain` | ● | · | · | · | ● | · |
 | `optionChains` | ● | · | · | · | · | ● |
 | `optionModel` | ● | · | · | · | ● | ● |

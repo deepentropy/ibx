@@ -642,6 +642,36 @@ impl EClient {
         Ok(shared.market.stated_figures(instrument, series))
     }
 
+    /// What one of the venue's numbered-table series last stated for a
+    /// subscription: its figures under the venue's own numbering.
+    ///
+    /// Four series state their figures as two tables, whole numbers and
+    /// fractional ones, each entry naming what it is before stating it.
+    /// `fractional` picks the table; the venue numbers the two separately, so
+    /// the same number in each is not the same figure.
+    #[pyo3(signature = (req_id, series, fractional=false))]
+    fn numbered_figures(
+        &self, req_id: i64, series: u32, fractional: bool,
+    ) -> PyResult<Vec<(i32, f64)>> {
+        let Ok(shared) = self.shared_state() else { return Ok(Vec::new()) };
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(shared.market.numbered_figures(instrument, series, fractional))
+    }
+
+    /// Which series have stated numbered figures for a subscription, in order.
+    #[pyo3(signature = (req_id))]
+    fn numbered_figures_series(&self, req_id: i64) -> PyResult<Vec<u32>> {
+        let Ok(shared) = self.shared_state() else { return Ok(Vec::new()) };
+        let Some(instrument) = self.core.req_to_instrument.lock().unwrap().get(&req_id).copied()
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(shared.market.numbered_figures_series(instrument))
+    }
+
     /// Which series have stated figures for a subscription, in order.
     #[pyo3(signature = (req_id))]
     fn stated_figures_series(&self, req_id: i64) -> PyResult<Vec<u32>> {
