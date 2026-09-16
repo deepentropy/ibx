@@ -833,6 +833,7 @@ fn deliver_series(
 /// | 658 | The volume of an average minute |
 /// | 680 | The venue's own weighted volume figure |
 /// | 689, 736 | The volatility either side of the close, and the model behind it |
+/// | 688, 694, 734, 735, 737 | Five more volatilities taken at or around the close |
 /// | 767 | What a perpetual contract is funding at |
 const STATED_FIGURES: &[(u32, &str)] = &[
     (30, "d"), (50, "d"), (75, "d"), (107, "d"), (125, "fffff"), (150, "d"),
@@ -842,7 +843,8 @@ const STATED_FIGURES: &[(u32, &str)] = &[
     (509, "ii"), (527, "d"), (531, "dii"), (540, "di"), (545, "d"),
     (584, "i"), (585, "i"), (597, "d"), (606, "did"), (613, "iff"),
     (645, "di"), (647, "d"), (649, "fi"), (657, "dif"), (658, "di"),
-    (587, "di"), (680, "d"), (689, "ddii"), (736, "ddi"), (767, "di"),
+    (587, "di"), (680, "d"), (688, "id"), (689, "ddii"), (694, "id"), (734, "id"),
+    (735, "id"), (736, "ddi"), (737, "id"), (767, "di"),
 ];
 
 /// Keep the figures a series states, where the documented API has no call to
@@ -1859,9 +1861,12 @@ fn company_text(series: u32, payload: &[u8]) -> Option<std::borrow::Cow<'_, [u8]
         // same runs of `KEY=VALUE` the rest state outright. Held to what one
         // payload may become, as every other inflate here is: what arrives is
         // bounded on the wire and what it becomes is not.
-        386 => {
+        386 | 691 => {
             use std::io::Read as _;
-            let compressed = payload.get(8..)?;
+            // Both compress what they state; they differ in how much they put
+            // in front of it. The calendar states eight bytes of its own, the
+            // other a single byte that is not part of what was squeezed.
+            let compressed = payload.get(if series == 386 { 8 } else { 1 }..)?;
             let mut text = Vec::new();
             flate2::read::ZlibDecoder::new(compressed)
                 .take(crate::protocol::fixcomp::MAX_INFLATED + 1)
@@ -4919,8 +4924,8 @@ impl FarmState {
                 // buys in from elsewhere; the lens it publishes over a
                 // company's accounts; and the price it holds a contract
                 // against for reference.
-                386 | 434 | 454 | 505 | 548 | 628 | 631 | 633 | 669 | 678 | 699 | 700 | 703
-                | 705 | 726 | 750 | 752 => {
+                386 | 434 | 454 | 505 | 548 | 628 | 631 | 633 | 669 | 678 | 691 | 699 | 700
+                | 703 | 705 | 726 | 750 | 752 => {
                     self.deliver_company_data(instrument, tick, payload, context, shared)
                 }
                 other => {
