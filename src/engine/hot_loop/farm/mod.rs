@@ -491,7 +491,7 @@ fn deliver_series(
                 shared.market.note_numbered_figures(instrument, tick, &[], &figures);
             }
         }
-        165 | 561 | 562 | 757 => {
+        165 | 561 | 562 | 661 | 662 | 663 | 664 | 665 | 666 | 757 => {
             let (whole, fractional) = read_numbered_figures(payload);
             // Kept whole, both tables, under the venue's own numbering. Two of
             // these figures have a documented call and the rest have none, and
@@ -802,6 +802,8 @@ fn deliver_series(
 ///
 /// | Series | What the venue states on it |
 /// | --- | --- |
+/// | 30, 50, 75, 150, 200 | Five figures the venue states under numbers of its own |
+/// | 107, 291 | A volatility taken at the close, and the close's own |
 /// | 125 | Five analytic figures for a bond |
 /// | 266 | The two coefficients that fit an index to its future |
 /// | 317, 531 | An underlying's mark once dealing has closed, frozen and delayed-frozen |
@@ -822,6 +824,7 @@ fn deliver_series(
 /// | 540 | The yield the venue works out from the price |
 /// | 545 | The volatility the venue's own model settles on |
 /// | 584, 585 | The volume a contract usually opens and closes on |
+/// | 587 | A mark the venue keeps behind the live one |
 /// | 613 | What the model makes the contract worth |
 /// | 645 | The close stated in money |
 /// | 647 | How much of the industry's borrowable stock is out on loan |
@@ -832,13 +835,14 @@ fn deliver_series(
 /// | 689, 736 | The volatility either side of the close, and the model behind it |
 /// | 767 | What a perpetual contract is funding at |
 const STATED_FIGURES: &[(u32, &str)] = &[
-    (125, "fffff"), (266, "dd"), (317, "dii"), (388, "dddd"), (391, "ddiidd"),
+    (30, "d"), (50, "d"), (75, "d"), (107, "d"), (125, "fffff"), (150, "d"),
+    (200, "d"), (266, "dd"), (291, "d"), (317, "dii"), (388, "dddd"), (391, "ddiidd"),
     (393, "dd"), (398, "i"), (399, "iii"), (402, "dddiii"), (407, "dddd"),
     (418, "d"), (459, "fiii"), (493, "did"), (497, "d"), (504, "di"),
     (509, "ii"), (527, "d"), (531, "dii"), (540, "di"), (545, "d"),
     (584, "i"), (585, "i"), (597, "d"), (606, "did"), (613, "iff"),
     (645, "di"), (647, "d"), (649, "fi"), (657, "dif"), (658, "di"),
-    (680, "d"), (689, "ddii"), (736, "ddi"), (767, "di"),
+    (587, "di"), (680, "d"), (689, "ddii"), (736, "ddi"), (767, "di"),
 ];
 
 /// Keep the figures a series states, where the documented API has no call to

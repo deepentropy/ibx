@@ -21,7 +21,15 @@ type StatedActions = (
 
 /// What the venue states about a contract's issuer, by its id for the
 /// contract and the series the statement arrived on.
-type CompanyData = std::collections::HashMap<(u32, u32), Vec<(String, String)>>;
+/// What each contract's series have stated, by contract and then by series,
+/// with the contracts in the order they were first heard of.
+///
+/// Nested rather than keyed by the pair, so the oldest contract can be dropped
+/// without walking everything held.
+type CompanyData = (
+    std::collections::HashMap<u32, std::collections::HashMap<u32, Vec<(String, String)>>>,
+    std::collections::VecDeque<u32>,
+);
 
 /// Which of the venue's records a number is held for.
 ///
@@ -240,7 +248,7 @@ impl ReferenceState {
             order_presets: Mutex::new(Vec::new()),
             under_con_ids: Mutex::new(std::collections::HashMap::new()),
             dividend_schedules: Mutex::new(std::collections::HashMap::new()),
-            company_data: Mutex::new(CompanyData::new()),
+            company_data: Mutex::new(Default::default()),
             spread_scans: Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -1265,26 +1273,28 @@ impl ReferenceState {
     /// The keys are the venue's own, unchanged. They are the venue's to add to
     /// and to rename, so nothing here reads them or promises a set of them.
     ///
-    /// What one contract states is kept for as long as the session runs, and
-    /// is not dropped when the subscription that fetched it ends — it is a fact
-    /// about the contract rather than about the watch. That costs memory in
-    /// proportion to the contracts a session has watched, not to the ones it is
-    /// watching now: measured against one ordinary share stating every series,
-    /// about twenty-three kilobytes for it, so a session that has watched ten
-    /// thousand contracts holds a couple of hundred megabytes of this. A
-    /// program watching a few hundred will not notice; one sweeping a scanner
-    /// across thousands should know where the memory went.
+    /// What one contract states is not dropped when the subscription that
+    /// fetched it ends — it is a fact about the contract rather than about the
+    /// watch, so a caller that comes back to a contract finds it still there.
+    ///
+    /// Held for as many contracts as this client can hold a slot for, and the
+    /// contract heard of longest ago is dropped to make room. One ordinary
+    /// share stating every series is about twenty-three kilobytes, so what this
+    /// holds is bounded at a hundred megabytes or so however long a session
+    /// runs — where before it grew with every contract ever watched.
     pub fn company_data(&self, con_id: u32, series: u32) -> Vec<(String, String)> {
-        self.company_data.lock().unwrap().get(&(con_id, series)).cloned().unwrap_or_default()
+        self.company_data.lock().unwrap().0
+            .get(&con_id)
+            .and_then(|held| held.get(&series))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Which of those series have been stated for a contract, in order.
     pub fn company_data_series(&self, con_id: u32) -> Vec<u32> {
-        let mut series: Vec<u32> = self.company_data.lock().unwrap()
-            .keys()
-            .filter(|(held, _)| *held == con_id)
-            .map(|(_, series)| *series)
-            .collect();
+        let held = self.company_data.lock().unwrap();
+        let Some(held) = held.0.get(&con_id) else { return Vec::new() };
+        let mut series: Vec<u32> = held.keys().copied().collect();
         series.sort_unstable();
         series
     }
@@ -1304,7 +1314,21 @@ impl ReferenceState {
         if con_id == 0 {
             return;
         }
-        self.company_data.lock().unwrap().insert((con_id, series), pairs);
+        let (held, order) = &mut *self.company_data.lock().unwrap();
+        if held.entry(con_id).or_default().insert(series, pairs).is_none()
+            && held[&con_id].len() == 1
+        {
+            // First time this contract has stated anything. Held for as many
+            // contracts as this client can hold a slot for and no more: a
+            // session sweeping a scanner across thousands would otherwise keep
+            // every one of them for as long as it ran.
+            order.push_back(con_id);
+            while order.len() > crate::types::MAX_INSTRUMENTS
+                && let Some(gone) = order.pop_front()
+            {
+                held.remove(&gone);
+            }
+        }
     }
 
     #[doc(hidden)] pub fn set_algorithms(&self, algorithms: HashMap<String, Vec<String>>) {
@@ -1704,5 +1728,42 @@ mod adjustments_store_tests {
         // The plain reader is unchanged: it states what is known about the
         // contract, which is a different question from whose answer it is.
         assert!(state.adjustments_for("4815747").is_some());
+    }
+
+    /// What the company series state is kept for as many contracts as this
+    /// client can hold a slot for, and no more.
+    ///
+    /// Kept for every contract ever watched, a session sweeping a scanner
+    /// across thousands holds all of them for as long as it runs.
+    #[test]
+    fn what_a_contract_stated_is_kept_for_as_many_as_can_be_watched() {
+        let state = ReferenceState::new();
+        let cap = crate::types::MAX_INSTRUMENTS as u32;
+
+        for con_id in 1..=cap {
+            state.note_company_data(con_id, 434, vec![("RATING".into(), "2".into())]);
+        }
+        assert_eq!(
+            state.company_data(1, 434).len(), 1, "the first is still held at the cap",
+        );
+
+        // One more contract, and the one heard of longest ago makes way.
+        state.note_company_data(cap + 1, 434, vec![("RATING".into(), "3".into())]);
+        assert!(
+            state.company_data(1, 434).is_empty(),
+            "the contract heard of longest ago was kept past the cap",
+        );
+        assert_eq!(
+            state.company_data(cap + 1, 434),
+            vec![("RATING".to_string(), "3".to_string())],
+            "and the newest is held",
+        );
+        assert_eq!(state.company_data(2, 434).len(), 1, "the rest are untouched");
+
+        // A contract stating a second series is not a second contract, so it
+        // costs nothing against the cap.
+        state.note_company_data(cap + 1, 548, vec![("SIRECOMM1".into(), "9".into())]);
+        assert_eq!(state.company_data_series(cap + 1), vec![434, 548]);
+        assert_eq!(state.company_data(2, 434).len(), 1, "nothing else made way for it");
     }
 }

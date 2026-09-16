@@ -688,8 +688,8 @@ impl EClient {
     /// Held against the venue's id for the contract rather than the request,
     /// because it is a fact about the contract and outlives the subscription
     /// that fetched it — so it is read by `con_id`, not by request number, and
-    /// it is still there after the watch ends. About twenty-three kilobytes per
-    /// contract that states every series, held for the life of the session.
+    /// it is still there after the watch ends — for as many contracts as this
+    /// client can hold a slot for, the one heard of longest ago making way.
     ///
     /// Empty where that series has stated nothing for the contract.
     pub fn company_data(&self, con_id: u32, series: u32) -> Vec<(String, String)> {

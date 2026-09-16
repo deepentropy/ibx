@@ -1049,7 +1049,18 @@ impl MarketDataState {
     /// The figures one series stated for a contract under the venue's own
     /// numbering, whole or fractional.
     ///
-    /// Four series state their figures as two numbered tables. Two of the
+    /// Ten series state their figures as two numbered tables — among them where
+    /// a contract's volatility stands against its own past, both the
+    /// volatility the market implies and the one it has actually shown: the
+    /// rank, the percentile and the high and low of each.
+    ///
+    /// On those six the number each figure is kept under is **weeks**, and the
+    /// venue keeps three windows: a quarter, a half year and a year. On the
+    /// two that state a high and a low, the window is written negative for the
+    /// low and positive for the high, so a year's range is the pair numbered
+    /// minus fifty-two and fifty-two. Read off a live session, where a share
+    /// stood at the same rank across all three windows while a fund's moved
+    /// with each. Two of the
     /// numbers have a documented call to reach a caller on and the rest have
     /// none, so the rest are kept here under the number the venue gave them
     /// rather than sent as a tick number of this client's own choosing.
