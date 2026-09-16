@@ -444,6 +444,18 @@ fn deliver_series(
                 shared.market.note_stated_rows(instrument, tick, rows);
             }
         }
+        // The one series this client does not read, and the reason is not that
+        // it is hard: the venue declares it and the plumbing to subscribe it,
+        // and then nothing anywhere asks for it or says how to read what it
+        // would answer with. There is no layout to read because nothing reads
+        // it. Recorded so a message that does arrive is not lost in silence.
+        230 => {
+            shared.market.note_unread_wire_under(
+                "farm",
+                "a portfolio figure on tick 230".to_string(),
+                "a portfolio figure on tick 230, which nothing states how to read".to_string(),
+            );
+        }
         // The moving averages the venue keeps over a contract's close. The
         // record is pairs of a number and a figure from end to end, which is
         // why its length is always a multiple of eight: the first pair's
