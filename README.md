@@ -14,6 +14,20 @@
   <a href="https://userfrm.github.io/ibx/"><img src="https://img.shields.io/badge/docs-book-green.svg" alt="Docs"></a>
 </p>
 
+## Contents
+
+**Start here** — [Introduction](#introduction) · [Why this exists](#why-this-exists) · [Installation](#installation) · [Quick start](#quick-start)
+
+**What you get** — [Beyond the documented API](#beyond-the-documented-api) · [Capabilities](#capabilities) · [Calls](#calls) · [Callbacks](#callbacks) · [Beyond the canonical list](#beyond-the-canonical-list)
+
+**Moving across** — [Running an existing program](#running-an-existing-program) · [ib_async](#ib_async) · [TWS API](#tws-api-eclient--ewrapper)
+
+**Under the hood** — [How it works](#how-it-works) · [Configuration](#configuration)
+
+**The honest parts** — [What is not covered](#what-is-not-covered) · [Questions](#questions) · [Testing](#testing)
+
+**Working on it** — [Contributing](#contributing) · [Security](#security) · [License](#license)
+
 ## Introduction
 
 IBX implements the IBKR client protocol directly. It authenticates, maintains
@@ -35,6 +49,32 @@ Python, additionally with [ib_async](https://github.com/ib-api-reloaded/ib_async
 > same callbacks, the same order objects. What changes is the line above and
 > the removal of whatever started the gateway.
 
+## Why this exists
+
+A program that trades through Interactive Brokers normally talks to a local
+process — IB Gateway or Trader Workstation — which talks to the venue. That
+process is a Java application. It holds a heap, it holds a window unless you
+fight it, it has to be logged in, and it has to stay alive for as long as your
+program does.
+
+That arrangement costs you four things:
+
+1. **An operational dependency.** Something has to start it, watch it, restart
+   it, and log in again when it drops. In a container or over ssh that is work
+   you did not want.
+2. **A second failure mode.** Your program can be healthy while the thing it
+   depends on is wedged, and the two do not agree about it.
+3. **A ceiling.** The heap is finite and bulk historical data is what finds the
+   edge of it.
+4. **A narrower view than the terminal's.** The gateway receives far more from
+   the venue than it forwards. Whatever has no message in the documented API
+   simply never reaches you.
+
+This client speaks the venue's own protocol, so none of those apply. It
+authenticates, holds the connections a session runs on, and answers the same
+calls a program already makes — and because it sits where the gateway sat, what
+the gateway kept to itself is reachable too.
+
 ### What this removes
 
 * **The gateway process** — nothing to install, launch, log into, or restart
@@ -54,6 +94,255 @@ No IB software is required. The `ibapi` package is not needed either.
 > A live login enters the venue's second-factor approval, which waits on a
 > device. Paper logins do not. One session per login: opening a second takes
 > the first away, and the venue says which host took it.
+
+## Installation
+
+### Python
+
+```bash
+uv venv .venv --python 3.13
+source .venv/bin/activate          # .venv\Scripts\activate on Windows
+pip install maturin
+maturin develop --features python
+```
+
+### Rust
+
+```toml
+[dependencies]
+ibx = { git = "https://github.com/userFRM/ibx" }
+```
+
+> [!NOTE]
+> Wheels are built for Linux, macOS and Windows; the workflow builds and tests
+> on all three. Rust 1.89+ and Python 3.11+ are the floors, and the Python
+> bindings are a compiled extension rather than a pure-Python package.
+
+## Quick start
+
+```python
+import ibx
+
+ib = ibx.IB()
+ib.connect(username="your_user", password="your_pass", paper=True)
+
+spy = ibx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
+
+(ticker,) = ib.reqTickers(spy)
+print(ticker.bid, ticker.ask)
+
+order = ibx.Order(action="BUY", orderType="LMT", totalQuantity=1, lmtPrice=1.00)
+trade = ib.placeOrder(spy, order)
+ib.sleep(2)
+print(trade.orderStatus.status)
+ib.cancelOrder(order)
+
+ib.disconnect()
+```
+
+A contract does not need to be qualified first: a request carrying a contract
+rather than a contract id is resolved before transmission.
+
+In Rust:
+
+```rust
+use ibx::types::model::{Contract, Order};
+use ibx::{Client, Config};
+
+let client = Client::connect(&Config {
+    username: "your_user".into(),
+    password: "your_pass".into(),
+    paper: true,
+    ..Default::default()
+})?;
+
+let spy = client.qualify(Contract::stock("SPY"))?;
+
+// A quote exists because something is watching it, and updates itself after.
+client.watch(&spy)?;
+if let Some(quote) = client.ticker(&spy) {
+    println!("bid {} ask {}", quote.bid, quote.ask);
+}
+
+// The order is the thing you hold. Its number is bookkeeping the client keeps.
+let order = client.place(&spy, &Order::limit("BUY", 100.0, 42.50))?;
+order.wait_done(Duration::from_secs(30));
+println!("{} — {} filled", order.status(), order.fills().len());
+order.cancel()?;
+
+// What the session holds, without asking for any of it.
+for position in client.positions() { /* ... */ }
+for value in client.account_values() { /* ... */ }
+```
+
+One thread reads the session and keeps what arrives, so a position, an order, a
+fill and a quote are things you look at rather than questions you ask. The
+account, its holdings and anything already working are asked for as the session
+opens, so they are there to read the moment it returns.
+
+To be told as it happens rather than reading afterwards, take a stream. Both
+are iterators, so they read the way anything else in Rust reads:
+
+```rust
+for tick in client.ticks(&spy)? {
+    println!("{} at {}", tick.size, tick.price);
+}
+
+for event in client.order_events() {
+    println!("order {} is {}", event.order_id, event.status);
+}
+```
+
+`ticks` subscribes and hands back the stream in one, and only that contract's
+ticks arrive on it — a caller watching one thing does not filter out the rest.
+Dropping the stream withdraws the subscription.
+
+**There is one client.** The calls above are the ones with a shape worth
+having; every other request the protocol carries — scanners, news, corporate
+events, fundamentals, option chains, histograms, market rules, P&L — is on the
+same `client`, in the reference client's own shape:
+
+```rust
+client.req_scanner_parameters()?;
+client.req_historical_news(9001, con_id, "BRFG", "", "", 10)?;
+```
+
+Nothing to import, nothing to choose between: `Client` reaches all 135. Where a
+name appears on both, the session's own is the one you get, because it is the
+better answer — `positions()` reads what the session already holds rather than
+asking again.
+
+### Inside an async runtime
+
+The engine is a thread of its own, so a blocking call holds the thread that
+made it and nothing else. Inside a runtime that thread is one of a shared pool,
+so the `async` feature moves each question onto a thread that may wait. What
+does not wait — reading what the session holds — is not awaited:
+
+```toml
+ibx = { git = "https://github.com/userFRM/ibx", features = ["async"] }
+```
+
+```rust
+let client = AsyncClient::connect(config).await?;
+let spy = client.qualify(Contract::stock("SPY")).await?;
+
+client.watch(&spy).await?;           // may have to ask about the contract
+let quote = client.ticker(&spy);     // a memory read
+
+let order = client.place(&spy, &Order::limit("BUY", 1.0, 1.0)).await?;
+client.wait_done(&order, Duration::from_secs(30)).await;
+```
+
+Every question has the same name and the same answer on both, and a test fails
+if either grows a name the other does not have.
+
+## Beyond the documented API
+
+A quote subscription carries far more than prices. The venue publishes well over
+a hundred series against a contract, and the documented API forwards a handful
+of them — the rest have no message, so a program had no way to ask. This client
+sits where the gateway sat and reads them.
+
+Everything below is stated by the venue on an ordinary session. The figures are
+from one paper session and will differ with the account and the day; what does
+not differ is that none of it is reachable through `ibapi` or `ib_async`.
+
+### What a company is worth, and what it is
+
+```python
+client.req_mkt_data(1, aapl, "454,678,705", False, False, [])
+
+client.company_data(265598, 678)   # 212 fields, among them:
+#   FLOAT      = 1.4352417904E10      the float, to the share
+#   FLOAT_DATE = 20260901
+client.company_data(265598, 454)
+#   IISHOS     = 14594180000          shares on issue
+#   IITPCHL    = 47.7348              percent held by institutions
+client.company_data(265598, 705)
+#   TRESGS     = 7.10404              how it scores against screening principles
+```
+
+> [!TIP]
+> The float is the example worth giving. It is not derived from anything — the
+> venue states it outright on a series the documented API never named, and it
+> matched a terminal's own figure to the share.
+
+### Where a contract's volatility stands against its own past
+
+```python
+client.numbered_figures(1, 661, fractional=True)
+#   [(13, 56.155), (26, 56.155), (52, 56.155)]      implied-volatility rank
+client.numbered_figures(1, 664, fractional=True)
+#   [(13, 2.436), (26, 6.450), (52, 31.749)]        the same for realised
+```
+
+The number each figure is kept under is **weeks** — a quarter, a half year, a
+year. Two of these series state a high and a low, and there the window is
+written negative for the low and positive for the high, so a year's range is the
+pair numbered `-52` and `52`.
+
+### Five years of price history, without a history request
+
+```python
+client.numbered_figures(1, 562, fractional=False)   # the date of each point
+client.numbered_figures(1, 562, fractional=True)    # the price on it
+#   [(7, 765.96), (30, 776.34), … (1826, 419.586)]
+```
+
+The key is a span of days: a week, a month, a quarter, a year, three years,
+five. It arrives on a quote subscription with no historical-data request behind
+it at all.
+
+### Figures with no call anywhere in the API
+
+```python
+client.stated_figures(1, 504)    # [383820.0, 1.0]   what one contract delivers
+client.stated_figures(1, 527)    # [0.0154349]       volatility over twenty days
+client.stated_figures(1, 407)    # four margin figures for a future
+```
+
+> [!NOTE]
+> On a future, *what one contract delivers* came back as its multiplier times
+> its own modelled price; on an option, a hundred times the underlying; on a
+> share, the price itself. That is the kind of check every reader here is held
+> to — a figure is only claimed once the wire agrees with it.
+
+### The option model the terminal sees
+
+`tick_option_computation` carries what the documented API names. The venue states
+more on the same record, and it is all here: **rho**, **fugit**, the exercise
+boundary, the forward coefficient, the model and bridge yields — and the same
+model again as of the close, kept apart from the standing one.
+
+```python
+m = client.option_model(1)
+m["rho"], m["fugit"], m["exerciseBoundary"], m["modelYield"]
+client.closing_option_model(1)      # the same, worked out as the contract closed
+```
+
+### Asking the venue to find a trade
+
+```python
+scan = ibx.SpreadScan(version=6, request=0, under_con_id=265598,
+                      account="DU1234567", min_delta=0.25)
+client.req_spread_scan(1, aapl, scan)
+for s in client.scanned_strategies(1):
+    s["legs"], s["figures"], s["breakEvens"]
+```
+
+### And the session itself
+
+```python
+client.enabled_features()          # what the venue permits this account
+client.order_permissions()         # which order types, per security type
+client.algorithms_for("STK")       # which algorithms it may use
+client.order_presets()             # the defaults it fills an order's blanks from
+client.req_ping(); client.last_rtt_ms()
+```
+
+The full list, with what each returns, is in
+[Beyond the API](https://userfrm.github.io/ibx/reference/beyond-the-api.html).
 
 <!-- capabilities:begin — written by scripts/gen_parity_matrix.py -->
 
@@ -438,143 +727,6 @@ Four things the venue declares and this client deliberately does not read:
 | Four numbers | Second numbers for series already read under their first. |
 | Nine callbacks | Declared so a program written against the reference client still compiles, and never fired because the venue states nothing for them — no terminal to make a verification handshake with, no socket layer of the reference client's own, no reroute on this connection, and neither an exchange-for-physical quote nor a delta-neutral pairing. |
 
-## Installation
-
-### Python
-
-```bash
-uv venv .venv --python 3.13
-source .venv/bin/activate          # .venv\Scripts\activate on Windows
-pip install maturin
-maturin develop --features python
-```
-
-### Rust
-
-```toml
-[dependencies]
-ibx = { git = "https://github.com/userFRM/ibx" }
-```
-
-## Quick start
-
-```python
-import ibx
-
-ib = ibx.IB()
-ib.connect(username="your_user", password="your_pass", paper=True)
-
-spy = ibx.Contract(symbol="SPY", secType="STK", exchange="SMART", currency="USD")
-
-(ticker,) = ib.reqTickers(spy)
-print(ticker.bid, ticker.ask)
-
-order = ibx.Order(action="BUY", orderType="LMT", totalQuantity=1, lmtPrice=1.00)
-trade = ib.placeOrder(spy, order)
-ib.sleep(2)
-print(trade.orderStatus.status)
-ib.cancelOrder(order)
-
-ib.disconnect()
-```
-
-A contract does not need to be qualified first: a request carrying a contract
-rather than a contract id is resolved before transmission.
-
-In Rust:
-
-```rust
-use ibx::types::model::{Contract, Order};
-use ibx::{Client, Config};
-
-let client = Client::connect(&Config {
-    username: "your_user".into(),
-    password: "your_pass".into(),
-    paper: true,
-    ..Default::default()
-})?;
-
-let spy = client.qualify(Contract::stock("SPY"))?;
-
-// A quote exists because something is watching it, and updates itself after.
-client.watch(&spy)?;
-if let Some(quote) = client.ticker(&spy) {
-    println!("bid {} ask {}", quote.bid, quote.ask);
-}
-
-// The order is the thing you hold. Its number is bookkeeping the client keeps.
-let order = client.place(&spy, &Order::limit("BUY", 100.0, 42.50))?;
-order.wait_done(Duration::from_secs(30));
-println!("{} — {} filled", order.status(), order.fills().len());
-order.cancel()?;
-
-// What the session holds, without asking for any of it.
-for position in client.positions() { /* ... */ }
-for value in client.account_values() { /* ... */ }
-```
-
-One thread reads the session and keeps what arrives, so a position, an order, a
-fill and a quote are things you look at rather than questions you ask. The
-account, its holdings and anything already working are asked for as the session
-opens, so they are there to read the moment it returns.
-
-To be told as it happens rather than reading afterwards, take a stream. Both
-are iterators, so they read the way anything else in Rust reads:
-
-```rust
-for tick in client.ticks(&spy)? {
-    println!("{} at {}", tick.size, tick.price);
-}
-
-for event in client.order_events() {
-    println!("order {} is {}", event.order_id, event.status);
-}
-```
-
-`ticks` subscribes and hands back the stream in one, and only that contract's
-ticks arrive on it — a caller watching one thing does not filter out the rest.
-Dropping the stream withdraws the subscription.
-
-**There is one client.** The calls above are the ones with a shape worth
-having; every other request the protocol carries — scanners, news, corporate
-events, fundamentals, option chains, histograms, market rules, P&L — is on the
-same `client`, in the reference client's own shape:
-
-```rust
-client.req_scanner_parameters()?;
-client.req_historical_news(9001, con_id, "BRFG", "", "", 10)?;
-```
-
-Nothing to import, nothing to choose between: `Client` reaches all 135. Where a
-name appears on both, the session's own is the one you get, because it is the
-better answer — `positions()` reads what the session already holds rather than
-asking again.
-
-### Inside an async runtime
-
-The engine is a thread of its own, so a blocking call holds the thread that
-made it and nothing else. Inside a runtime that thread is one of a shared pool,
-so the `async` feature moves each question onto a thread that may wait. What
-does not wait — reading what the session holds — is not awaited:
-
-```toml
-ibx = { git = "https://github.com/userFRM/ibx", features = ["async"] }
-```
-
-```rust
-let client = AsyncClient::connect(config).await?;
-let spy = client.qualify(Contract::stock("SPY")).await?;
-
-client.watch(&spy).await?;           // may have to ask about the contract
-let quote = client.ticker(&spy);     // a memory read
-
-let order = client.place(&spy, &Order::limit("BUY", 1.0, 1.0)).await?;
-client.wait_done(&order, Duration::from_secs(30)).await;
-```
-
-Every question has the same name and the same answer on both, and a test fails
-if either grows a name the other does not have.
-
 ## Running an existing program
 
 ### ib_async
@@ -637,6 +789,48 @@ Both naming conventions resolve on every type and method: `reqMktData` and
 drive one client and one engine — `ibx.IB` is a facade over `EClient`, they
 share a session, and either may be used.
 
+## How it works
+
+There is no process between your program and the venue. The client opens the
+connections a session runs on and keeps them:
+
+| Connection | Carries |
+| --- | --- |
+| Trading | Orders, executions, positions, account values, news bulletins |
+| Market data | Quotes, depth, the extra series, tick-by-tick |
+| Historical | Bars, historical ticks, head timestamps |
+| Security definition | Contract details, option chains, matching symbols |
+
+Each is authenticated at logon, kept alive, and rebuilt on its own if it drops —
+a subscription the venue was serving is asked for again, under the same request
+the caller made, so a caller does not see the seam.
+
+> [!NOTE]
+> Reconnection is per connection, not per session. A market-data connection that
+> drops does not take the trading connection with it, and an order in flight is
+> not orphaned by a quote feed reconnecting.
+
+**A quote is a value, not a stream of events.** The client keeps the current
+state of every contract it watches in a lock-free table and hands you a snapshot
+when you ask. Callers who want events get them too — the point is that reading a
+quote does not mean draining a queue first.
+
+**Nothing is derived.** Every figure a caller reads was stated by the venue. A
+figure the venue holds nothing for comes back as the largest number its field
+carries — the venue's own way of saying so — rather than as a zero that reads
+like a price.
+
+### Second factor and sessions
+
+> [!IMPORTANT]
+> A live login enters the venue's second-factor approval and waits on a device.
+> Paper logins do not. **One session per login**: opening a second takes the
+> first away, and the venue names the host that took it.
+
+A session can be resumed rather than re-authenticated, which is what makes a
+restart cheap. See
+[Login](https://userfrm.github.io/ibx/recipes/python/login.html).
+
 ## Configuration
 
 The gateway's configuration file is replaced by settings on the client:
@@ -668,7 +862,139 @@ Rust: `EClientConfig.gateway`. Python: `ibx.configure()`.
 * [Capabilities](docs/capabilities.md) — one row per capability, one column per client
 * [Evidence](docs/evidence.md) — what each claim rests on, and the session that produced it
 * [Notebooks](notebooks/) — the seven ib_async subjects, in the TWS API shape and in [ib_async's own](notebooks/ib_async_nogateway/)
-* [Examples](examples/) — runnable single-file programs in Rust and Python
+* [Examples](examples/) — 45 runnable single-file programs, 29 in Rust and 15 in Python
+* [Beyond the API](https://userfrm.github.io/ibx/reference/beyond-the-api.html) — what the session states that no documented call asks for
+* [Limits](https://userfrm.github.io/ibx/reference/limits.html) — what this client will not do, and why
+
+## Questions
+
+<details>
+<summary><b>Do I still need IB Gateway or TWS installed?</b></summary>
+
+No. Nothing is installed, launched or logged into. The `ibapi` package is not
+needed either — this client provides that surface itself.
+</details>
+
+<details>
+<summary><b>Will my existing program work unchanged?</b></summary>
+
+The connect call changes; nothing else has to. The same calls, the same
+callbacks, the same order objects. See
+[Running an existing program](#running-an-existing-program).
+</details>
+
+<details>
+<summary><b>Can I run this and a gateway at the same time?</b></summary>
+
+Not on the same login. One session per login — opening a second takes the first
+away, and the venue names the host that took it. Use a second login if you need
+both at once.
+</details>
+
+<details>
+<summary><b>I asked for a series and got nothing back. Is it broken?</b></summary>
+
+Probably not. An empty result means one of two things and this client cannot
+tell them apart: the venue holds nothing for that contract, or the account is
+not entitled to that series. The venue answers a series an account cannot see
+with silence rather than a refusal, so there is no error to read. The
+subscription list in account management is what separates them. See
+[What is not covered](#what-is-not-covered).
+</details>
+
+<details>
+<summary><b>Is paper different from live?</b></summary>
+
+Not in what arrives. The same wire, the same API, the same entitlements — the
+money is what differs. A live login additionally enters the second-factor
+approval, which paper does not.
+</details>
+
+<details>
+<summary><b>What happens when a connection drops?</b></summary>
+
+It is rebuilt on its own and the subscriptions it was serving are asked for
+again, under the request the caller made. Connections are independent: a quote
+feed reconnecting does not disturb an order in flight.
+</details>
+
+<details>
+<summary><b>Why does a figure come back as 1.7976931348623157e308?</b></summary>
+
+That is the largest number a double carries, and it is how the venue says it
+holds nothing for that field. It is passed through rather than turned into a
+zero, because zero is a real price and a real greek.
+</details>
+
+<details>
+<summary><b>Can I go back to a gateway after using the extra calls?</b></summary>
+
+Moving to this client changes nothing but the connect call. Moving back does, if
+your program has come to use a call the documented API never named — a gateway
+has no message to carry it. The extras are listed under
+[Limits](https://userfrm.github.io/ibx/reference/limits.html) so the trade is
+visible before it is made.
+</details>
+
+<details>
+<summary><b>Rust or Python — is one behind the other?</b></summary>
+
+Neither. The same request produces the same call on both, checked against live
+responses, and the capability table is generated by reading each surface rather
+than from memory. Where the two differ the count is zero.
+</details>
+
+## Testing
+
+Claims here rest on tests, and the tests are counted rather than described:
+
+| Suite | Count | Needs a session |
+| --- | ---: | :---: |
+| Rust, unit and integration | 2,746 | No |
+| Python | 914 | No |
+| Rust, live | 9 | Yes |
+| Python, live | 137 | Yes |
+| Paper compatibility, 154 phases | 51 | Yes |
+
+Every published count is checked against what is actually there, so a number in
+this file cannot drift from the suite that produced it. What each claim rests on
+is in [Evidence](docs/evidence.md).
+
+Readers of the venue's own records are held to a harder standard than passing:
+a test that would pass against a broken reader is not a test. Each is checked by
+breaking the reader deliberately and confirming the test fails.
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+> [!TIP]
+> The fastest way to be useful is a wire observation: a contract, a request, and
+> what the venue answered with. A reader is only as good as the records it has
+> been held against, and the ones that have met the fewest live records are
+> named in [What is not covered](#what-is-not-covered).
+
+Before opening a pull request, run the same gate the workflow runs. It builds
+both surfaces, runs every suite, regenerates the documentation and checks that
+what is published matches what is there:
+
+```sh
+python scripts/gate.py
+```
+
+## Security
+
+> [!CAUTION]
+> Credentials are the account. Never commit them, never paste them into an
+> issue, and never put them in a file the repository tracks.
+
+Pass them at connect time from the environment or a secret store. A resumed
+session is written to disk encrypted with a password you supply and never in the
+clear. Nothing in this repository ships credentials, and nothing that fabricates
+a session is compiled into the published wheel.
+
+If you find a security problem, please report it privately through the
+repository's security advisories rather than in a public issue.
 
 ## License
 
