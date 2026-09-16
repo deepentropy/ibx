@@ -30,6 +30,11 @@ Python, additionally with [ib_async](https://github.com/ib-api-reloaded/ib_async
 + ib.connect(username="...", password="...")    # no external process
 ```
 
+> [!TIP]
+> Everything else in an existing program stays as it is — the same calls, the
+> same callbacks, the same order objects. What changes is the line above and
+> the removal of whatever started the gateway.
+
 ### What this removes
 
 * **The gateway process** — nothing to install, launch, log into, or restart
@@ -44,6 +49,11 @@ Python, additionally with [ib_async](https://github.com/ib-api-reloaded/ib_async
 * Python 3.11+ for the bindings
 
 No IB software is required. The `ibapi` package is not needed either.
+
+> [!IMPORTANT]
+> A live login enters the venue's second-factor approval, which waits on a
+> device. Paper logins do not. One session per login: opening a second takes
+> the first away, and the venue says which host took it.
 
 <!-- capabilities:begin — written by scripts/gen_parity_matrix.py -->
 
@@ -392,6 +402,42 @@ The same table stands on its own in [docs/capabilities.md](docs/capabilities.md)
 
 <!-- capabilities:end -->
 
+## What is not covered
+
+Everything this client reads is listed above. This is the other half of that
+list, so nobody has to discover it by finding an empty result.
+
+> [!NOTE]
+> **Six series are read but have never been seen.** `490`, `546`, `669`, `700`,
+> `726` and `733` — the price-distribution weights, the volatility curve, the
+> historical ratios, the two screening dashboards, and the option model as of
+> the close. Each subscribes cleanly: the venue acknowledges it, assigns it a
+> tag, and then states nothing, which is how it answers a series an account is
+> not entitled to. Measured the same on a paper and a live login for one
+> account, minutes apart. The readers are written and tested; they fill in the
+> moment the data flows. The same is true of the spread scan.
+
+> [!NOTE]
+> **Some readers have not met their instrument.** The series for bonds,
+> municipals, warrants and perpetuals are read from the record's own shape and
+> have not been exercised against one of those contracts. Where a reader has
+> been run against live data, it says so in its own documentation.
+
+> [!IMPORTANT]
+> **An empty result means one of two things** and this client cannot tell them
+> apart: the venue holds nothing for that contract, or the account cannot see
+> that series. The subscription list in account management is what separates
+> them.
+
+Four things the venue declares and this client deliberately does not read:
+
+| | Why |
+| --- | --- |
+| Three series | Their own readers never touch the payload — one logs that it cannot be served and returns. |
+| The dividend series | This client already asks what a contract pays out and is answered with named fields. Reading the same thing again as letter-tagged lines would be worse than what a caller already has. |
+| Four numbers | Second numbers for series already read under their first. |
+| Nine callbacks | Declared so a program written against the reference client still compiles, and never fired because the venue states nothing for them — no terminal to make a verification handshake with, no socket layer of the reference client's own, no reroute on this connection, and neither an exchange-for-physical quote nor a delta-neutral pairing. |
+
 ## Installation
 
 ### Python
@@ -601,6 +647,12 @@ nothing here paces outgoing messages, which the gateway ships with off).
 
 Rust: `EClientConfig.gateway`. Python: `ibx.configure()`.
 
+> [!WARNING]
+> The calls under *Beyond the canonical list* have no message in the documented
+> API, so a program that uses them will not run against a gateway. They are the
+> part of this client that is not a drop-in, and they are named again under
+> [Limits](https://userfrm.github.io/ibx/reference/limits.html) for that reason.
+
 ## Documentation
 
 * [The book](https://userfrm.github.io/ibx/) — guides, recipes and the generated API reference
@@ -621,6 +673,11 @@ affiliated with, endorsed by, or supported by Interactive Brokers**.
 
 IBX is an independent, open-source project provided "as is", without warranty
 of any kind.
+
+> [!CAUTION]
+> This client places orders against a real account. Test against a paper login
+> first, and satisfy yourself that an order reads the way you meant it before
+> pointing it at money.
 
 ### Legal Considerations
 
