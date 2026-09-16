@@ -647,11 +647,20 @@ nothing here paces outgoing messages, which the gateway ships with off).
 
 Rust: `EClientConfig.gateway`. Python: `ibx.configure()`.
 
-> [!WARNING]
-> The calls under *Beyond the canonical list* have no message in the documented
-> API, so a program that uses them will not run against a gateway. They are the
-> part of this client that is not a drop-in, and they are named again under
-> [Limits](https://userfrm.github.io/ibx/reference/limits.html) for that reason.
+> [!TIP]
+> The calls under *Beyond the canonical list* are the point of this client, not
+> a shortfall in it. The venue states all of it on an ordinary session and the
+> documented API never gave it a message, so a program had no way to ask — a
+> contract's float, where its volatility stands against its own year, what
+> margin it takes, five years of its price with the date of each point. They are
+> reached here the way every other call is.
+>
+> The one thing to know is that the door only opens one way: **a program can
+> move to this client without changing a line, but a program that then calls one
+> of these cannot move back to a gateway**, because a gateway has no message to
+> carry it. Nothing else about it is different — the extras are named under
+> [Limits](https://userfrm.github.io/ibx/reference/limits.html) so that the
+> trade is visible before it is made.
 
 ## Documentation
 

@@ -169,10 +169,11 @@ Two consequences worth stating plainly:
 
 - **None of this is derived.** Every figure above is stated by the venue,
   read off the session. Nothing here computes what the venue did not say.
-- **It is not portable.** A program using these calls will not run against a
-  gateway, because a gateway has no message to carry them. They are the part of
-  this client that is not a drop-in, and they are named again under
-  [Limits](./limits.md) for that reason.
+- **The door opens one way.** A program moves to this client without changing a
+  line; a program that then calls one of these cannot move back to a gateway,
+  because a gateway has no message to carry it. That is the trade for reaching
+  what the documented API never named, and the calls are listed again under
+  [Limits](./limits.md) so it is visible before it is made.
 
 ## The same calls in Rust
 
