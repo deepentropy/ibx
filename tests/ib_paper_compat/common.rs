@@ -106,6 +106,14 @@ pub(super) fn connect_paper(
     Ok(session)
 }
 
+/// Price and quantity of an order as the server last confirmed them: the
+/// order cache is filled from execution reports, so after a replace
+/// confirmation it holds the new values. A replace that keeps the order's
+/// status emits no status update, so this is how a phase sees it land.
+pub(super) fn confirmed_price_qty(shared: &SharedState, order_id: u64) -> Option<(f64, f64)> {
+    shared.orders.get_order_info(order_id).map(|i| (i.order.lmt_price, i.order.total_quantity))
+}
+
 /// Shared connections passed between test phases.
 pub(super) struct Conns {
     pub(super) farm: Connection,
@@ -658,7 +666,7 @@ pub(super) fn run_submit_cancel_phase(
         return conns;
     }
     if fill_or_cancel {
-        assert!(order_filled || order_cancelled, "Order was neither filled nor cancelled");
+        check!(order_filled || order_cancelled, "Order was neither filled nor cancelled");
         if order_filled { println!("  PASS (filled)\n"); } else { println!("  PASS (cancelled)\n"); }
     } else {
         // Session-aware gate: some order types (Relative/pegged, snapshot, midprice)
@@ -669,8 +677,8 @@ pub(super) fn run_submit_cancel_phase(
             println!("  SKIP: Closed — order not acknowledged (order type needs a live market)\n");
             return conns;
         }
-        assert!(order_acked, "Order was never acknowledged");
-        assert!(order_cancelled, "Order was never cancelled");
+        check!(order_acked, "Order was never acknowledged");
+        check!(order_cancelled, "Order was never cancelled");
         println!("  PASS\n");
     }
     conns

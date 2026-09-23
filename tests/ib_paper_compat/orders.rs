@@ -186,8 +186,11 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
 
 pub(super) fn phase_stop_order(conns: Conns) -> Conns {
     let oid = next_order_id();
+    // A sell stop far below the market rests. The former buy stop at $1
+    // triggered at once whenever the market was open (buy stop: price >=
+    // stop), bought 1 SPY and could then not be cancelled.
     run_submit_cancel_phase(conns, "Phase 8: Stop Order Submit + Cancel (SPY)",
-        OrderRequest::SubmitStop { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, stop_price: 1_00_000_000 },
+        OrderRequest::SubmitStop { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, stop_price: 1_00_000_000 },
         false)
 }
 
@@ -200,7 +203,7 @@ pub(super) fn phase_modify_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -218,20 +221,22 @@ pub(super) fn phase_modify_order(conns: Conns) -> Conns {
     let mut modify_acked = false;
     let mut order_cancelled = false;
     let mut order_rejected = false;
-    let new_order_id = order_id + 1;
 
     while Instant::now() < deadline {
+        // A modify keeps the order id; the replace is confirmed when the
+        // server-reported price and quantity change.
+        if modify_sent && !modify_acked && confirmed_price_qty(&shared, order_id) == Some((2.0, 1.0)) {
+            modify_acked = true;
+            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+        }
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
                     OrderStatus::PreSubmitted | OrderStatus::Submitted => {
-                        if modify_sent && !modify_acked {
-                            modify_acked = true;
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: new_order_id })).unwrap();
-                        } else if !order_acked {
+                        if !order_acked {
                             order_acked = true;
                             control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                order_id, new_order_id, qty: 1, kind: OrderKind::Limit { price: 2_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
+                                order_id, new_order_id: order_id, qty: 1, kind: OrderKind::Limit { price: 2_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
                             })).unwrap();
                             modify_sent = true;
                         }
@@ -428,13 +433,12 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
 
     let order_id = next_order_id();
-    let new_order_id = order_id + 1;
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
     })).unwrap();
@@ -449,17 +453,20 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
     let mut order_rejected = false;
 
     while Instant::now() < deadline {
+        // A modify keeps the order id; the replace is confirmed when the
+        // server-reported price and quantity change.
+        if modify_sent && !modify_acked_local && confirmed_price_qty(&shared, order_id) == Some((1.0, 2.0)) {
+            modify_acked_local = true;
+            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+        }
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
                     OrderStatus::PreSubmitted | OrderStatus::Submitted => {
-                        if modify_sent && !modify_acked_local {
-                            modify_acked_local = true;
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: new_order_id })).unwrap();
-                        } else if !order_acked {
+                        if !order_acked {
                             order_acked = true;
                             control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                order_id, new_order_id, qty: 2, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
+                                order_id, new_order_id: order_id, qty: 2, kind: OrderKind::Limit { price: 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
                             })).unwrap();
                             modify_sent = true;
                         }
@@ -1636,13 +1643,16 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
     let mut rejected: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut cancel_batch_sent = false;
     let mut duplicate_acks = 0u32;
+    let mut seen_status: std::collections::HashSet<(u64, u8)> = std::collections::HashSet::new();
 
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
                     OrderStatus::PreSubmitted | OrderStatus::Submitted => {
-                        if acked.contains(&update.order_id) {
+                        // PreSubmitted then Submitted is one order being routed;
+                        // only the same status twice is a duplicate.
+                        if !seen_status.insert((update.order_id, update.status as u8)) {
                             duplicate_acks += 1;
                         }
                         acked.insert(update.order_id);
@@ -1695,13 +1705,12 @@ pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
 
     let order_id = next_order_id();
-    let new_order_id = order_id + 1;
     // Submit limit buy at $1, qty=1
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
@@ -1717,18 +1726,21 @@ pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
     let mut order_rejected = false;
 
     while Instant::now() < deadline {
+        // A modify keeps the order id; the replace is confirmed when the
+        // server-reported price and quantity change.
+        if modify_sent && !modify_acked && confirmed_price_qty(&shared, order_id) == Some((2.0, 3.0)) {
+            modify_acked = true;
+            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+        }
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
                     OrderStatus::PreSubmitted | OrderStatus::Submitted => {
-                        if modify_sent && !modify_acked {
-                            modify_acked = true;
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: new_order_id })).unwrap();
-                        } else if !order_acked {
+                        if !order_acked {
                             order_acked = true;
                             // Modify BOTH price ($1→$2) and qty (1→3) in a single Modify
                             control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                order_id, new_order_id, qty: 3, kind: OrderKind::Limit { price: 2_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
+                                order_id, new_order_id: order_id, qty: 3, kind: OrderKind::Limit { price: 2_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
                             })).unwrap();
                             modify_sent = true;
                         }
@@ -1766,14 +1778,12 @@ pub(super) fn phase_double_modify(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
 
     let order_id = next_order_id();
-    let modify_id_1 = order_id + 1;
-    let modify_id_2 = order_id + 2;
 
     // Submit limit buy at $1
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
@@ -1788,31 +1798,29 @@ pub(super) fn phase_double_modify(conns: Conns) -> Conns {
     let mut order_rejected = false;
 
     while Instant::now() < deadline {
+        // A modify keeps the order id; the replace is confirmed when the
+        // server-reported price and quantity change.
+        if phase == 1 && confirmed_price_qty(&shared, order_id) == Some((2.0, 1.0)) {
+            // First modify confirmed → modify the same order again to $3
+            control_tx.send(ControlCommand::Order(OrderRequest::Modify {
+                order_id, new_order_id: order_id, qty: 1, kind: OrderKind::Limit { price: 3_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
+            })).unwrap();
+            phase = 2;
+        } else if phase == 2 && confirmed_price_qty(&shared, order_id) == Some((3.0, 1.0)) {
+            // Second modify confirmed → cancel
+            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+            phase = 3;
+        }
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
                     OrderStatus::PreSubmitted | OrderStatus::Submitted => {
-                        match phase {
-                            0 => {
-                                // Original order acked → modify to $2
-                                control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                    order_id, new_order_id: modify_id_1, qty: 1, kind: OrderKind::Limit { price: 2_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
-                                })).unwrap();
-                                phase = 1;
-                            }
-                            1 => {
-                                // First modify acked → modify again to $3
-                                control_tx.send(ControlCommand::Order(OrderRequest::Modify {
-                                    order_id: modify_id_1, new_order_id: modify_id_2, qty: 1, kind: OrderKind::Limit { price: 3_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
-                                })).unwrap();
-                                phase = 2;
-                            }
-                            2 => {
-                                // Second modify acked → cancel
-                                control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: modify_id_2 })).unwrap();
-                                phase = 3;
-                            }
-                            _ => {}
+                        if phase == 0 {
+                            // Original order acked → modify to $2
+                            control_tx.send(ControlCommand::Order(OrderRequest::Modify {
+                                order_id, new_order_id: order_id, qty: 1, kind: OrderKind::Limit { price: 2_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
+                            })).unwrap();
+                            phase = 1;
                         }
                     }
                     OrderStatus::Cancelled => { order_cancelled = true; break; }

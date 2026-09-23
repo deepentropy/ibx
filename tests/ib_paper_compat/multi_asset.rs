@@ -39,8 +39,9 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
                     let (unsigned, _) = ccp.unsign(&raw);
                     fixcomp::fixcomp_decompress(&unsigned).unwrap_or_default()
                 }
-                Frame::Fix(raw) => vec![raw],
-                _ => continue,
+                Frame::Fix(raw) => vec![ccp.unsign(&raw).0],
+                Frame::Binary(raw) => { let _ = ccp.unsign(&raw); continue }
+                Frame::Control(_) => continue,
             };
             for msg in messages {
                 let tags = fix::fix_parse(&msg);
@@ -155,8 +156,9 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
                     let (unsigned, _) = ccp.unsign(&raw);
                     fixcomp::fixcomp_decompress(&unsigned).unwrap_or_default()
                 }
-                Frame::Fix(raw) => vec![raw],
-                _ => continue,
+                Frame::Fix(raw) => vec![ccp.unsign(&raw).0],
+                Frame::Binary(raw) => { let _ = ccp.unsign(&raw); continue }
+                Frame::Control(_) => continue,
             };
             for msg in messages {
                 let tags = fix::fix_parse(&msg);
@@ -278,8 +280,9 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
                     let (unsigned, _) = ccp.unsign(&raw);
                     fixcomp::fixcomp_decompress(&unsigned).unwrap_or_default()
                 }
-                Frame::Fix(raw) => vec![raw],
-                _ => continue,
+                Frame::Fix(raw) => vec![ccp.unsign(&raw).0],
+                Frame::Binary(raw) => { let _ = ccp.unsign(&raw); continue }
+                Frame::Control(_) => continue,
             };
             for msg in messages {
                 let tags = fix::fix_parse(&msg);

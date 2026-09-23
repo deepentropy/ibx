@@ -124,7 +124,18 @@ pub(super) fn phase_trading_hours(conns: &mut Conns) {
 
     while Instant::now() < deadline && schedule.is_none() {
         match conns.farm.try_recv() {
-            Ok(_) => { conns.farm.extract_frames(); }
+            // Frames read here are discarded, but each must still go through
+            // unsign: the read IV chains frame to frame, and one skipped frame
+            // garbles every later frame on this connection. Skipping them here
+            // broke the market-data phases that run after this one.
+            Ok(_) => {
+                for frame in conns.farm.extract_frames() {
+                    match frame {
+                        Frame::FixComp(raw) | Frame::Fix(raw) | Frame::Binary(raw) => { let _ = conns.farm.unsign(&raw); }
+                        Frame::Control(_) => {}
+                    }
+                }
+            }
             Err(_) => {}
         }
         match conns.ccp.try_recv() {
@@ -135,8 +146,9 @@ pub(super) fn phase_trading_hours(conns: &mut Conns) {
         for frame in conns.ccp.extract_frames() {
             let messages = match frame {
                 Frame::FixComp(raw) => { let (u, _) = conns.ccp.unsign(&raw); fixcomp::fixcomp_decompress(&u).unwrap_or_default() }
-                Frame::Fix(raw) => vec![raw],
-                _ => continue,
+                Frame::Fix(raw) => vec![conns.ccp.unsign(&raw).0],
+                Frame::Binary(raw) => { let _ = conns.ccp.unsign(&raw); continue }
+                Frame::Control(_) => continue,
             };
             for msg in messages {
                 if let Some(sched) = contracts::parse_schedule_response(&msg) {

@@ -40,6 +40,7 @@ macro_rules! check_eq {
     };
 }
 
+#[allow(unused_macros)]
 macro_rules! check_ne {
     ($a:expr, $b:expr $(,)?) => {
         match (&$a, &$b) {
