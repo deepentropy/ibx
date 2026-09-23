@@ -54,7 +54,7 @@ pub(super) fn phase_account_data(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if account_checked {
-        assert!(net_liq > 0, "Paper account net liquidation should be > 0");
+        check!(net_liq > 0, "Paper account net liquidation should be > 0");
         println!("  net_liq=${:.2}", net_liq as f64 / PRICE_SCALE as f64);
         println!("  PASS\n");
     } else {
@@ -110,7 +110,9 @@ pub(super) fn phase_account_pnl(conns: Conns) -> Conns {
         }
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
-                if update.status == OrderStatus::Submitted {
+                // Pre-market the order stays PreSubmitted: cancel it then too,
+                // or it is left working on the account.
+                if matches!(update.status, OrderStatus::Submitted | OrderStatus::PreSubmitted) {
                     control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
                 }
                 if matches!(update.status, OrderStatus::Cancelled | OrderStatus::Rejected) {
@@ -123,9 +125,16 @@ pub(super) fn phase_account_pnl(conns: Conns) -> Conns {
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    assert!(account_received,
-        "Account data not received — 6040=77 may not contain tag 9806");
-    assert!(net_liq > 0, "Paper account net liquidation should be > 0");
+    // Recorded, not asserted: account values arrive only when the server
+    // pushes them, and an assert here stopped every later phase.
+    if !account_received {
+        record_failure("Phase 14: account data not received within 15s");
+        return conns;
+    }
+    if net_liq <= 0 {
+        record_failure("Phase 14: paper account net liquidation is not > 0");
+        return conns;
+    }
     println!("  NetLiq: ${:.2}", net_liq as f64 / PRICE_SCALE as f64);
     println!("  PASS\n");
     conns
@@ -181,7 +190,7 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
             }
             Ok(Event::OrderUpdate(update)) => {
                 if update.status == OrderStatus::Rejected {
-                    println!("  SKIP: Order rejected — market closed\n");
+                    record_rejection("Order rejected — market closed");
                     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
                     return conns;
                 }
@@ -198,7 +207,7 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
         // After buy+sell round trip, position should return to 0 (or near it)
         let pos = shared.portfolio.position(0);
         println!("  Final position: {}", pos);
-        assert!(pos.abs() <= 1, "Position after round trip should be 0 (±1 for timing), got {}", pos);
+        check!(pos.abs() <= 1, "Position after round trip should be 0 (±1 for timing), got {}", pos);
         println!("  PASS (position returned to {})\n", pos);
     } else if phase == 2 {
         println!("  SKIP: Fills completed but no PositionUpdate events\n");
@@ -250,14 +259,14 @@ pub(super) fn phase_account_summary(conns: Conns) -> Conns {
                     has_account_data = true;
 
                     // Validate sanity
-                    assert!(acct.net_liquidation > 0, "NetLiquidation should be positive");
-                    assert!(acct.buying_power >= 0, "BuyingPower should be non-negative");
-                    assert!(acct.available_funds >= 0, "AvailableFunds should be non-negative");
-                    assert!(acct.excess_liquidity >= 0, "ExcessLiquidity should be non-negative");
+                    check!(acct.net_liquidation > 0, "NetLiquidation should be positive");
+                    check!(acct.buying_power >= 0, "BuyingPower should be non-negative");
+                    check!(acct.available_funds >= 0, "AvailableFunds should be non-negative");
+                    check!(acct.excess_liquidity >= 0, "ExcessLiquidity should be non-negative");
                     // EquityWithLoanValue should be close to NetLiquidation for paper accounts
                     if acct.equity_with_loan > 0 {
                         let ratio = acct.equity_with_loan as f64 / acct.net_liquidation as f64;
-                        assert!(ratio > 0.5 && ratio < 2.0,
+                        check!(ratio > 0.5 && ratio < 2.0,
                             "EquityWithLoan/NetLiq ratio {:.2} seems wrong", ratio);
                     }
                     break;
@@ -339,11 +348,11 @@ pub(super) fn phase_completed_orders(conns: Conns) -> Conns {
         return conns;
     }
 
-    assert!(!completed.is_empty(), "Expected at least one completed order after cancel");
+    check!(!completed.is_empty(), "Expected at least one completed order after cancel");
     let co = completed.iter().find(|c| c.order_id == order_id);
-    assert!(co.is_some(), "Completed order for our order_id not found");
+    check!(co.is_some(), "Completed order for our order_id not found");
     let co = co.unwrap();
-    assert!(
+    check!(
         matches!(co.status, OrderStatus::Cancelled | OrderStatus::Rejected),
         "Expected Cancelled or Rejected, got {:?}", co.status
     );
@@ -388,8 +397,7 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
     // Fetch secdef first to populate contract cache with exchange/localSymbol/tradingClass
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 9999, con_id: 756733, symbol: String::new(),
-        sec_type: String::new(), exchange: String::new(), currency: String::new(),
-    }).unwrap();
+        sec_type: String::new(), exchange: String::new(), currency: String::new(), filters: ibx::types::SecDefFilters::default() }).unwrap();
 
     let order_id = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
@@ -514,7 +522,7 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
     } else {
         println!("  FAIL\n");
     }
-    assert!(pass, "Enriched API output did not match GT expectations");
+    check!(pass, "Enriched API output did not match GT expectations");
 
     conns
 }
@@ -547,8 +555,7 @@ pub(super) fn phase_enriched_open_orders(conns: Conns) -> Conns {
     // Fetch secdef to populate contract cache
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 9998, con_id: 756733, symbol: String::new(),
-        sec_type: String::new(), exchange: String::new(), currency: String::new(),
-    }).unwrap();
+        sec_type: String::new(), exchange: String::new(), currency: String::new(), filters: ibx::types::SecDefFilters::default() }).unwrap();
 
     let order_id = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
@@ -567,7 +574,7 @@ pub(super) fn phase_enriched_open_orders(conns: Conns) -> Conns {
     let mut submitted = false;
     while Instant::now() < deadline && !submitted {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Event::OrderUpdate(u)) if u.status == OrderStatus::Submitted => { submitted = true; }
+            Ok(Event::OrderUpdate(u)) if matches!(u.status, OrderStatus::PreSubmitted | OrderStatus::Submitted) => { submitted = true; }
             _ => {}
         }
     }
@@ -641,7 +648,7 @@ pub(super) fn phase_enriched_open_orders(conns: Conns) -> Conns {
 
     if pass { println!("  PASS (all fields match GT)\n"); }
     else { println!("  FAIL\n"); }
-    assert!(pass, "open_order Wrapper output did not match GT");
+    check!(pass, "open_order Wrapper output did not match GT");
     conns
 }
 
@@ -739,7 +746,7 @@ pub(super) fn phase_enriched_positions(conns: Conns) -> Conns {
 
     if pass { println!("  PASS\n"); }
     else { println!("  FAIL\n"); }
-    assert!(pass, "position Wrapper output did not match GT");
+    check!(pass, "position Wrapper output did not match GT");
     conns
 }
 
@@ -772,8 +779,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
     // Fetch secdef to populate contract cache
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 9997, con_id: 756733, symbol: String::new(),
-        sec_type: String::new(), exchange: String::new(), currency: String::new(),
-    }).unwrap();
+        sec_type: String::new(), exchange: String::new(), currency: String::new(), filters: ibx::types::SecDefFilters::default() }).unwrap();
 
     let order_id = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitMarket {
@@ -796,7 +802,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
                 break;
             }
             Ok(Event::OrderUpdate(u)) if u.status == OrderStatus::Rejected => {
-                println!("  SKIP: Order rejected\n");
+                record_rejection("Order rejected");
                 let conns = shutdown_and_reclaim(&control_tx, join, account_id);
                 return conns;
             }
@@ -880,7 +886,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
 
     if pass { println!("  PASS (all fields match GT)\n"); }
     else { println!("  FAIL\n"); }
-    assert!(pass, "exec_details Wrapper output did not match GT");
+    check!(pass, "exec_details Wrapper output did not match GT");
     conns
 }
 

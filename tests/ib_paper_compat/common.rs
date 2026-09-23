@@ -15,6 +15,40 @@ pub(super) use ibx::protocol::connection::{Connection, Frame};
 pub(super) use ibx::protocol::{fix, fixcomp};
 pub(super) use ibx::types::*;
 
+/// Orders the server rejected during the run. A rejection used to print SKIP
+/// and let the phase pass, so an order ibx encoded wrongly looked like a
+/// server-side limitation. Every rejection is now a failure, reported at the
+/// end of the suite, unless the phase declares it expected with a reason.
+static REJECTIONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Record a rejection as a failure. The server's reason is in the
+/// "ExecReport REJECTED" log line (run with RUST_LOG=warn).
+pub(super) fn record_rejection(what: &str) {
+    println!("  FAIL: {} (rejected by the server)
+", what);
+    REJECTIONS.lock().unwrap().push(what.to_string());
+}
+
+/// Record a phase failure without stopping the suite, so the phases after it
+/// still run. Reported with the rejections at the end.
+pub(super) fn record_failure(what: &str) {
+    println!("  FAIL: {}
+", what);
+    REJECTIONS.lock().unwrap().push(what.to_string());
+}
+
+/// A rejection the server always gives for this account or session, with
+/// the reason. Printed, not counted as a failure.
+pub(super) fn expected_rejection(what: &str, why: &str) {
+    println!("  SKIP: {} rejected as expected: {}
+", what, why);
+}
+
+/// Rejections recorded so far.
+pub(super) fn take_rejections() -> Vec<String> {
+    std::mem::take(&mut *REJECTIONS.lock().unwrap())
+}
+
 /// Resolve paper-account credentials from the process environment.
 ///
 /// Absent credentials abort the suite instead of skipping it. This suite only
@@ -51,6 +85,25 @@ pub(super) fn get_config() -> Option<GatewayConfig> {
         ib_key_token_sub_type: ibx::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
         code_provider: None,
     })
+}
+
+/// Refuse to run on anything but a paper account. Paper account ids start
+/// with "DU". Checked right after login, before any request is sent; the id
+/// itself is never printed.
+pub(super) fn assert_paper_account(account_id: &str) {
+    assert!(
+        account_id.starts_with("DU"),
+        "refusing to run: the logged-in account is not a paper account (its id does not start with DU)"
+    );
+}
+
+/// Log in, then stop unless the account is a paper account.
+pub(super) fn connect_paper(
+    config: &GatewayConfig,
+) -> std::io::Result<(gateway::Gateway, Connection, Connection, Option<Connection>)> {
+    let session = gateway::Gateway::connect(config)?;
+    assert_paper_account(&session.0.account_id);
+    Ok(session)
 }
 
 /// Shared connections passed between test phases.
@@ -165,7 +218,7 @@ pub(super) fn ensure_ccp_alive(
     }
 
     // Full reconnection — CCP requires TLS+SRP auth, so we must reconnect everything
-    match gateway::Gateway::connect(config) {
+    match connect_paper(config) {
         Ok((new_gw, farm, ccp, hmds)) => {
             conns.farm = farm;
             conns.ccp = ccp;
@@ -601,7 +654,7 @@ pub(super) fn run_submit_cancel_phase(
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Order rejected\n");
+        record_rejection(phase_name);
         return conns;
     }
     if fill_or_cancel {

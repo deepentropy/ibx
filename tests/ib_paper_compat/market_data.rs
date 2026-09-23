@@ -51,9 +51,9 @@ pub(super) fn phase_market_data(conns: Conns) -> Conns {
                     );
                     // Value assertions
                     if q.bid > 0 && q.ask > 0 {
-                        assert!(bid > 50.0 && bid < 1000.0, "AAPL bid out of range: {}", bid);
-                        assert!(ask > 50.0 && ask < 1000.0, "AAPL ask out of range: {}", ask);
-                        assert!(ask >= bid, "Crossed market: bid={} ask={}", bid, ask);
+                        check!(bid > 50.0 && bid < 1000.0, "AAPL bid out of range: {}", bid);
+                        check!(ask > 50.0 && ask < 1000.0, "AAPL ask out of range: {}", ask);
+                        check!(ask >= bid, "Crossed market: bid={} ask={}", bid, ask);
                     }
                     first_tick = true;
                 }
@@ -173,7 +173,7 @@ pub(super) fn phase_multi_instrument(conns: Conns) -> Conns {
             tick_count
         );
     } else {
-        assert!(
+        check!(
             instruments_with_data >= 2,
             "At least 2 of 3 instruments should have data, got {}",
             instruments_with_data
@@ -493,10 +493,10 @@ pub(super) fn phase_streaming_validation(conns: Conns) -> Conns {
         "  {} ticks: bid_positive={} ask_positive={} spread_valid={} price_reasonable={}",
         tick_count, bid_positive, ask_positive, spread_valid, price_reasonable
     );
-    assert!(bid_positive, "Should have seen at least one positive bid");
-    assert!(ask_positive, "Should have seen at least one positive ask");
-    assert!(spread_valid, "Spread should not be crossed (ask >= bid)");
-    assert!(
+    check!(bid_positive, "Should have seen at least one positive bid");
+    check!(ask_positive, "Should have seen at least one positive ask");
+    check!(spread_valid, "Spread should not be crossed (ask >= bid)");
+    check!(
         price_reasonable,
         "Prices should be in reasonable range for SPY"
     );
@@ -621,7 +621,7 @@ pub(super) fn phase_forex_market_data(conns: Conns) -> Conns {
                 // Validate spread only after both bid and ask have been seen
                 // (early ticks may have one side at zero while the other updates)
                 if bid_seen && ask_seen && q.bid > 0 && q.ask > 0 {
-                    assert!(q.ask >= q.bid, "Crossed market: ask < bid");
+                    check!(q.ask >= q.bid, "Crossed market: ask < bid");
                 }
 
                 if tick_count >= 10 {
@@ -710,7 +710,7 @@ pub(super) fn phase_forex_streaming_validation(conns: Conns) -> Conns {
     if tick_count == 0 {
         println!("  SKIP: No forex ticks (weekend or forex market closed)\n");
     } else {
-        assert!(spread_valid, "Spread should not be crossed");
+        check!(spread_valid, "Spread should not be crossed");
         println!("  {} ticks, spread_valid={}", tick_count, spread_valid);
         println!("  PASS\n");
     }
@@ -807,7 +807,7 @@ pub(super) fn phase_forex_reconnection(conns: Conns) -> Conns {
 
     let conns2 = shutdown_and_reclaim(&control_tx2, join2, conns1.account_id);
 
-    assert!(
+    check!(
         got_ticks_after,
         "Should receive forex ticks after reconnection"
     );
@@ -913,12 +913,12 @@ pub(super) fn phase_tick_stress_test(conns: Conns) -> Conns {
 
     // At least 2 instruments should have received ticks
     let instruments_with_ticks = per_instrument.iter().filter(|&&c| c > 0).count();
-    assert!(
+    check!(
         instruments_with_ticks >= 2,
         "At least 2 instruments should receive ticks, got {}",
         instruments_with_ticks
     );
-    assert_eq!(
+    check_eq!(
         monotonic_violations, 0,
         "Timestamps should be monotonically increasing"
     );
@@ -1002,7 +1002,7 @@ pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
         tbt_after
     );
     // Allow a small number of in-flight events that were already queued
-    assert!(
+    check!(
         tbt_after <= 3,
         "Too many TBT events after unsubscribe: {} (expected <=3)",
         tbt_after
@@ -1201,7 +1201,7 @@ pub(super) fn phase_concurrent_subscribe_stress(conns: Conns) -> Conns {
     }
 
     // At least 3 instruments should receive ticks when 10 are subscribed
-    assert!(
+    check!(
         per_instrument.len() >= 3,
         "Expected ticks from >=3 instruments, got {}",
         per_instrument.len()

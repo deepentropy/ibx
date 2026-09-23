@@ -22,8 +22,7 @@ pub(super) fn phase_contract_details(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 1200, con_id: 756733,
         symbol: String::new(), sec_type: String::new(),
-        exchange: String::new(), currency: String::new(),
-    }).unwrap();
+        exchange: String::new(), currency: String::new(), filters: ibx::types::SecDefFilters::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     // Step 3: Wait for real server response via Event channel
@@ -43,14 +42,14 @@ pub(super) fn phase_contract_details(conns: Conns) -> Conns {
 
     // Step 4: Verify SPECIFIC VALUES
     let def = contract.expect("No contract details received for SPY (756733)");
-    assert_eq!(def.con_id, 756733);
-    assert_eq!(def.symbol, "SPY");
-    assert_eq!(def.sec_type, contracts::SecurityType::Stock);
-    assert_eq!(def.currency, "USD");
-    assert!(!def.long_name.is_empty(), "Long name should not be empty");
-    assert!(!def.valid_exchanges.is_empty(), "Valid exchanges should not be empty");
-    assert!(def.valid_exchanges.contains(&"SMART".to_string()), "SMART should be in valid exchanges");
-    assert!(def.min_tick > 0.0, "Min tick should be positive");
+    check_eq!(def.con_id, 756733);
+    check_eq!(def.symbol, "SPY");
+    check_eq!(def.sec_type, contracts::SecurityType::Stock);
+    check_eq!(def.currency, "USD");
+    check!(!def.long_name.is_empty(), "Long name should not be empty");
+    check!(!def.valid_exchanges.is_empty(), "Valid exchanges should not be empty");
+    check!(def.valid_exchanges.contains(&"SMART".to_string()), "SMART should be in valid exchanges");
+    check!(def.min_tick > 0.0, "Min tick should be positive");
     println!("  {} ({}) conId={}", def.symbol, def.long_name, def.con_id);
     println!("  SecType={:?} Currency={} MinTick={}", def.sec_type, def.currency, def.min_tick);
 
@@ -75,8 +74,7 @@ pub(super) fn phase_contract_details_by_symbol(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 7800, con_id: 0,
         symbol: "AAPL".into(), sec_type: "STK".into(),
-        exchange: "SMART".into(), currency: "USD".into(),
-    }).unwrap();
+        exchange: "SMART".into(), currency: "USD".into(), filters: ibx::types::SecDefFilters::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let mut contract: Option<contracts::ContractDefinition> = None;
@@ -92,12 +90,12 @@ pub(super) fn phase_contract_details_by_symbol(conns: Conns) -> Conns {
     }
 
     let def = contract.expect("No contract details received for AAPL by symbol search");
-    assert_eq!(def.symbol, "AAPL");
-    assert!(def.con_id > 0, "conId should be positive");
-    assert_eq!(def.sec_type, contracts::SecurityType::Stock);
-    assert_eq!(def.currency, "USD");
-    assert!(!def.long_name.is_empty(), "Long name should not be empty");
-    assert!(def.min_tick > 0.0, "Min tick should be positive");
+    check_eq!(def.symbol, "AAPL");
+    check!(def.con_id > 0, "conId should be positive");
+    check_eq!(def.sec_type, contracts::SecurityType::Stock);
+    check_eq!(def.currency, "USD");
+    check!(!def.long_name.is_empty(), "Long name should not be empty");
+    check!(def.min_tick > 0.0, "Min tick should be positive");
     println!("  {} ({}) conId={} MinTick={}", def.symbol, def.long_name, def.con_id, def.min_tick);
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
@@ -162,10 +160,10 @@ pub(super) fn phase_trading_hours(conns: &mut Conns) {
         return;
     }
     let sched = schedule.unwrap();
-    assert!(!sched.timezone.is_empty());
-    assert!(!sched.trading_hours.is_empty());
-    assert!(!sched.liquid_hours.is_empty());
-    assert!(sched.liquid_hours.len() <= sched.trading_hours.len());
+    check!(!sched.timezone.is_empty());
+    check!(!sched.trading_hours.is_empty());
+    check!(!sched.liquid_hours.is_empty());
+    check!(sched.liquid_hours.len() <= sched.trading_hours.len());
     println!("  PASS\n");
 }
 
@@ -200,11 +198,11 @@ pub(super) fn phase_matching_symbols(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     let m = matches.expect("No matching symbols response received for 'SPY'");
-    assert!(!m.is_empty(), "Should have at least one match for 'SPY'");
+    check!(!m.is_empty(), "Should have at least one match for 'SPY'");
     println!("  {} matches found", m.len());
     let spy = m.iter().find(|s| s.symbol == "SPY" && s.sec_type == contracts::SecurityType::Stock && s.currency == "USD");
     if let Some(spy) = spy {
-        assert_eq!(spy.con_id, 756733);
+        check_eq!(spy.con_id, 756733);
         println!("  SPY: conId={} exchange={} desc={}", spy.con_id, spy.primary_exchange, spy.description);
     } else {
         println!("  WARNING: SPY STK not found in matches");
@@ -227,8 +225,7 @@ pub(super) fn phase_market_rule_id(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 8400, con_id: 756733,
         symbol: String::new(), sec_type: String::new(),
-        exchange: String::new(), currency: String::new(),
-    }).unwrap();
+        exchange: String::new(), currency: String::new(), filters: ibx::types::SecDefFilters::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let mut contract: Option<contracts::ContractDefinition> = None;
@@ -251,8 +248,8 @@ pub(super) fn phase_market_rule_id(conns: Conns) -> Conns {
     }
     let def = contract.unwrap();
     println!("  market_rule_id={:?} min_tick={}", def.market_rule_id, def.min_tick);
-    assert!(def.market_rule_id.is_some(), "SPY should have a market rule ID (tag 6031)");
-    assert!(def.market_rule_id.unwrap() > 0);
+    check!(def.market_rule_id.is_some(), "SPY should have a market rule ID (tag 6031)");
+    check!(def.market_rule_id.unwrap() > 0);
     println!("  PASS\n");
     conns
 }
@@ -300,7 +297,7 @@ pub(super) fn phase_matching_symbols_channel(conns: Conns) -> Conns {
         println!("  SKIP: No matching symbols response received\n");
         return conns;
     }
-    assert!(match_count > 0, "Should have at least one match for 'AAPL'");
+    check!(match_count > 0, "Should have at least one match for 'AAPL'");
     println!("  PASS\n");
     conns
 }
@@ -318,8 +315,7 @@ pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 1001, con_id: 756733,
         symbol: String::new(), sec_type: String::new(),
-        exchange: String::new(), currency: String::new(),
-    }).unwrap();
+        exchange: String::new(), currency: String::new(), filters: ibx::types::SecDefFilters::default() }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -331,8 +327,8 @@ pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
             Ok(Event::ContractDetails { req_id, details }) => {
                 if req_id == 1001 {
                     println!("  ContractDetails: {} ({}) conId={}", details.symbol, details.long_name, details.con_id);
-                    assert_eq!(details.con_id, 756733);
-                    assert_eq!(details.symbol, "SPY");
+                    check_eq!(details.con_id, 756733);
+                    check_eq!(details.symbol, "SPY");
                     got_details = true;
                 }
             }
@@ -358,7 +354,7 @@ pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    assert!(got_details, "Event::ContractDetails not received for SPY");
+    check!(got_details, "Event::ContractDetails not received for SPY");
     if got_end {
         println!("  ContractDetailsEnd received");
     } else {

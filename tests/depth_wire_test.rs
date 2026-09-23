@@ -20,8 +20,9 @@ fn config() -> GatewayConfig {
 #[ignore]
 fn raw_farm_subscribe_test() {
     let cfg = config();
-    let (_gw, mut farm, _ccp, _hmds) =
+    let (gw, mut farm, _ccp, _hmds) =
         Gateway::connect(&cfg).expect("Gateway connect failed");
+    assert!(gw.account_id.starts_with("DU"), "refusing to run: the logged-in account is not a paper account (its id does not start with DU)");
 
     eprintln!("Farm connected, seq={}", farm.seq);
 

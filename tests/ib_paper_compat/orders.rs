@@ -79,14 +79,14 @@ pub(super) fn phase_market_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Order rejected — market may be closed\n");
+        record_rejection("Order rejected — market may be closed");
         return conns;
     }
     if buy_price == 0 {
         println!("  SKIP: No buy fill — market is closed\n");
         return conns;
     }
-    assert!(sell_price > 0, "Buy filled but no sell fill received");
+    check!(sell_price > 0, "Buy filled but no sell fill received");
 
     println!("  Buy: ${:.4} (RTT {:.3}ms)", buy_price as f64 / PRICE_SCALE as f64, buy_rtt_us as f64 / 1000.0);
     println!("  Sell: ${:.4} (RTT {:.3}ms)", sell_price as f64 / PRICE_SCALE as f64, sell_rtt_us as f64 / 1000.0);
@@ -137,7 +137,7 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         if !order_acked {
                             submit_ack_us = submit_time.elapsed().as_micros() as u64;
                             order_acked = true;
@@ -168,14 +168,14 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Order rejected — market may be closed\n");
+        record_rejection("Order rejected — market may be closed");
         return conns;
     }
 
-    assert!(submitted, "Order was never submitted");
+    check!(submitted, "Order was never submitted");
     if skip_unacked_if_closed(order_acked) { return conns; }
-    assert!(order_acked, "Order was never acknowledged");
-    assert!(order_cancelled, "Order was never cancelled");
+    check!(order_acked, "Order was never acknowledged");
+    check!(order_cancelled, "Order was never cancelled");
 
     println!("  Submit→Ack: {:.3}ms  Cancel→Conf: {:.3}ms", submit_ack_us as f64 / 1000.0, cancel_conf_us as f64 / 1000.0);
     println!("  PASS\n");
@@ -224,7 +224,7 @@ pub(super) fn phase_modify_order(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         if modify_sent && !modify_acked {
                             modify_acked = true;
                             control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: new_order_id })).unwrap();
@@ -248,14 +248,14 @@ pub(super) fn phase_modify_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Modify test rejected\n");
+        record_rejection("Modify test rejected");
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
-    assert!(order_acked, "Order was never acknowledged");
-    assert!(modify_sent, "Modify was never sent");
-    assert!(modify_acked, "Modify was never acknowledged");
-    assert!(order_cancelled, "Modified order was never cancelled");
+    check!(order_acked, "Order was never acknowledged");
+    check!(modify_sent, "Modify was never sent");
+    check!(modify_acked, "Modify was never acknowledged");
+    check!(order_cancelled, "Modified order was never cancelled");
     println!("  PASS\n");
     conns
 }
@@ -334,7 +334,7 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Order rejected — extended hours may not be active\n");
+        record_rejection("Order rejected — extended hours may not be active");
         return conns;
     }
     if buy_price == 0 {
@@ -347,11 +347,11 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
     let sc = sell_comm as f64 / PRICE_SCALE as f64;
     println!("  Buy:  ${:.2} commission=${:.4}", bp, bc);
     println!("  Sell: ${:.2} commission=${:.4}", sp, sc);
-    assert!(buy_price > 0, "Buy fill price should be positive");
-    assert!(sell_price > 0, "Sell fill price should be positive");
-    assert!((bp - sp).abs() / bp < 0.05, "Buy/sell prices should be within 5%: buy={} sell={}", bp, sp);
+    check!(buy_price > 0, "Buy fill price should be positive");
+    check!(sell_price > 0, "Sell fill price should be positive");
+    check!((bp - sp).abs() / bp < 0.05, "Buy/sell prices should be within 5%: buy={} sell={}", bp, sp);
     if buy_comm > 0 {
-        assert!(bc < 10.0, "Commission unreasonably high: ${:.4}", bc);
+        check!(bc < 10.0, "Commission unreasonably high: ${:.4}", bc);
         println!("  PASS (commission=${:.4})\n", bc);
     } else {
         println!("  PASS (commission=0 — paper account does not report tag 12)\n");
@@ -390,7 +390,7 @@ pub(super) fn phase_outside_rth_stop(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         order_acked = true;
                         if !cancel_sent {
                             control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
@@ -409,12 +409,12 @@ pub(super) fn phase_outside_rth_stop(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: GTC stop outside RTH rejected\n");
+        record_rejection("GTC stop outside RTH rejected");
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
-    assert!(order_acked, "GTC stop outside RTH was never acknowledged");
-    assert!(order_cancelled, "GTC stop outside RTH was never cancelled");
+    check!(order_acked, "GTC stop outside RTH was never acknowledged");
+    check!(order_cancelled, "GTC stop outside RTH was never cancelled");
     println!("  PASS\n");
     conns
 }
@@ -452,7 +452,7 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         if modify_sent && !modify_acked_local {
                             modify_acked_local = true;
                             control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: new_order_id })).unwrap();
@@ -476,14 +476,14 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Modify qty test rejected\n");
+        record_rejection("Modify qty test rejected");
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
-    assert!(order_acked, "Order was never acknowledged");
-    assert!(modify_sent, "Modify was never sent");
-    assert!(modify_acked_local, "Qty modify was never acknowledged");
-    assert!(order_cancelled, "Modified order was never cancelled");
+    check!(order_acked, "Order was never acknowledged");
+    check!(modify_sent, "Modify was never sent");
+    check!(modify_acked_local, "Qty modify was never acknowledged");
+    check!(order_cancelled, "Modified order was never cancelled");
     println!("  PASS\n");
     conns
 }
@@ -493,7 +493,7 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
 pub(super) fn phase_trailing_stop(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 19: Trailing Stop Order (SPY)",
-        OrderRequest::SubmitTrailingStop { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, trail_amt: 5_00_000_000 },
+        OrderRequest::SubmitTrailingStop { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, trail_amt: 5_00_000_000, trail_stop_price: 0 },
         false)
 }
 
@@ -502,7 +502,7 @@ pub(super) fn phase_trailing_stop(conns: Conns) -> Conns {
 pub(super) fn phase_trailing_stop_limit(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 20: Trailing Stop Limit Order (SPY)",
-        OrderRequest::SubmitTrailingStopLimit { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, lmt_offset: 1_00_000_000, trail_amt: 5_00_000_000 },
+        OrderRequest::SubmitTrailingStopLimit { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, lmt_offset: 1_00_000_000, trail_amt: 5_00_000_000, trail_stop_price: 0 },
         false)
 }
 
@@ -547,10 +547,10 @@ pub(super) fn phase_limit_ioc(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: IOC order rejected\n");
+        record_rejection("IOC order rejected");
         return conns;
     }
-    assert!(order_cancelled, "IOC order was not cancelled (should expire immediately at $1)");
+    check!(order_cancelled, "IOC order was not cancelled (should expire immediately at $1)");
     println!("  PASS (IOC cancelled as expected — no fill at $1)\n");
     conns
 }
@@ -596,10 +596,10 @@ pub(super) fn phase_limit_fok(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: FOK order rejected\n");
+        record_rejection("FOK order rejected");
         return conns;
     }
-    assert!(order_cancelled, "FOK order was not cancelled (should expire immediately at $1)");
+    check!(order_cancelled, "FOK order was not cancelled (should expire immediately at $1)");
     println!("  PASS (FOK cancelled as expected — no fill at $1)\n");
     conns
 }
@@ -692,7 +692,7 @@ pub(super) fn phase_bracket_order(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         if update.order_id == parent_id { parent_acked = true; }
                         if parent_acked && !cancel_sent {
                             control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: parent_id })).unwrap();
@@ -714,11 +714,11 @@ pub(super) fn phase_bracket_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if any_rejected {
-        println!("  SKIP: Bracket order rejected\n");
+        record_rejection("Bracket order rejected");
         return conns;
     }
     if skip_unacked_if_closed(parent_acked) { return conns; }
-    assert!(parent_acked, "Parent order was never acknowledged");
+    check!(parent_acked, "Parent order was never acknowledged");
     println!("  Parent acked: {}, Cancelled: {} orders", parent_acked, cancelled_count);
     println!("  PASS\n");
     conns
@@ -783,7 +783,7 @@ pub(super) fn phase_short_sell(conns: Conns) -> Conns {
 pub(super) fn phase_trailing_stop_pct(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 36: Trailing Stop Percent Order (SPY)",
-        OrderRequest::SubmitTrailingStopPct { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, trail_pct: 100 },
+        OrderRequest::SubmitTrailingStopPct { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, trail_pct: 100, trail_stop_price: 0 },
         false)
 }
 
@@ -826,7 +826,7 @@ pub(super) fn phase_oca_group(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         if update.order_id == id1 { order1_acked = true; }
                         if update.order_id == id2 { order2_acked = true; }
                         if order1_acked && order2_acked && !cancel_sent {
@@ -849,12 +849,12 @@ pub(super) fn phase_oca_group(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if any_rejected {
-        println!("  SKIP: OCA order rejected\n");
+        record_rejection("OCA order rejected");
         return conns;
     }
     if skip_unacked_if_closed(order1_acked && order2_acked) { return conns; }
-    assert!(order1_acked, "Order 1 never acked");
-    assert!(order2_acked, "Order 2 never acked");
+    check!(order1_acked, "Order 1 never acked");
+    check!(order2_acked, "Order 2 never acked");
     println!("  Order1 acked: {}, Order2 acked: {}, Cancelled: {}", order1_acked, order2_acked, cancelled_count);
     println!("  PASS\n");
     conns
@@ -1199,11 +1199,11 @@ pub(super) fn phase_what_if_order(conns: Conns) -> Conns {
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    assert!(what_if_received, "What-if response was never received");
+    check!(what_if_received, "What-if response was never received");
     let commission = response_snapshot.map(|r| r.commission).unwrap_or(0);
     if commission > 0 {
         println!("  Commission: ${:.2}", commission as f64 / PRICE_SCALE as f64);
-        assert!(dispatcher_validated, "Dispatcher path (open_order + order_status) failed validation");
+        check!(dispatcher_validated, "Dispatcher path (open_order + order_status) failed validation");
         println!("  PASS\n");
     } else {
         println!("  SKIP: Commission=0 (pre-market / no active quote)\n");
@@ -1243,7 +1243,7 @@ pub(super) fn phase_cash_qty_order(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         order_acked = true;
                         if !cancel_sent {
                             control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
@@ -1262,12 +1262,12 @@ pub(super) fn phase_cash_qty_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Cash qty rejected (expected on paper account)\n");
+        record_rejection("Cash qty rejected (expected on paper account)");
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
-    assert!(order_acked, "Order was never acknowledged");
-    assert!(order_cancelled, "Order was never cancelled");
+    check!(order_acked, "Order was never acknowledged");
+    check!(order_cancelled, "Order was never cancelled");
     println!("  PASS\n");
     conns
 }
@@ -1303,7 +1303,7 @@ pub(super) fn phase_fractional_order(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         order_acked = true;
                         if !cancel_sent {
                             control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
@@ -1322,12 +1322,12 @@ pub(super) fn phase_fractional_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Fractional rejected (may be blocked by CCP)\n");
+        record_rejection("Fractional rejected (may be blocked by CCP)");
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
-    assert!(order_acked, "Order was never acknowledged");
-    assert!(order_cancelled, "Order was never cancelled");
+    check!(order_acked, "Order was never acknowledged");
+    check!(order_cancelled, "Order was never cancelled");
     println!("  PASS\n");
     conns
 }
@@ -1337,7 +1337,7 @@ pub(super) fn phase_fractional_order(conns: Conns) -> Conns {
 pub(super) fn phase_adjustable_stop_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 75: Adjustable Stop Order (SPY)",
-        OrderRequest::SubmitAdjustableStop { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, stop_price: 1_00_000_000, trigger_price: 500_00_000_000, adjusted_order_type: AdjustedOrderType::StopLimit, adjusted_stop_price: 1_50_000_000, adjusted_stop_limit_price: 1_00_000_000 },
+        OrderRequest::SubmitAdjustableStop { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, stop_price: 1_00_000_000, trigger_price: 500_00_000_000, adjusted_order_type: AdjustedOrderType::StopLimit, adjusted_stop_price: 1_50_000_000, adjusted_stop_limit_price: 1_00_000_000, adjusted_trailing_amount: 0, adjustable_trailing_unit: 0 },
         false)
 }
 
@@ -1399,7 +1399,7 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
             }
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         if Some(update.order_id) == tp_id { tp_active = true; }
                         if Some(update.order_id) == sl_id { sl_active = true; }
                         if tp_active && sl_active && !cancel_sent {
@@ -1429,7 +1429,7 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if any_rejected {
-        println!("  SKIP: Bracket fill cascade rejected\n");
+        record_rejection("Bracket fill cascade rejected");
         return conns;
     }
     println!("  Entry filled: {}, TP active: {}, SL active: {}", entry_filled, tp_active, sl_active);
@@ -1437,8 +1437,8 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
         println!("  SKIP: Entry did not fill — market may not have liquidity\n");
         return conns;
     }
-    assert!(tp_active, "Take-profit child was never activated after entry fill");
-    assert!(sl_active, "Stop-loss child was never activated after entry fill");
+    check!(tp_active, "Take-profit child was never activated after entry fill");
+    check!(sl_active, "Stop-loss child was never activated after entry fill");
     println!("  PASS\n");
     conns
 }
@@ -1520,7 +1520,7 @@ pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    if order_rejected { println!("  SKIP: Order rejected\n"); return conns; }
+    if order_rejected { record_rejection("Order rejected"); return conns; }
     if !buy_filled { println!("  SKIP: No fill — market may not have liquidity\n"); return conns; }
 
     println!("  Buy filled: {}, Sell filled: {}", buy_filled, sell_filled);
@@ -1641,7 +1641,7 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         if acked.contains(&update.order_id) {
                             duplicate_acks += 1;
                         }
@@ -1675,13 +1675,13 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
         acked.len(), cancelled.len(), rejected.len(), duplicate_acks);
 
     if rejected.len() == order_ids.len() {
-        println!("  SKIP: All orders rejected\n");
+        record_rejection("All orders rejected");
         return conns;
     }
 
-    assert_eq!(duplicate_acks, 0, "No duplicate OrderUpdate(Submitted) for same order_id");
+    check_eq!(duplicate_acks, 0, "No duplicate OrderUpdate(Submitted) for same order_id");
     if skip_unacked_if_closed(acked.len() >= 3) { return conns; }
-    assert!(acked.len() >= 3, "At least 3 of 5 orders should be acknowledged, got {}", acked.len());
+    check!(acked.len() >= 3, "At least 3 of 5 orders should be acknowledged, got {}", acked.len());
     println!("  PASS\n");
     conns
 }
@@ -1720,7 +1720,7 @@ pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         if modify_sent && !modify_acked {
                             modify_acked = true;
                             control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: new_order_id })).unwrap();
@@ -1745,14 +1745,14 @@ pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Order rejected\n");
+        record_rejection("Order rejected");
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
-    assert!(order_acked, "Order was never acknowledged");
-    assert!(modify_sent, "Modify was never sent");
-    assert!(modify_acked, "Modify (price+qty) was never acknowledged");
-    assert!(order_cancelled, "Modified order was never cancelled");
+    check!(order_acked, "Order was never acknowledged");
+    check!(modify_sent, "Modify was never sent");
+    check!(modify_acked, "Modify (price+qty) was never acknowledged");
+    check!(order_cancelled, "Modified order was never cancelled");
     println!("  PASS\n");
     conns
 }
@@ -1791,7 +1791,7 @@ pub(super) fn phase_double_modify(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         match phase {
                             0 => {
                                 // Original order acked → modify to $2
@@ -1827,12 +1827,12 @@ pub(super) fn phase_double_modify(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Order rejected\n");
+        record_rejection("Order rejected");
         return conns;
     }
     if skip_unacked_if_closed(phase >= 3) { return conns; }
-    assert!(phase >= 3, "Did not complete double modify chain (reached phase {})", phase);
-    assert!(order_cancelled, "Final modified order was never cancelled");
+    check!(phase >= 3, "Did not complete double modify chain (reached phase {})", phase);
+    check!(order_cancelled, "Final modified order was never cancelled");
     println!("  PASS\n");
     conns
 }
@@ -1871,7 +1871,7 @@ pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         if !order_acked {
                             order_acked = true;
                             // Send modify AND cancel back-to-back — no waiting
@@ -1898,13 +1898,13 @@ pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Order rejected\n");
+        record_rejection("Order rejected");
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
-    assert!(order_acked, "Order was never acknowledged");
-    assert!(race_sent, "Race condition commands were never sent");
-    assert!(order_cancelled, "Order was never cancelled (neither original nor modified)");
+    check!(order_acked, "Order was never acknowledged");
+    check!(race_sent, "Race condition commands were never sent");
+    check!(order_cancelled, "Order was never cancelled (neither original nor modified)");
     println!("  PASS\n");
     conns
 }
@@ -1946,7 +1946,7 @@ pub(super) fn phase_global_cancel(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         acked.insert(update.order_id);
                         if acked.len() >= 3 && !cancel_all_sent {
                             control_tx.send(ControlCommand::Order(
@@ -1971,12 +1971,12 @@ pub(super) fn phase_global_cancel(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Order rejected\n");
+        record_rejection("Order rejected");
         return conns;
     }
     if skip_unacked_if_closed(cancel_all_sent) { return conns; }
-    assert!(cancel_all_sent, "CancelAll was never sent (not all orders acked)");
-    assert_eq!(cancelled.len(), 3, "Expected 3 cancellations, got {}", cancelled.len());
+    check!(cancel_all_sent, "CancelAll was never sent (not all orders acked)");
+    check_eq!(cancelled.len(), 3, "Expected 3 cancellations, got {}", cancelled.len());
     println!("  All 3 orders cancelled via CancelAll");
     println!("  PASS\n");
     conns
@@ -2077,7 +2077,7 @@ pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if got_order_reject {
-        println!("  SKIP: Order rejected — market closed\n");
+        record_rejection("Order rejected — market closed");
         return conns;
     }
     if phase < 2 {

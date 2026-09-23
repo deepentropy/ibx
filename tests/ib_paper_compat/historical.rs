@@ -74,11 +74,11 @@ pub(super) fn phase_historical_data(mut conns: Conns, gw: &Gateway, config: &Gat
     }
 
     let first = &all_bars[0];
-    assert!(first.open > 0.0, "Open price should be positive: {}", first.open);
-    assert!(first.high >= first.low, "High ({}) should be >= Low ({})", first.high, first.low);
-    assert!(first.volume > 0, "Volume should be positive: {}", first.volume);
+    check!(first.open > 0.0, "Open price should be positive: {}", first.open);
+    check!(first.high >= first.low, "High ({}) should be >= Low ({})", first.high, first.low);
+    check!(first.volume > 0, "Volume should be positive: {}", first.volume);
     for bar in &all_bars {
-        assert!(bar.high >= bar.low, "Bar {}: high ({}) < low ({})", bar.time, bar.high, bar.low);
+        check!(bar.high >= bar.low, "Bar {}: high ({}) < low ({})", bar.time, bar.high, bar.low);
     }
     println!("  First bar: O={:.2} H={:.2} L={:.2} C={:.2} V={}",
         first.open, first.high, first.low, first.close, first.volume);
@@ -140,11 +140,11 @@ pub(super) fn phase_historical_daily_bars(mut conns: Conns, gw: &Gateway, config
         println!("  SKIP: No daily bars received (HMDS may be unavailable)\n");
         return conns;
     }
-    assert!(all_bars.len() <= 5, "Should have at most 5 daily bars, got {}", all_bars.len());
+    check!(all_bars.len() <= 5, "Should have at most 5 daily bars, got {}", all_bars.len());
     for bar in &all_bars {
-        assert!(bar.open > 0.0, "Open should be positive: {}", bar.open);
-        assert!(bar.high >= bar.low, "High ({}) should be >= Low ({})", bar.high, bar.low);
-        assert!(bar.volume > 0, "Volume should be positive: {}", bar.volume);
+        check!(bar.open > 0.0, "Open should be positive: {}", bar.open);
+        check!(bar.high >= bar.low, "High ({}) should be >= Low ({})", bar.high, bar.low);
+        check!(bar.volume > 0, "Volume should be positive: {}", bar.volume);
         println!("  {} O={:.2} H={:.2} L={:.2} C={:.2} V={}", bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume);
     }
     println!("  PASS ({} daily bars)\n", all_bars.len());
@@ -276,13 +276,13 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config:
                 bars_seen, got_end_sentinel);
         }
         Some((_, code, msg)) => {
-            assert_eq!(code, 162, "expected canonical HMDS error code 162");
-            assert!(!msg.is_empty(), "error message must not be empty");
-            assert!(
+            check_eq!(code, 162, "expected canonical HMDS error code 162");
+            check!(!msg.is_empty(), "error message must not be empty");
+            check!(
                 got_end_sentinel,
                 "terminal historical_data sentinel must follow the error so consumers waiting on historical_data_end unblock"
             );
-            assert_eq!(bars_seen, 0, "no bars should be delivered for a rejected request");
+            check_eq!(bars_seen, 0, "no bars should be delivered for a rejected request");
             println!("  PASS (error surfaced, end sentinel delivered)\n");
         }
     }
@@ -328,9 +328,9 @@ pub(super) fn phase_head_timestamp(mut conns: Conns, gw: &Gateway, config: &Gate
         return conns;
     }
     let resp = response.unwrap();
-    assert!(!resp.head_timestamp.is_empty(), "Head timestamp should not be empty");
-    assert!(resp.head_timestamp.starts_with("199"), "SPY TRADES head timestamp should be in 1990s, got {}", resp.head_timestamp);
-    assert!(!resp.timezone.is_empty(), "Timezone should not be empty");
+    check!(!resp.head_timestamp.is_empty(), "Head timestamp should not be empty");
+    check!(resp.head_timestamp.starts_with("199"), "SPY TRADES head timestamp should be in 1990s, got {}", resp.head_timestamp);
+    check!(!resp.timezone.is_empty(), "Timezone should not be empty");
     println!("  headTS={} tz={}", resp.head_timestamp, resp.timezone);
     println!("  PASS\n");
     conns
@@ -382,8 +382,8 @@ pub(super) fn phase_scanner_subscription(mut conns: Conns, gw: &Gateway, config:
         return conns;
     }
     let r = result.unwrap();
-    assert!(!r.con_ids.is_empty(), "Scanner should return contracts");
-    assert!(!r.scan_time.is_empty(), "Scanner should have scan_time");
+    check!(!r.con_ids.is_empty(), "Scanner should return contracts");
+    check!(!r.scan_time.is_empty(), "Scanner should have scan_time");
     println!("  Scanner: {} contracts at {}", r.con_ids.len(), r.scan_time);
     for (i, cid) in r.con_ids.iter().enumerate().take(3) {
         println!("  Rank {}: conId={}", i, cid);
@@ -421,7 +421,7 @@ pub(super) fn phase_fundamental_data(mut conns: Conns, gw: &Gateway, config: &Ga
         for (req_id, data) in results {
             if req_id == 8300 {
                 println!("  Fundamental data: {} chars", data.len());
-                assert!(!data.is_empty(), "Fundamental data should not be empty");
+                check!(!data.is_empty(), "Fundamental data should not be empty");
                 got_data = true;
             }
         }
@@ -494,18 +494,18 @@ pub(super) fn phase_historical_news(mut conns: Conns, gw: &Gateway, config: &Gat
         if !results.is_empty() {
             for (req_id, headlines, has_more) in &results {
                 // Step 4: Verify SPECIFIC VALUES
-                assert_eq!(*req_id, 8500, "req_id should match what we sent");
+                check_eq!(*req_id, 8500, "req_id should match what we sent");
                 println!("  Got {} headlines (has_more={})", headlines.len(), has_more);
-                assert!(!headlines.is_empty(), "should have at least 1 headline");
+                check!(!headlines.is_empty(), "should have at least 1 headline");
 
                 for h in headlines {
                     // Verify each headline has non-empty fields
-                    assert!(!h.time.is_empty(), "headline time should not be empty");
-                    assert!(!h.provider_code.is_empty(), "provider_code should not be empty");
-                    assert!(!h.article_id.is_empty(), "article_id should not be empty");
-                    assert!(!h.headline.is_empty(), "headline text should not be empty");
+                    check!(!h.time.is_empty(), "headline time should not be empty");
+                    check!(!h.provider_code.is_empty(), "provider_code should not be empty");
+                    check!(!h.article_id.is_empty(), "article_id should not be empty");
+                    check!(!h.headline.is_empty(), "headline text should not be empty");
                     // Verify time format looks like a date (starts with 20)
-                    assert!(h.time.starts_with("20"), "time should be a date: {}", h.time);
+                    check!(h.time.starts_with("20"), "time should be a date: {}", h.time);
                     println!("    {} [{}] {}", h.time, h.provider_code, &h.headline[..h.headline.len().min(80)]);
                 }
             }
@@ -568,7 +568,7 @@ pub(super) fn phase_historical_ticks(mut conns: Conns, gw: &Gateway, config: &Ga
                     HistoricalTickData::Last(v) => {
                         for tick in v {
                             tick_count += 1;
-                            assert!(tick.price > 0.0, "Tick price should be positive: {}", tick.price);
+                            check!(tick.price > 0.0, "Tick price should be positive: {}", tick.price);
                             if !tick.time.is_empty() && tick.time < last_ts { monotonic_violations += 1; }
                             if !tick.time.is_empty() { last_ts = tick.time.clone(); }
                         }
@@ -576,14 +576,14 @@ pub(super) fn phase_historical_ticks(mut conns: Conns, gw: &Gateway, config: &Ga
                     HistoricalTickData::Midpoint(v) => {
                         for tick in v {
                             tick_count += 1;
-                            assert!(tick.price > 0.0, "Midpoint price should be positive: {}", tick.price);
+                            check!(tick.price > 0.0, "Midpoint price should be positive: {}", tick.price);
                         }
                     }
                     HistoricalTickData::BidAsk(v) => {
                         for tick in v {
                             tick_count += 1;
-                            assert!(tick.bid_price > 0.0, "Bid should be positive: {}", tick.bid_price);
-                            assert!(tick.ask_price >= tick.bid_price, "Ask ({}) should be >= Bid ({})", tick.ask_price, tick.bid_price);
+                            check!(tick.bid_price > 0.0, "Bid should be positive: {}", tick.bid_price);
+                            check!(tick.ask_price >= tick.bid_price, "Ask ({}) should be >= Bid ({})", tick.ask_price, tick.bid_price);
                         }
                     }
                 }
@@ -600,7 +600,7 @@ pub(super) fn phase_historical_ticks(mut conns: Conns, gw: &Gateway, config: &Ga
     if tick_count == 0 {
         println!("  SKIP: No historical ticks received\n");
     } else {
-        assert_eq!(monotonic_violations, 0, "Timestamps should be monotonically increasing");
+        check_eq!(monotonic_violations, 0, "Timestamps should be monotonically increasing");
         println!("  PASS ({} ticks, timestamps monotonic)\n", tick_count);
     }
     conns
@@ -707,7 +707,7 @@ pub(super) fn phase_historical_schedule(mut conns: Conns, gw: &Gateway, config: 
         for s in sched.sessions.iter().take(3) {
             println!("    {} open={} close={}", s.ref_date, s.open_time, s.close_time);
         }
-        assert!(!sched.sessions.is_empty(), "Schedule should contain sessions");
+        check!(!sched.sessions.is_empty(), "Schedule should contain sessions");
         println!("  PASS\n");
     } else {
         println!("  SKIP: No schedule data received\n");
@@ -765,7 +765,7 @@ pub(super) fn phase_realtime_bars(mut conns: Conns, gw: &Gateway, config: &Gatew
     } else {
         let bar = &bars[0];
         println!("  First bar: O={:.2} H={:.2} L={:.2} C={:.2} V={:.0}", bar.open, bar.high, bar.low, bar.close, bar.volume);
-        assert!(bar.high >= bar.low, "High should be >= Low");
+        check!(bar.high >= bar.low, "High should be >= Low");
         println!("  PASS ({} bars)\n", bars.len());
     }
     conns
@@ -833,8 +833,8 @@ pub(super) fn phase_news_article(mut conns: Conns, gw: &Gateway, config: &Gatewa
             for (req_id, art_type, body) in &articles {
                 if *req_id == 6002 {
                     println!("  Article: type={} len={}", art_type, body.len());
-                    assert!(!body.is_empty(), "Article body should not be empty");
-                    assert!(body.len() > 50, "Article body too short: {} bytes", body.len());
+                    check!(!body.is_empty(), "Article body should not be empty");
+                    check!(body.len() > 50, "Article body too short: {} bytes", body.len());
                     // Type 0 = HTML (may contain tags), type 1 = plain text
                     if *art_type == 0 && body.contains('<') && body.contains('>') {
                         println!("  Format: HTML");
@@ -1100,7 +1100,7 @@ pub(super) fn phase_historical_ohlc_validation(conns: Conns, _gw: &Gateway, _con
 
     let bars = &data.bars;
     println!("  Received {} bars", bars.len());
-    assert!(!bars.is_empty(), "Should receive at least 1 bar");
+    check!(!bars.is_empty(), "Should receive at least 1 bar");
 
     let mut ohlc_valid = true;
     let mut volume_valid = true;
@@ -1134,8 +1134,8 @@ pub(super) fn phase_historical_ohlc_validation(conns: Conns, _gw: &Gateway, _con
         }
     }
 
-    assert!(ohlc_valid, "All bars should have valid OHLC relationships");
-    assert!(volume_valid, "All bars should have non-negative volume");
+    check!(ohlc_valid, "All bars should have valid OHLC relationships");
+    check!(volume_valid, "All bars should have non-negative volume");
     println!("  PASS\n");
     conns
 }
@@ -1180,9 +1180,9 @@ pub(super) fn phase_large_historical_dataset(mut conns: Conns, gw: &Gateway, con
             if *req_id == 11001 {
                 for bar in &resp.bars {
                     total_bars += 1;
-                    assert!(bar.high >= bar.low, "Bar {}: high < low ({} < {})", bar.time, bar.high, bar.low);
-                    assert!(bar.open > 0.0, "Bar {}: open should be positive", bar.time);
-                    assert!(bar.volume >= 0, "Bar {}: volume should be non-negative", bar.time);
+                    check!(bar.high >= bar.low, "Bar {}: high < low ({} < {})", bar.time, bar.high, bar.low);
+                    check!(bar.open > 0.0, "Bar {}: open should be positive", bar.time);
+                    check!(bar.volume >= 0, "Bar {}: volume should be non-negative", bar.time);
                     if bar.time == prev_time {
                         duplicate_timestamps += 1;
                     }
@@ -1203,8 +1203,8 @@ pub(super) fn phase_large_historical_dataset(mut conns: Conns, gw: &Gateway, con
     }
     println!("  Total bars: {} (complete={})", total_bars, complete);
     println!("  Duplicate timestamps: {}", duplicate_timestamps);
-    assert!(total_bars >= 200, "1 year should have 200+ trading days, got {}", total_bars);
-    assert_eq!(duplicate_timestamps, 0, "No duplicate bar timestamps expected");
+    check!(total_bars >= 200, "1 year should have 200+ trading days, got {}", total_bars);
+    check_eq!(duplicate_timestamps, 0, "No duplicate bar timestamps expected");
     println!("  PASS\n");
     conns
 }
@@ -1270,15 +1270,15 @@ pub(super) fn phase_dst_boundary_historical(mut conns: Conns, gw: &Gateway, conf
 
     // Check all bars have valid OHLCV
     for bar in &bars {
-        assert!(bar.high >= bar.low, "Bar {}: high ({}) < low ({})", bar.time, bar.high, bar.low);
-        assert!(bar.open > 0.0, "Bar {}: zero/negative open", bar.time);
+        check!(bar.high >= bar.low, "Bar {}: high ({}) < low ({})", bar.time, bar.high, bar.low);
+        check!(bar.open > 0.0, "Bar {}: zero/negative open", bar.time);
     }
 
     println!("  {} bars received ({} unique timestamps, {} duplicates, complete={})", original_count, unique_count, duplicates, complete);
-    assert_eq!(duplicates, 0, "No duplicate timestamps at DST boundary");
+    check_eq!(duplicates, 0, "No duplicate timestamps at DST boundary");
 
     // 2 weeks of RTH = ~10 trading days * ~7 hours = ~70 bars
-    assert!(bars.len() >= 40, "2 weeks of hourly RTH should have 40+ bars, got {}", bars.len());
+    check!(bars.len() >= 40, "2 weeks of hourly RTH should have 40+ bars, got {}", bars.len());
     println!("  PASS\n");
     conns
 }
@@ -1438,7 +1438,7 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config
             Ok(Event::OrderUpdate(update)) => {
                 if update.order_id == oid {
                     match update.status {
-                        OrderStatus::Submitted => {
+                        OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                             order_acked = true;
                             if !cancel_sent {
                                 control_tx.send(ControlCommand::Order(
@@ -1470,8 +1470,8 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config
     }
     if !order_rejected {
         if skip_unacked_if_closed(order_acked) { return conns; }
-        assert!(order_acked, "Order should have been acknowledged");
-        assert!(order_cancelled, "Order should have been cancelled");
+        check!(order_acked, "Order should have been acknowledged");
+        check!(order_cancelled, "Order should have been cancelled");
     }
     // At least some historical requests should complete even during order activity
     // (tolerance for server pacing — may not get all 5)

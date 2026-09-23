@@ -451,6 +451,11 @@ fn api_gt_suite() {
 
     let client = EClient::connect(&config)
         .expect("EClient::connect failed");
+    // Place no order unless this is a paper account (id starts with DU).
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: the logged-in account is not a paper account (its id does not start with DU)");
+    }
 
     println!("Connected. Account: {}\n", client.account_id);
 
@@ -1289,7 +1294,10 @@ fn api_gt_suite() {
             order_type: "LMT".into(),
             lmt_price: 1.0,
             tif: "GTC".into(),
-            outside_rth: true,
+            // The server refuses outside-RTH for algo orders ("Only RTH orders
+            // are allowed for IB algorithmic orders"). This case passed before
+            // only because ibx dropped the flag on adaptive orders (ibx#318).
+            outside_rth: false,
             algo_strategy: "Adaptive".into(),
             algo_params: vec![TagValue { tag: "adaptivePriority".into(), value: "Normal".into() }],
             ..Default::default()
@@ -1318,8 +1326,10 @@ fn api_gt_suite() {
             println!("PASS (adaptive order accepted + cancelled)");
             pass_count += 1;
         } else if rejected {
-            println!("SKIP (adaptive order rejected — may not be available outside RTH)");
-            skip_count += 1;
+            // A regular-hours adaptive GTC order is accepted at any time of
+            // day; a rejection means ibx encoded it wrongly.
+            println!("FAIL (adaptive order rejected)");
+            fail_count += 1;
         } else {
             println!("FAIL (no order_status received)");
             fail_count += 1;

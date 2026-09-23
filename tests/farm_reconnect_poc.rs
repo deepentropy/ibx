@@ -30,6 +30,7 @@ fn farm_reconnect_with_cached_credentials() {
     let t0 = Instant::now();
     let (gw, farm_conn, _ccp_conn, _hmds) =
         Gateway::connect(&cfg).expect("Initial connect failed");
+    assert!(gw.account_id.starts_with("DU"), "refusing to run: the logged-in account is not a paper account (its id does not start with DU)");
     let full_auth_ms = t0.elapsed().as_millis();
 
     // Save credentials
@@ -63,6 +64,8 @@ fn hotloop_auto_reconnect_on_farm_disconnect() {
 
     let (gw, farm_conn, ccp_conn, hmds) =
         Gateway::connect(&cfg).expect("Initial connect failed");
+
+    assert!(gw.account_id.starts_with("DU"), "refusing to run: the logged-in account is not a paper account (its id does not start with DU)");
 
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::bounded(256);
@@ -117,6 +120,7 @@ fn ccp_reconnect_with_cached_credentials() {
     let t0 = Instant::now();
     let (gw, _farm_conn, ccp_conn, _hmds) =
         Gateway::connect(&cfg).expect("Initial connect failed");
+    assert!(gw.account_id.starts_with("DU"), "refusing to run: the logged-in account is not a paper account (its id does not start with DU)");
     let full_auth_ms = t0.elapsed().as_millis();
 
     let auth = ReconnectAuth {

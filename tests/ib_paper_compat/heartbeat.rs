@@ -27,7 +27,7 @@ pub(super) fn phase_heartbeat_keepalive(conns: Conns) -> Conns {
     let elapsed = start.elapsed();
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    assert!(!disconnected, "Connection dropped after {:.1}s — heartbeat mechanism failed", elapsed.as_secs_f64());
+    check!(!disconnected, "Connection dropped after {:.1}s — heartbeat mechanism failed", elapsed.as_secs_f64());
     println!("  PASS ({:.1}s, no disconnect)\n", elapsed.as_secs_f64());
     conns
 }
@@ -55,7 +55,7 @@ pub(super) fn phase_farm_heartbeat_keepalive(conns: Conns) -> Conns {
     let elapsed = start.elapsed();
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    assert!(!disconnected, "Farm disconnected after {:.1}s — heartbeat failed", elapsed.as_secs_f64());
+    check!(!disconnected, "Farm disconnected after {:.1}s — heartbeat failed", elapsed.as_secs_f64());
     println!("  PASS ({:.1}s, no disconnect, survived 2x farm heartbeat interval)\n", elapsed.as_secs_f64());
     conns
 }
@@ -89,8 +89,8 @@ pub(super) fn phase_heartbeat_timeout_detection(conns: Conns) -> Conns {
     }
 
     let elapsed = start.elapsed();
-    assert!(disconnect_count > 0, "No disconnect after {:.1}s — heartbeat timeout should fire at ~21s", elapsed.as_secs_f64());
-    assert!(elapsed.as_secs() >= 18 && elapsed.as_secs() <= 28,
+    check!(disconnect_count > 0, "No disconnect after {:.1}s — heartbeat timeout should fire at ~21s", elapsed.as_secs_f64());
+    check!(elapsed.as_secs() >= 18 && elapsed.as_secs() <= 28,
         "Disconnect at {:.1}s — expected 18-28s (10+1+10=21s theoretical)", elapsed.as_secs_f64());
 
     let reclaimed = shutdown_and_reclaim(&control_tx, join, account_id.clone());

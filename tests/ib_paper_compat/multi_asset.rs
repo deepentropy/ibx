@@ -92,7 +92,7 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
             Ok(Event::OrderUpdate(update)) => {
                 if update.order_id == oid {
                     match update.status {
-                        OrderStatus::Submitted => {
+                        OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                             order_acked = true;
                             if !cancel_sent {
                                 control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
@@ -112,11 +112,11 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Forex order rejected (may need trading permissions)\n");
+        record_rejection("Forex order rejected (may need trading permissions)");
     } else {
         if skip_unacked_if_closed(order_acked) { return conns; }
-        assert!(order_acked, "Forex order should be acknowledged");
-        assert!(order_cancelled, "Forex order should be cancelled");
+        check!(order_acked, "Forex order should be acknowledged");
+        check!(order_cancelled, "Forex order should be cancelled");
         println!("  PASS\n");
     }
     conns
@@ -166,8 +166,8 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
                             println!("  Contract: {} conId={} secType={:?} exchange={} expiry={} multiplier={}",
                                 def.symbol, def.con_id, def.sec_type, def.exchange,
                                 def.last_trade_date, def.multiplier);
-                            assert!(def.multiplier > 0.0, "Futures multiplier should be positive");
-                            assert!(!def.last_trade_date.is_empty(), "Futures should have expiry date");
+                            check!(def.multiplier > 0.0, "Futures multiplier should be positive");
+                            check!(!def.last_trade_date.is_empty(), "Futures should have expiry date");
                             // Take the first (front-month) contract
                             if fut_contract.is_none() {
                                 fut_contract = Some(def);
@@ -214,7 +214,7 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
             Ok(Event::OrderUpdate(update)) => {
                 if update.order_id == oid {
                     match update.status {
-                        OrderStatus::Submitted => {
+                        OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                             order_acked = true;
                             if !cancel_sent {
                                 control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
@@ -234,11 +234,11 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Futures order rejected (may need trading permissions)\n");
+        record_rejection("Futures order rejected (may need trading permissions)");
     } else {
         if skip_unacked_if_closed(order_acked) { return conns; }
-        assert!(order_acked, "Futures order should be acknowledged");
-        assert!(order_cancelled, "Futures order should be cancelled");
+        check!(order_acked, "Futures order should be acknowledged");
+        check!(order_cancelled, "Futures order should be cancelled");
         println!("  PASS\n");
     }
     conns
@@ -314,8 +314,8 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
     println!("  Found {} option contracts, using: {} conId={} strike={} right={:?} expiry={}",
         option_contracts.len(), opt.symbol, opt.con_id, opt.strike,
         opt.right, opt.last_trade_date);
-    assert!(opt.strike > 0.0, "Option strike should be positive");
-    assert!(opt.multiplier > 0.0, "Option multiplier should be positive (typically 100)");
+    check!(opt.strike > 0.0, "Option strike should be positive");
+    check!(opt.multiplier > 0.0, "Option multiplier should be positive (typically 100)");
 
     // Submit an option limit order using the actual option con_id
     let opt_con_id = opt.con_id;
@@ -345,7 +345,7 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
             Ok(Event::OrderUpdate(update)) => {
                 if update.order_id == oid {
                     match update.status {
-                        OrderStatus::Submitted => {
+                        OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                             order_acked = true;
                             if !cancel_sent {
                                 control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: oid })).unwrap();
@@ -365,11 +365,11 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        println!("  SKIP: Option order rejected (may need trading permissions)\n");
+        record_rejection("Option order rejected (may need trading permissions)");
     } else {
         if skip_unacked_if_closed(order_acked) { return conns; }
-        assert!(order_acked, "Option order should be acknowledged");
-        assert!(order_cancelled, "Option order should be cancelled");
+        check!(order_acked, "Option order should be acknowledged");
+        check!(order_cancelled, "Option order should be cancelled");
         println!("  PASS\n");
     }
     conns
@@ -420,7 +420,7 @@ pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
                 let idx = oids.iter().position(|&id| id == update.order_id);
                 if let Some(i) = idx {
                     match update.status {
-                        OrderStatus::Submitted => {
+                        OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                             acked[i] = true;
                             // Once all 3 are acked, cancel them all
                             if acked.iter().all(|&a| a) && !cancel_sent {
@@ -444,7 +444,7 @@ pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if rejected {
-        println!("  SKIP: One or more orders rejected\n");
+        record_rejection("One or more orders rejected");
         return conns;
     }
 
@@ -452,8 +452,8 @@ pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
     let cancelled_count = cancelled.iter().filter(|&&c| c).count();
     println!("  Acked: {}/3  Cancelled: {}/3", acked_count, cancelled_count);
 
-    assert_eq!(acked_count, 3, "All 3 orders should be acknowledged");
-    assert_eq!(cancelled_count, 3, "All 3 orders should be cancelled");
+    check_eq!(acked_count, 3, "All 3 orders should be acknowledged");
+    check_eq!(cancelled_count, 3, "All 3 orders should be cancelled");
     println!("  PASS\n");
     conns
 }

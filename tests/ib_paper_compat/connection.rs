@@ -7,21 +7,21 @@ use ibx::gateway::{Gateway, GatewayConfig};
 pub(super) fn phase_ccp_auth(gw: &Gateway, has_hmds: bool, connect_time: Duration) {
     println!("--- Phase 1: CCP Auth + Farm Logon ---");
 
-    assert!(!gw.account_id.is_empty(), "Account ID should be non-empty after CCP logon");
+    check!(!gw.account_id.is_empty(), "Account ID should be non-empty after CCP logon");
     println!("  Account ID: {}", gw.account_id);
 
-    assert!(!gw.server_session_id.is_empty(), "Server session ID should be set");
+    check!(!gw.server_session_id.is_empty(), "Server session ID should be set");
     if !gw.ccp_token.is_empty() {
         println!("  CCP token: present");
     } else {
         println!("  CCP token: not present (non-fatal)");
     }
-    assert!(gw.heartbeat_interval > 0, "Heartbeat interval should be positive");
+    check!(gw.heartbeat_interval > 0, "Heartbeat interval should be positive");
     println!("  Session ID: {}", gw.server_session_id);
     println!("  Heartbeat interval: {}s", gw.heartbeat_interval);
 
     use num_bigint::BigUint;
-    assert!(gw.session_token > BigUint::from(0u32), "Session token should be non-zero");
+    check!(gw.session_token > BigUint::from(0u32), "Session token should be non-zero");
 
     if has_hmds {
         println!("  ushmds farm: CONNECTED");
@@ -29,7 +29,7 @@ pub(super) fn phase_ccp_auth(gw: &Gateway, has_hmds: bool, connect_time: Duratio
         println!("  ushmds farm: NOT CONNECTED (non-fatal)");
     }
 
-    assert!(connect_time < Duration::from_secs(60), "Connection took too long: {:?}", connect_time);
+    check!(connect_time < Duration::from_secs(60), "Connection took too long: {:?}", connect_time);
     println!("  PASS ({:.3}s)\n", connect_time.as_secs_f64());
 }
 
@@ -93,7 +93,7 @@ pub(super) fn phase_graceful_shutdown(conns: Conns) -> Conns {
     let mut hl = join.join().expect("hot loop panicked");
     let shutdown_time = shutdown_start.elapsed();
 
-    assert!(
+    check!(
         shutdown_time < Duration::from_secs(2),
         "Shutdown took too long: {:?}", shutdown_time
     );
@@ -105,7 +105,7 @@ pub(super) fn phase_graceful_shutdown(conns: Conns) -> Conns {
             got_disconnect = true;
         }
     }
-    assert!(got_disconnect, "Disconnected event was not emitted during shutdown");
+    check!(got_disconnect, "Disconnected event was not emitted during shutdown");
 
     let farm = hl.farm_conn.take().expect("farm_conn missing");
     let ccp = hl.ccp_conn.take().expect("ccp_conn missing");
@@ -157,10 +157,10 @@ pub(super) fn phase_connection_recovery(conns: Conns, _gw: &Gateway, config: &Ga
     // The hot loop should exit on its own after detecting disconnect
     let _ = control_tx.send(ControlCommand::Shutdown);
     let result = join.join();
-    assert!(result.is_ok(), "Hot loop should not panic on connection drop");
+    check!(result.is_ok(), "Hot loop should not panic on connection drop");
 
     // Reconnect real farm for remaining tests
-    let (farm, ccp, hmds) = match Gateway::connect(config) {
+    let (farm, ccp, hmds) = match connect_paper(config) {
         Ok((_gw2, f, c, h)) => {
             println!("  Reconnected to IB for remaining tests");
             (f, c, h)
@@ -242,7 +242,7 @@ pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _co
 
     let conns2 = shutdown_and_reclaim(&control_tx2, join2, conns1.account_id);
 
-    assert!(got_ticks_after, "Should receive ticks after reconnection");
+    check!(got_ticks_after, "Should receive ticks after reconnection");
     println!("  PASS\n");
     conns2
 }
@@ -271,7 +271,7 @@ pub(super) fn phase_auth_wrong_password(config: &GatewayConfig) {
     };
     println!("  Error: {}", err_msg);
     println!("  Failed in {:.3}s (expected)", elapsed.as_secs_f64());
-    assert!(elapsed < Duration::from_secs(30), "Auth failure should not take >30s");
+    check!(elapsed < Duration::from_secs(30), "Auth failure should not take >30s");
     println!("  PASS\n");
 }
 
@@ -316,7 +316,7 @@ pub(super) fn phase_register_instrument_channel(conns: Conns) -> Conns {
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    assert!(count >= 3, "Should have at least 3 registered instruments, got {}", count);
+    check!(count >= 3, "Should have at least 3 registered instruments, got {}", count);
     println!("  Events received: {}", got_event);
     println!("  PASS\n");
     conns
@@ -362,7 +362,7 @@ pub(super) fn phase_update_param(conns: Conns) -> Conns {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
-                    OrderStatus::Submitted => {
+                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
                         order_acked = true;
                         if !cancel_sent {
                             control_tx.send(ControlCommand::Order(
@@ -384,8 +384,8 @@ pub(super) fn phase_update_param(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if skip_unacked_if_closed(order_acked) { return conns; }
-    assert!(order_acked, "Order should be acknowledged after UpdateParam");
-    assert!(terminal, "Order should reach terminal state");
+    check!(order_acked, "Order should be acknowledged after UpdateParam");
+    check!(terminal, "Order should reach terminal state");
     println!("  UpdateParam processed, hot loop still functional");
     println!("  PASS\n");
     conns

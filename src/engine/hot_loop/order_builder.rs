@@ -2361,68 +2361,68 @@ mod tests {
 
     #[test]
     fn replace_limit_without_outside_rth_matches_reference() {
-        let ours = replace_fields(1626578553, Side::Buy, 1,
+        let ours = replace_fields(9000000553, Side::Buy, 1,
             crate::types::OrderKind::Limit { price: px(241.22) }, b'0', attrs_rth(false));
-        assert_same_replace(&ours, "35=G|11=1626578553.1|41=1626578553.0|44=241.22|1=DU1|6205=1|6122=c|38=1|54=1|40=2|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+        assert_same_replace(&ours, "35=G|11=9000000553.1|41=9000000553.0|44=241.22|1=DU1|6205=1|6122=c|38=1|54=1|40=2|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
     }
 
     #[test]
     fn replace_limit_with_outside_rth_matches_reference() {
-        let ours = replace_fields(1626578554, Side::Buy, 1,
+        let ours = replace_fields(9000000554, Side::Buy, 1,
             crate::types::OrderKind::Limit { price: px(241.22) }, b'0', attrs_rth(true));
-        assert_same_replace(&ours, "35=G|11=1626578554.1|41=1626578554.0|44=241.22|1=DU1|6122=c|6433=1|38=1|54=1|40=2|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+        assert_same_replace(&ours, "35=G|11=9000000554.1|41=9000000554.0|44=241.22|1=DU1|6122=c|6433=1|38=1|54=1|40=2|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
     }
 
     #[test]
     fn replace_stop_moves_the_trigger_like_reference() {
-        let ours = replace_fields(1626578555, Side::Sell, 1,
+        let ours = replace_fields(9000000555, Side::Sell, 1,
             crate::types::OrderKind::Stop { stop_price: px(234.43) }, b'0', attrs_rth(false));
-        assert_same_replace(&ours, "35=G|11=1626578555.1|41=1626578555.0|99=234.43|1=DU1|6117=234.43|6122=c|38=1|54=2|40=3|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+        assert_same_replace(&ours, "35=G|11=9000000555.1|41=9000000555.0|99=234.43|1=DU1|6117=234.43|6122=c|38=1|54=2|40=3|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
     }
 
     #[test]
     fn replace_stop_limit_moves_both_prices_like_reference() {
-        let ours = replace_fields(1626578556, Side::Sell, 1,
+        let ours = replace_fields(9000000556, Side::Sell, 1,
             crate::types::OrderKind::StopLimit { price: px(227.63), stop_price: px(231.03) }, b'0', attrs_rth(false));
-        assert_same_replace(&ours, "35=G|11=1626578556.1|41=1626578556.0|44=227.63|99=231.03|1=DU1|6117=231.03|6205=1|6122=c|38=1|54=2|40=4|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+        assert_same_replace(&ours, "35=G|11=9000000556.1|41=9000000556.0|44=227.63|99=231.03|1=DU1|6117=231.03|6205=1|6122=c|38=1|54=2|40=4|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
     }
 
     #[test]
     fn replace_trailing_amount_matches_reference() {
-        let ours = replace_fields(1626578557, Side::Sell, 1,
+        let ours = replace_fields(9000000557, Side::Sell, 1,
             crate::types::OrderKind::TrailingStop { trail_amt: px(105.32), trail_stop_price: 0 }, b'0', attrs_rth(false));
-        assert_same_replace(&ours, "35=G|11=1626578557.1|41=1626578557.0|99=105.32|1=DU1|6122=c|6268=0|38=1|54=2|40=P|211=105.32|18=a|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+        assert_same_replace(&ours, "35=G|11=9000000557.1|41=9000000557.0|99=105.32|1=DU1|6122=c|6268=0|38=1|54=2|40=P|211=105.32|18=a|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
     }
 
     #[test]
     fn replace_trailing_limit_matches_reference() {
         // The initial stop trigger is not restated on a replace.
-        let ours = replace_fields(1626578568, Side::Sell, 1,
+        let ours = replace_fields(9000000568, Side::Sell, 1,
             crate::types::OrderKind::TrailingStopLimit { lmt_offset: px(0.50), trail_amt: px(105.32), trail_stop_price: px(237.82) },
             b'0', attrs_rth(false));
-        assert_same_replace(&ours, "35=G|11=1626578568.1|41=1626578568.0|99=105.32|1=DU1|6370=0.50|6205=1|6122=c|6268=0|38=1|54=2|40=TSL|211=105.32|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+        assert_same_replace(&ours, "35=G|11=9000000568.1|41=9000000568.0|99=105.32|1=DU1|6370=0.50|6205=1|6122=c|6268=0|38=1|54=2|40=TSL|211=105.32|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
     }
 
     #[test]
     fn replace_trailing_percent_matches_reference() {
-        let ours = replace_fields(1626578558, Side::Sell, 1,
+        let ours = replace_fields(9000000558, Side::Sell, 1,
             crate::types::OrderKind::TrailPct { trail_pct: 3100, trail_stop_price: 0 }, b'0', attrs_rth(false));
-        assert_same_replace(&ours, "35=G|11=1626578558.1|41=1626578558.0|99=31.00|1=DU1|6122=c|6268=100|38=1|54=2|40=P|211=31.00|18=a|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+        assert_same_replace(&ours, "35=G|11=9000000558.1|41=9000000558.0|99=31.00|1=DU1|6122=c|6268=100|38=1|54=2|40=P|211=31.00|18=a|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
     }
 
     #[test]
     fn replace_carries_the_new_time_in_force_like_reference() {
-        let ours = replace_fields(1626578559, Side::Buy, 1,
+        let ours = replace_fields(9000000559, Side::Buy, 1,
             crate::types::OrderKind::Limit { price: px(237.82) }, b'1', attrs_rth(false));
-        assert_same_replace(&ours, "35=G|11=1626578559.1|41=1626578559.0|44=237.82|1=DU1|6205=1|6122=c|38=1|54=1|40=2|55=AAPL|167=STK|6035=AAPL|59=1|6008=265598|6088=Socket|6211=|6238=");
+        assert_same_replace(&ours, "35=G|11=9000000559.1|41=9000000559.0|44=237.82|1=DU1|6205=1|6122=c|38=1|54=1|40=2|55=AAPL|167=STK|6035=AAPL|59=1|6008=265598|6088=Socket|6211=|6238=");
     }
 
     #[test]
     fn replace_good_till_stop_matches_reference() {
         let attrs = crate::types::OrderAttrs { good_till: 1_790_798_400, ..Default::default() }; // 20260930 20:00:00 UTC
-        let ours = replace_fields(1626578575, Side::Sell, 200,
+        let ours = replace_fields(9000000575, Side::Sell, 200,
             crate::types::OrderKind::Stop { stop_price: px(200.45) }, b'6', attrs);
-        assert_same_replace(&ours, "35=G|11=1626578575.1|41=1626578575.0|99=200.45|1=DU1|126=20260930-20:00:00|6117=200.45|6122=c|6531=4/2/-6183061|38=200|54=2|40=3|55=AAPL|167=STK|6035=AAPL|59=6|6008=265598|6088=Socket|6211=|6238=");
+        assert_same_replace(&ours, "35=G|11=9000000575.1|41=9000000575.0|99=200.45|1=DU1|126=20260930-20:00:00|6117=200.45|6122=c|6531=4/2/-1|38=200|54=2|40=3|55=AAPL|167=STK|6035=AAPL|59=6|6008=265598|6088=Socket|6211=|6238=");
     }
 
     // ibx#339: the reference sends a percent trail as the percent in the
@@ -2451,7 +2451,7 @@ mod tests {
     }
 
     fn bracket_child_attrs() -> crate::types::OrderAttrs {
-        crate::types::OrderAttrs { parent_id: 1626578577, oca_group_str: "BR1".into(), oca_type: 1, ..Default::default() }
+        crate::types::OrderAttrs { parent_id: 9000000577, oca_group_str: "BR1".into(), oca_type: 1, ..Default::default() }
     }
 
     // ibx#318: an algo, adaptive or what-if order used as a bracket child
@@ -2465,7 +2465,7 @@ mod tests {
             tif: b'1', attrs: bracket_child_attrs(),
         });
         assert_eq!(tag(&tags, 59), Some("1"));
-        assert_eq!(tag(&tags, 6107), Some("1626578577.0"));
+        assert_eq!(tag(&tags, 6107), Some("9000000577.0"));
         assert_eq!(tag(&tags, 583), Some("BR1"));
         assert_eq!(tag(&tags, 6209), Some("CancelOnFillWBlock"));
         assert_eq!(tag(&tags, 847), Some("Twap"));
@@ -2486,7 +2486,7 @@ mod tests {
         });
         assert_eq!(tag(&tags, 18), Some("e"));
         assert_eq!(tag(&tags, 59), Some("1"));
-        assert_eq!(tag(&tags, 6107), Some("1626578577.0"));
+        assert_eq!(tag(&tags, 6107), Some("9000000577.0"));
         assert_eq!(tag(&tags, 583), Some("BR1"));
         assert_eq!(tag(&tags, 847), Some("Adaptive"));
     }

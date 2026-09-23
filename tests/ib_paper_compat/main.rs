@@ -6,6 +6,58 @@
 //! All tests share a single Gateway connection to avoid session throttling.
 //! Each phase builds a fresh HotLoop, runs it, then reclaims connections.
 
+/// A failed check inside a phase is recorded and the suite goes on, so one
+/// failing phase cannot hide the phases after it. The suite fails at the end
+/// when anything was recorded.
+macro_rules! check {
+    ($cond:expr $(,)?) => {
+        if !$cond {
+            crate::common::record_failure(concat!("check failed: ", stringify!($cond)));
+        }
+    };
+    ($cond:expr, $($arg:tt)+) => {
+        if !$cond {
+            crate::common::record_failure(&format!($($arg)+));
+        }
+    };
+}
+
+macro_rules! check_eq {
+    ($a:expr, $b:expr $(,)?) => {
+        match (&$a, &$b) {
+            (l, r) => if !(*l == *r) {
+                crate::common::record_failure(&format!(
+                    "check failed: {} == {} ({:?} vs {:?})", stringify!($a), stringify!($b), l, r));
+            }
+        }
+    };
+    ($a:expr, $b:expr, $($arg:tt)+) => {
+        match (&$a, &$b) {
+            (l, r) => if !(*l == *r) {
+                crate::common::record_failure(&format!("{} ({:?} vs {:?})", format!($($arg)+), l, r));
+            }
+        }
+    };
+}
+
+macro_rules! check_ne {
+    ($a:expr, $b:expr $(,)?) => {
+        match (&$a, &$b) {
+            (l, r) => if *l == *r {
+                crate::common::record_failure(&format!(
+                    "check failed: {} != {} (both {:?})", stringify!($a), stringify!($b), l));
+            }
+        }
+    };
+    ($a:expr, $b:expr, $($arg:tt)+) => {
+        match (&$a, &$b) {
+            (l, r) => if *l == *r {
+                crate::common::record_failure(&format!("{} (both {:?})", format!($($arg)+), l));
+            }
+        }
+    };
+}
+
 mod account;
 mod common;
 mod connection;
@@ -43,7 +95,7 @@ fn compat_suite() {
     let suite_start = Instant::now();
 
     let start = Instant::now();
-    let (mut gw, farm_conn, mut ccp_conn, hmds_conn) = Gateway::connect(&config)
+    let (mut gw, farm_conn, mut ccp_conn, hmds_conn) = connect_paper(&config)
         .expect("Gateway::connect() failed");
     let connect_time = start.elapsed();
 
@@ -406,6 +458,15 @@ fn compat_suite() {
     let ran = total_phases - skipped + forex_fallback;
     println!("\n=== {}/{} phases ran ({} skipped, {} forex-fallback, {:?}) in {:.1}s ===",
         ran, total_phases, skipped, forex_fallback, session, suite_start.elapsed().as_secs_f64());
+
+    let rejected = take_rejections();
+    if !rejected.is_empty() {
+        println!("\n=== {} failure(s): rejected orders and failed checks ===", rejected.len());
+        for r in &rejected {
+            println!("  - {}", r);
+        }
+    }
+    assert!(rejected.is_empty(), "{} failure(s) in the suite: {:?}", rejected.len(), rejected);
 }
 
 /// ibx#186 focused live entry — runs only the QueryError phase so you don't
@@ -419,7 +480,7 @@ fn query_error_phase_live() {
     };
 
     println!("=== ibx#186 focused live test ===\n");
-    let (mut gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&config)
+    let (mut gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
         .expect("Gateway::connect() failed");
 
     let conns = Conns {
@@ -456,7 +517,7 @@ fn cross_session_recovery_phase_live() {
 
     // ─── Session A: place resting GTC LMT BUY 1 SPY @ $1 (far below market) ───
     println!("Session A: connecting + placing resting LMT GTC BUY 1 SPY @ $1");
-    let (gw_a, farm_a, ccp_a, hmds_a) = Gateway::connect(&config)
+    let (gw_a, farm_a, ccp_a, hmds_a) = connect_paper(&config)
         .expect("Session A: Gateway::connect failed");
     let account_id = gw_a.account_id.clone();
     drop(gw_a); // gateway state not needed after sockets are out
@@ -514,7 +575,7 @@ fn cross_session_recovery_phase_live() {
 
     // ─── Session B: fresh connect → expect 35=8 recovery push → cancel orderId ───
     println!("Session B: fresh Gateway::connect → expect recovery push for orderId={}", order_id);
-    let (gw_b, farm_b, ccp_b, hmds_b) = Gateway::connect(&config)
+    let (gw_b, farm_b, ccp_b, hmds_b) = connect_paper(&config)
         .expect("Session B: Gateway::connect failed");
     assert_eq!(account_id, gw_b.account_id, "Account ID changed between sessions");
     drop(gw_b);
@@ -582,7 +643,7 @@ fn cancel_by_perm_id_phase_live() {
     };
 
     println!("=== ibx#191 PR B: cancel_order_by_perm_id ===\n");
-    let (gw, farm, ccp, hmds) = Gateway::connect(&config)
+    let (gw, farm, ccp, hmds) = connect_paper(&config)
         .expect("Gateway::connect failed");
     let account_id = gw.account_id.clone();
     drop(gw);
@@ -708,7 +769,7 @@ fn submit_ex_bracket_child_phase_live() {
     };
 
     println!("=== ibx#224/ibx#215: SubmitEx bracket child ===\n");
-    let (gw, farm, ccp, hmds) = Gateway::connect(&config)
+    let (gw, farm, ccp, hmds) = connect_paper(&config)
         .expect("Gateway::connect failed");
     let account_id = gw.account_id.clone();
     drop(gw);
@@ -828,7 +889,7 @@ fn snap_to_tick_phase_live() {
     };
 
     println!("=== ibx#216: snap-to-tick ===\n");
-    let (gw, farm, ccp, hmds) = Gateway::connect(&config)
+    let (gw, farm, ccp, hmds) = connect_paper(&config)
         .expect("Gateway::connect failed");
     let account_id = gw.account_id.clone();
     drop(gw);
@@ -927,7 +988,7 @@ fn timeout_sweeps_phase_live() {
     };
 
     println!("=== ibx#231/ibx#227: happy paths under the deadline sweeps ===\n");
-    let (gw, farm, ccp, hmds) = Gateway::connect(&config)
+    let (gw, farm, ccp, hmds) = connect_paper(&config)
         .expect("Gateway::connect failed");
     let account_id = gw.account_id.clone();
     drop(gw);
@@ -963,8 +1024,7 @@ fn timeout_sweeps_phase_live() {
     // 1. By con_id — single record.
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 6001, con_id: 756733, symbol: String::new(),
-        sec_type: String::new(), exchange: String::new(), currency: String::new(),
-    }).expect("send details by con_id failed");
+        sec_type: String::new(), exchange: String::new(), currency: String::new(), filters: ibx::types::SecDefFilters::default() }).expect("send details by con_id failed");
     let (rows, end, _) = wait_details(6001, "by-conId SPY");
     assert!(rows >= 1, "by-conId lookup returned no rows");
     assert!(end, "by-conId end never fired — sweep may have eaten the reply (ibx#227)");
@@ -972,8 +1032,7 @@ fn timeout_sweeps_phase_live() {
     // 2. By symbol — exercises the fan-out counter and the deferred-end path.
     control_tx.send(ControlCommand::FetchContractDetails {
         req_id: 6002, con_id: 0, symbol: "AAPL".into(),
-        sec_type: "STK".into(), exchange: String::new(), currency: "USD".into(),
-    }).expect("send details by symbol failed");
+        sec_type: "STK".into(), exchange: String::new(), currency: "USD".into(), filters: ibx::types::SecDefFilters::default() }).expect("send details by symbol failed");
     let (rows, end, row_after_end) = wait_details(6002, "by-symbol AAPL fan-out");
     assert!(rows >= 1, "by-symbol lookup returned no rows");
     assert!(end, "by-symbol end never fired within 30s (ibx#227)");
@@ -1025,7 +1084,7 @@ fn reclaim_and_symbol_search_phase_live() {
     };
 
     println!("=== ibx#233/ibx#228: slot reclaim + symbol search ===\n");
-    let (gw, farm, ccp, hmds) = Gateway::connect(&config)
+    let (gw, farm, ccp, hmds) = connect_paper(&config)
         .expect("Gateway::connect failed");
     let account_id = gw.account_id.clone();
     drop(gw);
@@ -1114,7 +1173,7 @@ fn rtt_ping_phase_live() {
 
     println!("=== ibx#158: RTT ping ===
 ");
-    let (gw, farm, ccp, hmds) = Gateway::connect(&config)
+    let (gw, farm, ccp, hmds) = connect_paper(&config)
         .expect("Gateway::connect failed");
     let account_id = gw.account_id.clone();
     drop(gw);
