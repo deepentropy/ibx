@@ -33,6 +33,12 @@ impl EClient {
             self.next_order_id.fetch_add(1, Ordering::Relaxed)
         };
 
+        // Refused before sending, like the reference: error() only.
+        if let Some((code, message)) = ClientCore::fractional_quantity_refusal(&api_order) {
+            self.shared_state()?.orders.push_order_error(oid, code, message);
+            return Ok(());
+        }
+
         let instrument = self.find_or_register_instrument(contract)?;
 
         // If orderId is already tracked, this is a modification: replace it

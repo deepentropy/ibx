@@ -1411,6 +1411,18 @@ impl ClientCore {
         ))
     }
 
+    /// The reference refuses a fractional quantity before sending anything,
+    /// with error 10243 (ib-agent#192 B3). ibx used to cut it to a whole
+    /// number and send it, so 1.5 shares went out as 1 (ibx#313).
+    pub fn fractional_quantity_refusal(order: &ApiOrder) -> Option<(i64, String)> {
+        if order.total_quantity.fract() != 0.0 {
+            Some((10243, "Fractional-sized order cannot be placed via API. \
+                Please use desktop version to place this order.".to_string()))
+        } else {
+            None
+        }
+    }
+
     /// Order type of a tracked order, as the caller placed it.
     pub fn tracked_order_type(&self, order_id: u64) -> Option<String> {
         self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.order_type.clone())

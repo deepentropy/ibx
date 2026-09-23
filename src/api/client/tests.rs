@@ -2627,6 +2627,42 @@ fn percent_trail_rounds_to_basis_points() {
     assert!(matches!(ClientCore::order_kind(&order).unwrap(), OrderKind::TrailPct { trail_pct: 115, .. }));
 }
 
+// ibx#313: a fractional quantity was cut to a whole number and sent (1.5
+// shares went out as 1). The reference refuses it before sending, with
+// error 10243 (ib-agent#192 B3).
+#[test]
+fn fractional_quantity_is_refused_before_sending() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.5, order_type: "LMT".into(), lmt_price: 1.0, ..Default::default()
+    };
+    client.place_order(93, &spy(), &order).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing may be sent");
+    assert!(!client.core.is_order_tracked(93));
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("error:93:10243:Fractional-sized order")), "{:?}", w.events);
+}
+
+#[test]
+fn fractional_quantity_on_a_modify_is_refused_and_keeps_the_order() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let whole = Order {
+        action: "BUY".into(), total_quantity: 2.0, order_type: "LMT".into(), lmt_price: 1.0, ..Default::default()
+    };
+    client.place_order(94, &spy(), &whole).unwrap();
+    while rx.try_recv().is_ok() {}
+    let frac = Order { total_quantity: 2.5, ..whole.clone() };
+    client.place_order(94, &spy(), &frac).unwrap();
+    assert!(rx.try_recv().is_err(), "no replace may be sent");
+    assert!(client.core.is_order_tracked(94), "the working order stays tracked");
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!((errors[0].0, errors[0].1), (94, 10243));
+}
+
 // ibx#247: outside-RTH follows the order; it is not forced on.
 #[test]
 fn modify_carries_outside_rth_as_set() {
