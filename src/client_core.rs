@@ -982,9 +982,9 @@ impl ClientCore {
         for pi in &positions {
             con_ids.insert(pi.con_id);
         }
-        if con_ids.is_empty() {
-            return None;
-        }
+        // No early return on an empty set: an account with no position still
+        // has account-level P&L (for example realized today), delivered by the
+        // fallback below (ibx#239, ibx#301).
 
         let con_id_map = self.con_id_to_instrument.lock().unwrap();
         let mut total_daily: f64 = 0.0;
@@ -1086,16 +1086,22 @@ impl ClientCore {
             let qty_now = pi.position;
             let avg_cost = pi.avg_cost;
 
-            let Some(&iid) = con_id_map.get(&con_id) else { continue; };
-            let q = shared.market.quote(iid);
-            let price_now = q.last;
+            // Price from this client's market-data subscription when there is
+            // one, else the server's own mark on the position (ibx#238). A
+            // req_pnl_single-only client has no subscription, so without the
+            // mark it never got a callback (same gap as ibx#239 for req_pnl).
+            let q = con_id_map.get(&con_id).map(|&iid| shared.market.quote(iid));
+            let price_now = match q.map(|q| q.last) {
+                Some(last) if last != 0 => last,
+                _ => pi.market_price,
+            };
             if price_now == 0 {
                 continue;
             }
 
             let seed = seeds.get(&con_id);
             let qty_midnight = seed.map(|s| s.qty_midnight).unwrap_or(0);
-            let prev_close = q.close;
+            let prev_close = q.map(|q| q.close).unwrap_or(0);
             if prev_close == 0 && qty_midnight != 0 {
                 continue;
             }

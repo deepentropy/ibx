@@ -998,16 +998,22 @@ fn pnl_single_dispatches_position_info() {
 
     client.req_pnl_single(20, "DU123", "", 265598);
 
+    // No market-data subscription: the P&L comes from the server's mark on
+    // the position (ibx#238). A position with no price at all gives nothing.
     shared.portfolio.set_position_info(PositionInfo {
         con_id: 265598,
         position: 100,
         avg_cost: 150 * PRICE_SCALE,
+        market_price: 155 * PRICE_SCALE,
         ..Default::default()
     });
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("pnl_single:20:")), "PnL single callback expected");
+    // 100 shares, avg cost 150, mark 155, opened today: daily 500, unrealized
+    // 500, realized 0, value 15500.
+    assert!(w.events.iter().any(|e| e == "pnl_single:20:100:500:500:0:15500"), "{:?}", w.events);
 
     // Cancel should stop dispatch
     client.cancel_pnl_single(20);
