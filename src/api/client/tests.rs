@@ -1011,6 +1011,62 @@ fn place_order_algo_vwap() {
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitAlgo { .. })));
 }
 
+// ibx#318: an algo bracket child keeps its parent link, OCA group and GTC.
+#[test]
+fn place_order_algo_bracket_child_keeps_parent_oca_and_tif() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 509.0,
+        algo_strategy: "Twap".into(),
+        algo_params: vec![TagValue { tag: "allowPastEndTime".into(), value: "1".into() }],
+        parent_id: 100, oca_group: "BR1".into(), tif: "GTC".into(),
+        ..Default::default()
+    };
+    client.place_order(101, &spy(), &order).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitAlgo { tif, attrs, .. }) => {
+            assert_eq!(tif, b'1');
+            assert_eq!(attrs.parent_id, 100);
+            assert_eq!(attrs.oca_group_str, "BR1");
+        }
+        cmd => panic!("expected SubmitAlgo, got {:?}", cmd),
+    }
+    let adaptive = Order { algo_strategy: "Adaptive".into(), algo_params: vec![], ..order.clone() };
+    client.place_order(102, &spy(), &adaptive).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitAdaptive { tif, attrs, .. }) => {
+            assert_eq!(tif, b'1');
+            assert_eq!(attrs.parent_id, 100);
+        }
+        cmd => panic!("expected SubmitAdaptive, got {:?}", cmd),
+    }
+}
+
+// ibx#325: an order whose only extra is conditions took the plain path and
+// was sent without them.
+#[test]
+fn place_order_with_only_conditions_keeps_them() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 237.0,
+        conditions: vec![OrderCondition::Price {
+            con_id: 265598, exchange: "SMART".into(), price: 509 * crate::types::PRICE_SCALE,
+            is_more: true, trigger_method: 0,
+        }],
+        ..Default::default()
+    };
+    client.place_order(95, &spy(), &order).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitLimitEx { attrs, .. })
+        | ControlCommand::Order(OrderRequest::SubmitEx { attrs, .. }) => {
+            assert_eq!(attrs.conditions.len(), 1);
+        }
+        cmd => panic!("expected an extended submit carrying the conditions, got {:?}", cmd),
+    }
+}
+
 #[test]
 fn place_order_what_if() {
     let (client, rx, shared) = test_client();

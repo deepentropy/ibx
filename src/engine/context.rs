@@ -572,6 +572,8 @@ impl Context {
             qty,
             price,
             priority,
+            tif: b'0',
+            attrs: OrderAttrs::default(),
         });
         id
     }
@@ -719,6 +721,7 @@ impl Context {
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitAlgo {
             order_id: id, instrument, side, qty, price, algo,
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -799,6 +802,7 @@ impl Context {
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitWhatIf {
             order_id: id, instrument, side, qty, price,
+            tif: b'0', attrs: OrderAttrs::default(),
         });
         id
     }
@@ -1654,7 +1658,7 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price } => {
+            OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price, .. } => {
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);

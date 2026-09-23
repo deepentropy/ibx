@@ -776,100 +776,100 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ])
             }
-            OrderRequest::SubmitAdaptive { order_id, instrument, side, qty, price, priority } => {
+            OrderRequest::SubmitAdaptive { order_id, instrument, side, qty, price, priority, tif, attrs } => {
                 context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, b'2', b'0', 0,
+                    order_id, instrument, side, qty, price, b'2', tif, 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let priority_str = priority.as_str();
+                let now = chrono_free_timestamp().to_string();
                 // Per ib-agent#136 capture: Adaptive needs 18=e (ExecInst =
                 // Adaptive algo wrapper). Without it, gateway rejects with
                 // "Invalid value in field # 18".
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "2"),              // OrdType = Limit
-                    (44, &price_str),
-                    (18, "e"),              // ExecInst = Adaptive algo
-                    (59, "0"),              // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                    (847, "Adaptive"),      // AlgoStrategy
-                    (5957, "1"),            // AlgoParamCount
-                    (5958, "adaptivePriority"), // AlgoParamTag
-                    (5960, priority_str),   // AlgoParamValue
-                ])
+                let mut fields: Vec<(u32, String)> = vec![
+                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
+                    (fix::TAG_SENDING_TIME, now.clone()),
+                    (11, format!("{}.{}", order_id, ver)),
+                    (1, account_id.to_string()),
+                    (21, "2".to_string()),
+                    (55, symbol),
+                    (54, fix_side(side).to_string()),
+                    (38, format_uint(qty as u64).to_string()),
+                    (40, "2".to_string()),              // OrdType = Limit
+                    (44, format_price(price).to_string()),
+                    (18, "e".to_string()),              // ExecInst = algo
+                    (59, tif_str(tif)),
+                    (60, now),
+                    (167, sec_type_str),
+                    (100, destination.clone()),
+                    (6210, destination),
+                    (15, "USD".to_string()),
+                    (204, "0".to_string()),
+                ];
+                // Parent link, OCA group and the other attributes (ibx#318).
+                push_extended_attrs(&mut fields, &attrs, true);
+                fields.push((847, "Adaptive".to_string()));      // AlgoStrategy
+                fields.push((5957, "1".to_string()));            // AlgoParamCount
+                fields.push((5958, "adaptivePriority".to_string())); // AlgoParamTag
+                fields.push((5960, priority.as_str().to_string()));  // AlgoParamValue
+                let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+                conn.send_fix(&refs)
             }
-            OrderRequest::SubmitAlgo { order_id, instrument, side, qty, price, algo } => {
+            OrderRequest::SubmitAlgo { order_id, instrument, side, qty, price, algo, tif, attrs } => {
                 context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, b'2', b'0', 0,
+                    order_id, instrument, side, qty, price, b'2', tif, 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "2"),              // OrdType = Limit
-                    (44, &price_str),
-                    (59, "0"),              // TIF = DAY
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
+                let now = chrono_free_timestamp().to_string();
+                // Every algo type rides the same algo instruction as Adaptive:
+                // the reference sends 18=e on all six (ib-agent#192 B9, ibx#405).
+                let mut fields: Vec<(u32, String)> = vec![
+                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
+                    (fix::TAG_SENDING_TIME, now.clone()),
+                    (11, format!("{}.{}", order_id, ver)),
+                    (1, account_id.to_string()),
+                    (21, "2".to_string()),
+                    (55, symbol),
+                    (54, fix_side(side).to_string()),
+                    (38, format_uint(qty as u64).to_string()),
+                    (40, "2".to_string()),              // OrdType = Limit
+                    (44, format_price(price).to_string()),
+                    (18, "e".to_string()),              // ExecInst = algo
+                    (59, tif_str(tif)),
+                    (60, now),
+                    (167, sec_type_str),
+                    (100, destination.clone()),
+                    (6210, destination),
+                    (15, "USD".to_string()),
+                    (204, "0".to_string()),
                 ];
+                // Parent link, OCA group and the other attributes (ibx#318).
+                push_extended_attrs(&mut fields, &attrs, true);
                 let (algo_name, param_strs) = build_algo_tags(&algo);
-                fields.push((847, algo_name));
+                fields.push((847, algo_name.to_string()));
                 // Tag 849 (maxPctVol) for algos that use it
-                let pct_str = match &algo {
+                match &algo {
                     AlgoParams::Vwap { max_pct_vol, .. }
                     | AlgoParams::ArrivalPx { max_pct_vol, .. }
-                    | AlgoParams::ClosePx { max_pct_vol, .. } => format!("{}", max_pct_vol),
-                    _ => String::new(),
-                };
-                if !pct_str.is_empty() {
-                    fields.push((849, &pct_str));
+                    | AlgoParams::ClosePx { max_pct_vol, .. } => fields.push((849, format!("{}", max_pct_vol))),
+                    _ => {}
                 }
-                let count_str = (param_strs.len() / 2).to_string();
-                fields.push((5957, &count_str));
+                // Only parameters that have a value: the reference leaves out
+                // one that was not given (an unset start/end time), and the
+                // server refuses an empty one with "Invalid value in field
+                // # 5957" (ib-agent#192 B9, ibx#405).
+                let pairs: Vec<&[String]> = param_strs.chunks(2).filter(|p| !p[1].is_empty()).collect();
+                fields.push((5957, pairs.len().to_string()));
                 // Emit key/value pairs: 5958=key, 5960=value (repeated)
-                let mut i = 0;
-                while i < param_strs.len() {
-                    fields.push((5958, &param_strs[i]));
-                    fields.push((5960, &param_strs[i + 1]));
-                    i += 2;
+                for pair in pairs {
+                    fields.push((5958, pair[0].clone()));
+                    fields.push((5960, pair[1].clone()));
                 }
-                conn.send_fix(&fields)
+                let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+                conn.send_fix(&refs)
             }
             OrderRequest::SubmitPegBench { order_id, instrument, side, qty, price,
                 ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount } => {
@@ -974,39 +974,40 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ])
             }
-            OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price } => {
+            OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price, tif, attrs } => {
                 // What-if: insert with ORD_WHAT_IF marker so we can detect the response
                 context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, crate::types::ORD_WHAT_IF, b'0', 0,
+                    order_id, instrument, side, qty, price, crate::types::ORD_WHAT_IF, tif, 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "2"),           // OrdType = Limit
-                    (44, &price_str),
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, "USD"),
-                    (204, "0"),
-                    (6091, "1"),         // What-If flag
-                ])
+                let now = chrono_free_timestamp().to_string();
+                let mut fields: Vec<(u32, String)> = vec![
+                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
+                    (fix::TAG_SENDING_TIME, now.clone()),
+                    (11, format!("{}.{}", order_id, ver)),
+                    (1, account_id.to_string()),
+                    (21, "2".to_string()),
+                    (55, symbol),
+                    (54, fix_side(side).to_string()),
+                    (38, format_uint(qty as u64).to_string()),
+                    (40, "2".to_string()),           // OrdType = Limit
+                    (44, format_price(price).to_string()),
+                    (59, tif_str(tif)),
+                    (60, now),
+                    (167, sec_type_str),
+                    (100, destination.clone()),
+                    (6210, destination),
+                    (15, "USD".to_string()),
+                    (204, "0".to_string()),
+                    (6091, "1".to_string()),         // What-If flag
+                ];
+                // The preview is for the order as it would be placed: its
+                // time-in-force and attributes go too (ibx#318).
+                push_extended_attrs(&mut fields, &attrs, false);
+                let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+                conn.send_fix(&refs)
             }
             OrderRequest::SubmitLimitFractional { order_id, instrument, side, qty, price } => {
                 context.insert_order(crate::types::Order::new(
@@ -1710,6 +1711,105 @@ fn modify_fields(
     f
 }
 
+/// The time-in-force byte as its wire string.
+fn tif_str(tif: u8) -> String {
+    let b = [tif];
+    std::str::from_utf8(&b).unwrap_or("0").to_string()
+}
+
+/// The extended-attribute block (display size, outside-RTH, hidden, good-after,
+/// good-till, OCA group, parent link, conditions, ...), shared by every order
+/// path that carries attributes so the emission cannot drift between order
+/// types (ibx#224, ibx#318). `has_base_exec_inst` is true when the order type
+/// already rides the instruction field, which then cannot also carry
+/// all-or-none.
+fn push_extended_attrs(
+    fields: &mut Vec<(u32, String)>,
+    attrs: &crate::types::OrderAttrs,
+    has_base_exec_inst: bool,
+) {
+    if attrs.display_size > 0 {
+        fields.push((111, format_uint(attrs.display_size as u64).to_string()));
+    }
+    if attrs.min_qty > 0 {
+        fields.push((110, format_uint(attrs.min_qty as u64).to_string()));
+    }
+    if attrs.outside_rth {
+        fields.push((6433, "1".to_string()));
+    }
+    if attrs.hidden {
+        fields.push((6135, "1".to_string()));
+    }
+    if attrs.good_after > 0 {
+        fields.push((168, unix_to_ib_datetime(attrs.good_after)));
+    }
+    // GTD expiry: date-only -> tag 432; time-precise -> tag 126 (UTC).
+    // Mutually exclusive — never both (gateway rejects both together).
+    if attrs.good_till_date_ymd > 0 {
+        fields.push((432, format!("{:08}", attrs.good_till_date_ymd)));
+    } else if attrs.good_till > 0 {
+        fields.push((126, unix_to_ib_utc_dash(attrs.good_till)));
+    }
+    let oca_str = if !attrs.oca_group_str.is_empty() {
+        attrs.oca_group_str.clone()
+    } else if attrs.oca_group > 0 {
+        format!("OCA_{}", attrs.oca_group)
+    } else {
+        String::new()
+    };
+    if !oca_str.is_empty() {
+        fields.push((583, oca_str));
+        fields.push((6209, oca_type_str(attrs.oca_type).to_string()));
+    }
+    if attrs.parent_id > 0 {
+        // Match parent ClOrdID format: "{order_id}.{ver}" — assume ver=0
+        // for initial submission.
+        fields.push((6107, format!("{}.0", attrs.parent_id)));
+    }
+    if attrs.discretionary_amt > 0 {
+        fields.push((9813, format_price(attrs.discretionary_amt).to_string()));
+    }
+    if attrs.sweep_to_fill {
+        fields.push((6102, "1".to_string()));
+    }
+    if attrs.all_or_none && !has_base_exec_inst {
+        fields.push((18, "G".to_string()));
+    }
+    if attrs.trigger_method > 0 {
+        fields.push((6115, attrs.trigger_method.to_string()));
+    }
+    if attrs.cash_qty > 0 {
+        fields.push((5920, format_price(attrs.cash_qty).to_string()));
+    }
+    // Condition tags (6136+ framework). The reference always sends both
+    // flags, 0 or 1, before the count: ignore-RTH rides 6128 and cancel-order
+    // 6151. ibx had them the other way round and sent them only when set
+    // (ib-agent#192 B2, ibx#327).
+    if !attrs.conditions.is_empty() {
+        let cond_strs = build_condition_strings(&attrs.conditions);
+        let flag = |on: bool| if on { "1" } else { "0" }.to_string();
+        fields.push((6128, flag(attrs.conditions_ignore_rth)));
+        fields.push((6151, flag(attrs.conditions_cancel_order)));
+        fields.push((6136, cond_strs[0].clone())); // first element is count
+        // Per-condition tags start at index 1, 11 strings per condition
+        for i in 0..attrs.conditions.len() {
+            let base = 1 + i * 11;
+            fields.push((6222, cond_strs[base].clone()));      // condType
+            fields.push((6137, cond_strs[base + 1].clone()));  // conjunction
+            fields.push((6126, cond_strs[base + 2].clone()));  // operator
+            fields.push((6123, cond_strs[base + 3].clone()));  // conId
+            fields.push((6124, cond_strs[base + 4].clone()));  // exchange
+            fields.push((6127, cond_strs[base + 5].clone()));  // triggerMethod
+            fields.push((6125, cond_strs[base + 6].clone()));  // price
+            fields.push((6223, cond_strs[base + 7].clone()));  // time
+            fields.push((6245, cond_strs[base + 8].clone()));  // percent
+            fields.push((6263, cond_strs[base + 9].clone()));  // volume
+            fields.push((6246, cond_strs[base + 10].clone())); // execution
+            fields.push((6947, String::new()));                // empty, as the reference sends it
+        }
+    }
+}
+
 /// One shared encoder for every extended order submission (ibx#224): the
 /// order-type-specific tags come from `kind`; the TIF and the full
 /// `OrderAttrs` block are emitted identically for all kinds.
@@ -1922,85 +2022,7 @@ fn send_order_ex(
 
     // Extended attributes — same tag order as the historical SubmitLimitEx
     // block.
-    if attrs.display_size > 0 {
-        fields.push((111, format_uint(attrs.display_size as u64).to_string()));
-    }
-    if attrs.min_qty > 0 {
-        fields.push((110, format_uint(attrs.min_qty as u64).to_string()));
-    }
-    if attrs.outside_rth {
-        fields.push((6433, "1".to_string()));
-    }
-    if attrs.hidden {
-        fields.push((6135, "1".to_string()));
-    }
-    if attrs.good_after > 0 {
-        fields.push((168, unix_to_ib_datetime(attrs.good_after)));
-    }
-    // GTD expiry: date-only -> tag 432; time-precise -> tag 126 (UTC).
-    // Mutually exclusive — never both (gateway rejects both together).
-    if attrs.good_till_date_ymd > 0 {
-        fields.push((432, format!("{:08}", attrs.good_till_date_ymd)));
-    } else if attrs.good_till > 0 {
-        fields.push((126, unix_to_ib_utc_dash(attrs.good_till)));
-    }
-    let oca_str = if !attrs.oca_group_str.is_empty() {
-        attrs.oca_group_str.clone()
-    } else if attrs.oca_group > 0 {
-        format!("OCA_{}", attrs.oca_group)
-    } else {
-        String::new()
-    };
-    if !oca_str.is_empty() {
-        fields.push((583, oca_str));
-        fields.push((6209, oca_type_str(attrs.oca_type).to_string()));
-    }
-    if attrs.parent_id > 0 {
-        // Match parent ClOrdID format: "{order_id}.{ver}" — assume ver=0
-        // for initial submission.
-        fields.push((6107, format!("{}.0", attrs.parent_id)));
-    }
-    if attrs.discretionary_amt > 0 {
-        fields.push((9813, format_price(attrs.discretionary_amt).to_string()));
-    }
-    if attrs.sweep_to_fill {
-        fields.push((6102, "1".to_string()));
-    }
-    if attrs.all_or_none && !has_base_exec_inst {
-        fields.push((18, "G".to_string()));
-    }
-    if attrs.trigger_method > 0 {
-        fields.push((6115, attrs.trigger_method.to_string()));
-    }
-    if attrs.cash_qty > 0 {
-        fields.push((5920, format_price(attrs.cash_qty).to_string()));
-    }
-    // Condition tags (6136+ framework)
-    if !attrs.conditions.is_empty() {
-        let cond_strs = build_condition_strings(&attrs.conditions);
-        fields.push((6136, cond_strs[0].clone())); // first element is count
-        if attrs.conditions_cancel_order {
-            fields.push((6128, "1".to_string()));
-        }
-        if attrs.conditions_ignore_rth {
-            fields.push((6151, "1".to_string()));
-        }
-        // Per-condition tags start at index 1, 11 strings per condition
-        for i in 0..attrs.conditions.len() {
-            let base = 1 + i * 11;
-            fields.push((6222, cond_strs[base].clone()));      // condType
-            fields.push((6137, cond_strs[base + 1].clone()));  // conjunction
-            fields.push((6126, cond_strs[base + 2].clone()));  // operator
-            fields.push((6123, cond_strs[base + 3].clone()));  // conId
-            fields.push((6124, cond_strs[base + 4].clone()));  // exchange
-            fields.push((6127, cond_strs[base + 5].clone()));  // triggerMethod
-            fields.push((6125, cond_strs[base + 6].clone()));  // price
-            fields.push((6223, cond_strs[base + 7].clone()));  // time
-            fields.push((6245, cond_strs[base + 8].clone()));  // percent
-            fields.push((6263, cond_strs[base + 9].clone()));  // volume
-            fields.push((6246, cond_strs[base + 10].clone())); // execution
-        }
-    }
+    push_extended_attrs(&mut fields, attrs, has_base_exec_inst);
 
     let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
     conn.send_fix(&refs)
@@ -2058,6 +2080,12 @@ fn build_algo_tags(algo: &AlgoParams) -> (&'static str, Vec<String>) {
     }
 }
 
+/// Exchange of a price-type condition: the reference sends SMART as BEST, as it
+/// does for the order's own destination (ib-agent#165, ib-agent#192 B2).
+fn condition_exchange(exchange: &str) -> String {
+    if exchange.eq_ignore_ascii_case("SMART") { "BEST".to_string() } else { exchange.to_string() }
+}
+
 fn build_condition_strings(conditions: &[OrderCondition]) -> Vec<String> {
     let mut out = Vec::with_capacity(1 + conditions.len() * 11);
     out.push(conditions.len().to_string());
@@ -2071,7 +2099,7 @@ fn build_condition_strings(conditions: &[OrderCondition]) -> Vec<String> {
                 out.push(conj.into());                             // conjunction
                 out.push(op(*is_more).into());                     // operator
                 out.push(con_id.to_string());                      // conId
-                out.push(exchange.clone());                        // exchange
+                out.push(condition_exchange(exchange));            // exchange
                 out.push(trigger_method.to_string());              // triggerMethod
                 out.push(format_price(*price).to_string());         // price
                 out.push(String::new());                           // time (unused)
@@ -2420,6 +2448,109 @@ mod tests {
                 assert_eq!(tag(tags, 6268), Some("100"), "unit is percent at {} bp", bp);
             }
         }
+    }
+
+    fn bracket_child_attrs() -> crate::types::OrderAttrs {
+        crate::types::OrderAttrs { parent_id: 1626578577, oca_group_str: "BR1".into(), oca_type: 1, ..Default::default() }
+    }
+
+    // ibx#318: an algo, adaptive or what-if order used as a bracket child
+    // shipped DAY with no parent link and no OCA group. The reference sends
+    // them like any other child (ib-agent#192 B1).
+    #[test]
+    fn algo_bracket_child_carries_parent_oca_and_gtc() {
+        let tags = wire_tags(OrderRequest::SubmitAlgo {
+            order_id: 9, instrument: 0, side: Side::Sell, qty: 1, price: 509 * crate::types::PRICE_SCALE,
+            algo: AlgoParams::Twap { allow_past_end_time: true, start_time: String::new(), end_time: String::new() },
+            tif: b'1', attrs: bracket_child_attrs(),
+        });
+        assert_eq!(tag(&tags, 59), Some("1"));
+        assert_eq!(tag(&tags, 6107), Some("1626578577.0"));
+        assert_eq!(tag(&tags, 583), Some("BR1"));
+        assert_eq!(tag(&tags, 6209), Some("CancelOnFillWBlock"));
+        assert_eq!(tag(&tags, 847), Some("Twap"));
+        // Unset start/end times are left out, as the reference does.
+        assert_eq!(tag(&tags, 5957), Some("1"));
+        assert!(!tags.iter().any(|(t, v)| *t == 5958 && (v == "startTime" || v == "endTime")), "{:?}", tags);
+        // ibx#405: every algo type rides the algo instruction, not only Adaptive.
+        assert_eq!(tag(&tags, 18), Some("e"));
+        assert_eq!(tags.iter().filter(|(t, _)| *t == 18).count(), 1, "no second instruction");
+    }
+
+    #[test]
+    fn adaptive_bracket_child_carries_parent_oca_and_gtc() {
+        let tags = wire_tags(OrderRequest::SubmitAdaptive {
+            order_id: 10, instrument: 0, side: Side::Sell, qty: 1, price: 509 * crate::types::PRICE_SCALE,
+            priority: crate::types::AdaptivePriority::Normal,
+            tif: b'1', attrs: bracket_child_attrs(),
+        });
+        assert_eq!(tag(&tags, 18), Some("e"));
+        assert_eq!(tag(&tags, 59), Some("1"));
+        assert_eq!(tag(&tags, 6107), Some("1626578577.0"));
+        assert_eq!(tag(&tags, 583), Some("BR1"));
+        assert_eq!(tag(&tags, 847), Some("Adaptive"));
+    }
+
+    #[test]
+    fn what_if_carries_its_time_in_force() {
+        let tags = wire_tags(OrderRequest::SubmitWhatIf {
+            order_id: 11, instrument: 0, side: Side::Buy, qty: 1, price: 237 * crate::types::PRICE_SCALE,
+            tif: b'1', attrs: crate::types::OrderAttrs::default(),
+        });
+        assert_eq!(tag(&tags, 59), Some("1"));
+        assert_eq!(tag(&tags, 6091), Some("1"));
+    }
+
+    // A plain algo order (no attributes, DAY) is unchanged apart from the
+    // instruction field.
+    #[test]
+    fn plain_algo_order_sends_no_attribute_fields() {
+        let tags = wire_tags(OrderRequest::SubmitAlgo {
+            order_id: 12, instrument: 0, side: Side::Buy, qty: 1, price: 237 * crate::types::PRICE_SCALE,
+            algo: AlgoParams::Twap { allow_past_end_time: true, start_time: String::new(), end_time: String::new() },
+            tif: b'0', attrs: crate::types::OrderAttrs::default(),
+        });
+        assert_eq!(tag(&tags, 59), Some("0"));
+        for absent in [583, 6107, 6209, 6433] {
+            assert!(tag(&tags, absent).is_none(), "field {} must not be sent", absent);
+        }
+    }
+
+    /// The condition block of one order: from the first flag to the last
+    /// per-condition field.
+    fn condition_block(cancel_order: bool, ignore_rth: bool) -> Vec<(u32, String)> {
+        let tags = wire_tags(OrderRequest::SubmitEx {
+            order_id: 13, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::Limit { price: 237 * crate::types::PRICE_SCALE },
+            tif: b'0',
+            attrs: crate::types::OrderAttrs {
+                conditions: vec![OrderCondition::Price {
+                    con_id: 265598, exchange: "SMART".into(),
+                    price: (509.62 * crate::types::PRICE_SCALE as f64).round() as i64,
+                    is_more: true, trigger_method: 0,
+                }],
+                conditions_cancel_order: cancel_order,
+                conditions_ignore_rth: ignore_rth,
+                ..Default::default()
+            },
+        });
+        let start = pos(&tags, 6128);
+        let end = pos(&tags, 6947);
+        tags[start..=end].to_vec()
+    }
+
+    // ibx#327: the two condition flags were swapped and sent only when set.
+    // Reference (ib-agent#192 B2b/B2c, one price condition, account removed).
+    #[test]
+    fn condition_block_with_cancel_order_matches_reference() {
+        let want = parse_frame("6128=0|6151=1|6136=1|6222=1|6137=n|6126=>=|6123=265598|6124=BEST|6127=0|6125=509.62|6223=|6245=|6263=|6246=|6947=");
+        assert_eq!(condition_block(true, false), want);
+    }
+
+    #[test]
+    fn condition_block_with_ignore_rth_matches_reference() {
+        let want = parse_frame("6128=1|6151=0|6136=1|6222=1|6137=n|6126=>=|6123=265598|6124=BEST|6127=0|6125=509.62|6223=|6245=|6263=|6246=|6947=");
+        assert_eq!(condition_block(false, true), want);
     }
 
     #[test]

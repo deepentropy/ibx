@@ -763,6 +763,10 @@ pub enum OrderRequest {
         qty: u32,
         price: Price,
         priority: AdaptivePriority,
+        /// Time-in-force byte and extended attributes, like every other
+        /// order type: a parented or GTC algo order kept neither (ibx#318).
+        tif: u8,
+        attrs: OrderAttrs,
     },
     /// Market to Limit: fills at market, remainder converts to limit at fill price. OrdType K.
     SubmitMtl {
@@ -839,6 +843,10 @@ pub enum OrderRequest {
         qty: u32,
         price: Price,
         algo: AlgoParams,
+        /// Time-in-force byte and extended attributes, like every other
+        /// order type: a parented or GTC algo order kept neither (ibx#318).
+        tif: u8,
+        attrs: OrderAttrs,
     },
     /// Pegged to Benchmark: pegs to a benchmark instrument's price. OrdType PB.
     /// Companion tags: 6941=refConId, 6938=isPegDecrease, 6939=pegChangeAmt, 6942=refChangeAmt.
@@ -876,6 +884,10 @@ pub enum OrderRequest {
         side: Side,
         qty: u32,
         price: Price,
+        /// Time-in-force byte and extended attributes, like every other
+        /// order type: a parented or GTC algo order kept neither (ibx#318).
+        tif: u8,
+        attrs: OrderAttrs,
     },
     /// Fractional shares limit order. Qty is fixed-point (QTY_SCALE = 10^4).
     /// E.g., 0.5 shares = 5000. Tag 38 sent as decimal string.

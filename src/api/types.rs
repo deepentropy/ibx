@@ -479,6 +479,9 @@ impl Order {
             || self.all_or_none
             || self.trigger_method > 0
             || self.cash_qty > 0.0
+            // An order whose only extra is conditions went down a path that
+            // sends none, and was routed at once (ibx#325).
+            || !self.conditions.is_empty()
     }
 }
 

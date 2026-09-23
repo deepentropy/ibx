@@ -1558,6 +1558,7 @@ impl ClientCore {
             };
             return Ok(ControlCommand::Order(OrderRequest::SubmitAdaptive {
                 order_id, instrument, side, qty, price, priority,
+                tif: order.tif_byte(), attrs: order.attrs(),
             }));
         }
 
@@ -1567,6 +1568,7 @@ impl ClientCore {
             let price = (order.lmt_price * PRICE_SCALE_F) as i64;
             return Ok(ControlCommand::Order(OrderRequest::SubmitAlgo {
                 order_id, instrument, side, qty, price, algo,
+                tif: order.tif_byte(), attrs: order.attrs(),
             }));
         }
 
@@ -1575,6 +1577,7 @@ impl ClientCore {
             let price = (order.lmt_price * PRICE_SCALE_F) as i64;
             return Ok(ControlCommand::Order(OrderRequest::SubmitWhatIf {
                 order_id, instrument, side, qty, price,
+                tif: order.tif_byte(), attrs: order.attrs(),
             }));
         }
 

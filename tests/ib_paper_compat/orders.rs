@@ -729,7 +729,7 @@ pub(super) fn phase_bracket_order(conns: Conns) -> Conns {
 pub(super) fn phase_adaptive_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 30: Adaptive Algo Limit Order (SPY)",
-        OrderRequest::SubmitAdaptive { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, priority: AdaptivePriority::Normal },
+        OrderRequest::SubmitAdaptive { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, priority: AdaptivePriority::Normal, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -1031,7 +1031,7 @@ pub(super) fn phase_vwap_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 62: VWAP Algo Order (SPY)",
         OrderRequest::SubmitAlgo { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000,
-            algo: AlgoParams::Vwap { max_pct_vol: 0.1, no_take_liq: false, allow_past_end_time: true, start_time: "20260311-13:30:00".into(), end_time: "20260311-20:00:00".into() } },
+            algo: AlgoParams::Vwap { max_pct_vol: 0.1, no_take_liq: false, allow_past_end_time: true, start_time: "20260311-13:30:00".into(), end_time: "20260311-20:00:00".into() }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -1041,7 +1041,7 @@ pub(super) fn phase_twap_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 63: TWAP Algo Order (SPY)",
         OrderRequest::SubmitAlgo { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000,
-            algo: AlgoParams::Twap { allow_past_end_time: true, start_time: "20260311-13:30:00".into(), end_time: "20260311-20:00:00".into() } },
+            algo: AlgoParams::Twap { allow_past_end_time: true, start_time: "20260311-13:30:00".into(), end_time: "20260311-20:00:00".into() }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -1051,7 +1051,7 @@ pub(super) fn phase_arrival_px_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 64: Arrival Price Algo Order (SPY)",
         OrderRequest::SubmitAlgo { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000,
-            algo: AlgoParams::ArrivalPx { max_pct_vol: 0.1, risk_aversion: RiskAversion::Neutral, allow_past_end_time: true, force_completion: false, start_time: "20260311-13:30:00".into(), end_time: "20260311-20:00:00".into() } },
+            algo: AlgoParams::ArrivalPx { max_pct_vol: 0.1, risk_aversion: RiskAversion::Neutral, allow_past_end_time: true, force_completion: false, start_time: "20260311-13:30:00".into(), end_time: "20260311-20:00:00".into() }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -1061,7 +1061,7 @@ pub(super) fn phase_close_px_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 65: Close Price Algo Order (SPY)",
         OrderRequest::SubmitAlgo { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000,
-            algo: AlgoParams::ClosePx { max_pct_vol: 0.1, risk_aversion: RiskAversion::Neutral, force_completion: false, start_time: "20260311-13:30:00".into() } },
+            algo: AlgoParams::ClosePx { max_pct_vol: 0.1, risk_aversion: RiskAversion::Neutral, force_completion: false, start_time: "20260311-13:30:00".into() }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -1071,7 +1071,7 @@ pub(super) fn phase_dark_ice_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 66: Dark Ice Algo Order (SPY)",
         OrderRequest::SubmitAlgo { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000,
-            algo: AlgoParams::DarkIce { allow_past_end_time: true, display_size: 1, start_time: "20260311-13:30:00".into(), end_time: "20260311-20:00:00".into() } },
+            algo: AlgoParams::DarkIce { allow_past_end_time: true, display_size: 1, start_time: "20260311-13:30:00".into(), end_time: "20260311-20:00:00".into() }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -1081,7 +1081,7 @@ pub(super) fn phase_pct_vol_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 67: % of Volume Algo Order (SPY)",
         OrderRequest::SubmitAlgo { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000,
-            algo: AlgoParams::PctVol { pct_vol: 0.1, no_take_liq: false, start_time: "20260311-13:30:00".into(), end_time: "20260311-20:00:00".into() } },
+            algo: AlgoParams::PctVol { pct_vol: 0.1, no_take_liq: false, start_time: "20260311-13:30:00".into(), end_time: "20260311-20:00:00".into() }, tif: b'0', attrs: OrderAttrs::default() },
         false)
 }
 
@@ -1138,8 +1138,7 @@ pub(super) fn phase_what_if_order(conns: Conns) -> Conns {
 
     let order_id = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitWhatIf {
-        order_id, instrument: inst_id, side: Side::Buy, qty: 100, price: 1_00_000_000,
-    })).unwrap();
+        order_id, instrument: inst_id, side: Side::Buy, qty: 100, price: 1_00_000_000, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
