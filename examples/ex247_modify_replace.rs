@@ -141,6 +141,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         action: "SELL".into(), order_type: "TRAIL LIMIT".into(), total_quantity: 1.0,
         aux_price: aux, lmt_price_offset: 0.50, ..Default::default()
     };
+    let trail_pct = |p: f64| Order {
+        action: "SELL".into(), order_type: "TRAIL".into(), total_quantity: 1.0, trailing_percent: p, ..Default::default()
+    };
     let gtd_stp = |aux: f64| Order {
         action: "SELL".into(), order_type: "STP".into(), total_quantity: 1.0, aux_price: aux,
         tif: "GTD".into(), good_till_date: "20261230 16:00:00 US/Eastern".into(), ..Default::default()
@@ -153,8 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("A2b STP LMT both prices", stp_lmt(194.0, 195.0), stp_lmt(189.0, 190.0), false),
         ("A3a TRAIL amount", trail(100.0), trail(110.0), false),
         ("A3b TRAIL LIMIT amount", trail_lmt(100.0), trail_lmt(110.0), false),
-        // A percent trail replace is encoded and unit-tested, but a percent
-        // trail cannot be placed on the server until ibx#339 is fixed.
+        ("A3c TRAIL percent (ibx#339)", trail_pct(1.25), trail_pct(2.0), false),
         ("A4a LMT DAY -> GTC", lmt("BUY", 200.0, false, "DAY"), lmt("BUY", 200.0, false, "GTC"), false),
         ("A4b LMT -> STP (refused)", lmt("BUY", 200.0, false, "DAY"), stp(195.0), true),
         ("A5 GTD STP trigger", gtd_stp(200.0), gtd_stp(195.0), false),

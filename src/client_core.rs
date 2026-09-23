@@ -1455,7 +1455,7 @@ impl ClientCore {
             "TRAIL" => {
                 if order.trailing_percent > 0.0 {
                     OrderKind::TrailPct {
-                        trail_pct: (order.trailing_percent * 100.0) as u32,
+                        trail_pct: (order.trailing_percent * 100.0).round() as u32,
                         trail_stop_price: trail_stop,
                     }
                 } else {
@@ -1656,7 +1656,7 @@ impl ClientCore {
                 // Optional initial stop trigger (tag 6117); default f64::MAX = unset.
                 let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { (order.trail_stop_price * PRICE_SCALE_F) as i64 };
                 if order.trailing_percent > 0.0 {
-                    let pct = (order.trailing_percent * 100.0) as u32;
+                    let pct = (order.trailing_percent * 100.0).round() as u32;
                     if extended {
                         OrderRequest::SubmitTrailingStopPctEx {
                             order_id, instrument, side, qty, trail_pct: pct,

@@ -444,11 +444,12 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let pct_str = trail_pct.to_string(); // basis points: 100 = 1%
                 // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
-                // percent in decimal form (1.00 for 1%), alongside 6268 in basis
-                // points and 18=a (ExecInst=TrailingStop). Without 99/211/18 the
-                // gateway rejects with "Invalid value in field # 18".
+                // percent in decimal form (1.00 for 1%) with 18=a (ExecInst=
+                // TrailingStop); without 99/211/18 the gateway rejects with
+                // "Invalid value in field # 18". 6268 is the trail unit, 100 =
+                // percent, at every percentage (ib-agent#192 B7, ibx#339); it
+                // was sent as basis points, right only at exactly 1%.
                 let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
                 let trail_stop_str = format_price(trail_stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -467,7 +468,7 @@ pub(crate) fn drain_and_send_orders(
                     (99, &pct_decimal),     // StopPx = percent as decimal
                     (211, &pct_decimal),    // PegOffset = percent as decimal (mirror of 99)
                     (18, "a"),              // ExecInst = TrailingStop
-                    (6268, &pct_str),       // TrailingPercent (basis points)
+                    (6268, "100"),          // Trail unit = percent
                     (59, "0"),              // TIF = DAY
                     (60, &now),
                     (167, &sec_type_str),
@@ -1824,14 +1825,14 @@ fn send_order_ex(
         }
         K::TrailPct { trail_pct, trail_stop_price } => {
             // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
-            // percent in decimal form (1.00 for 1%), alongside 6268 in
-            // basis points and 18=a.
+            // percent in decimal form (1.00 for 1%), with 18=a. 6268 is the
+            // trail unit, 100 = percent (ib-agent#192 B7, ibx#339).
             let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
             fields.push((40, "P".to_string()));
             fields.push((99, pct_decimal.clone()));
             fields.push((211, pct_decimal));
             fields.push((18, "a".to_string()));
-            fields.push((6268, trail_pct.to_string()));
+            fields.push((6268, "100".to_string()));
             if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
             has_base_exec_inst = true;
         }
@@ -2394,6 +2395,31 @@ mod tests {
         let ours = replace_fields(1626578575, Side::Sell, 200,
             crate::types::OrderKind::Stop { stop_price: px(200.45) }, b'6', attrs);
         assert_same_replace(&ours, "35=G|11=1626578575.1|41=1626578575.0|99=200.45|1=DU1|126=20260930-20:00:00|6117=200.45|6122=c|6531=4/2/-6183061|38=200|54=2|40=3|55=AAPL|167=STK|6035=AAPL|59=6|6008=265598|6088=Socket|6211=|6238=");
+    }
+
+    // ibx#339: the reference sends a percent trail as the percent in the
+    // price fields and the trail unit set to percent at every percentage
+    // (ib-agent#192 B7: 0.5%, 1%, 1.25%, 2%). ibx sent basis points in the
+    // unit field, which only matched at exactly 1%.
+    #[test]
+    fn percent_trail_submit_matches_reference_at_every_percentage() {
+        for (bp, pct) in [(50u32, "0.50"), (100, "1.00"), (125, "1.25"), (200, "2.00")] {
+            let plain = wire_tags(OrderRequest::SubmitTrailingStopPct {
+                order_id: 7, instrument: 0, side: Side::Sell, qty: 1, trail_pct: bp, trail_stop_price: 0,
+            });
+            let ext = wire_tags(OrderRequest::SubmitEx {
+                order_id: 8, instrument: 0, side: Side::Sell, qty: 1,
+                kind: crate::types::OrderKind::TrailPct { trail_pct: bp, trail_stop_price: 0 },
+                tif: b'1', attrs: crate::types::OrderAttrs::default(),
+            });
+            for tags in [&plain, &ext] {
+                assert_eq!(tag(tags, 40), Some("P"));
+                assert_eq!(tag(tags, 99), Some(pct), "{} bp", bp);
+                assert_eq!(tag(tags, 211), Some(pct), "{} bp", bp);
+                assert_eq!(tag(tags, 18), Some("a"));
+                assert_eq!(tag(tags, 6268), Some("100"), "unit is percent at {} bp", bp);
+            }
+        }
     }
 
     #[test]

@@ -2609,6 +2609,24 @@ fn modify_trailing_keeps_the_trail() {
     assert!(matches!(kind, OrderKind::TrailPct { trail_pct: 250, .. }), "{:?}", kind);
 }
 
+// ibx#339: a percent is rounded to basis points, not truncated: 1.15 %
+// became 114 bp (1.14 %) through float truncation.
+#[test]
+fn percent_trail_rounds_to_basis_points() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(),
+        trailing_percent: 1.15, ..Default::default()
+    };
+    client.place_order(91, &spy(), &order).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitTrailingStopPct { trail_pct, .. }) => assert_eq!(trail_pct, 115),
+        other => panic!("expected SubmitTrailingStopPct, got {:?}", other),
+    }
+    assert!(matches!(ClientCore::order_kind(&order).unwrap(), OrderKind::TrailPct { trail_pct: 115, .. }));
+}
+
 // ibx#247: outside-RTH follows the order; it is not forced on.
 #[test]
 fn modify_carries_outside_rth_as_set() {

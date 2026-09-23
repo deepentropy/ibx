@@ -652,7 +652,9 @@ pub enum OrderRequest {
         /// Optional initial stop trigger (tag 6117); 0 = not set.
         trail_stop_price: Price,
     },
-    /// Trailing stop by percentage (tag 6268). Trail percent is in basis points (1% = 100).
+    /// Trailing stop by percentage. `trail_pct` is in basis points (1% = 100);
+    /// on the wire the percent rides as a decimal with the unit flag set to
+    /// percent (ibx#339).
     SubmitTrailingStopPct {
         order_id: OrderId,
         instrument: InstrumentId,
