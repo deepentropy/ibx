@@ -264,9 +264,19 @@ impl FarmState {
         let text = String::from_utf8_lossy(body);
         let text = text.split("\x018349=").next().unwrap_or(&text);
         let parts: Vec<&str> = text.trim().split(',').collect();
-        if parts.len() < 3 { return; }
-        let server_tag: u32 = match parts[0].parse() { Ok(v) => v, Err(_) => return };
-        let req_id: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => return };
+        // An ack dropped here leaves the subscription with no server tag, so
+        // its ticks are never routed: say why.
+        if parts.len() < 3 {
+            log::warn!("Farm 35=Q ack not understood (fewer than 3 fields): {:?}", text);
+            return;
+        }
+        let (server_tag, req_id): (u32, u32) = match (parts[0].parse(), parts[1].parse()) {
+            (Ok(t), Ok(r)) => (t, r),
+            _ => {
+                log::warn!("Farm 35=Q ack not understood (tag or request id): {:?}", text);
+                return;
+            }
+        };
         let min_tick: f64 = parts[2].parse().unwrap_or(0.01);
 
         // Depth ack: always map the server_tag if this req_id is a depth subscription,
@@ -293,7 +303,11 @@ impl FarmState {
                 let (_, instr) = self.md_req_to_instrument.remove(idx);
                 instr
             }
-            None => return,
+            None => {
+                log::warn!("Farm 35=Q ack for request id {} (server tag {}) matches no pending subscription; pending: {:?}",
+                    req_id, server_tag, self.md_req_to_instrument.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+                return;
+            }
         };
 
         context.market.register_server_tag(server_tag, instrument);

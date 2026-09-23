@@ -187,12 +187,18 @@ impl Connection {
             // here keeps them out of the buf.clear() arm below, which would
             // otherwise wipe any FIXCOMP frame queued behind them in the same
             // recv slice (ibx#185).
+            // A compressed frame is recognized above only at offset 0. Search
+            // for it here too: with a stray byte in front ("\x01" seen live),
+            // the "8=FIX." search does not match "8=FIXCOMP", the buffer was
+            // cleared, and the lost signed frame put the read IV chain out of
+            // step, garbling every later frame on the connection.
             let fix_pos = find_subsequence(&self.buf, b"8=FIX.");
+            let fixcomp_pos = find_subsequence(&self.buf, b"8=FIXCOMP\x01");
             let o_pos = find_subsequence(&self.buf, b"8=O\x01");
             let one_pos = find_subsequence(&self.buf, b"8=1\x01");
             let x_pos = find_subsequence(&self.buf, b"8=X\x01");
 
-            let earliest = [fix_pos, o_pos, one_pos, x_pos]
+            let earliest = [fix_pos, fixcomp_pos, o_pos, one_pos, x_pos]
                 .into_iter()
                 .flatten()
                 .min();
@@ -507,6 +513,36 @@ mod tests {
             Frame::FixComp(data) => assert_eq!(data, &comp),
             other => panic!("expected Frame::FixComp, got {:?}", other),
         }
+    }
+
+    // A stray byte in front of a compressed frame used to clear the whole
+    // buffer, losing the frame (seen live as "dropping 391B (no header)",
+    // first byte 0x01 then "8=FIXCOMP").
+    #[test]
+    fn frame_extraction_stray_byte_before_fixcomp() {
+        let inner = fix_build(&[(35, "Q")], 1);
+        let comp = fixcomp_build(&inner);
+        let mut buf = vec![0x01];
+        buf.extend_from_slice(&comp);
+        let mut conn = test_connection_with_buf(buf);
+        let frames = conn.extract_frames();
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            Frame::FixComp(data) => assert_eq!(data, &comp),
+            other => panic!("expected Frame::FixComp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn frame_extraction_fixcomp_behind_garbage_keeps_both_frames() {
+        let first = fixcomp_build(&fix_build(&[(35, "Q")], 1));
+        let second = fixcomp_build(&fix_build(&[(35, "P")], 2));
+        let mut buf = vec![0xDE, 0xAD];
+        buf.extend_from_slice(&first);
+        buf.extend_from_slice(&second);
+        let mut conn = test_connection_with_buf(buf);
+        let frames = conn.extract_frames();
+        assert_eq!(frames.len(), 2);
     }
 
     #[test]
