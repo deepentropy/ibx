@@ -424,6 +424,45 @@ fn place_order_adjustable_trail_carries_trailing_amount_and_unit() {
     }
 }
 
+// ibx#240: an adjustable stop with a parent, an OCA group or a non-DAY tif
+// must take the extended path, or a bracket child ships unlinked and DAY.
+#[test]
+fn place_order_adjustable_stop_child_keeps_parent_oca_and_tif() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
+        aux_price: 9.00,
+        adjusted_order_type: "STP".into(),
+        trigger_price: 11.00,
+        adjusted_stop_price: 10.00,
+        parent_id: 100,
+        oca_group: "BR1".into(),
+        tif: "GTC".into(),
+        ..Default::default()
+    };
+    client.place_order(101, &spy(), &order).unwrap();
+
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitEx { kind, tif, attrs, .. }) => {
+            match kind {
+                crate::types::OrderKind::AdjustableStop {
+                    stop_price, trigger_price, adjusted_order_type, adjusted_stop_price, .. } => {
+                    assert_eq!(adjusted_order_type, crate::types::AdjustedOrderType::Stop);
+                    assert_eq!(stop_price, (9.00 * PRICE_SCALE_F) as i64);
+                    assert_eq!(trigger_price, (11.00 * PRICE_SCALE_F) as i64);
+                    assert_eq!(adjusted_stop_price, (10.00 * PRICE_SCALE_F) as i64);
+                }
+                other => panic!("expected AdjustableStop kind, got {:?}", other),
+            }
+            assert_eq!(tif, b'1');
+            assert_eq!(attrs.parent_id, 100);
+            assert_eq!(attrs.oca_group_str, "BR1");
+        }
+        cmd => panic!("expected SubmitEx, got {:?}", cmd),
+    }
+}
+
 #[test]
 fn place_order_adjustable_trail_percent_unit_passes_through() {
     // Percent unit (100) must survive; the trailing amount is a percent value.

@@ -508,6 +508,18 @@ pub enum OrderKind {
     PegMkt { offset: Price },
     PegMid { offset: Price },
     Rel { offset: Price },
+    /// Adjustable stop, same fields as `OrderRequest::SubmitAdjustableStop`.
+    /// On this path it also carries parent, OCA and tif, so it can be a
+    /// bracket child (ibx#240).
+    AdjustableStop {
+        stop_price: Price,
+        trigger_price: Price,
+        adjusted_order_type: AdjustedOrderType,
+        adjusted_stop_price: Price,
+        adjusted_stop_limit_price: Price,
+        adjusted_trailing_amount: Price,
+        adjustable_trailing_unit: i32,
+    },
 }
 
 /// Order request sent via control channel, processed by engine.
@@ -1041,6 +1053,14 @@ impl OrderRequest {
                 OrderKind::MidPrice { price_cap } => s(price_cap),
                 OrderKind::PegMkt { offset } | OrderKind::PegMid { offset }
                 | OrderKind::Rel { offset } => s(offset),
+                OrderKind::AdjustableStop {
+                    stop_price, trigger_price, adjusted_stop_price, adjusted_stop_limit_price,
+                    adjusted_trailing_amount, adjustable_trailing_unit, ..
+                } => {
+                    s(stop_price); s(trigger_price); s(adjusted_stop_price); s(adjusted_stop_limit_price);
+                    // Same rule as SubmitAdjustableStop: a percent does not snap.
+                    if *adjustable_trailing_unit == 0 { s(adjusted_trailing_amount); }
+                }
             },
         }
     }

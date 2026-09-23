@@ -1448,11 +1448,26 @@ impl ClientCore {
             }));
         }
 
+        // Every order type must carry extended attributes and a non-DAY tif
+        // when the caller sets them — dropping them silently produced
+        // unlinked, immediate-DAY bracket children (ibx#224). An empty tif
+        // is treated as DAY, matching the official API default.
+        let extended = order.has_extended_attrs()
+            || !matches!(order.tif.as_str(), "" | "DAY");
+        let ex = |kind: OrderKind| OrderRequest::SubmitEx {
+            order_id, instrument, side, qty,
+            kind,
+            tif: order.tif_byte(),
+            attrs: order.attrs(),
+        };
+
         // Adjustable stop: a base STP that converts to another order type when
         // its trigger is reached. Signalled by a non-empty adjustedOrderType,
         // which is empty on every ordinary order, so this affects nothing else.
         // A Trail/TrailLimit conversion carries the trailing amount + unit
         // (tags 6260/6269, ib-agent#167). (ibx#225)
+        // With extended attributes or a non-DAY tif it takes the extended path,
+        // so a bracket child keeps its parent, OCA group and tif (ibx#240).
         if !order.adjusted_order_type.is_empty() {
             let adjusted = match order.adjusted_order_type.to_uppercase().as_str() {
                 "STP" => AdjustedOrderType::Stop,
@@ -1468,30 +1483,28 @@ impl ClientCore {
             } else {
                 order.adjusted_trailing_amount
             };
-            return Ok(ControlCommand::Order(OrderRequest::SubmitAdjustableStop {
-                order_id, instrument, side, qty,
-                stop_price: scale(order.aux_price),
-                trigger_price: scale(order.trigger_price),
-                adjusted_order_type: adjusted,
-                adjusted_stop_price: scale(order.adjusted_stop_price),
-                adjusted_stop_limit_price: scale(order.adjusted_stop_limit_price),
-                adjusted_trailing_amount: scale(adj_trail),
-                adjustable_trailing_unit: order.adjustable_trailing_unit,
-            }));
+            let stop_price = scale(order.aux_price);
+            let trigger_price = scale(order.trigger_price);
+            let adjusted_stop_price = scale(order.adjusted_stop_price);
+            let adjusted_stop_limit_price = scale(order.adjusted_stop_limit_price);
+            let adjusted_trailing_amount = scale(adj_trail);
+            let adjustable_trailing_unit = order.adjustable_trailing_unit;
+            let req = if extended {
+                ex(OrderKind::AdjustableStop {
+                    stop_price, trigger_price, adjusted_order_type: adjusted,
+                    adjusted_stop_price, adjusted_stop_limit_price,
+                    adjusted_trailing_amount, adjustable_trailing_unit,
+                })
+            } else {
+                OrderRequest::SubmitAdjustableStop {
+                    order_id, instrument, side, qty,
+                    stop_price, trigger_price, adjusted_order_type: adjusted,
+                    adjusted_stop_price, adjusted_stop_limit_price,
+                    adjusted_trailing_amount, adjustable_trailing_unit,
+                }
+            };
+            return Ok(ControlCommand::Order(req));
         }
-
-        // Every order type must carry extended attributes and a non-DAY tif
-        // when the caller sets them — dropping them silently produced
-        // unlinked, immediate-DAY bracket children (ibx#224). An empty tif
-        // is treated as DAY, matching the official API default.
-        let extended = order.has_extended_attrs()
-            || !matches!(order.tif.as_str(), "" | "DAY");
-        let ex = |kind: OrderKind| OrderRequest::SubmitEx {
-            order_id, instrument, side, qty,
-            kind,
-            tif: order.tif_byte(),
-            attrs: order.attrs(),
-        };
 
         let req = match order_type.as_str() {
             "MKT" => {
