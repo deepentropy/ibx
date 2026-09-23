@@ -2124,7 +2124,7 @@ mod tests {
             .filter(|t| *t != 10).collect(); // drop the checksum
         assert_eq!(tail, vec![6257, 6261, 6258, 6259, 6260, 6269]);
         assert_eq!(tag(&tags, 59), Some("0"));
-        assert_eq!(tag(&tags, 6261), Some("7"));
+        assert_eq!(tag(&tags, 6261), Some("T"));
         assert_eq!(tag(&tags, 6260), Some("0.5"));
         assert!(tag(&tags, 6107).is_none() && tag(&tags, 583).is_none());
     }

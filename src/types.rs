@@ -231,17 +231,21 @@ pub struct WhatIfResponse {
 pub enum AdjustedOrderType {
     Stop,       // 3
     StopLimit,  // 4
-    Trail,      // 7
-    TrailLimit, // 8
+    Trail,      // T
+    TrailLimit, // TSL
 }
 
 impl AdjustedOrderType {
+    /// The order-type code, the same one the base order type rides on.
+    /// Stop and Trail captured (ib-agent#167, ib-agent#192); StopLimit and
+    /// TrailLimit from the reference order-type table. The earlier 7/8 were
+    /// not codes the reference ever sends (ibx#240).
     pub fn fix_code(&self) -> &'static str {
         match self {
             Self::Stop => "3",
             Self::StopLimit => "4",
-            Self::Trail => "7",
-            Self::TrailLimit => "8",
+            Self::Trail => "T",
+            Self::TrailLimit => "TSL",
         }
     }
 }
@@ -2079,8 +2083,8 @@ mod tests {
     fn adjusted_order_type_fix_codes() {
         assert_eq!(AdjustedOrderType::Stop.fix_code(), "3");
         assert_eq!(AdjustedOrderType::StopLimit.fix_code(), "4");
-        assert_eq!(AdjustedOrderType::Trail.fix_code(), "7");
-        assert_eq!(AdjustedOrderType::TrailLimit.fix_code(), "8");
+        assert_eq!(AdjustedOrderType::Trail.fix_code(), "T");
+        assert_eq!(AdjustedOrderType::TrailLimit.fix_code(), "TSL");
     }
 
     // --- OrderAttrs cash_qty ---

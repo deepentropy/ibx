@@ -8,7 +8,10 @@
 //! does when the parent link reached it. Any order still working at the end
 //! is cancelled.
 //!
-//! Run: cargo run --example ex240_adjustable_stop_bracket
+//! The optional argument picks what the stop converts to: `stp` (default),
+//! `trail` or `trail-limit`, to check each adjusted-type code on the server.
+//!
+//! Run: cargo run --example ex240_adjustable_stop_bracket [stp|trail|trail-limit]
 //! Needs IB_USERNAME / IB_PASSWORD (paper) and optionally IB_HOST.
 
 use std::env;
@@ -101,8 +104,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lmt_price: 1.00, tif: "GTC".into(),
         ..Default::default()
     };
-    // Child 1: adjustable STP. Stop $0.50; if $900 trades, move the stop to $0.60.
-    let stop = Order {
+    // Child 1: adjustable STP. Stop $0.50; if $900 trades, move the stop to
+    // $0.60 and convert it to the chosen type.
+    let mode = env::args().nth(1).unwrap_or_else(|| "stp".into());
+    let mut stop = Order {
         action: "SELL".into(), order_type: "STP".into(), total_quantity: 1.0,
         aux_price: 0.50,
         adjusted_order_type: "STP".into(),
@@ -111,6 +116,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         parent_id, oca_group: oca.clone(), tif: "GTC".into(),
         ..Default::default()
     };
+    match mode.as_str() {
+        "stp" => {}
+        "trail" => {
+            stop.adjusted_order_type = "TRAIL".into();
+            stop.adjusted_trailing_amount = 0.10;
+            stop.adjustable_trailing_unit = 0;
+        }
+        "trail-limit" => {
+            stop.adjusted_order_type = "TRAIL LIMIT".into();
+            stop.adjusted_stop_limit_price = 0.55;
+            stop.adjusted_trailing_amount = 0.10;
+            stop.adjustable_trailing_unit = 0;
+        }
+        other => return Err(format!("unknown mode '{}': use stp, trail or trail-limit", other).into()),
+    }
+    println!("== Adjustable stop converts to: {}", stop.adjusted_order_type);
     // Child 2: take-profit LMT, same parent and OCA group.
     let tp = Order {
         action: "SELL".into(), order_type: "LMT".into(), total_quantity: 1.0,
