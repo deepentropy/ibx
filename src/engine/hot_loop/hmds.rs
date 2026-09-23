@@ -92,6 +92,10 @@ impl HmdsState {
                     Err(e) => {
                         log::error!("HMDS connection lost: {}", e);
                         self.disconnected = true;
+                        // Drop the dead socket so the HMDS reconnect loop,
+                        // which only runs with no connection held, re-dials
+                        // it (ibx#399).
+                        *hmds_conn = None;
                         return;
                     }
                     Ok(n) => {

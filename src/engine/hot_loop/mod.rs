@@ -361,7 +361,23 @@ impl HotLoop {
 
             // 6. Wake any waiting consumers (e.g. Python event loop)
             self.shared.notify();
+
+            // 7. With every transport down there is nothing to poll, and the
+            //    spin pinned a core for the whole outage (ibx#399). Park 1ms in
+            //    that state only; reconnects run on a seconds-scale backoff and
+            //    the connected path is unchanged.
+            if self.all_transports_down() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
+    }
+
+    /// True when the farm and auth connections are down and no historical
+    /// connection is up.
+    fn all_transports_down(&self) -> bool {
+        self.farm.disconnected
+            && self.ccp.disconnected
+            && (self.hmds_conn.is_none() || self.hmds.disconnected)
     }
 
     fn emit_hmds_unavailable(&self, req_id: u32, from_historical: bool) {
@@ -723,6 +739,7 @@ impl HotLoop {
         }
 
         // --- Historical heartbeat (skip if disconnected or no historical activity) ---
+        let mut hmds_dead = false;
         if !self.hmds.disconnected && self.hmds_conn.is_some() {
         if let Some(conn) = self.hmds_conn.as_mut() {
             let since_sent = now.duration_since(self.hb.last_hmds_sent).as_secs();
@@ -741,6 +758,7 @@ impl HotLoop {
                 if since_recv > LIVENESS_DEAD_SECS {
                     log::error!("HMDS liveness timeout ({}s silent) — connection lost", since_recv);
                     self.hmds.disconnected = true;
+                    hmds_dead = true;
                 } else if self.hb.pending_hmds_test.is_none() {
                     let test_id = self.hb.next_test_id();
                     let _ = conn.send_fix(&[
@@ -753,6 +771,11 @@ impl HotLoop {
                 }
             }
         }
+        }
+        // Drop the dead socket so the HMDS reconnect loop, which only runs
+        // with no connection held, re-dials it (ibx#399).
+        if hmds_dead {
+            self.hmds_conn = None;
         }
     }
 
@@ -790,6 +813,11 @@ impl HotLoop {
     /// Set cached auth credentials for farm auto-reconnect.
     pub fn set_reconnect_auth(&mut self, auth: ReconnectAuth) {
         self.reconnect_auth = Some(auth);
+    }
+
+    /// Whether auto-reconnect has a host to dial (ibx#399).
+    pub fn has_reconnect_host(&self) -> bool {
+        self.reconnect_auth.as_ref().is_some_and(|a| !a.host.is_empty())
     }
 
     /// Update caller-specific fields on the reconnect auth (host, username, password, paper).
@@ -1722,6 +1750,81 @@ mod tests {
         // Saturating math survives degenerate inputs.
         assert_eq!(hmds_reconnect_backoff(0), Duration::from_secs(3));
         assert_eq!(hmds_reconnect_backoff(u32::MAX), Duration::from_secs(64));
+    }
+
+    fn reconnect_auth_with_host(host: &str) -> ReconnectAuth {
+        ReconnectAuth {
+            host: host.into(),
+            username: "user".into(),
+            password: zeroize::Zeroizing::new("pass".into()),
+            paper: true,
+            session_key: num_bigint::BigUint::default(),
+            session_token: num_bigint::BigUint::default(),
+            server_session_id: String::new(),
+            hw_info: String::new(),
+            encoded: String::new(),
+            hmds_host: "hmds.example".into(),
+            hmds_farm: "ushmds".into(),
+        }
+    }
+
+    // ibx#399: with every transport down the loop spun at ~1M passes/s and
+    // pinned a core for the whole outage. Parked, 60ms is ~60 passes.
+    #[test]
+    fn a_loop_with_every_transport_down_does_not_spin() {
+        let shared = Arc::new(SharedState::new());
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let mut engine = HotLoop::new(shared, None, None);
+        engine.set_control_rx(rx);
+        engine.force_farm_disconnect();
+        engine.ccp.disconnected = true;
+        assert!(engine.all_transports_down());
+
+        let handle = std::thread::spawn(move || { engine.run(); engine });
+        std::thread::sleep(Duration::from_millis(60));
+        tx.send(ControlCommand::Shutdown).unwrap();
+        let engine = handle.join().unwrap();
+        let passes = engine.context.loop_iterations;
+        assert!(passes < 1_000, "loop spun {} times in 60ms while every transport was down", passes);
+    }
+
+    // ibx#399: the park applies only when nothing is up.
+    #[test]
+    fn a_loop_with_any_transport_up_is_not_parked() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared, None, None);
+        assert!(!engine.all_transports_down(), "all up");
+        engine.force_farm_disconnect();
+        assert!(!engine.all_transports_down(), "auth still up");
+        engine.farm.disconnected = false;
+        engine.ccp.disconnected = true;
+        assert!(!engine.all_transports_down(), "farm still up");
+    }
+
+    // ibx#399: a mid-session historical loss set the flag but kept the dead
+    // socket, and the reconnect loop only runs with no socket held, so the
+    // historical connection never came back.
+    #[test]
+    fn a_lost_hmds_socket_is_dropped_and_reconnect_is_scheduled() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        drop(server);
+
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.set_reconnect_auth(reconnect_auth_with_host("gw.example"));
+        engine.hmds_conn = Some(Connection::new_raw(client).unwrap());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !engine.hmds.disconnected && Instant::now() < deadline {
+            engine.hmds.poll(&mut engine.hmds_conn, &shared, &None, &mut engine.hb);
+        }
+        assert!(engine.hmds.disconnected, "peer close must be detected");
+        assert!(engine.hmds_conn.is_none(), "dead socket must be dropped");
+
+        engine.maybe_spawn_hmds_reconnect();
+        assert!(engine.hmds_next_attempt_at.is_some(), "reconnect must be scheduled");
     }
 
     #[test]

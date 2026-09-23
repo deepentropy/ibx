@@ -11,6 +11,38 @@ use crate::control::scanner::{ScannerEntry, ScannerResult};
 use crate::control::news::NewsHeadline;
 use crate::control::histogram::HistogramEntry;
 
+// ibx#399: the gateway leaves host and credentials empty for the caller, and
+// the Rust client never filled them, so every auto-reconnect was skipped.
+#[test]
+fn connect_caches_reconnect_credentials() {
+    let mut hot_loop = crate::engine::hot_loop::HotLoop::new(Arc::new(SharedState::new()), None, None);
+    // What into_hot_loop_with_farms installs: session fields set, caller fields empty.
+    hot_loop.set_reconnect_auth(crate::gateway::ReconnectAuth {
+        host: String::new(),
+        username: String::new(),
+        password: zeroize::Zeroizing::new(String::new()),
+        paper: false,
+        session_key: num_bigint::BigUint::default(),
+        session_token: num_bigint::BigUint::default(),
+        server_session_id: String::new(),
+        hw_info: String::new(),
+        encoded: String::new(),
+        hmds_host: String::new(),
+        hmds_farm: String::new(),
+    });
+    assert!(!hot_loop.has_reconnect_host(), "gateway leaves the host empty");
+
+    let config = EClientConfig {
+        username: "user".into(),
+        password: "pass".into(),
+        host: "gw.example".into(),
+        paper: true,
+        core_id: None,
+    };
+    cache_reconnect_credentials(&mut hot_loop, &config);
+    assert!(hot_loop.has_reconnect_host());
+}
+
 /// Helper: create a test EClient backed by SharedState + channel.
 fn test_client() -> (EClient, crossbeam_channel::Receiver<ControlCommand>, Arc<SharedState>) {
     let shared = Arc::new(SharedState::new());

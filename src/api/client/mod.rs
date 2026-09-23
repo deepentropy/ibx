@@ -97,6 +97,18 @@ pub struct EClientConfig {
     pub core_id: Option<usize>,
 }
 
+/// Give the engine the caller's host and credentials for auto-reconnect. The
+/// gateway leaves them empty for the caller to fill; without this every
+/// reconnect was skipped for the Rust client (ibx#399).
+fn cache_reconnect_credentials(hot_loop: &mut crate::engine::hot_loop::HotLoop, config: &EClientConfig) {
+    hot_loop.update_reconnect_auth(
+        config.host.clone(),
+        config.username.clone(),
+        zeroize::Zeroizing::new(config.password.clone()),
+        config.paper,
+    );
+}
+
 /// ibapi-compatible EClient. Matches C++ `EClientSocket` method signatures.
 ///
 /// # Thread lifecycle
@@ -194,9 +206,10 @@ impl EClient {
         let shared = Arc::new(SharedState::new());
         gw.populate_init_data(&shared);
 
-        let (hot_loop, control_tx) = gw.into_hot_loop_with_farms(
+        let (mut hot_loop, control_tx) = gw.into_hot_loop_with_farms(
             shared.clone(), event_tx, farm_conn, ccp_conn, hmds_conn, config.core_id,
         );
+        cache_reconnect_credentials(&mut hot_loop, config);
 
         let handle = thread::Builder::new()
             .name("ib-engine-hotloop".into())
