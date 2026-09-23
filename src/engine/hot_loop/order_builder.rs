@@ -1424,19 +1424,8 @@ pub(crate) fn drain_and_send_orders(
                 }
                 last_result
             }
-            OrderRequest::Modify { new_order_id, order_id, price, qty } => {
+            OrderRequest::Modify { new_order_id: _, order_id, qty, kind, tif, attrs } => {
                 let orig = context.order(order_id).copied();
-                // Modify carries no instrument; resolve it from the tracked
-                // order to snap the new price to the tick grid (ibx#216).
-                let price = orig.map_or(price, |o| crate::types::snap_to_tick(
-                    price, context.market.min_tick_scaled(o.instrument)));
-                if let Some(orig) = orig {
-                    context.insert_order(crate::types::Order::new(
-                        new_order_id, orig.instrument, orig.side, qty, price,
-                        orig.ord_type, orig.tif, orig.stop_price,
-                    ));
-                }
-                // Versioned ClOrdID chaining: orderId.0 → .1 → .2
                 let prev_ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let new_ver = prev_ver + 1;
                 context.modify_versions.insert(order_id, new_ver);
@@ -1450,51 +1439,20 @@ pub(crate) fn drain_and_send_orders(
                 // right version.
                 context.last_clord.insert(order_id, clord_str.clone());
 
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let now = chrono_free_timestamp();
                 let side_str = orig.map(|o| fix_side(o.side)).unwrap_or("1");
                 let symbol = orig.map(|o| context.market.symbol(o.instrument).to_string())
                     .unwrap_or_default();
                 let (sec_type_str, _destination) = orig
                     .map(|o| context.market.order_routing(o.instrument))
                     .unwrap_or_else(|| ("STK".to_string(), "SMART".to_string()));
-                let ord_type_str = crate::types::ord_type_fix_str(orig.map(|o| o.ord_type).unwrap_or(b'2')).to_string();
-                let tif_str = std::str::from_utf8(&[orig.map(|o| o.tif).unwrap_or(b'0')]).unwrap_or("0").to_string();
                 let con_id_str = orig.and_then(|o| context.market.con_id(o.instrument))
                     .map(|c| c.to_string()).unwrap_or_default();
-
-                // Lean modify message — omit identity tags (6121, 6119, 231, 100, 15, 204)
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),    // ClOrdID (versioned)
-                    (41, &orig_clord),   // OrigClOrdID (previous version)
-                    (44, &price_str),    // Price
-                    (1, account_id),     // Account
-                    (6122, "c"),         // Client version
-                    (6433, "1"),         // OutsideRTH (preserve from original)
-                    (38, &qty_str),      // OrderQty
-                    (54, side_str),      // Side
-                    (40, &ord_type_str), // OrdType
-                    (55, &symbol),       // Symbol
-                    (167, &sec_type_str),        // SecurityType
-                    (6035, &symbol),     // LocalSymbol echo
-                    (59, &tif_str),      // TIF
-                    (6008, &con_id_str), // ConId
-                    (6088, "Socket"),    // Connection type
-                    (6211, ""),          // Empty (matches reference)
-                    (6238, ""),          // Empty (matches reference)
-                ];
-                // Include stop price for order types that need it
-                let stop_str;
-                if let Some(o) = orig {
-                    if o.stop_price != 0 {
-                        stop_str = format_price(o.stop_price);
-                        fields.push((99, &stop_str));
-                    }
-                }
-                conn.send_fix(&fields)
+                let fields = modify_fields(
+                    &clord_str, &orig_clord, account_id, qty, side_str, &symbol,
+                    &sec_type_str, &con_id_str, kind, tif, &attrs,
+                );
+                let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+                conn.send_fix(&refs)
             }
         };
         match result {
@@ -1600,6 +1558,155 @@ fn adjustable_stop_tags(
         tags.push((6269, adjustable_trailing_unit.to_string()));
     }
     tags
+}
+
+/// The replace message for a working order, in the reference's field order
+/// (ib-agent#192 group A). The identity fields the reference leaves out of a
+/// replace (exchange, currency, routing) are left out; the order type, its
+/// prices and the time-in-force are restated from the wanted state.
+///
+/// Captured: LMT, STP, STP LMT, TRAIL (amount and percent), TRAIL LIMIT,
+/// outside-RTH (sent only when set), time-in-force and the good-till date.
+/// Other kinds restate their prices in the same fields as their submission;
+/// their replace has not been captured.
+/// Not restated: the OCA group and parent link (the reference leaves them
+/// out and the server keeps them), and the other extended attributes.
+#[allow(clippy::too_many_arguments)]
+fn modify_fields(
+    clord: &str,
+    orig_clord: &str,
+    account_id: &str,
+    qty: u32,
+    side: &str,
+    symbol: &str,
+    sec_type: &str,
+    con_id: &str,
+    kind: crate::types::OrderKind,
+    tif: u8,
+    attrs: &crate::types::OrderAttrs,
+) -> Vec<(u32, String)> {
+    use crate::types::OrderKind as K;
+    let p = |v: crate::types::Price| format_price(v).to_string();
+
+    // Prices go before the account; type-specific fields after the order
+    // type. A trail value rides both the stop field and the trail field.
+    let mut before_account: Vec<(u32, String)> = Vec::new();
+    let mut stop_trigger: Option<String> = None; // restated for STP / STP LMT
+    let mut trail_offset: Option<String> = None; // TRAIL LIMIT limit offset
+    let mut trail_unit: Option<&str> = None;     // 0 = amount, 100 = percent
+    let mut after_type: Vec<(u32, String)> = Vec::new();
+    let ord_type: &str = match kind {
+        K::Market => "1",
+        K::Limit { price } => { before_account.push((44, p(price))); "2" }
+        K::Stop { stop_price } => {
+            before_account.push((99, p(stop_price)));
+            stop_trigger = Some(p(stop_price));
+            "3"
+        }
+        K::StopLimit { price, stop_price } => {
+            before_account.push((44, p(price)));
+            before_account.push((99, p(stop_price)));
+            stop_trigger = Some(p(stop_price));
+            "4"
+        }
+        K::TrailingStop { trail_amt, .. } => {
+            before_account.push((99, p(trail_amt)));
+            trail_unit = Some("0");
+            after_type.push((211, p(trail_amt)));
+            after_type.push((18, "a".to_string()));
+            "P"
+        }
+        K::TrailPct { trail_pct, .. } => {
+            let pct = format!("{:.2}", trail_pct as f64 / 100.0);
+            before_account.push((99, pct.clone()));
+            trail_unit = Some("100");
+            after_type.push((211, pct));
+            after_type.push((18, "a".to_string()));
+            "P"
+        }
+        K::TrailingStopLimit { lmt_offset, trail_amt, .. } => {
+            before_account.push((99, p(trail_amt)));
+            trail_offset = Some(p(lmt_offset));
+            trail_unit = Some("0");
+            after_type.push((211, p(trail_amt)));
+            "TSL"
+        }
+        K::Moc => "5",
+        K::Loc { price } => { before_account.push((44, p(price))); "B" }
+        K::Mit { stop_price } => { before_account.push((99, p(stop_price))); "J" }
+        K::Lit { price, stop_price } => {
+            before_account.push((44, p(price)));
+            before_account.push((99, p(stop_price)));
+            "LT"
+        }
+        K::Mtl => "K",
+        K::MktPrt => "U",
+        K::StpPrt { stop_price } => { before_account.push((99, p(stop_price))); "SP" }
+        K::MidPrice { price_cap } => {
+            if price_cap > 0 { before_account.push((44, p(price_cap))); }
+            "MIDPX"
+        }
+        K::SnapMkt => "SMKT",
+        K::SnapMid => "SMID",
+        K::SnapPri => "SREL",
+        K::PegMkt { offset } => {
+            if offset > 0 { after_type.push((211, p(offset))); }
+            "E"
+        }
+        K::PegMid { offset } => {
+            after_type.push((8403, "0.0".to_string()));
+            after_type.push((8404, "0.0".to_string()));
+            if offset > 0 { after_type.push((211, p(offset))); }
+            "E"
+        }
+        K::Rel { offset } => {
+            after_type.push((211, p(offset)));
+            after_type.push((18, "R".to_string()));
+            "P"
+        }
+        K::AdjustableStop { stop_price, .. } => {
+            before_account.push((99, p(stop_price)));
+            stop_trigger = Some(p(stop_price));
+            "3"
+        }
+    };
+
+    let tif_byte = [tif];
+    let tif_str = std::str::from_utf8(&tif_byte).unwrap_or("0").to_string();
+    let mut f: Vec<(u32, String)> = vec![
+        (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE.to_string()),
+        (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
+        (11, clord.to_string()),
+        (41, orig_clord.to_string()),
+    ];
+    f.extend(before_account);
+    f.push((1, account_id.to_string()));
+    // Good-till: the reference restates the expiry right after the account.
+    if attrs.good_till_date_ymd > 0 {
+        f.push((432, format!("{:08}", attrs.good_till_date_ymd)));
+    } else if attrs.good_till > 0 {
+        f.push((126, unix_to_ib_utc_dash(attrs.good_till)));
+    }
+    if let Some(s) = stop_trigger { f.push((6117, s)); }
+    if let Some(o) = trail_offset { f.push((6370, o)); }
+    f.push((6122, "c".to_string()));
+    // Outside-RTH only when the order has it: a replace without it leaves
+    // the order regular-hours only (ibx#247).
+    if attrs.outside_rth { f.push((6433, "1".to_string())); }
+    if let Some(u) = trail_unit { f.push((6268, u.to_string())); }
+    f.push((38, format_uint(qty as u64).to_string()));
+    f.push((54, side.to_string()));
+    f.push((40, ord_type.to_string()));
+    f.extend(after_type);
+    f.push((55, symbol.to_string()));
+    f.push((167, sec_type.to_string()));
+    f.push((6035, symbol.to_string()));
+    f.push((59, tif_str));
+    f.push((6008, con_id.to_string()));
+    f.push((6088, "Socket".to_string()));
+    f.push((6211, String::new()));
+    f.push((6238, String::new()));
+    f
 }
 
 /// One shared encoder for every extended order submission (ibx#224): the
@@ -2075,6 +2182,11 @@ mod tests {
     /// Encode one order request through `drain_and_send_orders` over a
     /// loopback socket and return the sent tags in wire order.
     fn wire_tags(req: OrderRequest) -> Vec<(u32, String)> {
+        wire_tags_with(|_| {}, req)
+    }
+
+    /// Same as `wire_tags`, with a hook to set up the engine state first.
+    fn wire_tags_with(setup: impl FnOnce(&mut Context), req: OrderRequest) -> Vec<(u32, String)> {
         use std::io::Read;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -2083,6 +2195,7 @@ mod tests {
 
         let mut context = Context::new();
         context.market.register(265598);
+        setup(&mut context);
         context.pending_orders.push(req);
         let shared = Arc::new(SharedState::new());
         let mut conn = Some(Connection::new_raw(client).unwrap());
@@ -2160,6 +2273,127 @@ mod tests {
         assert_eq!(pos(&tags, 6257), pos(&tags, 204) + 1);
         assert!(pos(&tags, 6259) < pos(&tags, 583));
         assert!(tag(&tags, 6260).is_none(), "trail tags only for a trail conversion");
+    }
+
+    // ── Replace (ibx#247 ibx#324 ibx#334 ibx#349) ──
+    //
+    // Each case replays one replace the reference sent (ib-agent#192 group
+    // A, account id replaced) and checks ibx sends the same fields in the
+    // same order with the same values. Left out on purpose: 6205 (only when
+    // the original order carried a price cap, meaning unknown; the server
+    // accepts replaces without it) and 6531 (bracket group index, which ibx
+    // does not send on submit either).
+
+    fn parse_frame(s: &str) -> Vec<(u32, String)> {
+        s.split('|')
+            .filter_map(|f| {
+                let (t, v) = f.split_once('=')?;
+                Some((t.parse().ok()?, v.to_string()))
+            })
+            .filter(|(t, _)| !matches!(t, 6205 | 6531))
+            .collect()
+    }
+
+    /// Send one Modify for a working order `order_id` (AAPL, the given side)
+    /// and return the fields, framing and timestamps removed.
+    fn replace_fields(order_id: u64, side: Side, qty: u32, kind: crate::types::OrderKind,
+                      tif: u8, attrs: crate::types::OrderAttrs) -> Vec<(u32, String)> {
+        wire_tags_with(
+            |ctx| {
+                ctx.set_symbol(0, "AAPL".to_string());
+                ctx.insert_order(Order::new(order_id, 0, side, qty, 0, b'2', b'0', 0));
+            },
+            OrderRequest::Modify { new_order_id: order_id, order_id, qty, kind, tif, attrs },
+        )
+        .into_iter()
+        .filter(|(t, _)| !matches!(t, 8 | 9 | 34 | 52 | 10))
+        .collect()
+    }
+
+    fn assert_same_replace(ours: &[(u32, String)], reference: &str) {
+        let want = parse_frame(reference);
+        let ours_tags: Vec<u32> = ours.iter().map(|(t, _)| *t).collect();
+        let want_tags: Vec<u32> = want.iter().map(|(t, _)| *t).collect();
+        assert_eq!(ours_tags, want_tags, "field order differs\n ours: {:?}\n want: {:?}", ours, want);
+        for ((t, a), (_, b)) in ours.iter().zip(want.iter()) {
+            let same = match (a.parse::<f64>(), b.parse::<f64>()) {
+                (Ok(x), Ok(y)) => (x - y).abs() < 1e-9,
+                _ => a == b,
+            };
+            assert!(same, "field {}: ours {:?}, reference {:?}", t, a, b);
+        }
+    }
+
+    fn px(v: f64) -> i64 { (v * crate::types::PRICE_SCALE as f64).round() as i64 }
+
+    fn attrs_rth(outside_rth: bool) -> crate::types::OrderAttrs {
+        crate::types::OrderAttrs { outside_rth, ..Default::default() }
+    }
+
+    #[test]
+    fn replace_limit_without_outside_rth_matches_reference() {
+        let ours = replace_fields(1626578553, Side::Buy, 1,
+            crate::types::OrderKind::Limit { price: px(241.22) }, b'0', attrs_rth(false));
+        assert_same_replace(&ours, "35=G|11=1626578553.1|41=1626578553.0|44=241.22|1=DU1|6205=1|6122=c|38=1|54=1|40=2|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+    }
+
+    #[test]
+    fn replace_limit_with_outside_rth_matches_reference() {
+        let ours = replace_fields(1626578554, Side::Buy, 1,
+            crate::types::OrderKind::Limit { price: px(241.22) }, b'0', attrs_rth(true));
+        assert_same_replace(&ours, "35=G|11=1626578554.1|41=1626578554.0|44=241.22|1=DU1|6122=c|6433=1|38=1|54=1|40=2|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+    }
+
+    #[test]
+    fn replace_stop_moves_the_trigger_like_reference() {
+        let ours = replace_fields(1626578555, Side::Sell, 1,
+            crate::types::OrderKind::Stop { stop_price: px(234.43) }, b'0', attrs_rth(false));
+        assert_same_replace(&ours, "35=G|11=1626578555.1|41=1626578555.0|99=234.43|1=DU1|6117=234.43|6122=c|38=1|54=2|40=3|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+    }
+
+    #[test]
+    fn replace_stop_limit_moves_both_prices_like_reference() {
+        let ours = replace_fields(1626578556, Side::Sell, 1,
+            crate::types::OrderKind::StopLimit { price: px(227.63), stop_price: px(231.03) }, b'0', attrs_rth(false));
+        assert_same_replace(&ours, "35=G|11=1626578556.1|41=1626578556.0|44=227.63|99=231.03|1=DU1|6117=231.03|6205=1|6122=c|38=1|54=2|40=4|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+    }
+
+    #[test]
+    fn replace_trailing_amount_matches_reference() {
+        let ours = replace_fields(1626578557, Side::Sell, 1,
+            crate::types::OrderKind::TrailingStop { trail_amt: px(105.32), trail_stop_price: 0 }, b'0', attrs_rth(false));
+        assert_same_replace(&ours, "35=G|11=1626578557.1|41=1626578557.0|99=105.32|1=DU1|6122=c|6268=0|38=1|54=2|40=P|211=105.32|18=a|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+    }
+
+    #[test]
+    fn replace_trailing_limit_matches_reference() {
+        // The initial stop trigger is not restated on a replace.
+        let ours = replace_fields(1626578568, Side::Sell, 1,
+            crate::types::OrderKind::TrailingStopLimit { lmt_offset: px(0.50), trail_amt: px(105.32), trail_stop_price: px(237.82) },
+            b'0', attrs_rth(false));
+        assert_same_replace(&ours, "35=G|11=1626578568.1|41=1626578568.0|99=105.32|1=DU1|6370=0.50|6205=1|6122=c|6268=0|38=1|54=2|40=TSL|211=105.32|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+    }
+
+    #[test]
+    fn replace_trailing_percent_matches_reference() {
+        let ours = replace_fields(1626578558, Side::Sell, 1,
+            crate::types::OrderKind::TrailPct { trail_pct: 3100, trail_stop_price: 0 }, b'0', attrs_rth(false));
+        assert_same_replace(&ours, "35=G|11=1626578558.1|41=1626578558.0|99=31.00|1=DU1|6122=c|6268=100|38=1|54=2|40=P|211=31.00|18=a|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
+    }
+
+    #[test]
+    fn replace_carries_the_new_time_in_force_like_reference() {
+        let ours = replace_fields(1626578559, Side::Buy, 1,
+            crate::types::OrderKind::Limit { price: px(237.82) }, b'1', attrs_rth(false));
+        assert_same_replace(&ours, "35=G|11=1626578559.1|41=1626578559.0|44=237.82|1=DU1|6205=1|6122=c|38=1|54=1|40=2|55=AAPL|167=STK|6035=AAPL|59=1|6008=265598|6088=Socket|6211=|6238=");
+    }
+
+    #[test]
+    fn replace_good_till_stop_matches_reference() {
+        let attrs = crate::types::OrderAttrs { good_till: 1_790_798_400, ..Default::default() }; // 20260930 20:00:00 UTC
+        let ours = replace_fields(1626578575, Side::Sell, 200,
+            crate::types::OrderKind::Stop { stop_price: px(200.45) }, b'6', attrs);
+        assert_same_replace(&ours, "35=G|11=1626578575.1|41=1626578575.0|99=200.45|1=DU1|126=20260930-20:00:00|6117=200.45|6122=c|6531=4/2/-6183061|38=200|54=2|40=3|55=AAPL|167=STK|6035=AAPL|59=6|6008=265598|6088=Socket|6211=|6238=");
     }
 
     #[test]

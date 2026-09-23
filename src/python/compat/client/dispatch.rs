@@ -174,6 +174,11 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "error", (reject.order_id as i64, code, msg.as_str(), ""));
         }
 
+        // Order errors raised before sending -> error
+        for (order_id, code, msg) in shared.orders.drain_order_errors() {
+            call_wrapper!(self.wrapper, py, "error", (order_id as i64, code, msg.as_str(), ""));
+        }
+
         // Poll quotes for changes -> tickPrice/tickSize
         // Poll quotes via shared ClientCore (same logic as Rust dispatch)
         let instruments = self.core.snapshot_instruments();

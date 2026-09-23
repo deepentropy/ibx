@@ -122,6 +122,11 @@ impl EClient {
             wrapper.error(reject.order_id as i64, code, &msg, "");
         }
 
+        // Order errors raised before sending → error
+        for (order_id, code, msg) in self.shared.orders.drain_order_errors() {
+            wrapper.error(order_id as i64, code, &msg, "");
+        }
+
         // What-if → open_order(contract, order, OrderState) + order_status (iso with ibapi)
         for wi in self.shared.orders.drain_what_if_responses() {
             let fmt = |p: Price| format!("{:.2}", p as f64 / PRICE_SCALE_F);

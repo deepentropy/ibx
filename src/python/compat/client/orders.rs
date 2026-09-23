@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use crate::api::types::{
     Contract as ApiContract, Order as ApiOrder, ExecutionFilter,
 };
-use crate::client_core::ClientCore;
+use crate::client_core::{ClientCore, ModifyPlan};
 use crate::types::*;
 use super::EClient;
 use super::super::contract::{Contract, Order, CommissionAndFeesReport, Execution};
@@ -35,16 +35,20 @@ impl EClient {
 
         let instrument = self.find_or_register_instrument(contract)?;
 
-        // If orderId is already tracked, this is a modification — emit Modify instead of Submit.
-        let cmd = if self.core.is_order_tracked(oid) {
-            let price = (api_order.lmt_price * crate::api::types::PRICE_SCALE_F) as i64;
-            let qty = api_order.total_quantity as u32;
-            ControlCommand::Order(OrderRequest::Modify {
-                new_order_id: oid,
-                order_id: oid,
-                price,
-                qty,
-            })
+        // If orderId is already tracked, this is a modification: replace it
+        // with the full wanted state (ibx#247).
+        let cmd = if let Some(working_type) = self.core.tracked_order_type(oid) {
+            match ClientCore::build_modify_request(&api_order, oid, &working_type)
+                .map_err(|e| PyRuntimeError::new_err(e))?
+            {
+                ModifyPlan::Send(cmd) => cmd,
+                ModifyPlan::Refused { code, message } => {
+                    // Refused before sending, like the reference: the caller
+                    // gets error() and the tracked order keeps its old state.
+                    self.shared_state()?.orders.push_order_error(oid, code, message);
+                    return Ok(());
+                }
+            }
         } else {
             ClientCore::build_order_request(&api_order, oid, instrument)
                 .map_err(|e| PyRuntimeError::new_err(e))?

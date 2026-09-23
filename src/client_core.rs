@@ -301,6 +301,14 @@ pub struct TrackedOrder {
     pub instrument: InstrumentId,
 }
 
+/// What `place_order` does with an order id that is already working (ibx#247).
+pub enum ModifyPlan {
+    /// Send this replace.
+    Send(ControlCommand),
+    /// Refused before sending, as the reference does; report it through `error()`.
+    Refused { code: i64, message: String },
+}
+
 // ── ClientCore ──
 
 /// Shared subscription tracking and dispatch preparation logic.
@@ -1401,6 +1409,116 @@ impl ClientCore {
              See https://github.com/deepentropy/ibx/issues/202",
             sec_type
         ))
+    }
+
+    /// Order type of a tracked order, as the caller placed it.
+    pub fn tracked_order_type(&self, order_id: u64) -> Option<String> {
+        self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.order_type.clone())
+    }
+
+    /// The order kind with its prices, as the extended submit path builds it
+    /// from the same `Order` fields. Used for a replace, which restates the
+    /// order type and its prices (ibx#247).
+    pub fn order_kind(order: &ApiOrder) -> Result<OrderKind, String> {
+        let scale = |v: f64| (v * PRICE_SCALE_F) as i64;
+        if !order.adjusted_order_type.is_empty() {
+            let adjusted = match order.adjusted_order_type.to_uppercase().as_str() {
+                "STP" => AdjustedOrderType::Stop,
+                "STP LMT" => AdjustedOrderType::StopLimit,
+                "TRAIL" => AdjustedOrderType::Trail,
+                "TRAIL LIMIT" => AdjustedOrderType::TrailLimit,
+                other => return Err(format!("unknown adjustedOrderType '{}'", other)),
+            };
+            let adj_trail = if order.adjusted_trailing_amount == f64::MAX {
+                0.0
+            } else {
+                order.adjusted_trailing_amount
+            };
+            return Ok(OrderKind::AdjustableStop {
+                stop_price: scale(order.aux_price),
+                trigger_price: scale(order.trigger_price),
+                adjusted_order_type: adjusted,
+                adjusted_stop_price: scale(order.adjusted_stop_price),
+                adjusted_stop_limit_price: scale(order.adjusted_stop_limit_price),
+                adjusted_trailing_amount: scale(adj_trail),
+                adjustable_trailing_unit: order.adjustable_trailing_unit,
+            });
+        }
+        let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { scale(order.trail_stop_price) };
+        Ok(match order.order_type.to_uppercase().as_str() {
+            "MKT" => OrderKind::Market,
+            "LMT" => OrderKind::Limit { price: scale(order.lmt_price) },
+            "STP" => OrderKind::Stop { stop_price: scale(order.aux_price) },
+            "STP LMT" => OrderKind::StopLimit {
+                price: scale(order.lmt_price), stop_price: scale(order.aux_price),
+            },
+            "TRAIL" => {
+                if order.trailing_percent > 0.0 {
+                    OrderKind::TrailPct {
+                        trail_pct: (order.trailing_percent * 100.0) as u32,
+                        trail_stop_price: trail_stop,
+                    }
+                } else {
+                    OrderKind::TrailingStop { trail_amt: scale(order.aux_price), trail_stop_price: trail_stop }
+                }
+            }
+            "TRAIL LIMIT" => {
+                let offset = if order.lmt_price_offset != f64::MAX {
+                    order.lmt_price_offset
+                } else {
+                    order.lmt_price
+                };
+                OrderKind::TrailingStopLimit {
+                    lmt_offset: scale(offset),
+                    trail_amt: scale(order.aux_price),
+                    trail_stop_price: trail_stop,
+                }
+            }
+            "MOC" => OrderKind::Moc,
+            "LOC" => OrderKind::Loc { price: scale(order.lmt_price) },
+            "MIT" => OrderKind::Mit { stop_price: scale(order.aux_price) },
+            "LIT" => OrderKind::Lit { price: scale(order.lmt_price), stop_price: scale(order.aux_price) },
+            "MTL" | "BOX TOP" => OrderKind::Mtl,
+            "MKT PRT" => OrderKind::MktPrt,
+            "STP PRT" => OrderKind::StpPrt { stop_price: scale(order.aux_price) },
+            "REL" => OrderKind::Rel { offset: scale(order.aux_price) },
+            "PEG MKT" => OrderKind::PegMkt { offset: scale(order.aux_price) },
+            "PEG MID" | "PEG MIDPT" => OrderKind::PegMid { offset: scale(order.aux_price) },
+            "MIDPX" | "MIDPRICE" => OrderKind::MidPrice { price_cap: scale(order.lmt_price) },
+            "SNAP MKT" => OrderKind::SnapMkt,
+            "SNAP MID" | "SNAP MIDPT" => OrderKind::SnapMid,
+            "SNAP PRI" | "SNAP PRIM" => OrderKind::SnapPri,
+            _ => return Err(format!("Unsupported order type: '{}'", order.order_type)),
+        })
+    }
+
+    /// Build the replace for an order that is already working, from the full
+    /// `Order` the caller passed (ibx#247 ibx#324 ibx#334 ibx#349).
+    ///
+    /// The reference refuses a change of order type before sending anything
+    /// (error 329, ib-agent#192 A4b); so does this.
+    pub fn build_modify_request(
+        order: &ApiOrder,
+        order_id: u64,
+        working_order_type: &str,
+    ) -> Result<ModifyPlan, String> {
+        if !working_order_type.eq_ignore_ascii_case(&order.order_type) {
+            return Ok(ModifyPlan::Refused {
+                code: 329,
+                message: format!(
+                    "Order modify failed. Cannot change to the new order type.{}",
+                    order.order_type.to_uppercase(),
+                ),
+            });
+        }
+        Ok(ModifyPlan::Send(ControlCommand::Order(OrderRequest::Modify {
+            new_order_id: order_id,
+            order_id,
+            qty: order.total_quantity as u32,
+            kind: Self::order_kind(order)?,
+            tif: order.tif_byte(),
+            attrs: order.attrs(),
+        })))
     }
 
     /// Build an `OrderRequest` from an API `Order`, handling all order types.

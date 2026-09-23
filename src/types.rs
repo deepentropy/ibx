@@ -526,6 +526,41 @@ pub enum OrderKind {
     },
 }
 
+impl OrderKind {
+    /// Snap every price of this kind to the tick grid (ibx#216). Percent
+    /// values are not prices and are left alone.
+    pub fn snap_prices(&mut self, tick: i64) {
+        if tick <= 0 {
+            return;
+        }
+        let s = |p: &mut Price| *p = snap_to_tick(*p, tick);
+        match self {
+            OrderKind::Market | OrderKind::Moc | OrderKind::Mtl | OrderKind::MktPrt
+            | OrderKind::SnapMkt | OrderKind::SnapMid | OrderKind::SnapPri => {}
+            OrderKind::TrailPct { trail_stop_price, .. } => s(trail_stop_price),
+            OrderKind::Limit { price } | OrderKind::Loc { price } => s(price),
+            OrderKind::Stop { stop_price }
+            | OrderKind::Mit { stop_price }
+            | OrderKind::StpPrt { stop_price } => s(stop_price),
+            OrderKind::StopLimit { price, stop_price }
+            | OrderKind::Lit { price, stop_price } => { s(price); s(stop_price); }
+            OrderKind::TrailingStop { trail_amt, trail_stop_price } => { s(trail_amt); s(trail_stop_price); }
+            OrderKind::TrailingStopLimit { lmt_offset, trail_amt, trail_stop_price } => { s(lmt_offset); s(trail_amt); s(trail_stop_price); }
+            OrderKind::MidPrice { price_cap } => s(price_cap),
+            OrderKind::PegMkt { offset } | OrderKind::PegMid { offset }
+            | OrderKind::Rel { offset } => s(offset),
+            OrderKind::AdjustableStop {
+                stop_price, trigger_price, adjusted_stop_price, adjusted_stop_limit_price,
+                adjusted_trailing_amount, adjustable_trailing_unit, ..
+            } => {
+                s(stop_price); s(trigger_price); s(adjusted_stop_price); s(adjusted_stop_limit_price);
+                // Same rule as SubmitAdjustableStop: a percent does not snap.
+                if *adjustable_trailing_unit == 0 { s(adjusted_trailing_amount); }
+            }
+        }
+    }
+}
+
 /// Order request sent via control channel, processed by engine.
 #[derive(Debug, Clone)]
 pub enum OrderRequest {
@@ -876,11 +911,17 @@ pub enum OrderRequest {
     CancelAll {
         instrument: InstrumentId,
     },
+    /// Replace a working order. Carries the full wanted state, like a new
+    /// order does: the replace restates the order type, prices, time-in-force
+    /// and the attributes the reference restates (ibx#247 ibx#324 ibx#334
+    /// ibx#349, reference capture ib-agent#192 group A).
     Modify {
         new_order_id: OrderId,
         order_id: OrderId,
-        price: Price,
         qty: u32,
+        kind: OrderKind,
+        tif: u8,
+        attrs: OrderAttrs,
     },
 }
 
@@ -999,7 +1040,7 @@ impl OrderRequest {
             | Self::SubmitMtl { .. } | Self::SubmitMktPrt { .. }
             | Self::SubmitSnapMkt { .. } | Self::SubmitSnapMid { .. }
             | Self::SubmitSnapPri { .. } | Self::SubmitMtlAuc { .. } => {}
-            Self::Modify { price, .. } => s(price),
+            Self::Modify { kind, .. } => kind.snap_prices(tick),
             Self::SubmitLimit { price, .. }
             | Self::SubmitLimitGtc { price, .. }
             | Self::SubmitLimitIoc { price, .. }
@@ -1042,30 +1083,7 @@ impl OrderRequest {
                 // offset; a percent (unit 100) is not a price and must not snap.
                 if *adjustable_trailing_unit == 0 { s(adjusted_trailing_amount); }
             }
-            Self::SubmitEx { kind, .. } => match kind {
-                OrderKind::Market | OrderKind::Moc | OrderKind::Mtl | OrderKind::MktPrt
-                | OrderKind::SnapMkt | OrderKind::SnapMid | OrderKind::SnapPri => {}
-                OrderKind::TrailPct { trail_stop_price, .. } => s(trail_stop_price),
-                OrderKind::Limit { price } | OrderKind::Loc { price } => s(price),
-                OrderKind::Stop { stop_price }
-                | OrderKind::Mit { stop_price }
-                | OrderKind::StpPrt { stop_price } => s(stop_price),
-                OrderKind::StopLimit { price, stop_price }
-                | OrderKind::Lit { price, stop_price } => { s(price); s(stop_price); }
-                OrderKind::TrailingStop { trail_amt, trail_stop_price } => { s(trail_amt); s(trail_stop_price); }
-                OrderKind::TrailingStopLimit { lmt_offset, trail_amt, trail_stop_price } => { s(lmt_offset); s(trail_amt); s(trail_stop_price); }
-                OrderKind::MidPrice { price_cap } => s(price_cap),
-                OrderKind::PegMkt { offset } | OrderKind::PegMid { offset }
-                | OrderKind::Rel { offset } => s(offset),
-                OrderKind::AdjustableStop {
-                    stop_price, trigger_price, adjusted_stop_price, adjusted_stop_limit_price,
-                    adjusted_trailing_amount, adjustable_trailing_unit, ..
-                } => {
-                    s(stop_price); s(trigger_price); s(adjusted_stop_price); s(adjusted_stop_limit_price);
-                    // Same rule as SubmitAdjustableStop: a percent does not snap.
-                    if *adjustable_trailing_unit == 0 { s(adjusted_trailing_amount); }
-                }
-            },
+            Self::SubmitEx { kind, .. } => kind.snap_prices(tick),
         }
     }
 }
@@ -1642,8 +1660,10 @@ mod tests {
         let req = OrderRequest::Modify {
             new_order_id: 2,
             order_id: 1,
-            price: 100 * PRICE_SCALE,
             qty: 200,
+            kind: OrderKind::Limit { price: 100 * PRICE_SCALE },
+            tif: b'0',
+            attrs: OrderAttrs::default(),
         };
         let req2 = req.clone();
         match (req, req2) {
@@ -1892,7 +1912,10 @@ mod tests {
         assert_eq!(req.instrument(), Some(7));
         assert_eq!(OrderRequest::Cancel { order_id: 1 }.instrument(), None);
         assert_eq!(
-            OrderRequest::Modify { new_order_id: 2, order_id: 1, price: 0, qty: 1 }.instrument(),
+            OrderRequest::Modify {
+                new_order_id: 2, order_id: 1, qty: 1,
+                kind: OrderKind::Market, tif: b'0', attrs: OrderAttrs::default(),
+            }.instrument(),
             None
         );
     }
@@ -1917,12 +1940,17 @@ mod tests {
 
     #[test]
     fn order_request_modify_fields() {
-        let req = OrderRequest::Modify { new_order_id: 100, order_id: 99, price: 200 * PRICE_SCALE, qty: 10 };
+        let req = OrderRequest::Modify {
+            new_order_id: 100, order_id: 99, qty: 10,
+            kind: OrderKind::Stop { stop_price: 200 * PRICE_SCALE },
+            tif: b'1', attrs: OrderAttrs::default(),
+        };
         match req {
-            OrderRequest::Modify { order_id, price, qty, .. } => {
+            OrderRequest::Modify { order_id, qty, kind, tif, .. } => {
                 assert_eq!(order_id, 99);
-                assert_eq!(price, 200 * PRICE_SCALE);
+                assert!(matches!(kind, OrderKind::Stop { stop_price } if stop_price == 200 * PRICE_SCALE));
                 assert_eq!(qty, 10);
+                assert_eq!(tif, b'1');
             }
             _ => panic!("wrong variant"),
         }

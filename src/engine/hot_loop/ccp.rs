@@ -811,25 +811,39 @@ impl CcpState {
                 parsed.get(&103).map(|s| s.as_str()).unwrap_or(""));
         }
 
-        let status = match ord_status {
-            "0" => {
-                // 39=0 is New on the wire, but the gateway reports PreSubmitted
-                // until the order is actually routed to and acknowledged by an
-                // exchange (for example a limit order resting pre-market). Routing
-                // shows up on the same exec report as a non-empty ExDestination
-                // (tag 100) plus an exec ref (tag 198) other than "NONE"; before
-                // routing both are absent/"NONE". Captured in ib-agent#162 (ibx#210).
-                let routed = parsed.get(&100).is_some_and(|s| !s.is_empty())
-                    || parsed.get(&198).is_some_and(|s| s != "NONE" && !s.is_empty());
-                if routed {
-                    crate::types::OrderStatus::Submitted
-                } else {
-                    crate::types::OrderStatus::PreSubmitted
-                }
+        // 39=0 is New on the wire, but the gateway reports PreSubmitted
+        // until the order is actually routed to and acknowledged by an
+        // exchange (for example a limit order resting pre-market). Routing
+        // shows up on the same exec report as a non-empty ExDestination
+        // (tag 100) plus an exec ref (tag 198) other than "NONE"; before
+        // routing both are absent/"NONE". Captured in ib-agent#162 (ibx#210).
+        let working = || {
+            let routed = parsed.get(&100).is_some_and(|s| !s.is_empty())
+                || parsed.get(&198).is_some_and(|s| s != "NONE" && !s.is_empty());
+            if routed {
+                crate::types::OrderStatus::Submitted
+            } else {
+                crate::types::OrderStatus::PreSubmitted
             }
-            "5" => crate::types::OrderStatus::Submitted,
+        };
+        // A cancel request carries a "C"-prefixed ClOrdID; a replace carries
+        // the order's next version.
+        let is_cancel_request = parsed.get(&11).is_some_and(|s| s.starts_with('C'));
+        let status = match ord_status {
+            "0" => working(),
+            // Replaced: back to working, by the same routing rule. The
+            // reference reports no status change across a replace
+            // (ib-agent#192 A1a: PreSubmitted before and after).
+            "5" => working(),
             "A" => crate::types::OrderStatus::PreSubmitted,
             "E" => crate::types::OrderStatus::PendingReplace,
+            // Pending on a replace: the reference reports nothing, so keep
+            // the current status. Reporting it as PendingCancel left the
+            // order looking cancelled, since nothing moves it back (ibx#247).
+            "6" if !is_cancel_request => match context.order(clord_id) {
+                Some(o) => o.status,
+                None => crate::types::OrderStatus::PendingReplace,
+            },
             "6" => crate::types::OrderStatus::PendingCancel,
             "1" => crate::types::OrderStatus::PartiallyFilled,
             "2" => crate::types::OrderStatus::Filled,
@@ -2208,6 +2222,46 @@ mod tests {
         ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
         assert_eq!(context.order(42).unwrap().status,
             crate::types::OrderStatus::Submitted);
+    }
+
+    // ibx#247: a limit replace is acked with a pending report (39=6 on the
+    // new version) and then Replaced (39=5). The reference reports no status
+    // change across it (ib-agent#192 A1a); ibx used to report PendingCancel
+    // and never move back, so the order looked cancelled.
+    #[test]
+    fn ord_status_replace_keeps_the_working_status() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let waiting = exec_report_frame(&[(39, "0"), (150, "0"), (198, "NONE")]);
+        ccp.handle_exec_report(&waiting, &mut context, &shared, &None, "");
+        shared.orders.drain_order_updates();
+
+        let pending = exec_report_frame(&[(11, "42.1"), (39, "6"), (150, "6"), (198, "NONE")]);
+        ccp.handle_exec_report(&pending, &mut context, &shared, &None, "");
+        let replaced = exec_report_frame(&[(11, "42.1"), (41, "42.0"), (39, "5"), (150, "5"), (198, "NONE")]);
+        ccp.handle_exec_report(&replaced, &mut context, &shared, &None, "");
+
+        assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::PreSubmitted);
+        assert!(shared.orders.drain_order_updates().is_empty(), "no status change is reported");
+    }
+
+    #[test]
+    fn ord_status_replace_of_a_routed_order_stays_submitted() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let routed = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1")]);
+        ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
+        let replaced = exec_report_frame(&[(11, "42.1"), (39, "5"), (150, "5"), (198, "NONE")]);
+        ccp.handle_exec_report(&replaced, &mut context, &shared, &None, "");
+        assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::Submitted);
+    }
+
+    #[test]
+    fn ord_status_pending_on_a_cancel_request_is_pending_cancel() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let routed = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA"), (198, "ARCA:1")]);
+        ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
+        let pending = exec_report_frame(&[(11, "C42"), (39, "6"), (150, "6")]);
+        ccp.handle_exec_report(&pending, &mut context, &shared, &None, "");
+        assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::PendingCancel);
     }
 
     // ibx#238 / ib-agent#172: in the UP portfolio snapshot the average cost is

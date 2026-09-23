@@ -2362,8 +2362,8 @@ fn modify_limit_order_price_via_resubmit() {
 
     let mut found = false;
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::Modify { order_id: 80, price, qty, .. }) = cmd {
-            assert_eq!(price, (152.0 * PRICE_SCALE_F) as i64);
+        if let ControlCommand::Order(OrderRequest::Modify { order_id: 80, kind, qty, .. }) = cmd {
+            assert!(matches!(kind, OrderKind::Limit { price } if price == (152.0 * PRICE_SCALE_F) as i64));
             assert_eq!(qty, 100);
             found = true;
         }
@@ -2475,9 +2475,11 @@ fn modify_tif_day_to_gtc_via_resubmit() {
 
     let mut found_modify = false;
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::Modify { order_id: 88, price, qty, .. }) = cmd {
-            assert_eq!(price, (150.0 * PRICE_SCALE_F) as i64);
+        if let ControlCommand::Order(OrderRequest::Modify { order_id: 88, kind, qty, tif, .. }) = cmd {
+            assert!(matches!(kind, OrderKind::Limit { price } if price == (150.0 * PRICE_SCALE_F) as i64));
             assert_eq!(qty, 100);
+            // ibx#349: the new time-in-force must reach the replace.
+            assert_eq!(tif, b'1', "DAY -> GTC must be carried");
             found_modify = true;
         }
     }
@@ -2503,9 +2505,9 @@ fn modify_price_and_qty_simultaneously() {
 
     let mut found = false;
     while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::Modify { order_id: 55, qty, price, .. }) = cmd {
+        if let ControlCommand::Order(OrderRequest::Modify { order_id: 55, qty, kind, .. }) = cmd {
             assert_eq!(qty, 200);
-            assert_eq!(price, (148.0 * PRICE_SCALE_F) as i64);
+            assert!(matches!(kind, OrderKind::Limit { price } if price == (148.0 * PRICE_SCALE_F) as i64));
             found = true;
         }
     }
@@ -2529,13 +2531,95 @@ fn modify_order_type_lmt_to_stp() {
     };
     client.place_order(66, &spy(), &modified).unwrap();
 
-    let mut found_modify = false;
-    while let Ok(cmd) = rx.try_recv() {
-        if matches!(cmd, ControlCommand::Order(OrderRequest::Modify { order_id: 66, .. })) {
-            found_modify = true;
-        }
+    // The reference refuses a change of order type before sending anything:
+    // error 329, no replace, the order stays LMT (ib-agent#192 A4b, ibx#349).
+    assert!(rx.try_recv().is_err(), "no replace may be sent for a type change");
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].0, 66);
+    assert_eq!(errors[0].1, 329);
+    assert!(errors[0].2.ends_with("Cannot change to the new order type.STP"), "{}", errors[0].2);
+    assert_eq!(client.core.tracked_order_type(66).as_deref(), Some("LMT"));
+}
+
+// The refusal must carry the full order id: ibx ids do not fit in 32 bits.
+#[test]
+fn modify_type_change_error_keeps_a_large_order_id() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let id: i64 = 1_790_166_425_204;
+    let lmt = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 1.0, ..Default::default() };
+    let stp = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "STP".into(), aux_price: 2.0, ..Default::default() };
+    client.place_order(id, &spy(), &lmt).unwrap();
+    while rx.try_recv().is_ok() {}
+    client.place_order(id, &spy(), &stp).unwrap();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with(&format!("error:{}:329:", id))), "{:?}", w.events);
+}
+
+/// Place `first`, then resubmit `second` with the same id; return the replace.
+fn modify_of(first: Order, second: Order) -> (u32, OrderKind, u8, OrderAttrs) {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    client.place_order(90, &spy(), &first).unwrap();
+    while rx.try_recv().is_ok() {}
+    client.place_order(90, &spy(), &second).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::Modify { order_id: 90, qty, kind, tif, attrs, .. }) => (qty, kind, tif, attrs),
+        other => panic!("expected Modify, got {:?}", other),
     }
-    assert!(found_modify, "Resubmit with same orderId should emit Modify");
+}
+
+// ibx#324: a stop modify must carry the new trigger, not a limit price of 0.
+#[test]
+fn modify_stop_moves_the_trigger() {
+    let stp = |aux: f64| Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(), aux_price: aux, ..Default::default()
+    };
+    let (_, kind, _, _) = modify_of(stp(100.0), stp(95.0));
+    assert!(matches!(kind, OrderKind::Stop { stop_price } if stop_price == (95.0 * PRICE_SCALE_F) as i64), "{:?}", kind);
+}
+
+// ibx#324: a stop-limit modify moves both prices.
+#[test]
+fn modify_stop_limit_moves_both_prices() {
+    let stp_lmt = |lmt: f64, aux: f64| Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "STP LMT".into(),
+        lmt_price: lmt, aux_price: aux, ..Default::default()
+    };
+    let (_, kind, _, _) = modify_of(stp_lmt(99.0, 100.0), stp_lmt(94.0, 95.0));
+    assert!(matches!(kind, OrderKind::StopLimit { price, stop_price }
+        if price == (94.0 * PRICE_SCALE_F) as i64 && stop_price == (95.0 * PRICE_SCALE_F) as i64), "{:?}", kind);
+}
+
+// ibx#334: a trailing modify keeps its trailing kind and amount / percent.
+#[test]
+fn modify_trailing_keeps_the_trail() {
+    let trail = |aux: f64| Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(), aux_price: aux, ..Default::default()
+    };
+    let (_, kind, _, _) = modify_of(trail(2.0), trail(3.0));
+    assert!(matches!(kind, OrderKind::TrailingStop { trail_amt, .. } if trail_amt == (3.0 * PRICE_SCALE_F) as i64), "{:?}", kind);
+
+    let pct = |p: f64| Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(), trailing_percent: p, ..Default::default()
+    };
+    let (_, kind, _, _) = modify_of(pct(1.0), pct(2.5));
+    assert!(matches!(kind, OrderKind::TrailPct { trail_pct: 250, .. }), "{:?}", kind);
+}
+
+// ibx#247: outside-RTH follows the order; it is not forced on.
+#[test]
+fn modify_carries_outside_rth_as_set() {
+    let lmt = |rth: bool, px: f64| Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: px,
+        outside_rth: rth, ..Default::default()
+    };
+    let (_, _, _, attrs) = modify_of(lmt(false, 10.0), lmt(false, 11.0));
+    assert!(!attrs.outside_rth);
+    let (_, _, _, attrs) = modify_of(lmt(true, 10.0), lmt(true, 11.0));
+    assert!(attrs.outside_rth);
 }
 
 // ── Market data type switching ────────────────────────────────────

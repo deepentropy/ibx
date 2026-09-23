@@ -853,14 +853,25 @@ impl Context {
             .push(OrderRequest::CancelAll { instrument });
     }
 
-    pub fn modify(&mut self, order_id: OrderId, price: Price, qty: u32) -> OrderId {
+    /// Replace a working order with the full wanted state: quantity, order
+    /// kind with its prices, time-in-force and attributes (ibx#247).
+    pub fn modify(
+        &mut self,
+        order_id: OrderId,
+        qty: u32,
+        kind: OrderKind,
+        tif: u8,
+        attrs: OrderAttrs,
+    ) -> OrderId {
         let new_id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::Modify {
             new_order_id: new_id,
             order_id,
-            price,
             qty,
+            kind,
+            tif,
+            attrs,
         });
         new_id
     }
@@ -1067,19 +1078,21 @@ mod tests {
     #[test]
     fn modify_drains_correctly() {
         let mut ctx = Context::new();
-        ctx.modify(7, 200 * PRICE_SCALE, 50);
+        ctx.modify(7, 50, OrderKind::Limit { price: 200 * PRICE_SCALE }, b'1', OrderAttrs::default());
 
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
-        match orders[0] {
+        match &orders[0] {
             OrderRequest::Modify {
                 order_id,
-                price,
+                kind,
                 qty,
+                tif,
                 ..
             } => {
-                assert_eq!(order_id, 7);
-                assert_eq!(price, 200 * PRICE_SCALE);
-                assert_eq!(qty, 50);
+                assert_eq!(*order_id, 7);
+                assert!(matches!(kind, OrderKind::Limit { price } if *price == 200 * PRICE_SCALE));
+                assert_eq!(*qty, 50);
+                assert_eq!(*tif, b'1');
             }
             _ => panic!("expected Modify"),
         }

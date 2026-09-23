@@ -109,8 +109,10 @@ fn main() {
         session.send_order(OrderRequest::Modify {
             new_order_id,
             order_id: current_order_id,
-            price: new_price,
             qty: 1,
+            kind: OrderKind::Limit { price: new_price },
+            tif: b'0',
+            attrs: OrderAttrs::default(),
         });
 
         // Wait for ack on new_order_id

@@ -245,6 +245,8 @@ pub struct OrderState {
     fills: Mutex<Vec<Fill>>,
     order_updates: Mutex<Vec<OrderUpdate>>,
     cancel_rejects: Mutex<Vec<CancelReject>>,
+    /// Order errors raised before sending, keyed by the full order id (ibx#349).
+    order_errors: Mutex<Vec<(u64, i64, String)>>,
     what_if_responses: Mutex<Vec<WhatIfResponse>>,
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
@@ -257,6 +259,7 @@ impl OrderState {
             fills: Mutex::new(Vec::with_capacity(64)),
             order_updates: Mutex::new(Vec::with_capacity(64)),
             cancel_rejects: Mutex::new(Vec::with_capacity(16)),
+            order_errors: Mutex::new(Vec::new()),
             what_if_responses: Mutex::new(Vec::with_capacity(8)),
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             order_cache: Mutex::new(HashMap::new()),
@@ -273,6 +276,11 @@ impl OrderState {
 
     pub fn drain_cancel_rejects(&self) -> Vec<CancelReject> {
         self.cancel_rejects.lock().unwrap().drain(..).collect()
+    }
+
+    /// Order errors raised before anything was sent: (order id, code, message).
+    pub fn drain_order_errors(&self) -> Vec<(u64, i64, String)> {
+        self.order_errors.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_what_if_responses(&self) -> Vec<WhatIfResponse> {
@@ -318,6 +326,10 @@ impl OrderState {
 
     #[doc(hidden)] pub fn push_cancel_reject(&self, reject: CancelReject) {
         self.cancel_rejects.lock().unwrap().push(reject);
+    }
+
+    #[doc(hidden)] pub fn push_order_error(&self, order_id: u64, code: i64, message: String) {
+        self.order_errors.lock().unwrap().push((order_id, code, message));
     }
 
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {
