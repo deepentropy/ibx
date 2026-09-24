@@ -699,8 +699,22 @@ impl CcpState {
                 .unwrap_or(0);
             let ord_type_byte: u8 = parsed.get(&40).and_then(|s| s.bytes().next()).unwrap_or(b'2');
             let tif_byte: u8 = parsed.get(&59).and_then(|s| s.bytes().next()).unwrap_or(b'1');
-            if con_id != 0 && qty > 0 {
-                let instrument = context.register_instrument(con_id);
+            // A full instrument table must not stop the engine: register()
+            // panics there, and the panic ended the hot loop (ibx#257).
+            let instrument = if con_id != 0 && qty > 0 {
+                let slot = context.market.try_register(con_id);
+                if slot.is_none() {
+                    log::error!("CCP recovery: instrument table full ({} contracts), order {} on con_id {} is not tracked",
+                        crate::types::MAX_INSTRUMENTS, clord_id, con_id);
+                }
+                slot
+            } else {
+                None
+            };
+            if let Some(instrument) = instrument {
+                // req_global_cancel walks ids below this count; without it a
+                // recovered order on a new contract was never cancelled.
+                shared.market.set_instrument_count(context.market.count());
                 if let Some(sym) = parsed.get(&55) {
                     context.set_symbol(instrument, sym.clone());
                 }
@@ -2518,5 +2532,58 @@ mod tests {
         assert_eq!(ccp.pending_fanout.len(), 1);
         assert!(shared.reference.drain_historical_errors().is_empty());
         assert!(shared.reference.drain_contract_details_end().is_empty());
+    }
+
+    // A session-start recovery entry (150=0/39=0) for an order this session
+    // does not know.
+    fn recovery_frame(order_id: u64, con_id: i64) -> std::collections::HashMap<u32, String> {
+        [
+            (11u32, format!("{}.0", order_id)), (150, "0".into()), (39, "0".into()),
+            (6008, con_id.to_string()), (55, "TEST".into()), (54, "1".into()),
+            (38, "1".into()), (44, "1".into()), (40, "2".into()), (59, "1".into()),
+        ].into_iter().collect()
+    }
+
+    // ibx#257: a recovered order on a new contract, with the instrument table
+    // full, panicked in register() and the panic stopped the engine.
+    #[test]
+    fn recovery_on_a_full_instrument_table_does_not_panic() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        for i in 0..crate::types::MAX_INSTRUMENTS as i64 {
+            context.market.try_register(1_000 + i).unwrap();
+        }
+
+        ccp.handle_exec_report(&recovery_frame(77, 999_999), &mut context, &shared, &None, "");
+        assert!(context.order(77).is_none(), "no slot, so the order is not tracked");
+
+        // A recovered order on a contract that already has a slot is still tracked.
+        ccp.handle_exec_report(&recovery_frame(78, 1_005), &mut context, &shared, &None, "");
+        let order = context.order(78).expect("tracked on its existing slot");
+        assert_eq!(context.market.con_id(order.instrument), Some(1_005));
+    }
+
+    // req_global_cancel sends a cancel-all for each id below the shared
+    // instrument count. A recovered order on a new contract took a slot
+    // without raising that count, so the global cancel never reached it.
+    #[test]
+    fn recovered_order_is_inside_the_global_cancel_range() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        context.market.try_register(265598).unwrap();
+        shared.market.set_instrument_count(context.market.count());
+
+        ccp.handle_exec_report(&recovery_frame(79, 756733), &mut context, &shared, &None, "");
+
+        let order = context.order(79).copied().expect("recovered order tracked");
+        let count = shared.market.instrument_count();
+        assert!(order.instrument < count, "instrument {} outside 0..{}", order.instrument, count);
+        for instrument in 0..count {
+            context.cancel_all(instrument);
+        }
+        assert!(context.pending_orders.drain().any(|r| matches!(r,
+            crate::types::OrderRequest::CancelAll { instrument } if instrument == order.instrument)));
     }
 }
