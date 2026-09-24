@@ -17,6 +17,21 @@ from ibx import (
 )
 
 
+class NotConnectedWrapper(EWrapper):
+    """Records error(): a request on a client that is not connected is
+    answered with error 504 "Not connected" and no exception, as in the
+    reference client."""
+
+    def error(self, req_id, error_code, error_string, advanced_order_reject_json=""):
+        if not hasattr(self, "errors"):
+            self.errors = []
+        self.errors.append((req_id, error_code, error_string))
+
+
+def assert_not_connected(wrapper, expected_id):
+    assert getattr(wrapper, "errors", []) == [(expected_id, 504, "Not connected")]
+
+
 # ── Helpers ──
 
 class RecordingWrapper(EWrapper):
@@ -489,7 +504,7 @@ class TestFillDispatch:
         c._test_dispatch_once()
 
         status_events = [e for e in w.events if e[0] == "order_status"]
-        assert status_events[0][2] == "PartiallyFilled"
+        assert status_events[0][2] == "Submitted"  # no partially-filled status in the reference
         assert status_events[0][3] == 50.0   # filled
         assert status_events[0][4] == 50.0   # remaining
 
@@ -801,6 +816,8 @@ class TestAccountDispatch:
 
     def test_account_update_value(self):
         w, c = make_test_client("DU12345")
+        # Account values follow a subscription, as in the reference.
+        c.req_account_updates(True, "DU12345")
         c._test_set_account(net_liquidation=100000.0)
         c._test_dispatch_once()
 
@@ -873,28 +890,28 @@ class TestAccountDispatch:
 class TestNotConnected:
 
     def test_req_mkt_data_not_connected(self):
-        w = EWrapper()
+        w = NotConnectedWrapper()
         c = EClient(w)
-        with pytest.raises(RuntimeError, match="Not connected"):
-            c.req_mkt_data(1, Contract(con_id=265598, symbol="AAPL"), "")
+        c.req_mkt_data(1, Contract(con_id=265598, symbol="AAPL"), "")
+        assert_not_connected(w, 1)
 
     def test_place_order_not_connected(self):
-        w = EWrapper()
+        w = NotConnectedWrapper()
         c = EClient(w)
-        with pytest.raises(RuntimeError, match="Not connected"):
-            c.place_order(1, Contract(), Order(action="BUY", total_quantity=100, order_type="MKT"))
+        c.place_order(1, Contract(), Order(action="BUY", total_quantity=100, order_type="MKT"))
+        assert_not_connected(w, 1)
 
     def test_cancel_order_not_connected(self):
-        w = EWrapper()
+        w = NotConnectedWrapper()
         c = EClient(w)
-        with pytest.raises(RuntimeError, match="Not connected"):
-            c.cancel_order(1)
+        c.cancel_order(1)
+        assert_not_connected(w, -1)
 
     def test_historical_data_not_connected(self):
-        w = EWrapper()
+        w = NotConnectedWrapper()
         c = EClient(w)
-        with pytest.raises(RuntimeError, match="Not connected"):
-            c.req_historical_data(1, Contract(), "", "1 D", "1 hour", "TRADES", 1)
+        c.req_historical_data(1, Contract(), "", "1 D", "1 hour", "TRADES", 1)
+        assert_not_connected(w, 1)
 
     def test_dispatch_not_connected(self):
         w = EWrapper()
@@ -910,7 +927,9 @@ class TestNotConnected:
 
 
 class TestCallbackException:
-    """Verify that a Python exception in a callback doesn't crash Rust."""
+    """A Python exception in a callback is logged and the dispatch goes on
+    (issue #97): it does not escape the dispatch, and the client stays
+    connected."""
 
     def test_exception_in_tick_price(self):
         class BadWrapper(EWrapper):
@@ -924,26 +943,31 @@ class TestCallbackException:
         c._test_map_instrument(1, 0)
         c._test_push_quote(0, bid=100.0)
 
-        with pytest.raises(Exception):
-            c._test_dispatch_once()
+        c._test_dispatch_once()  # must not raise
 
         # Client should still be alive
         assert c.is_connected() is True
 
     def test_exception_in_order_status(self):
         class BadWrapper(EWrapper):
+            exec_details_seen = False
+
             def order_status(self, *args):
                 raise RuntimeError("explode!")
+
+            def exec_details(self, *args):
+                self.exec_details_seen = True
 
         w = BadWrapper()
         c = EClient(w)
         c._test_connect()
         c._test_push_fill(0, order_id=1, side="BUY", price=100.0, qty=10, remaining=0)
 
-        with pytest.raises(Exception):
-            c._test_dispatch_once()
+        c._test_dispatch_once()  # must not raise
 
         assert c.is_connected() is True
+        # The callbacks after the failing one in the same pass still run.
+        assert w.exec_details_seen
 
 
 class TestEdgeCases:
@@ -964,12 +988,12 @@ class TestEdgeCases:
             c._test_connect()
 
     def test_req_ids_without_connection(self):
-        """req_ids fires next_valid_id even without connect."""
+        """req_ids without a connection reports error 504, as in the reference."""
         w = RecordingWrapper()
         c = EClient(w)
         c.req_ids()
-        events = [e for e in w.events if e[0] == "next_valid_id"]
-        assert len(events) == 1
+        assert [e for e in w.events if e[0] == "next_valid_id"] == []
+        assert ("error", -1, 504, "Not connected") in w.events
 
     def test_disconnect_idempotent(self):
         w, c = make_test_client()
@@ -1038,7 +1062,7 @@ class TestScenarios:
         c._test_dispatch_once()
 
         statuses = [e for e in w.events if e[0] == "order_status"]
-        assert statuses[0][2] == "PartiallyFilled"
+        assert statuses[0][2] == "Submitted"  # no partially-filled status in the reference
         assert statuses[1][2] == "Cancelled"
 
     def test_ticks_during_fills(self):

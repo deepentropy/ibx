@@ -24,6 +24,9 @@ impl EClient {
             .map_err(|e| PyRuntimeError::new_err(e))?;
         ClientCore::validate_order_contract(&contract.sec_type)
             .map_err(|e| PyRuntimeError::new_err(e))?;
+        // After the checks above, which refuse an invalid order even with no
+        // connection (ibx#115).
+        if let Some(r) = self.not_connected(order_id as i64) { return r; }
 
         let tx = self.tx()?;
 
@@ -82,6 +85,7 @@ impl EClient {
     /// Cancel an order.
     #[pyo3(signature = (order_id, manual_order_cancel_time=""))]
     fn cancel_order(&self, order_id: i64, manual_order_cancel_time: &str) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: order_id as u64 }))
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -91,6 +95,7 @@ impl EClient {
 
     /// Cancel all orders globally.
     fn req_global_cancel(&self) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         let shared = self.shared_state()?;
         let count = shared.market.instrument_count();
@@ -103,6 +108,7 @@ impl EClient {
     /// Request next valid order ID.
     #[pyo3(signature = (num_ids=1))]
     fn req_ids(&self, py: Python<'_>, num_ids: i32) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let next_id = self.next_order_id.load(Ordering::Relaxed) as i64;
         self.wrapper.call_method1(py, "next_valid_id", (next_id,))?;
         let _ = num_ids;
@@ -116,6 +122,7 @@ impl EClient {
 
     /// Request all open orders for this client.
     fn req_open_orders(&self, py: Python<'_>) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
         let orders = self.core.collect_open_orders(&shared);
         for (order_id, tracked) in &orders {
@@ -163,12 +170,14 @@ impl EClient {
 
     /// Request all open orders across all clients.
     fn req_all_open_orders(&self, py: Python<'_>) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.req_open_orders(py)
     }
 
     /// Automatically bind future orders to this client.
     #[pyo3(signature = (b_auto_bind))]
     fn req_auto_open_orders(&self, b_auto_bind: bool) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = b_auto_bind;
         Ok(())
     }
@@ -176,6 +185,7 @@ impl EClient {
     /// Request execution reports.
     #[pyo3(signature = (req_id, exec_filter=None))]
     fn req_executions(&self, py: Python<'_>, req_id: i64, exec_filter: Option<Py<PyAny>>) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let filter = if let Some(ref fobj) = exec_filter {
             let get = |attr: &str| -> String {
                 fobj.getattr(py, pyo3::types::PyString::new(py, attr))
@@ -254,6 +264,7 @@ impl EClient {
     /// Request completed orders.
     #[pyo3(signature = (api_only=false))]
     fn req_completed_orders(&self, py: Python<'_>, api_only: bool) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = api_only;
         if let Some(shared) = self.shared.lock().unwrap().clone() {
             let completed = shared.orders.drain_completed_orders();

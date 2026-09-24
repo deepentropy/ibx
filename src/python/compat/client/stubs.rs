@@ -30,11 +30,13 @@ impl EClient {
     }
 
     fn cancel_calculate_implied_volatility(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = req_id;
         Ok(())
     }
 
     fn cancel_calculate_option_price(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = req_id;
         Ok(())
     }
@@ -69,12 +71,14 @@ impl EClient {
 
     #[pyo3(signature = (all_msgs=true))]
     fn req_news_bulletins(&self, all_msgs: bool) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = all_msgs;
         self.core.subscribe_bulletins();
         Ok(())
     }
 
     fn cancel_news_bulletins(&self) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.core.unsubscribe_bulletins();
         Ok(())
     }
@@ -82,6 +86,7 @@ impl EClient {
     // ── Server Time ──
 
     fn req_current_time(&self, py: Python<'_>) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -93,12 +98,14 @@ impl EClient {
     // ── FA (Financial Advisor) ──
 
     fn request_fa(&self, _fa_data_type: i32) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         log::warn!("request_fa: not yet implemented — needs FIX capture");
         Ok(())
     }
 
     #[pyo3(signature = (req_id, fa_data_type, cxml))]
     fn replace_fa(&self, req_id: i64, fa_data_type: i32, cxml: &str) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = (req_id, fa_data_type, cxml);
         log::warn!("replace_fa: not yet implemented — needs FIX capture");
         Ok(())
@@ -107,21 +114,25 @@ impl EClient {
     // ── Display Groups ──
 
     fn query_display_groups(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.wrapper.call_method1(py, "display_group_list", (req_id, ""))?;
         Ok(())
     }
 
     fn subscribe_to_group_events(&self, req_id: i64, group_id: i32) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = (req_id, group_id);
         Ok(())
     }
 
     fn unsubscribe_from_group_events(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = req_id;
         Ok(())
     }
 
     fn update_display_group(&self, req_id: i64, contract_info: &str) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = (req_id, contract_info);
         Ok(())
     }
@@ -129,6 +140,7 @@ impl EClient {
     // ── Smart Components ──
 
     fn req_smart_components(&self, py: Python<'_>, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = bbo_exchange;
         let shared = self.shared_state()?;
         let sc = shared.reference.smart_components();
@@ -148,6 +160,7 @@ impl EClient {
     // ── News Providers ──
 
     fn req_news_providers(&self, py: Python<'_>) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
         let np = shared.reference.news_providers();
         let mut providers: Vec<Py<NewsProviderPy>> = Vec::with_capacity(np.len());
@@ -163,6 +176,7 @@ impl EClient {
     // ── Soft Dollar Tiers ──
 
     fn req_soft_dollar_tiers(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
         let tiers = shared.reference.soft_dollar_tiers();
         let mut objs: Vec<Py<SoftDollarTierPy>> = Vec::with_capacity(tiers.len());
@@ -182,6 +196,7 @@ impl EClient {
     // ── Family Codes ──
 
     fn req_family_codes(&self, py: Python<'_>) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
         let codes = shared.reference.family_codes();
         let py_list = pyo3::types::PyList::new(py, codes.iter().map(|fc| {
@@ -198,6 +213,7 @@ impl EClient {
 
     #[pyo3(signature = (log_level=2))]
     fn set_server_log_level(&self, log_level: i32) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let level = match log_level {
             1 => "error",
             2 => "warn",
@@ -213,6 +229,7 @@ impl EClient {
     // ── User Info ──
 
     fn req_user_info(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
         let id = shared.reference.white_branding_id();
         self.wrapper.call_method1(py, "user_info", (req_id, id))?;
@@ -222,6 +239,7 @@ impl EClient {
     // ── WSH ──
 
     fn req_wsh_meta_data(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = req_id;
         log::warn!("req_wsh_meta_data: not yet implemented — needs FIX capture");
         Ok(())

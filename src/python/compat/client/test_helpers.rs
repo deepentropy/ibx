@@ -22,7 +22,7 @@ impl EClient {
             return Err(PyRuntimeError::new_err("Already connected"));
         }
         let shared = Arc::new(SharedState::new());
-        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = crossbeam_channel::unbounded();
         let (event_tx, event_rx) = crossbeam_channel::bounded(256);
         *self.shared.lock().unwrap() = Some(shared);
         *self.control_tx.lock().unwrap() = Some(tx);
@@ -30,6 +30,9 @@ impl EClient {
         *self.account_id.lock().unwrap() = Some(account_id);
         // Store event_tx so _test_push_disconnect_event can use it.
         *self._test_event_tx.lock().unwrap() = Some(event_tx);
+        // Keep the command receiver: commands sent to the absent engine
+        // must not fail as "Engine stopped".
+        *self._test_control_rx.lock().unwrap() = Some(rx);
         self.next_order_id.store(1000, Ordering::Relaxed);
         self.connected.store(true, Ordering::Release);
         Ok(())

@@ -2053,7 +2053,14 @@ pub(crate) fn handle_position_update(
     let symbol = parsed.get(&6068).map(|s| s.trim_end().to_string()).unwrap_or_default();
     let sec_type = parsed.get(&167).cloned().unwrap_or_default();
     let currency = parsed.get(&15).cloned().unwrap_or_default();
-    let multiplier = parsed.get(&8002).cloned().unwrap_or_default();
+    // Only the multiplier part of the row key; the whole key used to be
+    // reported as the contract's multiplier.
+    let multiplier = parsed.get(&8002)
+        .and_then(|key| {
+            let parts: Vec<&str> = key.split('/').collect();
+            (parts.len() == 4).then(|| parts[2].to_string())
+        })
+        .unwrap_or_default();
 
     // Always store position info for reqPositions/pnlSingle, regardless of instrument registry.
     shared.portfolio.set_position_info(PositionInfo {
@@ -2352,6 +2359,8 @@ mod tests {
         assert_eq!((row(272093).position, row(272093).symbol.as_str()), (-10, "MSFT"));
         assert_eq!(row(272093).unrealized_pnl, (270.91 * PRICE_SCALE as f64) as Price);
         assert_eq!((row(756733).position, row(756733).symbol.as_str()), (18, "SPY"));
+        // The multiplier is one part of the row key, not the whole key.
+        assert_eq!(row(4726868).multiplier, "1");
         assert_eq!(context.position(msft), -10, "a registered instrument's position follows its row");
     }
 

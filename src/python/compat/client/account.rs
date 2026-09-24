@@ -13,6 +13,7 @@ impl EClient {
     /// Request P&L updates for the account.
     #[pyo3(signature = (req_id, account, model_code=""))]
     fn req_pnl(&self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.core.subscribe_pnl(req_id);
         let tx = self.tx()?;
         let acct = if account.is_empty() { self.account() } else { account.to_string() };
@@ -24,6 +25,7 @@ impl EClient {
 
     /// Cancel P&L subscription.
     fn cancel_pnl(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.core.unsubscribe_pnl(req_id);
         let tx = self.tx()?;
         let _ = tx.send(ControlCommand::CancelPnl { req_id });
@@ -33,6 +35,7 @@ impl EClient {
     /// Request P&L for a single position.
     #[pyo3(signature = (req_id, account, model_code, con_id))]
     fn req_pnl_single(&self, req_id: i64, account: &str, model_code: &str, con_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.core.subscribe_pnl_single(req_id, con_id);
         let _ = (account, model_code);
         Ok(())
@@ -40,6 +43,7 @@ impl EClient {
 
     /// Cancel single-position P&L subscription.
     fn cancel_pnl_single(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.core.unsubscribe_pnl_single(req_id);
         Ok(())
     }
@@ -47,6 +51,7 @@ impl EClient {
     /// Request account summary.
     #[pyo3(signature = (req_id, group_name, tags))]
     fn req_account_summary(&self, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.core.subscribe_account_summary(req_id, tags);
         let _ = group_name;
         Ok(())
@@ -54,12 +59,14 @@ impl EClient {
 
     /// Cancel account summary.
     fn cancel_account_summary(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.core.unsubscribe_account_summary(req_id);
         Ok(())
     }
 
     /// Request all positions.
     fn req_positions(&self, py: Python<'_>) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
         // Wait for CCP init burst to complete (up to 10s).
         for _ in 0..1000 {
@@ -83,6 +90,7 @@ impl EClient {
                 c.symbol = pi.symbol.clone();
                 c.sec_type = pi.sec_type.clone();
                 c.currency = pi.currency.clone();
+                c.multiplier = pi.multiplier.clone();
                 c
             });
             let c_py = Py::new(py, c)?.into_any();
@@ -99,18 +107,21 @@ impl EClient {
 
     /// Cancel positions.
     fn cancel_positions(&self) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         Ok(())
     }
 
     /// Request account updates.
     #[pyo3(signature = (subscribe, _acct_code=""))]
     fn req_account_updates(&self, subscribe: bool, _acct_code: &str) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.core.subscribe_account_updates(subscribe);
         Ok(())
     }
 
     /// Request managed accounts list.
     fn req_managed_accts(&self, py: Python<'_>) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.wrapper.call_method1(py, "managed_accounts", (self.account().as_str(),))?;
         Ok(())
     }
@@ -120,6 +131,7 @@ impl EClient {
     fn req_account_updates_multi(
         &self, py: Python<'_>, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let shared = self.shared_state()?;
         let _ = ledger_and_nlv;
         let acct = shared.portfolio.account();
@@ -149,6 +161,7 @@ impl EClient {
 
     /// Cancel multi-account updates.
     fn cancel_account_updates_multi(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = req_id;
         Ok(())
     }
@@ -156,6 +169,7 @@ impl EClient {
     /// Request positions across multiple accounts/models.
     #[pyo3(signature = (req_id, account, model_code))]
     fn req_positions_multi(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
         for _ in 0..500 {
             if shared.portfolio.account_data_received() { break; }
@@ -179,6 +193,7 @@ impl EClient {
 
     /// Cancel multi-account positions.
     fn cancel_positions_multi(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = req_id;
         Ok(())
     }

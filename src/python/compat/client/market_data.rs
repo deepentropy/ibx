@@ -26,6 +26,7 @@ impl EClient {
         regulatory_snapshot: bool,
         mkt_data_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         let shared = self.shared_state()?;
 
@@ -55,6 +56,7 @@ impl EClient {
 
     /// Cancel market data.
     pub fn cancel_mkt_data(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
         if let Some(instrument) = instrument {
             let tx = self.tx()?;
@@ -77,6 +79,7 @@ impl EClient {
         number_of_ticks: i32,
         ignore_size: bool,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
 
         let tbt_type = match tick_type {
@@ -104,6 +107,7 @@ impl EClient {
 
     /// Cancel tick-by-tick data.
     fn cancel_tick_by_tick_data(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         if let Some(instrument) = self.core.req_to_instrument.lock().unwrap().remove(&req_id) {
             self.core.instrument_to_req.lock().unwrap().remove(&instrument);
             self.core.forget_instrument(instrument);
@@ -144,6 +148,7 @@ impl EClient {
     /// type logs a warning, and the `market_data_type` callback reports the
     /// DELIVERED type (realtime) rather than echoing the request.
     fn req_market_data_type(&self, market_data_type: i32) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         self.core.set_market_data_type(market_data_type);
         Ok(())
     }
@@ -158,6 +163,7 @@ impl EClient {
         is_smart_depth: bool,
         mkt_depth_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = mkt_depth_options;
         let exchange = if contract.exchange.is_empty() { "SMART".to_string() } else { contract.exchange.clone() };
         let sec_type = if contract.sec_type.is_empty() { "STK".to_string() } else { contract.sec_type.clone() };
@@ -176,6 +182,7 @@ impl EClient {
     /// Cancel market depth.
     #[pyo3(signature = (req_id, is_smart_depth=false))]
     fn cancel_mkt_depth(&self, req_id: i64, is_smart_depth: bool) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let _ = is_smart_depth;
         let tx = self.tx()?;
         tx.send(ControlCommand::UnsubscribeDepth { req_id: req_id as u32 })
@@ -194,6 +201,7 @@ impl EClient {
         use_rth: i32,
         real_time_bars_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         let _ = (bar_size, real_time_bars_options);
         tx.send(ControlCommand::SubscribeRealTimeBar {
@@ -208,6 +216,7 @@ impl EClient {
 
     /// Cancel real-time bars.
     fn cancel_real_time_bars(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::CancelRealTimeBar { req_id: req_id as u32 })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;

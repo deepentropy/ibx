@@ -162,13 +162,17 @@ struct Seen {
     priced: std::collections::BTreeSet<i64>,
     /// con_id -> symbol carried by update_portfolio.
     symbols: BTreeMap<i64, String>,
+    /// Multipliers carried by position and update_portfolio.
+    multipliers: Vec<String>,
 }
 
 struct Probe(Arc<Mutex<Seen>>);
 
 impl ibx::api::wrapper::Wrapper for Probe {
     fn position(&mut self, _account: &str, contract: &ibx::api::client::Contract, _pos: f64, _avg: f64) {
-        self.0.lock().unwrap().positions.push(contract.con_id);
+        let mut s = self.0.lock().unwrap();
+        s.positions.push(contract.con_id);
+        s.multipliers.push(contract.multiplier.clone());
     }
     fn update_portfolio(
         &mut self, contract: &ibx::api::client::Contract, _position: f64, market_price: f64,
@@ -180,6 +184,7 @@ impl ibx::api::wrapper::Wrapper for Probe {
             s.priced.insert(contract.con_id);
         }
         s.symbols.insert(contract.con_id, contract.symbol.clone());
+        s.multipliers.push(contract.multiplier.clone());
     }
 }
 
@@ -227,5 +232,13 @@ fn eclient_delivers_update_portfolio() {
     let unnamed: Vec<&i64> = listed.iter().filter(|c| symbols.get(c).is_none_or(|s| s.is_empty())).collect();
     println!("  symbols: {:?}", symbols.values().collect::<Vec<_>>());
     assert!(unnamed.is_empty(), "update_portfolio without a symbol for {:?}", unnamed);
+    // The multiplier was the whole portfolio row key (symbol, currency,
+    // multiplier and contract id joined).
+    let multipliers = seen.lock().unwrap().multipliers.clone();
+    let mut distinct = multipliers.clone();
+    distinct.sort();
+    distinct.dedup();
+    println!("  multipliers: {:?}", distinct);
+    assert!(!multipliers.iter().any(|m| m.contains('/')), "multiplier holds the row key: {:?}", distinct);
     println!("  PASS");
 }

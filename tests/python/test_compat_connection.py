@@ -102,18 +102,18 @@ def test_eclient_get_account_id_empty():
 
 
 def test_eclient_req_ids_not_connected():
-    """req_ids() dispatches next_valid_id even without connection."""
+    """req_ids() without a connection reports error 504, as in the reference."""
     w = ConnectionWrapper()
     client = EClient(w)
     client.req_ids()
-    assert len(w.events) == 1
-    assert w.events[0][0] == "next_valid_id"
+    assert w.events == [("error", -1, 504, "Not connected")]
 
 
 def test_eclient_req_ids_with_num():
     """req_ids() accepts num_ids parameter."""
     w = ConnectionWrapper()
     client = EClient(w)
+    client._test_connect()
     client.req_ids(5)
     assert w.events[0][0] == "next_valid_id"
 

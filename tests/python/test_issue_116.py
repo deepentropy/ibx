@@ -99,19 +99,20 @@ def _next_oid(wrapper):
 # ═══════════════════════════════════════════════════════════════════
 
 class TestUnconnectedClient:
-    """place_order on an unconnected client must raise, not return None silently."""
+    """place_order on an unconnected client must not return silently: like
+    the reference client, it reports error 504 "Not connected" through
+    error() for the order id, and raises nothing."""
 
-    def test_place_order_raises_when_not_connected(self):
+    def test_place_order_reports_error_when_not_connected(self):
         wrapper = Wrapper()
         client = EClient(wrapper)
-        # Not connected — place_order must raise RuntimeError
         order = Order()
         order.action = "BUY"
         order.total_quantity = 1
         order.order_type = "LMT"
         order.lmt_price = 100.0
-        with pytest.raises(RuntimeError):
-            client.place_order(1, make_spy(), order)
+        client.place_order(1, make_spy(), order)
+        assert ("error", 1, 504, "Not connected") in wrapper.events
 
 
 # ═══════════════════════════════════════════════════════════════════

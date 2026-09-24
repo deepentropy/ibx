@@ -58,6 +58,10 @@ pub struct EClient {
     /// Sender for test-injected events (test-only).
     #[doc(hidden)]
     pub(crate) _test_event_tx: Mutex<Option<crossbeam_channel::Sender<Event>>>,
+    /// Receiving end of the command channel in a test connection (test-only).
+    /// With no engine behind it, dropping it made every command send fail.
+    #[doc(hidden)]
+    pub(crate) _test_control_rx: Mutex<Option<crossbeam_channel::Receiver<ControlCommand>>>,
     /// Shared subscription tracking and dispatch preparation.
     pub(crate) core: ClientCore,
 }
@@ -88,6 +92,7 @@ impl EClient {
             connected: AtomicBool::new(false),
             event_rx: Mutex::new(None),
             _test_event_tx: Mutex::new(None),
+            _test_control_rx: Mutex::new(None),
             core: ClientCore::new(),
         }
     }
@@ -244,6 +249,22 @@ impl EClient {
 }
 
 impl EClient {
+    /// A request on a client that is not connected: the reference reports
+    /// error 504 "Not connected" through `error()` and returns, it does not
+    /// raise. `id` is the request's id, or -1 when it has none. Returns the
+    /// method's result when not connected, `None` when connected.
+    pub(crate) fn not_connected(&self, id: i64) -> Option<PyResult<()>> {
+        if self.control_tx.lock().unwrap().is_some() {
+            return None;
+        }
+        Python::attach(|py| {
+            if let Err(e) = self.wrapper.call_method1(py, "error", (id, 504i64, "Not connected", "")) {
+                log::error!("Python callback error() raised: {}", e);
+            }
+        });
+        Some(Ok(()))
+    }
+
     /// Clone the control channel sender, or return "Not connected".
     pub(crate) fn tx(&self) -> PyResult<Sender<ControlCommand>> {
         self.control_tx.lock().unwrap().clone()

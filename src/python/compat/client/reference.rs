@@ -25,6 +25,7 @@ impl EClient {
         keep_up_to_date: bool,
         chart_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         let _ = (format_date, chart_options);
         if !what_to_show.eq_ignore_ascii_case("SCHEDULE") {
@@ -57,6 +58,7 @@ impl EClient {
 
     /// Cancel historical data.
     fn cancel_historical_data(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::CancelHistorical { req_id: req_id as u32 })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -73,6 +75,7 @@ impl EClient {
         use_rth: i32,
         format_date: i32,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchHeadTimestamp {
             req_id: req_id as u32,
@@ -86,6 +89,7 @@ impl EClient {
 
     /// Cancel head timestamp request.
     fn cancel_head_time_stamp(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::CancelHeadTimestamp { req_id: req_id as u32 })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -94,6 +98,7 @@ impl EClient {
 
     /// Request contract details.
     fn req_contract_details(&self, req_id: i64, contract: &Contract) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchContractDetails {
             req_id: req_id as u32,
@@ -119,6 +124,7 @@ impl EClient {
 
     /// Request available exchanges for market depth.
     fn req_mkt_depth_exchanges(&self) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchMktDepthExchanges)
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -127,6 +133,7 @@ impl EClient {
 
     /// Search for matching symbols.
     fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchMatchingSymbols {
             req_id: req_id as u32,
@@ -143,6 +150,7 @@ impl EClient {
         subscription: Py<PyAny>,
         scanner_subscription_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = scanner_subscription_options;
         let tx = self.tx()?;
         Python::attach(|py| {
@@ -162,6 +170,7 @@ impl EClient {
 
     /// Cancel scanner subscription.
     fn cancel_scanner_subscription(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::CancelScanner { req_id: req_id as u32 })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -170,6 +179,7 @@ impl EClient {
 
     /// Request scanner parameters XML.
     fn req_scanner_parameters(&self) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchScannerParams)
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -185,6 +195,7 @@ impl EClient {
         article_id: &str,
         news_article_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = news_article_options;
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchNewsArticle {
@@ -207,6 +218,7 @@ impl EClient {
         total_results: i32,
         historical_news_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = historical_news_options;
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchHistoricalNews {
@@ -229,6 +241,7 @@ impl EClient {
         report_type: &str,
         fundamental_data_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = fundamental_data_options;
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchFundamentalData {
@@ -241,6 +254,7 @@ impl EClient {
 
     /// Cancel fundamental data.
     fn cancel_fundamental_data(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::CancelFundamentalData { req_id: req_id as u32 })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -261,6 +275,7 @@ impl EClient {
         ignore_size: bool,
         misc_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         let _ = (ignore_size, misc_options);
         tx.send(ControlCommand::FetchHistoricalTicks {
@@ -277,6 +292,7 @@ impl EClient {
 
     /// Request market rule details.
     fn req_market_rule(&self, py: Python<'_>, market_rule_id: i32) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         if let Some(shared) = self.shared.lock().unwrap().clone() {
             if let Some(rule) = shared.reference.market_rule(market_rule_id) {
                 let increments: Vec<(f64, f64)> = rule.price_increments.iter()
@@ -295,6 +311,7 @@ impl EClient {
     /// Request histogram data.
     #[pyo3(signature = (req_id, contract, use_rth, time_period))]
     fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, time_period: &str) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchHistogramData {
             req_id: req_id as u32,
@@ -307,6 +324,7 @@ impl EClient {
 
     /// Cancel histogram data.
     fn cancel_histogram_data(&self, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::CancelHistogramData { req_id: req_id as u32 })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -319,6 +337,7 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration_str: &str, use_rth: bool,
     ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchHistoricalSchedule {
             req_id: req_id as u32,

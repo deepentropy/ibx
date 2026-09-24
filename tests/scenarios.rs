@@ -60,7 +60,7 @@ fn order_lifecycle_partial_then_full_fill() {
     });
     w.events.clear();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("order_status:100:PartiallyFilled")));
+    assert!(w.events.iter().any(|e| e.starts_with("order_status:100:Submitted")));
     assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:BOT:120")));
 
     // Step 3: Remaining 80 fills
@@ -142,7 +142,7 @@ fn order_lifecycle_partial_fill_then_cancel() {
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("order_status:70:PartiallyFilled")));
+    assert!(w.events.iter().any(|e| e.starts_with("order_status:70:Submitted")));
 
     // Cancel remaining
     shared.orders.push_order_update(OrderUpdate {
@@ -271,8 +271,9 @@ fn order_lifecycle_algo_vwap_partial_fills() {
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
 
-    // 3 partial fills + 1 final fill
-    let partial_count = w.events.iter().filter(|e| e.starts_with("order_status:110:PartiallyFilled")).count();
+    // 3 partial fills + 1 final fill. A partial fill keeps the working
+    // status: the reference has no partially-filled status.
+    let partial_count = w.events.iter().filter(|e| e.starts_with("order_status:110:Submitted")).count();
     let filled_count = w.events.iter().filter(|e| e.starts_with("order_status:110:Filled")).count();
     assert_eq!(partial_count, 3);
     assert_eq!(filled_count, 1);

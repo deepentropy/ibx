@@ -56,7 +56,7 @@ impl EClient {
             let price = fill.price as f64 / PRICE_SCALE_F;
             let commission = fill.commission as f64 / PRICE_SCALE_F;
 
-            let status = if fill.remaining == 0 { "Filled" } else { "PartiallyFilled" };
+            let status = if fill.remaining == 0 { "Filled" } else { self.core.partial_fill_status(fill.order_id) };
             let (perm_id, parent_id) = shared.orders.get_order_info(fill.order_id)
                 .map(|info| (info.order.perm_id, info.order.parent_id))
                 .unwrap_or((0, 0));
@@ -568,6 +568,7 @@ impl EClient {
                 c.sec_type = ac.sec_type;
                 c.exchange = ac.exchange;
                 c.currency = ac.currency;
+                c.multiplier = ac.multiplier;
                 let c_py = pyo3::Py::new(py, c).unwrap().into_any();
                 call_wrapper!(self.wrapper, py, "update_portfolio",
                     (&c_py, entry.position, entry.market_price, entry.market_value,

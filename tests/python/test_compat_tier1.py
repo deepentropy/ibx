@@ -14,6 +14,21 @@ from ibx import (
 )
 
 
+class NotConnectedWrapper(EWrapper):
+    """Records error(): a request on a client that is not connected is
+    answered with error 504 "Not connected" and no exception, as in the
+    reference client."""
+
+    def error(self, req_id, error_code, error_string, advanced_order_reject_json=""):
+        if not hasattr(self, "errors"):
+            self.errors = []
+        self.errors.append((req_id, error_code, error_string))
+
+
+def assert_not_connected(wrapper, expected_id):
+    assert getattr(wrapper, "errors", []) == [(expected_id, 504, "Not connected")]
+
+
 # ── EWrapper with new Tier 1 callbacks ──
 
 class Tier1Wrapper(EWrapper):
@@ -208,6 +223,7 @@ def test_req_open_orders_empty():
     """req_open_orders delivers open_order_end when no orders exist."""
     w = Tier1Wrapper()
     client = EClient(w)
+    client._test_connect()
     client.req_open_orders()
     assert ("open_order_end",) in w.events
 
@@ -216,6 +232,7 @@ def test_req_open_orders_only_open_order_end():
     """With no prior orders, req_open_orders only fires open_order_end."""
     w = Tier1Wrapper()
     client = EClient(w)
+    client._test_connect()
     client.req_open_orders()
     # Should only have open_order_end, no order_status
     assert len([e for e in w.events if e[0] == "order_status"]) == 0
@@ -226,6 +243,7 @@ def test_req_all_open_orders_empty():
     """req_all_open_orders delivers open_order_end like req_open_orders."""
     w = Tier1Wrapper()
     client = EClient(w)
+    client._test_connect()
     client.req_all_open_orders()
     assert ("open_order_end",) in w.events
 
@@ -238,6 +256,7 @@ def test_req_executions_empty():
     """req_executions delivers exec_details_end when no executions exist."""
     w = Tier1Wrapper()
     client = EClient(w)
+    client._test_connect()
     client.req_executions(1)
     assert ("exec_details_end", 1) in w.events
 
@@ -246,6 +265,7 @@ def test_req_executions_only_end():
     """With no fills, only exec_details_end is fired."""
     w = Tier1Wrapper()
     client = EClient(w)
+    client._test_connect()
     client.req_executions(1)
     assert len([e for e in w.events if e[0] == "exec_details"]) == 0
     assert len([e for e in w.events if e[0] == "exec_details_end"]) == 1
@@ -255,6 +275,7 @@ def test_req_executions_with_filter():
     """req_executions accepts a filter parameter."""
     w = Tier1Wrapper()
     client = EClient(w)
+    client._test_connect()
     client.req_executions(1, None)  # filter=None is valid
     assert ("exec_details_end", 1) in w.events
 
@@ -264,28 +285,28 @@ def test_req_executions_with_filter():
 # ═══════════════════════════════════════
 
 def test_req_historical_ticks_not_connected():
-    """req_historical_ticks raises when not connected."""
-    client = EClient(EWrapper())
+    """req_historical_ticks reports error 504 when not connected."""
+    client = EClient(_nc := NotConnectedWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    with pytest.raises(Exception, match="Not connected"):
-        client.req_historical_ticks(1, contract, "20260311 09:30:00", "",
-                                     1000, "TRADES", 1, False)
+    client.req_historical_ticks(1, contract, "20260311 09:30:00", "",
+                                 1000, "TRADES", 1, False)
+    assert_not_connected(_nc, 1)
 
 
 def test_req_historical_ticks_defaults_not_connected():
-    """req_historical_ticks with defaults raises when not connected."""
-    client = EClient(EWrapper())
+    """req_historical_ticks with defaults reports error 504 when not connected."""
+    client = EClient(_nc := NotConnectedWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    with pytest.raises(Exception, match="Not connected"):
-        client.req_historical_ticks(1, contract)
+    client.req_historical_ticks(1, contract)
+    assert_not_connected(_nc, 1)
 
 
 def test_req_historical_ticks_bid_ask_not_connected():
-    """req_historical_ticks with BID_ASK raises when not connected."""
-    client = EClient(EWrapper())
+    """req_historical_ticks with BID_ASK reports error 504 when not connected."""
+    client = EClient(_nc := NotConnectedWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    with pytest.raises(Exception, match="Not connected"):
-        client.req_historical_ticks(1, contract, what_to_show="BID_ASK")
+    client.req_historical_ticks(1, contract, what_to_show="BID_ASK")
+    assert_not_connected(_nc, 1)
 
 
 # ═══════════════════════════════════════
@@ -293,26 +314,26 @@ def test_req_historical_ticks_bid_ask_not_connected():
 # ═══════════════════════════════════════
 
 def test_req_real_time_bars_not_connected():
-    """req_real_time_bars raises when not connected."""
-    client = EClient(EWrapper())
+    """req_real_time_bars reports error 504 when not connected."""
+    client = EClient(_nc := NotConnectedWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    with pytest.raises(Exception, match="Not connected"):
-        client.req_real_time_bars(1, contract, 5, "TRADES", 0)
+    client.req_real_time_bars(1, contract, 5, "TRADES", 0)
+    assert_not_connected(_nc, 1)
 
 
 def test_req_real_time_bars_defaults_not_connected():
-    """req_real_time_bars with defaults raises when not connected."""
-    client = EClient(EWrapper())
+    """req_real_time_bars with defaults reports error 504 when not connected."""
+    client = EClient(_nc := NotConnectedWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    with pytest.raises(Exception, match="Not connected"):
-        client.req_real_time_bars(1, contract)
+    client.req_real_time_bars(1, contract)
+    assert_not_connected(_nc, 1)
 
 
 def test_cancel_real_time_bars_not_connected():
-    """cancel_real_time_bars raises when not connected."""
-    client = EClient(EWrapper())
-    with pytest.raises(Exception, match="Not connected"):
-        client.cancel_real_time_bars(1)
+    """cancel_real_time_bars reports error 504 when not connected."""
+    client = EClient(_nc := NotConnectedWrapper())
+    client.cancel_real_time_bars(1)
+    assert_not_connected(_nc, 1)
 
 
 # ═══════════════════════════════════════
@@ -320,10 +341,10 @@ def test_cancel_real_time_bars_not_connected():
 # ═══════════════════════════════════════
 
 def test_cancel_head_time_stamp_not_connected():
-    """cancel_head_time_stamp raises when not connected."""
-    client = EClient(EWrapper())
-    with pytest.raises(Exception, match="Not connected"):
-        client.cancel_head_time_stamp(1)
+    """cancel_head_time_stamp reports error 504 when not connected."""
+    client = EClient(_nc := NotConnectedWrapper())
+    client.cancel_head_time_stamp(1)
+    assert_not_connected(_nc, -1)
 
 
 # ═══════════════════════════════════════
@@ -347,10 +368,10 @@ def test_req_sec_def_opt_params_defaults():
 # ═══════════════════════════════════════
 
 def test_req_matching_symbols_not_connected():
-    """req_matching_symbols raises when not connected."""
-    client = EClient(EWrapper())
-    with pytest.raises(Exception, match="Not connected"):
-        client.req_matching_symbols(1, "AAPL")
+    """req_matching_symbols reports error 504 when not connected."""
+    client = EClient(_nc := NotConnectedWrapper())
+    client.req_matching_symbols(1, "AAPL")
+    assert_not_connected(_nc, -1)
 
 
 # ═══════════════════════════════════════
@@ -361,6 +382,7 @@ def test_req_current_time_fires_callback():
     """req_current_time dispatches current_time callback with unix timestamp."""
     w = Tier1Wrapper()
     client = EClient(w)
+    client._test_connect()
     client.req_current_time()
     assert len(w.events) == 1
     assert w.events[0][0] == "current_time"
@@ -374,6 +396,7 @@ def test_req_current_time_reasonable_value():
     """req_current_time returns a time close to now."""
     w = Tier1Wrapper()
     client = EClient(w)
+    client._test_connect()
     before = int(time.time())
     client.req_current_time()
     after = int(time.time())
@@ -385,6 +408,7 @@ def test_req_current_time_multiple_calls():
     """Multiple req_current_time calls each fire the callback."""
     w = Tier1Wrapper()
     client = EClient(w)
+    client._test_connect()
     client.req_current_time()
     client.req_current_time()
     client.req_current_time()
@@ -560,9 +584,10 @@ def test_full_ibapi_app_pattern_with_tier1():
             self.events.append(("symbol_samples", req_id))
 
     app = App()
-    assert app.client.is_connected() is False
+    app.client._test_connect()
+    assert app.client.is_connected() is True
 
-    # These should all work without connection
+    # Answered from local data on a (test) connection
     app.client.req_market_data_type(3)
     app.client.req_current_time()
     app.client.req_open_orders()
@@ -594,17 +619,17 @@ def test_req_mkt_depth_exchanges_signature():
 
 
 def test_real_time_bars_options_list():
-    """req_real_time_bars with options list raises when not connected."""
-    client = EClient(EWrapper())
+    """req_real_time_bars with options list reports error 504 when not connected."""
+    client = EClient(_nc := NotConnectedWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    with pytest.raises(Exception, match="Not connected"):
-        client.req_real_time_bars(1, contract, 5, "TRADES", 1, [])
+    client.req_real_time_bars(1, contract, 5, "TRADES", 1, [])
+    assert_not_connected(_nc, 1)
 
 
 def test_historical_ticks_misc_options():
-    """req_historical_ticks with misc_options raises when not connected."""
-    client = EClient(EWrapper())
+    """req_historical_ticks with misc_options reports error 504 when not connected."""
+    client = EClient(_nc := NotConnectedWrapper())
     contract = Contract(con_id=265598, symbol="AAPL")
-    with pytest.raises(Exception, match="Not connected"):
-        client.req_historical_ticks(1, contract, "20260311 09:30:00", "",
-                                     1000, "TRADES", 1, False, [])
+    client.req_historical_ticks(1, contract, "20260311 09:30:00", "",
+                                 1000, "TRADES", 1, False, [])
+    assert_not_connected(_nc, 1)

@@ -267,7 +267,9 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
         OrderStatus::PendingCancel => "PendingCancel",
         OrderStatus::PendingReplace => "PendingCancel", // IB API has no PendingReplace string
         OrderStatus::Filled => "Filled",
-        OrderStatus::PartiallyFilled => "PartiallyFilled",
+        // The reference has no partially-filled status: an order with part
+        // of it filled is still working (ib-agent#192 C8).
+        OrderStatus::PartiallyFilled => "Submitted",
         OrderStatus::Cancelled => "Cancelled",
         // ibapi has no "Rejected" status string — rejected orders surface as "Inactive"
         // with the rejection reason carried separately on OrderState.completedStatus.
@@ -614,7 +616,7 @@ impl ClientCore {
             let pi = shared.portfolio.position_info(con_id).unwrap_or_default();
             ApiContract {
                 con_id, symbol: pi.symbol, sec_type: pi.sec_type, currency: pi.currency,
-                ..Default::default()
+                multiplier: pi.multiplier, ..Default::default()
             }
         })
     }
@@ -1489,6 +1491,17 @@ impl ClientCore {
             }
         }
         None
+    }
+
+    /// Status to report with a fill that leaves part of the order open.
+    /// The reference keeps the order's working status on a fill and has no
+    /// partially-filled status: a fill on an order last reported as
+    /// PreSubmitted stays PreSubmitted, otherwise Submitted (ib-agent#192 C8).
+    pub fn partial_fill_status(&self, order_id: u64) -> &'static str {
+        match self.open_orders.lock().unwrap().get(&order_id).map(|t| t.status.as_str()) {
+            Some("PreSubmitted") => "PreSubmitted",
+            _ => "Submitted",
+        }
     }
 
     /// Order type of a tracked order, as the caller placed it.

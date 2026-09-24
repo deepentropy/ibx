@@ -19,11 +19,26 @@ import pytest
 from ibx import EClient, EWrapper, Contract
 
 
+class NotConnectedWrapper(EWrapper):
+    """Records error(): a request on a client that is not connected is
+    answered with error 504 "Not connected" and no exception, as in the
+    reference client."""
+
+    def error(self, req_id, error_code, error_string, advanced_order_reject_json=""):
+        if not hasattr(self, "errors"):
+            self.errors = []
+        self.errors.append((req_id, error_code, error_string))
+
+
+def assert_not_connected(wrapper, expected_id):
+    assert getattr(wrapper, "errors", []) == [(expected_id, 504, "Not connected")]
+
+
 # ── Helper fixtures ──
 
 def make_client():
     """Create an unconnected EClient + EWrapper pair."""
-    w = EWrapper()
+    w = NotConnectedWrapper()
     c = EClient(w)
     return c, w
 
@@ -51,11 +66,8 @@ class MockScannerSub:
 
 def test_req_scanner_subscription_not_connected():
     c, w = make_client()
-    try:
-        c.req_scanner_subscription(1, MockScannerSub())
-        assert False, "Should raise"
-    except RuntimeError as e:
-        assert "Not connected" in str(e)
+    c.req_scanner_subscription(1, MockScannerSub())
+    assert_not_connected(w, 1)
 
 
 def test_req_scanner_subscription_signature():
@@ -67,20 +79,14 @@ def test_req_scanner_subscription_signature():
 
 def test_cancel_scanner_subscription_not_connected():
     c, w = make_client()
-    try:
-        c.cancel_scanner_subscription(1)
-        assert False, "Should raise"
-    except RuntimeError as e:
-        assert "Not connected" in str(e)
+    c.cancel_scanner_subscription(1)
+    assert_not_connected(w, -1)
 
 
 def test_req_scanner_parameters_not_connected():
     c, w = make_client()
-    try:
-        c.req_scanner_parameters()
-        assert False, "Should raise"
-    except RuntimeError as e:
-        assert "Not connected" in str(e)
+    c.req_scanner_parameters()
+    assert_not_connected(w, -1)
 
 
 def test_req_scanner_subscription_with_options():
@@ -102,6 +108,7 @@ def test_req_news_providers_fires_callback():
             calls.append(providers)
     w = W()
     c = EClient(w)
+    c._test_connect()
     c.req_news_providers()
     assert len(calls) == 1
 
@@ -114,17 +121,15 @@ def test_req_news_providers_returns_list():
             result.append(type(providers).__name__)
     w = W()
     c = EClient(w)
+    c._test_connect()
     c.req_news_providers()
     assert result[0] == "list"
 
 
 def test_req_news_article_not_connected():
     c, w = make_client()
-    try:
-        c.req_news_article(1, "BRFG", "BRFG$12345")
-        assert False, "Should raise"
-    except RuntimeError as e:
-        assert "Not connected" in str(e)
+    c.req_news_article(1, "BRFG", "BRFG$12345")
+    assert_not_connected(w, 1)
 
 
 def test_req_news_article_signature():
@@ -140,11 +145,8 @@ def test_req_news_article_with_options():
 
 def test_req_historical_news_not_connected():
     c, w = make_client()
-    try:
-        c.req_historical_news(1, 265598, "BRFG", "2026-01-01", "2026-03-12", 10)
-        assert False, "Should raise"
-    except RuntimeError as e:
-        assert "Not connected" in str(e)
+    c.req_historical_news(1, 265598, "BRFG", "2026-01-01", "2026-03-12", 10)
+    assert_not_connected(w, 1)
 
 
 def test_req_historical_news_signature():
@@ -159,11 +161,8 @@ def test_req_historical_news_signature():
 def test_req_fundamental_data_not_connected():
     c, w = make_client()
     contract = make_contract(con_id=265598, symbol="AAPL")
-    try:
-        c.req_fundamental_data(1, contract, "ReportSnapshot")
-        assert False, "Should raise"
-    except RuntimeError as e:
-        assert "Not connected" in str(e)
+    c.req_fundamental_data(1, contract, "ReportSnapshot")
+    assert_not_connected(w, 1)
 
 
 def test_req_fundamental_data_signature():
@@ -173,11 +172,8 @@ def test_req_fundamental_data_signature():
 
 def test_cancel_fundamental_data_not_connected():
     c, w = make_client()
-    try:
-        c.cancel_fundamental_data(1)
-        assert False, "Should raise"
-    except RuntimeError as e:
-        assert "Not connected" in str(e)
+    c.cancel_fundamental_data(1)
+    assert_not_connected(w, 1)
 
 
 def test_req_fundamental_data_with_options():
@@ -279,10 +275,11 @@ def test_req_managed_accts_fires_callback():
             calls.append(accounts_list)
     w = W()
     c = EClient(w)
+    c._test_connect()
     c.req_managed_accts()
     assert len(calls) == 1
-    # Account ID is empty for unconnected client
-    assert calls[0] == ""
+    # The test connection's account
+    assert calls[0] == "TEST123"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -291,14 +288,14 @@ def test_req_managed_accts_fires_callback():
 
 def test_req_account_updates_multi_not_connected():
     c, w = make_client()
-    with pytest.raises(Exception, match="Not connected"):
-        c.req_account_updates_multi(1, "DU12345", "")
+    c.req_account_updates_multi(1, "DU12345", "")
+    assert_not_connected(w, 1)
 
 
 def test_req_account_updates_multi_with_ledger_not_connected():
     c, w = make_client()
-    with pytest.raises(Exception, match="Not connected"):
-        c.req_account_updates_multi(1, "DU12345", "", True)
+    c.req_account_updates_multi(1, "DU12345", "", True)
+    assert_not_connected(w, 1)
 
 
 def test_cancel_account_updates_multi():
@@ -309,8 +306,8 @@ def test_cancel_account_updates_multi():
 
 def test_req_positions_multi_not_connected():
     c, w = make_client()
-    with pytest.raises(Exception, match="Not connected"):
-        c.req_positions_multi(1, "DU12345", "")
+    c.req_positions_multi(1, "DU12345", "")
+    assert_not_connected(w, -1)
 
 
 def test_cancel_positions_multi():
@@ -432,8 +429,9 @@ def test_full_ibapi_app_pattern_with_tier2():
             self.events.append(("managed_accounts", accounts_list))
 
     app = App()
+    app.client._test_connect()
 
-    # These should work without connection
+    # Answered from local data on a (test) connection
     app.client.req_news_providers()
     app.client.req_managed_accts()
     app.client.req_news_bulletins()
@@ -452,7 +450,7 @@ def test_full_ibapi_app_pattern_with_tier2():
 
     # Verify callbacks fired
     assert ("news_providers",) in app.events
-    assert ("managed_accounts", "") in app.events
+    assert ("managed_accounts", "TEST123") in app.events
 
 
 def test_full_scanner_sequence():
@@ -504,6 +502,7 @@ def test_full_news_sequence():
             pass
 
     app = App()
+    app.client._test_connect()
     app.client.req_news_providers()
     assert app.providers is not None
     assert isinstance(app.providers, list)

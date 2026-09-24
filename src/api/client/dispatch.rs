@@ -50,7 +50,7 @@ impl EClient {
         for fill in self.shared.orders.drain_fills() {
             let price_f = fill.price as f64 / PRICE_SCALE_F;
             let commission_and_fees_f = fill.commission as f64 / PRICE_SCALE_F;
-            let status = if fill.remaining == 0 { "Filled" } else { "PartiallyFilled" };
+            let status = if fill.remaining == 0 { "Filled" } else { self.core.partial_fill_status(fill.order_id) };
             let (perm_id, parent_id) = self.shared.orders.get_order_info(fill.order_id)
                 .map(|info| (info.order.perm_id, info.order.parent_id))
                 .unwrap_or((0, 0));
@@ -413,7 +413,8 @@ impl EClient {
                 let ac = self.core.position_contract(entry.con_id, &self.shared);
                 let c = Contract {
                     con_id: ac.con_id, symbol: ac.symbol, sec_type: ac.sec_type,
-                    exchange: ac.exchange, currency: ac.currency, ..Default::default()
+                    exchange: ac.exchange, currency: ac.currency, multiplier: ac.multiplier,
+                    ..Default::default()
                 };
                 wrapper.update_portfolio(
                     &c, entry.position, entry.market_price, entry.market_value,

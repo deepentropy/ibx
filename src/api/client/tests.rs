@@ -1790,7 +1790,33 @@ fn process_msgs_dispatches_partial_fill() {
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("order_status:42:PartiallyFilled")));
+    // The reference has no partially-filled status: the order stays working.
+    assert!(w.events.iter().any(|e| e.starts_with("order_status:42:Submitted:50:50")), "{:?}", w.events);
+}
+
+// A fill keeps the order's working status: one last reported as
+// PreSubmitted stays PreSubmitted (ib-agent#192 C8, pre-market fill).
+#[test]
+fn partial_fill_keeps_presubmitted() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(), lmt_price: 1.0, ..Default::default()
+    };
+    client.place_order(48, &spy(), &order).unwrap();
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 48, instrument: 0, status: OrderStatus::PreSubmitted,
+        filled_qty: 0, remaining_qty: 100, avg_fill_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    shared.orders.push_fill(Fill {
+        instrument: 0, order_id: 48, side: Side::Buy, price: PRICE_SCALE, qty: 40, remaining: 60,
+        cum_qty: 40, avg_price: PRICE_SCALE, commission: 0, timestamp_ns: 0,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("order_status:48:PreSubmitted:40:60")), "{:?}", w.events);
 }
 
 #[test]
@@ -1893,7 +1919,7 @@ fn process_msgs_reports_order_totals_on_a_multi_print_fill() {
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e == "order_status:46:PartiallyFilled:200:100:11"), "{:?}", w.events);
+    assert!(w.events.iter().any(|e| e == "order_status:46:Submitted:200:100:11"), "{:?}", w.events);
     assert!(w.events.iter().any(|e| e == "order_status:46:Cancelled:200:0:11"), "{:?}", w.events);
 }
 
