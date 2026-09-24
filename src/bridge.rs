@@ -62,7 +62,8 @@ pub enum Event {
     /// End of contract details for a request.
     ContractDetailsEnd(u32),
     /// Position update.
-    PositionUpdate { instrument: InstrumentId, con_id: i64, position: i64, avg_cost: Price },
+    /// `position` is fixed-point (QTY_SCALE).
+    PositionUpdate { instrument: InstrumentId, con_id: i64, position_fixed: Qty, avg_cost: Price },
     /// Connection lost.
     Disconnected,
     /// Gateway logon completed. `ccp_session_id` matches the `x-ccp-session-id` header
@@ -694,7 +695,8 @@ impl PortfolioState {
     }
 
     /// Read current position for an instrument.
-    pub fn position(&self, id: InstrumentId) -> i64 {
+    /// Fixed-point (QTY_SCALE).
+    pub fn position_fixed(&self, id: InstrumentId) -> Qty {
         self.positions[id as usize].load(Ordering::Relaxed) as i64
     }
 
@@ -724,7 +726,7 @@ impl PortfolioState {
         let mut map = self.position_infos.lock().unwrap();
         match map.get_mut(&info.con_id) {
             Some(existing) => {
-                existing.position = info.position;
+                existing.position_fixed = info.position_fixed;
                 existing.avg_cost = info.avg_cost;
                 if !info.symbol.is_empty() { existing.symbol = info.symbol; }
                 if !info.sec_type.is_empty() { existing.sec_type = info.sec_type; }
@@ -749,7 +751,7 @@ impl PortfolioState {
         entry.realized_pnl = realized_pnl;
     }
 
-    #[doc(hidden)] pub fn set_position(&self, id: InstrumentId, pos: i64) {
+    #[doc(hidden)] pub fn set_position_fixed(&self, id: InstrumentId, pos: Qty) {
         self.positions[id as usize].store(pos as u64, Ordering::Relaxed);
     }
 
@@ -891,15 +893,15 @@ mod tests {
     fn shared_state_fills_drain() {
         let ss = SharedState::new();
         ss.orders.push_fill(Fill {
-            cum_qty: 0, avg_price: 0,
+            cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
             instrument: 0, order_id: 1, side: Side::Buy,
-            price: 100 * PRICE_SCALE, qty: 10, remaining: 0,
+            price: 100 * PRICE_SCALE, qty_fixed: (10) as i64 * crate::types::QTY_SCALE, remaining_fixed: (0) as i64 * crate::types::QTY_SCALE,
             commission: 0, timestamp_ns: 0,
         });
         ss.orders.push_fill(Fill {
-            cum_qty: 0, avg_price: 0,
+            cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
             instrument: 0, order_id: 2, side: Side::Sell,
-            price: 101 * PRICE_SCALE, qty: 5, remaining: 0,
+            price: 101 * PRICE_SCALE, qty_fixed: (5) as i64 * crate::types::QTY_SCALE, remaining_fixed: (0) as i64 * crate::types::QTY_SCALE,
             commission: 0, timestamp_ns: 0,
         });
         let fills = ss.orders.drain_fills();
@@ -914,7 +916,7 @@ mod tests {
         ss.orders.push_order_update(OrderUpdate {
             avg_fill_price: 0,
             order_id: 1, instrument: 0, status: OrderStatus::Submitted,
-            filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+            filled_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, remaining_qty_fixed: (100) as i64 * crate::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0,
         });
         let updates = ss.orders.drain_order_updates();
         assert_eq!(updates.len(), 1);
@@ -924,11 +926,11 @@ mod tests {
     #[test]
     fn shared_state_position_roundtrip() {
         let ss = SharedState::new();
-        assert_eq!(ss.portfolio.position(0), 0);
-        ss.portfolio.set_position(0, 42);
-        assert_eq!(ss.portfolio.position(0), 42);
-        ss.portfolio.set_position(0, -10);
-        assert_eq!(ss.portfolio.position(0), -10);
+        assert_eq!(ss.portfolio.position_fixed(0) / crate::types::QTY_SCALE, 0);
+        ss.portfolio.set_position_fixed(0, (42) as i64 * crate::types::QTY_SCALE);
+        assert_eq!(ss.portfolio.position_fixed(0) / crate::types::QTY_SCALE, 42);
+        ss.portfolio.set_position_fixed(0, (-10) as i64 * crate::types::QTY_SCALE);
+        assert_eq!(ss.portfolio.position_fixed(0) / crate::types::QTY_SCALE, -10);
     }
 
     #[test]

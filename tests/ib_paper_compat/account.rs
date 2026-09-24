@@ -183,9 +183,9 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
                     break;
                 }
             }
-            Ok(Event::PositionUpdate { instrument, con_id, position, avg_cost }) => {
+            Ok(Event::PositionUpdate { instrument, con_id, position_fixed: position, avg_cost }) => {
                 println!("  PositionUpdate: inst={} conId={} pos={} avgCost={:.4}",
-                    instrument, con_id, position, avg_cost as f64 / ibx::types::PRICE_SCALE as f64);
+                    instrument, con_id, position as f64 / ibx::types::QTY_SCALE as f64, avg_cost as f64 / ibx::types::PRICE_SCALE as f64);
                 got_position_update = true;
             }
             Ok(Event::OrderUpdate(update)) => {
@@ -205,7 +205,7 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
         println!("  SKIP: No ticks received — market closed\n");
     } else if phase == 2 && got_position_update {
         // After buy+sell round trip, position should return to 0 (or near it)
-        let pos = shared.portfolio.position(0);
+        let pos = shared.portfolio.position_fixed(0) / ibx::types::QTY_SCALE;
         println!("  Final position: {}", pos);
         check!(pos.abs() <= 1, "Position after round trip should be 0 (±1 for timing), got {}", pos);
         println!("  PASS (position returned to {})\n", pos);
@@ -338,7 +338,7 @@ pub(super) fn phase_completed_orders(conns: Conns) -> Conns {
     let completed = shared.orders.drain_completed_orders();
     println!("  Completed orders drained: {}", completed.len());
     for co in &completed {
-        println!("    order_id={} status={:?} filled_qty={}", co.order_id, co.status, co.filled_qty);
+        println!("    order_id={} status={:?} filled_qty={}", co.order_id, co.status, co.filled_qty_fixed / ibx::types::QTY_SCALE);
     }
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
@@ -461,7 +461,7 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
         let c = shared.reference.get_contract(pi.con_id)
             .unwrap_or_else(|| api::Contract { con_id: pi.con_id, ..Default::default() });
         let avg_cost = pi.avg_cost as f64 / PRICE_SCALE as f64;
-        wrapper.position(&account_id, &c, pi.position as f64, avg_cost);
+        wrapper.position(&account_id, &c, pi.position_fixed as f64 / ibx::types::QTY_SCALE as f64, avg_cost);
     }
 
     let gt_account = account_id.clone();
@@ -684,8 +684,8 @@ pub(super) fn phase_enriched_positions(conns: Conns) -> Conns {
     let mut got_pos = false;
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(Event::PositionUpdate { con_id, position, .. }) if con_id == 756733 => {
-                println!("  PositionUpdate: con_id={} position={}", con_id, position);
+            Ok(Event::PositionUpdate { con_id, position_fixed: position, .. }) if con_id == 756733 => {
+                println!("  PositionUpdate: con_id={} position={}", con_id, position as f64 / ibx::types::QTY_SCALE as f64);
                 got_pos = true;
                 break;
             }
@@ -702,7 +702,7 @@ pub(super) fn phase_enriched_positions(conns: Conns) -> Conns {
         let c = shared.reference.get_contract(pi.con_id)
             .unwrap_or_else(|| api::Contract { con_id: pi.con_id, ..Default::default() });
         let avg_cost = pi.avg_cost as f64 / PRICE_SCALE as f64;
-        wrapper.position(&account_id, &c, pi.position as f64, avg_cost);
+        wrapper.position(&account_id, &c, pi.position_fixed as f64 / ibx::types::QTY_SCALE as f64, avg_cost);
     }
 
     let gt_account = account_id.clone();
@@ -797,7 +797,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::Fill(f)) if f.order_id == order_id => {
-                println!("  Fill received: qty={} price={:.2}", f.qty, f.price as f64 / PRICE_SCALE as f64);
+                println!("  Fill received: qty={} price={:.2}", f.qty_fixed / ibx::types::QTY_SCALE, f.price as f64 / PRICE_SCALE as f64);
                 filled = true;
                 break;
             }
@@ -828,7 +828,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
         };
         let exec = api::Execution {
             side: side_str.into(),
-            shares: fill.qty as f64,
+            shares: fill.qty_fixed as f64 / ibx::types::QTY_SCALE as f64,
             price: price_f,
             order_id: fill.order_id as i64,
             ..Default::default()

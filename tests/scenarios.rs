@@ -45,7 +45,7 @@ fn order_lifecycle_partial_then_full_fill() {
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 100, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 200, perm_id: 0, parent_id: 0, timestamp_ns: 1000,
+        filled_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, remaining_qty_fixed: (200) as i64 * ibx::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 1000,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -53,9 +53,9 @@ fn order_lifecycle_partial_then_full_fill() {
 
     // Step 2: Partial fill — 120 of 200 shares
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 100, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 120, remaining: 80,
+        price: 150 * PRICE_SCALE, qty_fixed: (120) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (80) as i64 * ibx::types::QTY_SCALE,
         commission: PRICE_SCALE / 2, timestamp_ns: 2000,
     });
     w.events.clear();
@@ -65,9 +65,9 @@ fn order_lifecycle_partial_then_full_fill() {
 
     // Step 3: Remaining 80 fills
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 100, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 80, remaining: 0,
+        price: 150 * PRICE_SCALE, qty_fixed: (80) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: PRICE_SCALE / 2, timestamp_ns: 3000,
     });
     w.events.clear();
@@ -101,14 +101,14 @@ fn order_lifecycle_place_then_cancel() {
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 50, instrument: 0, status: OrderStatus::Cancelled,
-        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+        filled_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, remaining_qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:50:Cancelled")));
 
     // Position should be 0 (no fills happened)
-    assert_eq!(shared.portfolio.position(0), 0);
+    assert_eq!(shared.portfolio.position_fixed(0) / ibx::types::QTY_SCALE, 0);
 }
 
 /// Place order → rejection → error callback → no position change.
@@ -119,12 +119,12 @@ fn order_lifecycle_rejection() {
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 60, instrument: 0, status: OrderStatus::Rejected,
-        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+        filled_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, remaining_qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:60:Inactive")));
-    assert_eq!(shared.portfolio.position(0), 0);
+    assert_eq!(shared.portfolio.position_fixed(0) / ibx::types::QTY_SCALE, 0);
 }
 
 /// Place order → partial fill → cancel → verify position reflects only the partial fill.
@@ -135,9 +135,9 @@ fn order_lifecycle_partial_fill_then_cancel() {
 
     // Partial fill: 30 of 100
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 70, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 30, remaining: 70,
+        price: 150 * PRICE_SCALE, qty_fixed: (30) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (70) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 1000,
     });
     let mut w = RecordingWrapper::default();
@@ -148,7 +148,7 @@ fn order_lifecycle_partial_fill_then_cancel() {
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 70, instrument: 0, status: OrderStatus::Cancelled,
-        filled_qty: 30, remaining_qty: 70, perm_id: 0, parent_id: 0, timestamp_ns: 2000,
+        filled_qty_fixed: (30) as i64 * ibx::types::QTY_SCALE, remaining_qty_fixed: (70) as i64 * ibx::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 2000,
     });
     w.events.clear();
     client.process_msgs(&mut w);
@@ -180,9 +180,9 @@ fn order_lifecycle_modify_then_fill() {
 
     // Fill at new price
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 80, side: Side::Buy,
-        price: 151 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 151 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: PRICE_SCALE, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
@@ -230,7 +230,7 @@ fn order_lifecycle_what_if_preview() {
     assert!(w.events.iter().any(|e| e.starts_with("order_status:90:PreSubmitted")));
 
     // No actual position change
-    assert_eq!(shared.portfolio.position(0), 0);
+    assert_eq!(shared.portfolio.position_fixed(0) / ibx::types::QTY_SCALE, 0);
 }
 
 /// Algo order (VWAP): place → multiple partial fills over time.
@@ -261,9 +261,9 @@ fn order_lifecycle_algo_vwap_partial_fills() {
         total_filled += qtys[i];
         let remaining = 1000 - total_filled;
         shared.orders.push_fill(Fill {
-            cum_qty: 0, avg_price: 0,
+            cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
             instrument: 0, order_id: 110, side: Side::Buy,
-            price: prices[i as usize], qty: qtys[i] as i64, remaining,
+            price: prices[i as usize], qty_fixed: (qtys[i] as i64) as i64 * ibx::types::QTY_SCALE, remaining_fixed: remaining as i64 * ibx::types::QTY_SCALE,
             commission: PRICE_SCALE / 10, timestamp_ns: (i as u64 + 1) * 1000,
         });
     }
@@ -290,9 +290,9 @@ fn order_lifecycle_cancel_reject_on_filled_order() {
 
     // Order fills completely
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 120, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 150 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 1000,
     });
     let mut w = RecordingWrapper::default();
@@ -424,23 +424,23 @@ fn account_round_trip_position() {
 
     // Buy 100 @ 150
     engine.inject_fill(&Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: spy_id, order_id: 1, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 150 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: PRICE_SCALE, timestamp_ns: 1000,
     });
-    assert_eq!(engine.context_mut().position(spy_id), 100);
-    assert_eq!(shared.portfolio.position(spy_id), 100);
+    assert_eq!(engine.context_mut().position_fixed(spy_id) / ibx::types::QTY_SCALE, 100);
+    assert_eq!(shared.portfolio.position_fixed(spy_id) / ibx::types::QTY_SCALE, 100);
 
     // Sell 100 @ 152
     engine.inject_fill(&Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: spy_id, order_id: 2, side: Side::Sell,
-        price: 152 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 152 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: PRICE_SCALE, timestamp_ns: 2000,
     });
-    assert_eq!(engine.context_mut().position(spy_id), 0);
-    assert_eq!(shared.portfolio.position(spy_id), 0);
+    assert_eq!(engine.context_mut().position_fixed(spy_id) / ibx::types::QTY_SCALE, 0);
+    assert_eq!(shared.portfolio.position_fixed(spy_id) / ibx::types::QTY_SCALE, 0);
 
     // Two fills in shared state
     let fills = shared.orders.drain_fills();
@@ -459,32 +459,32 @@ fn account_multi_instrument_positions() {
 
     // Buy 50 SPY
     engine.inject_fill(&Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: spy_id, order_id: 1, side: Side::Buy,
-        price: 450 * PRICE_SCALE, qty: 50, remaining: 0,
+        price: 450 * PRICE_SCALE, qty_fixed: (50) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 1000,
     });
 
     // Buy 100 AAPL
     engine.inject_fill(&Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: aapl_id, order_id: 2, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 150 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 2000,
     });
 
     // Sell 20 SPY
     engine.inject_fill(&Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: spy_id, order_id: 3, side: Side::Sell,
-        price: 452 * PRICE_SCALE, qty: 20, remaining: 0,
+        price: 452 * PRICE_SCALE, qty_fixed: (20) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 3000,
     });
 
-    assert_eq!(engine.context_mut().position(spy_id), 30);
-    assert_eq!(engine.context_mut().position(aapl_id), 100);
-    assert_eq!(shared.portfolio.position(spy_id), 30);
-    assert_eq!(shared.portfolio.position(aapl_id), 100);
+    assert_eq!(engine.context_mut().position_fixed(spy_id) / ibx::types::QTY_SCALE, 30);
+    assert_eq!(engine.context_mut().position_fixed(aapl_id) / ibx::types::QTY_SCALE, 100);
+    assert_eq!(shared.portfolio.position_fixed(spy_id) / ibx::types::QTY_SCALE, 30);
+    assert_eq!(shared.portfolio.position_fixed(aapl_id) / ibx::types::QTY_SCALE, 100);
 }
 
 /// Account state tracks through fills and position updates.
@@ -514,10 +514,10 @@ fn account_req_positions_reflects_fills() {
 
     // Set position info (as engine would after fills)
     shared.portfolio.set_position_info(PositionInfo {
-        con_id: 756733, position: 100, avg_cost: 450 * PRICE_SCALE, ..Default::default()
+        con_id: 756733, position_fixed: (100) as i64 * ibx::types::QTY_SCALE, avg_cost: 450 * PRICE_SCALE, ..Default::default()
     });
     shared.portfolio.set_position_info(PositionInfo {
-        con_id: 265598, position: -50, avg_cost: 150 * PRICE_SCALE, ..Default::default()
+        con_id: 265598, position_fixed: (-50) as i64 * ibx::types::QTY_SCALE, avg_cost: 150 * PRICE_SCALE, ..Default::default()
     });
 
     let mut w = RecordingWrapper::default();
@@ -691,12 +691,12 @@ fn engine_full_trade_lifecycle() {
 
     // Buy fill
     engine.inject_fill(&Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: spy_id, order_id: 1, side: Side::Buy,
-        price: 450 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 450 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: PRICE_SCALE, timestamp_ns: 1000,
     });
-    assert_eq!(engine.context_mut().position(spy_id), 100);
+    assert_eq!(engine.context_mut().position_fixed(spy_id) / ibx::types::QTY_SCALE, 100);
 
     // Price moves up
     let q = engine.context_mut().quote_mut(spy_id);
@@ -706,12 +706,12 @@ fn engine_full_trade_lifecycle() {
 
     // Sell fill at higher price
     engine.inject_fill(&Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: spy_id, order_id: 2, side: Side::Sell,
-        price: 455 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 455 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: PRICE_SCALE, timestamp_ns: 2000,
     });
-    assert_eq!(engine.context_mut().position(spy_id), 0);
+    assert_eq!(engine.context_mut().position_fixed(spy_id) / ibx::types::QTY_SCALE, 0);
 
     // Verify all fills flowed to SharedState
     let fills = shared.orders.drain_fills();
@@ -747,9 +747,9 @@ fn engine_to_eclient_end_to_end() {
 
     // Now inject a fill through the engine
     engine.inject_fill(&Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: spy_id, order_id: 42, side: Side::Buy,
-        price: 450 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 450 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: PRICE_SCALE, timestamp_ns: 1000,
     });
 
@@ -769,21 +769,21 @@ fn engine_short_sell_then_cover() {
 
     // Short sell 50
     engine.inject_fill(&Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: spy_id, order_id: 1, side: Side::ShortSell,
-        price: 450 * PRICE_SCALE, qty: 50, remaining: 0,
+        price: 450 * PRICE_SCALE, qty_fixed: (50) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 1000,
     });
-    assert_eq!(engine.context_mut().position(spy_id), -50);
+    assert_eq!(engine.context_mut().position_fixed(spy_id) / ibx::types::QTY_SCALE, -50);
 
     // Buy to cover 50
     engine.inject_fill(&Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: spy_id, order_id: 2, side: Side::Buy,
-        price: 445 * PRICE_SCALE, qty: 50, remaining: 0,
+        price: 445 * PRICE_SCALE, qty_fixed: (50) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 2000,
     });
-    assert_eq!(engine.context_mut().position(spy_id), 0);
+    assert_eq!(engine.context_mut().position_fixed(spy_id) / ibx::types::QTY_SCALE, 0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -804,9 +804,9 @@ fn mixed_ticks_during_fills() {
 
     // Fill arrives at same time
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 42, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 150 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 0,
     });
 
@@ -814,7 +814,7 @@ fn mixed_ticks_during_fills() {
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 43, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 200, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+        filled_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, remaining_qty_fixed: (200) as i64 * ibx::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
 
     let mut w = RecordingWrapper::default();
@@ -839,7 +839,7 @@ fn mixed_news_between_orders() {
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 50, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 1000,
+        filled_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, remaining_qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 1000,
     });
 
     // News arrives
@@ -851,9 +851,9 @@ fn mixed_news_between_orders() {
 
     // Fill after news
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 50, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 150 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 2000,
     });
 
@@ -878,9 +878,9 @@ fn mixed_all_data_types_single_process() {
 
     // Fill
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 1, side: Side::Buy,
-        price: PRICE_SCALE, qty: 1, remaining: 0,
+        price: PRICE_SCALE, qty_fixed: (1) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 0,
     });
 
@@ -932,11 +932,11 @@ fn req_completed_orders_drains_and_dispatches() {
 
     shared.orders.push_completed_order(CompletedOrder {
         order_id: 100, instrument: 0, status: OrderStatus::Filled,
-        filled_qty: 50, timestamp_ns: 1000,
+        filled_qty_fixed: (50) as i64 * ibx::types::QTY_SCALE, timestamp_ns: 1000,
     });
     shared.orders.push_completed_order(CompletedOrder {
         order_id: 200, instrument: 0, status: OrderStatus::Cancelled,
-        filled_qty: 0, timestamp_ns: 2000,
+        filled_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, timestamp_ns: 2000,
     });
 
     let mut w = RecordingWrapper::default();
@@ -1028,7 +1028,7 @@ fn pnl_single_dispatches_position_info() {
     // the position (ibx#238). A position with no price at all gives nothing.
     shared.portfolio.set_position_info(PositionInfo {
         con_id: 265598,
-        position: 100,
+        position_fixed: (100) as i64 * ibx::types::QTY_SCALE,
         avg_cost: 150 * PRICE_SCALE,
         market_price: 155 * PRICE_SCALE,
         ..Default::default()

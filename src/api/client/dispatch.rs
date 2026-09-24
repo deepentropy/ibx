@@ -2,7 +2,7 @@
 
 use crate::api::types::{
     BarData, CommissionAndFeesReport, ContractDetails, ContractDescription, Execution,
-    Order as ApiOrder, OrderState, TickAttribLast, TickAttribBidAsk, PRICE_SCALE_F,
+    Order as ApiOrder, OrderState, TickAttribLast, TickAttribBidAsk, PRICE_SCALE_F, QTY_SCALE_F,
 };
 use crate::api::wrapper::Wrapper;
 use crate::client_core::order_status_str;
@@ -50,16 +50,19 @@ impl EClient {
         for fill in self.shared.orders.drain_fills() {
             let price_f = fill.price as f64 / PRICE_SCALE_F;
             let commission_and_fees_f = fill.commission as f64 / PRICE_SCALE_F;
-            let status = if fill.remaining == 0 { "Filled" } else { self.core.partial_fill_status(fill.order_id) };
+            let status = if fill.remaining_fixed == 0 { "Filled" } else { self.core.partial_fill_status(fill.order_id) };
             let (perm_id, parent_id) = self.shared.orders.get_order_info(fill.order_id)
                 .map(|info| (info.order.perm_id, info.order.parent_id))
                 .unwrap_or((0, 0));
             // filled and avgFillPrice are the order totals, lastFillPrice
-            // is this print (ibx#315).
-            let filled_f = fill.filled_so_far() as f64;
+            // is this print (ibx#315). Quantities are fixed-point; the
+            // callbacks take decimal shares (ibx#313).
+            let filled_f = fill.filled_so_far_fixed() as f64 / QTY_SCALE_F;
+            let remaining_f = fill.remaining_fixed as f64 / QTY_SCALE_F;
+            let shares_f = fill.qty_fixed as f64 / QTY_SCALE_F;
             let avg_f = fill.average_price() as f64 / PRICE_SCALE_F;
             wrapper.order_status(
-                fill.order_id as i64, status, filled_f, fill.remaining as f64,
+                fill.order_id as i64, status, filled_f, remaining_f,
                 avg_f, perm_id, parent_id, price_f, 0, "", 0.0,
             );
 
@@ -71,7 +74,7 @@ impl EClient {
             let (c, exec) = if let Some(info) = self.shared.orders.get_order_info(fill.order_id) {
                 let mut ex = info.last_exec;
                 ex.side = side_str.into();
-                ex.shares = fill.qty as f64;
+                ex.shares = shares_f;
                 ex.price = price_f;
                 ex.order_id = fill.order_id as i64;
                 ex.cum_qty = filled_f;
@@ -85,7 +88,7 @@ impl EClient {
             } else {
                 (Contract::default(), Execution {
                     side: side_str.into(),
-                    shares: fill.qty as f64,
+                    shares: shares_f,
                     price: price_f,
                     order_id: fill.order_id as i64,
                     cum_qty: filled_f,
@@ -110,7 +113,7 @@ impl EClient {
             self.core.push_execution(req_id, c, exec, report);
 
             // Update open order tracking
-            self.core.update_order_fill(fill.order_id, status, filled_f, fill.remaining as f64);
+            self.core.update_order_fill(fill.order_id, status, filled_f, remaining_f);
         }
 
         // Order errors (refused before sending, or rejected by the server)
@@ -123,12 +126,14 @@ impl EClient {
         // Order updates → order_status
         for update in self.shared.orders.drain_order_updates() {
             let status = order_status_str(update.status);
+            let filled_f = update.filled_qty_fixed as f64 / QTY_SCALE_F;
+            let remaining_f = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
             wrapper.order_status(
-                update.order_id as i64, status, update.filled_qty as f64,
-                update.remaining_qty as f64, update.avg_fill_price as f64 / PRICE_SCALE_F,
+                update.order_id as i64, status, filled_f,
+                remaining_f, update.avg_fill_price as f64 / PRICE_SCALE_F,
                 update.perm_id, update.parent_id, 0.0, 0, "", 0.0,
             );
-            self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
+            self.core.update_order_status(update.order_id, status, filled_f, remaining_f);
         }
 
         // Cancel rejects → error

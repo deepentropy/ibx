@@ -16,7 +16,7 @@ use crate::api::types::{
 use super::EClient;
 use super::super::contract::{Contract, ContractDescription, ContractDetails, BarData, CommissionAndFeesReport, DepthMktDataDescriptionPy, Execution, Order, OrderState};
 use super::super::tick_types::*;
-use super::super::super::types::PRICE_SCALE_F;
+use super::super::super::types::{PRICE_SCALE_F, QTY_SCALE_F};
 
 /// Call a Python wrapper method, catching and logging any exception instead of propagating.
 /// This prevents user callback exceptions from killing the dispatch loop.
@@ -56,15 +56,18 @@ impl EClient {
             let price = fill.price as f64 / PRICE_SCALE_F;
             let commission = fill.commission as f64 / PRICE_SCALE_F;
 
-            let status = if fill.remaining == 0 { "Filled" } else { self.core.partial_fill_status(fill.order_id) };
+            let status = if fill.remaining_fixed == 0 { "Filled" } else { self.core.partial_fill_status(fill.order_id) };
             let (perm_id, parent_id) = shared.orders.get_order_info(fill.order_id)
                 .map(|info| (info.order.perm_id, info.order.parent_id))
                 .unwrap_or((0, 0));
             // filled and avgFillPrice are the order totals carried on the
-            // fill, lastFillPrice is this print (ibx#315).
-            let cum_qty = fill.filled_so_far() as f64;
+            // fill, lastFillPrice is this print (ibx#315). Quantities are
+            // fixed-point; the callbacks take decimal shares (ibx#313).
+            let cum_qty = fill.filled_so_far_fixed() as f64 / QTY_SCALE_F;
+            let remaining = fill.remaining_fixed as f64 / QTY_SCALE_F;
+            let shares = fill.qty_fixed as f64 / QTY_SCALE_F;
             let avg_price = fill.average_price() as f64 / PRICE_SCALE_F;
-            call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, cum_qty, fill.remaining as f64,
+            call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, cum_qty, remaining,
                  avg_price, perm_id, parent_id, price, 0i64, "", 0.0f64));
 
             // Track execution for req_executions
@@ -87,7 +90,7 @@ impl EClient {
                 acct_number: self.account(),
                 exchange: exec_exchange.clone(),
                 side: side_str.to_string(),
-                shares: fill.qty as f64,
+                shares,
                 price,
                 order_id: fill.order_id as i64,
                 cum_qty,
@@ -124,7 +127,7 @@ impl EClient {
                 acct_number: acct_name,
                 exchange: exec_exchange.clone(),
                 side: side_str.to_string(),
-                shares: fill.qty as f64,
+                shares,
                 price,
                 perm_id,
                 client_id: 0,
@@ -140,7 +143,7 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "exec_details", (req_id, &c_py, &exec_py));
 
             // Update open order tracking
-            self.core.update_order_fill(fill.order_id, status, cum_qty, fill.remaining as f64);
+            self.core.update_order_fill(fill.order_id, status, cum_qty, remaining);
 
             // Dispatch commission_and_fees_report
             let report = CommissionAndFeesReport {
@@ -166,12 +169,14 @@ impl EClient {
         let updates = shared.orders.drain_order_updates();
         for update in updates {
             let status = order_status_str(update.status);
-            call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, update.filled_qty as f64,
-                 update.remaining_qty as f64, update.avg_fill_price as f64 / PRICE_SCALE_F,
+            let filled = update.filled_qty_fixed as f64 / QTY_SCALE_F;
+            let remaining = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
+            call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, filled,
+                 remaining, update.avg_fill_price as f64 / PRICE_SCALE_F,
                  update.perm_id, update.parent_id, 0.0f64, 0i64, "", 0.0f64));
 
             // Track open orders
-            self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
+            self.core.update_order_status(update.order_id, status, filled, remaining);
         }
 
         // Drain cancel rejects -> error

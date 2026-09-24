@@ -1485,8 +1485,8 @@ fn req_matching_symbols_sends_fetch() {
 #[test]
 fn req_positions_delivers_via_wrapper() {
     let (client, _rx, shared) = test_client();
-    shared.portfolio.set_position_info(PositionInfo { con_id: 265598, position: 100, avg_cost: 150 * PRICE_SCALE, ..Default::default() });
-    shared.portfolio.set_position_info(PositionInfo { con_id: 756733, position: -50, avg_cost: 400 * PRICE_SCALE, ..Default::default() });
+    shared.portfolio.set_position_info(PositionInfo { con_id: 265598, position_fixed: (100) as i64 * crate::types::QTY_SCALE, avg_cost: 150 * PRICE_SCALE, ..Default::default() });
+    shared.portfolio.set_position_info(PositionInfo { con_id: 756733, position_fixed: (-50) as i64 * crate::types::QTY_SCALE, avg_cost: 400 * PRICE_SCALE, ..Default::default() });
     let mut w = RecordingWrapper::default();
     client.req_positions(&mut w);
     let positions: Vec<_> = w.events.iter().filter(|e| e.starts_with("position:")).collect();
@@ -1768,9 +1768,9 @@ fn account_reads_shared_state() {
 fn process_msgs_dispatches_fill() {
     let (client, _rx, shared) = test_client();
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 42, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 150 * PRICE_SCALE, qty_fixed: (100) as i64 * crate::types::QTY_SCALE, remaining_fixed: (0) as i64 * crate::types::QTY_SCALE,
         commission: PRICE_SCALE, timestamp_ns: 123456789,
     });
     let mut w = RecordingWrapper::default();
@@ -1783,9 +1783,9 @@ fn process_msgs_dispatches_fill() {
 fn process_msgs_dispatches_partial_fill() {
     let (client, _rx, shared) = test_client();
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 42, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 50, remaining: 50,
+        price: 150 * PRICE_SCALE, qty_fixed: (50) as i64 * crate::types::QTY_SCALE, remaining_fixed: (50) as i64 * crate::types::QTY_SCALE,
         commission: PRICE_SCALE, timestamp_ns: 123456789,
     });
     let mut w = RecordingWrapper::default();
@@ -1806,13 +1806,13 @@ fn partial_fill_keeps_presubmitted() {
     client.place_order(48, &spy(), &order).unwrap();
     shared.orders.push_order_update(OrderUpdate {
         order_id: 48, instrument: 0, status: OrderStatus::PreSubmitted,
-        filled_qty: 0, remaining_qty: 100, avg_fill_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+        filled_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, remaining_qty_fixed: (100) as i64 * crate::types::QTY_SCALE, avg_fill_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     shared.orders.push_fill(Fill {
-        instrument: 0, order_id: 48, side: Side::Buy, price: PRICE_SCALE, qty: 40, remaining: 60,
-        cum_qty: 40, avg_price: PRICE_SCALE, commission: 0, timestamp_ns: 0,
+        instrument: 0, order_id: 48, side: Side::Buy, price: PRICE_SCALE, qty_fixed: (40) as i64 * crate::types::QTY_SCALE, remaining_fixed: (60) as i64 * crate::types::QTY_SCALE,
+        cum_qty_fixed: (40) as i64 * crate::types::QTY_SCALE, avg_price: PRICE_SCALE, commission: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -1823,9 +1823,9 @@ fn partial_fill_keeps_presubmitted() {
 fn process_msgs_dispatches_sell_fill() {
     let (client, _rx, shared) = test_client();
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 43, side: Side::Sell,
-        price: 151 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 151 * PRICE_SCALE, qty_fixed: (100) as i64 * crate::types::QTY_SCALE, remaining_fixed: (0) as i64 * crate::types::QTY_SCALE,
         commission: PRICE_SCALE, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
@@ -1859,7 +1859,7 @@ fn process_msgs_delivers_update_portfolio() {
     let (client, _rx, shared) = test_client();
     client.req_account_updates(true, "");
     shared.portfolio.set_position_info(crate::types::PositionInfo {
-        con_id: 756733, position: 18, avg_cost: 723 * PRICE_SCALE, symbol: "SPY".into(),
+        con_id: 756733, position_fixed: (18) as i64 * crate::types::QTY_SCALE, avg_cost: 723 * PRICE_SCALE, symbol: "SPY".into(),
         sec_type: "STK".into(), currency: "USD".into(),
         ..Default::default()
     });
@@ -1880,6 +1880,23 @@ fn process_msgs_delivers_update_portfolio() {
     assert!(!w.events.iter().any(|e| e.starts_with("portfolio:")), "{:?}", w.events);
 }
 
+// ibx#313: quantities are fixed-point inside the engine; the callbacks
+// report decimal shares, so half a share reaches the caller as 0.5.
+#[test]
+fn process_msgs_reports_a_fractional_fill_in_shares() {
+    let (client, _rx, shared) = test_client();
+    let q = crate::types::QTY_SCALE;
+    shared.orders.push_fill(Fill {
+        instrument: 0, order_id: 49, side: Side::Buy,
+        price: 15 * PRICE_SCALE, qty_fixed: q / 2, remaining_fixed: q, cum_qty_fixed: q / 2,
+        avg_price: 15 * PRICE_SCALE, commission: 0, timestamp_ns: 0,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "order_status:49:Submitted:0.5:1:15"), "{:?}", w.events);
+    assert!(w.events.iter().any(|e| e == "exec_details:-1:BOT:0.5"), "{:?}", w.events);
+}
+
 // ibx#250: the reference delivers a server reject's error 201 before the
 // Inactive status (ib-agent#192 C1).
 #[test]
@@ -1888,7 +1905,7 @@ fn process_msgs_delivers_a_reject_error_before_the_status() {
     shared.orders.push_order_error(47, 201, "Order rejected - reason:too big".into());
     shared.orders.push_order_update(OrderUpdate {
         order_id: 47, instrument: 0, status: OrderStatus::Rejected,
-        filled_qty: 0, remaining_qty: 0, avg_fill_price: 0,
+        filled_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, remaining_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_fill_price: 0,
         perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
@@ -1907,14 +1924,14 @@ fn process_msgs_reports_order_totals_on_a_multi_print_fill() {
     // Second print of a 300-share order: 100 @ 12 after 100 @ 10.
     shared.orders.push_fill(Fill {
         instrument: 0, order_id: 46, side: Side::Buy,
-        price: 12 * PRICE_SCALE, qty: 100, remaining: 100,
-        cum_qty: 200, avg_price: 11 * PRICE_SCALE,
+        price: 12 * PRICE_SCALE, qty_fixed: (100) as i64 * crate::types::QTY_SCALE, remaining_fixed: (100) as i64 * crate::types::QTY_SCALE,
+        cum_qty_fixed: (200) as i64 * crate::types::QTY_SCALE, avg_price: 11 * PRICE_SCALE,
         commission: PRICE_SCALE, timestamp_ns: 0,
     });
     // A status report after a partial fill carries the average too.
     shared.orders.push_order_update(OrderUpdate {
         order_id: 46, instrument: 0, status: OrderStatus::Cancelled,
-        filled_qty: 200, remaining_qty: 0, avg_fill_price: 11 * PRICE_SCALE,
+        filled_qty_fixed: (200) as i64 * crate::types::QTY_SCALE, remaining_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_fill_price: 11 * PRICE_SCALE,
         perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
@@ -1929,17 +1946,17 @@ fn process_msgs_dispatches_order_updates() {
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 43, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+        filled_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, remaining_qty_fixed: (100) as i64 * crate::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 44, instrument: 0, status: OrderStatus::Cancelled,
-        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+        filled_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, remaining_qty_fixed: (100) as i64 * crate::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 45, instrument: 0, status: OrderStatus::Rejected,
-        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+        filled_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, remaining_qty_fixed: (100) as i64 * crate::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -2478,15 +2495,15 @@ fn process_msgs_empty_queues_no_events() {
 fn process_msgs_drains_on_first_call_empty_on_second() {
     let (client, _rx, shared) = test_client();
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 1, side: Side::Buy,
-        price: PRICE_SCALE, qty: 1, remaining: 0,
+        price: PRICE_SCALE, qty_fixed: (1) as i64 * crate::types::QTY_SCALE, remaining_fixed: (0) as i64 * crate::types::QTY_SCALE,
         commission: 0, timestamp_ns: 0,
     });
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 2, instrument: 0, status: OrderStatus::Submitted,
-        filled_qty: 0, remaining_qty: 1, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+        filled_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, remaining_qty_fixed: (1) as i64 * crate::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
 
     let mut w = RecordingWrapper::default();
@@ -2511,9 +2528,9 @@ fn process_msgs_fill_uses_instrument_to_req_mapping() {
     let (client, _rx, shared) = test_client();
     client.core.instrument_to_req.lock().unwrap().insert(0, 42);
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 1, side: Side::Buy,
-        price: PRICE_SCALE, qty: 100, remaining: 0,
+        price: PRICE_SCALE, qty_fixed: (100) as i64 * crate::types::QTY_SCALE, remaining_fixed: (0) as i64 * crate::types::QTY_SCALE,
         commission: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
@@ -2599,9 +2616,9 @@ fn modify_filled_order_receives_cancel_reject() {
     let (client, _rx, shared) = test_client();
     client.map_req_instrument(1, 0);
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 120, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100, remaining: 0,
+        price: 150 * PRICE_SCALE, qty_fixed: (100) as i64 * crate::types::QTY_SCALE, remaining_fixed: (0) as i64 * crate::types::QTY_SCALE,
         commission: 0, timestamp_ns: 1000,
     });
     let mut w = RecordingWrapper::default();

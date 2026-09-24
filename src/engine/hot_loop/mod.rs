@@ -1175,12 +1175,12 @@ impl HotLoop {
     /// Simulate a fill for testing. Updates position and notifies.
     pub fn inject_fill(&mut self, fill: &Fill) {
         let delta = match fill.side {
-            crate::types::Side::Buy => fill.qty,
-            crate::types::Side::Sell | crate::types::Side::ShortSell => -fill.qty,
+            crate::types::Side::Buy => fill.qty_fixed,
+            crate::types::Side::Sell | crate::types::Side::ShortSell => -fill.qty_fixed,
         };
-        self.context.update_position(fill.instrument, delta);
+        self.context.update_position_fixed(fill.instrument, delta);
         self.shared.orders.push_fill(*fill);
-        self.shared.portfolio.set_position(fill.instrument, self.context.position(fill.instrument));
+        self.shared.portfolio.set_position_fixed(fill.instrument, self.context.position_fixed(fill.instrument));
         emit(&self.event_tx, Event::Fill(*fill));
     }
 }
@@ -1396,6 +1396,13 @@ pub(crate) fn decode_tif(tif: u8) -> &'static str {
     }
 }
 
+/// Parse a decimal quantity ("1", "0.5") into a fixed-point Qty
+/// (QTY_SCALE = 10^4). A fraction such as a partial share is kept: reading
+/// it as a whole number dropped the fill (ibx#313).
+pub(crate) fn parse_qty(s: &str) -> Option<Qty> {
+    s.parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| (v * QTY_SCALE as f64).round() as Qty)
+}
+
 /// Format a fixed-point Qty (QTY_SCALE = 10^4) to a decimal string. Zero alloc.
 pub(crate) fn format_qty(qty: Qty) -> StackStr {
     let whole = qty / QTY_SCALE;
@@ -1577,18 +1584,18 @@ mod tests {
         engine.context_mut().market.register(265598);
 
         let fill = Fill {
-            cum_qty: 0, avg_price: 0,
+            cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
             instrument: 0,
             order_id: 1001,
             side: Side::Buy,
             price: 150_00000000,
-            qty: 100,
-            remaining: 0,
+            qty_fixed: (100) as i64 * crate::types::QTY_SCALE,
+            remaining_fixed: (0) as i64 * crate::types::QTY_SCALE,
             commission: 1_00000000,
             timestamp_ns: 0,
         };
         engine.inject_fill(&fill);
-        assert_eq!(engine.context_mut().position(0), 100);
+        assert_eq!(engine.context_mut().position_fixed(0) / crate::types::QTY_SCALE, 100);
     }
 
     #[test]

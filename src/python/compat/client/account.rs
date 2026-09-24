@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use crate::types::*;
 use super::EClient;
 use super::super::contract::Contract;
-use super::super::super::types::PRICE_SCALE_F;
+use super::super::super::types::{PRICE_SCALE_F, QTY_SCALE_F};
 
 #[pymethods]
 impl EClient {
@@ -97,7 +97,7 @@ impl EClient {
             let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
             self.wrapper.call_method(
                 py, "position",
-                (self.account().as_str(), &c_py, pi.position as f64, avg_cost),
+                (self.account().as_str(), &c_py, pi.position_fixed as f64 / QTY_SCALE_F, avg_cost),
                 None,
             )?;
         }
@@ -183,7 +183,7 @@ impl EClient {
             let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
             self.wrapper.call_method(
                 py, "position_multi",
-                (req_id, account, model_code, &c_py, pi.position as f64, avg_cost),
+                (req_id, account, model_code, &c_py, pi.position_fixed as f64 / QTY_SCALE_F, avg_cost),
                 None,
             )?;
         }

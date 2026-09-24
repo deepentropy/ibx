@@ -122,7 +122,8 @@ impl Context {
     // ── Positions & orders (read) ──
 
     #[inline(always)]
-    pub fn position(&self, id: InstrumentId) -> i64 {
+    /// Fixed-point (QTY_SCALE).
+    pub fn position_fixed(&self, id: InstrumentId) -> Qty {
         self.positions[id as usize]
     }
 
@@ -927,7 +928,8 @@ impl Context {
         self.pending_orders.drain()
     }
 
-    pub fn update_position(&mut self, instrument: InstrumentId, delta: i64) {
+    /// `delta` is fixed-point (QTY_SCALE).
+    pub fn update_position_fixed(&mut self, instrument: InstrumentId, delta: Qty) {
         self.positions[instrument as usize] += delta;
     }
 
@@ -971,9 +973,10 @@ impl Context {
         }
     }
 
-    pub fn update_order_filled(&mut self, order_id: OrderId, last_shares: u32) {
+    /// `last_qty` is fixed-point (QTY_SCALE).
+    pub fn update_order_filled_fixed(&mut self, order_id: OrderId, last_qty: Qty) {
         if let Some(order) = self.open_orders.get_mut(&order_id) {
-            order.filled += last_shares;
+            order.filled_fixed += last_qty;
         }
     }
 
@@ -1128,28 +1131,28 @@ mod tests {
     #[test]
     fn position_starts_at_zero() {
         let ctx = Context::new();
-        assert_eq!(ctx.position(0), 0);
-        assert_eq!(ctx.position(255), 0);
+        assert_eq!(ctx.position_fixed(0) / crate::types::QTY_SCALE, 0);
+        assert_eq!(ctx.position_fixed(255) / crate::types::QTY_SCALE, 0);
     }
 
     #[test]
     fn update_position_accumulates() {
         let mut ctx = Context::new();
-        ctx.update_position(0, 100);
-        assert_eq!(ctx.position(0), 100);
-        ctx.update_position(0, -30);
-        assert_eq!(ctx.position(0), 70);
-        ctx.update_position(0, -70);
-        assert_eq!(ctx.position(0), 0);
+        ctx.update_position_fixed(0, (100) as i64 * crate::types::QTY_SCALE);
+        assert_eq!(ctx.position_fixed(0) / crate::types::QTY_SCALE, 100);
+        ctx.update_position_fixed(0, (-30) as i64 * crate::types::QTY_SCALE);
+        assert_eq!(ctx.position_fixed(0) / crate::types::QTY_SCALE, 70);
+        ctx.update_position_fixed(0, (-70) as i64 * crate::types::QTY_SCALE);
+        assert_eq!(ctx.position_fixed(0) / crate::types::QTY_SCALE, 0);
     }
 
     #[test]
     fn positions_per_instrument() {
         let mut ctx = Context::new();
-        ctx.update_position(0, 100);
-        ctx.update_position(1, -50);
-        assert_eq!(ctx.position(0), 100);
-        assert_eq!(ctx.position(1), -50);
+        ctx.update_position_fixed(0, (100) as i64 * crate::types::QTY_SCALE);
+        ctx.update_position_fixed(1, (-50) as i64 * crate::types::QTY_SCALE);
+        assert_eq!(ctx.position_fixed(0) / crate::types::QTY_SCALE, 100);
+        assert_eq!(ctx.position_fixed(1) / crate::types::QTY_SCALE, -50);
     }
 
     // --- Open orders ---
@@ -1162,8 +1165,8 @@ mod tests {
             instrument: 0,
             side: Side::Buy,
             price: 150 * PRICE_SCALE,
-            qty: 100,
-            filled: 0,
+            qty_fixed: (100) as i64 * crate::types::QTY_SCALE,
+            filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::Submitted,
             ord_type: b'2',
             tif: b'0',
@@ -1171,7 +1174,7 @@ mod tests {
         };
         ctx.insert_order(order);
         assert!(ctx.order(1).is_some());
-        assert_eq!(ctx.order(1).unwrap().qty, 100);
+        assert_eq!(ctx.order(1).unwrap().qty_fixed / crate::types::QTY_SCALE, 100);
     }
 
     #[test]
@@ -1182,8 +1185,8 @@ mod tests {
             instrument: 0,
             side: Side::Buy,
             price: 150 * PRICE_SCALE,
-            qty: 100,
-            filled: 0,
+            qty_fixed: (100) as i64 * crate::types::QTY_SCALE,
+            filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::Submitted,
             ord_type: b'2',
             tif: b'0',
@@ -1194,8 +1197,8 @@ mod tests {
             instrument: 1,
             side: Side::Sell,
             price: 400 * PRICE_SCALE,
-            qty: 50,
-            filled: 0,
+            qty_fixed: (50) as i64 * crate::types::QTY_SCALE,
+            filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::Submitted,
             ord_type: b'2',
             tif: b'0',
@@ -1215,8 +1218,8 @@ mod tests {
             instrument: 0,
             side: Side::Buy,
             price: 150 * PRICE_SCALE,
-            qty: 100,
-            filled: 0,
+            qty_fixed: (100) as i64 * crate::types::QTY_SCALE,
+            filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::Submitted,
             ord_type: b'2',
             tif: b'0',
@@ -1234,7 +1237,7 @@ mod tests {
     fn submitted_order(ctx: &mut Context, oid: u64) {
         ctx.insert_order(Order {
             order_id: oid, instrument: 0, side: Side::Buy, price: 100,
-            qty: 100, filled: 0, status: OrderStatus::Submitted,
+            qty_fixed: (100) as i64 * crate::types::QTY_SCALE, filled_fixed: (0) as i64 * crate::types::QTY_SCALE, status: OrderStatus::Submitted,
             ord_type: b'2', tif: b'0', stop_price: 0,
         });
     }
@@ -1308,8 +1311,8 @@ mod tests {
             instrument: 0,
             side: Side::Buy,
             price: 150 * PRICE_SCALE,
-            qty: 100,
-            filled: 0,
+            qty_fixed: (100) as i64 * crate::types::QTY_SCALE,
+            filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::Submitted,
             ord_type: b'2',
             tif: b'0',
@@ -1479,19 +1482,19 @@ mod tests {
 
         ctx.insert_order(Order {
             order_id: 1, instrument: 0, side: Side::Buy,
-            price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+            price: 150 * PRICE_SCALE, qty_fixed: (100) as i64 * crate::types::QTY_SCALE, filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::Submitted,
             ord_type: b'2', tif: b'0', stop_price: 0,
         });
         ctx.insert_order(Order {
             order_id: 2, instrument: 0, side: Side::Sell,
-            price: 155 * PRICE_SCALE, qty: 50, filled: 0,
+            price: 155 * PRICE_SCALE, qty_fixed: (50) as i64 * crate::types::QTY_SCALE, filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::Submitted,
             ord_type: b'2', tif: b'0', stop_price: 0,
         });
         ctx.insert_order(Order {
             order_id: 3, instrument: 0, side: Side::Buy,
-            price: 149 * PRICE_SCALE, qty: 200, filled: 0,
+            price: 149 * PRICE_SCALE, qty_fixed: (200) as i64 * crate::types::QTY_SCALE, filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::Filled,
             ord_type: b'2', tif: b'0', stop_price: 0,
         });
@@ -1540,14 +1543,14 @@ mod tests {
         let mut ctx = Context::new();
         ctx.insert_order(Order {
             order_id: 1, instrument: 0, side: Side::Buy,
-            price: PRICE_SCALE, qty: 100, filled: 0,
+            price: PRICE_SCALE, qty_fixed: (100) as i64 * crate::types::QTY_SCALE, filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::PendingSubmit,
             ord_type: b'2', tif: b'0', stop_price: 0,
         });
-        ctx.update_order_filled(1, 30);
-        assert_eq!(ctx.order(1).unwrap().filled, 30);
-        ctx.update_order_filled(1, 50);
-        assert_eq!(ctx.order(1).unwrap().filled, 80);
+        ctx.update_order_filled_fixed(1, (30) as i64 * crate::types::QTY_SCALE);
+        assert_eq!(ctx.order(1).unwrap().filled_fixed / crate::types::QTY_SCALE, 30);
+        ctx.update_order_filled_fixed(1, (50) as i64 * crate::types::QTY_SCALE);
+        assert_eq!(ctx.order(1).unwrap().filled_fixed / crate::types::QTY_SCALE, 80);
     }
 
     #[test]
@@ -1555,19 +1558,19 @@ mod tests {
         let mut ctx = Context::new();
         ctx.insert_order(Order {
             order_id: 1, instrument: 0, side: Side::Buy,
-            price: PRICE_SCALE, qty: 100, filled: 0,
+            price: PRICE_SCALE, qty_fixed: (100) as i64 * crate::types::QTY_SCALE, filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::PendingSubmit,
             ord_type: b'2', tif: b'0', stop_price: 0,
         });
         ctx.insert_order(Order {
             order_id: 2, instrument: 0, side: Side::Buy,
-            price: PRICE_SCALE, qty: 100, filled: 50,
+            price: PRICE_SCALE, qty_fixed: (100) as i64 * crate::types::QTY_SCALE, filled_fixed: (50) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::PartiallyFilled,
             ord_type: b'2', tif: b'0', stop_price: 0,
         });
         ctx.insert_order(Order {
             order_id: 3, instrument: 0, side: Side::Buy,
-            price: PRICE_SCALE, qty: 100, filled: 100,
+            price: PRICE_SCALE, qty_fixed: (100) as i64 * crate::types::QTY_SCALE, filled_fixed: (100) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::Filled,
             ord_type: b'2', tif: b'0', stop_price: 0,
         });

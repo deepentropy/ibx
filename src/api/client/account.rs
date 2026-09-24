@@ -1,6 +1,6 @@
 //! Account-related methods: positions, PnL, account summary/updates.
 
-use crate::api::types::PRICE_SCALE_F;
+use crate::api::types::{PRICE_SCALE_F, QTY_SCALE_F};
 use crate::api::wrapper::Wrapper;
 use crate::types::*;
 
@@ -41,7 +41,7 @@ impl EClient {
                     ..Default::default()
                 });
             let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
-            wrapper.position(&self.account_id, &c, pi.position as f64, avg_cost);
+            wrapper.position(&self.account_id, &c, pi.position_fixed as f64 / QTY_SCALE_F, avg_cost);
         }
         wrapper.position_end();
     }

@@ -26,19 +26,19 @@ fn full_lifecycle() {
 
     // Simulate fill → pushed to shared state
     let fill = Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: aapl,
         order_id: 1,
         side: Side::Buy,
         price: 150 * PRICE_SCALE,
-        qty: 100,
-        remaining: 0,
+        qty_fixed: (100) as i64 * ibx::types::QTY_SCALE,
+        remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0,
         timestamp_ns: 0,
     };
     engine.inject_fill(&fill);
 
-    assert_eq!(engine.context_mut().position(aapl), 100);
+    assert_eq!(engine.context_mut().position_fixed(aapl) / ibx::types::QTY_SCALE, 100);
 
     let fills = shared.orders.drain_fills();
     assert_eq!(fills.len(), 1);

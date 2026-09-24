@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use ibx::bridge::SharedState;
 use ibx::gateway::{Gateway, GatewayConfig};
-use ibx::types::{ControlCommand, PRICE_SCALE};
+use ibx::types::{ControlCommand, PRICE_SCALE, QTY_SCALE};
 
 struct WireLog {
     lines: Mutex<Vec<String>>,
@@ -138,9 +138,13 @@ fn every_portfolio_row_is_applied() {
     let mut wrong = Vec::new();
     for (con_id, row) in &last {
         let held = shared.portfolio.position_info(*con_id);
+        // Positions are fixed-point (QTY_SCALE), ibx#313.
+        let position = row.get(&6064).and_then(|v| v.parse::<f64>().ok())
+            .map(|v| (v * QTY_SCALE as f64).round() as i64).unwrap_or(0);
         let ok = held.as_ref().is_some_and(|p| p.market_price == scaled(row, 6065)
             && p.avg_cost == scaled(row, 6101)
-            && p.unrealized_pnl == scaled(row, 6100));
+            && p.unrealized_pnl == scaled(row, 6100)
+            && p.position_fixed == position);
         if !ok {
             wrong.push(*con_id);
         }
@@ -164,18 +168,22 @@ struct Seen {
     symbols: BTreeMap<i64, String>,
     /// Multipliers carried by position and update_portfolio.
     multipliers: Vec<String>,
+    /// con_id -> position in shares, from position() and update_portfolio().
+    from_positions: BTreeMap<i64, f64>,
+    from_portfolio: BTreeMap<i64, f64>,
 }
 
 struct Probe(Arc<Mutex<Seen>>);
 
 impl ibx::api::wrapper::Wrapper for Probe {
-    fn position(&mut self, _account: &str, contract: &ibx::api::client::Contract, _pos: f64, _avg: f64) {
+    fn position(&mut self, _account: &str, contract: &ibx::api::client::Contract, pos: f64, _avg: f64) {
         let mut s = self.0.lock().unwrap();
         s.positions.push(contract.con_id);
         s.multipliers.push(contract.multiplier.clone());
+        s.from_positions.insert(contract.con_id, pos);
     }
     fn update_portfolio(
-        &mut self, contract: &ibx::api::client::Contract, _position: f64, market_price: f64,
+        &mut self, contract: &ibx::api::client::Contract, position: f64, market_price: f64,
         _market_value: f64, _average_cost: f64, _unrealized_pnl: f64,
         _realized_pnl: f64, _account_name: &str,
     ) {
@@ -184,6 +192,7 @@ impl ibx::api::wrapper::Wrapper for Probe {
             s.priced.insert(contract.con_id);
         }
         s.symbols.insert(contract.con_id, contract.symbol.clone());
+        s.from_portfolio.insert(contract.con_id, position);
         s.multipliers.push(contract.multiplier.clone());
     }
 }
@@ -240,5 +249,10 @@ fn eclient_delivers_update_portfolio() {
     distinct.dedup();
     println!("  multipliers: {:?}", distinct);
     assert!(!multipliers.iter().any(|m| m.contains('/')), "multiplier holds the row key: {:?}", distinct);
+    // Positions are fixed-point inside ibx (ibx#313); both callbacks must
+    // report the same number of shares.
+    let (a, b) = { let s = seen.lock().unwrap(); (s.from_positions.clone(), s.from_portfolio.clone()) };
+    println!("  positions: {:?}", a);
+    assert_eq!(a, b, "position() and update_portfolio() disagree");
     println!("  PASS");
 }

@@ -15,7 +15,7 @@ use crate::api::types::{
     Contract as ApiContract, CommissionAndFeesReport as ApiCommissionAndFeesReport,
     Execution as ApiExecution, ExecutionFilter,
     Order as ApiOrder,
-    PRICE_SCALE_F,
+    PRICE_SCALE_F, QTY_SCALE_F,
 };
 use crate::bridge::SharedState;
 use crate::types::*;
@@ -1011,9 +1011,10 @@ impl ClientCore {
         for con_id in con_ids {
             let seed = seeds.get(&con_id);
             let pi = shared.portfolio.position_info(con_id);
-            let qty_now = pi.as_ref().map(|p| p.position).unwrap_or(0);
+            // Positions are fixed-point; the P&L works in shares.
+            let qty_now = pi.as_ref().map(|p| p.position_fixed).unwrap_or(0) as f64 / QTY_SCALE_F;
             let avg_cost = pi.as_ref().map(|p| p.avg_cost).unwrap_or(0);
-            let qty_midnight = seed.map(|s| s.qty_midnight).unwrap_or(0);
+            let qty_midnight = seed.map(|s| s.qty_midnight_fixed).unwrap_or(0) as f64 / QTY_SCALE_F;
 
             total_realized += seed.map(|s| s.realized_pnl).unwrap_or(0.0);
 
@@ -1026,7 +1027,7 @@ impl ClientCore {
                 continue;
             }
             // Skip overnight positions without prev close (would give wrong result)
-            if prev_close == 0 && qty_midnight != 0 {
+            if prev_close == 0 && qty_midnight != 0.0 {
                 continue;
             }
 
@@ -1036,16 +1037,16 @@ impl ClientCore {
             // -qty*avgCost (cash paid to open a long, received to open a short).
             let money_traded = match seed {
                 Some(s) => s.money_traded,
-                None => -(qty_now as f64 * avg_cost as f64 / PRICE_SCALE_F),
+                None => -(qty_now * avg_cost as f64 / PRICE_SCALE_F),
             };
 
-            let mv_now = qty_now as f64 * price_now as f64 / PRICE_SCALE_F;
-            let mv_midnight = qty_midnight as f64 * prev_close as f64 / PRICE_SCALE_F;
+            let mv_now = qty_now * price_now as f64 / PRICE_SCALE_F;
+            let mv_midnight = qty_midnight * prev_close as f64 / PRICE_SCALE_F;
             // Daily P&L = value change since midnight plus today's net cash.
             total_daily += mv_now - mv_midnight + money_traded;
 
             if avg_cost != 0 {
-                total_unrealized += qty_now as f64 * (price_now - avg_cost) as f64 / PRICE_SCALE_F;
+                total_unrealized += qty_now * (price_now - avg_cost) as f64 / PRICE_SCALE_F;
             }
             priced += 1;
         }
@@ -1099,7 +1100,9 @@ impl ClientCore {
 
         for (req_id, con_id) in reqs {
             let Some(pi) = shared.portfolio.position_info(con_id) else { continue; };
-            let qty_now = pi.position;
+            // Positions are fixed-point; the P&L works in shares.
+            let qty_fx = pi.position_fixed;
+            let qty_now = qty_fx as f64 / QTY_SCALE_F;
             let avg_cost = pi.avg_cost;
 
             // Price from this client's market-data subscription when there is
@@ -1116,9 +1119,9 @@ impl ClientCore {
             }
 
             let seed = seeds.get(&con_id);
-            let qty_midnight = seed.map(|s| s.qty_midnight).unwrap_or(0);
+            let qty_midnight = seed.map(|s| s.qty_midnight_fixed).unwrap_or(0) as f64 / QTY_SCALE_F;
             let prev_close = q.map(|q| q.close).unwrap_or(0);
-            if prev_close == 0 && qty_midnight != 0 {
+            if prev_close == 0 && qty_midnight != 0.0 {
                 continue;
             }
 
@@ -1127,20 +1130,20 @@ impl ClientCore {
             // trade's net cash for an intraday-only position (no seed row).
             let money_traded = match seed {
                 Some(s) => s.money_traded,
-                None => -(qty_now as f64 * avg_cost as f64 / PRICE_SCALE_F),
+                None => -(qty_now * avg_cost as f64 / PRICE_SCALE_F),
             };
 
-            let mv_now = qty_now as f64 * price_now as f64 / PRICE_SCALE_F;
-            let mv_midnight = qty_midnight as f64 * prev_close as f64 / PRICE_SCALE_F;
+            let mv_now = qty_now * price_now as f64 / PRICE_SCALE_F;
+            let mv_midnight = qty_midnight * prev_close as f64 / PRICE_SCALE_F;
             let daily = mv_now - mv_midnight + money_traded;
             let unrealized = if avg_cost != 0 {
-                qty_now as f64 * (price_now - avg_cost) as f64 / PRICE_SCALE_F
+                qty_now * (price_now - avg_cost) as f64 / PRICE_SCALE_F
             } else { 0.0 };
             let realized = seed.map(|s| s.realized_pnl).unwrap_or(0.0);
             let value = mv_now;
 
             let snapshot: [i64; 5] = [
-                qty_now,
+                qty_fx,
                 (daily * PRICE_SCALE_F) as i64,
                 (unrealized * PRICE_SCALE_F) as i64,
                 (realized * PRICE_SCALE_F) as i64,
@@ -1153,7 +1156,7 @@ impl ClientCore {
 
             results.push(PnlSingleUpdate {
                 req_id,
-                pos: qty_now as f64,
+                pos: qty_now,
                 daily_pnl: daily,
                 unrealized_pnl: unrealized,
                 realized_pnl: realized,
@@ -1233,7 +1236,7 @@ impl ClientCore {
 
         let to_entry = |pi: &PositionInfo| PortfolioUpdateEntry {
             con_id: pi.con_id,
-            position: pi.position as f64,
+            position: pi.position_fixed as f64 / QTY_SCALE_F,
             avg_cost: pi.avg_cost as f64 / PRICE_SCALE_F,
             market_price: pi.market_price as f64 / PRICE_SCALE_F,
             market_value: pi.market_value as f64 / PRICE_SCALE_F,
@@ -1249,7 +1252,7 @@ impl ClientCore {
             // snapshot) is a genuine update, so compare them too (ibx#238).
             current.iter().filter(|pi| {
                 !prev.iter().any(|pp| pp.con_id == pi.con_id
-                    && pp.position == pi.position
+                    && pp.position_fixed == pi.position_fixed
                     && pp.avg_cost == pi.avg_cost
                     && pp.market_price == pi.market_price
                     && pp.market_value == pi.market_value
@@ -1918,7 +1921,7 @@ mod tests {
         core.instrument_to_req.lock().unwrap().insert(iid, 1);
         shared.portfolio.set_position_info(PositionInfo {
             con_id,
-            position,
+            position_fixed: position as i64 * crate::types::QTY_SCALE,
             avg_cost: (avg_cost_dollars * PRICE_SCALE_F) as i64,
             symbol: format!("SYM{con_id}"),
             sec_type: "STK".into(),
@@ -1969,7 +1972,7 @@ mod tests {
         seed_pnl_position(&core, &shared, 756733, 0, 10, 700.00, 735.00, 730.00);
         shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
             con_id: 756733,
-            qty_midnight: 10,
+            qty_midnight_fixed: (10) as i64 * crate::types::QTY_SCALE,
             money_traded: 0.0,
             realized_pnl: 0.0,
         }]);
@@ -1995,7 +1998,7 @@ mod tests {
         seed_pnl_position(&core, &shared, 1, 0, 7, 100.00, 110.00, 100.00);
         shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
             con_id: 1,
-            qty_midnight: 10,
+            qty_midnight_fixed: (10) as i64 * crate::types::QTY_SCALE,
             money_traded: 330.0,   // +330 = sold 3 @ $110 (wire sign, SELL positive)
             realized_pnl: 30.0,
         }]);
@@ -2032,7 +2035,7 @@ mod tests {
         // Open position, but NO instrument mapping and NO quote pushed.
         shared.portfolio.set_position_info(PositionInfo {
             con_id: 756733,
-            position: 10,
+            position_fixed: (10) as i64 * crate::types::QTY_SCALE,
             avg_cost: (700.00 * PRICE_SCALE_F) as i64,
             symbol: "SPY".into(),
             sec_type: "STK".into(),
@@ -2132,7 +2135,7 @@ mod tests {
         seed_pnl_position(&core, &shared, 756733, 0, 10, 700.00, 735.00, 730.00);
         shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
             con_id: 756733,
-            qty_midnight: 10,
+            qty_midnight_fixed: (10) as i64 * crate::types::QTY_SCALE,
             money_traded: 0.0,
             realized_pnl: 12.34,
         }]);

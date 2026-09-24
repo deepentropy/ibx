@@ -171,7 +171,7 @@ fn disconnect_during_pending_order_uncertain_status() {
     shared.orders.push_order_update(OrderUpdate {
         avg_fill_price: 0,
         order_id: 50, instrument: 0, status: OrderStatus::Uncertain,
-        filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+        filled_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, remaining_qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -190,7 +190,7 @@ fn fill_dedup_duplicate_exec_id_no_double_position() {
 
     engine.context_mut().insert_order(ibx::types::Order {
         order_id: 70, instrument: 0, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 100, filled: 0,
+        price: 150 * PRICE_SCALE, qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, filled_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         status: OrderStatus::Submitted,
         ord_type: b'2', tif: b'0', stop_price: 0,
     });
@@ -206,7 +206,7 @@ fn fill_dedup_duplicate_exec_id_no_double_position() {
 
     // Only one fill
     assert_eq!(shared.orders.drain_fills().len(), 1);
-    assert_eq!(engine.context_mut().position(0), 100);
+    assert_eq!(engine.context_mut().position_fixed(0) / ibx::types::QTY_SCALE, 100);
 }
 
 #[test]
@@ -217,7 +217,7 @@ fn fill_dedup_different_exec_ids_both_count() {
 
     engine.context_mut().insert_order(ibx::types::Order {
         order_id: 71, instrument: 0, side: Side::Buy,
-        price: 150 * PRICE_SCALE, qty: 200, filled: 0,
+        price: 150 * PRICE_SCALE, qty_fixed: (200) as i64 * ibx::types::QTY_SCALE, filled_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         status: OrderStatus::Submitted,
         ord_type: b'2', tif: b'0', stop_price: 0,
     });
@@ -236,7 +236,7 @@ fn fill_dedup_different_exec_ids_both_count() {
     engine.inject_ccp_message(&msg_b);
 
     assert_eq!(shared.orders.drain_fills().len(), 2);
-    assert_eq!(engine.context_mut().position(0), 200);
+    assert_eq!(engine.context_mut().position_fixed(0) / ibx::types::QTY_SCALE, 200);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -393,9 +393,9 @@ fn empty_historical_news() {
 fn process_msgs_multiple_rapid_calls_no_duplicates() {
     let (client, _rx, shared) = test_client();
     shared.orders.push_fill(Fill {
-        cum_qty: 0, avg_price: 0,
+        cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 1, side: Side::Buy,
-        price: PRICE_SCALE, qty: 1, remaining: 0,
+        price: PRICE_SCALE, qty_fixed: (1) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
         commission: 0, timestamp_ns: 0,
     });
 
@@ -515,9 +515,9 @@ fn concurrent_disconnect_during_process_msgs() {
     // Push lots of data
     for i in 0..100 {
         shared.orders.push_fill(Fill {
-            cum_qty: 0, avg_price: 0,
+            cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
             instrument: 0, order_id: i, side: Side::Buy,
-            price: PRICE_SCALE, qty: 1, remaining: 0,
+            price: PRICE_SCALE, qty_fixed: (1) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
             commission: 0, timestamp_ns: 0,
         });
     }
@@ -587,9 +587,9 @@ fn concurrent_place_order_and_process_msgs() {
     let process_handle = thread::spawn(move || {
         for i in 0..50 {
             shared_a.orders.push_fill(Fill {
-                cum_qty: 0, avg_price: 0,
+                cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
                 instrument: 0, order_id: i, side: Side::Buy,
-                price: PRICE_SCALE, qty: 1, remaining: 0,
+                price: PRICE_SCALE, qty_fixed: (1) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
                 commission: 0, timestamp_ns: 0,
             });
             let mut w = RecordingWrapper::default();
@@ -689,10 +689,10 @@ fn shared_state_all_drains_empty_after_first_call() {
     let ss = SharedState::new();
 
     // Push one item to each queue
-    ss.orders.push_fill(Fill { cum_qty: 0, avg_price: 0, instrument: 0, order_id: 1, side: Side::Buy,
-        price: PRICE_SCALE, qty: 1, remaining: 0, commission: 0, timestamp_ns: 0 });
+    ss.orders.push_fill(Fill { cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0, instrument: 0, order_id: 1, side: Side::Buy,
+        price: PRICE_SCALE, qty_fixed: (1) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE, commission: 0, timestamp_ns: 0 });
     ss.orders.push_order_update(OrderUpdate { avg_fill_price: 0, order_id: 1, instrument: 0,
-        status: OrderStatus::Filled, filled_qty: 1, remaining_qty: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0 });
+        status: OrderStatus::Filled, filled_qty_fixed: (1) as i64 * ibx::types::QTY_SCALE, remaining_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0 });
     ss.orders.push_cancel_reject(CancelReject { order_id: 1, instrument: 0,
         reject_type: 1, reason_code: 0, timestamp_ns: 0 });
     ss.market.push_tbt_trade(TbtTrade { instrument: 0, price: PRICE_SCALE,
@@ -726,9 +726,9 @@ fn concurrent_drain_fills_no_duplicates() {
     // Push 100 fills
     for i in 0..100 {
         shared.orders.push_fill(Fill {
-            cum_qty: 0, avg_price: 0,
+            cum_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, avg_price: 0,
             instrument: 0, order_id: i, side: Side::Buy,
-            price: PRICE_SCALE, qty: 1, remaining: 0,
+            price: PRICE_SCALE, qty_fixed: (1) as i64 * ibx::types::QTY_SCALE, remaining_fixed: (0) as i64 * ibx::types::QTY_SCALE,
             commission: 0, timestamp_ns: 0,
         });
     }

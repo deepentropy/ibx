@@ -1010,9 +1010,12 @@ pub(crate) fn drain_and_send_orders(
                 send_new_order(conn, context, instrument, &refs)
             }
             OrderRequest::SubmitLimitFractional { order_id, instrument, side, qty, price } => {
-                context.insert_order(crate::types::Order::new(
+                // The tracked quantity is fixed-point like `qty` (it was 0).
+                let mut tracked = crate::types::Order::new(
                     order_id, instrument, side, 0, price, b'2', b'0', 0,
-                ));
+                );
+                tracked.qty_fixed = qty;
+                context.insert_order(tracked);
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
@@ -1470,8 +1473,8 @@ pub(crate) fn drain_and_send_orders(
                         order_id: oid,
                         instrument: 0,
                         status: OrderStatus::Rejected,
-                        filled_qty: 0,
-                        remaining_qty: 0,
+                        filled_qty_fixed: 0,
+                        remaining_qty_fixed: 0,
                         perm_id: 0,
                         parent_id: 0,
                         timestamp_ns: 0,
@@ -1511,8 +1514,8 @@ fn synthesize_pending_cancel(
             order_id,
             instrument: order.instrument,
             status: OrderStatus::PendingCancel,
-            filled_qty: order.filled as i64,
-            remaining_qty: order.qty as i64 - order.filled as i64,
+            filled_qty_fixed: order.filled_fixed,
+            remaining_qty_fixed: order.qty_fixed - order.filled_fixed,
             perm_id: 0,
             parent_id: 0,
             timestamp_ns: context.now_ns(),
@@ -2213,7 +2216,7 @@ mod tests {
     fn order(oid: u64, filled: u32, status: OrderStatus) -> Order {
         Order {
             order_id: oid, instrument: 0, side: Side::Buy, price: 100,
-            qty: 10, filled, status, ord_type: b'2', tif: b'0', stop_price: 0,
+            qty_fixed: (10) as i64 * crate::types::QTY_SCALE, filled_fixed: filled as i64 * crate::types::QTY_SCALE, status, ord_type: b'2', tif: b'0', stop_price: 0,
         }
     }
 
@@ -2231,8 +2234,8 @@ mod tests {
         let updates = shared.orders.drain_order_updates();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].status, OrderStatus::PendingCancel);
-        assert_eq!(updates[0].filled_qty, 3);
-        assert_eq!(updates[0].remaining_qty, 7);
+        assert_eq!(updates[0].filled_qty_fixed / crate::types::QTY_SCALE, 3);
+        assert_eq!(updates[0].remaining_qty_fixed / crate::types::QTY_SCALE, 7);
     }
 
     /// Encode one order request through `drain_and_send_orders` over a

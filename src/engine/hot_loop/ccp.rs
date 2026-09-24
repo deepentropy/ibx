@@ -10,11 +10,11 @@ use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::types::{
     CompletedOrder, Fill, InstrumentId, MidnightSeed, NewsBulletin,
-    PositionInfo, Price, Side, PRICE_SCALE,
+    PositionInfo, Price, Qty, Side, PRICE_SCALE, QTY_SCALE,
 };
 use crossbeam_channel::Sender;
 
-use super::{HeartbeatState, emit, clone_for_event, parse_price_tag, decode_tif};
+use super::{HeartbeatState, emit, clone_for_event, parse_price_tag, parse_qty, decode_tif};
 
 /// Bound for an in-flight contract-details request (secdef reply or
 /// per-exchange fan-out). Refreshed on fan-out activity; on expiry the
@@ -688,7 +688,7 @@ impl CcpState {
                 Some("5") => Side::ShortSell,
                 _ => Side::Sell,
             };
-            let qty: u32 = parsed.get(&38).and_then(|s| s.parse::<f64>().ok()).map(|q| q as u32).unwrap_or(0);
+            let qty: Qty = parsed.get(&38).and_then(|s| parse_qty(s)).unwrap_or(0);
             let limit_price_i64: i64 = parsed.get(&44)
                 .and_then(|s| s.parse::<f64>().ok())
                 .map(|p| (p * PRICE_SCALE as f64) as i64)
@@ -723,15 +723,15 @@ impl CcpState {
                     instrument,
                     side,
                     price: limit_price_i64,
-                    qty,
-                    filled: 0,
+                    qty_fixed: qty,
+                    filled_fixed: 0,
                     status: crate::types::OrderStatus::Submitted,
                     ord_type: ord_type_byte,
                     tif: tif_byte,
                     stop_price: stop_price_i64,
                 });
                 log::info!("CCP recovery: inserted orderId={} sym={:?} side={:?} qty={} px={}",
-                    clord_id, parsed.get(&55), side, qty,
+                    clord_id, parsed.get(&55), side, qty as f64 / QTY_SCALE as f64,
                     limit_price_i64 as f64 / PRICE_SCALE as f64);
             }
         }
@@ -809,8 +809,9 @@ impl CcpState {
         let exec_type = parsed.get(&150).map(|s| s.as_str()).unwrap_or("");
         let exec_id = parsed.get(&17).map(|s| s.as_str()).unwrap_or("");
         let last_px = parsed.get(&31).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let last_shares = parsed.get(&32).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-        let leaves_qty = parsed.get(&151).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        // Fixed-point: a fraction of a share is kept (ibx#313).
+        let last_shares: Qty = parsed.get(&32).and_then(|s| parse_qty(s)).unwrap_or(0);
+        let leaves_qty: Qty = parsed.get(&151).and_then(|s| parse_qty(s)).unwrap_or(0);
         let commission = parsed.get(&12).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
 
         if ord_status == "8" {
@@ -891,20 +892,20 @@ impl CcpState {
                 return;
             }
             if let Some(order) = context.order(clord_id).copied() {
-                context.update_order_filled(clord_id, last_shares as u32);
+                context.update_order_filled_fixed(clord_id, last_shares);
                 // Order totals ride on every fill report next to the print
                 // (ib-agent#192 C3): the callback's filled and average price
                 // are these, not the print (ibx#315).
-                let cum_qty = parsed.get(&14).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let cum_qty: Qty = parsed.get(&14).and_then(|s| parse_qty(s)).unwrap_or(0);
                 let avg_px = parsed.get(&6).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let fill = Fill {
                     instrument: order.instrument,
                     order_id: clord_id,
                     side: order.side,
                     price: (last_px * PRICE_SCALE as f64) as i64,
-                    qty: last_shares,
-                    remaining: leaves_qty,
-                    cum_qty: cum_qty as i64,
+                    qty_fixed: last_shares,
+                    remaining_fixed: leaves_qty,
+                    cum_qty_fixed: cum_qty,
                     avg_price: (avg_px * PRICE_SCALE as f64).round() as i64,
                     commission: (commission * PRICE_SCALE as f64) as i64,
                     timestamp_ns: context.now_ns(),
@@ -913,10 +914,10 @@ impl CcpState {
                     Side::Buy => last_shares,
                     Side::Sell | Side::ShortSell => -last_shares,
                 };
-                context.update_position(order.instrument, delta);
+                context.update_position_fixed(order.instrument, delta);
                 // notify_fill inlined
                 shared.orders.push_fill(fill);
-                shared.portfolio.set_position(fill.instrument, context.position(fill.instrument));
+                shared.portfolio.set_position_fixed(fill.instrument, context.position_fixed(fill.instrument));
                 emit(event_tx, Event::Fill(fill));
                 had_fill = true;
             }
@@ -932,8 +933,8 @@ impl CcpState {
                     order_id: clord_id,
                     instrument: order.instrument,
                     status,
-                    filled_qty: order.filled as i64,
-                    remaining_qty: leaves_qty,
+                    filled_qty_fixed: order.filled_fixed,
+                    remaining_qty_fixed: leaves_qty,
                     avg_fill_price: (avg_px * PRICE_SCALE as f64).round() as i64,
                     perm_id,
                     parent_id,
@@ -1163,7 +1164,7 @@ impl CcpState {
                     order_id: clord_id,
                     instrument: order.instrument,
                     status,
-                    filled_qty: order.filled as i64,
+                    filled_qty_fixed: order.filled_fixed,
                     timestamp_ns: context.now_ns(),
                 });
             }
@@ -1195,7 +1196,7 @@ impl CcpState {
 
         // Update local context only if we tracked the order in this session.
         let instrument = if let Some(order) = context.order(oid).copied() {
-            let restore_status = if order.filled > 0 {
+            let restore_status = if order.filled_fixed > 0 {
                 crate::types::OrderStatus::PartiallyFilled
             } else {
                 crate::types::OrderStatus::Submitted
@@ -1794,14 +1795,14 @@ fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
     };
     let mut seeds = Vec::new();
     let mut con_id: i64 = 0;
-    let mut qty_midnight: i64 = 0;
+    let mut qty_midnight: Qty = 0;
     let mut money_traded: f64 = 0.0;
     let mut realized_pnl: f64 = 0.0;
     let mut count = 0;
     for part in text.split('\x01') {
         if let Some(v) = part.strip_prefix("6008=") {
             if count > 0 && con_id != 0 {
-                seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
+                seeds.push(MidnightSeed { con_id, qty_midnight_fixed: qty_midnight, money_traded, realized_pnl });
             }
             con_id = v.parse().unwrap_or(0);
             qty_midnight = 0;
@@ -1809,7 +1810,7 @@ fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
             realized_pnl = 0.0;
             count += 1;
         } else if let Some(v) = part.strip_prefix("6064=") {
-            qty_midnight = v.parse::<f64>().unwrap_or(0.0) as i64;
+            qty_midnight = parse_qty(v).unwrap_or(0);
         } else if let Some(v) = part.strip_prefix("6822=") {
             // moneyTradedSinceMidnight: signed net cash, SELL positive / BUY
             // negative. Stored with the wire sign; poll_pnl adds it (ib-agent#163).
@@ -1819,7 +1820,7 @@ fn handle_pnl_response(msg: &[u8], shared: &SharedState) {
         }
     }
     if count > 0 && con_id != 0 {
-        seeds.push(MidnightSeed { con_id, qty_midnight, money_traded, realized_pnl });
+        seeds.push(MidnightSeed { con_id, qty_midnight_fixed: qty_midnight, money_traded, realized_pnl });
     }
     shared.portfolio.set_midnight_seeds(seeds);
 }
@@ -1845,7 +1846,7 @@ impl CcpState {
     };
     // Parse repeating group by scanning for 6008= boundaries
     let mut con_id: i64 = 0;
-    let mut qty: i64 = 0;
+    let mut qty: Qty = 0;
     let mut avg_cost_raw: f64 = 0.0;
     let mut count = 0;
     for part in text.split('\x01') {
@@ -1854,11 +1855,11 @@ impl CcpState {
             if count > 0 && con_id != 0 {
                 let avg_cost = (avg_cost_raw * PRICE_SCALE as f64) as Price;
                 shared.portfolio.set_position_info(PositionInfo {
-                    con_id, position: qty, avg_cost, ..Default::default()
+                    con_id, position_fixed: qty, avg_cost, ..Default::default()
                 });
                 if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
-                    shared.portfolio.set_position(instrument, qty);
-                    emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
+                    shared.portfolio.set_position_fixed(instrument, qty);
+                    emit(event_tx, Event::PositionUpdate { instrument, con_id, position_fixed: qty, avg_cost });
                 }
                 self.auto_fetch_secdef_if_cold(con_id, ccp_conn, shared, hb);
             }
@@ -1867,7 +1868,7 @@ impl CcpState {
             avg_cost_raw = 0.0;
             count += 1;
         } else if let Some(v) = part.strip_prefix("6064=") {
-            qty = v.parse::<f64>().unwrap_or(0.0) as i64;
+            qty = parse_qty(v).unwrap_or(0);
         } else if let Some(v) = part.strip_prefix("6101=") {
             avg_cost_raw = v.parse().unwrap_or(0.0);
         }
@@ -1876,11 +1877,11 @@ impl CcpState {
     if count > 0 && con_id != 0 {
         let avg_cost = (avg_cost_raw * PRICE_SCALE as f64) as Price;
         shared.portfolio.set_position_info(PositionInfo {
-            con_id, position: qty, avg_cost, ..Default::default()
+            con_id, position_fixed: qty, avg_cost, ..Default::default()
         });
         if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
-            shared.portfolio.set_position(instrument, qty);
-            emit(event_tx, Event::PositionUpdate { instrument, con_id, position: qty, avg_cost });
+            shared.portfolio.set_position_fixed(instrument, qty);
+            emit(event_tx, Event::PositionUpdate { instrument, con_id, position_fixed: qty, avg_cost });
         }
         self.auto_fetch_secdef_if_cold(con_id, ccp_conn, shared, hb);
     }
@@ -2032,10 +2033,8 @@ pub(crate) fn handle_position_update(
         Some(v) => v,
         None => return,
     };
-    let position: i64 = parsed.get(&6064)
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|v| v as i64)
-        .unwrap_or(0);
+    // Fixed-point: a fractional position is kept (ibx#313).
+    let position: Qty = parsed.get(&6064).and_then(|s| parse_qty(s)).unwrap_or(0);
     // Tag map verified against the updatePortfolio callback (ib-agent#172):
     // 6101 = averageCost, 6065 = marketPrice (per share), 6067 = marketValue,
     // 6100 = unrealizedPNL, 6099 = realizedPNL. Earlier code read 6065 as the
@@ -2064,20 +2063,20 @@ pub(crate) fn handle_position_update(
 
     // Always store position info for reqPositions/pnlSingle, regardless of instrument registry.
     shared.portfolio.set_position_info(PositionInfo {
-        con_id, position, avg_cost,
+        con_id, position_fixed: position, avg_cost,
         symbol, sec_type, currency, multiplier,
         ..Default::default()
     });
     shared.portfolio.set_position_marks(con_id, market_price, market_value, unrealized_pnl, realized_pnl);
 
     if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
-        let current = context.position(instrument);
+        let current = context.position_fixed(instrument);
         let delta = position - current;
         if delta != 0 {
-            context.update_position(instrument, delta);
+            context.update_position_fixed(instrument, delta);
         }
-        shared.portfolio.set_position(instrument, position);
-        emit(event_tx, Event::PositionUpdate { instrument, con_id, position, avg_cost });
+        shared.portfolio.set_position_fixed(instrument, position);
+        emit(event_tx, Event::PositionUpdate { instrument, con_id, position_fixed: position, avg_cost });
     }
 }
 
@@ -2155,8 +2154,8 @@ mod tests {
             instrument,
             side: Side::Buy,
             price: 0,
-            qty: 100,
-            filled: 0,
+            qty_fixed: (100) as i64 * crate::types::QTY_SCALE,
+            filled_fixed: (0) as i64 * crate::types::QTY_SCALE,
             status: crate::types::OrderStatus::Submitted,
             ord_type: b'2',
             tif: b'0',
@@ -2354,14 +2353,14 @@ mod tests {
         handle_portfolio_message(msg.as_bytes(), &mut context, &shared, &None);
 
         let row = |con_id: i64| shared.portfolio.position_info(con_id).expect("row applied");
-        assert_eq!((row(4726868).position, row(4726868).symbol.as_str()), (1, "AXTI"));
+        assert_eq!((row(4726868).position_fixed / crate::types::QTY_SCALE, row(4726868).symbol.as_str()), (1, "AXTI"));
         assert_eq!(row(4726868).avg_cost, (117.79 * PRICE_SCALE as f64) as Price);
-        assert_eq!((row(272093).position, row(272093).symbol.as_str()), (-10, "MSFT"));
+        assert_eq!((row(272093).position_fixed / crate::types::QTY_SCALE, row(272093).symbol.as_str()), (-10, "MSFT"));
         assert_eq!(row(272093).unrealized_pnl, (270.91 * PRICE_SCALE as f64) as Price);
-        assert_eq!((row(756733).position, row(756733).symbol.as_str()), (18, "SPY"));
+        assert_eq!((row(756733).position_fixed / crate::types::QTY_SCALE, row(756733).symbol.as_str()), (18, "SPY"));
         // The multiplier is one part of the row key, not the whole key.
         assert_eq!(row(4726868).multiplier, "1");
-        assert_eq!(context.position(msft), -10, "a registered instrument's position follows its row");
+        assert_eq!(context.position_fixed(msft) / crate::types::QTY_SCALE, -10, "a registered instrument's position follows its row");
     }
 
     // ibx#238 / ib-agent#172: in the UP portfolio snapshot the average cost is
@@ -2382,7 +2381,7 @@ mod tests {
         handle_position_update(&m, &mut context, &shared, &None);
 
         let pi = shared.portfolio.position_info(756733).expect("position stored");
-        assert_eq!(pi.position, 10);
+        assert_eq!(pi.position_fixed / crate::types::QTY_SCALE, 10);
         assert_eq!(pi.avg_cost, (100.50 * PRICE_SCALE as f64) as Price);
         assert_eq!(pi.market_price, (110.25 * PRICE_SCALE as f64) as Price);
         assert_eq!(pi.market_value, (1102.50 * PRICE_SCALE as f64) as Price);
@@ -2396,15 +2395,15 @@ mod tests {
     fn lean_position_feed_does_not_clobber_marks() {
         let shared = SharedState::new();
         shared.portfolio.set_position_info(PositionInfo {
-            con_id: 1, position: 10, avg_cost: 100 * PRICE_SCALE, ..Default::default()
+            con_id: 1, position_fixed: (10) as i64 * crate::types::QTY_SCALE, avg_cost: 100 * PRICE_SCALE, ..Default::default()
         });
         shared.portfolio.set_position_marks(1, 110 * PRICE_SCALE, 1100 * PRICE_SCALE, 100 * PRICE_SCALE, 5 * PRICE_SCALE);
         // Lean feed updates position + avg_cost only.
         shared.portfolio.set_position_info(PositionInfo {
-            con_id: 1, position: 12, avg_cost: 101 * PRICE_SCALE, ..Default::default()
+            con_id: 1, position_fixed: (12) as i64 * crate::types::QTY_SCALE, avg_cost: 101 * PRICE_SCALE, ..Default::default()
         });
         let pi = shared.portfolio.position_info(1).unwrap();
-        assert_eq!(pi.position, 12);
+        assert_eq!(pi.position_fixed / crate::types::QTY_SCALE, 12);
         assert_eq!(pi.avg_cost, 101 * PRICE_SCALE);
         assert_eq!(pi.market_price, 110 * PRICE_SCALE, "marks survive the lean feed");
         assert_eq!(pi.market_value, 1100 * PRICE_SCALE);
@@ -2681,10 +2680,60 @@ mod tests {
         let fills = shared.orders.drain_fills();
         assert_eq!(fills.len(), 2);
         let second = fills[1];
-        assert_eq!((second.qty, second.price), (100, 12 * PRICE_SCALE), "the print");
-        assert_eq!((second.cum_qty, second.avg_price), (200, 11 * PRICE_SCALE), "the order totals");
+        assert_eq!((second.qty_fixed / crate::types::QTY_SCALE, second.price), (100, 12 * PRICE_SCALE), "the print");
+        assert_eq!((second.cum_qty_fixed / crate::types::QTY_SCALE, second.avg_price), (200, 11 * PRICE_SCALE), "the order totals");
         let info = shared.orders.get_order_info(90).expect("order cached");
         assert_eq!(info.order.filled_quantity, 200.0);
+    }
+
+    // ibx#313: fill quantities were read as whole numbers, so a fill of a
+    // fraction of a share parsed to 0 and was dropped: no fill, no position
+    // change. Quantities are fixed-point (QTY_SCALE) end to end.
+    #[test]
+    fn a_fractional_fill_is_applied() {
+        let q = crate::types::QTY_SCALE;
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        // An order of 1.5 shares listed at connect (placed in another application).
+        ccp.handle_exec_report(&[
+            (11u32, "93.0".to_string()), (150, "0".into()), (39, "0".into()), (6008, "1005".into()),
+            (55, "TEST".into()), (54, "1".into()), (38, "1.5".into()), (44, "15".into()), (40, "2".into()),
+        ].into_iter().collect(), &mut context, &shared, &None, "");
+        let order = context.order(93).copied().expect("listed order tracked");
+        assert_eq!(order.qty_fixed, 3 * q / 2, "1.5 shares kept");
+
+        let fill: std::collections::HashMap<u32, String> = [
+            (11u32, "93.0".to_string()), (17, "e93".into()), (150, "1".into()), (39, "1".into()),
+            (55, "TEST".into()), (54, "1".into()), (38, "1.5".into()), (40, "2".into()), (44, "15".into()),
+            (32, "0.5".into()), (31, "15".into()), (14, "0.5".into()), (6, "15".into()), (151, "1".into()),
+            (6008, "1005".into()),
+        ].into_iter().collect();
+        ccp.handle_exec_report(&fill, &mut context, &shared, &None, "");
+
+        let fills = shared.orders.drain_fills();
+        assert_eq!(fills.len(), 1, "the fill is not dropped");
+        assert_eq!((fills[0].qty_fixed, fills[0].cum_qty_fixed, fills[0].remaining_fixed), (q / 2, q / 2, q));
+        assert_eq!(context.order(93).unwrap().filled_fixed, q / 2);
+        assert_eq!(context.position_fixed(order.instrument), q / 2, "position moved by half a share");
+        assert_eq!(shared.portfolio.position_fixed(order.instrument), q / 2);
+    }
+
+    // ibx#313: a fractional position from the server is kept, in both the
+    // portfolio rows and the lean position feed.
+    #[test]
+    fn a_fractional_position_is_kept() {
+        let q = crate::types::QTY_SCALE;
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let msg = "8=FIX.4.1|35=UP|6068=TEST|6008=1005|6064=2.5|6101=10|6065=11|15=USD|167=STK|10=000|".replace('|', "\x01");
+        handle_portfolio_message(msg.as_bytes(), &mut context, &shared, &None);
+        assert_eq!(shared.portfolio.position_info(1005).unwrap().position_fixed, 5 * q / 2);
+
+        let mut ccp = CcpState::new();
+        let feed = "8=FIX.4.1|35=U|6040=75|146=1|6008=1006|6064=0.25|6101=10|10=000|".replace('|', "\x01");
+        ccp.handle_position_feed(feed.as_bytes(), &mut None, &mut context, &shared, &None, &mut HeartbeatState::new());
+        assert_eq!(shared.portfolio.position_info(1006).unwrap().position_fixed, q / 4);
     }
 
     // ibx#250: a server reject reaches the caller as error 201 with the

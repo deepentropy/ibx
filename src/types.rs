@@ -151,12 +151,13 @@ pub struct Fill {
     pub side: Side,
     /// Price of this print.
     pub price: Price,
-    /// Size of this print.
-    pub qty: i64,
-    pub remaining: i64,
-    /// Quantity filled on the order so far, this print included. 0 when
-    /// the report did not carry it.
-    pub cum_qty: i64,
+    /// Size of this print, fixed-point (QTY_SCALE).
+    pub qty_fixed: Qty,
+    /// Quantity still working, fixed-point (QTY_SCALE).
+    pub remaining_fixed: Qty,
+    /// Quantity filled on the order so far, this print included,
+    /// fixed-point (QTY_SCALE). 0 when the report did not carry it.
+    pub cum_qty_fixed: Qty,
     /// Average price over every print of the order so far. 0 when the
     /// report did not carry it.
     pub avg_price: Price,
@@ -167,8 +168,8 @@ pub struct Fill {
 impl Fill {
     /// Quantity filled on the order so far; the print when the report did
     /// not carry the total.
-    pub fn filled_so_far(&self) -> i64 {
-        if self.cum_qty > 0 { self.cum_qty } else { self.qty }
+    pub fn filled_so_far_fixed(&self) -> Qty {
+        if self.cum_qty_fixed > 0 { self.cum_qty_fixed } else { self.qty_fixed }
     }
 
     /// Average price over the order's prints so far; the print price when
@@ -184,8 +185,10 @@ pub struct OrderUpdate {
     pub order_id: OrderId,
     pub instrument: InstrumentId,
     pub status: OrderStatus,
-    pub filled_qty: i64,
-    pub remaining_qty: i64,
+    /// Fixed-point (QTY_SCALE).
+    pub filled_qty_fixed: Qty,
+    /// Fixed-point (QTY_SCALE).
+    pub remaining_qty_fixed: Qty,
     /// Average price over the order's prints so far; 0 before any fill or
     /// when the report did not carry it.
     pub avg_fill_price: Price,
@@ -282,8 +285,10 @@ pub struct Order {
     pub instrument: InstrumentId,
     pub side: Side,
     pub price: Price,
-    pub qty: u32,
-    pub filled: u32,
+    /// Order quantity, fixed-point (QTY_SCALE).
+    pub qty_fixed: Qty,
+    /// Filled so far, fixed-point (QTY_SCALE).
+    pub filled_fixed: Qty,
     pub status: OrderStatus,
     /// FIX tag 40 OrdType: b'1'=MKT, b'2'=LMT, b'3'=STP, b'4'=STPLMT, b'P'=TRAIL, etc.
     /// For multi-char OrdTypes (MIDPX, SP, SMKT, etc.), uses ORD_* constants (values < 32).
@@ -295,9 +300,10 @@ pub struct Order {
 }
 
 impl Order {
-    /// Create a new tracked order with FIX type metadata.
+    /// Create a new tracked order with its order-type metadata. `qty` is in
+    /// whole shares; it is stored fixed-point.
     pub fn new(order_id: OrderId, instrument: InstrumentId, side: Side, qty: u32, price: Price, ord_type: u8, tif: u8, stop_price: Price) -> Self {
-        Self { order_id, instrument, side, price, qty, filled: 0, status: OrderStatus::PendingSubmit, ord_type, tif, stop_price }
+        Self { order_id, instrument, side, price, qty_fixed: qty as Qty * QTY_SCALE, filled_fixed: 0, status: OrderStatus::PendingSubmit, ord_type, tif, stop_price }
     }
 }
 
@@ -1334,7 +1340,8 @@ pub struct CompletedOrder {
     pub order_id: OrderId,
     pub instrument: InstrumentId,
     pub status: OrderStatus,
-    pub filled_qty: i64,
+    /// Fixed-point (QTY_SCALE).
+    pub filled_qty_fixed: Qty,
     pub timestamp_ns: u64,
 }
 
@@ -1553,7 +1560,8 @@ pub struct AccountState {
 #[derive(Debug, Clone, Default)]
 pub struct PositionInfo {
     pub con_id: i64,
-    pub position: i64,
+    /// Fixed-point (QTY_SCALE).
+    pub position_fixed: Qty,
     pub avg_cost: Price,      // per-share avg cost * PRICE_SCALE
     pub symbol: String,
     pub sec_type: String,
@@ -1572,7 +1580,7 @@ pub struct PositionInfo {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MidnightSeed {
     pub con_id: i64,
-    pub qty_midnight: i64,            // position held at midnight
+    pub qty_midnight_fixed: Qty,  // position held at midnight, fixed-point (QTY_SCALE)
     pub money_traded: f64,            // net cash from today's fills (signed)
     pub realized_pnl: f64,           // realized P&L since midnight
 }
@@ -2071,13 +2079,13 @@ mod tests {
     #[test]
     fn fill_is_copy() {
         let f = Fill {
-            cum_qty: 0, avg_price: 0,
+            cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
             instrument: 0,
             order_id: 1,
             side: Side::Buy,
             price: 150 * PRICE_SCALE,
-            qty: 100,
-            remaining: 0,
+            qty_fixed: (100) as i64 * crate::types::QTY_SCALE,
+            remaining_fixed: (0) as i64 * crate::types::QTY_SCALE,
             commission: 0,
             timestamp_ns: 123456789,
         };
@@ -2095,8 +2103,8 @@ mod tests {
             instrument: 0,
             side: Side::Sell,
             price: 200 * PRICE_SCALE,
-            qty: 50,
-            filled: 10,
+            qty_fixed: (50) as i64 * crate::types::QTY_SCALE,
+            filled_fixed: (10) as i64 * crate::types::QTY_SCALE,
             status: OrderStatus::PartiallyFilled,
             ord_type: b'2',
             tif: b'0',
@@ -2104,7 +2112,7 @@ mod tests {
         };
         let o2 = o; // Copy
         assert_eq!(o.order_id, o2.order_id);
-        assert_eq!(o.filled, o2.filled);
+        assert_eq!(o.filled_fixed / crate::types::QTY_SCALE, o2.filled_fixed / crate::types::QTY_SCALE);
     }
 
     // --- Side ---
