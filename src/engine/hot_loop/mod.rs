@@ -1105,6 +1105,26 @@ impl HotLoop {
         self.farm.handle_disconnect_for_test();
     }
 
+    /// Test-only: lose the farm connection through the same path as a real
+    /// loss (subscription state cleared, socket dropped).
+    pub fn lose_farm_for_test(&mut self) {
+        self.farm.handle_disconnect(&mut self.context, &self.event_tx);
+        self.farm_conn = None;
+    }
+
+    /// Test-only: the engine's instrument table.
+    pub fn market_for_test(&mut self) -> &mut crate::engine::market_state::MarketState {
+        &mut self.context.market
+    }
+
+    /// Test-only: poll the farm socket once.
+    pub fn poll_farm_for_test(&mut self) {
+        self.farm.poll_market_data(
+            &mut self.farm_conn, &mut self.context, &self.shared,
+            &self.event_tx, &mut self.hb,
+        );
+    }
+
     /// Test-only: trigger farm reconnect spawn.
     pub fn spawn_farm_reconnect_for_test(&mut self) {
         self.spawn_farm_reconnect();
@@ -1825,6 +1845,77 @@ mod tests {
 
         engine.maybe_spawn_hmds_reconnect();
         assert!(engine.hmds_next_attempt_at.is_some(), "reconnect must be scheduled");
+    }
+
+    fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    /// Every compressed message the engine wrote to `server`, as inner text.
+    fn farm_messages_sent(server: &mut std::net::TcpStream) -> Vec<String> {
+        use std::io::Read;
+        server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = server.read(&mut chunk) {
+            if n == 0 { break; }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let mut out = Vec::new();
+        let mut rest = &buf[..];
+        while let Some(len) = crate::protocol::fixcomp::fixcomp_length(rest) {
+            for m in crate::protocol::fixcomp::fixcomp_decompress(&rest[..len]).unwrap() {
+                out.push(String::from_utf8_lossy(&m).replace('\x01', "|"));
+            }
+            rest = &rest[len..];
+        }
+        out
+    }
+
+    // ibx#288: handle_disconnect cleared the request-id maps and reconnect
+    // rebuilt its list from them, so no subscription came back after a farm
+    // reconnect. A subscription cancelled while the farm was down must still
+    // stay cancelled.
+    #[test]
+    fn farm_reconnect_reissues_every_live_subscription() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared, None, None);
+        let (c1, _s1) = socket_pair();
+        engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
+        let aapl = engine.context.market.register(265598);
+        let msft = engine.context.market.register(272093);
+        let spy = engine.context.market.register(756733);
+        for (con_id, sym, inst, mode) in [(265598, "AAPL", aapl, 0), (272093, "MSFT", msft, 0), (756733, "SPY", spy, 3)] {
+            engine.farm.send_mktdata_subscribe(
+                con_id, sym, "SMART", "STK", "", 0.0, "", "", inst, mode,
+                &mut engine.farm_conn, &mut engine.hb,
+            );
+        }
+
+        engine.farm.handle_disconnect(&mut engine.context, &None);
+        engine.farm.send_mktdata_unsubscribe(msft, &mut engine.farm_conn, &mut engine.hb);
+
+        let (c2, mut s2) = socket_pair();
+        engine.reconnect_farm(Connection::new_raw(c2).unwrap());
+
+        let sent = farm_messages_sent(&mut s2);
+        assert_eq!(sent.len(), 2, "one subscribe per live instrument: {:?}", sent);
+        let aapl_sub = sent.iter().find(|m| m.contains("6008=265598")).expect("AAPL re-subscribed");
+        assert!(aapl_sub.contains("264=442|") && aapl_sub.contains("264=443|"), "realtime keeps both entries");
+        let spy_sub = sent.iter().find(|m| m.contains("6008=756733")).expect("SPY re-subscribed");
+        assert!(spy_sub.contains("9887=3|"), "delayed mode kept: {}", spy_sub);
+        assert!(!sent.iter().any(|m| m.contains("6008=272093")), "MSFT was cancelled while down");
+        assert_eq!(engine.farm.instrument_md_reqs.len(), 2);
+        assert_eq!(engine.farm.md_req_to_instrument.len(), 3);
+
+        // A second drop and reconnect re-issues them again.
+        engine.farm.handle_disconnect(&mut engine.context, &None);
+        let (c3, mut s3) = socket_pair();
+        engine.reconnect_farm(Connection::new_raw(c3).unwrap());
+        assert_eq!(farm_messages_sent(&mut s3).len(), 2);
     }
 
     #[test]

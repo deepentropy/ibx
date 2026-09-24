@@ -476,6 +476,10 @@ impl FarmState {
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
+        // Before the lookup: while the farm is down the request ids are
+        // already cleared, and the subscription must still not come back on
+        // reconnect (ibx#288).
+        self.md_resub_info.retain(|(id, ..)| *id != instrument);
         let reqs = match self.instrument_md_reqs.iter()
             .position(|(id, _)| *id == instrument)
         {
@@ -485,7 +489,6 @@ impl FarmState {
             }
             None => return,
         };
-        self.md_resub_info.retain(|(id, ..)| *id != instrument);
 
         let conn = match farm_conn.as_mut() {
             Some(c) => c,
@@ -928,24 +931,21 @@ impl FarmState {
         hb.pending_farm_test = None;
 
         // Snapshot active subscriptions and re-issue them on the new connection.
-        let active: Vec<(InstrumentId, i64, String, String, String, String, f64, String, String, i32)> = self.instrument_md_reqs.iter()
-            .filter_map(|(id, _)| {
+        // md_resub_info is the list to use: handle_disconnect already cleared
+        // the request-id maps, so reading them re-issued nothing (ibx#288).
+        let active: Vec<(InstrumentId, i64, String, String, String, String, f64, String, String, i32)> = self.md_resub_info.iter()
+            .filter_map(|(id, s, e, st, l, k, r, m, mode)| {
                 context.market.con_id(*id).map(|con_id| {
-                    let (sym, exch, st, ltd, strike, right, mult, mode) = self.md_resub_info.iter()
-                        .find(|(iid, ..)| *iid == *id)
-                        .map(|(_, s, e, st, l, k, r, m, mode)| (s.clone(), e.clone(), st.clone(), l.clone(), *k, r.clone(), m.clone(), *mode))
-                        .unwrap_or_default();
-                    (*id, con_id, sym, exch, st, ltd, strike, right, mult, mode)
+                    (*id, con_id, s.clone(), e.clone(), st.clone(), l.clone(), *k, r.clone(), m.clone(), *mode)
                 })
             })
             .collect();
         self.md_req_to_instrument.clear();
         self.instrument_md_reqs.clear();
-        let old_resub = std::mem::take(&mut self.md_resub_info);
+        self.md_resub_info.clear();
         for (instrument, con_id, sym, exch, st, ltd, strike, right, mult, mode) in active {
             self.send_mktdata_subscribe(con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, mode, farm_conn, hb);
         }
-        drop(old_resub);
 
         // Re-subscribe depth subscriptions (depth_resub_info survived disconnect)
         let depth_params: Vec<_> = self.depth_resub_info.drain(..).collect();
