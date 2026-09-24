@@ -1577,6 +1577,7 @@ mod tests {
         engine.context_mut().market.register(265598);
 
         let fill = Fill {
+            cum_qty: 0, avg_price: 0,
             instrument: 0,
             order_id: 1001,
             side: Side::Buy,

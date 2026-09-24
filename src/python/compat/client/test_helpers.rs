@@ -91,6 +91,7 @@ impl EClient {
         };
         let ps = PRICE_SCALE as f64;
         shared.orders.push_fill(Fill {
+            cum_qty: 0, avg_price: 0,
             instrument, order_id, side: s,
             price: (price * ps) as i64, qty, remaining,
             commission: (commission * ps) as i64,
@@ -120,6 +121,7 @@ impl EClient {
             _ => return Err(PyRuntimeError::new_err(format!("Invalid status: {}", status))),
         };
         shared.orders.push_order_update(OrderUpdate {
+            avg_fill_price: 0,
             order_id, instrument, status: st, filled_qty, remaining_qty, perm_id: 0, parent_id: 0, timestamp_ns: 100,
         });
         Ok(())

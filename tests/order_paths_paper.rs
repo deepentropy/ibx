@@ -1,7 +1,7 @@
 //! Order-path tests against the real server on the paper account, through `EClient`.
 //!
 //! Covers the order paths fixed in ibx#240 ibx#225 ibx#247 ibx#324 ibx#334
-//! ibx#339 ibx#349 ibx#313 ibx#318 ibx#405 ibx#325 ibx#327. Each case checks
+//! ibx#339 ibx#349 ibx#313 ibx#318 ibx#405 ibx#325 ibx#327 ibx#250 ibx#328. Each case checks
 //! the server's own reply (captured from the engine's wire trace), not only
 //! that `place_order` returned: the replace confirmation must carry the new
 //! values, a bracket child must be cancelled by the server with its parent
@@ -99,6 +99,9 @@ fn same_number(a: Option<&str>, b: f64) -> bool {
 struct State {
     statuses: Vec<(i64, String)>,
     errors: Vec<(i64, i64, String)>,
+    /// Every order callback in arrival order ("status:<id>:<status>",
+    /// "error:<id>:<code>").
+    sequence: Vec<String>,
 }
 
 struct Probe {
@@ -111,11 +114,15 @@ impl Wrapper for Probe {
         _avg_fill_price: f64, _perm_id: i64, _parent_id: i64, _last_fill_price: f64,
         _client_id: i64, _why_held: &str, _mkt_cap_price: f64,
     ) {
-        self.state.lock().unwrap().statuses.push((order_id, status.into()));
+        let mut s = self.state.lock().unwrap();
+        s.statuses.push((order_id, status.into()));
+        s.sequence.push(format!("status:{}:{}", order_id, status));
     }
     fn error(&mut self, req_id: i64, code: i64, msg: &str, _adv: &str) {
         eprintln!("  [error] id={} code={} {}", req_id, code, msg);
-        self.state.lock().unwrap().errors.push((req_id, code, msg.into()));
+        let mut s = self.state.lock().unwrap();
+        s.errors.push((req_id, code, msg.into()));
+        s.sequence.push(format!("error:{}:{}", req_id, code));
     }
 }
 
@@ -444,6 +451,43 @@ fn conditions(paper: &mut Paper, base: i64) {
     }
 }
 
+/// ibx#250: a server reject reaches the caller as error 201 with the
+/// server's reason, before the Inactive status (ib-agent#192 C1). The server
+/// refuses FOK on this route (ib-agent#192 C7).
+fn server_reject(paper: &mut Paper, id: i64) {
+    println!("  server reject (order {})", id);
+    let order = Order {
+        action: "BUY".into(), order_type: "LMT".into(), total_quantity: 1.0, lmt_price: 200.0,
+        tif: "FOK".into(), ..Default::default()
+    };
+    paper.place(id, &order);
+    let done = paper.pump(20, |s| last_status(s, id).as_deref() == Some("Inactive"));
+    let s = paper.state.lock().unwrap();
+    let error = s.sequence.iter().position(|e| *e == format!("error:{}:201", id));
+    let status = s.sequence.iter().position(|e| *e == format!("status:{}:Inactive", id));
+    let reason_ok = s.errors.iter().any(|(r, c, m)| *r == id && *c == 201 && m.starts_with("Order rejected - reason:") && m.len() > 24);
+    drop(s);
+    paper.check(done, "server reject: status Inactive");
+    paper.check(reason_ok, "server reject: error 201 with the server's reason");
+    paper.check(error.is_some() && error < status, "server reject: error before the status");
+}
+
+/// ibx#328: every new order carries the contract id after the secondary
+/// routing field, as the reference does (ib-agent#192 B4).
+fn contract_id_on_new_orders(paper: &mut Paper) {
+    let sent: Vec<Frame> = wire().lines.lock().unwrap().iter()
+        .filter(|l| l.starts_with("WIRE>"))
+        .map(|l| parse_frame(l))
+        .filter(|f| field(f, 35) == Some("D"))
+        .collect();
+    let missing = sent.iter().filter(|f| {
+        let i = f.iter().position(|(t, _)| *t == 6210);
+        !i.is_some_and(|i| f.get(i + 1) == Some(&(6008, "265598".to_string())))
+    }).count();
+    paper.check(!sent.is_empty() && missing == 0,
+        &format!("contract id after the routing field on all {} new orders ({} missing)", sent.len(), missing));
+}
+
 #[test]
 fn order_paths_paper() {
     wire();
@@ -472,6 +516,8 @@ fn order_paths_paper() {
     fractional(&mut paper, base + 200);
     algos(&mut paper, base + 300);
     conditions(&mut paper, base + 400);
+    server_reject(&mut paper, base + 500);
+    contract_id_on_new_orders(&mut paper);
 
     println!("  cleanup: cancelling every order still working");
     // A modified order is placed twice under one id: cancel it once.

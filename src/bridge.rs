@@ -891,11 +891,13 @@ mod tests {
     fn shared_state_fills_drain() {
         let ss = SharedState::new();
         ss.orders.push_fill(Fill {
+            cum_qty: 0, avg_price: 0,
             instrument: 0, order_id: 1, side: Side::Buy,
             price: 100 * PRICE_SCALE, qty: 10, remaining: 0,
             commission: 0, timestamp_ns: 0,
         });
         ss.orders.push_fill(Fill {
+            cum_qty: 0, avg_price: 0,
             instrument: 0, order_id: 2, side: Side::Sell,
             price: 101 * PRICE_SCALE, qty: 5, remaining: 0,
             commission: 0, timestamp_ns: 0,
@@ -910,6 +912,7 @@ mod tests {
     fn shared_state_order_updates_drain() {
         let ss = SharedState::new();
         ss.orders.push_order_update(OrderUpdate {
+            avg_fill_price: 0,
             order_id: 1, instrument: 0, status: OrderStatus::Submitted,
             filled_qty: 0, remaining_qty: 100, perm_id: 0, parent_id: 0, timestamp_ns: 0,
         });

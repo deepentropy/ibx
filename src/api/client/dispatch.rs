@@ -54,9 +54,13 @@ impl EClient {
             let (perm_id, parent_id) = self.shared.orders.get_order_info(fill.order_id)
                 .map(|info| (info.order.perm_id, info.order.parent_id))
                 .unwrap_or((0, 0));
+            // filled and avgFillPrice are the order totals, lastFillPrice
+            // is this print (ibx#315).
+            let filled_f = fill.filled_so_far() as f64;
+            let avg_f = fill.average_price() as f64 / PRICE_SCALE_F;
             wrapper.order_status(
-                fill.order_id as i64, status, fill.qty as f64, fill.remaining as f64,
-                price_f, perm_id, parent_id, price_f, 0, "", 0.0,
+                fill.order_id as i64, status, filled_f, fill.remaining as f64,
+                avg_f, perm_id, parent_id, price_f, 0, "", 0.0,
             );
 
             let side_str = match fill.side {
@@ -70,6 +74,8 @@ impl EClient {
                 ex.shares = fill.qty as f64;
                 ex.price = price_f;
                 ex.order_id = fill.order_id as i64;
+                ex.cum_qty = filled_f;
+                ex.avg_price = avg_f;
                 let contract = if info.contract.con_id != 0 {
                     self.core.get_contract(info.contract.con_id, &self.shared).unwrap_or(info.contract)
                 } else {
@@ -82,6 +88,8 @@ impl EClient {
                     shares: fill.qty as f64,
                     price: price_f,
                     order_id: fill.order_id as i64,
+                    cum_qty: filled_f,
+                    avg_price: avg_f,
                     ..Default::default()
                 })
             };
@@ -102,7 +110,14 @@ impl EClient {
             self.core.push_execution(req_id, c, exec, report);
 
             // Update open order tracking
-            self.core.update_order_fill(fill.order_id, status, fill.qty as f64, fill.remaining as f64);
+            self.core.update_order_fill(fill.order_id, status, filled_f, fill.remaining as f64);
+        }
+
+        // Order errors (refused before sending, or rejected by the server)
+        // → error, ahead of the status: the reference reports a server
+        // reject as error 201 before the Inactive status (ibx#250).
+        for (order_id, code, msg) in self.shared.orders.drain_order_errors() {
+            wrapper.error(order_id as i64, code, &msg, "");
         }
 
         // Order updates → order_status
@@ -110,7 +125,8 @@ impl EClient {
             let status = order_status_str(update.status);
             wrapper.order_status(
                 update.order_id as i64, status, update.filled_qty as f64,
-                update.remaining_qty as f64, 0.0, update.perm_id, update.parent_id, 0.0, 0, "", 0.0,
+                update.remaining_qty as f64, update.avg_fill_price as f64 / PRICE_SCALE_F,
+                update.perm_id, update.parent_id, 0.0, 0, "", 0.0,
             );
             self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
         }
@@ -120,11 +136,6 @@ impl EClient {
             let code = if reject.reject_type == 1 { 202 } else { 10147 };
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
             wrapper.error(reject.order_id as i64, code, &msg, "");
-        }
-
-        // Order errors raised before sending → error
-        for (order_id, code, msg) in self.shared.orders.drain_order_errors() {
-            wrapper.error(order_id as i64, code, &msg, "");
         }
 
         // What-if → open_order(contract, order, OrderState) + order_status (iso with ibapi)
@@ -395,6 +406,19 @@ impl EClient {
         if let Some(batch) = self.core.prepare_account_updates(&self.shared) {
             for field in &batch.fields {
                 wrapper.update_account_value(&field.key, &field.value, &field.currency, &self.account_id);
+            }
+            // Portfolio rows → update_portfolio, as the Python client does;
+            // the Rust client never delivered them.
+            for entry in self.core.prepare_portfolio_updates(&self.shared) {
+                let ac = self.core.position_contract(entry.con_id, &self.shared);
+                let c = Contract {
+                    con_id: ac.con_id, symbol: ac.symbol, sec_type: ac.sec_type,
+                    exchange: ac.exchange, currency: ac.currency, ..Default::default()
+                };
+                wrapper.update_portfolio(
+                    &c, entry.position, entry.market_price, entry.market_value,
+                    entry.avg_cost, entry.unrealized_pnl, entry.realized_pnl, &self.account_id,
+                );
             }
             if batch.delivered {
                 wrapper.update_account_time("");

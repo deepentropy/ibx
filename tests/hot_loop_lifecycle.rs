@@ -26,6 +26,7 @@ fn full_lifecycle() {
 
     // Simulate fill → pushed to shared state
     let fill = Fill {
+        cum_qty: 0, avg_price: 0,
         instrument: aapl,
         order_id: 1,
         side: Side::Buy,

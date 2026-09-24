@@ -457,7 +457,7 @@ impl CcpState {
                 }
             }
             "UT" | "UM" | "RL" => handle_account_update(msg, context, shared),
-            "UP" => handle_position_update(&parsed, context, shared, event_tx),
+            "UP" => handle_portfolio_message(msg, context, shared, event_tx),
             "d" => {
                 let response_req_id = crate::control::contracts::secdef_response_req_id(msg);
                 let fanout_idx = response_req_id.as_ref().and_then(|rid| {
@@ -874,6 +874,16 @@ impl CcpState {
         // frame the guard rejects must not surface as an order_status either.
         let status_changed = context.update_order_status(clord_id, status);
 
+        // The reference reports a server reject as error 201 with the
+        // server's reason (ib-agent#192 C1, ibx#250). Only on the first
+        // transition of an order this session tracks: the "No such order"
+        // frames that follow a cancel of an order already gone are not
+        // shown by the reference (C2).
+        if status == crate::types::OrderStatus::Rejected && status_changed {
+            let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("");
+            shared.orders.push_order_error(clord_id, 201, format!("Order rejected - reason:{}", reason));
+        }
+
         let mut had_fill = false;
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
             if !exec_id.is_empty() && !self.record_exec_id(exec_id) {
@@ -882,6 +892,11 @@ impl CcpState {
             }
             if let Some(order) = context.order(clord_id).copied() {
                 context.update_order_filled(clord_id, last_shares as u32);
+                // Order totals ride on every fill report next to the print
+                // (ib-agent#192 C3): the callback's filled and average price
+                // are these, not the print (ibx#315).
+                let cum_qty = parsed.get(&14).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let avg_px = parsed.get(&6).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let fill = Fill {
                     instrument: order.instrument,
                     order_id: clord_id,
@@ -889,6 +904,8 @@ impl CcpState {
                     price: (last_px * PRICE_SCALE as f64) as i64,
                     qty: last_shares,
                     remaining: leaves_qty,
+                    cum_qty: cum_qty as i64,
+                    avg_price: (avg_px * PRICE_SCALE as f64).round() as i64,
                     commission: (commission * PRICE_SCALE as f64) as i64,
                     timestamp_ns: context.now_ns(),
                 };
@@ -909,12 +926,15 @@ impl CcpState {
             if let Some(order) = context.order(clord_id).copied() {
                 let perm_id: i64 = parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
                 let parent_id: i64 = parsed.get(&583).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
+                // Average fill price rides on status reports too (ibx#315).
+                let avg_px = parsed.get(&6).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let update = crate::types::OrderUpdate {
                     order_id: clord_id,
                     instrument: order.instrument,
                     status,
                     filled_qty: order.filled as i64,
                     remaining_qty: leaves_qty,
+                    avg_fill_price: (avg_px * PRICE_SCALE as f64).round() as i64,
                     perm_id,
                     parent_id,
                     timestamp_ns: context.now_ns(),
@@ -1068,7 +1088,8 @@ impl CcpState {
                 tif: if tif_str.is_empty() { fb_tif.to_string() } else { tif_str.to_string() },
                 account: if account.is_empty() { account_id.to_string() } else { account.clone() },
                 perm_id,
-                filled_quantity: leaves_qty as f64,
+                // Filled so far, not the quantity still working (ibx#309).
+                filled_quantity: cum_qty,
                 outside_rth,
                 clearing_intent,
                 auto_cancel_date,
@@ -1969,6 +1990,38 @@ impl CcpState {
 }
 
 /// Handle position update messages (cross-cutting, called from CCP message processing).
+/// A portfolio message carries one row per position, each row starting with
+/// the symbol field and repeating the same fields (ib-agent#192 D4:
+/// most messages carry 2 or 3 rows). Parsing the whole message into one map
+/// kept only the last row (ibx#411). A message with no symbol field is one row.
+pub(crate) fn handle_portfolio_message(
+    msg: &[u8],
+    context: &mut Context,
+    shared: &SharedState,
+    event_tx: &Option<Sender<Event>>,
+) {
+    let mut header = std::collections::HashMap::new();
+    let mut rows: Vec<std::collections::HashMap<u32, String>> = Vec::new();
+    for field in msg.split(|&b| b == fix::SOH) {
+        let Some(eq) = field.iter().position(|&b| b == b'=') else { continue };
+        let Some(tag) = std::str::from_utf8(&field[..eq]).ok().and_then(|t| t.parse::<u32>().ok()) else { continue };
+        let value = String::from_utf8_lossy(&field[eq + 1..]).into_owned();
+        if tag == 6068 {
+            rows.push(std::collections::HashMap::new());
+        }
+        match rows.last_mut() {
+            Some(row) => { row.insert(tag, value); }
+            None => { header.insert(tag, value); }
+        }
+    }
+    if rows.is_empty() {
+        rows.push(header);
+    }
+    for row in &rows {
+        handle_position_update(row, context, shared, event_tx);
+    }
+}
+
 pub(crate) fn handle_position_update(
     parsed: &std::collections::HashMap<u32, String>,
     context: &mut Context,
@@ -2278,6 +2331,30 @@ mod tests {
         assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::PendingCancel);
     }
 
+    // ibx#411: one portfolio message carries a row per position (ib-agent#192
+    // D4). This one is captured, 3 rows; only the last was applied.
+    #[test]
+    fn a_portfolio_message_applies_every_position_row() {
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let msft = context.market.try_register(272093).unwrap();
+        let captured = "8=FIX.4.1|9=000999|35=UP|6529=AR.3|\
+            6068=AXTI                  |6288=0|8001=PositionList|8002=AXTI/USD/1/4726868|6064=1|6067=107.50|6065=107.5|6066=1781529403|15=USD|6008=4726868|167=STK|6101=117.79|6235=107.5|6099=0.00|6100=-10.29|9821=0|6627=0|6920=0|8136=107.485466|8152=107.5|\
+            6068=MSFT                  |6288=0|8001=PositionList|8002=MSFT/USD/1/272093|6064=-10|6067=-3964.40|6065=396.44000245|6066=1781529403|15=USD|6008=272093|167=STK|6101=423.53108|6235=396.44000245|6099=0.00|6100=270.91|9821=0|6627=0|6920=0|8136=396.4232483|8152=-3964.4000244|\
+            6068=SPY                   |6288=0|8001=PositionList|8002=SPY/USD/1/756733|6064=18|6067=13530.35|6065=751.6859131|6066=1781529403|15=USD|6008=756733|167=STK|6101=723.43166665|6235=751.6859131|6099=0.00|6100=508.58|9821=0|6627=0|6920=0|8136=-1|8152=13530.34643555|10=000|";
+        let msg = captured.replace('|', "\x01");
+
+        handle_portfolio_message(msg.as_bytes(), &mut context, &shared, &None);
+
+        let row = |con_id: i64| shared.portfolio.position_info(con_id).expect("row applied");
+        assert_eq!((row(4726868).position, row(4726868).symbol.as_str()), (1, "AXTI"));
+        assert_eq!(row(4726868).avg_cost, (117.79 * PRICE_SCALE as f64) as Price);
+        assert_eq!((row(272093).position, row(272093).symbol.as_str()), (-10, "MSFT"));
+        assert_eq!(row(272093).unrealized_pnl, (270.91 * PRICE_SCALE as f64) as Price);
+        assert_eq!((row(756733).position, row(756733).symbol.as_str()), (18, "SPY"));
+        assert_eq!(context.position(msft), -10, "a registered instrument's position follows its row");
+    }
+
     // ibx#238 / ib-agent#172: in the UP portfolio snapshot the average cost is
     // tag 6101 and 6065 is the market price. The handler previously read 6065 as
     // the average cost. Verify the mapping and that all marks are stored.
@@ -2562,6 +2639,77 @@ mod tests {
         ccp.handle_exec_report(&recovery_frame(78, 1_005), &mut context, &shared, &None, "");
         let order = context.order(78).expect("tracked on its existing slot");
         assert_eq!(context.market.con_id(order.instrument), Some(1_005));
+    }
+
+    // A fill report for order 90 (BUY 300), as the server sends it: the
+    // print and the order totals side by side.
+    fn fill_frame(exec_id: &str, last_qty: u32, last_px: &str, cum_qty: u32, avg_px: &str, leaves: u32)
+        -> std::collections::HashMap<u32, String>
+    {
+        let status = if leaves == 0 { "2" } else { "1" };
+        [
+            (11u32, "90.0".to_string()), (17, exec_id.into()), (150, status.into()), (39, status.into()),
+            (55, "TEST".into()), (54, "1".into()), (38, "300".into()), (40, "2".into()), (44, "15".into()),
+            (32, last_qty.to_string()), (31, last_px.into()), (14, cum_qty.to_string()),
+            (6, avg_px.into()), (151, leaves.to_string()), (6008, "1005".into()),
+        ].into_iter().collect()
+    }
+
+    // ibx#315: the fill carries the order totals next to the print.
+    // ibx#309: the order cache's filled quantity is the filled total, not
+    // the quantity still working.
+    #[test]
+    fn a_multi_print_fill_carries_the_order_totals() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.try_register(1005).unwrap();
+        context.insert_order(crate::types::Order::new(90, instrument, Side::Buy, 300, 15 * PRICE_SCALE, b'2', b'0', 0));
+
+        ccp.handle_exec_report(&fill_frame("e1", 100, "10", 100, "10", 200), &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&fill_frame("e2", 100, "12", 200, "11", 100), &mut context, &shared, &None, "");
+
+        let fills = shared.orders.drain_fills();
+        assert_eq!(fills.len(), 2);
+        let second = fills[1];
+        assert_eq!((second.qty, second.price), (100, 12 * PRICE_SCALE), "the print");
+        assert_eq!((second.cum_qty, second.avg_price), (200, 11 * PRICE_SCALE), "the order totals");
+        let info = shared.orders.get_order_info(90).expect("order cached");
+        assert_eq!(info.order.filled_quantity, 200.0);
+    }
+
+    // ibx#250: a server reject reaches the caller as error 201 with the
+    // server's reason (ib-agent#192 C1), once, and only for an order this
+    // session tracks.
+    #[test]
+    fn a_server_reject_is_reported_as_error_201_with_the_reason() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.try_register(1005).unwrap();
+        context.insert_order(crate::types::Order::new(91, instrument, Side::Buy, 1000, 15 * PRICE_SCALE, b'2', b'0', 0));
+        let frame = |order: &str, status: &str| -> std::collections::HashMap<u32, String> {
+            let mut m: std::collections::HashMap<u32, String> = [
+                (11u32, format!("{}.0", order)), (150, status.to_string()), (39, status.to_string()),
+                (55, "TEST".into()), (38, "1000".into()), (151, "1000".into()),
+            ].into_iter().collect();
+            if status == "8" {
+                m.insert(58, "Display size should be a multiple of lot size".into());
+            }
+            m
+        };
+
+        ccp.handle_exec_report(&frame("91", "A"), &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_order_errors().is_empty(), "no error on the acknowledgement");
+        ccp.handle_exec_report(&frame("91", "8"), &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_order_errors(), vec![
+            (91, 201, "Order rejected - reason:Display size should be a multiple of lot size".to_string()),
+        ]);
+
+        // A repeat, and a reject for an order this session does not track.
+        ccp.handle_exec_report(&frame("91", "8"), &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&frame("92", "8"), &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_order_errors().is_empty());
     }
 
     // req_global_cancel sends a cancel-all for each id below the shared

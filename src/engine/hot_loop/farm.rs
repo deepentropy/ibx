@@ -169,10 +169,7 @@ impl FarmState {
             }
             b"L" => self.handle_ticker_setup(msg, context),
             b"UT" | b"UM" | b"RL" => super::ccp::handle_account_update(msg, context, shared),
-            b"UP" => {
-                let parsed = fix::fix_parse(msg);
-                super::ccp::handle_position_update(&parsed, context, shared, event_tx);
-            }
+            b"UP" => super::ccp::handle_portfolio_message(msg, context, shared, event_tx),
             b"Y" => self.handle_depth_35y(msg, shared),
             b"G" => self.handle_tick_news(msg, context, shared, event_tx),
             other => {

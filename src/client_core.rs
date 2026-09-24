@@ -605,6 +605,20 @@ impl ClientCore {
         }
     }
 
+    /// Contract for a portfolio row: the cached contract when the session
+    /// has one, else the symbol, security type and currency the server's
+    /// portfolio row carries. The reference fills these in updatePortfolio;
+    /// ibx sent only the contract id for a contract it had not looked up.
+    pub fn position_contract(&self, con_id: i64, shared: &SharedState) -> ApiContract {
+        self.get_contract(con_id, shared).unwrap_or_else(|| {
+            let pi = shared.portfolio.position_info(con_id).unwrap_or_default();
+            ApiContract {
+                con_id, symbol: pi.symbol, sec_type: pi.sec_type, currency: pi.currency,
+                ..Default::default()
+            }
+        })
+    }
+
     /// Register a TBT subscription mapping.
     pub fn register_tbt(
         &self,
@@ -1427,6 +1441,54 @@ impl ClientCore {
         } else {
             None
         }
+    }
+
+    /// Every order the reference refuses before sending anything, with its
+    /// error code and text. Nothing is sent for such an order.
+    pub fn refusal_before_sending(order: &ApiOrder) -> Option<(i64, String)> {
+        Self::fractional_quantity_refusal(order).or_else(|| Self::algo_param_refusal(order))
+    }
+
+    /// Algo parameter values the reference refuses before sending
+    /// (ib-agent#192 B10). ibx used to turn them into defaults: an unknown
+    /// choice became Normal or Neutral, a negative percentage went out
+    /// (ibx#263). Only the rules the capture showed; a value that does not
+    /// parse as a number is left to the existing handling.
+    fn algo_param_refusal(order: &ApiOrder) -> Option<(i64, String)> {
+        if order.algo_strategy.is_empty() {
+            return None;
+        }
+        let limit = |label: &str, what: &str, bound: &str| {
+            Some((441, format!(
+                "Algo attributes validation failed: '{}' is invalid: Value is {} {}.. ", label, what, bound)))
+        };
+        for tv in &order.algo_params {
+            let value = tv.value.as_str();
+            if value.is_empty() {
+                continue;
+            }
+            let known_choice = match tv.tag.as_str() {
+                "adaptivePriority" => Some(matches!(value, "Urgent" | "Normal" | "Patient")),
+                "riskAversion" => Some(matches!(value.to_lowercase().as_str(),
+                    "get_done" | "getdone" | "aggressive" | "neutral" | "passive")),
+                _ => None,
+            };
+            if known_choice == Some(false) {
+                return Some((145, format!("Error in validating entry fields -{}", value)));
+            }
+            let Ok(number) = value.parse::<f64>() else { continue };
+            match tv.tag.as_str() {
+                // A NaN fails the upper bound check in the reference.
+                "maxPctVol" if number.is_nan() || number > 50.0 =>
+                    return limit("Max Percentage", "greater than maximum value", "50.0"),
+                "maxPctVol" if number < 0.01 =>
+                    return limit("Max Percentage", "less than minimum value", "0.01"),
+                "pctVol" if number < 0.01 =>
+                    return limit("Target Percentage", "less than minimum value", "0.01"),
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Order type of a tracked order, as the caller placed it.

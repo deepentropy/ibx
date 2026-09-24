@@ -50,7 +50,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),   // ClOrdID
@@ -83,7 +83,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -138,7 +138,7 @@ pub(crate) fn drain_and_send_orders(
                 if outside_rth {
                     fields.push((6433, "1")); // OutsideRTH
                 }
-                conn.send_fix(&fields)
+                send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::SubmitLimitEx { order_id, instrument, side, qty, price, tif, attrs } => {
                 send_order_ex(conn, context, account_id, order_id, instrument, side, qty,
@@ -161,7 +161,7 @@ pub(crate) fn drain_and_send_orders(
                 let now = chrono_free_timestamp();
                 log::info!("Sending MKT order: clord={} acct={} sym={} side={} qty={}",
                     clord_str, account_id, symbol, side_str, qty_str);
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -192,7 +192,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -246,7 +246,7 @@ pub(crate) fn drain_and_send_orders(
                 if outside_rth {
                     fields.push((6433, "1"));
                 }
-                conn.send_fix(&fields)
+                send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::SubmitStopLimitGtc { order_id, instrument, side, qty, price, stop_price, outside_rth } => {
                 context.insert_order(crate::types::Order::new(
@@ -284,7 +284,7 @@ pub(crate) fn drain_and_send_orders(
                 if outside_rth {
                     fields.push((6433, "1"));
                 }
-                conn.send_fix(&fields)
+                send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::SubmitLimitIoc { order_id, instrument, side, qty, price } => {
                 context.insert_order(crate::types::Order::new(
@@ -298,7 +298,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -330,7 +330,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -391,7 +391,7 @@ pub(crate) fn drain_and_send_orders(
                 // Optional initial stop trigger (tag 6117), only when set
                 // (ib-agent#173).
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
-                conn.send_fix(&fields)
+                send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::SubmitTrailingStopLimit { order_id, instrument, side, qty, lmt_offset, trail_amt, trail_stop_price } => {
                 context.insert_order(crate::types::Order::new(
@@ -434,7 +434,7 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ];
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
-                conn.send_fix(&fields)
+                send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_pct, trail_stop_price } => {
                 context.insert_order(crate::types::Order::new(
@@ -478,7 +478,7 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ];
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
-                conn.send_fix(&fields)
+                send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::SubmitTrailingStopPctEx { order_id, instrument, side, qty, trail_pct, tif, attrs, trail_stop_price } => {
                 send_order_ex(conn, context, account_id, order_id, instrument, side, qty,
@@ -495,7 +495,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -526,7 +526,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -558,7 +558,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -591,7 +591,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -632,7 +632,7 @@ pub(crate) fn drain_and_send_orders(
                     parent_id, instrument, side, qty, entry_price, b'2', b'0', 0,
                 ));
                 let now = chrono_free_timestamp();
-                let _ = conn.send_fix(&[
+                let _ = send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &parent_str),
@@ -657,7 +657,7 @@ pub(crate) fn drain_and_send_orders(
                     tp_id, instrument, exit_side, qty, take_profit, b'2', b'1', 0,
                 ));
                 let now = chrono_free_timestamp();
-                let _ = conn.send_fix(&[
+                let _ = send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &tp_str),
@@ -685,7 +685,7 @@ pub(crate) fn drain_and_send_orders(
                     sl_id, instrument, exit_side, qty, stop_loss, b'3', b'1', stop_loss,
                 ));
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &sl_str),
@@ -723,7 +723,7 @@ pub(crate) fn drain_and_send_orders(
                 // Per ib-agent#138 capture: Relative shares OrdType=P with
                 // Trail and is disambiguated by ExecInst=R. Peg offset goes
                 // on tag 211 (not 99 outbound), and there is no tag 44.
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -756,7 +756,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -814,7 +814,7 @@ pub(crate) fn drain_and_send_orders(
                 fields.push((5958, "adaptivePriority".to_string())); // AlgoParamTag
                 fields.push((5960, priority.as_str().to_string()));  // AlgoParamValue
                 let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
-                conn.send_fix(&refs)
+                send_new_order(conn, context, instrument, &refs)
             }
             OrderRequest::SubmitAlgo { order_id, instrument, side, qty, price, algo, tif, attrs } => {
                 context.insert_order(crate::types::Order::new(
@@ -869,7 +869,7 @@ pub(crate) fn drain_and_send_orders(
                     fields.push((5960, pair[1].clone()));
                 }
                 let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
-                conn.send_fix(&refs)
+                send_new_order(conn, context, instrument, &refs)
             }
             OrderRequest::SubmitPegBench { order_id, instrument, side, qty, price,
                 ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount } => {
@@ -888,7 +888,7 @@ pub(crate) fn drain_and_send_orders(
                 let peg_decrease_str = if is_peg_decrease { "1" } else { "0" };
                 let peg_change_str = format_price(pegged_change_amount);
                 let ref_change_str = format_price(ref_change_amount);
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -924,7 +924,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -955,7 +955,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -1007,7 +1007,7 @@ pub(crate) fn drain_and_send_orders(
                 // time-in-force and attributes go too (ibx#318).
                 push_extended_attrs(&mut fields, &attrs, false);
                 let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
-                conn.send_fix(&refs)
+                send_new_order(conn, context, instrument, &refs)
             }
             OrderRequest::SubmitLimitFractional { order_id, instrument, side, qty, price } => {
                 context.insert_order(crate::types::Order::new(
@@ -1021,7 +1021,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -1079,7 +1079,7 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ];
                 fields.extend(adjustable.iter().map(|(t, s)| (*t, s.as_str())));
-                conn.send_fix(&fields)
+                send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::SubmitMtl { order_id, instrument, side, qty } => {
                 context.insert_order(crate::types::Order::new(
@@ -1092,7 +1092,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -1122,7 +1122,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -1153,7 +1153,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -1207,7 +1207,7 @@ pub(crate) fn drain_and_send_orders(
                     cap_str = format_price(price_cap);
                     fields.push((44, &cap_str)); // Price cap
                 }
-                conn.send_fix(&fields)
+                send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::SubmitSnapMkt { order_id, instrument, side, qty } => {
                 context.insert_order(crate::types::Order::new(
@@ -1220,7 +1220,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, _destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -1250,7 +1250,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, _destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -1280,7 +1280,7 @@ pub(crate) fn drain_and_send_orders(
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, _destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
-                conn.send_fix(&[
+                send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
@@ -1333,7 +1333,7 @@ pub(crate) fn drain_and_send_orders(
                     offset_str = format_price(offset);
                     fields.push((211, &offset_str)); // PegOffsetValue
                 }
-                conn.send_fix(&fields)
+                send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::SubmitPegMid { order_id, instrument, side, qty, offset } => {
                 context.insert_order(crate::types::Order::new(
@@ -1371,7 +1371,7 @@ pub(crate) fn drain_and_send_orders(
                     offset_str = format_price(offset);
                     fields.push((211, &offset_str)); // PegOffsetValue
                 }
-                conn.send_fix(&fields)
+                send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::Cancel { order_id } => {
                 // OrigClOrdID must match exactly what the server has on record.
@@ -1466,6 +1466,7 @@ pub(crate) fn drain_and_send_orders(
                 if oid != 0 {
                     context.remove_order(oid);
                     shared.orders.push_order_update(OrderUpdate {
+                        avg_fill_price: 0,
                         order_id: oid,
                         instrument: 0,
                         status: OrderStatus::Rejected,
@@ -1506,6 +1507,7 @@ fn synthesize_pending_cancel(
     }
     if let Some(order) = context.order(order_id).copied() {
         shared.orders.push_order_update(OrderUpdate {
+            avg_fill_price: 0,
             order_id,
             instrument: order.instrument,
             status: OrderStatus::PendingCancel,
@@ -1528,6 +1530,31 @@ fn oca_type_str(oca_type: u8) -> &'static str {
         4 => "ReduceOnFillWBlockFromTotal",
         _ => "ReduceOnFillNonBlock",
     }
+}
+
+/// Send a new order with the contract id right after the secondary routing
+/// field, where the reference puts it on every new order (ib-agent#192 B4,
+/// ibx#328). An instrument registered without a contract id keeps the
+/// symbol-only form.
+fn send_new_order(
+    conn: &mut Connection,
+    context: &Context,
+    instrument: crate::types::InstrumentId,
+    fields: &[(u32, &str)],
+) -> std::io::Result<()> {
+    let con_id = context.market.con_id(instrument).unwrap_or(0);
+    if con_id <= 0 {
+        return conn.send_fix(fields);
+    }
+    let con_id_str = con_id.to_string();
+    let mut out: Vec<(u32, &str)> = Vec::with_capacity(fields.len() + 1);
+    for &(tag, value) in fields {
+        out.push((tag, value));
+        if tag == 6210 {
+            out.push((6008, &con_id_str));
+        }
+    }
+    conn.send_fix(&out)
 }
 
 /// The adjustable-stop tags (ib-agent#49), shared by the plain and extended
@@ -2025,7 +2052,7 @@ fn send_order_ex(
     push_extended_attrs(&mut fields, attrs, has_base_exec_inst);
 
     let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
-    conn.send_fix(&refs)
+    send_new_order(conn, context, instrument, &refs)
 }
 
 fn build_algo_tags(algo: &AlgoParams) -> (&'static str, Vec<String>) {
@@ -2302,6 +2329,51 @@ mod tests {
         assert_eq!(pos(&tags, 6257), pos(&tags, 204) + 1);
         assert!(pos(&tags, 6259) < pos(&tags, 583));
         assert!(tag(&tags, 6260).is_none(), "trail tags only for a trail conversion");
+    }
+
+    /// Every secondary routing field in `tags` is followed by the contract id.
+    fn contract_id_follows_routing(tags: &[(u32, String)], con_id: &str) -> bool {
+        tags.iter().enumerate().filter(|(_, (t, _))| *t == 6210)
+            .all(|(i, _)| tags.get(i + 1) == Some(&(6008, con_id.to_string())))
+    }
+
+    // ibx#328: the reference sends the contract id right after the secondary
+    // routing field on every new order (ib-agent#192 B4, 21/21 frames and
+    // all 63 of groups A and B); ibx sent it only on a replace.
+    #[test]
+    fn new_orders_carry_the_contract_id_after_the_routing_field() {
+        let limit = wire_tags(OrderRequest::SubmitLimit {
+            order_id: 1, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P,
+        });
+        assert_eq!(tag(&limit, 6008), Some("265598"));
+        assert!(contract_id_follows_routing(&limit, "265598"));
+
+        let extended = wire_tags(OrderRequest::SubmitEx {
+            order_id: 2, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::Limit { price: 100 * P }, tif: b'1',
+            attrs: crate::types::OrderAttrs { outside_rth: true, ..Default::default() },
+        });
+        assert_eq!(tag(&extended, 6008), Some("265598"));
+        assert!(contract_id_follows_routing(&extended, "265598"));
+
+        // Parent and both children: every frame read carries it.
+        let bracket = wire_tags(OrderRequest::SubmitBracket {
+            parent_id: 3, tp_id: 4, sl_id: 5, instrument: 0, side: Side::Buy, qty: 1,
+            entry_price: 100 * P, take_profit: 110 * P, stop_loss: 90 * P,
+        });
+        assert!(bracket.iter().any(|(t, _)| *t == 6210));
+        assert!(contract_id_follows_routing(&bracket, "265598"));
+    }
+
+    // An instrument registered without a contract id keeps the symbol-only form.
+    #[test]
+    fn a_new_order_without_a_contract_id_sends_none() {
+        let tags = wire_tags_with(
+            |ctx| { ctx.market.register(0); },
+            OrderRequest::SubmitLimit { order_id: 6, instrument: 1, side: Side::Buy, qty: 1, price: 100 * P },
+        );
+        assert!(tag(&tags, 6210).is_some());
+        assert!(tag(&tags, 6008).is_none());
     }
 
     // ── Replace (ibx#247 ibx#324 ibx#334 ibx#349) ──

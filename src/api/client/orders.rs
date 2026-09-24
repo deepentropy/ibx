@@ -25,7 +25,7 @@ impl EClient {
         };
 
         // Refused before sending, like the reference: error() only.
-        if let Some((code, message)) = ClientCore::fractional_quantity_refusal(order) {
+        if let Some((code, message)) = ClientCore::refusal_before_sending(order) {
             self.shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }

@@ -60,8 +60,12 @@ impl EClient {
             let (perm_id, parent_id) = shared.orders.get_order_info(fill.order_id)
                 .map(|info| (info.order.perm_id, info.order.parent_id))
                 .unwrap_or((0, 0));
-            call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, fill.qty as f64, fill.remaining as f64,
-                 price, perm_id, parent_id, price, 0i64, "", 0.0f64));
+            // filled and avgFillPrice are the order totals carried on the
+            // fill, lastFillPrice is this print (ibx#315).
+            let cum_qty = fill.filled_so_far() as f64;
+            let avg_price = fill.average_price() as f64 / PRICE_SCALE_F;
+            call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, cum_qty, fill.remaining as f64,
+                 avg_price, perm_id, parent_id, price, 0i64, "", 0.0f64));
 
             // Track execution for req_executions
             let exec_id = format!("{}.{}", fill.order_id, fill.timestamp_ns);
@@ -69,10 +73,6 @@ impl EClient {
             let rich_info = shared.orders.get_order_info(fill.order_id);
             let exec_exchange = rich_info.as_ref()
                 .map(|i| i.last_exec.exchange.as_str()).unwrap_or("").to_string();
-            let cum_qty = rich_info.as_ref()
-                .map(|i| i.last_exec.cum_qty).unwrap_or(fill.qty as f64);
-            let avg_price = rich_info.as_ref()
-                .map(|i| i.last_exec.avg_price).unwrap_or(price);
             // Build api-level contract for shared storage
             let api_contract = self.core.open_orders.lock().unwrap()
                 .get(&fill.order_id).map(|o| o.contract.clone())
@@ -140,7 +140,7 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "exec_details", (req_id, &c_py, &exec_py));
 
             // Update open order tracking
-            self.core.update_order_fill(fill.order_id, status, fill.qty as f64, fill.remaining as f64);
+            self.core.update_order_fill(fill.order_id, status, cum_qty, fill.remaining as f64);
 
             // Dispatch commission_and_fees_report
             let report = CommissionAndFeesReport {
@@ -155,12 +155,20 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "commission_and_fees_report", (&report_py,));
         }
 
+        // Order errors (refused before sending, or rejected by the server)
+        // -> error, ahead of the status: the reference reports a server
+        // reject as error 201 before the Inactive status (ibx#250).
+        for (order_id, code, msg) in shared.orders.drain_order_errors() {
+            call_wrapper!(self.wrapper, py, "error", (order_id as i64, code, msg.as_str(), ""));
+        }
+
         // Drain order updates -> orderStatus
         let updates = shared.orders.drain_order_updates();
         for update in updates {
             let status = order_status_str(update.status);
             call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, update.filled_qty as f64,
-                 update.remaining_qty as f64, 0.0f64, update.perm_id, update.parent_id, 0.0f64, 0i64, "", 0.0f64));
+                 update.remaining_qty as f64, update.avg_fill_price as f64 / PRICE_SCALE_F,
+                 update.perm_id, update.parent_id, 0.0f64, 0i64, "", 0.0f64));
 
             // Track open orders
             self.core.update_order_status(update.order_id, status, update.filled_qty as f64, update.remaining_qty as f64);
@@ -172,11 +180,6 @@ impl EClient {
             let code = if reject.reject_type == 1 { 202i64 } else { 10147i64 };
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
             call_wrapper!(self.wrapper, py, "error", (reject.order_id as i64, code, msg.as_str(), ""));
-        }
-
-        // Order errors raised before sending -> error
-        for (order_id, code, msg) in shared.orders.drain_order_errors() {
-            call_wrapper!(self.wrapper, py, "error", (order_id as i64, code, msg.as_str(), ""));
         }
 
         // Poll quotes for changes -> tickPrice/tickSize
@@ -558,20 +561,13 @@ impl EClient {
             // Portfolio updates (position entries)
             let portfolio = self.core.prepare_portfolio_updates(shared);
             for entry in &portfolio {
-                let contract = self.core.get_contract(entry.con_id, shared);
-                let c = contract.map(|ac| {
-                    let mut c = crate::python::compat::contract::Contract::default();
-                    c.con_id = ac.con_id;
-                    c.symbol = ac.symbol;
-                    c.sec_type = ac.sec_type;
-                    c.exchange = ac.exchange;
-                    c.currency = ac.currency;
-                    c
-                }).unwrap_or_else(|| {
-                    let mut c = crate::python::compat::contract::Contract::default();
-                    c.con_id = entry.con_id;
-                    c
-                });
+                let ac = self.core.position_contract(entry.con_id, shared);
+                let mut c = crate::python::compat::contract::Contract::default();
+                c.con_id = ac.con_id;
+                c.symbol = ac.symbol;
+                c.sec_type = ac.sec_type;
+                c.exchange = ac.exchange;
+                c.currency = ac.currency;
                 let c_py = pyo3::Py::new(py, c).unwrap().into_any();
                 call_wrapper!(self.wrapper, py, "update_portfolio",
                     (&c_py, entry.position, entry.market_price, entry.market_value,

@@ -149,11 +149,33 @@ pub struct Fill {
     pub instrument: InstrumentId,
     pub order_id: OrderId,
     pub side: Side,
+    /// Price of this print.
     pub price: Price,
+    /// Size of this print.
     pub qty: i64,
     pub remaining: i64,
+    /// Quantity filled on the order so far, this print included. 0 when
+    /// the report did not carry it.
+    pub cum_qty: i64,
+    /// Average price over every print of the order so far. 0 when the
+    /// report did not carry it.
+    pub avg_price: Price,
     pub commission: Price,
     pub timestamp_ns: u64,
+}
+
+impl Fill {
+    /// Quantity filled on the order so far; the print when the report did
+    /// not carry the total.
+    pub fn filled_so_far(&self) -> i64 {
+        if self.cum_qty > 0 { self.cum_qty } else { self.qty }
+    }
+
+    /// Average price over the order's prints so far; the print price when
+    /// the report did not carry it.
+    pub fn average_price(&self) -> Price {
+        if self.avg_price > 0 { self.avg_price } else { self.price }
+    }
 }
 
 /// Order status change notification.
@@ -164,6 +186,9 @@ pub struct OrderUpdate {
     pub status: OrderStatus,
     pub filled_qty: i64,
     pub remaining_qty: i64,
+    /// Average price over the order's prints so far; 0 before any fill or
+    /// when the report did not carry it.
+    pub avg_fill_price: Price,
     pub perm_id: i64,
     pub parent_id: i64,
     pub timestamp_ns: u64,
@@ -2046,6 +2071,7 @@ mod tests {
     #[test]
     fn fill_is_copy() {
         let f = Fill {
+            cum_qty: 0, avg_price: 0,
             instrument: 0,
             order_id: 1,
             side: Side::Buy,
