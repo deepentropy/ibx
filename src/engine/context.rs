@@ -33,6 +33,9 @@ impl Clock {
 
 /// The context passed to strategy callbacks. Provides market data access and
 /// order management. All hot-path data is pre-allocated.
+/// Most finished orders kept for `Context::finished_status`.
+pub const FINISHED_ORDERS_MAX: usize = 65_536;
+
 /// What a server-reported status did to an order (ibx#212 ibx#473).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusChange {
@@ -60,6 +63,11 @@ pub struct Context {
     /// it appeared on the wire. Used as the OrigClOrdID on cancel/modify so that
     /// legacy orders recorded without a `.{ver}` suffix still match — see ibx#179.
     pub(crate) last_clord: HashMap<OrderId, String>,
+    /// Final status of orders that left the engine filled, cancelled or
+    /// rejected, for the reference's refusal of a later cancel (ibx#464).
+    /// Bounded: the oldest are dropped past `FINISHED_ORDERS_MAX`.
+    finished_orders: HashMap<OrderId, OrderStatus>,
+    finished_order_ids: std::collections::VecDeque<OrderId>,
     /// Timestamp when the last farm socket recv returned data (for decode latency measurement).
     pub(crate) recv_at: Instant,
     /// Total hot loop iterations since start.
@@ -75,6 +83,8 @@ impl Context {
             pending_orders: OrderBuffer::new(),
             modify_versions: HashMap::new(),
             last_clord: HashMap::new(),
+            finished_orders: HashMap::new(),
+            finished_order_ids: std::collections::VecDeque::new(),
             account: AccountState::default(),
             clock: Clock::new(),
             next_order_id: {
@@ -1001,6 +1011,27 @@ impl Context {
 
     pub fn remove_order(&mut self, order_id: OrderId) {
         self.open_orders.remove(&order_id);
+    }
+
+    /// Remove an order that ended with `status`, and keep that status for a
+    /// later cancel of the same id (ibx#464).
+    pub fn finish_order(&mut self, order_id: OrderId, status: OrderStatus) {
+        if self.open_orders.remove(&order_id).is_none() {
+            return;
+        }
+        if self.finished_orders.insert(order_id, status).is_none() {
+            self.finished_order_ids.push_back(order_id);
+            while self.finished_order_ids.len() > FINISHED_ORDERS_MAX {
+                if let Some(old) = self.finished_order_ids.pop_front() {
+                    self.finished_orders.remove(&old);
+                }
+            }
+        }
+    }
+
+    /// Final status of an order that left the engine (ibx#464).
+    pub fn finished_status(&self, order_id: OrderId) -> Option<OrderStatus> {
+        self.finished_orders.get(&order_id).copied()
     }
 
     /// Mark all live open orders as Uncertain (auth disconnect — status may have changed).

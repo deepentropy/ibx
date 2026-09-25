@@ -1307,7 +1307,7 @@ impl CcpState {
                     timestamp_ns: context.now_ns(),
                 });
             }
-            context.remove_order(clord_id);
+            context.finish_order(clord_id, status);
         }
     }
 
@@ -2671,6 +2671,8 @@ mod tests {
             ccp.handle_exec_report(&exec_report_frame(pairs), &mut context, &shared, &None, "");
         }
         assert!(context.order(42).is_none(), "a cancelled order leaves the engine");
+        // Its state stays known for a later cancel (ibx#464).
+        assert_eq!(context.finished_status(42), Some(OrderStatus::Cancelled));
         let last = shared.orders.drain_order_updates().last().map(|u| u.status);
         assert_eq!(last, Some(OrderStatus::Cancelled));
     }

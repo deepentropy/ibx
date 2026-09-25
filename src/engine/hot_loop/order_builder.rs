@@ -44,6 +44,17 @@ pub(crate) fn drain_and_send_orders(
                 continue;
             }
         }
+        // The reference refuses a cancel it cannot apply and sends nothing
+        // (ibx#464; captured 23/09/2026): 10147 for an order it does not
+        // know, 10148 with the state for one that is finished or has a
+        // cancel pending.
+        if let OrderRequest::Cancel { order_id } = &order_req {
+            if let Some((code, message)) = cancel_refusal(context, *order_id) {
+                log::warn!("Cancel of order {} refused: {}", order_id, message);
+                shared.orders.push_order_error(*order_id, code, message);
+                continue;
+            }
+        }
         // Snap every price to the contract's tick grid before encoding
         // (ibx#216). The tick comes from the market-data subscription ack;
         // without one it is 0 and prices pass through unchanged.
@@ -1498,6 +1509,30 @@ pub(crate) fn drain_and_send_orders(
     }
 }
 
+/// The reference's answer to a cancel it does not send (ibx#464): the order
+/// is unknown (10147), or finished or already pending cancel (10148, with
+/// the state). `None` when the cancel goes out.
+fn cancel_refusal(context: &Context, order_id: crate::types::OrderId) -> Option<(i64, String)> {
+    let state = match context.order(order_id) {
+        Some(o) if o.status == OrderStatus::PendingCancel => OrderStatus::PendingCancel,
+        Some(_) => return None,
+        None => match context.finished_status(order_id) {
+            Some(status) => status,
+            None => return Some((
+                10147,
+                format!("OrderId {} that needs to be cancelled is not found.", order_id),
+            )),
+        },
+    };
+    Some((
+        10148,
+        format!(
+            "OrderId {} that needs to be cancelled can not be cancelled, state: {}.",
+            order_id, crate::client_core::order_status_str(state),
+        ),
+    ))
+}
+
 /// Convert Side to FIX tag 54 value.
 fn fix_side(side: Side) -> &'static str {
     match side {
@@ -2707,6 +2742,66 @@ mod tests {
     fn modify_of_a_working_order_is_sent() {
         let (sent, errors) = modify_of(Some(order(5, 0, OrderStatus::Submitted)));
         assert!(sent > 0, "the replace is sent");
+        assert!(errors.is_empty());
+    }
+
+    /// Run one Cancel of order 5 through `drain_and_send_orders` after
+    /// `setup`; return the bytes sent and the order errors raised.
+    fn cancel_of(setup: impl FnOnce(&mut Context)) -> (usize, Vec<(u64, i64, String)>) {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+
+        let mut context = Context::new();
+        context.market.register(265598);
+        setup(&mut context);
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 5 });
+        let shared = Arc::new(SharedState::new());
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        drop(conn);
+
+        let mut buf = Vec::new();
+        let _ = server.read_to_end(&mut buf);
+        (buf.len(), shared.orders.drain_order_errors())
+    }
+
+    // ibx#464: the reference answers a cancel of an unknown id with 10147
+    // and sends nothing (captured 23/09/2026).
+    #[test]
+    fn cancel_of_an_unknown_order_is_refused_with_10147() {
+        let (sent, errors) = cancel_of(|_| {});
+        assert_eq!(sent, 0);
+        assert_eq!(errors, [(5, 10147, "OrderId 5 that needs to be cancelled is not found.".to_string())]);
+    }
+
+    // A second cancel while the first is pending: 10148 with the state
+    // (captured 23/09/2026: "state: PendingCancel").
+    #[test]
+    fn cancel_of_an_order_with_a_pending_cancel_is_refused_with_10148() {
+        let (sent, errors) = cancel_of(|ctx| ctx.insert_order(order(5, 0, OrderStatus::PendingCancel)));
+        assert_eq!(sent, 0);
+        assert_eq!(errors, [(5, 10148,
+            "OrderId 5 that needs to be cancelled can not be cancelled, state: PendingCancel.".to_string())]);
+    }
+
+    #[test]
+    fn cancel_of_a_finished_order_gives_its_state() {
+        let (sent, errors) = cancel_of(|ctx| {
+            ctx.insert_order(order(5, 10, OrderStatus::Filled));
+            ctx.finish_order(5, OrderStatus::Filled);
+        });
+        assert_eq!(sent, 0);
+        assert_eq!(errors[0].1, 10148);
+        assert!(errors[0].2.ends_with("state: Filled."), "{}", errors[0].2);
+    }
+
+    #[test]
+    fn cancel_of_a_working_order_is_sent() {
+        let (sent, errors) = cancel_of(|ctx| ctx.insert_order(order(5, 0, OrderStatus::Submitted)));
+        assert!(sent > 0);
         assert!(errors.is_empty());
     }
 }
