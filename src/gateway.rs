@@ -1406,43 +1406,14 @@ impl Gateway {
         );
 
         // The auth-server's logon ACK arrives DEFLATE-compressed inside one or
-        // more `8=FIXCOMP` envelopes (per ib-agent#129). The compressed body
-        // is ~30 kB on the wire but expands to ~48 kB plaintext containing
-        // the routing tags 6145/6171/8008. Walk the buffer, decompress every
-        // FIXCOMP segment, and concatenate the plaintext with init_data so the
-        // existing tag-scan loop below sees the inflated content.
-        let mut inflated_extra: Vec<u8> = Vec::new();
-        let mut cursor = 0usize;
-        while cursor + 12 < init_data.len() {
-            if init_data[cursor..].starts_with(b"8=FIXCOMP\x01") {
-                if let Some(total_len) = fixcomp::fixcomp_length(&init_data[cursor..]) {
-                    let segment = &init_data[cursor..cursor + total_len.min(init_data.len() - cursor)];
-                    let inflated = fixcomp::fixcomp_decompress(segment).unwrap_or_else(|e| {
-                        log::warn!("Init FIXCOMP segment at offset {}: dropping malformed frame: {}", cursor, e);
-                        Vec::new()
-                    });
-                    let inflated_bytes: usize = inflated.iter().map(|m| m.len() + 1).sum();
-                    log::info!(
-                        "Init FIXCOMP segment at offset {}: {} compressed → {} inner messages, ~{} inflated bytes",
-                        cursor, total_len, inflated.len(), inflated_bytes,
-                    );
-                    for inner in inflated {
-                        inflated_extra.extend_from_slice(&inner);
-                        inflated_extra.push(b'\x01');
-                    }
-                    cursor += total_len;
-                    continue;
-                }
-            }
-            cursor += 1;
-        }
-        if !inflated_extra.is_empty() {
-            log::info!("Inflated {} bytes of FIXCOMP content; appending to scan buffer", inflated_extra.len());
-            init_data.extend_from_slice(&inflated_extra);
-        }
+        // more `8=FIXCOMP` envelopes (per ib-agent#129); the routing tags are
+        // in the inflated content. The scan reads a copy with that content
+        // appended; `init_data` itself seeds the connection buffer below
+        // unchanged (ibx#317).
+        let scan_data = init_scan_buffer(&init_data);
 
         // Scan init response for account ID and gateway-local init tags
-        let init_str = String::from_utf8_lossy(&init_data);
+        let init_str = String::from_utf8_lossy(&scan_data);
         // TEMP diagnostic (ib-agent#128 follow-up): log every part containing
         // "farm" or "hmds" so we can locate the routing tags.
         for part in init_str.split('\x01') {
@@ -1881,9 +1852,75 @@ pub fn build_mktdata_unsubscribe(md_req_id: &str, seq: u32) -> Vec<u8> {
 /// Re-exports for backward compatibility.
 pub use crate::config::{chrono_free_timestamp, days_to_ymd};
 
+/// The init burst as the logon tag scan reads it: the received bytes, then
+/// the inflated content of every `8=FIXCOMP` frame in them (ib-agent#129).
+/// The compressed body is ~30 kB on the wire and expands to ~48 kB plaintext
+/// holding the routing tags 6145/6171/8008.
+///
+/// The received bytes also seed the connection buffer, where the hot loop
+/// inflates the compressed frames itself. The copy must stay out of it: with
+/// the inflated content appended there, every compressed message of the init
+/// burst was handled twice, executions included (ibx#317).
+fn init_scan_buffer(init_data: &[u8]) -> Vec<u8> {
+    let mut inflated_extra: Vec<u8> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor + 12 < init_data.len() {
+        if init_data[cursor..].starts_with(b"8=FIXCOMP\x01") {
+            if let Some(total_len) = fixcomp::fixcomp_length(&init_data[cursor..]) {
+                let segment = &init_data[cursor..cursor + total_len.min(init_data.len() - cursor)];
+                let inflated = fixcomp::fixcomp_decompress(segment).unwrap_or_else(|e| {
+                    log::warn!("Init FIXCOMP segment at offset {}: dropping malformed frame: {}", cursor, e);
+                    Vec::new()
+                });
+                let inflated_bytes: usize = inflated.iter().map(|m| m.len() + 1).sum();
+                log::info!(
+                    "Init FIXCOMP segment at offset {}: {} compressed → {} inner messages, ~{} inflated bytes",
+                    cursor, total_len, inflated.len(), inflated_bytes,
+                );
+                for inner in inflated {
+                    inflated_extra.extend_from_slice(&inner);
+                    inflated_extra.push(b'\x01');
+                }
+                cursor += total_len;
+                continue;
+            }
+        }
+        cursor += 1;
+    }
+    let mut scan = init_data.to_vec();
+    if !inflated_extra.is_empty() {
+        log::info!("Inflated {} bytes of FIXCOMP content; appending to scan buffer", inflated_extra.len());
+        scan.extend_from_slice(&inflated_extra);
+    }
+    scan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ibx#317: the tag scan sees the inflated init burst, and the bytes that
+    // seed the connection buffer stay as received. The inflated copy used
+    // to be appended to them, so every compressed message of the burst
+    // reached the engine twice (seen on paper 25/09/2026: seq 4 to 119).
+    #[test]
+    fn init_scan_buffer_inflates_for_the_scan_only() {
+        use crate::protocol::fix::fix_build;
+        let plain = fix_build(&[(35, "U"), (6040, "93")], 3);
+        let mut inner = fix_build(&[(35, "8"), (17, "e1"), (6145, "usfarm")], 4);
+        inner.extend_from_slice(&fix_build(&[(35, "U"), (6040, "60"), (17, "e1")], 5));
+        let mut init_data = plain.clone();
+        init_data.extend_from_slice(&fixcomp::fixcomp_build(&inner));
+        let received = init_data.clone();
+
+        let scan = init_scan_buffer(&init_data);
+
+        assert_eq!(init_data, received, "the seed bytes are unchanged");
+        assert!(scan.starts_with(&received));
+        let text = String::from_utf8_lossy(&scan[received.len()..]).into_owned();
+        assert!(text.contains("6145=usfarm"), "the scan sees the inflated content");
+        assert_eq!(text.matches("35=").count(), 2, "each inflated message once");
+    }
 
     #[test]
     fn token_short_hash_deterministic() {
