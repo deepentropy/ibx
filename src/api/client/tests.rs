@@ -3539,3 +3539,110 @@ fn an_unsubscribe_when_not_subscribed_sends_nothing() {
     client.process_msgs(&mut w);
     assert!(w.events.is_empty(), "{:?}", w.events);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+//  Account summary subscription (ibx#479)
+// ═══════════════════════════════════════════════════════════════════
+
+#[derive(Default)]
+struct SummaryRec { events: Vec<String> }
+impl Wrapper for SummaryRec {
+    fn account_summary(&mut self, req_id: i64, _a: &str, tag: &str, value: &str, currency: &str) {
+        self.events.push(format!("row:{req_id}:{tag}:{value}:{currency}"));
+    }
+    fn account_summary_end(&mut self, req_id: i64) {
+        self.events.push(format!("end:{req_id}"));
+    }
+    fn error(&mut self, id: i64, code: i64, msg: &str, _a: &str) {
+        self.events.push(format!("error:{id}:{code}:{msg}"));
+    }
+}
+
+fn summary_sent(rx: &crossbeam_channel::Receiver<ControlCommand>) -> Vec<String> {
+    rx.try_iter().filter_map(|c| match c {
+        ControlCommand::SubscribeAccountSummary { sr_id, tags, group } => Some(format!("sub:{sr_id}:{tags}:{group}")),
+        ControlCommand::CancelAccountSummary { sr_id } => Some(format!("cancel:{sr_id}")),
+        _ => None,
+    }).collect()
+}
+
+fn summary_row(key: &str, value: &str, currency: &str) -> crate::bridge::AccountRow {
+    crate::bridge::AccountRow { key: key.into(), value: value.into(), currency: currency.into() }
+}
+
+#[test]
+fn account_summary_is_a_server_subscription() {
+    let (client, rx, shared) = test_client();
+    client.req_account_summary(1, "All", "AccountType,NetLiquidation,$LEDGER:USD");
+    assert_eq!(summary_sent(&rx), ["sub:SR.Socket.1:AccountType,NetLiquidation,$LEDGER:All"]);
+
+    // Rows as sent; ledger rows of the chosen currency only; the end.
+    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+        sr_id: "SR.Socket.1".into(), ledger: false, end: false,
+        rows: vec![summary_row("AccountType", "INDIVIDUAL", ""), summary_row("NetLiquidation", "953633.06", "USD")],
+    });
+    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+        sr_id: "SR.Socket.1".into(), ledger: true, end: false,
+        rows: vec![summary_row("CashBalance", "899133.4993", "BASE"), summary_row("CashBalance", "899133.4993", "USD")],
+    });
+    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+        sr_id: "SR.Socket.1".into(), ledger: false, end: true, rows: vec![],
+    });
+    let mut w = SummaryRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, [
+        "row:1:AccountType:INDIVIDUAL:",
+        "row:1:NetLiquidation:953633.06:USD",
+        "row:1:CashBalance:899133.4993:USD",
+        "end:1",
+    ]);
+
+    // A later batch keeps coming, with its own end.
+    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+        sr_id: "SR.Socket.1".into(), ledger: false, end: false,
+        rows: vec![summary_row("NetLiquidation", "953642.02", "USD")],
+    });
+    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+        sr_id: "SR.Socket.1".into(), ledger: false, end: true, rows: vec![],
+    });
+    let mut w = SummaryRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["row:1:NetLiquidation:953642.02:USD", "end:1"]);
+
+    // Cancel: the server subscription is cancelled; later rows are dropped.
+    client.cancel_account_summary(1);
+    assert_eq!(summary_sent(&rx), ["cancel:SR.Socket.1"]);
+    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+        sr_id: "SR.Socket.1".into(), ledger: false, end: true, rows: vec![],
+    });
+    let mut w = SummaryRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+}
+
+#[test]
+fn account_summary_refusals_and_limit() {
+    let (client, rx, _shared) = test_client();
+    client.req_account_summary(1, "All", "");
+    client.req_account_summary(2, "", "NetLiquidation");
+    client.req_account_summary(3, "all", "NetLiquidation");
+    client.req_account_summary(4, "All", "NetLiquidation");
+    client.req_account_summary(5, "AllNonProp", "NetLiquidation");
+    client.req_account_summary(6, "All", "NetLiquidation");
+    // The same id again replaces its request: cancel, then subscribe.
+    client.req_account_summary(5, "All", "Cushion");
+    let mut w = SummaryRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, [
+        "error:1:321:Error validating request.-'b2' : cause - Tags cannot be null",
+        "error:2:321:Error validating request.-'b2' : cause - Group name cannot be null",
+        "error:3:321:Error validating request.-'b2' : cause - Group name is invalid",
+        "error:6:322:Maximum number of account summary requests exceeded; desubscribe to previous request first",
+    ]);
+    assert_eq!(summary_sent(&rx), [
+        "sub:SR.Socket.1:NetLiquidation:All",
+        "sub:SR.Socket.2:NetLiquidation:AllNonProp",
+        "cancel:SR.Socket.2",
+        "sub:SR.Socket.3:Cushion:All",
+    ]);
+}

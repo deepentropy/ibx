@@ -1587,6 +1587,34 @@ impl CcpState {
         }
     }
 
+    /// Account summary subscription (ibx#479), as the reference writes it:
+    /// `6040=55|6036=1|6529={sr_id}|6374={tags}|6160={group}` to subscribe,
+    /// `6036=0` with the same id to cancel (`subscribe` is `None`).
+    pub(crate) fn send_account_summary(
+        &mut self,
+        sr_id: &str,
+        subscribe: Option<(&str, &str)>,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        let Some(conn) = ccp_conn.as_mut() else { return };
+        let ts = chrono_free_timestamp();
+        let mut fields: Vec<(u32, &str)> = vec![
+            (fix::TAG_MSG_TYPE, "U"),
+            (fix::TAG_SENDING_TIME, &ts),
+            (6040, "55"),
+            (6036, if subscribe.is_some() { "1" } else { "0" }),
+            (6529, sr_id),
+        ];
+        if let Some((tags, group)) = subscribe {
+            fields.push((6374, tags));
+            fields.push((6160, group));
+        }
+        let _ = conn.send_fix(&fields);
+        hb.last_ccp_sent = Instant::now();
+        log::info!("Sent account summary {}: {}", if subscribe.is_some() { "subscribe" } else { "cancel" }, sr_id);
+    }
+
     pub(crate) fn send_news_subscribe(
         &mut self,
         con_id: i64,
@@ -1893,6 +1921,20 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
         Ok(t) => t,
         Err(_) => return,
     };
+    // Rows of an account summary subscription go to that request only, not
+    // to the account state (ibx#479).
+    if let Some(sr_id) = summary_id(text) {
+        let (rows, _) = parse_account_rows(text);
+        shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+            sr_id: sr_id.to_string(),
+            rows: rows.into_iter()
+                .map(|(key, currency, value)| crate::bridge::AccountRow { key, value, currency })
+                .collect(),
+            ledger: text.split(SOH_CHAR).any(|p| p == "35=RL"),
+            end: false,
+        });
+        return;
+    }
     let mut key: Option<&str> = None;
     for part in text.split('\x01') {
         if let Some(val) = part.strip_prefix("8001=") {
@@ -1942,6 +1984,13 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
 
 /// The account stream's frames carry `6529=AR.{n}`; other subscriptions
 /// (account summary, `SR.{n}`) have their own id.
+/// The subscription id of an account summary frame (`6529=SR.{...}`).
+fn summary_id(text: &str) -> Option<&str> {
+    text.split(SOH_CHAR).find_map(|p| p.strip_prefix("6529=")).filter(|id| id.starts_with("SR."))
+}
+
+const SOH_CHAR: char = '\x01';
+
 fn is_account_stream(text: &str) -> bool {
     text.split('\x01').any(|p| p.starts_with("6529=AR."))
 }
@@ -1951,6 +2000,13 @@ fn is_account_stream(text: &str) -> bool {
 /// 25/09/2026).
 fn handle_account_end(msg: &[u8], shared: &SharedState) {
     let Ok(text) = std::str::from_utf8(msg) else { return };
+    // The end of an account summary batch (ibx#479).
+    if let Some(sr_id) = summary_id(text) {
+        shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+            sr_id: sr_id.to_string(), rows: Vec::new(), ledger: false, end: true,
+        });
+        return;
+    }
     if is_account_stream(text) {
         shared.portfolio.update_account_rows(|store| {
             if !store.image_complete {
@@ -3390,5 +3446,26 @@ mod tests {
         assert!(complete);
         assert_eq!(time, 1790323947);
         assert_eq!(shared.portfolio.account_rows().rows.len(), 4);
+    }
+
+    // ibx#479: frames of an account summary subscription (6529=SR.*) go to
+    // that request only, not to the account stream or the account state.
+    #[test]
+    fn summary_frames_go_to_their_subscription_only() {
+        let (mut context, shared) = (Context::new(), SharedState::new());
+        let um = UM_IMAGE.replace("6529=AR.1", "6529=SR.Socket.7");
+        handle_account_update(soh(&um).as_bytes(), &mut context, &shared);
+        let rl = RL_IMAGE.replace("6529=AR.1", "6529=SR.Socket.7");
+        handle_account_update(soh(&rl).as_bytes(), &mut context, &shared);
+        handle_account_end(soh("8=O|9=000016|35=EB|6529=SR.Socket.7|").as_bytes(), &shared);
+
+        assert!(shared.portfolio.account_rows().rows.is_empty(), "not the account stream");
+        assert_eq!(shared.portfolio.account().net_liquidation, 0, "not the account state");
+        let events = shared.portfolio.drain_account_summary_events();
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().all(|e| e.sr_id == "SR.Socket.7"));
+        assert_eq!(events[0].rows.len(), 4);
+        assert!(!events[0].ledger && events[1].ledger && events[2].end);
+        assert!(events[1].rows.iter().any(|r| r.key == "CashBalance" && r.currency == "USD"));
     }
 }

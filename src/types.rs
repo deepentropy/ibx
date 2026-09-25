@@ -1390,6 +1390,11 @@ pub enum ControlCommand {
     SubscribePnl { req_id: i64, account: String },
     /// Cancel P&L subscription.
     CancelPnl { req_id: i64 },
+    /// Subscribe to an account summary (6040=55, ibx#479): `sr_id` is the
+    /// subscription id the server echoes on the rows (`SR.Socket.{n}`).
+    SubscribeAccountSummary { sr_id: String, tags: String, group: String },
+    /// Cancel an account summary subscription.
+    CancelAccountSummary { sr_id: String },
     /// Update a strategy parameter.
     UpdateParam { key: String, value: String },
     /// Submit an order from external caller (bridge mode).

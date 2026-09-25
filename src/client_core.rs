@@ -6,7 +6,7 @@
 //! respective callback formats (Rust `Wrapper` trait calls or PyO3 `call_method`).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crossbeam_channel::Sender;
@@ -44,48 +44,6 @@ pub const TICK_LAST_EXCHANGE: i32 = 84;
 // ── Shared account field definitions ──
 
 
-/// Account summary tags (numeric). Superset of update fields + extras.
-pub const ACCOUNT_SUMMARY_TAGS: &[&str] = &[
-    "NetLiquidation",
-    "TotalCashValue",
-    "SettledCash",
-    "BuyingPower",
-    "EquityWithLoanValue",
-    "GrossPositionValue",
-    "InitMarginReq",
-    "MaintMarginReq",
-    "AvailableFunds",
-    "ExcessLiquidity",
-    "Cushion",
-    "DayTradesRemaining",
-    "Leverage",
-    "UnrealizedPnL",
-    "RealizedPnL",
-    "DailyPnL",
-];
-
-/// Extract account summary values in ACCOUNT_SUMMARY_TAGS order.
-#[inline]
-pub fn account_summary_values(acct: &AccountState) -> [f64; 16] {
-    [
-        acct.net_liquidation as f64 / PRICE_SCALE_F,
-        acct.total_cash_value as f64 / PRICE_SCALE_F,
-        acct.settled_cash as f64 / PRICE_SCALE_F,
-        acct.buying_power as f64 / PRICE_SCALE_F,
-        acct.equity_with_loan as f64 / PRICE_SCALE_F,
-        acct.gross_position_value as f64 / PRICE_SCALE_F,
-        acct.init_margin_req as f64 / PRICE_SCALE_F,
-        acct.maint_margin_req as f64 / PRICE_SCALE_F,
-        acct.available_funds as f64 / PRICE_SCALE_F,
-        acct.excess_liquidity as f64 / PRICE_SCALE_F,
-        acct.cushion as f64 / PRICE_SCALE_F,
-        acct.day_trades_remaining as f64,
-        acct.leverage as f64 / PRICE_SCALE_F,
-        acct.unrealized_pnl as f64 / PRICE_SCALE_F,
-        acct.realized_pnl as f64 / PRICE_SCALE_F,
-        acct.daily_pnl as f64 / PRICE_SCALE_F,
-    ]
-}
 
 /// Render an exchange-code bitmask to a letter string using the smart components
 /// table. Each set bit at position N picks `smart_components[N].exchange_letter`.
@@ -208,16 +166,52 @@ pub fn format_account_time(unix_secs: i64) -> String {
     ts.to_zoned(tz).strftime("%H:%M").to_string()
 }
 
-/// Prepared account summary response.
+/// Account summary rows to send for one request (ibx#479).
 pub struct AccountSummaryBatch {
     pub req_id: i64,
-    pub entries: Vec<AccountSummaryEntry>,
+    pub rows: Vec<crate::bridge::AccountRow>,
+    /// The server's batch ended: account_summary_end follows the rows.
+    pub end: bool,
 }
 
-pub struct AccountSummaryEntry {
-    pub tag: &'static str,
-    pub value: String,
-    pub currency: &'static str,
+/// Which ledger rows a summary request asked for (ibx#479). `$LEDGER`,
+/// `$LEDGER:{CCY}` and `$LEDGER:ALL` are one `$LEDGER` item on the wire;
+/// the currency choice stays in the client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LedgerChoice {
+    None,
+    /// `$LEDGER`: the base currency.
+    Base,
+    /// `$LEDGER:{CCY}`.
+    Currency(String),
+    /// `$LEDGER:ALL`.
+    All,
+}
+
+/// A running account summary request (ibx#479).
+#[derive(Clone, Debug)]
+pub struct AccountSummaryRequest {
+    pub req_id: i64,
+    /// Subscription id the server echoes on the rows.
+    pub sr_id: String,
+    pub ledger: LedgerChoice,
+}
+
+/// What `req_account_summary` sends: the subscription, and the one it
+/// replaces when the request id was already running.
+pub struct AccountSummaryPlan {
+    pub cancel_sr_id: Option<String>,
+    pub sr_id: String,
+    pub wire_tags: String,
+    pub group: String,
+}
+
+/// Most account summary requests per client (ibx#479).
+pub const ACCOUNT_SUMMARY_MAX: usize = 2;
+
+/// The reference's refusals of an account summary request (ibx#479).
+fn summary_refusal(cause: &str) -> (i64, String) {
+    (321, format!("Error validating request.-'b2' : cause - {}", cause))
 }
 
 /// A single portfolio position update.
@@ -418,7 +412,8 @@ pub struct ClientCore {
     pub last_pnl_single: Mutex<HashMap<i64, [i64; 5]>>,
 
     // Account summary subscription state (req_id, tags)
-    pub account_summary_req: Mutex<Option<(i64, Vec<String>)>>,
+    pub account_summaries: Mutex<Vec<AccountSummaryRequest>>,
+    pub next_account_summary: AtomicU64,
 
     // News bulletin subscription
     pub bulletin_subscribed: AtomicBool,
@@ -472,7 +467,8 @@ impl ClientCore {
             pnl_single_reqs: Mutex::new(HashMap::new()),
             last_pnl: Mutex::new([0; 3]),
             last_pnl_single: Mutex::new(HashMap::new()),
-            account_summary_req: Mutex::new(None),
+            account_summaries: Mutex::new(Vec::new()),
+            next_account_summary: AtomicU64::new(1),
             bulletin_subscribed: AtomicBool::new(false),
             account_updates_subscribed: AtomicBool::new(false),
             account_stream: Mutex::new(AccountStream::default()),
@@ -502,7 +498,7 @@ impl ClientCore {
         self.pnl_single_reqs.lock().unwrap().clear();
         *self.last_pnl.lock().unwrap() = [0; 3];
         self.last_pnl_single.lock().unwrap().clear();
-        *self.account_summary_req.lock().unwrap() = None;
+        self.account_summaries.lock().unwrap().clear();
         self.bulletin_subscribed.store(false, Ordering::Relaxed);
         self.account_updates_subscribed.store(false, Ordering::Relaxed);
         *self.account_stream.lock().unwrap() = AccountStream::default();
@@ -774,19 +770,52 @@ impl ClientCore {
 
     // ── Account summary subscription management ──
 
-    pub fn subscribe_account_summary(&self, req_id: i64, tags: &str) {
-        let tag_list: Vec<String> = tags.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        *self.account_summary_req.lock().unwrap() = Some((req_id, tag_list));
+    /// Check and register an account summary request (ibx#479), as the
+    /// reference does: empty tags or group, or a group other than `All` /
+    /// `AllNonProp` on a single account, give 321; a third request gives 322.
+    /// A request id already running replaces that request.
+    pub fn subscribe_account_summary(&self, req_id: i64, group: &str, tags: &str) -> Result<AccountSummaryPlan, (i64, String)> {
+        if tags.trim().is_empty() {
+            return Err(summary_refusal("Tags cannot be null"));
+        }
+        if group.is_empty() {
+            return Err(summary_refusal("Group name cannot be null"));
+        }
+        if group != "All" && group != "AllNonProp" {
+            return Err(summary_refusal("Group name is invalid"));
+        }
+        let mut ledger = LedgerChoice::None;
+        let mut wire: Vec<&str> = Vec::new();
+        for item in tags.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            if let Some(rest) = item.strip_prefix("$LEDGER") {
+                ledger = match rest.strip_prefix(':') {
+                    None => LedgerChoice::Base,
+                    Some("ALL") => LedgerChoice::All,
+                    Some(ccy) => LedgerChoice::Currency(ccy.to_string()),
+                };
+                if !wire.contains(&"$LEDGER") {
+                    wire.push("$LEDGER");
+                }
+            } else {
+                wire.push(item);
+            }
+        }
+        let mut reqs = self.account_summaries.lock().unwrap();
+        let cancel_sr_id = reqs.iter().position(|r| r.req_id == req_id).map(|i| reqs.remove(i).sr_id);
+        if reqs.len() >= ACCOUNT_SUMMARY_MAX {
+            return Err((322, "Maximum number of account summary requests exceeded; desubscribe to previous request first".into()));
+        }
+        let sr_id = format!("SR.Socket.{}", self.next_account_summary.fetch_add(1, Ordering::Relaxed));
+        reqs.push(AccountSummaryRequest { req_id, sr_id: sr_id.clone(), ledger });
+        Ok(AccountSummaryPlan { cancel_sr_id, sr_id, wire_tags: wire.join(","), group: group.to_string() })
     }
 
-    pub fn unsubscribe_account_summary(&self, req_id: i64) {
-        let mut req = self.account_summary_req.lock().unwrap();
-        if req.as_ref().map(|(r, _)| *r) == Some(req_id) {
-            *req = None;
-        }
+    /// Forget an account summary request; returns its subscription id to
+    /// cancel on the server.
+    pub fn unsubscribe_account_summary(&self, req_id: i64) -> Option<String> {
+        let mut reqs = self.account_summaries.lock().unwrap();
+        let i = reqs.iter().position(|r| r.req_id == req_id)?;
+        Some(reqs.remove(i).sr_id)
     }
 
     // ── Account updates subscription management ──
@@ -1509,31 +1538,32 @@ impl ClientCore {
         changed
     }
 
-    /// Prepare account summary response (one-shot, consumes the request).
-    pub fn prepare_account_summary(&self, shared: &SharedState, _account_id: &str) -> Option<AccountSummaryBatch> {
-        // Wait for gateway account data before delivering summary.
-        if !shared.portfolio.account_data_received() {
-            return None;
+    /// Account summary rows and ends the server sent, by request (ibx#479):
+    /// every row of the request's subscription, with its text and currency;
+    /// ledger rows only for the currency the request chose; the end at each
+    /// end marker. Rows of a cancelled subscription are dropped.
+    pub fn prepare_account_summary(&self, shared: &SharedState) -> Vec<AccountSummaryBatch> {
+        let events = shared.portfolio.drain_account_summary_events();
+        if events.is_empty() {
+            return Vec::new();
         }
-        let req = self.account_summary_req.lock().unwrap().take();
-        let (req_id, tags) = req?;
-
-        let acct = shared.portfolio.account();
-        let values = account_summary_values(&acct);
-
-        let mut entries = Vec::new();
-        for (i, &tag) in ACCOUNT_SUMMARY_TAGS.iter().enumerate() {
-            if !tags.is_empty() && !tags.iter().any(|t| t == tag) {
-                continue;
-            }
-            entries.push(AccountSummaryEntry {
-                tag,
-                value: format!("{:.2}", values[i]),
-                currency: "USD",
-            });
+        let reqs = self.account_summaries.lock().unwrap();
+        let mut out = Vec::new();
+        for event in events {
+            let Some(req) = reqs.iter().find(|r| r.sr_id == event.sr_id) else { continue };
+            let rows = if event.ledger {
+                event.rows.into_iter().filter(|row| match &req.ledger {
+                    LedgerChoice::None => false,
+                    LedgerChoice::Base => row.currency == "BASE",
+                    LedgerChoice::Currency(ccy) => &row.currency == ccy,
+                    LedgerChoice::All => true,
+                }).collect()
+            } else {
+                event.rows
+            };
+            out.push(AccountSummaryBatch { req_id: req.req_id, rows, end: event.end });
         }
-
-        Some(AccountSummaryBatch { req_id, entries })
+        out
     }
 
     // ── Order routing ──

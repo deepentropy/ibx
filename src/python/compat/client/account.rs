@@ -52,15 +52,29 @@ impl EClient {
     #[pyo3(signature = (req_id, group_name, tags))]
     fn req_account_summary(&self, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.core.subscribe_account_summary(req_id, tags);
-        let _ = group_name;
+        // A server subscription: the rows come as the server sends them, each
+        // batch ends with account_summary_end, until the cancel (ibx#479).
+        match self.core.subscribe_account_summary(req_id, group_name, tags) {
+            Ok(plan) => {
+                let tx = self.tx()?;
+                if let Some(sr_id) = plan.cancel_sr_id {
+                    let _ = tx.send(ControlCommand::CancelAccountSummary { sr_id });
+                }
+                let _ = tx.send(ControlCommand::SubscribeAccountSummary {
+                    sr_id: plan.sr_id, tags: plan.wire_tags, group: plan.group,
+                });
+            }
+            Err((code, message)) => self.shared_state()?.orders.push_order_error(req_id as u64, code, message),
+        }
         Ok(())
     }
 
     /// Cancel account summary.
     fn cancel_account_summary(&self, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.core.unsubscribe_account_summary(req_id);
+        if let Some(sr_id) = self.core.unsubscribe_account_summary(req_id) {
+            let _ = self.tx()?.send(ControlCommand::CancelAccountSummary { sr_id });
+        }
         Ok(())
     }
 

@@ -670,19 +670,17 @@ impl EClient {
                  update.unrealized_pnl, update.realized_pnl, update.value));
         }
 
-        // Account summary dispatch (via ClientCore)
+        // Account summary rows as the server sends them; the end at each of
+        // its end markers (ibx#479).
         {
             let acct_name = self.account();
-            if let Some(batch) = self.core.prepare_account_summary(shared, acct_name.as_str()) {
-                let tags_orig = self.core.account_summary_req.lock().unwrap().clone();
-                let tags_list = tags_orig.map(|(_, t)| t).unwrap_or_default();
-                if tags_list.is_empty() || tags_list.iter().any(|t| t == "AccountType") {
-                    call_wrapper!(self.wrapper, py, "account_summary", (batch.req_id, acct_name.as_str(), "AccountType", "INDIVIDUAL", ""));
+            for batch in self.core.prepare_account_summary(shared) {
+                for row in &batch.rows {
+                    call_wrapper!(self.wrapper, py, "account_summary", (batch.req_id, acct_name.as_str(), row.key.as_str(), row.value.as_str(), row.currency.as_str()));
                 }
-                for entry in &batch.entries {
-                    call_wrapper!(self.wrapper, py, "account_summary", (batch.req_id, acct_name.as_str(), entry.tag, entry.value.as_str(), entry.currency));
+                if batch.end {
+                    call_wrapper!(self.wrapper, py, "account_summary_end", (batch.req_id,));
                 }
-                call_wrapper!(self.wrapper, py, "account_summary_end", (batch.req_id,));
             }
         }
 

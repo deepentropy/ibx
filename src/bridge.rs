@@ -735,8 +735,22 @@ impl AccountRows {
     }
 }
 
+/// Rows or the end of a batch for one account summary subscription
+/// (ibx#479), keyed by the id the server echoes (`SR.Socket.{n}`).
+#[derive(Clone, Debug)]
+pub struct AccountSummaryEvent {
+    pub sr_id: String,
+    pub rows: Vec<AccountRow>,
+    /// The rows came from a ledger frame (per-currency keys).
+    pub ledger: bool,
+    /// The server's end marker of a batch.
+    pub end: bool,
+}
+
 pub struct PortfolioState {
     account: Mutex<AccountState>,
+    /// Account summary rows and ends, in arrival order (ibx#479).
+    account_summary_events: Mutex<Vec<AccountSummaryEvent>>,
     /// Account values as the server sends them (ibx#475).
     account_rows: Mutex<AccountRows>,
     /// True once the first gateway account message ("UT"/"UM"/"RL") has been received.
@@ -755,6 +769,7 @@ impl PortfolioState {
         Self {
             account: Mutex::new(AccountState::default()),
             account_rows: Mutex::new(AccountRows::default()),
+            account_summary_events: Mutex::new(Vec::new()),
             account_data_received: AtomicBool::new(false),
             account_download_complete: AtomicBool::new(false),
             position_infos: Mutex::new(HashMap::new()),
@@ -773,6 +788,15 @@ impl PortfolioState {
     pub fn account_rows_generation(&self) -> (u64, bool, i64) {
         let rows = self.account_rows.lock().unwrap();
         (rows.generation, rows.image_complete, rows.time_secs)
+    }
+
+    #[doc(hidden)]
+    pub fn push_account_summary_event(&self, event: AccountSummaryEvent) {
+        self.account_summary_events.lock().unwrap().push(event);
+    }
+
+    pub fn drain_account_summary_events(&self) -> Vec<AccountSummaryEvent> {
+        self.account_summary_events.lock().unwrap().drain(..).collect()
     }
 
     /// Copy of the account rows.

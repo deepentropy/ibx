@@ -71,13 +71,27 @@ impl EClient {
     // ── Account Summary ──
 
     /// Request account summary. Matches `reqAccountSummary` in C++.
-    pub fn req_account_summary(&self, req_id: i64, _group: &str, tags: &str) {
-        self.core.subscribe_account_summary(req_id, tags);
+    /// A server subscription: the rows come as the server sends them, each
+    /// batch ends with account_summary_end, until the cancel (ibx#479).
+    pub fn req_account_summary(&self, req_id: i64, group: &str, tags: &str) {
+        match self.core.subscribe_account_summary(req_id, group, tags) {
+            Ok(plan) => {
+                if let Some(sr_id) = plan.cancel_sr_id {
+                    let _ = self.control_tx.send(ControlCommand::CancelAccountSummary { sr_id });
+                }
+                let _ = self.control_tx.send(ControlCommand::SubscribeAccountSummary {
+                    sr_id: plan.sr_id, tags: plan.wire_tags, group: plan.group,
+                });
+            }
+            Err((code, message)) => self.shared.orders.push_order_error(req_id as u64, code, message),
+        }
     }
 
     /// Cancel account summary. Matches `cancelAccountSummary` in C++.
     pub fn cancel_account_summary(&self, req_id: i64) {
-        self.core.unsubscribe_account_summary(req_id);
+        if let Some(sr_id) = self.core.unsubscribe_account_summary(req_id) {
+            let _ = self.control_tx.send(ControlCommand::CancelAccountSummary { sr_id });
+        }
     }
 
     // ── Account Updates ──
