@@ -425,6 +425,9 @@ impl EClient {
             wrapper.pnl_single(update.req_id, update.pos, update.daily_pnl, update.unrealized_pnl, update.realized_pnl, update.value);
         }
 
+        // Positions of a running req_positions (ibx#477).
+        self.dispatch_positions(wrapper);
+
         // Account updates (ibx#475): values, portfolio rows each followed by
         // the account time, the time after the batch, and for the first image
         // the end, once per subscription.

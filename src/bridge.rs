@@ -759,6 +759,8 @@ pub struct PortfolioState {
     account_download_complete: AtomicBool,
     /// Position info (conId -> PositionInfo) for reqPositions and P&L.
     position_infos: Mutex<HashMap<i64, PositionInfo>>,
+    /// Bumped when a position or its average cost changes (ibx#477).
+    position_generation: AtomicU64,
     positions: [AtomicU64; MAX_INSTRUMENTS],
     /// Midnight seeds from 6040=143 for client-side daily P&L computation.
     midnight_seeds: Mutex<HashMap<i64, MidnightSeed>>,
@@ -773,6 +775,7 @@ impl PortfolioState {
             account_data_received: AtomicBool::new(false),
             account_download_complete: AtomicBool::new(false),
             position_infos: Mutex::new(HashMap::new()),
+            position_generation: AtomicU64::new(0),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
             midnight_seeds: Mutex::new(HashMap::new()),
         }
@@ -847,8 +850,18 @@ impl PortfolioState {
         self.account_download_complete.load(Ordering::Acquire)
     }
 
+    /// Changes whenever a position or its average cost changes (ibx#477).
+    pub fn position_generation(&self) -> u64 {
+        self.position_generation.load(Ordering::Acquire)
+    }
+
     #[doc(hidden)] pub fn set_position_info(&self, info: PositionInfo) {
         let mut map = self.position_infos.lock().unwrap();
+        let changed = map.get(&info.con_id)
+            .is_none_or(|e| e.position_fixed != info.position_fixed || e.avg_cost != info.avg_cost);
+        if changed {
+            self.position_generation.fetch_add(1, Ordering::AcqRel);
+        }
         match map.get_mut(&info.con_id) {
             Some(existing) => {
                 existing.position_fixed = info.position_fixed;

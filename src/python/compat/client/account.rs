@@ -81,47 +81,17 @@ impl EClient {
     /// Request all positions.
     fn req_positions(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        // A subscription, as the reference (ibx#477): the snapshot and
+        // position_end once the data is in, then a row on each change.
+        self.core.subscribe_positions();
         let shared = self.shared_state()?;
-        // Wait for CCP init burst to complete (up to 10s).
-        for _ in 0..1000 {
-            if shared.portfolio.account_download_complete() { break; }
-            py.detach(|| std::thread::sleep(std::time::Duration::from_millis(10)));
-        }
-        let positions = shared.portfolio.position_infos();
-        for pi in &positions {
-            let c = self.core.get_contract(pi.con_id, &shared).map(|ac| {
-                let mut c = Contract::default();
-                c.con_id = ac.con_id;
-                c.symbol = ac.symbol;
-                c.sec_type = ac.sec_type;
-                c.exchange = ac.exchange;
-                c.currency = ac.currency;
-                c
-            }).unwrap_or_else(|| {
-                // Cache miss: fall back to wire-derived PositionInfo fields.
-                let mut c = Contract::default();
-                c.con_id = pi.con_id;
-                c.symbol = pi.symbol.clone();
-                c.sec_type = pi.sec_type.clone();
-                c.currency = pi.currency.clone();
-                c.multiplier = pi.multiplier.clone();
-                c
-            });
-            let c_py = Py::new(py, c)?.into_any();
-            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
-            self.wrapper.call_method(
-                py, "position",
-                (self.account().as_str(), &c_py, pi.position_fixed as f64 / QTY_SCALE_F, avg_cost),
-                None,
-            )?;
-        }
-        self.wrapper.call_method0(py, "position_end")?;
-        Ok(())
+        self.dispatch_positions(py, &shared)
     }
 
     /// Cancel positions.
     fn cancel_positions(&self) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.core.unsubscribe_positions();
         Ok(())
     }
 

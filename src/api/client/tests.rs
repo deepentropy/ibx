@@ -1485,6 +1485,7 @@ fn req_matching_symbols_sends_fetch() {
 #[test]
 fn req_positions_delivers_via_wrapper() {
     let (client, _rx, shared) = test_client();
+    shared.portfolio.set_account_download_complete();
     shared.portfolio.set_position_info(PositionInfo { con_id: 265598, position_fixed: (100) as i64 * crate::types::QTY_SCALE, avg_cost: 150 * PRICE_SCALE, ..Default::default() });
     shared.portfolio.set_position_info(PositionInfo { con_id: 756733, position_fixed: (-50) as i64 * crate::types::QTY_SCALE, avg_cost: 400 * PRICE_SCALE, ..Default::default() });
     let mut w = RecordingWrapper::default();
@@ -1496,7 +1497,8 @@ fn req_positions_delivers_via_wrapper() {
 
 #[test]
 fn req_positions_empty_still_calls_position_end() {
-    let (client, _rx, _shared) = test_client();
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.set_account_download_complete();
     let mut w = RecordingWrapper::default();
     client.req_positions(&mut w);
     assert_eq!(w.events, vec!["position_end"]);
@@ -3645,4 +3647,85 @@ fn account_summary_refusals_and_limit() {
         "cancel:SR.Socket.2",
         "sub:SR.Socket.3:Cushion:All",
     ]);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  req_positions is a subscription (ibx#477)
+// ═══════════════════════════════════════════════════════════════════
+
+fn aapl_position(qty: i64, avg: i64) -> PositionInfo {
+    PositionInfo {
+        con_id: 265598, position_fixed: qty * crate::types::QTY_SCALE, avg_cost: avg,
+        symbol: "AAPL".into(), sec_type: "STK".into(), currency: "USD".into(), ..Default::default()
+    }
+}
+
+// The capture of 25/09/2026: after a fill of BUY 100 AAPL for another
+// client, the observer got a position row, then a second one when the
+// average cost moved, with no new req_positions.
+#[test]
+fn req_positions_sends_a_row_on_each_change() {
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.set_account_download_complete();
+    let mut w = RecordingWrapper::default();
+    client.req_positions(&mut w);
+    assert_eq!(w.events, vec!["position_end"]);
+
+    shared.portfolio.set_position_info(aapl_position(100, 33625 * PRICE_SCALE / 100));
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.iter().filter(|e| e.starts_with("position:")).count(), 1, "{:?}", w.events);
+    assert!(!w.events.iter().any(|e| e == "position_end"), "no end after the snapshot");
+
+    // Average cost moves: another row. Same values again: nothing.
+    shared.portfolio.set_position_info(aapl_position(100, 336_260_003 * PRICE_SCALE / 1_000_000));
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.iter().filter(|e| e.starts_with("position:")).count(), 1);
+    shared.portfolio.set_position_info(aapl_position(100, 336_260_003 * PRICE_SCALE / 1_000_000));
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+
+    // After cancel_positions: no row.
+    client.cancel_positions();
+    shared.portfolio.set_position_info(aapl_position(200, 336 * PRICE_SCALE));
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+}
+
+// Before the position data is in, req_positions returns at once; the
+// snapshot and the end come through process_msgs.
+#[test]
+fn req_positions_does_not_wait_in_the_caller() {
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.set_position_info(aapl_position(100, 336 * PRICE_SCALE));
+    let started = std::time::Instant::now();
+    let mut w = RecordingWrapper::default();
+    client.req_positions(&mut w);
+    assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    assert!(w.events.is_empty(), "{:?}", w.events);
+
+    shared.portfolio.set_account_download_complete();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.last().map(String::as_str), Some("position_end"));
+    assert_eq!(w.events.iter().filter(|e| e.starts_with("position:")).count(), 1);
+}
+
+// No position data after 30 s: error 2151 and no end, as the reference.
+#[test]
+fn req_positions_gives_2151_when_the_data_never_comes() {
+    let (client, _rx, _shared) = test_client();
+    client.req_positions(&mut RecordingWrapper::default());
+    if let Some(sub) = client.core.positions_sub.lock().unwrap().as_mut() {
+        sub.backdate(crate::client_core::POSITIONS_WAIT);
+    }
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec!["error:-1:2151:Positions info is not available yet"]);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "the request ended");
 }

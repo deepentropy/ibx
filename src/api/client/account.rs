@@ -10,40 +10,37 @@ impl EClient {
     // ── Positions ──
 
     /// Request positions. Matches `reqPositions` in C++.
-    /// Waits for server-pushed account data before delivering, then calls position_end.
+    ///
+    /// A subscription, as the reference (ibx#477): the snapshot and
+    /// `position_end` once the position data is in, then one `position` row
+    /// each time a position or its average cost changes, until
+    /// `cancel_positions`. What is ready now is sent through `wrapper`; the
+    /// rest comes through `process_msgs`. No wait in the caller's thread.
     pub fn req_positions(&self, wrapper: &mut impl Wrapper) {
-        // Wait for init burst to deliver account/position data (up to 5s).
-        for _ in 0..500 {
-            if self.shared.portfolio.account_data_received() { break; }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        self.core.subscribe_positions();
+        self.dispatch_positions(wrapper);
+    }
+
+    /// Position rows of a running req_positions (ibx#477).
+    pub(crate) fn dispatch_positions(&self, wrapper: &mut impl Wrapper) {
+        let Some(batch) = self.core.prepare_positions(&self.shared) else { return };
+        for pi in &batch.rows {
+            let ac = self.core.position_contract(pi.con_id, &self.shared);
+            let c = Contract {
+                con_id: ac.con_id, symbol: ac.symbol, sec_type: ac.sec_type,
+                exchange: ac.exchange, primary_exchange: ac.primary_exchange,
+                currency: ac.currency, local_symbol: ac.local_symbol,
+                trading_class: ac.trading_class, multiplier: ac.multiplier,
+                ..Default::default()
+            };
+            wrapper.position(&self.account_id, &c, pi.position_fixed as f64 / QTY_SCALE_F, pi.avg_cost as f64 / PRICE_SCALE_F);
         }
-        // Position updates (UP msgs) may still be in-flight after account data arrives.
-        // If account shows positions exist but none received yet, wait up to 2s.
-        if self.shared.portfolio.account().gross_position_value > 0
-            && self.shared.portfolio.position_infos().is_empty()
-        {
-            for _ in 0..200 {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                if !self.shared.portfolio.position_infos().is_empty() { break; }
-            }
+        if batch.end {
+            wrapper.position_end();
         }
-        let positions = self.shared.portfolio.position_infos();
-        for pi in &positions {
-            // Prefer the secdef cache (carries exchange/localSymbol/tradingClass),
-            // but fall back to the wire-derived PositionInfo fields when cold.
-            let c = self.core.get_contract(pi.con_id, &self.shared)
-                .unwrap_or_else(|| Contract {
-                    con_id: pi.con_id,
-                    symbol: pi.symbol.clone(),
-                    sec_type: pi.sec_type.clone(),
-                    currency: pi.currency.clone(),
-                    multiplier: pi.multiplier.clone(),
-                    ..Default::default()
-                });
-            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
-            wrapper.position(&self.account_id, &c, pi.position_fixed as f64 / QTY_SCALE_F, avg_cost);
+        if let Some((code, message)) = batch.error {
+            wrapper.error(-1, code, &message, "");
         }
-        wrapper.position_end();
     }
 
     // ── PnL ──
@@ -106,7 +103,7 @@ impl EClient {
 
     /// Cancel positions subscription. Matches `cancelPositions` in C++.
     pub fn cancel_positions(&self) {
-        // No-op: positions are delivered immediately by req_positions.
+        self.core.unsubscribe_positions();
     }
 
     /// Request managed accounts. Matches `reqManagedAccts` in C++.

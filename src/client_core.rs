@@ -206,6 +206,36 @@ pub struct AccountSummaryPlan {
     pub group: String,
 }
 
+/// A running req_positions (ibx#477).
+pub struct PositionsSubscription {
+    requested_at: std::time::Instant,
+    snapshot_sent: bool,
+    /// Position and average cost last sent, by conId.
+    sent: HashMap<i64, (Qty, Price)>,
+    generation: u64,
+}
+
+impl PositionsSubscription {
+    /// Move the request time back (tests of the 30 s wait).
+    #[doc(hidden)]
+    pub fn backdate(&mut self, by: std::time::Duration) {
+        self.requested_at -= by;
+    }
+}
+
+/// Position rows to send for req_positions (ibx#477).
+pub struct PositionsBatch {
+    pub rows: Vec<PositionInfo>,
+    /// The snapshot: position_end follows the rows.
+    pub end: bool,
+    /// The position data never came: error(-1, code, message), no end.
+    pub error: Option<(i64, String)>,
+}
+
+/// How long req_positions waits for the position data before error 2151,
+/// as the reference (ibx#477).
+pub const POSITIONS_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Most account summary requests per client (ibx#479).
 pub const ACCOUNT_SUMMARY_MAX: usize = 2;
 
@@ -413,6 +443,7 @@ pub struct ClientCore {
 
     // Account summary subscription state (req_id, tags)
     pub account_summaries: Mutex<Vec<AccountSummaryRequest>>,
+    pub positions_sub: Mutex<Option<PositionsSubscription>>,
     pub next_account_summary: AtomicU64,
 
     // News bulletin subscription
@@ -468,6 +499,7 @@ impl ClientCore {
             last_pnl: Mutex::new([0; 3]),
             last_pnl_single: Mutex::new(HashMap::new()),
             account_summaries: Mutex::new(Vec::new()),
+            positions_sub: Mutex::new(None),
             next_account_summary: AtomicU64::new(1),
             bulletin_subscribed: AtomicBool::new(false),
             account_updates_subscribed: AtomicBool::new(false),
@@ -499,6 +531,7 @@ impl ClientCore {
         *self.last_pnl.lock().unwrap() = [0; 3];
         self.last_pnl_single.lock().unwrap().clear();
         self.account_summaries.lock().unwrap().clear();
+        *self.positions_sub.lock().unwrap() = None;
         self.bulletin_subscribed.store(false, Ordering::Relaxed);
         self.account_updates_subscribed.store(false, Ordering::Relaxed);
         *self.account_stream.lock().unwrap() = AccountStream::default();
@@ -816,6 +849,63 @@ impl ClientCore {
         let mut reqs = self.account_summaries.lock().unwrap();
         let i = reqs.iter().position(|r| r.req_id == req_id)?;
         Some(reqs.remove(i).sr_id)
+    }
+
+    // ── Positions subscription (ibx#477) ──
+
+    /// Start req_positions: a subscription, as the reference. One per
+    /// client; a new request replaces the running one.
+    pub fn subscribe_positions(&self) {
+        *self.positions_sub.lock().unwrap() = Some(PositionsSubscription {
+            requested_at: std::time::Instant::now(),
+            snapshot_sent: false,
+            sent: HashMap::new(),
+            generation: 0,
+        });
+    }
+
+    pub fn unsubscribe_positions(&self) {
+        *self.positions_sub.lock().unwrap() = None;
+    }
+
+    /// Position rows to send (ibx#477): the snapshot and the end once the
+    /// position data is in; then one row each time a position or its
+    /// average cost changes. When the data is not in after 30 s: error 2151
+    /// and no end, and the request ends.
+    pub fn prepare_positions(&self, shared: &SharedState) -> Option<PositionsBatch> {
+        let mut guard = self.positions_sub.lock().unwrap();
+        let sub = guard.as_mut()?;
+        if !sub.snapshot_sent {
+            if !shared.portfolio.account_download_complete() {
+                if sub.requested_at.elapsed() >= POSITIONS_WAIT {
+                    *guard = None;
+                    return Some(PositionsBatch {
+                        rows: Vec::new(), end: false,
+                        error: Some((2151, "Positions info is not available yet".into())),
+                    });
+                }
+                return None;
+            }
+            sub.generation = shared.portfolio.position_generation();
+            let mut rows = shared.portfolio.position_infos();
+            rows.sort_by_key(|p| p.con_id);
+            sub.sent = rows.iter().map(|p| (p.con_id, (p.position_fixed, p.avg_cost))).collect();
+            sub.snapshot_sent = true;
+            return Some(PositionsBatch { rows, end: true, error: None });
+        }
+        let generation = shared.portfolio.position_generation();
+        if generation == sub.generation {
+            return None;
+        }
+        sub.generation = generation;
+        let mut rows: Vec<PositionInfo> = shared.portfolio.position_infos().into_iter()
+            .filter(|p| sub.sent.get(&p.con_id) != Some(&(p.position_fixed, p.avg_cost)))
+            .collect();
+        rows.sort_by_key(|p| p.con_id);
+        for p in &rows {
+            sub.sent.insert(p.con_id, (p.position_fixed, p.avg_cost));
+        }
+        (!rows.is_empty()).then_some(PositionsBatch { rows, end: false, error: None })
     }
 
     // ── Account updates subscription management ──
