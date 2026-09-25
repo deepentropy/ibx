@@ -1584,6 +1584,11 @@ impl ClientCore {
         }
         con_ids.extend(realized_since.keys().copied());
         con_ids.extend(money_since.keys().copied());
+        // Sum in a fixed order: a set's order changes between polls, and the
+        // float sums with it, so the same P&L passed the change filter again
+        // and again (a callback every poll, seen on paper).
+        let mut con_ids: Vec<i64> = con_ids.into_iter().collect();
+        con_ids.sort_unstable();
         // No early return on an empty set: an account with no position still
         // has account-level P&L (for example realized today), delivered by the
         // fallback below (ibx#239, ibx#301).
@@ -1592,7 +1597,9 @@ impl ClientCore {
         let mut total_daily: f64 = 0.0;
         let mut total_unrealized: f64 = 0.0;
         let mut total_realized: f64 = 0.0;
-        let mut priced = 0usize;
+        let mut live_priced = 0usize;
+        let mut daily_known = true;
+        let mut unrealized_known = true;
 
         for con_id in con_ids {
             let seed = seeds.get(&con_id);
@@ -1606,49 +1613,74 @@ impl ClientCore {
             total_realized += seed.map(|s| s.realized_pnl).unwrap_or(0.0)
                 + realized_since.get(&con_id).copied().unwrap_or(0.0);
 
-            let Some(&iid) = con_id_map.get(&con_id) else { continue; };
-            let q = shared.market.quote(iid);
-            let price_now = q.last;
-            let prev_close = q.close;
-
-            if price_now == 0 {
-                continue;
-            }
-            // Skip overnight positions without prev close (would give wrong result)
-            if prev_close == 0 && qty_midnight != 0.0 {
-                continue;
-            }
-
             let money_traded = money_traded_today(seed, money_since.get(&con_id).copied(), qty_now, avg_cost);
-
-            let mv_now = qty_now * price_now as f64 / PRICE_SCALE_F;
-            let mv_midnight = qty_midnight * prev_close as f64 / PRICE_SCALE_F;
-            // Daily P&L = value change since midnight plus today's net cash.
-            total_daily += mv_now - mv_midnight + money_traded;
-
-            if avg_cost != 0 {
-                total_unrealized += qty_now * (price_now - avg_cost) as f64 / PRICE_SCALE_F;
+            // A position flat at midnight and now: its daily P&L is its cash.
+            if qty_now == 0.0 && qty_midnight == 0.0 {
+                total_daily += money_traded;
+                continue;
             }
-            priced += 1;
+
+            // Price: this client's quote, else the server's mark on the
+            // position (ibx#238). The previous close comes with a quote only.
+            let quote = con_id_map.get(&con_id).map(|&iid| shared.market.quote(iid));
+            let live = quote.map(|q| q.last).filter(|&p| p != 0);
+            if live.is_some() {
+                live_priced += 1;
+            }
+            let Some(price_now) = live.or_else(|| pi.as_ref().map(|p| p.market_price).filter(|&p| p != 0)) else {
+                daily_known = false;
+                unrealized_known = false;
+                continue;
+            };
+            let prev_close = quote.map(|q| q.close).unwrap_or(0);
+
+            // Daily P&L = value change since midnight plus today's net cash.
+            // A position held at midnight needs the previous close.
+            if qty_midnight != 0.0 && prev_close == 0 {
+                daily_known = false;
+            } else {
+                let mv_now = qty_now * price_now as f64 / PRICE_SCALE_F;
+                let mv_midnight = qty_midnight * prev_close as f64 / PRICE_SCALE_F;
+                total_daily += mv_now - mv_midnight + money_traded;
+            }
+
+            if qty_now != 0.0 {
+                if avg_cost != 0 {
+                    total_unrealized += qty_now * (price_now - avg_cost) as f64 / PRICE_SCALE_F;
+                } else {
+                    unrealized_known = false;
+                }
+            }
         }
 
-        // No position carried a live quote (a req_pnl-only client never populates
-        // con_id_to_instrument, so every position above hits `continue`). Fall back
-        // to the gateway's account-level P&L, which the gateway pushes independently
-        // of any market-data subscription. Without this the quote-derived totals stay
-        // [0,0,0] and no callback ever fires (ibx#239).
-        if priced == 0 {
-            let acct = shared.portfolio.account();
-            total_daily = acct.daily_pnl as f64 / PRICE_SCALE_F;
-            total_unrealized = acct.unrealized_pnl as f64 / PRICE_SCALE_F;
-            total_realized = acct.realized_pnl as f64 / PRICE_SCALE_F;
+        // No live quote at all: the server's own account P&L keys, when it
+        // sends them (ibx#239); the paper account's frames carry none.
+        if live_priced == 0 {
+            let rows = shared.portfolio.account_rows();
+            let server = |key: &str| rows.rows.iter()
+                .filter(|r| r.key == key)
+                .min_by_key(|r| r.currency != "BASE")
+                .and_then(|r| r.value.parse::<f64>().ok());
+            if let (Some(daily), Some(unrealized), Some(realized)) =
+                (server("DailyPnL"), server("UnrealizedPnL"), server("RealizedPnL"))
+            {
+                total_daily = daily;
+                total_unrealized = unrealized;
+                total_realized = realized;
+                daily_known = true;
+                unrealized_known = true;
+            }
+        }
+        // A value that cannot be computed is unset, as the reference (ibx#478).
+        if !daily_known {
+            total_daily = f64::MAX;
+        }
+        if !unrealized_known {
+            total_unrealized = f64::MAX;
         }
 
-        let pnl = [
-            (total_daily * PRICE_SCALE_F) as i64,
-            (total_unrealized * PRICE_SCALE_F) as i64,
-            (total_realized * PRICE_SCALE_F) as i64,
-        ];
+        let scaled = |v: f64| if v == f64::MAX { i64::MAX } else { (v * PRICE_SCALE_F) as i64 };
+        let pnl = [scaled(total_daily), scaled(total_unrealized), scaled(total_realized)];
         // Every running request gets the values; each its own change filter.
         let mut reqs = self.pnl_reqs.lock().unwrap();
         let mut out: Vec<PnlUpdate> = reqs.iter_mut().filter_map(|(&req_id, last)| {
@@ -1709,15 +1741,18 @@ impl ClientCore {
             let seed = seeds.get(&con_id);
             let qty_midnight = seed.map(|s| s.qty_midnight_fixed).unwrap_or(0) as f64 / QTY_SCALE_F;
             let prev_close = q.map(|q| q.close).unwrap_or(0);
-            if prev_close == 0 && qty_midnight != 0.0 {
-                continue;
-            }
 
             let money_traded = money_traded_today(seed, money_since.get(&con_id).copied(), qty_now, avg_cost);
 
             let mv_now = qty_now * price_now as f64 / PRICE_SCALE_F;
             let mv_midnight = qty_midnight * prev_close as f64 / PRICE_SCALE_F;
-            let daily = mv_now - mv_midnight + money_traded;
+            // A position held at midnight needs the previous close, which
+            // comes with a quote only: without one, the daily P&L is unset.
+            let daily = if qty_midnight != 0.0 && prev_close == 0 {
+                f64::MAX
+            } else {
+                mv_now - mv_midnight + money_traded
+            };
             // A value that cannot be computed is unset (f64::MAX), as the
             // reference (ibx#478): no average cost, or no realized P&L on
             // this position today (captured 25/09/2026).
@@ -2595,6 +2630,72 @@ mod tests {
     }
 
     #[test]
+    fn poll_pnl_without_market_data_uses_marks_and_unset() {
+        // The paper case (25/09/2026): no quote, no server P&L keys. The
+        // unrealized P&L comes from the server's mark; the realized P&L from
+        // the seed; the daily P&L of a position held at midnight needs the
+        // previous close, so it is unset (it was 0.0 for all three).
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.subscribe_pnl(21);
+        shared.portfolio.set_position_info(PositionInfo {
+            con_id: 756733, position_fixed: 31 * crate::types::QTY_SCALE,
+            avg_cost: (764.59 * PRICE_SCALE_F) as i64, ..Default::default()
+        });
+        shared.portfolio.set_position_marks(756733, (770.0 * PRICE_SCALE_F) as i64, 0, 0, 0);
+        shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
+            con_id: 756733, qty_midnight_fixed: 31 * crate::types::QTY_SCALE, money_traded: 0.0, realized_pnl: 37.12,
+        }]);
+        let u = core.poll_pnl(&shared).pop().unwrap();
+        assert_eq!(u.daily_pnl, f64::MAX);
+        assert!((u.unrealized_pnl - 31.0 * (770.0 - 764.59)).abs() < 1e-3, "unreal={}", u.unrealized_pnl);
+        assert!((u.realized_pnl - 37.12).abs() < 1e-9);
+    }
+
+    // The same inputs give the same P&L, whatever the order of the positions
+    // in the stores: no repeated callback.
+    #[test]
+    fn poll_pnl_does_not_repeat_unchanged_values() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.subscribe_pnl(21);
+        for con_id in 1..40 {
+            shared.portfolio.set_position_info(PositionInfo {
+                con_id, position_fixed: crate::types::QTY_SCALE / 3,
+                avg_cost: (100.1 * PRICE_SCALE_F) as i64, ..Default::default()
+            });
+            shared.portfolio.set_position_marks(con_id, (100.7 * PRICE_SCALE_F) as i64, 0, 0, 0);
+            shared.portfolio.add_realized_since_seed(con_id, 0.1);
+        }
+        assert_eq!(core.poll_pnl(&shared).len(), 1);
+        for _ in 0..50 {
+            assert!(core.poll_pnl(&shared).is_empty());
+        }
+    }
+
+    #[test]
+    fn pnl_single_without_market_data_sends_the_position_with_daily_unset() {
+        // It used to skip a position held at midnight when there was no
+        // quote: no callback at all.
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        shared.portfolio.set_position_info(PositionInfo {
+            con_id: 756733, position_fixed: 31 * crate::types::QTY_SCALE,
+            avg_cost: (764.59 * PRICE_SCALE_F) as i64, ..Default::default()
+        });
+        shared.portfolio.set_position_marks(756733, (770.0 * PRICE_SCALE_F) as i64, 0, 0, 0);
+        shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
+            con_id: 756733, qty_midnight_fixed: 31 * crate::types::QTY_SCALE, money_traded: 0.0, realized_pnl: 37.12,
+        }]);
+        core.subscribe_pnl_single(4, 756733);
+        let u = core.poll_pnl_single(&shared).pop().expect("a callback");
+        assert_eq!(u.daily_pnl, f64::MAX);
+        assert!((u.unrealized_pnl - 31.0 * (770.0 - 764.59)).abs() < 1e-3);
+        assert!((u.realized_pnl - 37.12).abs() < 1e-9);
+        assert!((u.value - 31.0 * 770.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn poll_pnl_falls_back_to_account_level_without_market_data() {
         // #239: a req_pnl-only client never subscribes to market data, so no
         // position has a live quote (con_id_to_instrument is empty and every
@@ -2616,13 +2717,13 @@ mod tests {
             ..Default::default()
         });
 
-        // Gateway-pushed account-level P&L (from the DailyPnL/UnrealizedPnL/
-        // RealizedPnL account-value keys).
-        let mut acct = AccountState::default();
-        acct.daily_pnl = (12.50 * PRICE_SCALE_F) as i64;
-        acct.unrealized_pnl = (35.00 * PRICE_SCALE_F) as i64;
-        acct.realized_pnl = (4.00 * PRICE_SCALE_F) as i64;
-        shared.portfolio.set_account(&acct);
+        // Server-sent account-level P&L keys (the account values as sent,
+        // ibx#475); only used when the server sends them.
+        shared.portfolio.update_account_rows(|store| {
+            store.set("DailyPnL", "BASE", "12.50");
+            store.set("UnrealizedPnL", "BASE", "35.00");
+            store.set("RealizedPnL", "BASE", "4.00");
+        });
 
         let update = core.poll_pnl(&shared).pop().expect("callback must fire from account-level P&L");
         assert_eq!(update.req_id, 21);

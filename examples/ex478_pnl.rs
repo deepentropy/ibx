@@ -26,7 +26,7 @@ impl Wrapper for W {
         let mut s = self.s.lock().unwrap();
         let n = s.pnl_count.entry(req_id).or_default();
         *n += 1;
-        if *n <= 2 {
+        if *n <= 2 || (req_id == 1 && env::var("PROBE_ALL_PNL").is_ok()) {
             println!("{:6.1}s pnl {} daily={} unrealized={} realized={}", self.start.elapsed().as_secs_f64(), req_id, show(daily), show(unrealized), show(realized));
         }
     }
