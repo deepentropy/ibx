@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::bridge::SharedState;
-use crate::config::{chrono_free_timestamp, unix_to_ib_datetime, unix_to_ib_utc_dash};
+use crate::config::{chrono_free_timestamp, unix_to_ib_utc_dash};
 use crate::engine::context::Context;
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
@@ -845,6 +845,7 @@ pub(crate) fn drain_and_send_orders(
                     (15, currency.clone()),
                     (204, "0".to_string()),
                 ];
+                push_dtc_flag(&mut fields, tif);
                 // Parent link, OCA group and the other attributes (ibx#318).
                 push_extended_attrs(&mut fields, &attrs, true);
                 fields.push((847, "Adaptive".to_string()));      // AlgoStrategy
@@ -884,6 +885,7 @@ pub(crate) fn drain_and_send_orders(
                     (15, currency.clone()),
                     (204, "0".to_string()),
                 ];
+                push_dtc_flag(&mut fields, tif);
                 // Parent link, OCA group and the other attributes (ibx#318).
                 push_extended_attrs(&mut fields, &attrs, true);
                 let (algo_name, param_strs) = build_algo_tags(&algo);
@@ -1041,6 +1043,7 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0".to_string()),
                     (6091, "1".to_string()),         // What-If flag
                 ];
+                push_dtc_flag(&mut fields, tif);
                 // The preview is for the order as it would be placed: its
                 // time-in-force and attributes go too (ibx#318).
                 push_extended_attrs(&mut fields, &attrs, false);
@@ -1783,8 +1786,7 @@ fn modify_fields(
         }
     };
 
-    let tif_byte = [tif];
-    let tif_str = std::str::from_utf8(&tif_byte).unwrap_or("0").to_string();
+    let tif_str = tif_str(tif);
     let mut f: Vec<(u32, String)> = vec![
         (fix::TAG_MSG_TYPE, fix::MSG_ORDER_REPLACE.to_string()),
         (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
@@ -1816,6 +1818,7 @@ fn modify_fields(
     f.push((167, sec_type.to_string()));
     f.push((6035, symbol.to_string()));
     f.push((59, tif_str));
+    push_dtc_flag(&mut f, tif);
     f.push((6008, con_id.to_string()));
     f.push((6088, "Socket".to_string()));
     f.push((6211, String::new()));
@@ -1823,10 +1826,19 @@ fn modify_fields(
     f
 }
 
-/// The time-in-force byte as its wire string.
+/// The time-in-force byte as its wire string. DTC goes out as GTC.
 fn tif_str(tif: u8) -> String {
+    if tif == crate::types::TIF_DTC { return "1".to_string(); }
     let b = [tif];
     std::str::from_utf8(&b).unwrap_or("0").to_string()
+}
+
+/// A DTC order: the DTC flag right after the time in force, as the
+/// reference (ibx#467).
+fn push_dtc_flag(fields: &mut Vec<(u32, String)>, tif: u8) {
+    if tif != crate::types::TIF_DTC { return; }
+    let at = fields.iter().position(|(t, _)| *t == 59).map_or(fields.len(), |i| i + 1);
+    fields.insert(at, (6436, "1".to_string()));
 }
 
 /// The extended-attribute block (display size, outside-RTH, hidden, good-after,
@@ -1855,8 +1867,10 @@ fn push_extended_attrs(
     if attrs.hidden {
         fields.push((6135, "1".to_string()));
     }
+    // goodAfterTime in UTC, "YYYYMMDD-HH:MM:SS", as the reference writes
+    // it (ibx#467).
     if attrs.good_after > 0 {
-        fields.push((168, unix_to_ib_datetime(attrs.good_after)));
+        fields.push((168, unix_to_ib_utc_dash(attrs.good_after)));
     }
     // GTD expiry: date-only -> tag 432; time-precise -> tag 126 (UTC).
     // Mutually exclusive — never both (gateway rejects both together).
@@ -1979,8 +1993,7 @@ fn send_order_ex(
     let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
     let now = chrono_free_timestamp().to_string();
-    let tif_byte = [tif];
-    let tif_str = std::str::from_utf8(&tif_byte).unwrap_or("0");
+    let tif_str = tif_str(tif);
 
     let mut fields: Vec<(u32, String)> = vec![
         (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
@@ -2117,7 +2130,8 @@ fn send_order_ex(
         }
     }
 
-    fields.push((59, tif_str.to_string()));
+    fields.push((59, tif_str));
+    push_dtc_flag(&mut fields, tif);
     fields.push((60, now));
     fields.push((167, sec_type_str.clone()));
     // MIDPX / SNAP* / PEG* require a directed exchange; everything else
@@ -2997,5 +3011,54 @@ mod tests {
         assert_eq!(tag(&tags, 44), Some("745.76"));
         assert_eq!(tag(&tags, 6370), Some("5"), "ibx writes prices without trailing zeros");
         assert!(pos(&tags, 44) < pos(&tags, 99));
+    }
+
+    // ibx#467: DTC goes out as GTC with the DTC flag right after it, on the
+    // new order and on the replace, with no expiry.
+    #[test]
+    fn dtc_is_gtc_with_the_dtc_flag() {
+        let tags = wire_tags(OrderRequest::SubmitEx {
+            order_id: 30, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::Limit { price: 100 * P },
+            tif: crate::types::TIF_DTC, attrs: Default::default(),
+        });
+        assert_eq!(tag(&tags, 59), Some("1"));
+        assert_eq!(tag(&tags, 6436), Some("1"));
+        assert_eq!(pos(&tags, 6436), pos(&tags, 59) + 1);
+        assert_eq!(tag(&tags, 126), None);
+        assert_eq!(tag(&tags, 432), None);
+
+        let replace = wire_tags_with(
+            |ctx| {
+                ctx.set_symbol(0, "SPY".to_string());
+                ctx.insert_order(Order::new(31, 0, Side::Buy, 1, 100 * P, b'2', crate::types::TIF_DTC, 0));
+            },
+            OrderRequest::Modify {
+                new_order_id: 31, order_id: 31, qty: 1,
+                kind: crate::types::OrderKind::Limit { price: 101 * P },
+                tif: crate::types::TIF_DTC, attrs: Default::default(),
+            },
+        );
+        assert_eq!(tag(&replace, 59), Some("1"));
+        assert_eq!(tag(&replace, 6436), Some("1"));
+
+        // Other time-in-force values have no flag.
+        let gtc = wire_tags(OrderRequest::SubmitEx {
+            order_id: 32, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::Limit { price: 100 * P },
+            tif: b'1', attrs: Default::default(),
+        });
+        assert_eq!(tag(&gtc, 6436), None);
+    }
+
+    // ibx#467: goodAfterTime is written in UTC with a dash.
+    #[test]
+    fn good_after_time_is_utc_with_a_dash() {
+        let tags = wire_tags(OrderRequest::SubmitEx {
+            order_id: 33, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::Limit { price: 100 * P },
+            tif: b'0', attrs: crate::types::OrderAttrs { good_after: 1_798_641_000, ..Default::default() },
+        });
+        assert_eq!(tag(&tags, 168), Some("20261230-14:30:00"));
     }
 }

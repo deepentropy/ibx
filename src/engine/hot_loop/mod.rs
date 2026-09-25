@@ -1403,7 +1403,8 @@ pub(crate) fn parse_price_tag(val: Option<&String>) -> Price {
 pub(crate) fn decode_tif(tif: u8) -> &'static str {
     match tif {
         b'0' => "DAY", b'1' => "GTC", b'2' => "OPG", b'3' => "IOC",
-        b'4' => "FOK", b'6' => "GTD", b'8' => "AUC", _ => "",
+        b'4' => "FOK", b'6' => "GTD", b'8' => "AUC",
+        crate::types::TIF_DTC => "DTC", _ => "",
     }
 }
 

@@ -325,6 +325,10 @@ impl AdaptivePriority {
     }
 }
 
+/// Time-in-force code of a DTC order. It is sent as GTC with the DTC flag
+/// (ibx#467).
+pub const TIF_DTC: u8 = b'r';
+
 /// Optional attributes for extended order submissions.
 /// All fields default to "not set" (0/false).
 #[derive(Debug, Clone, Default)]

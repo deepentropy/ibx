@@ -621,6 +621,22 @@ pub struct ClientCore {
     pub contract_cache: Mutex<HashMap<i64, ApiContract>>,
 }
 
+/// The reference's text for an invalid date or time (errors 337 and 343);
+/// %s is the field's label.
+const INVALID_DATE_TIME: &str = "%s: The date, time, or time-zone entered is invalid.\n\
+The correct format is yyyymmdd hh:mm:ss xx/xxxx\n\
+where yyyymmdd and xx/xxxx are optional.\n\
+E.g.: 20031126 15:59:00 US/Eastern\n\
+\n\
+Note that there is a space between the date and time,\n\
+and between the time and time-zone.\n\
+\n\
+If no date is specified, current date is assumed.\n\
+If no time-zone is specified, local time-zone is assumed(deprecated).\n\
+\n\
+You can also provide yyyymmddd-hh:mm:ss time is in UTC.\n\
+Note that there is a dash between the date and time in UTC notation.";
+
 /// A TRAIL LIMIT's limit price and offset are what the server reports (44,
 /// 6370), as the reference's openOrder (ib-agent#194).
 fn reported_trail_limit(order: &mut ApiOrder, reported: &ApiOrder) {
@@ -2228,7 +2244,19 @@ impl ClientCore {
     pub fn refusal_before_sending(order: &ApiOrder) -> Option<(i64, String)> {
         Self::fractional_quantity_refusal(order)
             .or_else(|| Self::algo_param_refusal(order))
+            .or_else(|| Self::good_after_time_refusal(order))
             .or_else(|| Self::order_rule_refusal(order))
+    }
+
+    /// A goodAfterTime that is not a date and time: error 337 with the
+    /// reference's text, whose label for this field is "Start Time"
+    /// (ibx#467). ibx needs the date; the reference also takes a time alone
+    /// (today assumed).
+    fn good_after_time_refusal(order: &ApiOrder) -> Option<(i64, String)> {
+        match crate::config::parse_ib_expiry(&order.good_after_time) {
+            Ok(None) | Ok(Some(crate::config::IbExpiry::Instant(_))) => None,
+            _ => Some((337, INVALID_DATE_TIME.replace("%s", "Start Time"))),
+        }
     }
 
     /// Order rules the reference checks before sending, answered as error

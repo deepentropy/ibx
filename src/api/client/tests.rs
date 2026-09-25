@@ -765,6 +765,35 @@ fn place_order_trailing_stop_limit() {
 
 // ib-agent#194: a TRAIL LIMIT without trailStopPrice is refused first, with
 // the reference's text (no final period); nothing is sent.
+// ibx#467: a goodAfterTime that is not a date and time is refused with 337
+// and the reference's text; nothing is sent. A good one is sent.
+#[test]
+fn place_order_bad_good_after_time_is_refused() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = |gat: &str| Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 100.0,
+        good_after_time: gat.into(), ..Default::default()
+    };
+    for (id, bad) in [(4, "tomorrow"), (5, "20261230"), (6, "20261230 25:00:00 US/Eastern"), (7, "20261230 09:30:00 Nowhere/Zone")] {
+        client.place_order(id, &spy(), &order(bad)).unwrap();
+    }
+    assert!(rx.try_iter().all(|c| !matches!(c, ControlCommand::Order(_))), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    for id in 4..=7 {
+        assert!(w.events.iter().any(|e| e.starts_with(&format!(
+            "error:{id}:337:Start Time: The date, time, or time-zone entered is invalid.\nThe correct format is yyyymmdd hh:mm:ss xx/xxxx\n"))),
+            "{id}: {:?}", w.events);
+    }
+
+    client.place_order(8, &spy(), &order("20261230 09:30:00 US/Eastern")).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitLimitEx { attrs, .. }) => assert_eq!(attrs.good_after, 1_798_641_000),
+        other => panic!("expected SubmitLimitEx, got {:?}", other),
+    }
+}
+
 #[test]
 fn place_order_trailing_stop_limit_without_stop_price_is_refused() {
     let (client, rx, shared) = test_client();

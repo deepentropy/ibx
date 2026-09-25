@@ -1252,7 +1252,9 @@ impl CcpState {
                 "K" => "MTL", "R" => "REL", _ => ord_type_tag,
             };
 
+            let dtc = parsed.get(&6436).map(|s| s.as_str()) == Some("1");
             let tif_str = match tif_tag {
+                "1" if dtc => "DTC",
                 "0" => "DAY", "1" => "GTC", "3" => "IOC", "4" => "FOK",
                 "2" => "OPG", "6" => "GTD", "8" => "AUC", _ => "DAY",
             };
@@ -3138,9 +3140,9 @@ mod tests {
             assert_eq!(decode_tif(order.tif_byte()), tif,
                 "TIF {tif} must survive encode->decode");
         }
-        // DTC shares the GTD wire byte and decodes as GTD.
+        // DTC has its own code (ibx#467).
         let dtc = api::Order { tif: "DTC".to_string(), ..Default::default() };
-        assert_eq!(decode_tif(dtc.tif_byte()), "GTD");
+        assert_eq!(decode_tif(dtc.tif_byte()), "DTC");
         // Unknown bytes decode to empty, not a wrong TIF.
         assert_eq!(decode_tif(b'7'), "");
     }
@@ -3698,5 +3700,17 @@ mod tests {
         let info = shared.orders.get_order_info(42).unwrap();
         assert_eq!(info.order.lmt_price_offset, 5.0);
         assert_eq!(info.order.lmt_price, 745.66);
+    }
+
+    // ibx#467: a report with 59=1 and the DTC flag is a DTC order.
+    #[test]
+    fn a_report_with_the_dtc_flag_is_dtc() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let ack = exec_report_frame(&[(39, "0"), (150, "0"), (40, "2"), (59, "1"), (6436, "1")]);
+        ccp.handle_exec_report(&ack, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.get_order_info(42).unwrap().order.tif, "DTC");
+        let ack = exec_report_frame(&[(39, "0"), (150, "0"), (40, "2"), (59, "1")]);
+        ccp.handle_exec_report(&ack, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.get_order_info(42).unwrap().order.tif, "GTC");
     }
 }

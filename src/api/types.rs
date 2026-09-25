@@ -402,7 +402,10 @@ impl Order {
             "IOC" => b'3',
             "FOK" => b'4',
             "OPG" => b'2',
-            "GTD" | "DTC" => b'6',
+            "GTD" => b'6',
+            // DTC keeps its own code; it goes out as GTC plus the DTC flag
+            // (ibx#467).
+            "DTC" => crate::types::TIF_DTC,
             "AUC" => b'8',
             _ => b'0', // DAY
         }
@@ -430,9 +433,12 @@ impl Order {
             min_qty: self.min_qty.max(0) as u32,
             hidden: self.hidden,
             outside_rth: self.outside_rth,
-            // good_after_time (tag 168) wire format is not yet captured against
-            // the gateway; left unset until verified (see ibx#199 / ib-agent).
-            good_after: 0,
+            // A goodAfterTime that is not a date and time is refused before
+            // sending (ibx#467), so only an instant reaches here.
+            good_after: match crate::config::parse_ib_expiry(&self.good_after_time) {
+                Ok(Some(crate::config::IbExpiry::Instant(secs))) => secs,
+                _ => 0,
+            },
             good_till,
             good_till_date_ymd,
             oca_group: self.oca_group.parse().unwrap_or(0),
@@ -824,6 +830,17 @@ mod tests {
         assert_eq!(o.tif_byte(), b'6');
         o.tif = "AUC".into();
         assert_eq!(o.tif_byte(), b'8');
+        o.tif = "DTC".into();
+        assert_eq!(o.tif_byte(), crate::types::TIF_DTC);
+    }
+
+    // ibx#467: goodAfterTime reaches the attributes as a UTC instant.
+    #[test]
+    fn good_after_time_is_an_instant() {
+        let o = Order { good_after_time: "20261230 09:30:00 US/Eastern".into(), ..Default::default() };
+        assert_eq!(o.attrs().good_after, 1_798_641_000); // 20261230 14:30:00 UTC
+        let o = Order { good_after_time: "20261230-14:30:00".into(), ..Default::default() };
+        assert_eq!(o.attrs().good_after, 1_798_641_000);
     }
 
     #[test]
