@@ -1470,12 +1470,22 @@ pub(crate) fn drain_and_send_orders(
                 // server reported; before any report, the reference computes
                 // it from the stop price and the new limit price, and keeps it
                 // (ib-agent#195, ibx#490).
-                let trail_limit_offset = match context.trail_limit_reported.get(&order_id) {
-                    Some(&(offset, _)) => Some(offset),
+                let trail_limit_offset = match context.trail_limit_reported.get_mut(&order_id) {
+                    Some(r) => {
+                        // Until the server reports again, the order has the
+                        // stop price of the replace, as the reference's
+                        // openOrder shows (ib-agent#195, ibx#491).
+                        if let crate::types::OrderKind::TrailingStopLimit { trail_stop_price, .. } = kind {
+                            if trail_stop_price > 0 { r.stop = trail_stop_price; }
+                        }
+                        Some(r.offset)
+                    }
                     None => {
                         let computed = computed_trail_limit_offset(kind, orig.map(|o| o.side));
-                        if let (Some(offset), crate::types::OrderKind::TrailingStopLimit { lmt_price: Some(price), .. }) = (computed, kind) {
-                            context.trail_limit_reported.insert(order_id, (offset, price));
+                        if let (Some(offset), crate::types::OrderKind::TrailingStopLimit { lmt_price: Some(price), trail_stop_price, .. }) = (computed, kind) {
+                            context.trail_limit_reported.insert(order_id, crate::engine::context::TrailLimitReported {
+                                offset, limit: price, stop: trail_stop_price,
+                            });
                         }
                         computed
                     }
@@ -3036,7 +3046,9 @@ mod tests {
             |ctx| {
                 ctx.set_symbol(0, "SPY".to_string());
                 ctx.insert_order(Order::new(23, 0, Side::Sell, 1, 0, b'P', b'0', 0));
-                ctx.trail_limit_reported.insert(23, (5 * P, 74566 * P / 100));
+                ctx.trail_limit_reported.insert(23, crate::engine::context::TrailLimitReported {
+                    offset: 5 * P, limit: 74566 * P / 100, stop: 75066 * P / 100,
+                });
             },
             OrderRequest::Modify { new_order_id: 23, order_id: 23, qty: 1, kind, tif: b'0', attrs: Default::default() },
         );

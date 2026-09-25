@@ -49,6 +49,19 @@ pub enum StatusChange {
     Unknown,
 }
 
+/// What the server last reported for a TRAIL LIMIT order. The offset is
+/// restated on its replace; all three fill the reports that omit them and
+/// show in openOrder (ib-agent#194, ib-agent#195, ibx#491). 0 = not reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrailLimitReported {
+    /// Limit offset (6370).
+    pub offset: Price,
+    /// Limit price (44).
+    pub limit: Price,
+    /// Stop price (6117), which the server moves as the market moves.
+    pub stop: Price,
+}
+
 pub struct Context {
     pub(crate) market: MarketState,
     positions: [i64; MAX_INSTRUMENTS],
@@ -67,10 +80,9 @@ pub struct Context {
     /// the cancel is rejected. Reports carrying it are about the cancel, not
     /// a new version of the order (ibx#464).
     pub(crate) cancel_clord: HashMap<OrderId, String>,
-    /// The last limit offset (6370) and limit price (44, 0 when absent) the
-    /// server reported for a TRAIL LIMIT order: the offset is restated on
-    /// its replace, both fill the reports that omit them (ib-agent#194).
-    pub(crate) trail_limit_reported: HashMap<OrderId, (Price, Price)>,
+    /// The last limit offset, limit price and stop price the server
+    /// reported for a TRAIL LIMIT order (ib-agent#194, ibx#491).
+    pub(crate) trail_limit_reported: HashMap<OrderId, TrailLimitReported>,
     /// Final status of orders that left the engine filled, cancelled or
     /// rejected, for the reference's refusal of a later cancel (ibx#464).
     /// Bounded: the oldest are dropped past `FINISHED_ORDERS_MAX`.

@@ -637,12 +637,14 @@ If no time-zone is specified, local time-zone is assumed(deprecated).\n\
 You can also provide yyyymmddd-hh:mm:ss time is in UTC.\n\
 Note that there is a dash between the date and time in UTC notation.";
 
-/// A TRAIL LIMIT's limit price and offset are what the server reports (44,
-/// 6370), as the reference's openOrder (ib-agent#194).
+/// A TRAIL LIMIT's limit price, offset and stop price are what the server
+/// reports (44, 6370, 6117), as the reference's openOrder (ib-agent#194,
+/// ibx#491).
 fn reported_trail_limit(order: &mut ApiOrder, reported: &ApiOrder) {
     if !order.order_type.eq_ignore_ascii_case("TRAIL LIMIT") { return; }
     if reported.lmt_price != 0.0 { order.lmt_price = reported.lmt_price; }
     if reported.lmt_price_offset != f64::MAX { order.lmt_price_offset = reported.lmt_price_offset; }
+    if reported.trail_stop_price != f64::MAX { order.trail_stop_price = reported.trail_stop_price; }
 }
 
 impl ClientCore {
