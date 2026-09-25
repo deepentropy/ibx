@@ -200,7 +200,10 @@ impl EClient {
                 exchange: get("exchange"),
                 side: get("side"),
                 acct_code: get("acctCode"),
-                ..Default::default()
+                time: get("time"),
+                client_id: fobj.getattr(py, pyo3::types::PyString::new(py, "clientId"))
+                    .and_then(|v| v.extract::<i64>(py))
+                    .unwrap_or(0),
             }
         } else {
             ExecutionFilter::default()
@@ -233,7 +236,7 @@ impl EClient {
                 liquidation: se.execution.liquidation,
                 cum_qty: se.execution.cum_qty,
                 avg_price: se.execution.avg_price,
-                order_ref: String::new(),
+                order_ref: se.execution.order_ref.clone(),
                 ev_rule: se.execution.ev_rule.clone(),
                 ev_multiplier: se.execution.ev_multiplier,
                 model_code: se.execution.model_code.clone(),

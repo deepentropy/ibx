@@ -48,7 +48,7 @@ impl EClient {
     fn dispatch_orders(&self, wrapper: &mut impl Wrapper) {
         // Fills → order_status + exec_details. The commission report comes
         // later, from its own server frame (ibx#471).
-        for (fill, exec_id) in self.shared.orders.drain_fills_with_exec_ids() {
+        for (fill, fill_exec) in self.shared.orders.drain_fills_with_exec() {
             let price_f = fill.price as f64 / PRICE_SCALE_F;
             let status = if fill.remaining_fixed == 0 { "Filled" } else { self.core.partial_fill_status(fill.order_id) };
             let (perm_id, parent_id) = self.shared.orders.get_order_info(fill.order_id)
@@ -71,11 +71,9 @@ impl EClient {
                 Side::Sell => "SLD",
                 Side::ShortSell => "SLD",
             };
-            let (c, exec) = if let Some(info) = self.shared.orders.get_order_info(fill.order_id) {
+            let (c, mut exec) = if let Some(info) = self.shared.orders.get_order_info(fill.order_id) {
                 let mut ex = info.last_exec;
-                if !exec_id.is_empty() {
-                    ex.exec_id = exec_id;
-                }
+                ex.perm_id = perm_id;
                 ex.side = side_str.into();
                 ex.shares = shares_f;
                 ex.price = price_f;
@@ -90,7 +88,6 @@ impl EClient {
                 (contract, ex)
             } else {
                 (Contract::default(), Execution {
-                    exec_id,
                     side: side_str.into(),
                     shares: shares_f,
                     price: price_f,
@@ -100,12 +97,13 @@ impl EClient {
                     ..Default::default()
                 })
             };
-            let req_id = self.core.req_id_for_instrument(fill.instrument);
-            wrapper.exec_details(req_id, &c, &exec);
+            self.core.apply_fill_exec(&mut exec, &fill_exec, fill.order_id);
+            // A live execution has no request: reqId -1 (ibx#474).
+            wrapper.exec_details(-1, &c, &exec);
 
             // Store for req_executions replay; a commission report that came
             // first is sent now.
-            if let Some(report) = self.core.push_execution(req_id, c, exec) {
+            if let Some(report) = self.core.push_execution(-1, c, exec, fill_exec.time_secs) {
                 wrapper.commission_and_fees_report(&report);
             }
 

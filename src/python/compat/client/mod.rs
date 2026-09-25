@@ -177,7 +177,9 @@ impl EClient {
         *self._thread.lock().unwrap() = Some(handle);
         self.connected.store(true, Ordering::Release);
 
-        let _ = (port, client_id); // unused but kept for ibapi signature compat
+        let _ = port; // unused but kept for ibapi signature compat
+        // The clientId of this client's executions (ibx#474).
+        self.core.client_id.store(client_id as i64, Ordering::Relaxed);
 
         // Fire initial callbacks synchronously, matching official Python ibapi
         // where connect_ack signals "socket ready" before run() is called.

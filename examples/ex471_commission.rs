@@ -1,8 +1,10 @@
-//! ibx#471 probe. Paper account only.
+//! ibx#471 / ibx#474 probe. Paper account only.
 //!
 //! Buys 1 SPY at a marketable limit, then sells it. Checks that each fill
 //! gives exec_details then a commission report with the server's commission
-//! and currency (not 0.0), and that req_executions replays both.
+//! and currency (not 0.0), and that req_executions replays both. Prints the
+//! exec_details fields of ibx#474 (reqId, time, exchange, permId, clientId,
+//! orderRef) and runs req_executions with side filters.
 //!
 //! Env: IB_USERNAME, IB_PASSWORD, PROBE_REF_PRICE (SPY reference price).
 use std::env;
@@ -38,7 +40,8 @@ impl Wrapper for W {
         println!("[error] {} {} {}", id, code, msg);
     }
     fn exec_details(&mut self, req_id: i64, _c: &Contract, e: &Execution) {
-        println!("[exec] req={} order={} exec_id={} {} {} @ {}", req_id, e.order_id, e.exec_id, e.side, e.shares, e.price);
+        println!("[exec] req={} order={} exec_id={} {} {} @ {} time='{}' exch={} perm={} client={} ref='{}'",
+            req_id, e.order_id, e.exec_id, e.side, e.shares, e.price, e.time, e.exchange, e.perm_id, e.client_id, e.order_ref);
         self.s.lock().unwrap().execs.push(e.exec_id.clone());
     }
     fn commission_and_fees_report(&mut self, r: &CommissionAndFeesReport) {
@@ -84,7 +87,8 @@ fn main() {
         println!("\n=== {} 1 SPY at {} (order {})", action, px, id);
         let order = Order {
             action: action.into(), order_type: "LMT".into(), total_quantity: 1.0,
-            lmt_price: px, tif: "DAY".into(), outside_rth: true, ..Default::default()
+            lmt_price: px, tif: "DAY".into(), outside_rth: true,
+            order_ref: format!("ex474-{}", action.to_lowercase()), ..Default::default()
         };
         client.place_order(id, &spy, &order).unwrap();
         let filled = pump(&client, &mut w, 30, || {
@@ -99,6 +103,10 @@ fn main() {
 
     println!("\n=== req_executions");
     client.req_executions(9, &ExecutionFilter::default(), &mut w);
+    println!("\n=== req_executions side=BUY");
+    client.req_executions(10, &ExecutionFilter { side: "BUY".into(), ..Default::default() }, &mut w);
+    println!("\n=== req_executions side=SELL");
+    client.req_executions(11, &ExecutionFilter { side: "SELL".into(), ..Default::default() }, &mut w);
 
     let st = s.lock().unwrap();
     let matched = st.execs.iter().filter(|e| st.reports.iter().any(|(r, _, _)| r == *e)).count();

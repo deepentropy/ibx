@@ -34,6 +34,25 @@ pub struct RichOrderInfo {
     pub last_exec: api::Execution,
 }
 
+/// What a fill report says about its execution, beyond the `Fill` numbers
+/// (ibx#471 ibx#474). Carried with each fill, so two fills of one order in
+/// the same batch keep their own values.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FillExec {
+    /// Server execution id (tag 17).
+    pub exec_id: String,
+    /// Execution time, Unix seconds: tag 6699, else 60, else 52.
+    pub time_secs: Option<i64>,
+    /// Tag 100, else 207.
+    pub exchange: String,
+    /// Placing client (tag 6119); 0 when absent.
+    pub client_id: i64,
+    /// Tag 6700.
+    pub model_code: String,
+    /// Tag 6010.
+    pub order_ref: String,
+}
+
 /// Events emitted by the IB engine.
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -243,8 +262,8 @@ impl MarketDataState {
 
 /// Fills, order status updates, cancel rejects, what-if responses, and order cache.
 pub struct OrderState {
-    /// Fills with the server's execution id of each print.
-    fills: Mutex<Vec<(Fill, String)>>,
+    /// Fills with what the report says about each execution.
+    fills: Mutex<Vec<(Fill, FillExec)>>,
     /// Commission reports from the server's commission frame (ibx#471).
     commission_reports: Mutex<Vec<api::CommissionAndFeesReport>>,
     order_updates: Mutex<Vec<OrderUpdate>>,
@@ -275,8 +294,8 @@ impl OrderState {
         self.fills.lock().unwrap().drain(..).map(|(fill, _)| fill).collect()
     }
 
-    /// Fills with the execution id of each print (empty when unknown).
-    pub fn drain_fills_with_exec_ids(&self) -> Vec<(Fill, String)> {
+    /// Fills with their execution details (empty when injected without).
+    pub fn drain_fills_with_exec(&self) -> Vec<(Fill, FillExec)> {
         self.fills.lock().unwrap().drain(..).collect()
     }
 
@@ -331,11 +350,11 @@ impl OrderState {
     // ── Hot-loop-side writers ──
 
     #[doc(hidden)] pub fn push_fill(&self, fill: Fill) {
-        self.fills.lock().unwrap().push((fill, String::new()));
+        self.fills.lock().unwrap().push((fill, FillExec::default()));
     }
 
-    #[doc(hidden)] pub fn push_fill_with_exec_id(&self, fill: Fill, exec_id: String) {
-        self.fills.lock().unwrap().push((fill, exec_id));
+    #[doc(hidden)] pub fn push_fill_with_exec(&self, fill: Fill, exec: FillExec) {
+        self.fills.lock().unwrap().push((fill, exec));
     }
 
     #[doc(hidden)] pub fn push_commission_report(&self, report: api::CommissionAndFeesReport) {

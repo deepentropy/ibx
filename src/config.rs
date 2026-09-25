@@ -203,7 +203,7 @@ pub fn parse_ib_expiry(input: &str) -> Result<Option<IbExpiry>, String> {
         Some(z) => z,
         None => {
             log::warn!(
-                "good-till expiry '{}' has a time but no timezone; interpreting as UTC. \
+                "time '{}' has no timezone; interpreting as UTC. \
                  Pass an explicit zone (e.g. 'US/Eastern') or UTC.",
                 input
             );
@@ -214,6 +214,17 @@ pub fn parse_ib_expiry(input: &str) -> Result<Option<IbExpiry>, String> {
         .in_tz(zone)
         .map_err(|e| format!("expiry '{}': unknown timezone '{}': {}", input, zone, e))?;
     Ok(Some(IbExpiry::Instant(zoned.timestamp().as_second())))
+}
+
+/// Parse an API date-time (`YYYYMMDD HH:MM:SS [zone]` or
+/// `YYYYMMDD-HH:MM:SS`, the forms of `parse_ib_expiry`) to Unix seconds.
+/// `Ok(None)` for an empty string; a date with no time is an error.
+pub fn parse_ib_time(input: &str) -> Result<Option<i64>, String> {
+    match parse_ib_expiry(input)? {
+        None => Ok(None),
+        Some(IbExpiry::Instant(secs)) => Ok(Some(secs)),
+        Some(IbExpiry::DateOnly(_)) => Err(format!("time '{}': HH:MM:SS is missing", input)),
+    }
 }
 
 /// Convert days since Unix epoch to (year, month, day).

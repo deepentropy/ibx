@@ -43,6 +43,30 @@ fn extract_tag_value(msg: &[u8], prefix: &[u8]) -> Option<String> {
     None
 }
 
+/// A UTC time as the reports write it, `YYYYMMDD-HH:MM:SS` with optional
+/// `.sss`, to Unix seconds.
+pub(crate) fn fix_utc_to_unix_secs(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 17 || b[8] != b'-' || b[11] != b':' || b[14] != b':' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse().ok() };
+    let (y, m, d) = (num(0..4)?, num(4..6)?, num(6..8)?);
+    let (hh, mm, ss) = (num(9..11)?, num(12..14)?, num(15..17)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Days from civil date (Howard Hinnant).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + hh * 3600 + mm * 60 + ss)
+}
+
 /// Split an execution id into the id without its revision and the
 /// revision, the last dot segment read as hex ("0000e0d5.6ab5f36f.01.01" →
 /// ("0000e0d5.6ab5f36f.01", 1)). An id with no dot has revision 0.
@@ -1000,7 +1024,17 @@ impl CcpState {
                 };
                 context.update_position_fixed(order.instrument, delta);
                 // notify_fill inlined
-                shared.orders.push_fill_with_exec_id(fill, exec_id.to_string());
+                let tag = |t: u32| parsed.get(&t).filter(|s| !s.is_empty());
+                let exec = crate::bridge::FillExec {
+                    exec_id: exec_id.to_string(),
+                    time_secs: tag(6699).or_else(|| tag(60)).or_else(|| tag(52))
+                        .and_then(|s| fix_utc_to_unix_secs(s)),
+                    exchange: tag(100).or_else(|| tag(207)).cloned().unwrap_or_default(),
+                    client_id: tag(6119).and_then(|s| s.parse().ok()).unwrap_or(0),
+                    model_code: tag(6700).cloned().unwrap_or_default(),
+                    order_ref: tag(6010).cloned().unwrap_or_default(),
+                };
+                shared.orders.push_fill_with_exec(fill, exec);
                 shared.portfolio.set_position_fixed(fill.instrument, context.position_fixed(fill.instrument));
                 emit(event_tx, Event::Fill(fill));
                 had_fill = true;
@@ -2242,9 +2276,48 @@ mod tests {
         let fill = exec_report_frame(&[(20, "0"), (39, "2"), (150, "F"), (17, "0000e0d5.6ab5f36f.01.01"),
             (31, "336.25"), (32, "1"), (14, "1"), (151, "0"), (6, "336.25")]);
         ccp.handle_exec_report(&fill, &mut context, &shared, &None, "");
-        let fills = shared.orders.drain_fills_with_exec_ids();
+        let fills = shared.orders.drain_fills_with_exec();
         assert_eq!(fills.len(), 1);
-        assert_eq!(fills[0].1, "0000e0d5.6ab5f36f.01.01");
+        assert_eq!(fills[0].1.exec_id, "0000e0d5.6ab5f36f.01.01");
+    }
+
+    // ibx#474: the captured fill of 25/09/2026 (clientId 250, orderRef
+    // pm0925-fill-BUY): time from tag 60 when 6699 is absent, exchange from
+    // tag 100, clientId from 6119, orderRef from 6010.
+    #[test]
+    fn a_fill_carries_its_execution_details() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let fill = exec_report_frame(&[(20, "0"), (39, "2"), (150, "F"), (17, "0000e0d5.6ab5f36f.01.01"),
+            (31, "336.25"), (32, "1"), (14, "1"), (151, "0"), (6, "336.25"),
+            (100, "ARCA"), (207, "ARCA"), (30, "ARCA"), (6119, "250"), (6010, "pm0925-fill-BUY"),
+            (60, "20260925-08:49:54"), (52, "20260925-08:49:55.123")]);
+        ccp.handle_exec_report(&fill, &mut context, &shared, &None, "");
+        let (_, exec) = shared.orders.drain_fills_with_exec().remove(0);
+        assert_eq!(exec.time_secs, Some(1790326194));
+        assert_eq!(exec.exchange, "ARCA");
+        assert_eq!(exec.client_id, 250);
+        assert_eq!(exec.order_ref, "pm0925-fill-BUY");
+        assert_eq!(exec.model_code, "");
+    }
+
+    #[test]
+    fn a_fill_time_prefers_6699_and_exchange_falls_back_to_207() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let fill = exec_report_frame(&[(20, "0"), (39, "2"), (150, "F"), (17, "e2"),
+            (31, "1"), (32, "1"), (14, "1"), (151, "0"), (207, "NASDAQ"),
+            (6699, "20260925-08:49:53.500"), (60, "20260925-08:49:54")]);
+        ccp.handle_exec_report(&fill, &mut context, &shared, &None, "");
+        let (_, exec) = shared.orders.drain_fills_with_exec().remove(0);
+        assert_eq!(exec.time_secs, Some(1790326193));
+        assert_eq!(exec.exchange, "NASDAQ");
+    }
+
+    #[test]
+    fn fix_utc_time_to_unix_seconds() {
+        assert_eq!(fix_utc_to_unix_secs("19700101-00:00:00"), Some(0));
+        assert_eq!(fix_utc_to_unix_secs("20000301-12:30:15.250"), Some(951913815));
+        assert_eq!(fix_utc_to_unix_secs("20260925 08:49:54"), None);
+        assert_eq!(fix_utc_to_unix_secs("2026"), None);
     }
 
     #[test]

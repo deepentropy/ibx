@@ -2520,11 +2520,13 @@ fn process_msgs_drains_on_first_call_empty_on_second() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  process_msgs — exec_details uses correct req_id from mapping
+//  process_msgs — a live exec_details has reqId -1 (ibx#474)
 // ═══════════════════════════════════════════════════════════════════
 
+// The reference sends a live execution with reqId -1. ibx used the market
+// data reqId of the instrument.
 #[test]
-fn process_msgs_fill_uses_instrument_to_req_mapping() {
+fn process_msgs_live_fill_has_req_id_minus_one() {
     let (client, _rx, shared) = test_client();
     client.core.instrument_to_req.lock().unwrap().insert(0, 42);
     shared.orders.push_fill(Fill {
@@ -2535,8 +2537,7 @@ fn process_msgs_fill_uses_instrument_to_req_mapping() {
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    // exec_details should use req_id=42 (not -1)
-    assert!(w.events.iter().any(|e| e.starts_with("exec_details:42:")));
+    assert!(w.events.iter().any(|e| e.starts_with("exec_details:-1:")), "{:?}", w.events);
 }
 
 // ── Order modification edge cases ─────────────────────────────────
@@ -3193,7 +3194,7 @@ fn captured_report() -> crate::api::types::CommissionAndFeesReport {
 #[test]
 fn commission_report_comes_from_the_commission_frame() {
     let (client, _rx, shared) = test_client();
-    shared.orders.push_fill_with_exec_id(aapl_fill(7), "0000e0d5.6ab5f36f.01.01".into());
+    shared.orders.push_fill_with_exec(aapl_fill(7), crate::bridge::FillExec { exec_id: "0000e0d5.6ab5f36f.01.01".into(), ..Default::default() });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(!w.events.iter().any(|e| e.starts_with("commission:")), "no report from the fill: {:?}", w.events);
@@ -3222,7 +3223,7 @@ fn commission_report_before_its_execution_waits_for_it() {
     client.process_msgs(&mut w);
     assert!(w.events.is_empty(), "{:?}", w.events);
 
-    shared.orders.push_fill_with_exec_id(aapl_fill(7), "0000e0d5.6ab5f36f.01.01".into());
+    shared.orders.push_fill_with_exec(aapl_fill(7), crate::bridge::FillExec { exec_id: "0000e0d5.6ab5f36f.01.01".into(), ..Default::default() });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     let exec = w.events.iter().position(|e| e.starts_with("exec_details:")).expect("exec_details");
@@ -3234,9 +3235,94 @@ fn commission_report_before_its_execution_waits_for_it() {
 #[test]
 fn req_executions_without_a_commission_report_sends_the_execution_only() {
     let (client, _rx, shared) = test_client();
-    shared.orders.push_fill_with_exec_id(aapl_fill(7), "0000e0d5.6ab5f36f.01.01".into());
+    shared.orders.push_fill_with_exec(aapl_fill(7), crate::bridge::FillExec { exec_id: "0000e0d5.6ab5f36f.01.01".into(), ..Default::default() });
     client.process_msgs(&mut RecordingWrapper::default());
     let mut w = RecordingWrapper::default();
     client.req_executions(1, &crate::api::types::ExecutionFilter::default(), &mut w);
     assert_eq!(w.events, ["exec_details:1:BOT:100", "exec_details_end:1"]);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  exec_details fields and the req_executions filter (ibx#474)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Captured fill of 25/09/2026: BUY 100 AAPL, clientId 250, orderRef
+/// pm0925-fill-BUY, time 20260925-08:49:54 UTC, routed to ARCA.
+fn captured_fill_exec() -> crate::bridge::FillExec {
+    crate::bridge::FillExec {
+        exec_id: "0000e0d5.6ab5f36f.01.01".into(),
+        time_secs: Some(1790326194),
+        exchange: "ARCA".into(),
+        client_id: 250,
+        model_code: String::new(),
+        order_ref: "pm0925-fill-BUY".into(),
+    }
+}
+
+#[derive(Default)]
+struct ExecRecorder { execs: Vec<(i64, crate::api::types::Execution)> }
+impl Wrapper for ExecRecorder {
+    fn exec_details(&mut self, req_id: i64, _c: &Contract, e: &crate::api::types::Execution) {
+        self.execs.push((req_id, e.clone()));
+    }
+}
+
+#[test]
+fn exec_details_carries_the_fill_report_fields() {
+    let (client, _rx, shared) = test_client();
+    shared.orders.push_fill_with_exec(aapl_fill(7), captured_fill_exec());
+    let mut w = ExecRecorder::default();
+    client.process_msgs(&mut w);
+    let (req_id, e) = &w.execs[0];
+    assert_eq!(*req_id, -1);
+    assert_eq!(e.exec_id, "0000e0d5.6ab5f36f.01.01");
+    assert_eq!(e.time, "20260925 04:49:54 US/Eastern");
+    assert_eq!(e.exchange, "ARCA");
+    assert_eq!(e.client_id, 250);
+    assert_eq!(e.order_ref, "pm0925-fill-BUY");
+    assert_eq!(e.side, "BOT");
+}
+
+// ibx sends no clientId or orderRef on its own orders: the execution takes
+// this client's id and the tracked order's orderRef.
+#[test]
+fn exec_details_of_an_own_order_takes_the_tracked_order_ref() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(), lmt_price: 336.0,
+        order_ref: "t1".into(), ..Default::default()
+    };
+    client.place_order(7, &spy(), &order).unwrap();
+    let exec = crate::bridge::FillExec { client_id: 0, order_ref: String::new(), ..captured_fill_exec() };
+    shared.orders.push_fill_with_exec(aapl_fill(7), exec);
+    let mut w = ExecRecorder::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.execs[0].1.order_ref, "t1");
+    assert_eq!(w.execs[0].1.client_id, 0, "the Rust client has no client id");
+}
+
+fn filter_count(client: &EClient, filter: crate::api::types::ExecutionFilter) -> usize {
+    let mut w = ExecRecorder::default();
+    client.req_executions(3, &filter, &mut w);
+    w.execs.len()
+}
+
+#[test]
+fn req_executions_filter_matches_like_the_reference() {
+    use crate::api::types::ExecutionFilter;
+    let (client, _rx, shared) = test_client();
+    shared.orders.push_fill_with_exec(aapl_fill(7), captured_fill_exec());
+    client.process_msgs(&mut RecordingWrapper::default());
+
+    assert_eq!(filter_count(&client, ExecutionFilter { side: "BUY".into(), ..Default::default() }), 1);
+    assert_eq!(filter_count(&client, ExecutionFilter { side: "BOT".into(), ..Default::default() }), 1);
+    assert_eq!(filter_count(&client, ExecutionFilter { side: "SELL".into(), ..Default::default() }), 0);
+    assert_eq!(filter_count(&client, ExecutionFilter { client_id: 250, ..Default::default() }), 1);
+    assert_eq!(filter_count(&client, ExecutionFilter { client_id: 251, ..Default::default() }), 0);
+    assert_eq!(filter_count(&client, ExecutionFilter { exchange: "ARCA".into(), ..Default::default() }), 1);
+    assert_eq!(filter_count(&client, ExecutionFilter { exchange: "arca".into(), ..Default::default() }), 0, "exact match");
+    // Time: executions at or after the filter time.
+    assert_eq!(filter_count(&client, ExecutionFilter { time: "20260925 04:49:54 US/Eastern".into(), ..Default::default() }), 1);
+    assert_eq!(filter_count(&client, ExecutionFilter { time: "20260925-08:49:55".into(), ..Default::default() }), 0);
 }

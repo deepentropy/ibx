@@ -6,7 +6,7 @@
 //! respective callback formats (Rust `Wrapper` trait calls or PyO3 `call_method`).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::Mutex;
 
 use crossbeam_channel::Sender;
@@ -281,6 +281,30 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
 
 // ── Execution storage ──
 
+/// Buy or sell from an API side string: `BUY` / `BOT` buy, `SELL` / `SLD` /
+/// `SSHORT` sell. `None` for anything else.
+fn side_is_buy(side: &str) -> Option<bool> {
+    match side.to_ascii_uppercase().as_str() {
+        "BUY" | "BOT" => Some(true),
+        "SELL" | "SLD" | "SSHORT" => Some(false),
+        _ => None,
+    }
+}
+
+/// An execution time as the reference writes it in execDetails:
+/// `yyyyMMdd HH:mm:ss US/Eastern` (ibx#474; the reference uses the zone of
+/// its API time setting, US/Eastern in the captures). UTC when the zone
+/// database has no US/Eastern.
+pub fn format_exec_time(unix_secs: i64) -> String {
+    let Ok(ts) = jiff::Timestamp::from_second(unix_secs) else {
+        return String::new();
+    };
+    match jiff::tz::TimeZone::get("US/Eastern") {
+        Ok(tz) => format!("{} US/Eastern", ts.to_zoned(tz).strftime("%Y%m%d %H:%M:%S")),
+        Err(_) => format!("{} UTC", ts.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y%m%d %H:%M:%S")),
+    }
+}
+
 /// A stored execution and its commission report for `req_executions` replay.
 /// Shared between Rust and Python adapters via `ClientCore`. The report
 /// comes from its own server frame after the fill; `None` until then (ibx#471).
@@ -288,6 +312,8 @@ pub struct StoredExecution {
     pub req_id: i64,
     pub contract: ApiContract,
     pub execution: ApiExecution,
+    /// Execution time, Unix seconds, for the time filter of `req_executions`.
+    pub time_secs: Option<i64>,
     pub commission_and_fees: Option<ApiCommissionAndFeesReport>,
 }
 
@@ -401,6 +427,9 @@ pub struct ClientCore {
 
     // Execution replay store
     pub executions: Mutex<Vec<StoredExecution>>,
+    // The API client id given at connect (0 in the Rust client, which has
+    // none): the clientId of this client's executions (ibx#474).
+    pub client_id: AtomicI64,
     // Commission reports that came before their execution, by execution id
     // without its revision (ibx#471). Bounded: reports for executions this
     // client never sees (earlier sessions, other clients) are dropped oldest
@@ -446,6 +475,7 @@ impl ClientCore {
             last_account: Mutex::new(None),
             last_portfolio: Mutex::new(None),
             executions: Mutex::new(Vec::new()),
+            client_id: AtomicI64::new(0),
             pending_commissions: Mutex::new(PendingCommissions::default()),
             open_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
@@ -813,10 +843,9 @@ impl ClientCore {
 
     // ── Execution replay store ──
 
-    /// Store an execution for later replay via `req_executions`.
     /// Store an execution for `req_executions`. Returns the commission
     /// report that came before it, to send after `exec_details`.
-    pub fn push_execution(&self, req_id: i64, contract: ApiContract, execution: ApiExecution) -> Option<ApiCommissionAndFeesReport> {
+    pub fn push_execution(&self, req_id: i64, contract: ApiContract, execution: ApiExecution, time_secs: Option<i64>) -> Option<ApiCommissionAndFeesReport> {
         let (base, _) = crate::engine::hot_loop::ccp::split_exec_revision(&execution.exec_id);
         let commission_and_fees = if execution.exec_id.is_empty() {
             None
@@ -824,9 +853,37 @@ impl ClientCore {
             self.pending_commissions.lock().unwrap().remove(base)
         };
         self.executions.lock().unwrap().push(StoredExecution {
-            req_id, contract, execution, commission_and_fees: commission_and_fees.clone(),
+            req_id, contract, execution, time_secs, commission_and_fees: commission_and_fees.clone(),
         });
         commission_and_fees
+    }
+
+    /// Set what the fill report says about this execution (ibx#474): the
+    /// server's execution id, the time as the reference writes it, tag 100 /
+    /// 207 as exchange, the placing client (this client when the report has
+    /// none), modelCode, and the orderRef of the report or of the tracked
+    /// order. Fields the report did not carry keep their value.
+    pub fn apply_fill_exec(&self, ex: &mut ApiExecution, fe: &crate::bridge::FillExec, order_id: u64) {
+        if !fe.exec_id.is_empty() {
+            ex.exec_id = fe.exec_id.clone();
+        }
+        if let Some(secs) = fe.time_secs {
+            ex.time = format_exec_time(secs);
+        }
+        if !fe.exchange.is_empty() {
+            ex.exchange = fe.exchange.clone();
+        }
+        ex.client_id = if fe.client_id != 0 { fe.client_id } else { self.client_id.load(Ordering::Relaxed) };
+        if !fe.model_code.is_empty() {
+            ex.model_code = fe.model_code.clone();
+        }
+        ex.order_ref = if !fe.order_ref.is_empty() {
+            fe.order_ref.clone()
+        } else {
+            self.open_orders.lock().unwrap().get(&order_id)
+                .map(|t| t.order.order_ref.clone())
+                .unwrap_or_default()
+        };
     }
 
     /// Attach a commission report to its stored execution (a higher revision
@@ -854,20 +911,44 @@ impl ClientCore {
     }
 
     /// Return executions matching the given filter.
+    ///
+    /// As the reference (ibx#474): symbol, secType and exchange match
+    /// exactly; the side is read as buy or sell, so `BUY` matches `BOT`;
+    /// clientId 0 is every client; the time keeps executions at or after it.
+    /// A time that does not parse is logged and not applied.
     pub fn filter_executions(&self, filter: &ExecutionFilter) -> Vec<usize> {
+        let side = if filter.side.is_empty() { None } else { Some(side_is_buy(&filter.side)) };
+        let since = if filter.time.trim().is_empty() {
+            None
+        } else {
+            match crate::config::parse_ib_time(&filter.time) {
+                Ok(Some(secs)) => Some(secs),
+                _ => {
+                    log::warn!("req_executions: filter time '{}' is not a valid time; not applied", filter.time);
+                    None
+                }
+            }
+        };
         let execs = self.executions.lock().unwrap();
         execs.iter().enumerate().filter_map(|(i, se)| {
-            if !filter.symbol.is_empty() && !se.contract.symbol.eq_ignore_ascii_case(&filter.symbol) {
+            if !filter.symbol.is_empty() && se.contract.symbol != filter.symbol {
                 return None;
             }
-            if !filter.sec_type.is_empty() && !se.contract.sec_type.eq_ignore_ascii_case(&filter.sec_type) {
+            if !filter.sec_type.is_empty() && se.contract.sec_type != filter.sec_type {
                 return None;
             }
-            if !filter.exchange.is_empty() && !se.execution.exchange.eq_ignore_ascii_case(&filter.exchange) {
+            if !filter.exchange.is_empty() && se.execution.exchange != filter.exchange {
                 return None;
             }
-            if !filter.side.is_empty() && !se.execution.side.eq_ignore_ascii_case(&filter.side) {
-                return None;
+            if let Some(buy) = side {
+                if buy.is_none() || buy != side_is_buy(&se.execution.side) {
+                    return None;
+                }
+            }
+            if let Some(since) = since {
+                if !se.time_secs.is_some_and(|t| t >= since) {
+                    return None;
+                }
             }
             if !filter.acct_code.is_empty() && !se.execution.acct_number.eq_ignore_ascii_case(&filter.acct_code) {
                 return None;

@@ -59,14 +59,12 @@ impl EClient {
 
         // Drain fills -> execDetails + orderStatus. The commission report
         // comes later, from its own server frame (ibx#471).
-        let fills = shared.orders.drain_fills_with_exec_ids();
-        for (fill, server_exec_id) in fills {
-            let req_id = self.core.instrument_to_req.lock().unwrap()
-                .get(&fill.instrument).copied().unwrap_or(-1);
+        let fills = shared.orders.drain_fills_with_exec();
+        for (fill, fill_exec) in fills {
+            // As the reference: BOT / SLD (ibx#474).
             let side_str = match fill.side {
-                Side::Buy => "BUY",
-                Side::Sell => "SELL",
-                Side::ShortSell => "SSHORT",
+                Side::Buy => "BOT",
+                Side::Sell | Side::ShortSell => "SLD",
             };
             let price = fill.price as f64 / PRICE_SCALE_F;
 
@@ -84,18 +82,7 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, cum_qty, remaining,
                  avg_price, perm_id, parent_id, price, 0i64, "", 0.0f64));
 
-            // Track execution for req_executions. The server's execution id,
-            // which the commission report names; a fill injected with none
-            // (tests) gets a local one.
-            let exec_id = if server_exec_id.is_empty() {
-                format!("{}.{}", fill.order_id, fill.timestamp_ns)
-            } else {
-                server_exec_id
-            };
-            let now_str = format!("{}", fill.timestamp_ns);
             let rich_info = shared.orders.get_order_info(fill.order_id);
-            let exec_exchange = rich_info.as_ref()
-                .map(|i| i.last_exec.exchange.as_str()).unwrap_or("").to_string();
             // Build api-level contract for shared storage
             let api_contract = self.core.open_orders.lock().unwrap()
                 .get(&fill.order_id).map(|o| o.contract.clone())
@@ -104,19 +91,22 @@ impl EClient {
                 })
                 .unwrap_or_default();
 
-            let api_exec = ApiExecution {
-                exec_id: exec_id.clone(),
-                time: now_str.clone(),
+            // A fill injected with no execution details (tests) gets a local
+            // id and time; a real fill carries the server's (ibx#471 ibx#474).
+            let mut api_exec = ApiExecution {
+                exec_id: format!("{}.{}", fill.order_id, fill.timestamp_ns),
+                time: format!("{}", fill.timestamp_ns),
                 acct_number: self.account(),
-                exchange: exec_exchange.clone(),
                 side: side_str.to_string(),
                 shares,
                 price,
+                perm_id,
                 order_id: fill.order_id as i64,
                 cum_qty,
                 avg_price,
                 ..Default::default()
             };
+            self.core.apply_fill_exec(&mut api_exec, &fill_exec, fill.order_id);
 
             // Build Python contract for callback
             let exec_contract = Contract {
@@ -128,32 +118,35 @@ impl EClient {
                 ..Default::default()
             };
 
-            // Store for req_executions replay via shared core; a commission
-            // report that came first is sent after exec_details.
-            let early_report = self.core.push_execution(req_id, api_contract, api_exec);
-
-            let acct_name = self.account();
             let c_py = Py::new(py, exec_contract)?.into_any();
             let exec_obj = Execution {
-                exec_id: exec_id.clone(),
-                time: now_str.clone(),
-                acct_number: acct_name,
-                exchange: exec_exchange.clone(),
-                side: side_str.to_string(),
+                exec_id: api_exec.exec_id.clone(),
+                time: api_exec.time.clone(),
+                acct_number: api_exec.acct_number.clone(),
+                exchange: api_exec.exchange.clone(),
+                side: api_exec.side.clone(),
                 shares,
                 price,
                 perm_id,
-                client_id: 0,
+                client_id: api_exec.client_id,
                 order_id: fill.order_id as i64,
                 liquidation: 0,
                 cum_qty,
                 avg_price,
+                order_ref: api_exec.order_ref.clone(),
+                model_code: api_exec.model_code.clone(),
                 last_liquidity: 0,
                 pending_price_revision: false,
                 ..Default::default()
             };
+
+            // Store for req_executions replay via shared core; a commission
+            // report that came first is sent after exec_details.
+            let early_report = self.core.push_execution(-1, api_contract, api_exec, fill_exec.time_secs);
+
             let exec_py = Py::new(py, exec_obj)?.into_any();
-            call_wrapper!(self.wrapper, py, "exec_details", (req_id, &c_py, &exec_py));
+            // A live execution has no request: reqId -1 (ibx#474).
+            call_wrapper!(self.wrapper, py, "exec_details", (-1i64, &c_py, &exec_py));
 
             if let Some(cr) = early_report {
                 self.send_commission_report(py, &cr)?;

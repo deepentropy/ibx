@@ -567,6 +567,8 @@ pub struct Execution {
     pub last_liquidity: i32,
     pub liquidation: i32,
     pub model_code: String,
+    /// The order's orderRef (ibx#474).
+    pub order_ref: String,
     pub ev_rule: String,
     pub ev_multiplier: f64,
     pub pending_price_revision: bool,
