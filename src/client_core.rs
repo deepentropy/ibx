@@ -116,6 +116,32 @@ fn money_traded_today(seed: Option<&MidnightSeed>, since_seed: Option<f64>, qty_
     }
 }
 
+/// Quotes ibx subscribes to by itself while a P&L request runs: the P&L
+/// needs the last price and the previous close of each position, and a
+/// client that did not subscribe had none (daily P&L unset). They never
+/// reach the tick callbacks.
+#[derive(Default)]
+pub struct PnlQuotes {
+    /// conId → instrument of a running internal subscription.
+    active: HashMap<i64, InstrumentId>,
+    /// conId → registration reply not received yet.
+    pending: HashMap<i64, crossbeam_channel::Receiver<Result<InstrumentId, String>>>,
+    /// Inputs of the last check: position generation, P&L requests, seeds.
+    key: (u64, usize, usize, usize),
+    checked_at: Option<std::time::Instant>,
+}
+
+impl PnlQuotes {
+    /// Time of the last check (tests move it back to force a check).
+    #[doc(hidden)]
+    pub fn checked_at_mut(&mut self) -> Option<&mut std::time::Instant> {
+        self.checked_at.as_mut()
+    }
+}
+
+/// How often the internal P&L quotes are checked when nothing else changed.
+const PNL_QUOTES_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Last values of a P&L request before its first callback.
 const PNL_NOT_SENT: i64 = i64::MIN;
 
@@ -541,6 +567,7 @@ pub struct ClientCore {
     // PnL subscription state
     /// Running req_pnl requests, with the last values sent (ibx#478).
     pub pnl_reqs: Mutex<HashMap<i64, [i64; 3]>>,
+    pub pnl_quotes: Mutex<PnlQuotes>,
     pub pnl_single_reqs: Mutex<HashMap<i64, i64>>, // req_id → con_id
     // Per-req_id change detection for pnl_single: [pos, daily, unrealized, realized, value] scaled.
     pub last_pnl_single: Mutex<HashMap<i64, [i64; 5]>>,
@@ -601,6 +628,7 @@ impl ClientCore {
             last_quotes: Mutex::new(HashMap::new()),
             snapshot_reqs: Mutex::new(HashSet::new()),
             pnl_reqs: Mutex::new(HashMap::new()),
+            pnl_quotes: Mutex::new(PnlQuotes::default()),
             pnl_single_reqs: Mutex::new(HashMap::new()),
             last_pnl_single: Mutex::new(HashMap::new()),
             account_summaries: Mutex::new(Vec::new()),
@@ -634,6 +662,7 @@ impl ClientCore {
         self.last_quotes.lock().unwrap().clear();
         self.snapshot_reqs.lock().unwrap().clear();
         self.pnl_reqs.lock().unwrap().clear();
+        *self.pnl_quotes.lock().unwrap() = PnlQuotes::default();
         self.pnl_single_reqs.lock().unwrap().clear();
         self.last_pnl_single.lock().unwrap().clear();
         self.account_summaries.lock().unwrap().clear();
@@ -738,6 +767,21 @@ impl ClientCore {
             });
         }
 
+        // A quote ibx subscribed to for the P&L becomes the caller's
+        // subscription: no second subscription to the server.
+        if let Some(instrument_id) = self.pnl_quotes.lock().unwrap().active.remove(&con_id) {
+            self.con_id_to_instrument.lock().unwrap().insert(con_id, instrument_id);
+            self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
+            self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
+            if snapshot {
+                self.snapshot_reqs.lock().unwrap().insert(req_id);
+            }
+            if wants_news {
+                self.news_instruments.lock().unwrap().insert(instrument_id);
+            }
+            return Ok(instrument_id);
+        }
+
         // instrument_to_req maps ONE req_id per instrument: a second live
         // subscription would clobber the first's reverse mapping and orphan
         // it silently — no ticks, no error (ibx#233). Reject up front via
@@ -787,6 +831,90 @@ impl ClientCore {
             self.news_instruments.lock().unwrap().insert(instrument_id);
         }
         Ok(instrument_id)
+    }
+
+    /// Keep a quote for each stock position the running P&L requests need
+    /// (held now or at midnight, and each pnl_single contract), subscribed
+    /// by ibx itself when the caller has none; cancel them when no P&L
+    /// request needs them. Never waits: a registration reply is read on a
+    /// later call. Checked when positions or requests change, and every
+    /// second.
+    pub fn maintain_pnl_quotes(&self, shared: &SharedState, control_tx: &Sender<ControlCommand>) {
+        let n_pnl = self.pnl_reqs.lock().unwrap().len();
+        let singles: Vec<i64> = self.pnl_single_reqs.lock().unwrap().values().copied().collect();
+        let mut q = self.pnl_quotes.lock().unwrap();
+        if n_pnl == 0 && singles.is_empty() && q.active.is_empty() && q.pending.is_empty() {
+            return;
+        }
+
+        let done: Vec<(i64, Result<InstrumentId, String>)> = q.pending.iter()
+            .filter_map(|(&con_id, rx)| rx.try_recv().ok().map(|r| (con_id, r)))
+            .collect();
+        for (con_id, reply) in done {
+            q.pending.remove(&con_id);
+            match reply {
+                Ok(instrument) => {
+                    q.active.insert(con_id, instrument);
+                    self.con_id_to_instrument.lock().unwrap().insert(con_id, instrument);
+                }
+                Err(e) => log::warn!("P&L quote for conId {} not subscribed: {}", con_id, e),
+            }
+        }
+
+        let seeds = shared.portfolio.midnight_seeds();
+        let key = (shared.portfolio.position_generation(), n_pnl, singles.len(), seeds.len());
+        if key == q.key && q.checked_at.is_some_and(|t| t.elapsed() < PNL_QUOTES_CHECK) {
+            return;
+        }
+        q.key = key;
+        q.checked_at = Some(std::time::Instant::now());
+
+        let infos: HashMap<i64, PositionInfo> = shared.portfolio.position_infos()
+            .into_iter().map(|p| (p.con_id, p)).collect();
+        let is_stock = |con_id: i64| infos.get(&con_id).is_none_or(|p| p.sec_type.is_empty() || p.sec_type == "STK");
+        let mut wanted: HashSet<i64> = HashSet::new();
+        if n_pnl > 0 {
+            wanted.extend(infos.values().filter(|p| p.position_fixed != 0).map(|p| p.con_id));
+            wanted.extend(seeds.iter().filter(|s| s.qty_midnight_fixed != 0).map(|s| s.con_id));
+        }
+        wanted.extend(singles.iter().copied());
+        wanted.retain(|&c| c != 0 && is_stock(c));
+
+        let caller_has = |con_id: i64| -> bool {
+            let map = self.con_id_to_instrument.lock().unwrap();
+            map.get(&con_id).is_some_and(|iid| self.instrument_to_req.lock().unwrap().contains_key(iid))
+        };
+
+        for &con_id in &wanted {
+            if q.active.contains_key(&con_id) || q.pending.contains_key(&con_id) || caller_has(con_id) {
+                continue;
+            }
+            let symbol = infos.get(&con_id).map(|p| p.symbol.clone()).unwrap_or_default();
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            let registered = control_tx.send(ControlCommand::RegisterInstrument {
+                con_id, symbol: symbol.clone(), sec_type: "STK".into(), exchange: "SMART".into(), reply_tx: None,
+            }).and_then(|_| control_tx.send(ControlCommand::Subscribe {
+                con_id, symbol, exchange: "SMART".into(), sec_type: "STK".into(),
+                last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+                mode_9887: 0, reply_tx: Some(reply_tx),
+            }));
+            if registered.is_ok() {
+                q.pending.insert(con_id, reply_rx);
+            }
+        }
+
+        let unwanted: Vec<(i64, InstrumentId)> = q.active.iter()
+            .filter(|(c, _)| !wanted.contains(c))
+            .map(|(&c, &i)| (c, i))
+            .collect();
+        for (con_id, instrument) in unwanted {
+            q.active.remove(&con_id);
+            if !caller_has(con_id) {
+                let _ = control_tx.send(ControlCommand::Unsubscribe { instrument });
+                // The engine may reuse the slot (ibx#233).
+                self.forget_instrument(instrument);
+            }
+        }
     }
 
     /// Unregister a market data subscription.

@@ -416,6 +416,9 @@ impl EClient {
         }
 
         // PnL → pnl callback (change-detected via ClientCore)
+        // Quotes the P&L needs, subscribed by ibx itself when the caller has
+        // none; they never reach the tick callbacks.
+        self.core.maintain_pnl_quotes(&self.shared, &self.control_tx);
         for update in self.core.poll_pnl(&self.shared) {
             wrapper.pnl(update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl);
         }

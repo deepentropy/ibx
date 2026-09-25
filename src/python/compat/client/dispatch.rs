@@ -736,6 +736,11 @@ impl EClient {
         }
 
         // P&L dispatch (via ClientCore)
+        // Quotes the P&L needs, subscribed by ibx itself when the caller has
+        // none; they never reach the tick callbacks.
+        if let Ok(tx) = self.tx() {
+            self.core.maintain_pnl_quotes(shared, &tx);
+        }
         for update in self.core.poll_pnl(shared) {
             call_wrapper!(self.wrapper, py, "pnl", (update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl));
         }
