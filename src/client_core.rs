@@ -101,6 +101,21 @@ pub struct QuotePollResult {
     pub delivered: bool,
 }
 
+/// Net cash traded today on a position, for the daily P&L.
+/// moneyTradedSinceMidnight (wire 6822) is signed net cash: SELL positive,
+/// BUY negative (ib-agent#163). The seed's value, plus the cash of this
+/// session's fills after it (a fill moved the daily P&L by the whole trade
+/// value: +770 for 1 SPY bought, seen on paper 25/09/2026). With no seed row:
+/// the cash of this session's fills when there are some, else the opening
+/// trade's cash synthesized from the average cost (-qty * avgCost).
+fn money_traded_today(seed: Option<&MidnightSeed>, since_seed: Option<f64>, qty_now: f64, avg_cost: Price) -> f64 {
+    match (seed, since_seed) {
+        (Some(s), since) => s.money_traded + since.unwrap_or(0.0),
+        (None, Some(since)) => since,
+        (None, None) => -(qty_now * avg_cost as f64 / PRICE_SCALE_F),
+    }
+}
+
 /// Last values of a P&L request before its first callback.
 const PNL_NOT_SENT: i64 = i64::MIN;
 
@@ -1557,6 +1572,7 @@ impl ClientCore {
             return Vec::new();
         }
         let realized_since = shared.portfolio.realized_since_seed();
+        let money_since = shared.portfolio.money_since_seed();
 
         let seeds: HashMap<i64, MidnightSeed> = shared.portfolio.midnight_seeds()
             .into_iter().map(|s| (s.con_id, s)).collect();
@@ -1567,6 +1583,7 @@ impl ClientCore {
             con_ids.insert(pi.con_id);
         }
         con_ids.extend(realized_since.keys().copied());
+        con_ids.extend(money_since.keys().copied());
         // No early return on an empty set: an account with no position still
         // has account-level P&L (for example realized today), delivered by the
         // fallback below (ibx#239, ibx#301).
@@ -1602,14 +1619,7 @@ impl ClientCore {
                 continue;
             }
 
-            // moneyTradedSinceMidnight (wire 6822) is signed net cash: SELL
-            // positive, BUY negative (ib-agent#163). An intraday-only position
-            // has no seed row, so synthesize the opening trade's net cash:
-            // -qty*avgCost (cash paid to open a long, received to open a short).
-            let money_traded = match seed {
-                Some(s) => s.money_traded,
-                None => -(qty_now * avg_cost as f64 / PRICE_SCALE_F),
-            };
+            let money_traded = money_traded_today(seed, money_since.get(&con_id).copied(), qty_now, avg_cost);
 
             let mv_now = qty_now * price_now as f64 / PRICE_SCALE_F;
             let mv_midnight = qty_midnight * prev_close as f64 / PRICE_SCALE_F;
@@ -1671,6 +1681,7 @@ impl ClientCore {
         let seeds: HashMap<i64, MidnightSeed> = shared.portfolio.midnight_seeds()
             .into_iter().map(|s| (s.con_id, s)).collect();
         let realized_since = shared.portfolio.realized_since_seed();
+        let money_since = shared.portfolio.money_since_seed();
         let con_id_map = self.con_id_to_instrument.lock().unwrap();
         let mut last_cache = self.last_pnl_single.lock().unwrap();
         let mut results = Vec::new();
@@ -1702,13 +1713,7 @@ impl ClientCore {
                 continue;
             }
 
-            // moneyTradedSinceMidnight (wire 6822) is signed net cash: SELL
-            // positive, BUY negative (ib-agent#163). Synthesize the opening
-            // trade's net cash for an intraday-only position (no seed row).
-            let money_traded = match seed {
-                Some(s) => s.money_traded,
-                None => -(qty_now * avg_cost as f64 / PRICE_SCALE_F),
-            };
+            let money_traded = money_traded_today(seed, money_since.get(&con_id).copied(), qty_now, avg_cost);
 
             let mv_now = qty_now * price_now as f64 / PRICE_SCALE_F;
             let mv_midnight = qty_midnight * prev_close as f64 / PRICE_SCALE_F;
@@ -2712,6 +2717,41 @@ mod tests {
         }]);
         let _ = core.poll_pnl_single(&shared);
         assert!(shared.portfolio.realized_since_seed().is_empty(), "the new seed includes the fill");
+    }
+
+    // The paper case of 25/09/2026: 31 SPY held overnight, then BUY 1 at the
+    // last price. The daily P&L must not move by the trade value (it jumped
+    // by about 770 when the fill's cash was left out).
+    #[test]
+    fn a_fill_does_not_move_the_daily_pnl_by_its_value() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        seed_pnl_position(&core, &shared, 756733, 0, 31, 764.59, 770.00, 760.00);
+        shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
+            con_id: 756733, qty_midnight_fixed: 31 * crate::types::QTY_SCALE, money_traded: 0.0, realized_pnl: 0.0,
+        }]);
+        core.subscribe_pnl_single(4, 756733);
+        let before = core.poll_pnl_single(&shared).pop().unwrap().daily_pnl;
+        assert!((before - 310.0).abs() < 1e-6, "31 × (770 - 760): {before}");
+
+        seed_pnl_position(&core, &shared, 756733, 0, 32, 764.78, 770.00, 760.00);
+        shared.portfolio.add_money_since_seed(756733, -770.0);
+        let after = core.poll_pnl_single(&shared).pop().unwrap().daily_pnl;
+        assert!((after - 310.0).abs() < 1e-6, "bought at the last price: no change, got {after}");
+    }
+
+    // No seed row, fills of this session only: the daily P&L is exact from
+    // their cash (buy 1 at 100, sell 1 at 103: +3).
+    #[test]
+    fn daily_pnl_of_a_position_traded_this_session_only() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        seed_pnl_position(&core, &shared, 1, 0, 0, 0.0, 103.0, 0.0);
+        shared.portfolio.add_money_since_seed(1, -100.0);
+        shared.portfolio.add_money_since_seed(1, 103.0);
+        core.subscribe_pnl_single(4, 1);
+        let u = core.poll_pnl_single(&shared).pop().unwrap();
+        assert!((u.daily_pnl - 3.0).abs() < 1e-6, "daily={}", u.daily_pnl);
     }
 
     #[test]

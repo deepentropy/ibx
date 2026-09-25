@@ -1086,6 +1086,19 @@ impl CcpState {
                 shared.portfolio.set_position_fixed(fill.instrument, context.position_fixed(fill.instrument));
                 if let Some(con_id) = context.market.con_id(order.instrument) {
                     self.record_exec_con_id(&exec.exec_id, con_id);
+                    // The daily P&L counts the cash of this session's fills
+                    // (sell positive, buy negative). Stock orders only, so
+                    // no multiplier.
+                    let shares = last_shares as f64 / QTY_SCALE as f64;
+                    let cash = match order.side {
+                        Side::Buy => -shares * last_px,
+                        Side::Sell | Side::ShortSell => shares * last_px,
+                    };
+                    shared.portfolio.add_money_since_seed(con_id, cash);
+                    // The position moves with the fill, as the reference's
+                    // position store does; the server's average cost follows
+                    // with its position feed.
+                    shared.portfolio.apply_fill_to_position(con_id, delta, fill.price);
                 }
                 fill_out = Some((fill, exec));
                 had_fill = true;
@@ -3519,6 +3532,14 @@ mod tests {
         let fill = exec_report_frame(&[(20, "0"), (39, "2"), (150, "F"), (17, "00025b49.6ab659f3.01.01"),
             (31, "770.56"), (32, "1"), (14, "1"), (151, "0"), (6, "770.56")]);
         ccp.handle_exec_report(&fill, &mut context, &shared, &None, "");
+        // The fill's cash, for the daily P&L: a buy of 1 at 770.56.
+        let cash = shared.portfolio.money_since_seed().get(&756733).copied().unwrap();
+        assert!((cash + 770.56).abs() < 1e-9, "cash={cash}");
+        // The position moves with the fill; a new position takes the fill
+        // price as average cost.
+        let pi = shared.portfolio.position_info(756733).unwrap();
+        assert_eq!(pi.position_fixed, QTY_SCALE);
+        assert_eq!(pi.avg_cost, 77056 * PRICE_SCALE / 100);
         ccp.handle_commission_report(&commission_frame(&[(17, "00025b49.6ab659f3.01.01"), (6099, "5.645252")]), &shared);
         assert_eq!(shared.portfolio.realized_since_seed().get(&756733).copied(), Some(5.645252));
 
