@@ -267,7 +267,7 @@ fn modifies(paper: &mut Paper, base: i64) {
     };
     let trail_lmt = |aux: f64| Order {
         action: "SELL".into(), order_type: "TRAIL LIMIT".into(), total_quantity: 1.0,
-        aux_price: aux, lmt_price_offset: 0.50, ..Default::default()
+        aux_price: aux, lmt_price_offset: 0.50, trail_stop_price: 50.0, ..Default::default()
     };
     let trail_pct = |p: f64| Order {
         action: "SELL".into(), order_type: "TRAIL".into(), total_quantity: 1.0, trailing_percent: p, ..Default::default()

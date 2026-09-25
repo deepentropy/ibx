@@ -1081,6 +1081,17 @@ impl CcpState {
             let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("");
             shared.orders.push_order_error(clord_id, 201, format!("Order rejected - reason:{}", reason));
         }
+        // The limit offset and price the server reports for a TRAIL LIMIT
+        // (6370, 44), restated on its replace (ib-agent#194).
+        if let Some(offset) = parsed.get(&6370).and_then(|s| s.parse::<f64>().ok()) {
+            if context.order(clord_id).is_some() {
+                let limit = parsed.get(&44).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                context.trail_limit_reported.insert(clord_id, (
+                    (offset * PRICE_SCALE as f64).round() as i64,
+                    (limit * PRICE_SCALE as f64).round() as i64,
+                ));
+            }
+        }
         // A cancel of an order of this session: error 202 with the server's
         // reason, before the Cancelled status, as the reference (ibx#465;
         // captured 25/09/2026, empty reason for a user cancel).
@@ -1328,6 +1339,13 @@ impl CcpState {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(f64::MAX);
 
+            // A TRAIL LIMIT report without its offset or limit price keeps
+            // the last ones reported (ib-agent#194).
+            let trail_limit = context.trail_limit_reported.get(&clord_id).copied();
+            let limit_price = match trail_limit {
+                Some((_, limit)) if limit_price == 0.0 && limit != 0 => limit as f64 / PRICE_SCALE as f64,
+                _ => limit_price,
+            };
             let order = api::Order {
                 order_id: clord_id as i64,
                 action: if action.is_empty() { fb_action.to_string() } else { action.to_string() },
@@ -1350,6 +1368,8 @@ impl CcpState {
                 algo_strategy,
                 // The orderRef the server echoes (ibx#466).
                 order_ref: parsed.get(&6010).cloned().unwrap_or_default(),
+                // A TRAIL LIMIT's offset as the server reports it (ib-agent#194).
+                lmt_price_offset: trail_limit.map_or(f64::MAX, |(offset, _)| offset as f64 / PRICE_SCALE as f64),
                 ..Default::default()
             };
 
@@ -3657,5 +3677,26 @@ mod tests {
         let price_cap = exec_report_frame(&[(39, "A"), (150, "A"), (6360, "PRICECAP"), (6361, "long text")]);
         ccp.handle_exec_report(&price_cap, &mut context, &shared, &None, "");
         assert!(shared.orders.drain_order_errors().is_empty());
+    }
+
+    // ib-agent#194: the server reports the offset of a TRAIL LIMIT set by
+    // its limit price (6370 = trailStopPrice - lmtPrice); it is kept for the
+    // replace and shown as lmtPriceOffset.
+    #[test]
+    fn the_server_trail_limit_offset_is_kept() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let ack = exec_report_frame(&[(39, "0"), (150, "0"), (40, "TSL"), (6370, "5"), (44, "745.66"), (6117, "750.66")]);
+        ccp.handle_exec_report(&ack, &mut context, &shared, &None, "");
+        assert_eq!(context.trail_limit_reported.get(&42).copied(), Some((5 * PRICE_SCALE, 74566 * PRICE_SCALE / 100)));
+        let info = shared.orders.get_order_info(42).unwrap();
+        assert_eq!(info.order.lmt_price_offset, 5.0);
+        assert_eq!(info.order.lmt_price, 745.66);
+
+        // A short report without them (seen on paper 25/09/2026) keeps both.
+        let short = exec_report_frame(&[(39, "0"), (150, "0"), (40, "TSL")]);
+        ccp.handle_exec_report(&short, &mut context, &shared, &None, "");
+        let info = shared.orders.get_order_info(42).unwrap();
+        assert_eq!(info.order.lmt_price_offset, 5.0);
+        assert_eq!(info.order.lmt_price, 745.66);
     }
 }

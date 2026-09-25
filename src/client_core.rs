@@ -621,6 +621,14 @@ pub struct ClientCore {
     pub contract_cache: Mutex<HashMap<i64, ApiContract>>,
 }
 
+/// A TRAIL LIMIT's limit price and offset are what the server reports (44,
+/// 6370), as the reference's openOrder (ib-agent#194).
+fn reported_trail_limit(order: &mut ApiOrder, reported: &ApiOrder) {
+    if !order.order_type.eq_ignore_ascii_case("TRAIL LIMIT") { return; }
+    if reported.lmt_price != 0.0 { order.lmt_price = reported.lmt_price; }
+    if reported.lmt_price_offset != f64::MAX { order.lmt_price_offset = reported.lmt_price_offset; }
+}
+
 impl ClientCore {
     pub fn new() -> Self {
         Self {
@@ -1486,6 +1494,7 @@ impl ClientCore {
                 if let Some(i) = &info {
                     if order.perm_id == 0 { order.perm_id = i.order.perm_id; }
                     if order.account.is_empty() { order.account = i.order.account.clone(); }
+                    reported_trail_limit(&mut order, &i.order);
                 }
                 (t.contract, order, t.last_fill_price, self.client_id.load(Ordering::Relaxed))
             }
@@ -1582,9 +1591,13 @@ impl ClientCore {
                     } else {
                         o.contract.clone()
                     };
+                    let mut order = o.order.clone();
+                    if let Some(info) = shared.orders.get_order_info(oid) {
+                        reported_trail_limit(&mut order, &info.order);
+                    }
                     result.push((oid, TrackedOrder {
                         contract,
-                        order: o.order.clone(),
+                        order,
                         status: o.status.clone(),
                         filled: o.filled,
                         remaining: o.remaining,
@@ -2233,6 +2246,11 @@ impl ClientCore {
         // replace: sending back the computed lmtPrice with the offset was
         // refused, captured 23/09/2026). lmtPrice is unset at 0 or MAX,
         // lmtPriceOffset at MAX.
+        // A TRAIL LIMIT needs its stop price (trailStopPrice), checked
+        // before the limit fields (ib-agent#194, no final period).
+        if order_type == "TRAIL LIMIT" && (order.trail_stop_price == f64::MAX || order.trail_stop_price == 0.0) {
+            return refuse("Please enter a stop price");
+        }
         if order_type == "TRAIL LIMIT" {
             let price_set = order.lmt_price != 0.0 && order.lmt_price != f64::MAX;
             let offset_set = order.lmt_price_offset != f64::MAX;
@@ -2348,13 +2366,16 @@ impl ClientCore {
                 }
             }
             "TRAIL LIMIT" => {
-                let offset = if order.lmt_price_offset != f64::MAX {
-                    order.lmt_price_offset
+                // Exactly one of the two (refused otherwise, ibx#468): the
+                // offset, or the absolute limit price (ib-agent#194).
+                let (lmt_offset, lmt_price) = if order.lmt_price_offset != f64::MAX {
+                    (scale(order.lmt_price_offset), None)
                 } else {
-                    order.lmt_price
+                    (0, Some(scale(order.lmt_price)))
                 };
                 OrderKind::TrailingStopLimit {
-                    lmt_offset: scale(offset),
+                    lmt_offset,
+                    lmt_price,
                     trail_amt: scale(order.aux_price),
                     trail_stop_price: trail_stop,
                 }
@@ -2562,19 +2583,18 @@ impl ClientCore {
                 }
             }
             "TRAIL LIMIT" => {
-                // Wire-side semantic is `LimitPriceOffset` (tag 6370), not an
-                // absolute limit price. Prefer `lmt_price_offset`; fall back
-                // to `lmt_price` for callers that haven't migrated.
-                let offset_f = if order.lmt_price_offset != f64::MAX {
-                    order.lmt_price_offset
+                // The offset (6370), or the absolute limit price (44, no
+                // 6370), as the caller gave it (ib-agent#194): exactly one of
+                // them, else refused before this (ibx#468).
+                let (lmt_offset, lmt_price) = if order.lmt_price_offset != f64::MAX {
+                    ((order.lmt_price_offset * PRICE_SCALE_F) as i64, None)
                 } else {
-                    order.lmt_price
+                    (0, Some((order.lmt_price * PRICE_SCALE_F) as i64))
                 };
-                let lmt_offset = (offset_f * PRICE_SCALE_F) as i64;
                 let trail = (order.aux_price * PRICE_SCALE_F) as i64;
                 let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { (order.trail_stop_price * PRICE_SCALE_F) as i64 };
-                if extended { ex(OrderKind::TrailingStopLimit { lmt_offset, trail_amt: trail, trail_stop_price: trail_stop }) }
-                else { OrderRequest::SubmitTrailingStopLimit { order_id, instrument, side, qty, lmt_offset, trail_amt: trail, trail_stop_price: trail_stop } }
+                if extended { ex(OrderKind::TrailingStopLimit { lmt_offset, lmt_price, trail_amt: trail, trail_stop_price: trail_stop }) }
+                else { OrderRequest::SubmitTrailingStopLimit { order_id, instrument, side, qty, lmt_offset, lmt_price, trail_amt: trail, trail_stop_price: trail_stop } }
             }
             "MOC" => {
                 if extended { ex(OrderKind::Moc) }
@@ -3156,7 +3176,8 @@ mod tests {
         assert!(ClientCore::refusal_before_sending(&rth).is_none());
 
         let trail = |lmt_price: f64, offset: f64| ApiOrder {
-            order_type: "TRAIL LIMIT".into(), aux_price: 1.0, lmt_price, lmt_price_offset: offset, ..lmt(0.0)
+            order_type: "TRAIL LIMIT".into(), aux_price: 1.0, trail_stop_price: 150.0,
+            lmt_price, lmt_price_offset: offset, ..lmt(0.0)
         };
         let both = ClientCore::refusal_before_sending(&trail(100.0, 0.30)).expect("both: refused");
         assert_eq!(both.0, 321);

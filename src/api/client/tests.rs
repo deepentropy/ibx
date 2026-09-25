@@ -748,12 +748,36 @@ fn place_order_trailing_stop_limit() {
     shared.market.set_instrument_count(1);
     let order = Order {
         action: "SELL".into(), total_quantity: 100.0, order_type: "TRAIL LIMIT".into(),
-        lmt_price: 148.0, aux_price: 2.0, ..Default::default()
+        lmt_price: 148.0, aux_price: 2.0, trail_stop_price: 150.0, ..Default::default()
     };
     client.place_order(1, &spy(), &order).unwrap();
 
+    // lmtPrice alone is an absolute limit price, not an offset (ib-agent#194).
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitTrailingStopLimit { .. })));
+    match cmd {
+        ControlCommand::Order(OrderRequest::SubmitTrailingStopLimit { lmt_price, lmt_offset, .. }) => {
+            assert_eq!(lmt_price, Some(148 * PRICE_SCALE));
+            assert_eq!(lmt_offset, 0);
+        }
+        other => panic!("expected SubmitTrailingStopLimit, got {:?}", other),
+    }
+}
+
+// ib-agent#194: a TRAIL LIMIT without trailStopPrice is refused first, with
+// the reference's text (no final period); nothing is sent.
+#[test]
+fn place_order_trailing_stop_limit_without_stop_price_is_refused() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL LIMIT".into(),
+        lmt_price_offset: 0.5, aux_price: 2.0, ..Default::default()
+    };
+    client.place_order(3, &spy(), &order).unwrap();
+    assert!(rx.try_iter().all(|c| !matches!(c, ControlCommand::Order(_))), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "error:3:321:Error validating request.-'bH' : cause - Please enter a stop price"), "{:?}", w.events);
 }
 
 #[test]

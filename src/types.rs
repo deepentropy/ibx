@@ -528,7 +528,9 @@ pub enum OrderKind {
     TrailingStop { trail_amt: Price, trail_stop_price: Price },
     /// Trailing stop limit; `lmt_offset` is the limit-vs-trail offset (tag 6370).
     /// `trail_stop_price` is the optional initial stop trigger (tag 6117); 0 = not set.
-    TrailingStopLimit { lmt_offset: Price, trail_amt: Price, trail_stop_price: Price },
+    /// `lmt_price`: the absolute limit price, sent in 44 with no 6370;
+    /// else `lmt_offset` in 6370 (ib-agent#194).
+    TrailingStopLimit { lmt_offset: Price, lmt_price: Option<Price>, trail_amt: Price, trail_stop_price: Price },
     /// Trailing stop by percentage. Basis points: 100 = 1%.
     /// `trail_stop_price` is the optional initial stop trigger (tag 6117); 0 = not set.
     TrailPct { trail_pct: u32, trail_stop_price: Price },
@@ -579,7 +581,9 @@ impl OrderKind {
             OrderKind::StopLimit { price, stop_price }
             | OrderKind::Lit { price, stop_price } => { s(price); s(stop_price); }
             OrderKind::TrailingStop { trail_amt, trail_stop_price } => { s(trail_amt); s(trail_stop_price); }
-            OrderKind::TrailingStopLimit { lmt_offset, trail_amt, trail_stop_price } => { s(lmt_offset); s(trail_amt); s(trail_stop_price); }
+            OrderKind::TrailingStopLimit { lmt_offset, lmt_price, trail_amt, trail_stop_price } => {
+                s(lmt_offset); if let Some(p) = lmt_price { s(p); } s(trail_amt); s(trail_stop_price);
+            }
             OrderKind::MidPrice { price_cap } => s(price_cap),
             OrderKind::PegMkt { offset } | OrderKind::PegMid { offset }
             | OrderKind::Rel { offset } => s(offset),
@@ -682,6 +686,8 @@ pub enum OrderRequest {
         /// Limit offset from the trail-stop price (wire tag 6370 LimitPriceOffset).
         /// The gateway derives the absolute limit price; do not pass an absolute price here.
         lmt_offset: Price,
+        /// Absolute limit price (44, no 6370) instead of the offset (ib-agent#194).
+        lmt_price: Option<Price>,
         trail_amt: Price,
         /// Optional initial stop trigger (tag 6117); 0 = not set.
         trail_stop_price: Price,
@@ -1109,7 +1115,9 @@ impl OrderRequest {
             | Self::SubmitStopLimitGtc { price, stop_price, .. }
             | Self::SubmitLit { price, stop_price, .. } => { s(price); s(stop_price); }
             Self::SubmitTrailingStop { trail_amt, trail_stop_price, .. } => { s(trail_amt); s(trail_stop_price); }
-            Self::SubmitTrailingStopLimit { lmt_offset, trail_amt, trail_stop_price, .. } => { s(lmt_offset); s(trail_amt); s(trail_stop_price); }
+            Self::SubmitTrailingStopLimit { lmt_offset, lmt_price, trail_amt, trail_stop_price, .. } => {
+                s(lmt_offset); if let Some(p) = lmt_price { s(p); } s(trail_amt); s(trail_stop_price);
+            }
             Self::SubmitTrailingStopPct { trail_stop_price, .. }
             | Self::SubmitTrailingStopPctEx { trail_stop_price, .. } => s(trail_stop_price),
             Self::SubmitMidPrice { price_cap, .. } => s(price_cap),

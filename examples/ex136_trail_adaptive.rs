@@ -153,6 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     trail_lmt.total_quantity = 1.0;
     trail_lmt.aux_price = 2.0;
     trail_lmt.lmt_price_offset = 0.50;
+    trail_lmt.trail_stop_price = 50.0;
     trail_lmt.tif = "DAY".into();
     let p2 = run_one(&client, &state, &mut wrapper, "TRAIL LIMIT", next_id(), trail_lmt);
 

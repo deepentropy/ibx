@@ -425,15 +425,16 @@ pub(crate) fn drain_and_send_orders(
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
                 send_new_order(conn, context, instrument, &fields)
             }
-            OrderRequest::SubmitTrailingStopLimit { order_id, instrument, side, qty, lmt_offset, trail_amt, trail_stop_price } => {
+            OrderRequest::SubmitTrailingStopLimit { order_id, instrument, side, qty, lmt_offset, lmt_price, trail_amt, trail_stop_price } => {
                 context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, lmt_offset, b'P', b'0', 0,
+                    order_id, instrument, side, qty, lmt_price.unwrap_or(lmt_offset), b'P', b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let offset_str = format_price(lmt_offset);
+                let price_str = lmt_price.map(format_price);
                 let trail_str = format_price(trail_amt);
                 let trail_stop_str = format_price(trail_stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -455,7 +456,6 @@ pub(crate) fn drain_and_send_orders(
                     (38, &qty_str),
                     (40, "TSL"),         // OrdType = Trailing Stop Limit
                     (99, &trail_str),    // StopPx = trail amount
-                    (6370, &offset_str), // LimitPriceOffset
                     (211, &trail_str),   // PegOffset = trail amount
                     (59, "0"),           // TIF = DAY
                     (60, &now),
@@ -466,6 +466,12 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ];
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
+                // The absolute limit price in 44 and no 6370, or the offset
+                // in 6370 (ib-agent#194).
+                match &price_str {
+                    Some(price) => fields.push((44, price)),
+                    None => fields.push((6370, &offset_str)),
+                }
                 send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_pct, trail_stop_price } => {
@@ -1459,8 +1465,7 @@ pub(crate) fn drain_and_send_orders(
                     .map(|c| c.to_string()).unwrap_or_default();
                 let fields = modify_fields(
                     &clord_str, &orig_clord, account_id, qty, side_str, &symbol,
-                    &sec_type_str, &con_id_str, kind, tif, &attrs,
-                );
+                    &sec_type_str, &con_id_str, kind, tif, &attrs, context.trail_limit_reported.get(&order_id).map(|&(offset, _)| offset));
                 let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
                 conn.send_fix(&refs)
             }
@@ -1684,6 +1689,7 @@ fn modify_fields(
     kind: crate::types::OrderKind,
     tif: u8,
     attrs: &crate::types::OrderAttrs,
+    server_trail_offset: Option<crate::types::Price>,
 ) -> Vec<(u32, String)> {
     use crate::types::OrderKind as K;
     let p = |v: crate::types::Price| format_price(v).to_string();
@@ -1724,9 +1730,15 @@ fn modify_fields(
             after_type.push((18, "a".to_string()));
             "P"
         }
-        K::TrailingStopLimit { lmt_offset, trail_amt, .. } => {
+        K::TrailingStopLimit { lmt_offset, lmt_price, trail_amt, .. } => {
+            // An absolute limit price: 44 with the offset the server
+            // reported, as the reference restates both (ib-agent#194).
+            if let Some(price) = lmt_price { before_account.push((44, p(price))); }
             before_account.push((99, p(trail_amt)));
-            trail_offset = Some(p(lmt_offset));
+            trail_offset = match lmt_price {
+                Some(_) => server_trail_offset.map(p),
+                None => Some(p(lmt_offset)),
+            };
             trail_unit = Some("0");
             after_type.push((211, p(trail_amt)));
             "TSL"
@@ -1941,7 +1953,7 @@ fn send_order_ex(
         K::Stop { stop_price } => (b'3', stop_price, stop_price),
         K::StopLimit { price, stop_price } => (b'4', price, stop_price),
         K::TrailingStop { .. } => (b'P', 0, 0),
-        K::TrailingStopLimit { lmt_offset, .. } => (b'P', lmt_offset, 0),
+        K::TrailingStopLimit { lmt_offset, lmt_price, .. } => (b'P', lmt_price.unwrap_or(lmt_offset), 0),
         K::TrailPct { .. } => (b'P', 0, 0),
         K::Moc => (b'5', 0, 0),
         K::Loc { price } => (b'B', price, 0),
@@ -2019,14 +2031,16 @@ fn send_order_ex(
             if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
             has_base_exec_inst = true;
         }
-        K::TrailingStopLimit { lmt_offset, trail_amt, trail_stop_price } => {
+        K::TrailingStopLimit { lmt_offset, lmt_price, trail_amt, trail_stop_price } => {
             // Per ib-agent#136 capture: TRAIL LIMIT uses OrdType=TSL, no
-            // tag 44, no tag 18; trail amount in both 99 and 211; 6370 is
-            // the limit-vs-trail offset.
+            // tag 18; trail amount in both 99 and 211; 6370 is the
+            // limit-vs-trail offset. An absolute limit price goes in 44
+            // instead, with no 6370 (ib-agent#194).
             let t = format_price(trail_amt).to_string();
             fields.push((40, "TSL".to_string()));
+            if let Some(price) = lmt_price { fields.push((44, format_price(price).to_string())); }
             fields.push((99, t.clone()));
-            fields.push((6370, format_price(lmt_offset).to_string()));
+            if lmt_price.is_none() { fields.push((6370, format_price(lmt_offset).to_string())); }
             fields.push((211, t));
             if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
         }
@@ -2552,7 +2566,7 @@ mod tests {
     fn replace_trailing_limit_matches_reference() {
         // The initial stop trigger is not restated on a replace.
         let ours = replace_fields(9000000568, Side::Sell, 1,
-            crate::types::OrderKind::TrailingStopLimit { lmt_offset: px(0.50), trail_amt: px(105.32), trail_stop_price: px(237.82) },
+            crate::types::OrderKind::TrailingStopLimit { lmt_offset: px(0.50), lmt_price: None, trail_amt: px(105.32), trail_stop_price: px(237.82) },
             b'0', attrs_rth(false));
         assert_same_replace(&ours, "35=G|11=9000000568.1|41=9000000568.0|99=105.32|1=DU1|6370=0.50|6205=1|6122=c|6268=0|38=1|54=2|40=TSL|211=105.32|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
     }
@@ -2930,5 +2944,58 @@ mod tests {
         assert_eq!(tag(&ex, 6117), Some("235.14"));
         let mit = wire_tags(OrderRequest::SubmitMit { order_id: 14, instrument: 0, side: Side::Sell, qty: 1, stop_price: 235 * P });
         assert_eq!(tag(&mit, 6117), None, "not on MIT");
+    }
+
+    // ib-agent#194, captured 25/09/2026: a TRAIL LIMIT with lmtPrice only
+    // sends the price in 44 and no 6370:
+    // 35=D|44=745.66|99=20.00|...|6117=750.66|...|40=TSL|211=20.00.
+    #[test]
+    fn trail_limit_with_a_limit_price_sends_44_and_no_offset() {
+        let plain = wire_tags(OrderRequest::SubmitTrailingStopLimit {
+            order_id: 20, instrument: 0, side: Side::Sell, qty: 1, lmt_offset: 0,
+            lmt_price: Some(74566 * P / 100), trail_amt: 20 * P, trail_stop_price: 75066 * P / 100,
+        });
+        assert_eq!(tag(&plain, 44), Some("745.66"));
+        assert_eq!(tag(&plain, 6370), None);
+        assert_eq!(tag(&plain, 40), Some("TSL"));
+        assert_eq!(tag(&plain, 6117), Some("750.66"));
+
+        let ex = wire_tags(OrderRequest::SubmitEx {
+            order_id: 21, instrument: 0, side: Side::Sell, qty: 1,
+            kind: crate::types::OrderKind::TrailingStopLimit {
+                lmt_offset: 0, lmt_price: Some(74566 * P / 100), trail_amt: 20 * P, trail_stop_price: 75066 * P / 100,
+            },
+            tif: b'1', attrs: crate::types::OrderAttrs { outside_rth: true, ..Default::default() },
+        });
+        assert_eq!(tag(&ex, 44), Some("745.66"));
+        assert_eq!(tag(&ex, 6370), None);
+
+        // The offset form keeps 6370 and no 44.
+        let offset = wire_tags(OrderRequest::SubmitTrailingStopLimit {
+            order_id: 22, instrument: 0, side: Side::Sell, qty: 1, lmt_offset: P / 2,
+            lmt_price: None, trail_amt: 20 * P, trail_stop_price: 75066 * P / 100,
+        });
+        assert_eq!(tag(&offset, 6370), Some("0.5"));
+        assert_eq!(tag(&offset, 44), None);
+    }
+
+    // ib-agent#194: the replace restates 44 and the offset the server
+    // reported (35=G|...|44=745.76|99=20.00|...|6370=5.00|...).
+    #[test]
+    fn trail_limit_replace_restates_the_price_and_the_server_offset() {
+        let kind = crate::types::OrderKind::TrailingStopLimit {
+            lmt_offset: 0, lmt_price: Some(74576 * P / 100), trail_amt: 20 * P, trail_stop_price: 0,
+        };
+        let tags = wire_tags_with(
+            |ctx| {
+                ctx.set_symbol(0, "SPY".to_string());
+                ctx.insert_order(Order::new(23, 0, Side::Sell, 1, 0, b'P', b'0', 0));
+                ctx.trail_limit_reported.insert(23, (5 * P, 74566 * P / 100));
+            },
+            OrderRequest::Modify { new_order_id: 23, order_id: 23, qty: 1, kind, tif: b'0', attrs: Default::default() },
+        );
+        assert_eq!(tag(&tags, 44), Some("745.76"));
+        assert_eq!(tag(&tags, 6370), Some("5"), "ibx writes prices without trailing zeros");
+        assert!(pos(&tags, 44) < pos(&tags, 99));
     }
 }

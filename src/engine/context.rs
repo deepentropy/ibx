@@ -67,6 +67,10 @@ pub struct Context {
     /// the cancel is rejected. Reports carrying it are about the cancel, not
     /// a new version of the order (ibx#464).
     pub(crate) cancel_clord: HashMap<OrderId, String>,
+    /// The last limit offset (6370) and limit price (44, 0 when absent) the
+    /// server reported for a TRAIL LIMIT order: the offset is restated on
+    /// its replace, both fill the reports that omit them (ib-agent#194).
+    pub(crate) trail_limit_reported: HashMap<OrderId, (Price, Price)>,
     /// Final status of orders that left the engine filled, cancelled or
     /// rejected, for the reference's refusal of a later cancel (ibx#464).
     /// Bounded: the oldest are dropped past `FINISHED_ORDERS_MAX`.
@@ -88,6 +92,7 @@ impl Context {
             modify_versions: HashMap::new(),
             last_clord: HashMap::new(),
             cancel_clord: HashMap::new(),
+            trail_limit_reported: HashMap::new(),
             finished_orders: HashMap::new(),
             finished_order_ids: std::collections::VecDeque::new(),
             account: AccountState::default(),
@@ -385,6 +390,7 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitTrailingStopLimit {
+            lmt_price: None,
             order_id: id,
             instrument,
             side,
@@ -1025,6 +1031,7 @@ impl Context {
             return;
         }
         self.cancel_clord.remove(&order_id);
+        self.trail_limit_reported.remove(&order_id);
         if self.finished_orders.insert(order_id, status).is_none() {
             self.finished_order_ids.push_back(order_id);
             while self.finished_order_ids.len() > FINISHED_ORDERS_MAX {
