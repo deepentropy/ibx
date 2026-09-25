@@ -1401,26 +1401,9 @@ pub(crate) fn drain_and_send_orders(
                 send_new_order(conn, context, instrument, &fields)
             }
             OrderRequest::Cancel { order_id } => {
-                // OrigClOrdID must match exactly what the server has on record.
-                // Prefer the string we last observed on the wire (see ibx#179 —
-                // legacy orders recorded without a `.{ver}` suffix won't match
-                // a computed `{id}.0`). Fall back to the versioned scheme when
-                // we have no observation yet (fresh-order place→immediate-cancel
-                // before the ack round-trip).
-                let orig_clord = context.last_clord.get(&order_id).cloned()
-                    .unwrap_or_else(|| {
-                        let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                        format!("{}.{}", order_id, ver)
-                    });
-                let clord_str = format!("C{}", order_id);
-                let now = chrono_free_timestamp();
-                let result = conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),   // ClOrdID (cancel)
-                    (41, &orig_clord),  // OrigClOrdID (latest version)
-                    (60, &now),         // TransactTime
-                ]);
+                let fields = cancel_fields(context, account_id, order_id, "SEL");
+                let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+                let result = conn.send_fix(&refs);
                 if result.is_ok() {
                     synthesize_pending_cancel(context, shared, order_id);
                 }
@@ -1433,20 +1416,9 @@ pub(crate) fn drain_and_send_orders(
                     .collect();
                 let mut last_result = Ok(());
                 for oid in open_ids {
-                    let orig_clord = context.last_clord.get(&oid).cloned()
-                        .unwrap_or_else(|| {
-                            let ver = *context.modify_versions.get(&oid).unwrap_or(&0);
-                            format!("{}.{}", oid, ver)
-                        });
-                    let clord_str = format!("C{}", oid);
-                    let now = chrono_free_timestamp();
-                    last_result = conn.send_fix(&[
-                        (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL),
-                        (fix::TAG_SENDING_TIME, &now),
-                        (11, &clord_str),
-                        (41, &orig_clord),
-                        (60, &now),
-                    ]);
+                    let fields = cancel_fields(context, account_id, oid, "ALL");
+                    let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+                    last_result = conn.send_fix(&refs);
                     if last_result.is_ok() {
                         synthesize_pending_cancel(context, shared, oid);
                     }
@@ -1507,6 +1479,45 @@ pub(crate) fn drain_and_send_orders(
             }
         }
     }
+}
+
+/// A cancel as the reference writes it (ibx#464; captured 25/09/2026):
+/// `11` the order's next ClOrdID version, `41` the ClOrdID the server has on
+/// record, then quantity, side, account, contract and `6944`: `SEL` for a
+/// cancel of one order, `ALL` for the global cancel. The new version and the
+/// cancel's id are recorded, so its reports are read as the cancel's.
+fn cancel_fields(context: &mut Context, account_id: &str, order_id: crate::types::OrderId, scope: &str) -> Vec<(u32, String)> {
+    let prev_ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
+    let new_ver = prev_ver + 1;
+    context.modify_versions.insert(order_id, new_ver);
+    let clord = format!("{}.{}", order_id, new_ver);
+    // OrigClOrdID must match exactly what the server has on record: the
+    // string last seen on the wire (ibx#179 — orders recorded without a
+    // `.{ver}` suffix), else the versioned scheme (a cancel right after
+    // the place, before its ack).
+    let orig_clord = context.last_clord.get(&order_id).cloned()
+        .unwrap_or_else(|| format!("{}.{}", order_id, prev_ver));
+    context.cancel_clord.insert(order_id, clord.clone());
+
+    let mut fields = vec![
+        (fix::TAG_MSG_TYPE, fix::MSG_ORDER_CANCEL.to_string()),
+        (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
+        (11, clord),
+        (41, orig_clord),
+    ];
+    if let Some(order) = context.order(order_id).copied() {
+        fields.push((38, format_qty(order.qty_fixed).to_string()));
+        fields.push((54, fix_side(order.side).to_string()));
+        fields.push((1, account_id.to_string()));
+        if let Some(con_id) = context.market.con_id(order.instrument) {
+            fields.push((6008, con_id.to_string()));
+        }
+    } else {
+        fields.push((1, account_id.to_string()));
+    }
+    fields.push((6088, "Socket".to_string()));
+    fields.push((6944, scope.to_string()));
+    fields
 }
 
 /// The reference's answer to a cancel it does not send (ibx#464): the order
@@ -2803,5 +2814,49 @@ mod tests {
         let (sent, errors) = cancel_of(|ctx| ctx.insert_order(order(5, 0, OrderStatus::Submitted)));
         assert!(sent > 0);
         assert!(errors.is_empty());
+    }
+
+    // ibx#464: the cancel the reference sends (captured 25/09/2026, account
+    // masked): 35=F|11=258354710.2|41=258354710.1|38=1|54=2|1=DU...|6008=265598|
+    // 6088=Socket|6944=SEL. ibx sent 11=C{id}|41|60 only.
+    #[test]
+    fn cancel_is_written_like_the_reference() {
+        let tags = wire_tags_with(
+            |ctx| {
+                ctx.insert_order(Order::new(5, 0, Side::Sell, 1, 0, b'2', b'0', 0));
+                ctx.last_clord.insert(5, "5.1".to_string());
+                ctx.modify_versions.insert(5, 1);
+            },
+            OrderRequest::Cancel { order_id: 5 },
+        );
+        let body: Vec<(u32, &str)> = tags.iter()
+            .filter(|(t, _)| !matches!(t, 8 | 9 | 34 | 52 | 10))
+            .map(|(t, v)| (*t, v.as_str()))
+            .collect();
+        assert_eq!(body, [
+            (35, "F"), (11, "5.2"), (41, "5.1"), (38, "1"), (54, "2"), (1, "DU1"),
+            (6008, "265598"), (6088, "Socket"), (6944, "SEL"),
+        ]);
+    }
+
+    #[test]
+    fn cancel_right_after_the_place_uses_the_first_version() {
+        let tags = wire_tags_with(
+            |ctx| ctx.insert_order(Order::new(6, 0, Side::Buy, 2, 0, b'2', b'0', 0)),
+            OrderRequest::Cancel { order_id: 6 },
+        );
+        assert_eq!(tag(&tags, 11), Some("6.1"));
+        assert_eq!(tag(&tags, 41), Some("6.0"));
+        assert_eq!(tag(&tags, 60), None, "the reference sends no TransactTime");
+    }
+
+    #[test]
+    fn global_cancel_is_marked_all() {
+        let tags = wire_tags_with(
+            |ctx| ctx.insert_order(Order::new(7, 0, Side::Buy, 1, 0, b'2', b'0', 0)),
+            OrderRequest::CancelAll { instrument: 0 },
+        );
+        assert_eq!(tag(&tags, 11), Some("7.1"));
+        assert_eq!(tag(&tags, 6944), Some("ALL"));
     }
 }

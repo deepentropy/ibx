@@ -843,11 +843,15 @@ impl CcpState {
         }
 
         // Record the ClOrdID exactly as the server reports it so subsequent
-        // cancel/modify can echo back the same string. Skip cancel-ack frames
-        // (tag 11 starts with 'C' there) — those carry the cancel request's
-        // own id, not the original order's. See ibx#179.
+        // cancel/modify can echo back the same string. Skip reports of a
+        // cancel: they carry the cancel request's own id, not the order's
+        // (ibx#179). A cancel's id is the one ibx sent (ibx#464), or starts
+        // with 'C' (the earlier form, on orders of a previous session).
+        let is_cancel_request = parsed.get(&11).is_some_and(|s| {
+            s.starts_with('C') || context.cancel_clord.get(&clord_id) == Some(s)
+        });
         if let Some(raw_clord) = parsed.get(&11) {
-            if !raw_clord.starts_with('C') && raw_clord != "*" {
+            if !is_cancel_request && raw_clord != "*" {
                 context.last_clord.insert(clord_id, raw_clord.clone());
             }
         }
@@ -938,9 +942,6 @@ impl CcpState {
                 crate::types::OrderStatus::PreSubmitted
             }
         };
-        // A cancel request carries a "C"-prefixed ClOrdID; a replace carries
-        // the order's next version.
-        let is_cancel_request = parsed.get(&11).is_some_and(|s| s.starts_with('C'));
         let status = match ord_status {
             "0" => working(),
             // Replaced: back to working, by the same routing rule. The
@@ -1332,6 +1333,8 @@ impl CcpState {
             orig_clord, reject_type, reason_code, reason);
 
         let Some(oid) = orig_clord else { return };
+        // The cancel is over; a later cancel sends a new id (ibx#464).
+        context.cancel_clord.remove(&oid);
 
         // Update local context only if we tracked the order in this session.
         let instrument = if let Some(order) = context.order(oid).copied() {
@@ -2675,6 +2678,39 @@ mod tests {
         assert_eq!(context.finished_status(42), Some(OrderStatus::Cancelled));
         let last = shared.orders.drain_order_updates().last().map(|u| u.status);
         assert_eq!(last, Some(OrderStatus::Cancelled));
+    }
+
+    // ibx#464: a cancel now carries the order's next ClOrdID version, not a
+    // 'C' prefix. Its reports are read as the cancel's: the pending report is
+    // PendingCancel, and the order's ClOrdID on record does not move.
+    #[test]
+    fn reports_of_a_versioned_cancel_are_read_as_the_cancel() {
+        use crate::types::OrderStatus;
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let routed = exec_report_frame(&[(11, "42.0"), (39, "0"), (150, "0"), (100, "ARCA")]);
+        ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
+        context.cancel_clord.insert(42, "42.1".to_string());
+        let pending = exec_report_frame(&[(11, "42.1"), (41, "42.0"), (39, "6"), (150, "6")]);
+        ccp.handle_exec_report(&pending, &mut context, &shared, &None, "");
+        assert_eq!(context.order(42).unwrap().status, OrderStatus::PendingCancel);
+        assert_eq!(context.last_clord.get(&42).map(String::as_str), Some("42.0"));
+        let done = exec_report_frame(&[(11, "42.1"), (41, "42.0"), (39, "4"), (150, "4")]);
+        ccp.handle_exec_report(&done, &mut context, &shared, &None, "");
+        assert!(context.order(42).is_none());
+        assert!(context.cancel_clord.get(&42).is_none());
+    }
+
+    #[test]
+    fn a_cancel_reject_ends_the_cancel() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        context.cancel_clord.insert(42, "42.1".to_string());
+        let mut reject = std::collections::HashMap::new();
+        for (t, v) in [(35u32, "9"), (11, "42.1"), (41, "42.0"), (434, "1"), (102, "0")] {
+            reject.insert(t, v.to_string());
+        }
+        ccp.handle_cancel_reject(&reject, &mut context, &shared, &None);
+        assert!(context.cancel_clord.get(&42).is_none());
+        assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::Submitted);
     }
 
     // ibx#472: the reference handles 39=E and 39=I as invalid statuses: no

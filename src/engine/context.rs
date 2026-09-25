@@ -63,6 +63,10 @@ pub struct Context {
     /// it appeared on the wire. Used as the OrigClOrdID on cancel/modify so that
     /// legacy orders recorded without a `.{ver}` suffix still match — see ibx#179.
     pub(crate) last_clord: HashMap<OrderId, String>,
+    /// ClOrdID of the cancel sent for each order, until the order ends or
+    /// the cancel is rejected. Reports carrying it are about the cancel, not
+    /// a new version of the order (ibx#464).
+    pub(crate) cancel_clord: HashMap<OrderId, String>,
     /// Final status of orders that left the engine filled, cancelled or
     /// rejected, for the reference's refusal of a later cancel (ibx#464).
     /// Bounded: the oldest are dropped past `FINISHED_ORDERS_MAX`.
@@ -83,6 +87,7 @@ impl Context {
             pending_orders: OrderBuffer::new(),
             modify_versions: HashMap::new(),
             last_clord: HashMap::new(),
+            cancel_clord: HashMap::new(),
             finished_orders: HashMap::new(),
             finished_order_ids: std::collections::VecDeque::new(),
             account: AccountState::default(),
@@ -1019,6 +1024,7 @@ impl Context {
         if self.open_orders.remove(&order_id).is_none() {
             return;
         }
+        self.cancel_clord.remove(&order_id);
         if self.finished_orders.insert(order_id, status).is_none() {
             self.finished_order_ids.push_back(order_id);
             while self.finished_order_ids.len() > FINISHED_ORDERS_MAX {
