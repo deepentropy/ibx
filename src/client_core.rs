@@ -621,6 +621,25 @@ pub struct ClientCore {
     pub contract_cache: Mutex<HashMap<i64, ApiContract>>,
 }
 
+/// The reference's other names for order types ibx supports, and the name
+/// ibx uses (ibx#469, from the reference's order-type map).
+const ORDER_TYPE_ALIASES: [(&str, &str); 14] = [
+    ("LIMIT", "LMT"),
+    ("MARKET", "MKT"),
+    ("STOP", "STP"),
+    ("STPLMT", "STP LMT"),
+    ("STOP LIMIT", "STP LMT"),
+    ("MKT CLS", "MOC"),
+    ("LMT CLS", "LOC"),
+    ("MKT TO LMT", "MTL"),
+    ("RELATIVE", "REL"),
+    ("PEG PRIM", "REL"),
+    ("PEGMKT", "PEG MKT"),
+    ("PEGMID", "PEG MID"),
+    ("TRAILING STOP", "TRAIL"),
+    ("TRAILLMT", "TRAIL LIMIT"),
+];
+
 /// The reference's text for an invalid date or time (errors 337 and 343);
 /// %s is the field's label.
 const INVALID_DATE_TIME: &str = "%s: The date, time, or time-zone entered is invalid.\n\
@@ -2086,6 +2105,23 @@ impl ClientCore {
     }
 
     // ── Order routing ──
+
+    /// The name ibx uses for an order type the reference also accepts under
+    /// another name (ibx#469), or None when the name is not one of these.
+    pub fn canonical_order_type(order_type: &str) -> Option<&'static str> {
+        ORDER_TYPE_ALIASES.iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(order_type))
+            .map(|&(_, name)| name)
+    }
+
+    /// The order with its type under the name ibx uses (ibx#469). Copied
+    /// only when the type is one of the other names.
+    pub fn with_canonical_order_type(order: &ApiOrder) -> std::borrow::Cow<'_, ApiOrder> {
+        match Self::canonical_order_type(&order.order_type) {
+            Some(name) => std::borrow::Cow::Owned(ApiOrder { order_type: name.to_string(), ..order.clone() }),
+            None => std::borrow::Cow::Borrowed(order),
+        }
+    }
 
     /// Pre-validate order fields that don't depend on instrument ID.
     /// Call this before `find_or_register_instrument` to fail fast.

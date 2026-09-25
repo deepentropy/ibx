@@ -765,6 +765,32 @@ fn place_order_trailing_stop_limit() {
 
 // ib-agent#194: a TRAIL LIMIT without trailStopPrice is refused first, with
 // the reference's text (no final period); nothing is sent.
+// ibx#469: the reference's other names for an order type give the same
+// request as ibx's name, and a modify under the other name is not a type
+// change.
+#[test]
+fn place_order_type_aliases() {
+    for (alias, name) in [("STOP LIMIT", "STP LMT"), ("stplmt", "STP LMT"), ("LIMIT", "LMT"), ("MKT TO LMT", "MTL"),
+                          ("PEG PRIM", "REL"), ("TRAILING STOP", "TRAIL"), ("TRAILLMT", "TRAIL LIMIT")] {
+        let order = |order_type: &str| Order {
+            action: "SELL".into(), total_quantity: 1.0, order_type: order_type.into(),
+            lmt_price: 148.0, aux_price: 2.0, trail_stop_price: 150.0, ..Default::default()
+        };
+        let (client, rx, shared) = test_client();
+        shared.market.set_instrument_count(1);
+        client.place_order(1, &spy(), &order(alias)).unwrap();
+        client.place_order(2, &spy(), &order(name)).unwrap();
+        let a = format!("{:?}", rx.try_recv().unwrap()).replacen("order_id: 1", "order_id: 2", 1);
+        let b = format!("{:?}", rx.try_recv().unwrap());
+        assert_eq!(a, b, "{alias}");
+        // Modify of order 1 under ibx's name, and of order 2 under the alias.
+        client.place_order(1, &spy(), &order(name)).unwrap();
+        client.place_order(2, &spy(), &order(alias)).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Order(OrderRequest::Modify { .. })), "{alias}");
+        assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Order(OrderRequest::Modify { .. })), "{alias}");
+    }
+}
+
 // ibx#467: a goodAfterTime that is not a date and time is refused with 337
 // and the reference's text; nothing is sent. A good one is sent.
 #[test]

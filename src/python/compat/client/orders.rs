@@ -20,6 +20,10 @@ impl EClient {
         // Convert and validate order params first (fail fast, no connection needed)
         let mut api_order = order.to_api();
         api_order.conditions = order.convert_conditions(py);
+        // The reference's other names for an order type (ibx#469).
+        if let Some(name) = ClientCore::canonical_order_type(&api_order.order_type) {
+            api_order.order_type = name.to_string();
+        }
         ClientCore::validate_order(&api_order)
             .map_err(|e| PyRuntimeError::new_err(e))?;
         ClientCore::validate_order_contract(&contract.sec_type)

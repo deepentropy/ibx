@@ -14,6 +14,9 @@ impl EClient {
 
     /// Place an order. Matches `placeOrder` in C++.
     pub fn place_order(&self, order_id: i64, contract: &Contract, order: &Order) -> Result<(), String> {
+        // The reference's other names for an order type, under ibx's name
+        // for every check and for the tracked order (ibx#469).
+        let order = &*ClientCore::with_canonical_order_type(order);
         // Validate order params and contract before registering instrument (fail fast).
         ClientCore::validate_order(order)?;
         ClientCore::validate_order_contract(&contract.sec_type)?;
