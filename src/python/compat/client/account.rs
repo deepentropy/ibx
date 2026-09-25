@@ -13,10 +13,14 @@ impl EClient {
     #[pyo3(signature = (req_id, account, model_code=""))]
     fn req_pnl(&self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.core.subscribe_pnl(req_id);
+        // Several requests can run; an empty or unknown account gives 321, a
+        // request id already running gives 102 (ibx#478).
+        if let Err((code, message)) = self.core.request_pnl(req_id, account, &self.account()) {
+            self.shared_state()?.orders.push_order_error(req_id as u64, code, message);
+            return Ok(());
+        }
         let tx = self.tx()?;
-        let acct = if account.is_empty() { self.account() } else { account.to_string() };
-        tx.send(ControlCommand::SubscribePnl { req_id, account: acct })
+        tx.send(ControlCommand::SubscribePnl { req_id, account: account.to_string() })
             .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         let _ = model_code;
         Ok(())
@@ -25,7 +29,11 @@ impl EClient {
     /// Cancel P&L subscription.
     fn cancel_pnl(&self, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.core.unsubscribe_pnl(req_id);
+        // A request id not running gives 10185 (ibx#478).
+        if let Some((code, message)) = self.core.cancel_pnl_request(req_id) {
+            self.shared_state()?.orders.push_order_error(req_id as u64, code, message);
+            return Ok(());
+        }
         let tx = self.tx()?;
         let _ = tx.send(ControlCommand::CancelPnl { req_id });
         Ok(())
@@ -35,15 +43,21 @@ impl EClient {
     #[pyo3(signature = (req_id, account, model_code, con_id))]
     fn req_pnl_single(&self, req_id: i64, account: &str, model_code: &str, con_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.core.subscribe_pnl_single(req_id, con_id);
-        let _ = (account, model_code);
+        // Same checks as req_pnl (ibx#478).
+        if let Err((code, message)) = self.core.request_pnl_single(req_id, account, &self.account(), con_id) {
+            self.shared_state()?.orders.push_order_error(req_id as u64, code, message);
+        }
+        let _ = model_code;
         Ok(())
     }
 
     /// Cancel single-position P&L subscription.
     fn cancel_pnl_single(&self, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.core.unsubscribe_pnl_single(req_id);
+        // A request id not running gives 10186 (ibx#478).
+        if let Some((code, message)) = self.core.cancel_pnl_single_request(req_id) {
+            self.shared_state()?.orders.push_order_error(req_id as u64, code, message);
+        }
         Ok(())
     }
 

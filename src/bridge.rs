@@ -776,6 +776,9 @@ pub struct PortfolioState {
     positions: [AtomicU64; MAX_INSTRUMENTS],
     /// Midnight seeds from 6040=143 for client-side daily P&L computation.
     midnight_seeds: Mutex<HashMap<i64, MidnightSeed>>,
+    /// Realized P&L of this session's fills since the last seed, by conId,
+    /// from the commission frames (ibx#478). A new seed includes them.
+    realized_since_seed: Mutex<HashMap<i64, f64>>,
 }
 
 impl PortfolioState {
@@ -790,6 +793,7 @@ impl PortfolioState {
             position_generation: AtomicU64::new(0),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
             midnight_seeds: Mutex::new(HashMap::new()),
+            realized_since_seed: Mutex::new(HashMap::new()),
         }
     }
 
@@ -907,11 +911,23 @@ impl PortfolioState {
 
     /// Store midnight seeds from 6040=143 P&L response.
     #[doc(hidden)] pub fn set_midnight_seeds(&self, seeds: Vec<MidnightSeed>) {
+        // The seed's realized P&L includes the fills so far (ibx#478).
+        self.realized_since_seed.lock().unwrap().clear();
         let mut map = self.midnight_seeds.lock().unwrap();
         map.clear();
         for s in seeds {
             map.insert(s.con_id, s);
         }
+    }
+
+    /// Add realized P&L of a fill for `con_id` (ibx#478).
+    #[doc(hidden)] pub fn add_realized_since_seed(&self, con_id: i64, amount: f64) {
+        *self.realized_since_seed.lock().unwrap().entry(con_id).or_insert(0.0) += amount;
+    }
+
+    /// Realized P&L of fills since the last seed, by conId (ibx#478).
+    pub fn realized_since_seed(&self) -> HashMap<i64, f64> {
+        self.realized_since_seed.lock().unwrap().clone()
     }
 
     /// Read midnight seeds for client-side P&L computation.

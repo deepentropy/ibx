@@ -736,7 +736,7 @@ impl EClient {
         }
 
         // P&L dispatch (via ClientCore)
-        if let Some(update) = self.core.poll_pnl(shared) {
+        for update in self.core.poll_pnl(shared) {
             call_wrapper!(self.wrapper, py, "pnl", (update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl));
         }
 

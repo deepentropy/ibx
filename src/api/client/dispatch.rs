@@ -416,7 +416,7 @@ impl EClient {
         }
 
         // PnL → pnl callback (change-detected via ClientCore)
-        if let Some(update) = self.core.poll_pnl(&self.shared) {
+        for update in self.core.poll_pnl(&self.shared) {
             wrapper.pnl(update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl);
         }
 

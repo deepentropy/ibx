@@ -105,6 +105,11 @@ pub(crate) struct CcpState {
     /// the highest revision (ibx#471). Bounded like `seen_exec_ids`.
     pub(crate) commission_revisions: std::collections::HashMap<String, u64>,
     pub(crate) commission_order: VecDeque<String>,
+    /// conId of this session's fills and the realized P&L counted for each,
+    /// by execution id without its revision (ibx#478). Bounded like the
+    /// commission window.
+    pub(crate) exec_realized: std::collections::HashMap<String, (i64, f64)>,
+    pub(crate) exec_realized_order: VecDeque<String>,
     pub(crate) bulletin_next_id: i32,
     pub(crate) news_subscriptions: Vec<(InstrumentId, u32)>,
     pub(crate) disconnected: bool,
@@ -189,6 +194,8 @@ impl CcpState {
             exec_id_order: VecDeque::with_capacity(256),
             commission_revisions: std::collections::HashMap::with_capacity(256),
             commission_order: VecDeque::with_capacity(256),
+            exec_realized: std::collections::HashMap::with_capacity(256),
+            exec_realized_order: VecDeque::with_capacity(256),
             bulletin_next_id: 0,
             news_subscriptions: Vec::new(),
             disconnected: false,
@@ -229,6 +236,23 @@ impl CcpState {
             }
         }
         true
+    }
+
+    /// Remember the conId of a fill of this session, for the realized P&L
+    /// its commission frame carries (ibx#478).
+    pub(crate) fn record_exec_con_id(&mut self, exec_id: &str, con_id: i64) {
+        if exec_id.is_empty() {
+            return;
+        }
+        let (base, _) = split_exec_revision(exec_id);
+        if self.exec_realized.insert(base.to_string(), (con_id, 0.0)).is_none() {
+            self.exec_realized_order.push_back(base.to_string());
+            while self.exec_realized_order.len() > EXEC_ID_WINDOW {
+                if let Some(old) = self.exec_realized_order.pop_front() {
+                    self.exec_realized.remove(&old);
+                }
+            }
+        }
     }
 
     /// Record a commission report for `exec_id`. Returns `false` for a
@@ -281,6 +305,18 @@ impl CcpState {
             yield_redemption_date: parsed.get(&696).filter(|s| s.len() == 8).cloned().unwrap_or_default(),
         };
         log::info!("Commission report: exec={} commission={} {}", report.exec_id, report.commission_and_fees, report.currency);
+        // The realized P&L of a fill of this session adds to P&L (ibx#478);
+        // a higher revision replaces the amount counted before.
+        if report.realized_pnl != f64::MAX {
+            let (base, _) = split_exec_revision(exec_id);
+            if let Some((con_id, counted)) = self.exec_realized.get_mut(base) {
+                let delta = report.realized_pnl - *counted;
+                *counted = report.realized_pnl;
+                shared.portfolio.add_realized_since_seed(*con_id, delta);
+            } else {
+                log::debug!("Commission report for {}: no fill of this session, realized P&L not counted", exec_id);
+            }
+        }
         shared.orders.push_commission_report(report);
     }
 
@@ -1048,6 +1084,9 @@ impl CcpState {
                     order_ref: tag(6010).cloned().unwrap_or_default(),
                 };
                 shared.portfolio.set_position_fixed(fill.instrument, context.position_fixed(fill.instrument));
+                if let Some(con_id) = context.market.con_id(order.instrument) {
+                    self.record_exec_con_id(&exec.exec_id, con_id);
+                }
                 fill_out = Some((fill, exec));
                 had_fill = true;
             }
@@ -3468,5 +3507,27 @@ mod tests {
         assert_eq!(events[0].rows.len(), 4);
         assert!(!events[0].ledger && events[1].ledger && events[2].end);
         assert!(events[1].rows.iter().any(|r| r.key == "CashBalance" && r.currency == "USD"));
+    }
+
+    // ibx#478: the realized P&L of a fill of this session (6099 of its
+    // commission frame, 5.645252 on the closing SELL seen on paper
+    // 25/09/2026) adds to the position's realized P&L; a higher revision
+    // replaces the amount; a fill of an earlier session is not counted.
+    #[test]
+    fn a_fill_realized_pnl_adds_to_its_position() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let fill = exec_report_frame(&[(20, "0"), (39, "2"), (150, "F"), (17, "00025b49.6ab659f3.01.01"),
+            (31, "770.56"), (32, "1"), (14, "1"), (151, "0"), (6, "770.56")]);
+        ccp.handle_exec_report(&fill, &mut context, &shared, &None, "");
+        ccp.handle_commission_report(&commission_frame(&[(17, "00025b49.6ab659f3.01.01"), (6099, "5.645252")]), &shared);
+        assert_eq!(shared.portfolio.realized_since_seed().get(&756733).copied(), Some(5.645252));
+
+        ccp.handle_commission_report(&commission_frame(&[(17, "00025b49.6ab659f3.01.02"), (6099, "6.0")]), &shared);
+        let total = shared.portfolio.realized_since_seed().get(&756733).copied().unwrap();
+        assert!((total - 6.0).abs() < 1e-9, "the revision replaces: {total}");
+
+        ccp.handle_commission_report(&commission_frame(&[(17, "0000e0d5.6ab5f36f.01.01"), (6099, "3.0")]), &shared);
+        let total = shared.portfolio.realized_since_seed().get(&756733).copied().unwrap();
+        assert!((total - 6.0).abs() < 1e-9, "an earlier session's fill is not counted");
     }
 }

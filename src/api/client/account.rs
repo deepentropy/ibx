@@ -46,23 +46,36 @@ impl EClient {
     // ── PnL ──
 
     /// Subscribe to account PnL updates. Matches `reqPnL` in C++.
-    pub fn req_pnl(&self, req_id: i64, _account: &str, _model_code: &str) {
-        self.core.subscribe_pnl(req_id);
+    /// Several requests can run; an empty or unknown account gives 321, a
+    /// request id already running gives 102 (ibx#478).
+    pub fn req_pnl(&self, req_id: i64, account: &str, _model_code: &str) {
+        if let Err((code, message)) = self.core.request_pnl(req_id, account, &self.account_id) {
+            self.shared.orders.push_order_error(req_id as u64, code, message);
+        }
     }
 
     /// Cancel PnL subscription. Matches `cancelPnL` in C++.
+    /// A request id not running gives 10185 (ibx#478).
     pub fn cancel_pnl(&self, req_id: i64) {
-        self.core.unsubscribe_pnl(req_id);
+        if let Some((code, message)) = self.core.cancel_pnl_request(req_id) {
+            self.shared.orders.push_order_error(req_id as u64, code, message);
+        }
     }
 
     /// Subscribe to single-position PnL updates. Matches `reqPnLSingle` in C++.
-    pub fn req_pnl_single(&self, req_id: i64, _account: &str, _model_code: &str, con_id: i64) {
-        self.core.subscribe_pnl_single(req_id, con_id);
+    /// Same checks as `req_pnl` (ibx#478).
+    pub fn req_pnl_single(&self, req_id: i64, account: &str, _model_code: &str, con_id: i64) {
+        if let Err((code, message)) = self.core.request_pnl_single(req_id, account, &self.account_id, con_id) {
+            self.shared.orders.push_order_error(req_id as u64, code, message);
+        }
     }
 
     /// Cancel single-position PnL subscription. Matches `cancelPnLSingle` in C++.
+    /// A request id not running gives 10186 (ibx#478).
     pub fn cancel_pnl_single(&self, req_id: i64) {
-        self.core.unsubscribe_pnl_single(req_id);
+        if let Some((code, message)) = self.core.cancel_pnl_single_request(req_id) {
+            self.shared.orders.push_order_error(req_id as u64, code, message);
+        }
     }
 
     // ── Account Summary ──

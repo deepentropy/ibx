@@ -101,6 +101,22 @@ pub struct QuotePollResult {
     pub delivered: bool,
 }
 
+/// Last values of a P&L request before its first callback.
+const PNL_NOT_SENT: i64 = i64::MIN;
+
+/// The reference's account checks of a P&L request (ibx#478): 321 for an
+/// empty account or one this session is not logged in to.
+fn pnl_account_refusal(class: &str, account: &str, own_account: &str) -> Result<(), (i64, String)> {
+    let cause = if account.is_empty() {
+        "Account must not be empty"
+    } else if account != own_account {
+        "Invalid account code"
+    } else {
+        return Ok(());
+    };
+    Err((321, format!("Error validating request.-'{}' : cause - {}", class, cause)))
+}
+
 /// PnL update (account-level).
 pub struct PnlUpdate {
     pub req_id: i64,
@@ -508,9 +524,9 @@ pub struct ClientCore {
     pub snapshot_reqs: Mutex<HashSet<i64>>,
 
     // PnL subscription state
-    pub pnl_req_id: Mutex<Option<i64>>,
+    /// Running req_pnl requests, with the last values sent (ibx#478).
+    pub pnl_reqs: Mutex<HashMap<i64, [i64; 3]>>,
     pub pnl_single_reqs: Mutex<HashMap<i64, i64>>, // req_id → con_id
-    pub last_pnl: Mutex<[i64; 3]>, // [daily, unrealized, realized]
     // Per-req_id change detection for pnl_single: [pos, daily, unrealized, realized, value] scaled.
     pub last_pnl_single: Mutex<HashMap<i64, [i64; 5]>>,
 
@@ -569,9 +585,8 @@ impl ClientCore {
             con_id_to_instrument: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
             snapshot_reqs: Mutex::new(HashSet::new()),
-            pnl_req_id: Mutex::new(None),
+            pnl_reqs: Mutex::new(HashMap::new()),
             pnl_single_reqs: Mutex::new(HashMap::new()),
-            last_pnl: Mutex::new([0; 3]),
             last_pnl_single: Mutex::new(HashMap::new()),
             account_summaries: Mutex::new(Vec::new()),
             positions_sub: Mutex::new(None),
@@ -603,9 +618,8 @@ impl ClientCore {
         self.con_id_to_instrument.lock().unwrap().clear();
         self.last_quotes.lock().unwrap().clear();
         self.snapshot_reqs.lock().unwrap().clear();
-        *self.pnl_req_id.lock().unwrap() = None;
+        self.pnl_reqs.lock().unwrap().clear();
         self.pnl_single_reqs.lock().unwrap().clear();
-        *self.last_pnl.lock().unwrap() = [0; 3];
         self.last_pnl_single.lock().unwrap().clear();
         self.account_summaries.lock().unwrap().clear();
         *self.positions_sub.lock().unwrap() = None;
@@ -861,23 +875,51 @@ impl ClientCore {
     // ── PnL subscription management ──
 
     pub fn subscribe_pnl(&self, req_id: i64) {
-        *self.pnl_req_id.lock().unwrap() = Some(req_id);
+        self.pnl_reqs.lock().unwrap().entry(req_id).or_insert([PNL_NOT_SENT; 3]);
     }
 
-    pub fn unsubscribe_pnl(&self, req_id: i64) {
-        let mut pnl = self.pnl_req_id.lock().unwrap();
-        if *pnl == Some(req_id) {
-            *pnl = None;
-        }
+    pub fn unsubscribe_pnl(&self, req_id: i64) -> bool {
+        self.pnl_reqs.lock().unwrap().remove(&req_id).is_some()
     }
 
     pub fn subscribe_pnl_single(&self, req_id: i64, con_id: i64) {
         self.pnl_single_reqs.lock().unwrap().insert(req_id, con_id);
     }
 
-    pub fn unsubscribe_pnl_single(&self, req_id: i64) {
-        self.pnl_single_reqs.lock().unwrap().remove(&req_id);
+    pub fn unsubscribe_pnl_single(&self, req_id: i64) -> bool {
         self.last_pnl_single.lock().unwrap().remove(&req_id);
+        self.pnl_single_reqs.lock().unwrap().remove(&req_id).is_some()
+    }
+
+    /// Check and start a req_pnl (ibx#478), as the reference: an empty or
+    /// unknown account gives 321, a request id already running gives 102.
+    pub fn request_pnl(&self, req_id: i64, account: &str, own_account: &str) -> Result<(), (i64, String)> {
+        pnl_account_refusal("cj", account, own_account)?;
+        if self.pnl_reqs.lock().unwrap().contains_key(&req_id) {
+            return Err((102, "Duplicate ticker id".into()));
+        }
+        self.subscribe_pnl(req_id);
+        Ok(())
+    }
+
+    /// Check and start a req_pnl_single (ibx#478); same checks as req_pnl.
+    pub fn request_pnl_single(&self, req_id: i64, account: &str, own_account: &str, con_id: i64) -> Result<(), (i64, String)> {
+        pnl_account_refusal("ck", account, own_account)?;
+        if self.pnl_single_reqs.lock().unwrap().contains_key(&req_id) {
+            return Err((102, "Duplicate ticker id".into()));
+        }
+        self.subscribe_pnl_single(req_id, con_id);
+        Ok(())
+    }
+
+    /// cancel_pnl: 10185 for a request id not running (ibx#478).
+    pub fn cancel_pnl_request(&self, req_id: i64) -> Option<(i64, String)> {
+        (!self.unsubscribe_pnl(req_id)).then(|| (10185, "Failed to cancel PNL (not subscribed)".to_string()))
+    }
+
+    /// cancel_pnl_single: 10186 for a request id not running (ibx#478).
+    pub fn cancel_pnl_single_request(&self, req_id: i64) -> Option<(i64, String)> {
+        (!self.unsubscribe_pnl_single(req_id)).then(|| (10186, "Failed to cancel PNL single (not subscribed)".to_string()))
     }
 
     // ── Account summary subscription management ──
@@ -1510,8 +1552,11 @@ impl ClientCore {
     /// Formula: dailyPnL = Σ(qtyNow × priceNow - qtyMidnight × prevClose - moneyTraded)
     /// For positions opened intraday (no seed), synthesizes
     /// moneyTraded = qtyNow × avgCost so the formula collapses to unrealized P&L.
-    pub fn poll_pnl(&self, shared: &SharedState) -> Option<PnlUpdate> {
-        let req_id = (*self.pnl_req_id.lock().unwrap())?;
+    pub fn poll_pnl(&self, shared: &SharedState) -> Vec<PnlUpdate> {
+        if self.pnl_reqs.lock().unwrap().is_empty() {
+            return Vec::new();
+        }
+        let realized_since = shared.portfolio.realized_since_seed();
 
         let seeds: HashMap<i64, MidnightSeed> = shared.portfolio.midnight_seeds()
             .into_iter().map(|s| (s.con_id, s)).collect();
@@ -1521,6 +1566,7 @@ impl ClientCore {
         for pi in &positions {
             con_ids.insert(pi.con_id);
         }
+        con_ids.extend(realized_since.keys().copied());
         // No early return on an empty set: an account with no position still
         // has account-level P&L (for example realized today), delivered by the
         // fallback below (ibx#239, ibx#301).
@@ -1539,7 +1585,9 @@ impl ClientCore {
             let avg_cost = pi.as_ref().map(|p| p.avg_cost).unwrap_or(0);
             let qty_midnight = seed.map(|s| s.qty_midnight_fixed).unwrap_or(0) as f64 / QTY_SCALE_F;
 
-            total_realized += seed.map(|s| s.realized_pnl).unwrap_or(0.0);
+            // The seed's realized P&L, plus this session's fills (ibx#478).
+            total_realized += seed.map(|s| s.realized_pnl).unwrap_or(0.0)
+                + realized_since.get(&con_id).copied().unwrap_or(0.0);
 
             let Some(&iid) = con_id_map.get(&con_id) else { continue; };
             let q = shared.market.quote(iid);
@@ -1591,17 +1639,22 @@ impl ClientCore {
             (total_unrealized * PRICE_SCALE_F) as i64,
             (total_realized * PRICE_SCALE_F) as i64,
         ];
-        let mut last = self.last_pnl.lock().unwrap();
-        if pnl == *last {
-            return None;
-        }
-        *last = pnl;
-        Some(PnlUpdate {
-            req_id,
-            daily_pnl: total_daily,
-            unrealized_pnl: total_unrealized,
-            realized_pnl: total_realized,
-        })
+        // Every running request gets the values; each its own change filter.
+        let mut reqs = self.pnl_reqs.lock().unwrap();
+        let mut out: Vec<PnlUpdate> = reqs.iter_mut().filter_map(|(&req_id, last)| {
+            if *last == pnl {
+                return None;
+            }
+            *last = pnl;
+            Some(PnlUpdate {
+                req_id,
+                daily_pnl: total_daily,
+                unrealized_pnl: total_unrealized,
+                realized_pnl: total_realized,
+            })
+        }).collect();
+        out.sort_by_key(|u| u.req_id);
+        out
     }
 
     /// Poll per-position PnL and return updates whose values changed.
@@ -1617,6 +1670,7 @@ impl ClientCore {
 
         let seeds: HashMap<i64, MidnightSeed> = shared.portfolio.midnight_seeds()
             .into_iter().map(|s| (s.con_id, s)).collect();
+        let realized_since = shared.portfolio.realized_since_seed();
         let con_id_map = self.con_id_to_instrument.lock().unwrap();
         let mut last_cache = self.last_pnl_single.lock().unwrap();
         let mut results = Vec::new();
@@ -1659,18 +1713,26 @@ impl ClientCore {
             let mv_now = qty_now * price_now as f64 / PRICE_SCALE_F;
             let mv_midnight = qty_midnight * prev_close as f64 / PRICE_SCALE_F;
             let daily = mv_now - mv_midnight + money_traded;
+            // A value that cannot be computed is unset (f64::MAX), as the
+            // reference (ibx#478): no average cost, or no realized P&L on
+            // this position today (captured 25/09/2026).
             let unrealized = if avg_cost != 0 {
                 qty_now * (price_now - avg_cost) as f64 / PRICE_SCALE_F
-            } else { 0.0 };
-            let realized = seed.map(|s| s.realized_pnl).unwrap_or(0.0);
+            } else { f64::MAX };
+            let realized_fills = realized_since.get(&con_id).copied();
+            let realized = match (seed.map(|s| s.realized_pnl), realized_fills) {
+                (None, None) => f64::MAX,
+                (seed_value, fills) => seed_value.unwrap_or(0.0) + fills.unwrap_or(0.0),
+            };
             let value = mv_now;
 
+            let scaled = |v: f64| if v == f64::MAX { i64::MAX } else { (v * PRICE_SCALE_F) as i64 };
             let snapshot: [i64; 5] = [
                 qty_fx,
-                (daily * PRICE_SCALE_F) as i64,
-                (unrealized * PRICE_SCALE_F) as i64,
-                (realized * PRICE_SCALE_F) as i64,
-                (value * PRICE_SCALE_F) as i64,
+                scaled(daily),
+                scaled(unrealized),
+                scaled(realized),
+                scaled(value),
             ];
             if last_cache.get(&req_id) == Some(&snapshot) {
                 continue;
@@ -2444,7 +2506,7 @@ mod tests {
     fn poll_pnl_no_subscription_returns_none() {
         let core = ClientCore::new();
         let shared = SharedState::new();
-        assert!(core.poll_pnl(&shared).is_none());
+        assert!(core.poll_pnl(&shared).is_empty());
     }
 
     #[test]
@@ -2459,7 +2521,7 @@ mod tests {
         // 1 share bought at $735.00, now $735.07. No midnight seed (flat at midnight).
         seed_pnl_position(&core, &shared, 756733, 0, 1, 735.00, 735.07, 0.0);
 
-        let update = core.poll_pnl(&shared).expect("callback must fire");
+        let update = core.poll_pnl(&shared).pop().expect("callback must fire");
         assert_eq!(update.req_id, 42);
         assert!((update.daily_pnl - 0.07).abs() < 1e-6, "daily={}", update.daily_pnl);
         assert!((update.unrealized_pnl - 0.07).abs() < 1e-6);
@@ -2482,7 +2544,7 @@ mod tests {
             realized_pnl: 0.0,
         }]);
 
-        let update = core.poll_pnl(&shared).expect("callback must fire");
+        let update = core.poll_pnl(&shared).pop().expect("callback must fire");
         // daily = 10×735 - 10×730 - 0 = 50
         assert!((update.daily_pnl - 50.0).abs() < 1e-6, "daily={}", update.daily_pnl);
         // unrealized = 10 × (735 - 700) = 350
@@ -2508,7 +2570,7 @@ mod tests {
             realized_pnl: 30.0,
         }]);
 
-        let update = core.poll_pnl(&shared).expect("callback must fire");
+        let update = core.poll_pnl(&shared).pop().expect("callback must fire");
         // daily = 7×110 - 10×100 + 330 = 100 (70 remaining unrealized + 30 realized)
         assert!((update.daily_pnl - 100.0).abs() < 1e-6, "daily={}", update.daily_pnl);
         // unrealized = 7 × (110 - 100) = 70
@@ -2522,9 +2584,9 @@ mod tests {
         let shared = SharedState::new();
         core.subscribe_pnl(7);
         seed_pnl_position(&core, &shared, 1, 0, 1, 100.0, 101.0, 0.0);
-        assert!(core.poll_pnl(&shared).is_some());
+        assert!(!core.poll_pnl(&shared).is_empty());
         // Same inputs → no callback.
-        assert!(core.poll_pnl(&shared).is_none());
+        assert!(core.poll_pnl(&shared).is_empty());
     }
 
     #[test]
@@ -2557,7 +2619,7 @@ mod tests {
         acct.realized_pnl = (4.00 * PRICE_SCALE_F) as i64;
         shared.portfolio.set_account(&acct);
 
-        let update = core.poll_pnl(&shared).expect("callback must fire from account-level P&L");
+        let update = core.poll_pnl(&shared).pop().expect("callback must fire from account-level P&L");
         assert_eq!(update.req_id, 21);
         assert!((update.daily_pnl - 12.50).abs() < 1e-6, "daily={}", update.daily_pnl);
         assert!((update.unrealized_pnl - 35.00).abs() < 1e-6, "unreal={}", update.unrealized_pnl);
@@ -2581,7 +2643,7 @@ mod tests {
         acct.unrealized_pnl = (999.0 * PRICE_SCALE_F) as i64;
         shared.portfolio.set_account(&acct);
 
-        let update = core.poll_pnl(&shared).expect("callback must fire");
+        let update = core.poll_pnl(&shared).pop().expect("callback must fire");
         assert!((update.daily_pnl - 1.0).abs() < 1e-6, "daily={}", update.daily_pnl);
         assert!((update.unrealized_pnl - 1.0).abs() < 1e-6, "unreal={}", update.unrealized_pnl);
     }
@@ -2629,7 +2691,69 @@ mod tests {
         assert_eq!(u.req_id, 42);
         assert!((u.daily_pnl - 0.07).abs() < 1e-6, "daily={}", u.daily_pnl);
         assert!((u.unrealized_pnl - 0.07).abs() < 1e-6);
-        assert!((u.realized_pnl - 0.0).abs() < 1e-6);
+        // No realized P&L on this position today: unset, as the reference
+        // (captured 25/09/2026: realized 1.7976931348623157e+308; ibx#478).
+        assert_eq!(u.realized_pnl, f64::MAX);
+    }
+
+    // ibx#478: the realized P&L of this session's fills adds to the seed's;
+    // a new seed includes them.
+    #[test]
+    fn poll_pnl_single_adds_the_realized_pnl_of_fills() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        seed_pnl_position(&core, &shared, 756733, 0, 1, 735.00, 735.07, 0.0);
+        core.subscribe_pnl_single(42, 756733);
+        shared.portfolio.add_realized_since_seed(756733, 5.645252);
+        let u = core.poll_pnl_single(&shared).pop().unwrap();
+        assert!((u.realized_pnl - 5.645252).abs() < 1e-9);
+        shared.portfolio.set_midnight_seeds(vec![MidnightSeed {
+            con_id: 756733, qty_midnight_fixed: 0, money_traded: 0.0, realized_pnl: 5.645252,
+        }]);
+        let _ = core.poll_pnl_single(&shared);
+        assert!(shared.portfolio.realized_since_seed().is_empty(), "the new seed includes the fill");
+    }
+
+    #[test]
+    fn poll_pnl_single_unrealized_is_unset_without_avg_cost() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        seed_pnl_position(&core, &shared, 756733, 0, 1, 0.0, 735.07, 0.0);
+        core.subscribe_pnl_single(42, 756733);
+        let u = core.poll_pnl_single(&shared).pop().unwrap();
+        assert_eq!(u.unrealized_pnl, f64::MAX);
+    }
+
+    // ibx#478: several req_pnl run together; each gets the values.
+    #[test]
+    fn several_pnl_requests_each_get_the_values() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        seed_pnl_position(&core, &shared, 1, 0, 1, 100.0, 101.0, 0.0);
+        core.request_pnl(1, "DU1", "DU1").unwrap();
+        core.request_pnl(2, "DU1", "DU1").unwrap();
+        let ids: Vec<i64> = core.poll_pnl(&shared).iter().map(|u| u.req_id).collect();
+        assert_eq!(ids, [1, 2]);
+        assert!(core.poll_pnl(&shared).is_empty(), "unchanged: nothing");
+        core.request_pnl(3, "DU1", "DU1").unwrap();
+        let ids: Vec<i64> = core.poll_pnl(&shared).iter().map(|u| u.req_id).collect();
+        assert_eq!(ids, [3], "a new request gets the current values");
+    }
+
+    #[test]
+    fn pnl_request_checks() {
+        let core = ClientCore::new();
+        assert_eq!(core.request_pnl(1, "", "DU1").unwrap_err(),
+            (321, "Error validating request.-'cj' : cause - Account must not be empty".to_string()));
+        assert_eq!(core.request_pnl(1, "DU2", "DU1").unwrap_err(),
+            (321, "Error validating request.-'cj' : cause - Invalid account code".to_string()));
+        core.request_pnl(1, "DU1", "DU1").unwrap();
+        assert_eq!(core.request_pnl(1, "DU1", "DU1").unwrap_err().0, 102);
+        assert_eq!(core.request_pnl_single(5, "", "DU1", 1).unwrap_err().1,
+            "Error validating request.-'ck' : cause - Account must not be empty");
+        assert_eq!(core.cancel_pnl_request(99), Some((10185, "Failed to cancel PNL (not subscribed)".to_string())));
+        assert_eq!(core.cancel_pnl_request(1), None);
+        assert_eq!(core.cancel_pnl_single_request(98), Some((10186, "Failed to cancel PNL single (not subscribed)".to_string())));
     }
 
     #[test]
