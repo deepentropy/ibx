@@ -100,7 +100,14 @@ fn main() {
     println!("{:>6} === replace, limit price +0.10", ms());
     client.place_order(pid, &spy, &Order { lmt_price: stop - 4.9, ..price_only.clone() }).unwrap();
     pump(&client, 4);
-    for id in sent_ok.into_iter().chain([pid]) {
+    // ibx#490: the replace right after the new order, before any report,
+    // computes the offset from the stop price and the new limit price.
+    let qid = client.next_order_id();
+    println!("{:>6} === TRAIL LIMIT price only, immediate replace +0.10 ({})", ms(), qid);
+    client.place_order(qid, &spy, &price_only).unwrap();
+    client.place_order(qid, &spy, &Order { lmt_price: stop - 4.9, ..price_only.clone() }).unwrap();
+    pump(&client, 4);
+    for id in sent_ok.into_iter().chain([pid, qid]) {
         client.cancel_order(id, "").unwrap();
     }
     pump(&client, 5);
