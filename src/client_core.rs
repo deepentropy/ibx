@@ -43,49 +43,6 @@ pub const TICK_LAST_EXCHANGE: i32 = 84;
 
 // ── Shared account field definitions ──
 
-/// Account update fields: (tag_name, accessor). Used by both `update_account_value`
-/// and the subscription-gated account updates dispatch.
-pub const ACCOUNT_UPDATE_FIELDS: &[&str] = &[
-    "NetLiquidation",
-    "TotalCashValue",
-    "SettledCash",
-    "BuyingPower",
-    "EquityWithLoanValue",
-    "GrossPositionValue",
-    "InitMarginReq",
-    "MaintMarginReq",
-    "AvailableFunds",
-    "ExcessLiquidity",
-    "Cushion",
-    "SMA",
-    "UnrealizedPnL",
-    "RealizedPnL",
-    "AccruedCash",
-    "DailyPnL",
-];
-
-/// Extract the 16 price-scaled fields from AccountState in ACCOUNT_UPDATE_FIELDS order.
-#[inline]
-pub fn account_field_values(acct: &AccountState) -> [i64; 16] {
-    [
-        acct.net_liquidation,
-        acct.total_cash_value,
-        acct.settled_cash,
-        acct.buying_power,
-        acct.equity_with_loan,
-        acct.gross_position_value,
-        acct.init_margin_req,
-        acct.maint_margin_req,
-        acct.available_funds,
-        acct.excess_liquidity,
-        acct.cushion,
-        acct.sma,
-        acct.unrealized_pnl,
-        acct.realized_pnl,
-        acct.accrued_cash,
-        acct.daily_pnl,
-    ]
-}
 
 /// Account summary tags (numeric). Superset of update fields + extras.
 pub const ACCOUNT_SUMMARY_TAGS: &[&str] = &[
@@ -211,11 +168,44 @@ pub struct AccountFieldUpdate {
     pub currency: String,
 }
 
-/// Batch of account update results.
+/// Batch of account update results (ibx#475).
 pub struct AccountUpdateBatch {
+    /// Account values to send: every value for the first image, then only
+    /// the ones that changed.
     pub fields: Vec<AccountFieldUpdate>,
-    /// Whether any field was delivered (triggers account_download_end).
-    pub delivered: bool,
+    /// The latest row time as `HH:mm`, for update_account_time.
+    pub time: String,
+    /// This batch is the first image: account_download_end follows it,
+    /// once per subscription.
+    pub download_end: bool,
+}
+
+/// This client's account stream (ibx#475).
+#[derive(Default)]
+pub struct AccountStream {
+    /// Subscribed, and the first image not sent yet.
+    image_pending: bool,
+    /// Last value sent per (key, currency).
+    sent: HashMap<(String, String), String>,
+    /// Row store generation last read.
+    generation: u64,
+}
+
+/// The reference's answer to an unsubscribe from account updates (ibx#475).
+pub const ACCOUNT_UNSUBSCRIBED: (i64, &str) = (2100, "API client has been unsubscribed from account data.");
+
+/// A row time as update_account_time carries it: `HH:mm`, in US/Eastern
+/// like the execution times (UTC when the zone database has none). Empty
+/// before any row time.
+pub fn format_account_time(unix_secs: i64) -> String {
+    if unix_secs <= 0 {
+        return String::new();
+    }
+    let Ok(ts) = jiff::Timestamp::from_second(unix_secs) else {
+        return String::new();
+    };
+    let tz = jiff::tz::TimeZone::get("US/Eastern").unwrap_or(jiff::tz::TimeZone::UTC);
+    ts.to_zoned(tz).strftime("%H:%M").to_string()
 }
 
 /// Prepared account summary response.
@@ -435,7 +425,7 @@ pub struct ClientCore {
 
     // Account updates subscription
     pub account_updates_subscribed: AtomicBool,
-    pub last_account: Mutex<Option<AccountState>>,
+    pub account_stream: Mutex<AccountStream>,
     pub last_portfolio: Mutex<Option<Vec<PositionInfo>>>,
 
     // Execution replay store
@@ -485,7 +475,7 @@ impl ClientCore {
             account_summary_req: Mutex::new(None),
             bulletin_subscribed: AtomicBool::new(false),
             account_updates_subscribed: AtomicBool::new(false),
-            last_account: Mutex::new(None),
+            account_stream: Mutex::new(AccountStream::default()),
             last_portfolio: Mutex::new(None),
             executions: Mutex::new(Vec::new()),
             client_id: AtomicI64::new(0),
@@ -515,7 +505,7 @@ impl ClientCore {
         *self.account_summary_req.lock().unwrap() = None;
         self.bulletin_subscribed.store(false, Ordering::Relaxed);
         self.account_updates_subscribed.store(false, Ordering::Relaxed);
-        *self.last_account.lock().unwrap() = None;
+        *self.account_stream.lock().unwrap() = AccountStream::default();
         *self.last_portfolio.lock().unwrap() = None;
         self.executions.lock().unwrap().clear();
         self.pending_commissions.lock().unwrap().clear();
@@ -801,12 +791,22 @@ impl ClientCore {
 
     // ── Account updates subscription management ──
 
-    pub fn subscribe_account_updates(&self, subscribe: bool) {
-        self.account_updates_subscribed.store(subscribe, Ordering::Release);
-        if !subscribe {
-            *self.last_account.lock().unwrap() = None;
-            *self.last_portfolio.lock().unwrap() = None;
+    /// Subscribe to or unsubscribe from account updates. As the reference
+    /// (ibx#475): a subscribe while already subscribed changes nothing (no
+    /// second image, no second end); an unsubscribe of a subscription
+    /// answers error 2100, which the caller reports with id -1.
+    pub fn subscribe_account_updates(&self, subscribe: bool) -> Option<(i64, String)> {
+        let was = self.account_updates_subscribed.swap(subscribe, Ordering::AcqRel);
+        if subscribe {
+            if !was {
+                *self.account_stream.lock().unwrap() = AccountStream { image_pending: true, ..Default::default() };
+                *self.last_portfolio.lock().unwrap() = None;
+            }
+            return None;
         }
+        *self.account_stream.lock().unwrap() = AccountStream::default();
+        *self.last_portfolio.lock().unwrap() = None;
+        was.then(|| (ACCOUNT_UNSUBSCRIBED.0, ACCOUNT_UNSUBSCRIBED.1.to_string()))
     }
 
     // ── Market data type tracking ──
@@ -1430,66 +1430,47 @@ impl ClientCore {
     }
 
     /// Prepare account update fields (subscription-gated, change-detected).
+    /// Account values to send (ibx#475). The first batch after a subscribe
+    /// is the full image, once the server's image is complete: every value
+    /// the server sent, with its text and currency, then the end. Later
+    /// batches carry the values that changed, and no end. `None` while not
+    /// subscribed or before the image is complete.
     pub fn prepare_account_updates(&self, shared: &SharedState) -> Option<AccountUpdateBatch> {
         if !self.account_updates_subscribed.load(Ordering::Acquire) {
             return None;
         }
-        if !shared.portfolio.account_data_received() {
+        let (generation, complete, time_secs) = shared.portfolio.account_rows_generation();
+        let mut stream = self.account_stream.lock().unwrap();
+        if stream.image_pending && !complete {
             return None;
         }
-
-        let acct = shared.portfolio.account();
-        let mut prev_guard = self.last_account.lock().unwrap();
-        let is_first = prev_guard.is_none();
-        let prev = prev_guard.unwrap_or_default();
-
-        let cur_vals = account_field_values(&acct);
-        let prev_vals = account_field_values(&prev);
-
+        let first = stream.image_pending;
         let mut fields = Vec::new();
-        let mut delivered = false;
-
-        for (i, &key) in ACCOUNT_UPDATE_FIELDS.iter().enumerate() {
-            if is_first || cur_vals[i] != prev_vals[i] {
-                fields.push(AccountFieldUpdate {
-                    key: key.to_string(),
-                    value: format!("{:.2}", cur_vals[i] as f64 / PRICE_SCALE_F),
-                    currency: "USD".to_string(),
-                });
-                delivered = true;
+        if first || generation != stream.generation {
+            let store = shared.portfolio.account_rows();
+            for row in &store.rows {
+                let id = (row.key.clone(), row.currency.clone());
+                if stream.sent.get(&id) != Some(&row.value) {
+                    stream.sent.insert(id, row.value.clone());
+                    fields.push(AccountFieldUpdate {
+                        key: row.key.clone(),
+                        value: row.value.clone(),
+                        currency: row.currency.clone(),
+                    });
+                }
             }
+            stream.generation = store.generation;
         }
-
-        // Integer fields
-        if is_first || acct.day_trades_remaining != prev.day_trades_remaining {
-            fields.push(AccountFieldUpdate {
-                key: "DayTradesRemaining".to_string(),
-                value: acct.day_trades_remaining.to_string(),
-                currency: String::new(),
-            });
-            delivered = true;
-        }
-        if is_first || acct.leverage != prev.leverage {
-            fields.push(AccountFieldUpdate {
-                key: "Leverage-S".to_string(),
-                value: format!("{:.4}", acct.leverage as f64 / PRICE_SCALE_F),
-                currency: String::new(),
-            });
-            delivered = true;
-        }
-
-        *prev_guard = Some(acct);
-
-        Some(AccountUpdateBatch { fields, delivered })
+        stream.image_pending = false;
+        Some(AccountUpdateBatch { fields, time: format_account_time(time_secs), download_end: first })
     }
 
     /// Prepare portfolio updates (position entries) for account streaming.
     /// Returns changed/new position infos when account updates are subscribed.
     pub fn prepare_portfolio_updates(&self, shared: &SharedState) -> Vec<PortfolioUpdateEntry> {
+        // Called after `prepare_account_updates`, so only once the account
+        // image is complete (ibx#475).
         if !self.account_updates_subscribed.load(Ordering::Acquire) {
-            return Vec::new();
-        }
-        if !shared.portfolio.account_data_received() {
             return Vec::new();
         }
 

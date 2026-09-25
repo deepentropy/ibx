@@ -1864,7 +1864,11 @@ fn process_msgs_delivers_update_portfolio() {
         ..Default::default()
     });
     shared.portfolio.set_position_marks(756733, 751 * PRICE_SCALE, 13518 * PRICE_SCALE, 504 * PRICE_SCALE, 0);
-    shared.portfolio.set_account(&Default::default());
+    // The account image, complete (ibx#475).
+    shared.portfolio.update_account_rows(|s| {
+        s.set("NetLiquidation", "USD", "1");
+        s.image_complete = true;
+    });
 
     let mut w = Rec::default();
     client.process_msgs(&mut w);
@@ -3414,4 +3418,124 @@ fn a_report_of_an_unknown_order_gives_order_status_only() {
     let mut w = StatusRecorder::default();
     client.process_msgs(&mut w);
     assert_eq!(w.events, ["order_status:63:Submitted:0:0:0"]);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Account updates (ibx#475)
+// ═══════════════════════════════════════════════════════════════════
+
+#[derive(Default)]
+struct AccountRec { events: Vec<String> }
+impl Wrapper for AccountRec {
+    fn update_account_value(&mut self, key: &str, value: &str, currency: &str, _a: &str) {
+        self.events.push(format!("value:{key}:{value}:{currency}"));
+    }
+    fn update_portfolio(&mut self, c: &Contract, position: f64, _mp: f64, _mv: f64, _ac: f64, _u: f64, _r: f64, _a: &str) {
+        self.events.push(format!("portfolio:{}:{}:{}", c.con_id, position, c.primary_exchange));
+    }
+    fn update_account_time(&mut self, time: &str) {
+        self.events.push(format!("time:{time}"));
+    }
+    fn account_download_end(&mut self, _a: &str) {
+        self.events.push("end".into());
+    }
+    fn error(&mut self, id: i64, code: i64, msg: &str, _a: &str) {
+        self.events.push(format!("error:{id}:{code}:{msg}"));
+    }
+}
+
+/// Rows as the server sent them at 12:16:29 UTC (08:16 US/Eastern), then
+/// the end marker when `complete`.
+fn seed_account_rows(shared: &SharedState, complete: bool) {
+    shared.portfolio.update_account_rows(|store| {
+        store.set("AccountType", "", "INDIVIDUAL");
+        store.set("NetLiquidation", "USD", "953633.06");
+        store.set("CashBalance", "BASE", "899133.4993");
+        store.time_secs = 1790338589;
+        store.image_complete = complete;
+    });
+}
+
+// The first image: every value as sent, the portfolio rows each followed by
+// the time, the time, then the end, once.
+#[test]
+fn account_updates_send_the_image_then_the_end_once() {
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.set_position_info(crate::types::PositionInfo {
+        con_id: 756733, position_fixed: 18 * crate::types::QTY_SCALE, symbol: "SPY".into(),
+        sec_type: "STK".into(), currency: "USD".into(), ..Default::default()
+    });
+    seed_account_rows(&shared, false);
+    client.req_account_updates(true, "");
+    let mut w = AccountRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "no image before the server's end marker: {:?}", w.events);
+
+    shared.portfolio.update_account_rows(|s| s.image_complete = true);
+    let mut w = AccountRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, [
+        "value:AccountType:INDIVIDUAL:",
+        "value:NetLiquidation:953633.06:USD",
+        "value:CashBalance:899133.4993:BASE",
+        "portfolio:756733:18:",
+        "time:08:16",
+        "time:08:16",
+        "end",
+    ]);
+
+    // A periodic batch: the changed value only, the time, no end.
+    shared.portfolio.update_account_rows(|s| {
+        s.set("NetLiquidation", "USD", "953642.02");
+        s.set("CashBalance", "BASE", "899133.4993");
+        s.time_secs = 1790338657;
+    });
+    let mut w = AccountRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["value:NetLiquidation:953642.02:USD", "time:08:17"]);
+
+    // Nothing changed: nothing sent.
+    let mut w = AccountRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+}
+
+// A second subscribe while subscribed sends nothing: no image, no end.
+#[test]
+fn a_second_subscribe_sends_nothing() {
+    let (client, _rx, shared) = test_client();
+    seed_account_rows(&shared, true);
+    client.req_account_updates(true, "");
+    client.process_msgs(&mut AccountRec::default());
+    client.req_account_updates(true, "");
+    let mut w = AccountRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+}
+
+#[test]
+fn an_unsubscribe_answers_2100_and_a_new_subscribe_gets_the_image_again() {
+    let (client, _rx, shared) = test_client();
+    seed_account_rows(&shared, true);
+    client.req_account_updates(true, "");
+    client.process_msgs(&mut AccountRec::default());
+    client.req_account_updates(false, "");
+    let mut w = AccountRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["error:-1:2100:API client has been unsubscribed from account data."]);
+
+    client.req_account_updates(true, "");
+    let mut w = AccountRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.last().map(String::as_str), Some("end"));
+    assert_eq!(w.events.iter().filter(|e| e.starts_with("value:")).count(), 3);
+}
+
+#[test]
+fn an_unsubscribe_when_not_subscribed_sends_nothing() {
+    let (client, _rx, _shared) = test_client();
+    client.req_account_updates(false, "");
+    let mut w = AccountRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
 }

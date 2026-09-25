@@ -425,27 +425,33 @@ impl EClient {
             wrapper.pnl_single(update.req_id, update.pos, update.daily_pnl, update.unrealized_pnl, update.realized_pnl, update.value);
         }
 
-        // Account updates → update_account_value + account_download_end (via ClientCore)
+        // Account updates (ibx#475): values, portfolio rows each followed by
+        // the account time, the time after the batch, and for the first image
+        // the end, once per subscription.
         if let Some(batch) = self.core.prepare_account_updates(&self.shared) {
             for field in &batch.fields {
                 wrapper.update_account_value(&field.key, &field.value, &field.currency, &self.account_id);
             }
-            // Portfolio rows → update_portfolio, as the Python client does;
-            // the Rust client never delivered them.
-            for entry in self.core.prepare_portfolio_updates(&self.shared) {
+            let portfolio = self.core.prepare_portfolio_updates(&self.shared);
+            for entry in &portfolio {
                 let ac = self.core.position_contract(entry.con_id, &self.shared);
                 let c = Contract {
                     con_id: ac.con_id, symbol: ac.symbol, sec_type: ac.sec_type,
-                    exchange: ac.exchange, currency: ac.currency, multiplier: ac.multiplier,
+                    exchange: ac.exchange, primary_exchange: ac.primary_exchange,
+                    currency: ac.currency, local_symbol: ac.local_symbol,
+                    trading_class: ac.trading_class, multiplier: ac.multiplier,
                     ..Default::default()
                 };
                 wrapper.update_portfolio(
                     &c, entry.position, entry.market_price, entry.market_value,
                     entry.avg_cost, entry.unrealized_pnl, entry.realized_pnl, &self.account_id,
                 );
+                wrapper.update_account_time(&batch.time);
             }
-            if batch.delivered {
-                wrapper.update_account_time("");
+            if !batch.fields.is_empty() || !portfolio.is_empty() {
+                wrapper.update_account_time(&batch.time);
+            }
+            if batch.download_end {
                 wrapper.account_download_end(&self.account_id);
             }
         }

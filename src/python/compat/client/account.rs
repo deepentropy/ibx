@@ -115,7 +115,10 @@ impl EClient {
     #[pyo3(signature = (subscribe, _acct_code=""))]
     fn req_account_updates(&self, subscribe: bool, _acct_code: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.core.subscribe_account_updates(subscribe);
+        // An unsubscribe answers error 2100 with id -1 (ibx#475).
+        if let Some((code, message)) = self.core.subscribe_account_updates(subscribe) {
+            self.shared_state()?.orders.push_order_error(-1i64 as u64, code, message);
+        }
         Ok(())
     }
 

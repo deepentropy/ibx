@@ -84,7 +84,10 @@ impl EClient {
 
     /// Subscribe to account updates. Matches `reqAccountUpdates` in C++.
     pub fn req_account_updates(&self, subscribe: bool, _acct_code: &str) {
-        self.core.subscribe_account_updates(subscribe);
+        // An unsubscribe answers error 2100 with id -1 (ibx#475).
+        if let Some((code, message)) = self.core.subscribe_account_updates(subscribe) {
+            self.shared.orders.push_order_error(-1i64 as u64, code, message);
+        }
     }
 
     /// Cancel positions subscription. Matches `cancelPositions` in C++.

@@ -694,8 +694,51 @@ impl ReferenceState {
 }
 
 /// Account snapshot, per-position info, and atomic instrument positions.
+/// One account value as the server sends it (ibx#475): the key, the value
+/// text unchanged, and the row currency (empty when the row has none).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountRow {
+    pub key: String,
+    pub value: String,
+    pub currency: String,
+}
+
+/// Account values of the account stream, by key and currency, in the order
+/// first seen (ibx#475).
+#[derive(Clone, Debug, Default)]
+pub struct AccountRows {
+    pub rows: Vec<AccountRow>,
+    /// Bumped on every change, so a reader can skip an unchanged store.
+    pub generation: u64,
+    /// The first full image ended (the stream's end marker came).
+    pub image_complete: bool,
+    /// Latest row time, Unix seconds.
+    pub time_secs: i64,
+}
+
+impl AccountRows {
+    /// Set a row; returns true when the value is new or changed.
+    pub fn set(&mut self, key: &str, currency: &str, value: &str) -> bool {
+        match self.rows.iter_mut().find(|r| r.key == key && r.currency == currency) {
+            Some(r) if r.value == value => false,
+            Some(r) => {
+                r.value = value.to_string();
+                self.generation += 1;
+                true
+            }
+            None => {
+                self.rows.push(AccountRow { key: key.into(), value: value.into(), currency: currency.into() });
+                self.generation += 1;
+                true
+            }
+        }
+    }
+}
+
 pub struct PortfolioState {
     account: Mutex<AccountState>,
+    /// Account values as the server sends them (ibx#475).
+    account_rows: Mutex<AccountRows>,
     /// True once the first gateway account message ("UT"/"UM"/"RL") has been received.
     account_data_received: AtomicBool,
     /// True once the CCP init burst has been fully processed.
@@ -711,6 +754,7 @@ impl PortfolioState {
     fn new() -> Self {
         Self {
             account: Mutex::new(AccountState::default()),
+            account_rows: Mutex::new(AccountRows::default()),
             account_data_received: AtomicBool::new(false),
             account_download_complete: AtomicBool::new(false),
             position_infos: Mutex::new(HashMap::new()),
@@ -722,6 +766,23 @@ impl PortfolioState {
     /// Read account state snapshot.
     pub fn account(&self) -> AccountState {
         *self.account.lock().unwrap()
+    }
+
+    /// Generation of the account rows (changes whenever a row does),
+    /// whether the first image is complete, and the latest row time.
+    pub fn account_rows_generation(&self) -> (u64, bool, i64) {
+        let rows = self.account_rows.lock().unwrap();
+        (rows.generation, rows.image_complete, rows.time_secs)
+    }
+
+    /// Copy of the account rows.
+    pub fn account_rows(&self) -> AccountRows {
+        self.account_rows.lock().unwrap().clone()
+    }
+
+    #[doc(hidden)]
+    pub fn update_account_rows(&self, f: impl FnOnce(&mut AccountRows)) {
+        f(&mut self.account_rows.lock().unwrap());
     }
 
     /// Get all position infos (for reqPositions).

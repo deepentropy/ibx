@@ -554,6 +554,7 @@ impl CcpState {
                 }
             }
             "UT" | "UM" | "RL" => handle_account_update(msg, context, shared),
+            "EB" => handle_account_end(msg, shared),
             "UP" => handle_portfolio_message(msg, context, shared, event_tx),
             "d" => {
                 let response_req_id = crate::control::contracts::secdef_response_req_id(msg);
@@ -1925,6 +1926,134 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
         }
     }
     shared.portfolio.set_account(context.account());
+    // The account stream's values as sent, for update_account_value (ibx#475).
+    if is_account_stream(text) {
+        let (rows, time_secs) = parse_account_rows(text);
+        shared.portfolio.update_account_rows(|store| {
+            for (key, currency, value) in &rows {
+                store.set(key, currency, value);
+            }
+            if let Some(t) = time_secs {
+                store.time_secs = store.time_secs.max(t);
+            }
+        });
+    }
+}
+
+/// The account stream's frames carry `6529=AR.{n}`; other subscriptions
+/// (account summary, `SR.{n}`) have their own id.
+fn is_account_stream(text: &str) -> bool {
+    text.split('\x01').any(|p| p.starts_with("6529=AR."))
+}
+
+/// End marker of the account stream (`35=EB|6529=AR.{n}`): the first full
+/// image is in (ibx#475). The periodic batches carry none (captured
+/// 25/09/2026).
+fn handle_account_end(msg: &[u8], shared: &SharedState) {
+    let Ok(text) = std::str::from_utf8(msg) else { return };
+    if is_account_stream(text) {
+        shared.portfolio.update_account_rows(|store| {
+            if !store.image_complete {
+                store.image_complete = true;
+                store.generation += 1;
+            }
+        });
+    }
+}
+
+/// Ledger tags of a `35=RL` row and the account keys the reference gives
+/// them (ibx#475). The row's currency (8002) is the key's currency.
+const LEDGER_KEYS: &[(&str, &str)] = &[
+    ("9806", "CashBalance"),
+    ("9818", "TotalCashBalance"),
+    ("6242", "AccruedCash"),
+    ("9807", "StockMarketValue"),
+    ("9808", "OptionMarketValue"),
+    ("9809", "FutureOptionValue"),
+    ("9810", "FuturesPNL"),
+    ("9819", "NetLiquidationByCurrency"),
+    ("6100", "UnrealizedPnL"),
+    ("6099", "RealizedPnL"),
+    ("9820", "ExchangeRate"),
+];
+
+/// Rows of an account frame as (key, currency, value text), and the latest
+/// row time (6066), as the reference reads them (ibx#475):
+/// - `35=UT` / `35=UM`: each `8001` key with its `8004` value, currency
+///   from tag 15 (UT rows have none). A row with no value is skipped. A
+///   `PNL` row ends the frame. `AddAccountCode` is skipped, and
+///   `AccountCode` is kept only after an `AccountType` row of the same frame
+///   (the periodic frames carry an empty one).
+/// - `35=RL`: each `LedgerList` row gives `Currency` and the ledger keys,
+///   with the row's currency (8002).
+pub(crate) fn parse_account_rows(text: &str) -> (Vec<(String, String, String)>, Option<i64>) {
+    let mut rows = Vec::new();
+    let mut time: Option<i64> = None;
+    let ledger = text.split('\x01').any(|p| p == "35=RL");
+    // Current row: key, currency, value, ledger values.
+    let mut key: Option<&str> = None;
+    let mut currency = "";
+    let mut value: Option<&str> = None;
+    let mut ledger_values: Vec<(&str, &str)> = Vec::new();
+    let mut seen_account_type = false;
+
+    let flush = |key: Option<&str>, currency: &str, value: Option<&str>,
+                     ledger_values: &mut Vec<(&str, &str)>, rows: &mut Vec<(String, String, String)>,
+                     seen_account_type: &mut bool| -> bool {
+        let Some(k) = key else { return true };
+        if ledger {
+            if k == "LedgerList" && !currency.is_empty() {
+                rows.push(("Currency".into(), currency.into(), currency.into()));
+                for (tag, name) in LEDGER_KEYS {
+                    if let Some((_, v)) = ledger_values.iter().find(|(t, _)| t == tag) {
+                        rows.push((name.to_string(), currency.into(), v.to_string()));
+                    }
+                }
+            }
+            ledger_values.clear();
+            return true;
+        }
+        match k {
+            "PNL" => return false,
+            "AddAccountCode" => {}
+            "AccountCode" if !*seen_account_type => {}
+            _ => {
+                if k == "AccountType" {
+                    *seen_account_type = true;
+                }
+                if let Some(v) = value {
+                    rows.push((k.into(), currency.into(), v.into()));
+                }
+            }
+        }
+        true
+    };
+
+    for part in text.split('\x01') {
+        let Some((tag, val)) = part.split_once('=') else { continue };
+        match tag {
+            "8001" => {
+                if !flush(key, currency, value, &mut ledger_values, &mut rows, &mut seen_account_type) {
+                    return (rows, time);
+                }
+                key = Some(val);
+                currency = "";
+                value = None;
+            }
+            "8002" if ledger => currency = val,
+            "15" if !ledger => currency = val,
+            "8004" => value = Some(val),
+            "6066" => {
+                if let Ok(t) = val.parse::<i64>() {
+                    time = Some(time.map_or(t, |p: i64| p.max(t)));
+                }
+            }
+            _ if ledger && key.is_some() => ledger_values.push((tag, val)),
+            _ => {}
+        }
+    }
+    flush(key, currency, value, &mut ledger_values, &mut rows, &mut seen_account_type);
+    (rows, time)
 }
 
 /// Handle 6040=143 P&L midnight seed response.
@@ -3184,5 +3313,82 @@ mod tests {
         }
         assert!(context.pending_orders.drain().any(|r| matches!(r,
             crate::types::OrderRequest::CancelAll { instrument } if instrument == order.instrument)));
+    }
+
+    // ibx#475: account frames captured on paper 25/09/2026 (account masked,
+    // rows shortened), '|' for SOH.
+    const UT_IMAGE: &str = "8=O|9=000000|35=UT|6529=AR.1|8001=AccountType|6066=1790323947|8004=INDIVIDUAL|6288=0|8001=AccountCode|6066=1790323947|8004=DU0000001|6288=0|8001=AccountReady|6066=1790323947|8004=true|6288=0|8001=DepositOnCreditHold|6066=1790323947|6288=0|8001=Leverage-S|6066=1790323947|8004=0.07|6288=0|8001=SettledCashByDate|8002=BASE|6066=1790323947|8004=20260925:932758.72933742;20260928:899133.49933742|6288=0|";
+    const UM_IMAGE: &str = "8=O|9=000000|35=UM|6529=AR.1|8001=AccruedCash|15=USD|6066=1790323947|6288=0|8004=1893.50|8001=FullMaintMarginReq|15=USD|6066=1790323947|6288=0|8004=11647.75|8001=MaintMarginReq|15=USD|6066=1790323947|6288=0|8004=11647.75|8001=NetLiquidation|15=USD|6066=1790323947|6288=0|8004=953633.06|";
+    const RL_IMAGE: &str = "8=O|9=000000|35=RL|6529=AR.1|8001=LedgerList|8002=BASE|15=BASE|9806=899133.4993|9819=953633.0601|9818=899133.4993|6711=0.0000|9807=52606.06|9808=0.00|9809=0.00|8007=0.00|9810=0.00|6099=26.57|6100=-791.71|9820=1|6242=1893.5|6066=1790338477|6288=0|8001=LedgerList|8002=USD|15=USD|9806=899133.4993|9819=953633.0601|9818=899133.4993|9807=52606.06|9808=0.00|9809=0.00|9810=0.00|6099=26.57|6100=-791.71|9820=1|6242=1893.5|6066=1790338477|6288=0|";
+    const UT_PERIODIC: &str = "8=O|9=000105|35=UT|6529=AR.1|8001=AccountCode|6066=1790338657|8004=|8001=Cushion|6066=1790338657|8004=0.987782|6288=0|";
+
+    fn soh(s: &str) -> String { s.replace('|', "\x01") }
+
+    fn rows_of(frame: &str) -> Vec<(String, String, String)> {
+        parse_account_rows(&soh(frame)).0
+    }
+
+    fn row(k: &str, c: &str, v: &str) -> (String, String, String) {
+        (k.into(), c.into(), v.into())
+    }
+
+    #[test]
+    fn account_rows_keep_the_key_the_text_and_the_currency() {
+        let ut = rows_of(UT_IMAGE);
+        assert_eq!(ut, [
+            row("AccountType", "", "INDIVIDUAL"),
+            row("AccountCode", "", "DU0000001"),
+            row("AccountReady", "", "true"),
+            row("Leverage-S", "", "0.07"),
+            row("SettledCashByDate", "", "20260925:932758.72933742;20260928:899133.49933742"),
+        ], "a row with no value is skipped; UT rows have no currency");
+        let um = rows_of(UM_IMAGE);
+        assert_eq!(um, [
+            row("AccruedCash", "USD", "1893.50"),
+            row("FullMaintMarginReq", "USD", "11647.75"),
+            row("MaintMarginReq", "USD", "11647.75"),
+            row("NetLiquidation", "USD", "953633.06"),
+        ], "each key as sent, the Full keys too");
+        assert_eq!(parse_account_rows(&soh(UM_IMAGE)).1, Some(1790323947));
+    }
+
+    #[test]
+    fn ledger_rows_give_the_keys_per_currency() {
+        let rl = rows_of(RL_IMAGE);
+        assert!(rl.contains(&row("Currency", "BASE", "BASE")));
+        assert!(rl.contains(&row("CashBalance", "BASE", "899133.4993")));
+        assert!(rl.contains(&row("NetLiquidationByCurrency", "USD", "953633.0601")));
+        assert!(rl.contains(&row("RealizedPnL", "USD", "26.57")));
+        assert!(rl.contains(&row("UnrealizedPnL", "BASE", "-791.71")));
+        assert!(rl.contains(&row("ExchangeRate", "USD", "1")));
+        assert!(!rl.iter().any(|(k, _, _)| k == "LedgerList"));
+        assert_eq!(rl.iter().filter(|(_, c, _)| c == "USD").count(), 12);
+    }
+
+    // The periodic frame's empty AccountCode is skipped: no AccountType
+    // before it in the frame.
+    #[test]
+    fn a_periodic_frame_skips_the_empty_account_code() {
+        assert_eq!(rows_of(UT_PERIODIC), [row("Cushion", "", "0.987782")]);
+    }
+
+    #[test]
+    fn a_pnl_row_ends_the_frame() {
+        let frame = "8=O|35=UM|6529=AR.1|8001=NetLiquidation|15=USD|8004=1|8001=PNL|15=USD|8004=2|8001=Cushion|8004=3|";
+        assert_eq!(rows_of(frame), [row("NetLiquidation", "USD", "1")]);
+    }
+
+    #[test]
+    fn the_end_marker_completes_the_image_of_the_account_stream_only() {
+        let (mut context, shared) = (Context::new(), SharedState::new());
+        handle_account_update(soh(UM_IMAGE).as_bytes(), &mut context, &shared);
+        assert_eq!(shared.portfolio.account_rows_generation().1, false);
+        handle_account_end(soh("8=O|9=000016|35=EB|6529=SR.3|").as_bytes(), &shared);
+        assert_eq!(shared.portfolio.account_rows_generation().1, false, "another subscription's end");
+        handle_account_end(soh("8=O|9=000016|35=EB|6529=AR.1|").as_bytes(), &shared);
+        let (_, complete, time) = shared.portfolio.account_rows_generation();
+        assert!(complete);
+        assert_eq!(time, 1790323947);
+        assert_eq!(shared.portfolio.account_rows().rows.len(), 4);
     }
 }

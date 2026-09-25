@@ -622,14 +622,15 @@ impl EClient {
             ));
         }
 
-        // Account updates (via ClientCore)
+        // Account updates (ibx#475): values, portfolio rows each followed by
+        // the account time, the time after the batch, and for the first image
+        // the end, once per subscription.
         if let Some(batch) = self.core.prepare_account_updates(shared) {
             let account_name = self.account();
             for field in &batch.fields {
                 call_wrapper!(self.wrapper, py, "update_account_value", (field.key.as_str(), field.value.as_str(), field.currency.as_str(), account_name.as_str()));
             }
 
-            // Portfolio updates (position entries)
             let portfolio = self.core.prepare_portfolio_updates(shared);
             for entry in &portfolio {
                 let ac = self.core.position_contract(entry.con_id, shared);
@@ -638,16 +639,22 @@ impl EClient {
                 c.symbol = ac.symbol;
                 c.sec_type = ac.sec_type;
                 c.exchange = ac.exchange;
+                c.primary_exchange = ac.primary_exchange;
                 c.currency = ac.currency;
+                c.local_symbol = ac.local_symbol;
+                c.trading_class = ac.trading_class;
                 c.multiplier = ac.multiplier;
                 let c_py = pyo3::Py::new(py, c).unwrap().into_any();
                 call_wrapper!(self.wrapper, py, "update_portfolio",
                     (&c_py, entry.position, entry.market_price, entry.market_value,
                      entry.avg_cost, entry.unrealized_pnl, entry.realized_pnl, account_name.as_str()));
+                call_wrapper!(self.wrapper, py, "update_account_time", (batch.time.as_str(),));
             }
 
-            if batch.delivered {
-                call_wrapper!(self.wrapper, py, "update_account_time", ("",));
+            if !batch.fields.is_empty() || !portfolio.is_empty() {
+                call_wrapper!(self.wrapper, py, "update_account_time", (batch.time.as_str(),));
+            }
+            if batch.download_end {
                 call_wrapper!(self.wrapper, py, "account_download_end", (account_name.as_str(),));
             }
         }
