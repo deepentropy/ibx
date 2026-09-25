@@ -2213,7 +2213,34 @@ impl ClientCore {
     /// Every order the reference refuses before sending anything, with its
     /// error code and text. Nothing is sent for such an order.
     pub fn refusal_before_sending(order: &ApiOrder) -> Option<(i64, String)> {
-        Self::fractional_quantity_refusal(order).or_else(|| Self::algo_param_refusal(order))
+        Self::fractional_quantity_refusal(order)
+            .or_else(|| Self::algo_param_refusal(order))
+            .or_else(|| Self::order_rule_refusal(order))
+    }
+
+    /// Order rules the reference checks before sending, answered as error
+    /// 321 with the rule text (ibx#468). The text after "cause - " is the
+    /// rule's; for the TRAIL LIMIT rule only its end is known.
+    fn order_rule_refusal(order: &ApiOrder) -> Option<(i64, String)> {
+        let refuse = |cause: &str| Some((321, format!("Error validating request.-'bH' : cause - {}", cause)));
+        let order_type = order.order_type.to_uppercase();
+        // Midprice outside regular hours: refused whatever the time of day
+        // (the flag alone, reference refusal 10210).
+        if matches!(order_type.as_str(), "MIDPRICE" | "MIDPX") && order.outside_rth {
+            return refuse("Midprice orders are not supported outside of regular trading hours.");
+        }
+        // TRAIL LIMIT: exactly one of lmtPrice and lmtPriceOffset (also on a
+        // replace: sending back the computed lmtPrice with the offset was
+        // refused, captured 23/09/2026). lmtPrice is unset at 0 or MAX,
+        // lmtPriceOffset at MAX.
+        if order_type == "TRAIL LIMIT" {
+            let price_set = order.lmt_price != 0.0 && order.lmt_price != f64::MAX;
+            let offset_set = order.lmt_price_offset != f64::MAX;
+            if price_set == offset_set {
+                return refuse("You must specify one value: limit price or limit price offset value.");
+            }
+        }
+        None
     }
 
     /// Algo parameter values the reference refuses before sending
@@ -3116,6 +3143,27 @@ mod tests {
         let sent: Vec<ControlCommand> = rx.try_iter().collect();
         assert_eq!(sent.len(), 1);
         assert!(matches!(&sent[0], ControlCommand::SetInstrumentCurrency { con_id: 1, currency } if currency == "EUR"));
+    }
+
+    // ibx#468: two local refusals of the reference.
+    #[test]
+    fn midprice_outside_rth_and_trail_limit_fields_are_refused() {
+        let midprice = ApiOrder { order_type: "MIDPRICE".into(), outside_rth: true, ..lmt(100.0) };
+        let (code, text) = ClientCore::refusal_before_sending(&midprice).expect("refused");
+        assert_eq!(code, 321);
+        assert!(text.ends_with("Midprice orders are not supported outside of regular trading hours."), "{text}");
+        let rth = ApiOrder { order_type: "MIDPRICE".into(), outside_rth: false, ..lmt(100.0) };
+        assert!(ClientCore::refusal_before_sending(&rth).is_none());
+
+        let trail = |lmt_price: f64, offset: f64| ApiOrder {
+            order_type: "TRAIL LIMIT".into(), aux_price: 1.0, lmt_price, lmt_price_offset: offset, ..lmt(0.0)
+        };
+        let both = ClientCore::refusal_before_sending(&trail(100.0, 0.30)).expect("both: refused");
+        assert_eq!(both.0, 321);
+        assert!(both.1.ends_with("You must specify one value: limit price or limit price offset value."));
+        assert!(ClientCore::refusal_before_sending(&trail(0.0, f64::MAX)).is_some(), "neither: refused");
+        assert!(ClientCore::refusal_before_sending(&trail(0.0, 0.30)).is_none(), "offset only");
+        assert!(ClientCore::refusal_before_sending(&trail(100.0, f64::MAX)).is_none(), "limit price only");
     }
 
     fn lmt(price: f64) -> ApiOrder {
