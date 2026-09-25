@@ -309,6 +309,53 @@ pub struct TrackedOrder {
 /// sent (ibx#463; captured 25/09/2026).
 pub const MODIFY_OF_FINISHED_ORDER: (i64, &str) = (104, "Cannot modify a filled order.");
 
+/// Most commission reports kept while waiting for their execution.
+pub const PENDING_COMMISSIONS_MAX: usize = 1024;
+
+/// Commission reports waiting for their execution, oldest dropped first
+/// past `PENDING_COMMISSIONS_MAX` (ibx#471).
+#[derive(Default)]
+pub struct PendingCommissions {
+    reports: HashMap<String, (u64, ApiCommissionAndFeesReport)>,
+    /// (insertion number, key), oldest at the front. An entry whose number
+    /// no longer matches `reports` was removed or replaced, and is skipped.
+    order: std::collections::VecDeque<(u64, String)>,
+    next: u64,
+}
+
+impl PendingCommissions {
+    pub fn insert(&mut self, key: String, report: ApiCommissionAndFeesReport) {
+        let seq = self.next;
+        self.next += 1;
+        self.order.push_back((seq, key.clone()));
+        self.reports.insert(key, (seq, report));
+        while self.order.len() > PENDING_COMMISSIONS_MAX {
+            if let Some((old_seq, old_key)) = self.order.pop_front() {
+                if self.reports.get(&old_key).is_some_and(|(s, _)| *s == old_seq) {
+                    self.reports.remove(&old_key);
+                }
+            }
+        }
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<ApiCommissionAndFeesReport> {
+        self.reports.remove(key).map(|(_, report)| report)
+    }
+
+    pub fn len(&self) -> usize {
+        self.reports.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.reports.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.reports.clear();
+        self.order.clear();
+    }
+}
+
 /// What `place_order` does with an order id that is already working (ibx#247).
 pub enum ModifyPlan {
     /// Send this replace.
@@ -355,8 +402,10 @@ pub struct ClientCore {
     // Execution replay store
     pub executions: Mutex<Vec<StoredExecution>>,
     // Commission reports that came before their execution, by execution id
-    // without its revision (ibx#471).
-    pub pending_commissions: Mutex<HashMap<String, ApiCommissionAndFeesReport>>,
+    // without its revision (ibx#471). Bounded: reports for executions this
+    // client never sees (earlier sessions, other clients) are dropped oldest
+    // first.
+    pub pending_commissions: Mutex<PendingCommissions>,
 
     // Open order tracking
     pub open_orders: Mutex<HashMap<u64, TrackedOrder>>,
@@ -397,7 +446,7 @@ impl ClientCore {
             last_account: Mutex::new(None),
             last_portfolio: Mutex::new(None),
             executions: Mutex::new(Vec::new()),
-            pending_commissions: Mutex::new(HashMap::new()),
+            pending_commissions: Mutex::new(PendingCommissions::default()),
             open_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
             market_data_type: AtomicI32::new(1),
@@ -2296,6 +2345,34 @@ mod tests {
         core.update_order_fill(10, "Filled", 100.0, 0.0);
         core.reset();
         assert!(core.refusal_for_order_id(10, &lmt(101.0)).is_some());
+    }
+
+    // Reports for executions this client never sees are dropped oldest
+    // first (ibx#471).
+    #[test]
+    fn pending_commissions_are_bounded_oldest_first() {
+        let mut pending = PendingCommissions::default();
+        let report = |id: &str| ApiCommissionAndFeesReport { exec_id: id.into(), ..Default::default() };
+        for i in 0..PENDING_COMMISSIONS_MAX + 10 {
+            pending.insert(format!("e{i}"), report(&format!("e{i}")));
+        }
+        assert_eq!(pending.len(), PENDING_COMMISSIONS_MAX);
+        assert!(pending.remove("e0").is_none(), "the oldest is dropped");
+        assert!(pending.remove(&format!("e{}", PENDING_COMMISSIONS_MAX + 9)).is_some(), "the newest is kept");
+    }
+
+    // A key replaced later is not dropped by its first, stale entry.
+    #[test]
+    fn pending_commission_replaced_keeps_its_new_place() {
+        let mut pending = PendingCommissions::default();
+        let report = |id: &str| ApiCommissionAndFeesReport { exec_id: id.into(), ..Default::default() };
+        pending.insert("a".into(), report("a.01"));
+        for i in 0..PENDING_COMMISSIONS_MAX - 1 {
+            pending.insert(format!("e{i}"), report("x"));
+        }
+        pending.insert("a".into(), report("a.02"));
+        pending.insert("b".into(), report("b"));
+        assert_eq!(pending.remove("a").map(|r| r.exec_id), Some("a.02".to_string()));
     }
 
     // A modify keeps the status the server last reported: the engine can
