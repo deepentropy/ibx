@@ -67,6 +67,45 @@ pub(crate) fn fix_utc_to_unix_secs(s: &str) -> Option<i64> {
     Some(days * 86400 + hh * 3600 + mm * 60 + ss)
 }
 
+/// Text of warning 399 for an order message (ibx#465): "Order Message:
+/// {action} {quantity} {symbol} {exchange} {text}". The exchange is the
+/// listing as the contract details give it, `{primaryExchange}.{marketName}`
+/// (NASDAQ.NMS for AAPL, as in the capture; the form is only checked for
+/// AAPL), else the primary exchange, else the order's exchange.
+fn order_message_399(
+    parsed: &std::collections::HashMap<u32, String>,
+    text: &str,
+    context: &Context,
+    clord_id: u64,
+    shared: &SharedState,
+) -> String {
+    let action = match parsed.get(&54).map(|s| s.as_str()) {
+        Some("1") => "BUY",
+        Some("5") => "SSHORT",
+        Some(_) => "SELL",
+        None => match context.order(clord_id).map(|o| o.side) {
+            Some(Side::Buy) => "BUY",
+            Some(Side::ShortSell) => "SSHORT",
+            _ => "SELL",
+        },
+    };
+    let quantity = parsed.get(&38).cloned().unwrap_or_default();
+    let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let cached = shared.reference.get_contract(con_id);
+    let symbol = parsed.get(&55).cloned()
+        .or_else(|| cached.as_ref().map(|c| c.symbol.clone()))
+        .unwrap_or_default();
+    let primary = cached.as_ref().map(|c| c.primary_exchange.clone()).filter(|p| !p.is_empty());
+    let exchange = match (primary, shared.reference.market_name(con_id)) {
+        (Some(p), Some(m)) => format!("{}.{}", p, m),
+        (Some(p), None) => p,
+        (None, _) => parsed.get(&207).or_else(|| parsed.get(&6004))
+            .map(|e| crate::control::contracts::exchange_from_fix(e).to_string())
+            .unwrap_or_default(),
+    };
+    format!("Order Message: {} {} {} {} {}", action, quantity, symbol, exchange, text)
+}
+
 /// Split an execution id into the id without its revision and the
 /// revision, the last dot segment read as hex ("0000e0d5.6ab5f36f.01.01" →
 /// ("0000e0d5.6ab5f36f.01", 1)). An id with no dot has revision 0.
@@ -109,6 +148,8 @@ pub(crate) struct CcpState {
     /// by execution id without its revision (ibx#478). Bounded like the
     /// commission window.
     pub(crate) exec_realized: std::collections::HashMap<String, (i64, f64)>,
+    /// Order messages already reported as 399, by order and text (ibx#465).
+    pub(crate) order_messages_sent: HashSet<(u64, String)>,
     pub(crate) exec_realized_order: VecDeque<String>,
     pub(crate) bulletin_next_id: i32,
     pub(crate) news_subscriptions: Vec<(InstrumentId, u32)>,
@@ -195,6 +236,7 @@ impl CcpState {
             commission_revisions: std::collections::HashMap::with_capacity(256),
             commission_order: VecDeque::with_capacity(256),
             exec_realized: std::collections::HashMap::with_capacity(256),
+            order_messages_sent: HashSet::new(),
             exec_realized_order: VecDeque::with_capacity(256),
             bulletin_next_id: 0,
             news_subscriptions: Vec::new(),
@@ -615,6 +657,7 @@ impl CcpState {
                                 trading_class: def.trading_class.clone(),
                                 ..Default::default()
                             });
+                            shared.reference.cache_market_name(def.con_id as i64, &def.market_name);
                             self.try_release_scanner_enrichments(def.con_id as i64, shared);
                         }
                         let for_event = clone_for_event(event_tx, &def);
@@ -652,6 +695,7 @@ impl CcpState {
                             trading_class: def.trading_class.clone(),
                             ..Default::default()
                         });
+                        shared.reference.cache_market_name(def.con_id as i64, &def.market_name);
                         self.try_release_scanner_enrichments(def.con_id as i64, shared);
                     }
                     // Match the response to its originating pending_secdef entry
@@ -1036,6 +1080,27 @@ impl CcpState {
         if status == crate::types::OrderStatus::Rejected && status_changed {
             let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("");
             shared.orders.push_order_error(clord_id, 201, format!("Order rejected - reason:{}", reason));
+        }
+        // A cancel of an order of this session: error 202 with the server's
+        // reason, before the Cancelled status, as the reference (ibx#465;
+        // captured 25/09/2026, empty reason for a user cancel).
+        if status == crate::types::OrderStatus::Cancelled && status_changed {
+            let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("");
+            shared.orders.push_order_error(clord_id, 202, format!("Order Canceled - reason:{}", reason));
+        }
+        // An order message of the server (6360 type, 6361 text): the
+        // reference reports the TIME one as warning 399, once, and the order
+        // keeps its status (ibx#465; captured 25/09/2026 on an OPG order:
+        // "Order Message: BUY 1 AAPL NASDAQ.NMS Warning: your order will not
+        // be placed at the exchange until ..."). The other types (PRICECAP
+        // in the capture) did not reach the API.
+        if parsed.get(&6360).map(|s| s.as_str()) == Some("TIME") && context.order(clord_id).is_some() {
+            if let Some(text) = parsed.get(&6361).filter(|t| !t.is_empty()) {
+                if self.order_messages_sent.insert((clord_id, text.clone())) {
+                    let message = order_message_399(parsed, text, context, clord_id, shared);
+                    shared.orders.push_order_error(clord_id, 399, message);
+                }
+            }
         }
 
         // The fill or status update of this frame, pushed once the order
@@ -3550,5 +3615,45 @@ mod tests {
         ccp.handle_commission_report(&commission_frame(&[(17, "0000e0d5.6ab5f36f.01.01"), (6099, "3.0")]), &shared);
         let total = shared.portfolio.realized_since_seed().get(&756733).copied().unwrap();
         assert!((total - 6.0).abs() < 1e-9, "an earlier session's fill is not counted");
+    }
+
+    // ibx#465: every cancel of an order of this session gives 202 with the
+    // server's reason (empty for a user cancel, captured 25/09/2026).
+    #[test]
+    fn a_cancel_gives_202_with_the_reason() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let routed = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA")]);
+        ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
+        let done = exec_report_frame(&[(39, "4"), (150, "4")]);
+        ccp.handle_exec_report(&done, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_order_errors(), [(42, 202, "Order Canceled - reason:".to_string())]);
+
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let done = exec_report_frame(&[(39, "4"), (150, "4"), (58, "Order expired")]);
+        ccp.handle_exec_report(&done, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_order_errors(), [(42, 202, "Order Canceled - reason:Order expired".to_string())]);
+    }
+
+    // ibx#465: the captured order message of an OPG order before the open.
+    #[test]
+    fn a_time_order_message_gives_399_once() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        shared.reference.cache_contract(265598, api::Contract {
+            con_id: 265598, symbol: "AAPL".into(), primary_exchange: "NASDAQ".into(), ..Default::default()
+        });
+        shared.reference.cache_market_name(265598, "NMS");
+        let text = "Warning: your order will not be placed at the exchange until 2026-09-25 09:30:00 US/Eastern";
+        let ack = exec_report_frame(&[(39, "A"), (150, "A"), (20, "3"), (54, "1"), (38, "1"), (55, "AAPL"),
+            (6008, "265598"), (59, "2"), (6360, "TIME"), (6361, text)]);
+        ccp.handle_exec_report(&ack, &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&ack, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_order_errors(),
+            [(42, 399, format!("Order Message: BUY 1 AAPL NASDAQ.NMS {}", text))], "once");
+        assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::PreSubmitted, "the order keeps working");
+
+        // Another message type did not reach the API in the capture.
+        let price_cap = exec_report_frame(&[(39, "A"), (150, "A"), (6360, "PRICECAP"), (6361, "long text")]);
+        ccp.handle_exec_report(&price_cap, &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_order_errors().is_empty());
     }
 }

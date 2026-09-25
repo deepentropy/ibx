@@ -156,7 +156,9 @@ impl EClient {
 
         // Cancel rejects → error
         for reject in self.shared.orders.drain_cancel_rejects() {
-            let code = if reject.reject_type == 1 { 202 } else { 10147 };
+            // 202 is the cancel notice (ibx#465); a server reject of a
+            // cancel or modify is 10147.
+            let code = 10147;
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
             wrapper.error(reject.order_id as i64, code, &msg, "");
         }

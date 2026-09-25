@@ -1979,7 +1979,8 @@ fn process_msgs_dispatches_cancel_reject_type_1() {
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("error:44:202:")));
+    // 202 is the cancel notice (ibx#465): a reject is 10147.
+    assert!(w.events.iter().any(|e| e.starts_with("error:44:10147:")), "{:?}", w.events);
 }
 
 #[test]

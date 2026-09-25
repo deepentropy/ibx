@@ -319,7 +319,9 @@ impl EClient {
         // Drain cancel rejects -> error
         let rejects = shared.orders.drain_cancel_rejects();
         for reject in rejects {
-            let code = if reject.reject_type == 1 { 202i64 } else { 10147i64 };
+            // 202 is the cancel notice (ibx#465); a server reject of a
+            // cancel or modify is 10147.
+            let code = 10147i64;
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
             call_wrapper!(self.wrapper, py, "error", (reject.order_id as i64, code, msg.as_str(), ""));
         }

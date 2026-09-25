@@ -409,6 +409,8 @@ pub struct ReferenceState {
     depth_exchanges_pending: Mutex<bool>,
     /// Contract cache from CCP exec reports (con_id -> api::Contract).
     contract_cache: Mutex<HashMap<i64, api::Contract>>,
+    /// Market names from contract details, by conId.
+    market_names: Mutex<HashMap<i64, String>>,
     /// Gateway-local init data (populated during connection, read-only after).
     smart_components: Mutex<Vec<crate::types::SmartComponent>>,
     news_providers: Mutex<Vec<crate::types::NewsProvider>>,
@@ -442,6 +444,7 @@ impl ReferenceState {
             depth_exchanges_cache: Mutex::new(Vec::new()),
             depth_exchanges_pending: Mutex::new(false),
             contract_cache: Mutex::new(HashMap::new()),
+            market_names: Mutex::new(HashMap::new()),
             smart_components: Mutex::new(Vec::new()),
             news_providers: Mutex::new(Vec::new()),
             soft_dollar_tiers: Mutex::new(Vec::new()),
@@ -521,6 +524,18 @@ impl ReferenceState {
     /// Get cached contract by con_id.
     pub fn get_contract(&self, con_id: i64) -> Option<api::Contract> {
         self.contract_cache.lock().unwrap().get(&con_id).cloned()
+    }
+
+    /// Market name of a contract from its contract details (for example
+    /// NMS for AAPL), when they were received.
+    pub fn market_name(&self, con_id: i64) -> Option<String> {
+        self.market_names.lock().unwrap().get(&con_id).cloned()
+    }
+
+    #[doc(hidden)] pub fn cache_market_name(&self, con_id: i64, market_name: &str) {
+        if !market_name.is_empty() {
+            self.market_names.lock().unwrap().insert(con_id, market_name.to_string());
+        }
     }
 
     // ── Hot-loop-side writers ──
