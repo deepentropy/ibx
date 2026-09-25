@@ -248,16 +248,19 @@ impl EClient {
                 None,
             )?;
 
-            let report = CommissionAndFeesReport {
-                exec_id: se.commission_and_fees.exec_id.clone(),
-                commission_and_fees: se.commission_and_fees.commission_and_fees,
-                currency: se.commission_and_fees.currency.clone(),
-                realized_pnl: se.commission_and_fees.realized_pnl,
-                yield_amount: se.commission_and_fees.yield_amount,
-                yield_redemption_date: se.commission_and_fees.yield_redemption_date.clone(),
-            };
-            let report_py = Py::new(py, report)?.into_any();
-            self.wrapper.call_method1(py, "commission_and_fees_report", (&report_py,))?;
+            // The report exists once the server's commission frame came (ibx#471).
+            if let Some(cr) = &se.commission_and_fees {
+                let report = CommissionAndFeesReport {
+                    exec_id: cr.exec_id.clone(),
+                    commission_and_fees: cr.commission_and_fees,
+                    currency: cr.currency.clone(),
+                    realized_pnl: cr.realized_pnl,
+                    yield_amount: cr.yield_amount,
+                    yield_redemption_date: cr.yield_redemption_date.clone(),
+                };
+                let report_py = Py::new(py, report)?.into_any();
+                self.wrapper.call_method1(py, "commission_and_fees_report", (&report_py,))?;
+            }
         }
         self.wrapper.call_method1(py, "exec_details_end", (req_id,))?;
         Ok(())

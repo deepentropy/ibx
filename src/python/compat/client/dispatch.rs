@@ -31,6 +31,20 @@ macro_rules! call_wrapper {
 }
 
 impl EClient {
+    fn send_commission_report(&self, py: Python<'_>, cr: &ApiCommissionAndFeesReport) -> PyResult<()> {
+        let report = CommissionAndFeesReport {
+            exec_id: cr.exec_id.clone(),
+            commission_and_fees: cr.commission_and_fees,
+            currency: cr.currency.clone(),
+            realized_pnl: cr.realized_pnl,
+            yield_amount: cr.yield_amount,
+            yield_redemption_date: cr.yield_redemption_date.clone(),
+        };
+        let report_py = Py::new(py, report)?.into_any();
+        call_wrapper!(self.wrapper, py, "commission_and_fees_report", (&report_py,));
+        Ok(())
+    }
+
     /// Single iteration of event dispatch: drain all shared queues and fire Python callbacks.
     pub(crate) fn dispatch_once(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
         // Drain engine events — surface disconnects as error callbacks.
@@ -43,9 +57,10 @@ impl EClient {
             }
         }
 
-        // Drain fills -> execDetails + orderStatus
-        let fills = shared.orders.drain_fills();
-        for fill in fills {
+        // Drain fills -> execDetails + orderStatus. The commission report
+        // comes later, from its own server frame (ibx#471).
+        let fills = shared.orders.drain_fills_with_exec_ids();
+        for (fill, server_exec_id) in fills {
             let req_id = self.core.instrument_to_req.lock().unwrap()
                 .get(&fill.instrument).copied().unwrap_or(-1);
             let side_str = match fill.side {
@@ -54,7 +69,6 @@ impl EClient {
                 Side::ShortSell => "SSHORT",
             };
             let price = fill.price as f64 / PRICE_SCALE_F;
-            let commission = fill.commission as f64 / PRICE_SCALE_F;
 
             let status = if fill.remaining_fixed == 0 { "Filled" } else { self.core.partial_fill_status(fill.order_id) };
             let (perm_id, parent_id) = shared.orders.get_order_info(fill.order_id)
@@ -70,8 +84,14 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, cum_qty, remaining,
                  avg_price, perm_id, parent_id, price, 0i64, "", 0.0f64));
 
-            // Track execution for req_executions
-            let exec_id = format!("{}.{}", fill.order_id, fill.timestamp_ns);
+            // Track execution for req_executions. The server's execution id,
+            // which the commission report names; a fill injected with none
+            // (tests) gets a local one.
+            let exec_id = if server_exec_id.is_empty() {
+                format!("{}.{}", fill.order_id, fill.timestamp_ns)
+            } else {
+                server_exec_id
+            };
             let now_str = format!("{}", fill.timestamp_ns);
             let rich_info = shared.orders.get_order_info(fill.order_id);
             let exec_exchange = rich_info.as_ref()
@@ -97,14 +117,6 @@ impl EClient {
                 avg_price,
                 ..Default::default()
             };
-            let api_commission = ApiCommissionAndFeesReport {
-                exec_id: exec_id.clone(),
-                commission_and_fees: commission,
-                currency: "USD".into(),
-                realized_pnl: f64::MAX,
-                yield_amount: f64::MAX,
-                yield_redemption_date: String::new(),
-            };
 
             // Build Python contract for callback
             let exec_contract = Contract {
@@ -116,8 +128,9 @@ impl EClient {
                 ..Default::default()
             };
 
-            // Store for req_executions replay via shared core
-            self.core.push_execution(req_id, api_contract, api_exec, api_commission);
+            // Store for req_executions replay via shared core; a commission
+            // report that came first is sent after exec_details.
+            let early_report = self.core.push_execution(req_id, api_contract, api_exec);
 
             let acct_name = self.account();
             let c_py = Py::new(py, exec_contract)?.into_any();
@@ -142,20 +155,19 @@ impl EClient {
             let exec_py = Py::new(py, exec_obj)?.into_any();
             call_wrapper!(self.wrapper, py, "exec_details", (req_id, &c_py, &exec_py));
 
+            if let Some(cr) = early_report {
+                self.send_commission_report(py, &cr)?;
+            }
+
             // Update open order tracking
             self.core.update_order_fill(fill.order_id, status, cum_qty, remaining);
+        }
 
-            // Dispatch commission_and_fees_report
-            let report = CommissionAndFeesReport {
-                exec_id,
-                commission_and_fees: commission,
-                currency: "USD".to_string(),
-                realized_pnl: f64::MAX,
-                yield_amount: f64::MAX,
-                yield_redemption_date: String::new(),
-            };
-            let report_py = Py::new(py, report)?.into_any();
-            call_wrapper!(self.wrapper, py, "commission_and_fees_report", (&report_py,));
+        // Commission reports, sent once their execution is known (ibx#471).
+        for cr in shared.orders.drain_commission_reports() {
+            if self.core.apply_commission(&cr) {
+                self.send_commission_report(py, &cr)?;
+            }
         }
 
         // Order errors (refused before sending, or rejected by the server)

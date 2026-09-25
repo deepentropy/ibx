@@ -43,6 +43,19 @@ fn extract_tag_value(msg: &[u8], prefix: &[u8]) -> Option<String> {
     None
 }
 
+/// Split an execution id into the id without its revision and the
+/// revision, the last dot segment read as hex ("0000e0d5.6ab5f36f.01.01" →
+/// ("0000e0d5.6ab5f36f.01", 1)). An id with no dot has revision 0.
+pub(crate) fn split_exec_revision(exec_id: &str) -> (&str, u64) {
+    match exec_id.rsplit_once('.') {
+        Some((base, rev)) => match u64::from_str_radix(rev, 16) {
+            Ok(r) => (base, r),
+            Err(_) => (exec_id, 0),
+        },
+        None => (exec_id, 0),
+    }
+}
+
 fn perm_id_from_fix_order_id(s: &str) -> i64 {
     // Hash only the stable prefix: "00cf16ed.000225ed.69ca0941" (drop ".0001")
     let stable = match s.rmatch_indices('.').next() {
@@ -64,6 +77,10 @@ pub(crate) struct CcpState {
     /// the whole set — a wholesale clear would let a post-reconnect server
     /// replay of a recently-seen ExecID double-count a fill (ibx#198).
     pub(crate) exec_id_order: VecDeque<String>,
+    /// Commission reports seen, by execution id without its revision:
+    /// the highest revision (ibx#471). Bounded like `seen_exec_ids`.
+    pub(crate) commission_revisions: std::collections::HashMap<String, u64>,
+    pub(crate) commission_order: VecDeque<String>,
     pub(crate) bulletin_next_id: i32,
     pub(crate) news_subscriptions: Vec<(InstrumentId, u32)>,
     pub(crate) disconnected: bool,
@@ -146,6 +163,8 @@ impl CcpState {
         Self {
             seen_exec_ids: HashSet::with_capacity(256),
             exec_id_order: VecDeque::with_capacity(256),
+            commission_revisions: std::collections::HashMap::with_capacity(256),
+            commission_order: VecDeque::with_capacity(256),
             bulletin_next_id: 0,
             news_subscriptions: Vec::new(),
             disconnected: false,
@@ -186,6 +205,59 @@ impl CcpState {
             }
         }
         true
+    }
+
+    /// Record a commission report for `exec_id`. Returns `false` for a
+    /// report to skip, as the reference does (ibx#471): the same execution
+    /// id again, or a lower revision than one already reported. The revision
+    /// is the last dot segment, in hex; a higher one replaces the report.
+    pub(crate) fn record_commission(&mut self, exec_id: &str) -> bool {
+        let (base, revision) = split_exec_revision(exec_id);
+        match self.commission_revisions.get(base) {
+            Some(&seen) if revision <= seen => return false,
+            Some(_) => {}
+            None => {
+                self.commission_order.push_back(base.to_string());
+                while self.commission_order.len() > EXEC_ID_WINDOW {
+                    if let Some(old) = self.commission_order.pop_front() {
+                        self.commission_revisions.remove(&old);
+                    }
+                }
+            }
+        }
+        self.commission_revisions.insert(base.to_string(), revision);
+        true
+    }
+
+    /// The server's commission frame for one execution (ibx#471). The fill
+    /// report carries no commission; this frame follows it (captured
+    /// 25/09/2026, 25 ms after the fill). A frame with neither the
+    /// commission nor tag 8189 is dropped, like the reference.
+    fn handle_commission_report(&mut self, parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
+        let Some(exec_id) = parsed.get(&17).filter(|s| !s.is_empty()) else {
+            log::debug!("Commission report without an execution id: dropped");
+            return;
+        };
+        let commission = parsed.get(&6378).and_then(|s| s.parse::<f64>().ok());
+        if commission.is_none() && !parsed.contains_key(&8189) {
+            log::debug!("Commission report for {} without a commission: dropped", exec_id);
+            return;
+        }
+        if !self.record_commission(exec_id) {
+            log::debug!("Commission report for {} skipped: already reported", exec_id);
+            return;
+        }
+        let unset_when_zero = |v: Option<f64>| v.filter(|x| *x != 0.0).unwrap_or(f64::MAX);
+        let report = api::CommissionAndFeesReport {
+            exec_id: exec_id.clone(),
+            commission_and_fees: commission.unwrap_or(0.0),
+            currency: parsed.get(&6381).cloned().unwrap_or_default(),
+            realized_pnl: unset_when_zero(parsed.get(&6099).and_then(|s| s.parse().ok())),
+            yield_amount: parsed.get(&236).and_then(|s| s.parse().ok()).unwrap_or(f64::MAX),
+            yield_redemption_date: parsed.get(&696).filter(|s| s.len() == 8).cloned().unwrap_or_default(),
+        };
+        log::info!("Commission report: exec={} commission={} {}", report.exec_id, report.commission_and_fees, report.currency);
+        shared.orders.push_commission_report(report);
     }
 
     pub(crate) fn poll_executions(
@@ -382,6 +454,7 @@ impl CcpState {
                                 }
                             }
                         }
+                        "60" => self.handle_commission_report(&parsed, shared),
                         "102" => self.handle_exchange_list(msg, shared),
                         "107" => self.handle_schedule_reply(msg, shared, event_tx),
                         _ => {}
@@ -927,7 +1000,7 @@ impl CcpState {
                 };
                 context.update_position_fixed(order.instrument, delta);
                 // notify_fill inlined
-                shared.orders.push_fill(fill);
+                shared.orders.push_fill_with_exec_id(fill, exec_id.to_string());
                 shared.portfolio.set_position_fixed(fill.instrument, context.position_fixed(fill.instrument));
                 emit(event_tx, Event::Fill(fill));
                 had_fill = true;
@@ -2098,6 +2171,88 @@ mod tests {
     // Regression for ibx#198: the fill-dedup set must NOT be wiped wholesale
     // when it reaches its cap. A recently-seen ExecID has to stay deduplicated
     // so a post-reconnect server replay can't double-count the fill.
+    /// The commission frame captured 25/09/2026, 25 ms after a BUY 100 AAPL
+    /// fill that carried no commission (ibx#471).
+    fn commission_frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
+        let mut m: std::collections::HashMap<u32, String> = [
+            (35u32, "U"), (6040, "60"), (17, "0000e0d5.6ab5f36f.01.01"), (37, "1"),
+            (6381, "USD"), (6378, "1.0003"), (6099, "0"),
+        ].iter().map(|(t, v)| (*t, v.to_string())).collect();
+        for (tag, val) in pairs {
+            m.insert(*tag, val.to_string());
+        }
+        m
+    }
+
+    #[test]
+    fn commission_frame_gives_the_commission_report() {
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        ccp.handle_commission_report(&commission_frame(&[]), &shared);
+        let reports = shared.orders.drain_commission_reports();
+        assert_eq!(reports.len(), 1);
+        let r = &reports[0];
+        assert_eq!(r.exec_id, "0000e0d5.6ab5f36f.01.01");
+        assert_eq!(r.commission_and_fees, 1.0003);
+        assert_eq!(r.currency, "USD");
+        assert_eq!(r.realized_pnl, f64::MAX, "a realized P&L of 0 is sent as unset");
+        assert_eq!(r.yield_amount, f64::MAX);
+        assert_eq!(r.yield_redemption_date, "");
+    }
+
+    #[test]
+    fn commission_frame_carries_realized_pnl_and_yield() {
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        ccp.handle_commission_report(&commission_frame(&[(6099, "-12.5"), (236, "4.25"), (696, "20301231")]), &shared);
+        let r = shared.orders.drain_commission_reports().remove(0);
+        assert_eq!(r.realized_pnl, -12.5);
+        assert_eq!(r.yield_amount, 4.25);
+        assert_eq!(r.yield_redemption_date, "20301231");
+    }
+
+    #[test]
+    fn commission_frame_duplicates_and_lower_revisions_are_skipped() {
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        ccp.handle_commission_report(&commission_frame(&[(17, "0000e0d5.6ab5f36f.01.02")]), &shared);
+        ccp.handle_commission_report(&commission_frame(&[(17, "0000e0d5.6ab5f36f.01.02")]), &shared);
+        ccp.handle_commission_report(&commission_frame(&[(17, "0000e0d5.6ab5f36f.01.01")]), &shared);
+        assert_eq!(shared.orders.drain_commission_reports().len(), 1);
+        // A higher revision replaces the report.
+        ccp.handle_commission_report(&commission_frame(&[(17, "0000e0d5.6ab5f36f.01.0a"), (6378, "1.5")]), &shared);
+        let r = shared.orders.drain_commission_reports();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].commission_and_fees, 1.5);
+    }
+
+    #[test]
+    fn commission_frame_without_a_commission_is_dropped() {
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        let mut frame = commission_frame(&[]);
+        frame.remove(&6378);
+        ccp.handle_commission_report(&frame, &shared);
+        assert!(shared.orders.drain_commission_reports().is_empty());
+    }
+
+    #[test]
+    fn a_fill_carries_its_execution_id() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let fill = exec_report_frame(&[(20, "0"), (39, "2"), (150, "F"), (17, "0000e0d5.6ab5f36f.01.01"),
+            (31, "336.25"), (32, "1"), (14, "1"), (151, "0"), (6, "336.25")]);
+        ccp.handle_exec_report(&fill, &mut context, &shared, &None, "");
+        let fills = shared.orders.drain_fills_with_exec_ids();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].1, "0000e0d5.6ab5f36f.01.01");
+    }
+
+    #[test]
+    fn split_exec_revision_reads_the_last_segment_as_hex() {
+        assert_eq!(split_exec_revision("0000e0d5.6ab5f36f.01.0a"), ("0000e0d5.6ab5f36f.01", 10));
+        assert_eq!(split_exec_revision("plain"), ("plain", 0));
+    }
+
     #[test]
     fn record_exec_id_dedupes_within_window() {
         let mut ccp = CcpState::new();

@@ -264,6 +264,12 @@ pub mod tests {
         fn exec_details(&mut self, req_id: i64, _contract: &Contract, execution: &Execution) {
             self.events.push(format!("exec_details:{req_id}:{}:{}", execution.side, execution.shares));
         }
+        fn exec_details_end(&mut self, req_id: i64) {
+            self.events.push(format!("exec_details_end:{req_id}"));
+        }
+        fn commission_and_fees_report(&mut self, report: &CommissionAndFeesReport) {
+            self.events.push(format!("commission:{}:{}:{}", report.exec_id, report.commission_and_fees, report.currency));
+        }
         fn historical_data(&mut self, req_id: i64, bar: &BarData) {
             self.events.push(format!("historical_data:{req_id}:{}", bar.date));
         }

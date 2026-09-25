@@ -243,7 +243,10 @@ impl MarketDataState {
 
 /// Fills, order status updates, cancel rejects, what-if responses, and order cache.
 pub struct OrderState {
-    fills: Mutex<Vec<Fill>>,
+    /// Fills with the server's execution id of each print.
+    fills: Mutex<Vec<(Fill, String)>>,
+    /// Commission reports from the server's commission frame (ibx#471).
+    commission_reports: Mutex<Vec<api::CommissionAndFeesReport>>,
     order_updates: Mutex<Vec<OrderUpdate>>,
     cancel_rejects: Mutex<Vec<CancelReject>>,
     /// Order errors raised before sending, keyed by the full order id (ibx#349).
@@ -258,6 +261,7 @@ impl OrderState {
     fn new() -> Self {
         Self {
             fills: Mutex::new(Vec::with_capacity(64)),
+            commission_reports: Mutex::new(Vec::with_capacity(64)),
             order_updates: Mutex::new(Vec::with_capacity(64)),
             cancel_rejects: Mutex::new(Vec::with_capacity(16)),
             order_errors: Mutex::new(Vec::new()),
@@ -268,7 +272,16 @@ impl OrderState {
     }
 
     pub fn drain_fills(&self) -> Vec<Fill> {
+        self.fills.lock().unwrap().drain(..).map(|(fill, _)| fill).collect()
+    }
+
+    /// Fills with the execution id of each print (empty when unknown).
+    pub fn drain_fills_with_exec_ids(&self) -> Vec<(Fill, String)> {
         self.fills.lock().unwrap().drain(..).collect()
+    }
+
+    pub fn drain_commission_reports(&self) -> Vec<api::CommissionAndFeesReport> {
+        self.commission_reports.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_order_updates(&self) -> Vec<OrderUpdate> {
@@ -318,7 +331,15 @@ impl OrderState {
     // ── Hot-loop-side writers ──
 
     #[doc(hidden)] pub fn push_fill(&self, fill: Fill) {
-        self.fills.lock().unwrap().push(fill);
+        self.fills.lock().unwrap().push((fill, String::new()));
+    }
+
+    #[doc(hidden)] pub fn push_fill_with_exec_id(&self, fill: Fill, exec_id: String) {
+        self.fills.lock().unwrap().push((fill, exec_id));
+    }
+
+    #[doc(hidden)] pub fn push_commission_report(&self, report: api::CommissionAndFeesReport) {
+        self.commission_reports.lock().unwrap().push(report);
     }
 
     #[doc(hidden)] pub fn push_order_update(&self, update: OrderUpdate) {

@@ -176,7 +176,9 @@ impl EClient {
         for i in indices {
             let se = &execs[i];
             wrapper.exec_details(req_id, &se.contract, &se.execution);
-            wrapper.commission_and_fees_report(&se.commission_and_fees);
+            if let Some(report) = &se.commission_and_fees {
+                wrapper.commission_and_fees_report(report);
+            }
         }
         wrapper.exec_details_end(req_id);
     }

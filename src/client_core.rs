@@ -281,13 +281,14 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
 
 // ── Execution storage ──
 
-/// A stored execution + commission_and_fees pair for `req_executions` replay.
-/// Shared between Rust and Python adapters via `ClientCore`.
+/// A stored execution and its commission report for `req_executions` replay.
+/// Shared between Rust and Python adapters via `ClientCore`. The report
+/// comes from its own server frame after the fill; `None` until then (ibx#471).
 pub struct StoredExecution {
     pub req_id: i64,
     pub contract: ApiContract,
     pub execution: ApiExecution,
-    pub commission_and_fees: ApiCommissionAndFeesReport,
+    pub commission_and_fees: Option<ApiCommissionAndFeesReport>,
 }
 
 // ── Order tracking ──
@@ -353,6 +354,9 @@ pub struct ClientCore {
 
     // Execution replay store
     pub executions: Mutex<Vec<StoredExecution>>,
+    // Commission reports that came before their execution, by execution id
+    // without its revision (ibx#471).
+    pub pending_commissions: Mutex<HashMap<String, ApiCommissionAndFeesReport>>,
 
     // Open order tracking
     pub open_orders: Mutex<HashMap<u64, TrackedOrder>>,
@@ -393,6 +397,7 @@ impl ClientCore {
             last_account: Mutex::new(None),
             last_portfolio: Mutex::new(None),
             executions: Mutex::new(Vec::new()),
+            pending_commissions: Mutex::new(HashMap::new()),
             open_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
             market_data_type: AtomicI32::new(1),
@@ -421,6 +426,7 @@ impl ClientCore {
         *self.last_account.lock().unwrap() = None;
         *self.last_portfolio.lock().unwrap() = None;
         self.executions.lock().unwrap().clear();
+        self.pending_commissions.lock().unwrap().clear();
         self.open_orders.lock().unwrap().clear();
         // `finished_orders` is kept: the server still knows those orders
         // after a reconnect, so their ids must not be sent as new orders.
@@ -759,10 +765,43 @@ impl ClientCore {
     // ── Execution replay store ──
 
     /// Store an execution for later replay via `req_executions`.
-    pub fn push_execution(&self, req_id: i64, contract: ApiContract, execution: ApiExecution, commission_and_fees: ApiCommissionAndFeesReport) {
+    /// Store an execution for `req_executions`. Returns the commission
+    /// report that came before it, to send after `exec_details`.
+    pub fn push_execution(&self, req_id: i64, contract: ApiContract, execution: ApiExecution) -> Option<ApiCommissionAndFeesReport> {
+        let (base, _) = crate::engine::hot_loop::ccp::split_exec_revision(&execution.exec_id);
+        let commission_and_fees = if execution.exec_id.is_empty() {
+            None
+        } else {
+            self.pending_commissions.lock().unwrap().remove(base)
+        };
         self.executions.lock().unwrap().push(StoredExecution {
-            req_id, contract, execution, commission_and_fees,
+            req_id, contract, execution, commission_and_fees: commission_and_fees.clone(),
         });
+        commission_and_fees
+    }
+
+    /// Attach a commission report to its stored execution (a higher revision
+    /// of the execution id replaces the report). Returns `true` when the
+    /// execution is known, and the report is to be sent now. Otherwise the
+    /// report waits for its execution, as the reference sends a live report
+    /// only for a known execution (ibx#471).
+    pub fn apply_commission(&self, report: &ApiCommissionAndFeesReport) -> bool {
+        let (base, _) = crate::engine::hot_loop::ccp::split_exec_revision(&report.exec_id);
+        let mut execs = self.executions.lock().unwrap();
+        let stored = execs.iter_mut().rev().find(|se| {
+            !se.execution.exec_id.is_empty()
+                && crate::engine::hot_loop::ccp::split_exec_revision(&se.execution.exec_id).0 == base
+        });
+        match stored {
+            Some(se) => {
+                se.commission_and_fees = Some(report.clone());
+                true
+            }
+            None => {
+                self.pending_commissions.lock().unwrap().insert(base.to_string(), report.clone());
+                false
+            }
+        }
     }
 
     /// Return executions matching the given filter.

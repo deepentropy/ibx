@@ -3166,3 +3166,77 @@ fn queued_data_is_dispatched_before_connection_closed() {
 
     assert_eq!(w.events, vec!["contract_details_end:7", "connection_closed"]);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+//  Commission reports from their own server frame (ibx#471)
+// ═══════════════════════════════════════════════════════════════════
+
+fn aapl_fill(order_id: u64) -> Fill {
+    Fill {
+        instrument: 0, order_id, side: Side::Buy, price: 336 * PRICE_SCALE,
+        qty_fixed: 100 * crate::types::QTY_SCALE, remaining_fixed: 0,
+        cum_qty_fixed: 100 * crate::types::QTY_SCALE, avg_price: 336 * PRICE_SCALE,
+        commission: 0, timestamp_ns: 0,
+    }
+}
+
+fn captured_report() -> crate::api::types::CommissionAndFeesReport {
+    crate::api::types::CommissionAndFeesReport {
+        exec_id: "0000e0d5.6ab5f36f.01.01".into(), commission_and_fees: 1.0003,
+        currency: "USD".into(), realized_pnl: f64::MAX, yield_amount: f64::MAX,
+        yield_redemption_date: String::new(),
+    }
+}
+
+// The fill carries no commission: the report comes from the commission
+// frame, after exec_details, with the server's values.
+#[test]
+fn commission_report_comes_from_the_commission_frame() {
+    let (client, _rx, shared) = test_client();
+    shared.orders.push_fill_with_exec_id(aapl_fill(7), "0000e0d5.6ab5f36f.01.01".into());
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("commission:")), "no report from the fill: {:?}", w.events);
+
+    shared.orders.push_commission_report(captured_report());
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["commission:0000e0d5.6ab5f36f.01.01:1.0003:USD"]);
+
+    let mut w = RecordingWrapper::default();
+    client.req_executions(1, &crate::api::types::ExecutionFilter::default(), &mut w);
+    assert_eq!(w.events, [
+        "exec_details:1:BOT:100",
+        "commission:0000e0d5.6ab5f36f.01.01:1.0003:USD",
+        "exec_details_end:1",
+    ]);
+}
+
+// A report that comes before its execution waits for it, and is sent
+// after exec_details.
+#[test]
+fn commission_report_before_its_execution_waits_for_it() {
+    let (client, _rx, shared) = test_client();
+    shared.orders.push_commission_report(captured_report());
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+
+    shared.orders.push_fill_with_exec_id(aapl_fill(7), "0000e0d5.6ab5f36f.01.01".into());
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let exec = w.events.iter().position(|e| e.starts_with("exec_details:")).expect("exec_details");
+    let comm = w.events.iter().position(|e| e.starts_with("commission:")).expect("commission");
+    assert!(exec < comm, "{:?}", w.events);
+}
+
+// Before the commission frame, req_executions replays the execution alone.
+#[test]
+fn req_executions_without_a_commission_report_sends_the_execution_only() {
+    let (client, _rx, shared) = test_client();
+    shared.orders.push_fill_with_exec_id(aapl_fill(7), "0000e0d5.6ab5f36f.01.01".into());
+    client.process_msgs(&mut RecordingWrapper::default());
+    let mut w = RecordingWrapper::default();
+    client.req_executions(1, &crate::api::types::ExecutionFilter::default(), &mut w);
+    assert_eq!(w.events, ["exec_details:1:BOT:100", "exec_details_end:1"]);
+}

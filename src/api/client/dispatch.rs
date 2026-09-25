@@ -1,7 +1,7 @@
 //! Event dispatch: drains SharedState queues and fires Wrapper callbacks.
 
 use crate::api::types::{
-    BarData, CommissionAndFeesReport, ContractDetails, ContractDescription, Execution,
+    BarData, ContractDetails, ContractDescription, Execution,
     Order as ApiOrder, OrderState, TickAttribLast, TickAttribBidAsk, PRICE_SCALE_F, QTY_SCALE_F,
 };
 use crate::api::wrapper::Wrapper;
@@ -46,10 +46,10 @@ impl EClient {
     // ── Order / Fill Dispatch ──
 
     fn dispatch_orders(&self, wrapper: &mut impl Wrapper) {
-        // Fills → order_status + exec_details + commission_and_fees_report
-        for fill in self.shared.orders.drain_fills() {
+        // Fills → order_status + exec_details. The commission report comes
+        // later, from its own server frame (ibx#471).
+        for (fill, exec_id) in self.shared.orders.drain_fills_with_exec_ids() {
             let price_f = fill.price as f64 / PRICE_SCALE_F;
-            let commission_and_fees_f = fill.commission as f64 / PRICE_SCALE_F;
             let status = if fill.remaining_fixed == 0 { "Filled" } else { self.core.partial_fill_status(fill.order_id) };
             let (perm_id, parent_id) = self.shared.orders.get_order_info(fill.order_id)
                 .map(|info| (info.order.perm_id, info.order.parent_id))
@@ -73,6 +73,9 @@ impl EClient {
             };
             let (c, exec) = if let Some(info) = self.shared.orders.get_order_info(fill.order_id) {
                 let mut ex = info.last_exec;
+                if !exec_id.is_empty() {
+                    ex.exec_id = exec_id;
+                }
                 ex.side = side_str.into();
                 ex.shares = shares_f;
                 ex.price = price_f;
@@ -87,6 +90,7 @@ impl EClient {
                 (contract, ex)
             } else {
                 (Contract::default(), Execution {
+                    exec_id,
                     side: side_str.into(),
                     shares: shares_f,
                     price: price_f,
@@ -99,21 +103,21 @@ impl EClient {
             let req_id = self.core.req_id_for_instrument(fill.instrument);
             wrapper.exec_details(req_id, &c, &exec);
 
-            let report = CommissionAndFeesReport {
-                exec_id: exec.exec_id.clone(),
-                commission_and_fees: commission_and_fees_f,
-                currency: "USD".into(),
-                realized_pnl: f64::MAX,
-                yield_amount: f64::MAX,
-                yield_redemption_date: String::new(),
-            };
-            wrapper.commission_and_fees_report(&report);
-
-            // Store for req_executions replay
-            self.core.push_execution(req_id, c, exec, report);
+            // Store for req_executions replay; a commission report that came
+            // first is sent now.
+            if let Some(report) = self.core.push_execution(req_id, c, exec) {
+                wrapper.commission_and_fees_report(&report);
+            }
 
             // Update open order tracking
             self.core.update_order_fill(fill.order_id, status, filled_f, remaining_f);
+        }
+
+        // Commission reports, sent once their execution is known (ibx#471).
+        for report in self.shared.orders.drain_commission_reports() {
+            if self.core.apply_commission(&report) {
+                wrapper.commission_and_fees_report(&report);
+            }
         }
 
         // Order errors (refused before sending, or rejected by the server)
