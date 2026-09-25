@@ -3326,3 +3326,92 @@ fn req_executions_filter_matches_like_the_reference() {
     assert_eq!(filter_count(&client, ExecutionFilter { time: "20260925 04:49:54 US/Eastern".into(), ..Default::default() }), 1);
     assert_eq!(filter_count(&client, ExecutionFilter { time: "20260925-08:49:55".into(), ..Default::default() }), 0);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+//  open_order + order_status on every report (ibx#473)
+// ═══════════════════════════════════════════════════════════════════
+
+#[derive(Default)]
+struct StatusRecorder { events: Vec<String> }
+impl Wrapper for StatusRecorder {
+    fn open_order(&mut self, order_id: i64, _c: &Contract, order: &Order, state: &crate::api::types::OrderState) {
+        self.events.push(format!("open_order:{order_id}:{}:{}", state.status, order.order_ref));
+    }
+    fn order_status(&mut self, order_id: i64, status: &str, filled: f64, _r: f64, _a: f64,
+                    _p: i64, _pa: i64, last_fill_price: f64, client_id: i64, _w: &str, _m: f64) {
+        self.events.push(format!("order_status:{order_id}:{status}:{filled}:{last_fill_price}:{client_id}"));
+    }
+}
+
+fn update(order_id: u64, status: OrderStatus, filled: i64) -> OrderUpdate {
+    OrderUpdate {
+        order_id, instrument: 0, status,
+        filled_qty_fixed: filled * crate::types::QTY_SCALE,
+        remaining_qty_fixed: (100 - filled) * crate::types::QTY_SCALE,
+        avg_fill_price: 0, perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    }
+}
+
+fn placed_order(client: &EClient, shared: &Arc<SharedState>, id: i64) {
+    shared.market.set_instrument_count(1);
+    let order = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(), lmt_price: 336.0,
+        order_ref: "ref1".into(), ..Default::default()
+    };
+    client.place_order(id, &spy(), &order).unwrap();
+}
+
+// Every report of a known order gives open_order then order_status, also
+// when the status is unchanged (a modify confirm).
+#[test]
+fn every_report_gives_open_order_then_order_status() {
+    let (client, _rx, shared) = test_client();
+    placed_order(&client, &shared, 60);
+    shared.orders.push_order_update(update(60, OrderStatus::Submitted, 0));
+    shared.orders.push_order_update(update(60, OrderStatus::Submitted, 0));
+    let mut w = StatusRecorder::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, [
+        "open_order:60:Submitted:ref1", "order_status:60:Submitted:0:0:0",
+        "open_order:60:Submitted:ref1", "order_status:60:Submitted:0:0:0",
+    ]);
+}
+
+#[test]
+fn a_cancel_gives_order_status_only() {
+    let (client, _rx, shared) = test_client();
+    placed_order(&client, &shared, 61);
+    shared.orders.push_order_update(update(61, OrderStatus::Cancelled, 0));
+    let mut w = StatusRecorder::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["order_status:61:Cancelled:0:0:0"]);
+}
+
+// A fill gives open_order too; a later report keeps the last fill price.
+#[test]
+fn a_later_report_carries_the_last_fill_price() {
+    let (client, _rx, shared) = test_client();
+    placed_order(&client, &shared, 62);
+    shared.orders.push_fill(Fill {
+        instrument: 0, order_id: 62, side: Side::Buy, price: 336 * PRICE_SCALE,
+        qty_fixed: 40 * crate::types::QTY_SCALE, remaining_fixed: 60 * crate::types::QTY_SCALE,
+        cum_qty_fixed: 40 * crate::types::QTY_SCALE, avg_price: 336 * PRICE_SCALE, commission: 0, timestamp_ns: 0,
+    });
+    shared.orders.push_order_update(update(62, OrderStatus::PartiallyFilled, 40));
+    let mut w = StatusRecorder::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, [
+        "open_order:62:Submitted:ref1", "order_status:62:Submitted:40:336:0",
+        "open_order:62:Submitted:ref1", "order_status:62:Submitted:40:336:0",
+    ]);
+}
+
+// An order this client does not know gives order_status only.
+#[test]
+fn a_report_of_an_unknown_order_gives_order_status_only() {
+    let (client, _rx, shared) = test_client();
+    shared.orders.push_order_update(update(63, OrderStatus::Submitted, 0));
+    let mut w = StatusRecorder::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["order_status:63:Submitted:0:0:0"]);
+}

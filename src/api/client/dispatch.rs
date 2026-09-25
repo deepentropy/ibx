@@ -61,10 +61,20 @@ impl EClient {
             let remaining_f = fill.remaining_fixed as f64 / QTY_SCALE_F;
             let shares_f = fill.qty_fixed as f64 / QTY_SCALE_F;
             let avg_f = fill.average_price() as f64 / PRICE_SCALE_F;
+            // openOrder then orderStatus for every report of a known order
+            // (ibx#473).
+            let client_id = match self.core.order_view(fill.order_id, &self.shared, status) {
+                Some(view) => {
+                    wrapper.open_order(fill.order_id as i64, &view.contract, &view.order, &view.state);
+                    view.client_id
+                }
+                None => 0,
+            };
             wrapper.order_status(
                 fill.order_id as i64, status, filled_f, remaining_f,
-                avg_f, perm_id, parent_id, price_f, 0, "", 0.0,
+                avg_f, perm_id, parent_id, price_f, client_id, "", 0.0,
             );
+            self.core.record_last_fill_price(fill.order_id, price_f);
 
             let side_str = match fill.side {
                 Side::Buy => "BOT",
@@ -125,15 +135,21 @@ impl EClient {
             wrapper.error(order_id as i64, code, &msg, "");
         }
 
-        // Order updates → order_status
+        // Order updates → open_order + order_status for every report of a
+        // known order; a cancel gives order_status only (ibx#473).
         for update in self.shared.orders.drain_order_updates() {
             let status = order_status_str(update.status);
             let filled_f = update.filled_qty_fixed as f64 / QTY_SCALE_F;
             let remaining_f = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
+            let view = self.core.order_view(update.order_id, &self.shared, status);
+            if let Some(v) = view.as_ref().filter(|_| status != "Cancelled") {
+                wrapper.open_order(update.order_id as i64, &v.contract, &v.order, &v.state);
+            }
+            let (last_fill_price, client_id) = view.map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
             wrapper.order_status(
                 update.order_id as i64, status, filled_f,
                 remaining_f, update.avg_fill_price as f64 / PRICE_SCALE_F,
-                update.perm_id, update.parent_id, 0.0, 0, "", 0.0,
+                update.perm_id, update.parent_id, last_fill_price, client_id, "", 0.0,
             );
             self.core.update_order_status(update.order_id, status, filled_f, remaining_f);
         }

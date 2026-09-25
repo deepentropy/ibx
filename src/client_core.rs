@@ -14,7 +14,7 @@ use crossbeam_channel::Sender;
 use crate::api::types::{
     Contract as ApiContract, CommissionAndFeesReport as ApiCommissionAndFeesReport,
     Execution as ApiExecution, ExecutionFilter,
-    Order as ApiOrder,
+    Order as ApiOrder, OrderState as ApiOrderState,
     PRICE_SCALE_F, QTY_SCALE_F,
 };
 use crate::bridge::SharedState;
@@ -328,6 +328,19 @@ pub struct TrackedOrder {
     pub filled: f64,
     pub remaining: f64,
     pub instrument: InstrumentId,
+    /// Price of the order's last print; 0 before any fill (ibx#473).
+    pub last_fill_price: f64,
+}
+
+/// What the client reports for an order in `open_order` / `order_status`
+/// after a server report (ibx#473).
+pub struct OrderView {
+    pub contract: ApiContract,
+    pub order: ApiOrder,
+    pub state: ApiOrderState,
+    pub last_fill_price: f64,
+    /// This client's id for an order it placed; 0 otherwise.
+    pub client_id: i64,
 }
 
 /// The reference's answer to a place or modify on an order id that is no
@@ -981,7 +994,46 @@ impl ClientCore {
         let remaining = order.total_quantity;
         orders.insert(order_id, TrackedOrder {
             contract, order, status: "PendingSubmit".into(), filled: 0.0, remaining, instrument,
+            last_fill_price: 0.0,
         });
+    }
+
+    /// The order as `open_order` reports it after a server report, with
+    /// `status`: the tracked order as the caller placed it when this client
+    /// placed it, else the order the server reports; the order state of the
+    /// latest report (ibx#473). `None` for an order known to neither.
+    pub fn order_view(&self, order_id: u64, shared: &SharedState, status: &str) -> Option<OrderView> {
+        let tracked = self.open_orders.lock().unwrap().get(&order_id).cloned();
+        let info = shared.orders.get_order_info(order_id);
+        let mut state = info.as_ref().map(|i| i.order_state.clone()).unwrap_or_default();
+        state.status = status.into();
+        let (contract, order, last_fill_price, client_id) = match (tracked, info) {
+            (Some(t), info) => {
+                let mut order = t.order;
+                order.order_id = order_id as i64;
+                if let Some(i) = &info {
+                    if order.perm_id == 0 { order.perm_id = i.order.perm_id; }
+                    if order.account.is_empty() { order.account = i.order.account.clone(); }
+                }
+                (t.contract, order, t.last_fill_price, self.client_id.load(Ordering::Relaxed))
+            }
+            (None, Some(i)) => (i.contract, i.order, 0.0, 0),
+            (None, None) => return None,
+        };
+        let contract = if contract.con_id != 0 {
+            self.get_contract(contract.con_id, shared).unwrap_or(contract)
+        } else {
+            contract
+        };
+        Some(OrderView { contract, order, state, last_fill_price, client_id })
+    }
+
+    /// Keep the price of an order's last print for later order_status
+    /// callbacks (ibx#473).
+    pub fn record_last_fill_price(&self, order_id: u64, price: f64) {
+        if let Some(o) = self.open_orders.lock().unwrap().get_mut(&order_id) {
+            o.last_fill_price = price;
+        }
     }
 
     /// Update a tracked order after a fill. Removes the order if fully filled.
@@ -1065,6 +1117,7 @@ impl ClientCore {
                         filled: o.filled,
                         remaining: o.remaining,
                         instrument: o.instrument,
+                        last_fill_price: o.last_fill_price,
                     }));
                 }
             }
@@ -1088,6 +1141,7 @@ impl ClientCore {
                     filled: 0.0,
                     remaining: 0.0,
                     instrument: 0,
+                    last_fill_price: 0.0,
                 }));
             }
         }

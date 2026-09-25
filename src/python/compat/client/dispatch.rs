@@ -31,6 +31,50 @@ macro_rules! call_wrapper {
 }
 
 impl EClient {
+    /// open_order for an order after a server report (ibx#473).
+    fn send_open_order(&self, py: Python<'_>, order_id: u64, view: &crate::client_core::OrderView) -> PyResult<()> {
+        let c = Contract {
+            con_id: view.contract.con_id,
+            symbol: view.contract.symbol.clone(),
+            sec_type: view.contract.sec_type.clone(),
+            exchange: view.contract.exchange.clone(),
+            primary_exchange: view.contract.primary_exchange.clone(),
+            currency: view.contract.currency.clone(),
+            local_symbol: view.contract.local_symbol.clone(),
+            trading_class: view.contract.trading_class.clone(),
+            ..Default::default()
+        };
+        let src = &view.order;
+        let mut o = Order::default();
+        o.order_id = order_id as i64;
+        o.action = src.action.clone();
+        o.total_quantity = src.total_quantity;
+        o.order_type = src.order_type.clone();
+        o.lmt_price = src.lmt_price;
+        o.aux_price = src.aux_price;
+        o.tif = src.tif.clone();
+        o.account = src.account.clone();
+        o.perm_id = src.perm_id;
+        o.parent_id = src.parent_id;
+        o.oca_type = src.oca_type;
+        o.outside_rth = src.outside_rth;
+        o.order_ref = src.order_ref.clone();
+        o.use_price_mgmt_algo = src.use_price_mgmt_algo;
+        o.trail_stop_price = src.trail_stop_price;
+        o.algo_strategy = src.algo_strategy.clone();
+        o.what_if = src.what_if;
+        let mut state = OrderState::default();
+        state.status = view.state.status.clone();
+        state.commission_and_fees = view.state.commission_and_fees;
+        state.completed_time = view.state.completed_time.clone();
+        state.completed_status = view.state.completed_status.clone();
+        let c_py = Py::new(py, c)?.into_any();
+        let o_py = Py::new(py, o)?.into_any();
+        let state_py = Py::new(py, state)?.into_any();
+        call_wrapper!(self.wrapper, py, "open_order", (order_id as i64, &c_py, &o_py, &state_py));
+        Ok(())
+    }
+
     fn send_commission_report(&self, py: Python<'_>, cr: &ApiCommissionAndFeesReport) -> PyResult<()> {
         let report = CommissionAndFeesReport {
             exec_id: cr.exec_id.clone(),
@@ -79,8 +123,18 @@ impl EClient {
             let remaining = fill.remaining_fixed as f64 / QTY_SCALE_F;
             let shares = fill.qty_fixed as f64 / QTY_SCALE_F;
             let avg_price = fill.average_price() as f64 / PRICE_SCALE_F;
+            // openOrder then orderStatus for every report of a known order
+            // (ibx#473).
+            let client_id = match self.core.order_view(fill.order_id, shared, status) {
+                Some(view) => {
+                    self.send_open_order(py, fill.order_id, &view)?;
+                    view.client_id
+                }
+                None => 0,
+            };
             call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, cum_qty, remaining,
-                 avg_price, perm_id, parent_id, price, 0i64, "", 0.0f64));
+                 avg_price, perm_id, parent_id, price, client_id, "", 0.0f64));
+            self.core.record_last_fill_price(fill.order_id, price);
 
             let rich_info = shared.orders.get_order_info(fill.order_id);
             // Build api-level contract for shared storage
@@ -176,9 +230,16 @@ impl EClient {
             let status = order_status_str(update.status);
             let filled = update.filled_qty_fixed as f64 / QTY_SCALE_F;
             let remaining = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
+            // open_order + order_status for every report of a known order;
+            // a cancel gives order_status only (ibx#473).
+            let view = self.core.order_view(update.order_id, shared, status);
+            if let Some(v) = view.as_ref().filter(|_| status != "Cancelled") {
+                self.send_open_order(py, update.order_id, v)?;
+            }
+            let (last_fill_price, client_id) = view.map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
             call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, filled,
                  remaining, update.avg_fill_price as f64 / PRICE_SCALE_F,
-                 update.perm_id, update.parent_id, 0.0f64, 0i64, "", 0.0f64));
+                 update.perm_id, update.parent_id, last_fill_price, client_id, "", 0.0f64));
 
             // Track open orders
             self.core.update_order_status(update.order_id, status, filled, remaining);

@@ -33,6 +33,19 @@ impl Clock {
 
 /// The context passed to strategy callbacks. Provides market data access and
 /// order management. All hot-path data is pre-allocated.
+/// What a server-reported status did to an order (ibx#212 ibx#473).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusChange {
+    /// The status moved forward.
+    Changed,
+    /// The report restates the current status.
+    Same,
+    /// A stale or reordered report, dropped by the guard.
+    Stale,
+    /// The engine does not hold this order.
+    Unknown,
+}
+
 pub struct Context {
     pub(crate) market: MarketState,
     positions: [i64; MAX_INSTRUMENTS],
@@ -946,23 +959,29 @@ impl Context {
     /// lower-rank status never overwrites a higher one. Deliberate
     /// regressions go through `set_order_status_forced`.
     pub fn update_order_status(&mut self, order_id: OrderId, status: OrderStatus) -> bool {
-        if let Some(order) = self.open_orders.get_mut(&order_id) {
-            let prev = order.status;
-            if prev == status {
-                return false;
-            }
-            if prev.is_terminal() || status.rank() < prev.rank() {
-                log::debug!(
-                    "Order {} status guard: keeping {:?}, dropping stale {:?} (ibx#212)",
-                    order_id, prev, status,
-                );
-                return false;
-            }
-            order.status = status;
-            true
-        } else {
-            false
+        self.apply_order_status(order_id, status) == StatusChange::Changed
+    }
+
+    /// `update_order_status`, telling a report that restates the current
+    /// status apart from a stale one: the reference reports the first and
+    /// not the second (ibx#473).
+    pub fn apply_order_status(&mut self, order_id: OrderId, status: OrderStatus) -> StatusChange {
+        let Some(order) = self.open_orders.get_mut(&order_id) else {
+            return StatusChange::Unknown;
+        };
+        let prev = order.status;
+        if prev == status {
+            return StatusChange::Same;
         }
+        if prev.is_terminal() || status.rank() < prev.rank() {
+            log::debug!(
+                "Order {} status guard: keeping {:?}, dropping stale {:?} (ibx#212)",
+                order_id, prev, status,
+            );
+            return StatusChange::Stale;
+        }
+        order.status = status;
+        StatusChange::Changed
     }
 
     /// Set a status unconditionally — for deliberate lifecycle regressions

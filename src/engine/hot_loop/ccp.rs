@@ -979,9 +979,16 @@ impl CcpState {
             }
         };
 
-        // The guard's verdict doubles as the change flag (ibx#212): a stale
-        // frame the guard rejects must not surface as an order_status either.
-        let status_changed = context.update_order_status(clord_id, status);
+        // The guard's verdict (ibx#212): a stale frame the guard rejects
+        // must not surface as an order_status. A frame that restates the
+        // current status does: the reference reports every report of a known
+        // order (ibx#473), except the statuses it reads as invalid (39=E,
+        // 39=I, ibx#472).
+        let change = context.apply_order_status(clord_id, status);
+        let status_changed = change == crate::engine::context::StatusChange::Changed;
+        let report_status = matches!(change,
+            crate::engine::context::StatusChange::Changed | crate::engine::context::StatusChange::Same)
+            && !matches!(ord_status, "E" | "I");
 
         // The reference reports a server reject as error 201 with the
         // server's reason (ib-agent#192 C1, ibx#250). Only on the first
@@ -993,6 +1000,10 @@ impl CcpState {
             shared.orders.push_order_error(clord_id, 201, format!("Order rejected - reason:{}", reason));
         }
 
+        // The fill or status update of this frame, pushed once the order
+        // cache below holds this frame's order state (ibx#473).
+        let mut fill_out: Option<(Fill, crate::bridge::FillExec)> = None;
+        let mut update_out: Option<crate::types::OrderUpdate> = None;
         let mut had_fill = false;
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
             if !exec_id.is_empty() && !self.record_exec_id(exec_id) {
@@ -1034,32 +1045,33 @@ impl CcpState {
                     model_code: tag(6700).cloned().unwrap_or_default(),
                     order_ref: tag(6010).cloned().unwrap_or_default(),
                 };
-                shared.orders.push_fill_with_exec(fill, exec);
                 shared.portfolio.set_position_fixed(fill.instrument, context.position_fixed(fill.instrument));
-                emit(event_tx, Event::Fill(fill));
+                fill_out = Some((fill, exec));
                 had_fill = true;
             }
         }
 
-        if status_changed && !had_fill {
+        if report_status && !had_fill {
             if let Some(order) = context.order(clord_id).copied() {
                 let perm_id: i64 = parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
                 let parent_id: i64 = parsed.get(&583).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
                 // Average fill price rides on status reports too (ibx#315).
                 let avg_px = parsed.get(&6).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                // Filled so far as the server counts it (tag 14): an order
+                // recovered at session start has no prints in this session.
+                let filled = parsed.get(&14).and_then(|s| parse_qty(s)).unwrap_or(order.filled_fixed);
                 let update = crate::types::OrderUpdate {
                     order_id: clord_id,
                     instrument: order.instrument,
-                    status,
-                    filled_qty_fixed: order.filled_fixed,
+                    status: order.status,
+                    filled_qty_fixed: filled,
                     remaining_qty_fixed: leaves_qty,
                     avg_fill_price: (avg_px * PRICE_SCALE as f64).round() as i64,
                     perm_id,
                     parent_id,
                     timestamp_ns: context.now_ns(),
                 };
-                shared.orders.push_order_update(update);
-                emit(event_tx, Event::OrderUpdate(update));
+                update_out = Some(update);
             }
         }
 
@@ -1270,6 +1282,15 @@ impl CcpState {
             shared.orders.push_order_info(clord_id, RichOrderInfo {
                 contract, order, order_state, last_exec,
             });
+        }
+
+        if let Some((fill, exec)) = fill_out {
+            shared.orders.push_fill_with_exec(fill, exec);
+            emit(event_tx, Event::Fill(fill));
+        }
+        if let Some(update) = update_out {
+            shared.orders.push_order_update(update);
+            emit(event_tx, Event::OrderUpdate(update));
         }
 
         if matches!(status,
@@ -2553,7 +2574,42 @@ mod tests {
         ccp.handle_exec_report(&replaced, &mut context, &shared, &None, "");
 
         assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::PreSubmitted);
-        assert!(shared.orders.drain_order_updates().is_empty(), "no status change is reported");
+        // Each report is reported with the unchanged status, as the
+        // reference does for a modify confirm (ibx#473).
+        let statuses: Vec<_> = shared.orders.drain_order_updates().iter().map(|u| u.status).collect();
+        assert_eq!(statuses, [crate::types::OrderStatus::PreSubmitted; 2]);
+    }
+
+    // ibx#473: a stale report is still not reported (ibx#212), and the
+    // update carries the server's filled quantity (tag 14).
+    #[test]
+    fn a_stale_report_is_not_reported_and_filled_is_the_server_count() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let routed = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA"), (14, "0")]);
+        ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
+        shared.orders.drain_order_updates();
+        let stale = exec_report_frame(&[(39, "A"), (150, "A")]);
+        ccp.handle_exec_report(&stale, &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_order_updates().is_empty(), "stale PreSubmitted after Submitted");
+        let restated = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA"), (14, "0.5"), (151, "0.5")]);
+        ccp.handle_exec_report(&restated, &mut context, &shared, &None, "");
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].status, crate::types::OrderStatus::Submitted);
+        assert_eq!(updates[0].filled_qty_fixed, QTY_SCALE / 2);
+    }
+
+    // ibx#473: the update is pushed after the order cache holds this
+    // report, so the client reads the same frame's order state.
+    #[test]
+    fn the_order_cache_holds_the_report_before_the_update() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let routed = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA"), (44, "101.5")]);
+        ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_order_updates().len(), 1);
+        let info = shared.orders.get_order_info(42).expect("cached");
+        assert_eq!(info.order_state.status, "Submitted");
+        assert_eq!(info.order.lmt_price, 101.5);
     }
 
     #[test]
