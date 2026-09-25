@@ -5,8 +5,7 @@ use pyo3::prelude::*;
 
 use crate::types::*;
 use super::EClient;
-use super::super::contract::Contract;
-use super::super::super::types::{PRICE_SCALE_F, QTY_SCALE_F};
+use super::super::super::types::PRICE_SCALE_F;
 
 #[pymethods]
 impl EClient {
@@ -113,75 +112,43 @@ impl EClient {
         Ok(())
     }
 
-    /// Request account updates for multiple accounts/models.
+    /// Request account updates across accounts / models. A subscription,
+    /// as the reference (ibx#476): the rows, account_update_multi_end, then
+    /// the rows that change, until cancel_account_updates_multi.
     #[pyo3(signature = (req_id, account, model_code, ledger_and_nlv=false))]
     fn req_account_updates_multi(
         &self, py: Python<'_>, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let shared = self.shared_state()?;
-        let _ = ledger_and_nlv;
-        let acct = shared.portfolio.account();
-        let acct_default = self.account();
-        let acct_name = if !account.is_empty() { account } else { acct_default.as_str() };
-        let tag_values: [(&str, f64); 8] = [
-            ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
-            ("TotalCashValue", acct.total_cash_value as f64 / PRICE_SCALE_F),
-            ("BuyingPower", acct.buying_power as f64 / PRICE_SCALE_F),
-            ("GrossPositionValue", acct.gross_position_value as f64 / PRICE_SCALE_F),
-            ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
-            ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
-            ("InitMarginReq", acct.init_margin_req as f64 / PRICE_SCALE_F),
-            ("MaintMarginReq", acct.maint_margin_req as f64 / PRICE_SCALE_F),
-        ];
-        for (key, val) in &tag_values {
-            let val_str = format!("{:.2}", val);
-            self.wrapper.call_method(
-                py, "account_update_multi",
-                (req_id, acct_name, model_code, *key, val_str.as_str(), "USD"),
-                None,
-            )?;
+        if let Err((code, message)) = self.core.subscribe_account_multi(req_id, account, model_code, ledger_and_nlv) {
+            shared.orders.push_order_error(req_id as u64, code, message);
+            return Ok(());
         }
-        self.wrapper.call_method1(py, "account_update_multi_end", (req_id,))?;
-        Ok(())
+        self.dispatch_multi(py, &shared)
     }
 
     /// Cancel multi-account updates.
     fn cancel_account_updates_multi(&self, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        let _ = req_id;
+        self.core.unsubscribe_account_multi(req_id);
         Ok(())
     }
 
-    /// Request positions across multiple accounts/models.
+    /// Request positions across multiple accounts/models. A subscription, as
+    /// the reference (ibx#476).
     #[pyo3(signature = (req_id, account, model_code))]
     fn req_positions_multi(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.core.subscribe_positions_multi(req_id, account, model_code);
         let shared = self.shared_state()?;
-        for _ in 0..500 {
-            if shared.portfolio.account_data_received() { break; }
-            py.detach(|| std::thread::sleep(std::time::Duration::from_millis(10)));
-        }
-        let positions = shared.portfolio.position_infos();
-        for pi in &positions {
-            let mut c = Contract::default();
-            c.con_id = pi.con_id;
-            let c_py = Py::new(py, c)?.into_any();
-            let avg_cost = pi.avg_cost as f64 / PRICE_SCALE_F;
-            self.wrapper.call_method(
-                py, "position_multi",
-                (req_id, account, model_code, &c_py, pi.position_fixed as f64 / QTY_SCALE_F, avg_cost),
-                None,
-            )?;
-        }
-        self.wrapper.call_method1(py, "position_multi_end", (req_id,))?;
-        Ok(())
+        self.dispatch_multi(py, &shared)
     }
 
     /// Cancel multi-account positions.
     fn cancel_positions_multi(&self, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        let _ = req_id;
+        self.core.unsubscribe_positions_multi(req_id);
         Ok(())
     }
 

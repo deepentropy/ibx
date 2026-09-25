@@ -1928,7 +1928,7 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
         shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
             sr_id: sr_id.to_string(),
             rows: rows.into_iter()
-                .map(|(key, currency, value)| crate::bridge::AccountRow { key, value, currency })
+                .map(|(key, currency, value)| crate::bridge::AccountRow { key, value, currency, ledger: false })
                 .collect(),
             ledger: text.split(SOH_CHAR).any(|p| p == "35=RL"),
             end: false,
@@ -1971,9 +1971,10 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
     // The account stream's values as sent, for update_account_value (ibx#475).
     if is_account_stream(text) {
         let (rows, time_secs) = parse_account_rows(text);
+        let ledger = text.split(SOH_CHAR).any(|p| p == "35=RL");
         shared.portfolio.update_account_rows(|store| {
             for (key, currency, value) in &rows {
-                store.set(key, currency, value);
+                store.set_row(key, currency, value, ledger);
             }
             if let Some(t) = time_secs {
                 store.time_secs = store.time_secs.max(t);

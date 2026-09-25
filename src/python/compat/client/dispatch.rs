@@ -31,6 +31,48 @@ macro_rules! call_wrapper {
 }
 
 impl EClient {
+    /// Rows of the running multi-account requests (ibx#476).
+    pub(crate) fn dispatch_multi(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
+        let own = self.account();
+        for batch in self.core.prepare_account_multi(shared) {
+            let account = if batch.account.is_empty() { own.as_str() } else { batch.account.as_str() };
+            for row in &batch.rows {
+                call_wrapper!(self.wrapper, py, "account_update_multi",
+                    (batch.req_id, account, batch.model_code.as_str(), row.key.as_str(), row.value.as_str(), row.currency.as_str()));
+            }
+            if batch.end {
+                call_wrapper!(self.wrapper, py, "account_update_multi_end", (batch.req_id,));
+            }
+        }
+        for (req_id, account, model_code, batch) in self.core.prepare_positions_multi(shared) {
+            let account = if account.is_empty() { own.clone() } else { account };
+            for pi in &batch.rows {
+                let ac = self.core.position_contract(pi.con_id, shared);
+                let mut c = Contract::default();
+                c.con_id = ac.con_id;
+                c.symbol = ac.symbol;
+                c.sec_type = ac.sec_type;
+                c.exchange = ac.exchange;
+                c.primary_exchange = ac.primary_exchange;
+                c.currency = ac.currency;
+                c.local_symbol = ac.local_symbol;
+                c.trading_class = ac.trading_class;
+                c.multiplier = ac.multiplier;
+                let c_py = Py::new(py, c)?.into_any();
+                call_wrapper!(self.wrapper, py, "position_multi",
+                    (req_id, account.as_str(), model_code.as_str(), &c_py,
+                     pi.position_fixed as f64 / QTY_SCALE_F, pi.avg_cost as f64 / PRICE_SCALE_F));
+            }
+            if batch.end {
+                call_wrapper!(self.wrapper, py, "position_multi_end", (req_id,));
+            }
+            if let Some((code, message)) = batch.error {
+                call_wrapper!(self.wrapper, py, "error", (req_id, code, message.as_str(), ""));
+            }
+        }
+        Ok(())
+    }
+
     /// Position rows of a running req_positions (ibx#477).
     pub(crate) fn dispatch_positions(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
         let Some(batch) = self.core.prepare_positions(shared) else { return Ok(()) };
@@ -653,6 +695,8 @@ impl EClient {
 
         // Positions of a running req_positions (ibx#477).
         self.dispatch_positions(py, shared)?;
+        // Multi-account requests (ibx#476).
+        self.dispatch_multi(py, shared)?;
 
         // Account updates (ibx#475): values, portfolio rows each followed by
         // the account time, the time after the batch, and for the first image

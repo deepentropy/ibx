@@ -701,6 +701,8 @@ pub struct AccountRow {
     pub key: String,
     pub value: String,
     pub currency: String,
+    /// A per-currency ledger key (from a ledger frame).
+    pub ledger: bool,
 }
 
 /// Account values of the account stream, by key and currency, in the order
@@ -719,15 +721,25 @@ pub struct AccountRows {
 impl AccountRows {
     /// Set a row; returns true when the value is new or changed.
     pub fn set(&mut self, key: &str, currency: &str, value: &str) -> bool {
+        self.set_row(key, currency, value, false)
+    }
+
+    /// Set a row, marking whether it is a ledger key (ibx#476).
+    pub fn set_row(&mut self, key: &str, currency: &str, value: &str, ledger: bool) -> bool {
         match self.rows.iter_mut().find(|r| r.key == key && r.currency == currency) {
-            Some(r) if r.value == value => false,
+            // A key the ledger also sends (AccruedCash) stays a ledger key.
+            Some(r) if r.value == value => {
+                r.ledger |= ledger;
+                false
+            }
             Some(r) => {
+                r.ledger |= ledger;
                 r.value = value.to_string();
                 self.generation += 1;
                 true
             }
             None => {
-                self.rows.push(AccountRow { key: key.into(), value: value.into(), currency: currency.into() });
+                self.rows.push(AccountRow { key: key.into(), value: value.into(), currency: currency.into(), ledger });
                 self.generation += 1;
                 true
             }

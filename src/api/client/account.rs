@@ -112,44 +112,81 @@ impl EClient {
     }
 
     /// Request account updates for multiple accounts/models. Matches `reqAccountUpdatesMulti` in C++.
+    ///
+    /// A subscription, as the reference (ibx#476): the account values
+    /// (unless `ledger_and_nlv`) and the ledger rows as the server sent them,
+    /// each through `account_update_multi` with the request id and model
+    /// code, then `account_update_multi_end`; then the rows that change,
+    /// until `cancel_account_updates_multi`. A request id already running
+    /// gives error 322. What is ready is sent through `wrapper` at once; the
+    /// rest comes through `process_msgs`.
     pub fn req_account_updates_multi(
-        &self, _req_id: i64, _account: &str, _model_code: &str, _ledger_and_nlv: bool,
+        &self, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
         wrapper: &mut impl Wrapper,
     ) {
-        let acct = self.shared.portfolio.account();
-        let fields: &[(&str, f64)] = &[
-            ("NetLiquidation", acct.net_liquidation as f64 / PRICE_SCALE_F),
-            ("TotalCashValue", acct.total_cash_value as f64 / PRICE_SCALE_F),
-            ("BuyingPower", acct.buying_power as f64 / PRICE_SCALE_F),
-            ("GrossPositionValue", acct.gross_position_value as f64 / PRICE_SCALE_F),
-            ("UnrealizedPnL", acct.unrealized_pnl as f64 / PRICE_SCALE_F),
-            ("RealizedPnL", acct.realized_pnl as f64 / PRICE_SCALE_F),
-            ("InitMarginReq", acct.init_margin_req as f64 / PRICE_SCALE_F),
-            ("MaintMarginReq", acct.maint_margin_req as f64 / PRICE_SCALE_F),
-        ];
-        for (key, val) in fields {
-            let val_str = format!("{:.2}", val);
-            wrapper.update_account_value(key, &val_str, "USD", &self.account_id);
+        if let Err((code, message)) = self.core.subscribe_account_multi(req_id, account, model_code, ledger_and_nlv) {
+            wrapper.error(req_id, code, &message, "");
+            return;
         }
-        wrapper.account_download_end(&self.account_id);
+        self.dispatch_multi(wrapper);
     }
 
     /// Cancel multi-account updates. Matches `cancelAccountUpdatesMulti` in C++.
-    pub fn cancel_account_updates_multi(&self, _req_id: i64) {
-        // No-op: delivered immediately.
+    pub fn cancel_account_updates_multi(&self, req_id: i64) {
+        self.core.unsubscribe_account_multi(req_id);
     }
 
     /// Request positions for multiple accounts/models. Matches `reqPositionsMulti` in C++.
+    ///
+    /// A subscription, as the reference (ibx#476): `position_multi` rows
+    /// with the request id and model code, `position_multi_end`, then a row
+    /// each time a position or its average cost changes, until
+    /// `cancel_positions_multi`.
     pub fn req_positions_multi(
-        &self, _req_id: i64, _account: &str, _model_code: &str,
+        &self, req_id: i64, account: &str, model_code: &str,
         wrapper: &mut impl Wrapper,
     ) {
-        self.req_positions(wrapper);
+        self.core.subscribe_positions_multi(req_id, account, model_code);
+        self.dispatch_multi(wrapper);
     }
 
     /// Cancel multi-account positions. Matches `cancelPositionsMulti` in C++.
-    pub fn cancel_positions_multi(&self, _req_id: i64) {
-        // No-op: delivered immediately.
+    pub fn cancel_positions_multi(&self, req_id: i64) {
+        self.core.unsubscribe_positions_multi(req_id);
+    }
+
+    /// Rows of the running multi-account requests (ibx#476).
+    pub(crate) fn dispatch_multi(&self, wrapper: &mut impl Wrapper) {
+        for batch in self.core.prepare_account_multi(&self.shared) {
+            let account = if batch.account.is_empty() { self.account_id.as_str() } else { batch.account.as_str() };
+            for row in &batch.rows {
+                wrapper.account_update_multi(batch.req_id, account, &batch.model_code, &row.key, &row.value, &row.currency);
+            }
+            if batch.end {
+                wrapper.account_update_multi_end(batch.req_id);
+            }
+        }
+        for (req_id, account, model_code, batch) in self.core.prepare_positions_multi(&self.shared) {
+            let account = if account.is_empty() { self.account_id.clone() } else { account };
+            for pi in &batch.rows {
+                let ac = self.core.position_contract(pi.con_id, &self.shared);
+                let c = Contract {
+                    con_id: ac.con_id, symbol: ac.symbol, sec_type: ac.sec_type,
+                    exchange: ac.exchange, primary_exchange: ac.primary_exchange,
+                    currency: ac.currency, local_symbol: ac.local_symbol,
+                    trading_class: ac.trading_class, multiplier: ac.multiplier,
+                    ..Default::default()
+                };
+                wrapper.position_multi(req_id, &account, &model_code, &c,
+                    pi.position_fixed as f64 / QTY_SCALE_F, pi.avg_cost as f64 / PRICE_SCALE_F);
+            }
+            if batch.end {
+                wrapper.position_multi_end(req_id);
+            }
+            if let Some((code, message)) = batch.error {
+                wrapper.error(req_id, code, &message, "");
+            }
+        }
     }
 
     /// Read account state snapshot.

@@ -57,6 +57,12 @@ pub trait Wrapper {
     fn account_summary_end(&mut self, req_id: i64) {}
     fn position(&mut self, account: &str, contract: &Contract, pos: f64, avg_cost: f64) {}
     fn position_end(&mut self) {}
+    /// A row of `req_account_updates_multi` (ibx#476).
+    fn account_update_multi(&mut self, req_id: i64, account: &str, model_code: &str, key: &str, value: &str, currency: &str) {}
+    fn account_update_multi_end(&mut self, req_id: i64) {}
+    /// A row of `req_positions_multi` (ibx#476).
+    fn position_multi(&mut self, req_id: i64, account: &str, model_code: &str, contract: &Contract, pos: f64, avg_cost: f64) {}
+    fn position_multi_end(&mut self, req_id: i64) {}
     fn pnl(&mut self, req_id: i64, daily_pnl: f64, unrealized_pnl: f64, realized_pnl: f64) {}
     fn pnl_single(&mut self, req_id: i64, pos: f64, daily_pnl: f64, unrealized_pnl: f64, realized_pnl: f64, value: f64) {}
 

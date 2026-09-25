@@ -3569,7 +3569,7 @@ fn summary_sent(rx: &crossbeam_channel::Receiver<ControlCommand>) -> Vec<String>
 }
 
 fn summary_row(key: &str, value: &str, currency: &str) -> crate::bridge::AccountRow {
-    crate::bridge::AccountRow { key: key.into(), value: value.into(), currency: currency.into() }
+    crate::bridge::AccountRow { key: key.into(), value: value.into(), currency: currency.into(), ledger: false }
 }
 
 #[test]
@@ -3728,4 +3728,115 @@ fn req_positions_gives_2151_when_the_data_never_comes() {
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.is_empty(), "the request ended");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Multi-account requests (ibx#476)
+// ═══════════════════════════════════════════════════════════════════
+
+#[derive(Default)]
+struct MultiRec { events: Vec<String> }
+impl Wrapper for MultiRec {
+    fn account_update_multi(&mut self, req_id: i64, _a: &str, model: &str, key: &str, value: &str, currency: &str) {
+        self.events.push(format!("acct:{req_id}:{model}:{key}:{value}:{currency}"));
+    }
+    fn account_update_multi_end(&mut self, req_id: i64) {
+        self.events.push(format!("acct_end:{req_id}"));
+    }
+    fn position_multi(&mut self, req_id: i64, _a: &str, model: &str, c: &Contract, pos: f64, _avg: f64) {
+        self.events.push(format!("pos:{req_id}:{model}:{}:{pos}", c.con_id));
+    }
+    fn position_multi_end(&mut self, req_id: i64) {
+        self.events.push(format!("pos_end:{req_id}"));
+    }
+    fn update_account_value(&mut self, _k: &str, _v: &str, _c: &str, _a: &str) {
+        self.events.push("single:update_account_value".into());
+    }
+    fn account_download_end(&mut self, _a: &str) {
+        self.events.push("single:account_download_end".into());
+    }
+    fn position(&mut self, _a: &str, _c: &Contract, _p: f64, _avg: f64) {
+        self.events.push("single:position".into());
+    }
+    fn position_end(&mut self) {
+        self.events.push("single:position_end".into());
+    }
+    fn error(&mut self, id: i64, code: i64, msg: &str, _a: &str) {
+        self.events.push(format!("error:{id}:{code}:{msg}"));
+    }
+}
+
+fn seed_multi_account(shared: &SharedState) {
+    shared.portfolio.update_account_rows(|store| {
+        store.set_row("NetLiquidation", "USD", "953633.06", false);
+        store.set_row("CashBalance", "BASE", "899133.4993", true);
+        store.image_complete = true;
+    });
+}
+
+// A key sent by the account frame and by the ledger (AccruedCash USD, seen
+// on paper) is a ledger key: ledgerAndNLV includes it.
+#[test]
+fn a_key_also_in_the_ledger_is_a_ledger_key() {
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.update_account_rows(|store| {
+        store.set_row("AccruedCash", "USD", "1893.50", false);
+        store.set_row("AccruedCash", "USD", "1893.5", true);
+        store.image_complete = true;
+    });
+    let mut w = MultiRec::default();
+    client.req_account_updates_multi(9002, "", "", true, &mut w);
+    assert_eq!(w.events, ["acct:9002::AccruedCash:1893.5:USD", "acct_end:9002"]);
+}
+
+#[test]
+fn account_updates_multi_carries_its_request_id_and_model_code() {
+    let (client, _rx, shared) = test_client();
+    seed_multi_account(&shared);
+    let mut w = MultiRec::default();
+    client.req_account_updates_multi(9001, "", "Core", false, &mut w);
+    client.req_account_updates_multi(9002, "", "", true, &mut w);
+    client.req_account_updates_multi(9001, "", "", false, &mut w);
+    assert_eq!(w.events, [
+        "acct:9001:Core:NetLiquidation:953633.06:USD",
+        "acct:9001:Core:CashBalance:899133.4993:BASE",
+        "acct_end:9001",
+        "acct:9002::CashBalance:899133.4993:BASE",
+        "acct_end:9002",
+        "error:9001:322:Duplicate ticker id",
+    ]);
+
+    // A change: a row for each request that has the key, no end.
+    shared.portfolio.update_account_rows(|s| { s.set_row("NetLiquidation", "USD", "953642.02", false); });
+    let mut w = MultiRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["acct:9001:Core:NetLiquidation:953642.02:USD"]);
+
+    // Cancelled: nothing more.
+    client.cancel_account_updates_multi(9001);
+    shared.portfolio.update_account_rows(|s| { s.set_row("NetLiquidation", "USD", "1", false); });
+    let mut w = MultiRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+}
+
+#[test]
+fn positions_multi_carries_its_request_id_and_updates() {
+    let (client, _rx, shared) = test_client();
+    shared.portfolio.set_account_download_complete();
+    shared.portfolio.set_position_info(aapl_position(100, 336 * PRICE_SCALE));
+    let mut w = MultiRec::default();
+    client.req_positions_multi(9003, "", "Core", &mut w);
+    assert_eq!(w.events, ["pos:9003:Core:265598:100", "pos_end:9003"]);
+
+    shared.portfolio.set_position_info(aapl_position(101, 336 * PRICE_SCALE));
+    let mut w = MultiRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["pos:9003:Core:265598:101"]);
+
+    client.cancel_positions_multi(9003);
+    shared.portfolio.set_position_info(aapl_position(102, 336 * PRICE_SCALE));
+    let mut w = MultiRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
 }

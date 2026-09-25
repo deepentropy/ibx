@@ -427,6 +427,8 @@ impl EClient {
 
         // Positions of a running req_positions (ibx#477).
         self.dispatch_positions(wrapper);
+        // Multi-account requests (ibx#476).
+        self.dispatch_multi(wrapper);
 
         // Account updates (ibx#475): values, portfolio rows each followed by
         // the account time, the time after the batch, and for the first image

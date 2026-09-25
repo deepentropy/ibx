@@ -223,6 +223,79 @@ impl PositionsSubscription {
     }
 }
 
+impl PositionsSubscription {
+    fn new() -> Self {
+        Self { requested_at: std::time::Instant::now(), snapshot_sent: false, sent: HashMap::new(), generation: 0 }
+    }
+}
+
+/// The next rows of a positions subscription (ibx#477 ibx#476): the snapshot
+/// and the end once the position data is in; then one row per change of a
+/// position or its average cost. Error 2151 when the data is not in after
+/// 30 s.
+fn advance_positions(sub: &mut PositionsSubscription, shared: &SharedState) -> Option<PositionsBatch> {
+    if !sub.snapshot_sent {
+        if !shared.portfolio.account_download_complete() {
+            if sub.requested_at.elapsed() >= POSITIONS_WAIT {
+                return Some(PositionsBatch {
+                    rows: Vec::new(), end: false,
+                    error: Some((2151, "Positions info is not available yet".into())),
+                });
+            }
+            return None;
+        }
+        sub.generation = shared.portfolio.position_generation();
+        let mut rows = shared.portfolio.position_infos();
+        rows.sort_by_key(|p| p.con_id);
+        sub.sent = rows.iter().map(|p| (p.con_id, (p.position_fixed, p.avg_cost))).collect();
+        sub.snapshot_sent = true;
+        return Some(PositionsBatch { rows, end: true, error: None });
+    }
+    let generation = shared.portfolio.position_generation();
+    if generation == sub.generation {
+        return None;
+    }
+    sub.generation = generation;
+    let mut rows: Vec<PositionInfo> = shared.portfolio.position_infos().into_iter()
+        .filter(|p| sub.sent.get(&p.con_id) != Some(&(p.position_fixed, p.avg_cost)))
+        .collect();
+    rows.sort_by_key(|p| p.con_id);
+    for p in &rows {
+        sub.sent.insert(p.con_id, (p.position_fixed, p.avg_cost));
+    }
+    (!rows.is_empty()).then_some(PositionsBatch { rows, end: false, error: None })
+}
+
+/// A running req_positions_multi (ibx#476).
+pub struct PositionsMultiSubscription {
+    pub req_id: i64,
+    pub account: String,
+    pub model_code: String,
+    sub: PositionsSubscription,
+}
+
+/// A running req_account_updates_multi (ibx#476).
+pub struct AccountMultiSubscription {
+    pub req_id: i64,
+    pub account: String,
+    pub model_code: String,
+    /// ledgerAndNLV: the ledger rows only.
+    ledger_only: bool,
+    image_sent: bool,
+    sent: HashMap<(String, String), String>,
+    generation: u64,
+}
+
+/// Rows of one req_account_updates_multi (ibx#476).
+pub struct AccountMultiBatch {
+    pub req_id: i64,
+    pub account: String,
+    pub model_code: String,
+    pub rows: Vec<crate::bridge::AccountRow>,
+    /// The snapshot: account_update_multi_end follows the rows.
+    pub end: bool,
+}
+
 /// Position rows to send for req_positions (ibx#477).
 pub struct PositionsBatch {
     pub rows: Vec<PositionInfo>,
@@ -444,6 +517,8 @@ pub struct ClientCore {
     // Account summary subscription state (req_id, tags)
     pub account_summaries: Mutex<Vec<AccountSummaryRequest>>,
     pub positions_sub: Mutex<Option<PositionsSubscription>>,
+    pub positions_multi: Mutex<Vec<PositionsMultiSubscription>>,
+    pub account_multi: Mutex<Vec<AccountMultiSubscription>>,
     pub next_account_summary: AtomicU64,
 
     // News bulletin subscription
@@ -500,6 +575,8 @@ impl ClientCore {
             last_pnl_single: Mutex::new(HashMap::new()),
             account_summaries: Mutex::new(Vec::new()),
             positions_sub: Mutex::new(None),
+            positions_multi: Mutex::new(Vec::new()),
+            account_multi: Mutex::new(Vec::new()),
             next_account_summary: AtomicU64::new(1),
             bulletin_subscribed: AtomicBool::new(false),
             account_updates_subscribed: AtomicBool::new(false),
@@ -532,6 +609,8 @@ impl ClientCore {
         self.last_pnl_single.lock().unwrap().clear();
         self.account_summaries.lock().unwrap().clear();
         *self.positions_sub.lock().unwrap() = None;
+        self.positions_multi.lock().unwrap().clear();
+        self.account_multi.lock().unwrap().clear();
         self.bulletin_subscribed.store(false, Ordering::Relaxed);
         self.account_updates_subscribed.store(false, Ordering::Relaxed);
         *self.account_stream.lock().unwrap() = AccountStream::default();
@@ -856,12 +935,7 @@ impl ClientCore {
     /// Start req_positions: a subscription, as the reference. One per
     /// client; a new request replaces the running one.
     pub fn subscribe_positions(&self) {
-        *self.positions_sub.lock().unwrap() = Some(PositionsSubscription {
-            requested_at: std::time::Instant::now(),
-            snapshot_sent: false,
-            sent: HashMap::new(),
-            generation: 0,
-        });
+        *self.positions_sub.lock().unwrap() = Some(PositionsSubscription::new());
     }
 
     pub fn unsubscribe_positions(&self) {
@@ -875,37 +949,104 @@ impl ClientCore {
     pub fn prepare_positions(&self, shared: &SharedState) -> Option<PositionsBatch> {
         let mut guard = self.positions_sub.lock().unwrap();
         let sub = guard.as_mut()?;
-        if !sub.snapshot_sent {
-            if !shared.portfolio.account_download_complete() {
-                if sub.requested_at.elapsed() >= POSITIONS_WAIT {
-                    *guard = None;
-                    return Some(PositionsBatch {
-                        rows: Vec::new(), end: false,
-                        error: Some((2151, "Positions info is not available yet".into())),
-                    });
-                }
-                return None;
+        let batch = advance_positions(sub, shared);
+        if batch.as_ref().is_some_and(|b| b.error.is_some()) {
+            *guard = None;
+        }
+        batch
+    }
+
+    // ── Multi-account requests (ibx#476) ──
+
+    /// Start req_positions_multi: the same subscription as req_positions,
+    /// with its request id and model code. The same id again replaces it.
+    pub fn subscribe_positions_multi(&self, req_id: i64, account: &str, model_code: &str) {
+        let mut subs = self.positions_multi.lock().unwrap();
+        subs.retain(|m| m.req_id != req_id);
+        subs.push(PositionsMultiSubscription {
+            req_id, account: account.to_string(), model_code: model_code.to_string(),
+            sub: PositionsSubscription::new(),
+        });
+    }
+
+    pub fn unsubscribe_positions_multi(&self, req_id: i64) {
+        self.positions_multi.lock().unwrap().retain(|m| m.req_id != req_id);
+    }
+
+    /// Rows of each running req_positions_multi: the snapshot and the end,
+    /// then one row per change (ibx#476). No position data after 30 s:
+    /// error 2151 for that request, and it ends.
+    pub fn prepare_positions_multi(&self, shared: &SharedState) -> Vec<(i64, String, String, PositionsBatch)> {
+        let mut subs = self.positions_multi.lock().unwrap();
+        let mut out = Vec::new();
+        subs.retain_mut(|m| match advance_positions(&mut m.sub, shared) {
+            Some(batch) => {
+                let expired = batch.error.is_some();
+                out.push((m.req_id, m.account.clone(), m.model_code.clone(), batch));
+                !expired
             }
-            sub.generation = shared.portfolio.position_generation();
-            let mut rows = shared.portfolio.position_infos();
-            rows.sort_by_key(|p| p.con_id);
-            sub.sent = rows.iter().map(|p| (p.con_id, (p.position_fixed, p.avg_cost))).collect();
-            sub.snapshot_sent = true;
-            return Some(PositionsBatch { rows, end: true, error: None });
+            None => true,
+        });
+        out
+    }
+
+    /// Start req_account_updates_multi (ibx#476). A request id already
+    /// running gives 322, as the reference.
+    pub fn subscribe_account_multi(&self, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool) -> Result<(), (i64, String)> {
+        let mut subs = self.account_multi.lock().unwrap();
+        if subs.iter().any(|m| m.req_id == req_id) {
+            return Err((322, "Duplicate ticker id".into()));
         }
-        let generation = shared.portfolio.position_generation();
-        if generation == sub.generation {
-            return None;
+        subs.push(AccountMultiSubscription {
+            req_id, account: account.to_string(), model_code: model_code.to_string(),
+            ledger_only: ledger_and_nlv, image_sent: false, sent: HashMap::new(), generation: 0,
+        });
+        Ok(())
+    }
+
+    /// Cancel sends nothing, as the reference.
+    pub fn unsubscribe_account_multi(&self, req_id: i64) {
+        self.account_multi.lock().unwrap().retain(|m| m.req_id != req_id);
+    }
+
+    /// Rows of each running req_account_updates_multi (ibx#476): the
+    /// account values (unless ledgerAndNLV) and the ledger rows as the server
+    /// sent them, then the end, once the account image is complete; then the
+    /// rows that change, with no end.
+    pub fn prepare_account_multi(&self, shared: &SharedState) -> Vec<AccountMultiBatch> {
+        let mut subs = self.account_multi.lock().unwrap();
+        if subs.is_empty() {
+            return Vec::new();
         }
-        sub.generation = generation;
-        let mut rows: Vec<PositionInfo> = shared.portfolio.position_infos().into_iter()
-            .filter(|p| sub.sent.get(&p.con_id) != Some(&(p.position_fixed, p.avg_cost)))
-            .collect();
-        rows.sort_by_key(|p| p.con_id);
-        for p in &rows {
-            sub.sent.insert(p.con_id, (p.position_fixed, p.avg_cost));
+        let (generation, complete, _) = shared.portfolio.account_rows_generation();
+        if !complete {
+            return Vec::new();
         }
-        (!rows.is_empty()).then_some(PositionsBatch { rows, end: false, error: None })
+        let mut store = None;
+        let mut out = Vec::new();
+        for m in subs.iter_mut() {
+            if m.image_sent && m.generation == generation {
+                continue;
+            }
+            let rows_now = store.get_or_insert_with(|| shared.portfolio.account_rows());
+            let mut rows = Vec::new();
+            for row in rows_now.rows.iter().filter(|r| !m.ledger_only || r.ledger) {
+                let id = (row.key.clone(), row.currency.clone());
+                if m.sent.get(&id) != Some(&row.value) {
+                    m.sent.insert(id, row.value.clone());
+                    rows.push(row.clone());
+                }
+            }
+            let end = !m.image_sent;
+            m.image_sent = true;
+            m.generation = generation;
+            if end || !rows.is_empty() {
+                out.push(AccountMultiBatch {
+                    req_id: m.req_id, account: m.account.clone(), model_code: m.model_code.clone(), rows, end,
+                });
+            }
+        }
+        out
     }
 
     // ── Account updates subscription management ──
