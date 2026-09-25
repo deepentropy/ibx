@@ -45,6 +45,7 @@ impl EClient {
         }
 
         let instrument = self.find_or_register_instrument(contract)?;
+        self.core.note_currency(&tx, contract.con_id, &contract.currency);
 
         // If orderId is already tracked, this is a modification: replace it
         // with the full wanted state (ibx#247).

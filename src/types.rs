@@ -329,6 +329,9 @@ impl AdaptivePriority {
 /// All fields default to "not set" (0/false).
 #[derive(Debug, Clone, Default)]
 pub struct OrderAttrs {
+    /// The caller's orderRef, sent in tag 6010 on the order and every
+    /// replace (ibx#466).
+    pub order_ref: String,
     /// Show on book as this many shares (tag 111). 0 = not set (show full qty).
     pub display_size: u32,
     /// Minimum fill quantity (FIX tag 110). 0 = not set.
@@ -1390,6 +1393,10 @@ pub enum ControlCommand {
     SubscribePnl { req_id: i64, account: String },
     /// Cancel P&L subscription.
     CancelPnl { req_id: i64 },
+    /// The currency of a contract, for the orders on its instrument
+    /// (tag 15, ibx#466). Sent before an order when the engine does not have
+    /// it yet.
+    SetInstrumentCurrency { con_id: i64, currency: String },
     /// Subscribe to an account summary (6040=55, ibx#479): `sr_id` is the
     /// subscription id the server echoes on the rows (`SR.Socket.{n}`).
     SubscribeAccountSummary { sr_id: String, tags: String, group: String },

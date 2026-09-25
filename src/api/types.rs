@@ -425,6 +425,7 @@ impl Order {
                 }
             };
         OrderAttrs {
+            order_ref: self.order_ref.clone(),
             display_size: self.display_size.max(0) as u32,
             min_qty: self.min_qty.max(0) as u32,
             hidden: self.hidden,
@@ -468,7 +469,9 @@ impl Order {
 
     /// Check if the order has any extended attributes set.
     pub fn has_extended_attrs(&self) -> bool {
-        self.display_size > 0
+        // An orderRef rides the extended encoders, which send it (ibx#466).
+        !self.order_ref.is_empty()
+            || self.display_size > 0
             || self.min_qty > 0
             || self.hidden
             || self.outside_rth

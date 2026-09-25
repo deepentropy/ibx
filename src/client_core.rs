@@ -568,6 +568,8 @@ pub struct ClientCore {
     /// Running req_pnl requests, with the last values sent (ibx#478).
     pub pnl_reqs: Mutex<HashMap<i64, [i64; 3]>>,
     pub pnl_quotes: Mutex<PnlQuotes>,
+    /// Contract currency already sent to the engine, by conId (ibx#466).
+    pub currency_sent: Mutex<HashMap<i64, String>>,
     pub pnl_single_reqs: Mutex<HashMap<i64, i64>>, // req_id → con_id
     // Per-req_id change detection for pnl_single: [pos, daily, unrealized, realized, value] scaled.
     pub last_pnl_single: Mutex<HashMap<i64, [i64; 5]>>,
@@ -629,6 +631,7 @@ impl ClientCore {
             snapshot_reqs: Mutex::new(HashSet::new()),
             pnl_reqs: Mutex::new(HashMap::new()),
             pnl_quotes: Mutex::new(PnlQuotes::default()),
+            currency_sent: Mutex::new(HashMap::new()),
             pnl_single_reqs: Mutex::new(HashMap::new()),
             last_pnl_single: Mutex::new(HashMap::new()),
             account_summaries: Mutex::new(Vec::new()),
@@ -663,6 +666,7 @@ impl ClientCore {
         self.snapshot_reqs.lock().unwrap().clear();
         self.pnl_reqs.lock().unwrap().clear();
         *self.pnl_quotes.lock().unwrap() = PnlQuotes::default();
+        self.currency_sent.lock().unwrap().clear();
         self.pnl_single_reqs.lock().unwrap().clear();
         self.last_pnl_single.lock().unwrap().clear();
         self.account_summaries.lock().unwrap().clear();
@@ -704,6 +708,21 @@ impl ClientCore {
 
     /// Find instrument ID for a contract, registering if needed.
     /// Returns `Err` if the control channel is closed.
+    /// Tell the engine the currency of a contract before an order on it,
+    /// when it does not have it yet (tag 15, ibx#466).
+    pub fn note_currency(&self, control_tx: &Sender<ControlCommand>, con_id: i64, currency: &str) {
+        if currency.is_empty() || con_id == 0 {
+            return;
+        }
+        let mut sent = self.currency_sent.lock().unwrap();
+        if sent.get(&con_id).map(String::as_str) == Some(currency) {
+            return;
+        }
+        if control_tx.send(ControlCommand::SetInstrumentCurrency { con_id, currency: currency.to_string() }).is_ok() {
+            sent.insert(con_id, currency.to_string());
+        }
+    }
+
     pub fn find_or_register_instrument(
         &self,
         control_tx: &Sender<ControlCommand>,
@@ -938,7 +957,15 @@ impl ClientCore {
     /// contract inherits the id. A later request for that conId simply
     /// re-registers.
     pub fn forget_instrument(&self, instrument: InstrumentId) {
-        self.con_id_to_instrument.lock().unwrap().retain(|_, iid| *iid != instrument);
+        let mut sent = self.currency_sent.lock().unwrap();
+        self.con_id_to_instrument.lock().unwrap().retain(|con_id, iid| {
+            let keep = *iid != instrument;
+            if !keep {
+                // The engine forgets the slot's currency too.
+                sent.remove(con_id);
+            }
+            keep
+        });
     }
 
     pub fn set_news_providers(&self, providers: &str) {
@@ -3071,6 +3098,24 @@ mod tests {
         // Re-subscribing with same req_id must re-emit (cache cleared on unsubscribe).
         core.subscribe_pnl_single(7, 1);
         assert_eq!(core.poll_pnl_single(&shared).len(), 1);
+    }
+
+    // ibx#466: an order with an orderRef goes to the extended encoder,
+    // which sends 6010; the currency reaches the engine once per contract.
+    #[test]
+    fn order_ref_uses_the_extended_encoder_and_currency_is_sent_once() {
+        let order = ApiOrder { order_ref: "t1".into(), ..lmt(100.0) };
+        assert!(order.has_extended_attrs());
+        assert_eq!(order.attrs().order_ref, "t1");
+
+        let core = ClientCore::new();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        core.note_currency(&tx, 1, "EUR");
+        core.note_currency(&tx, 1, "EUR");
+        core.note_currency(&tx, 1, "");
+        let sent: Vec<ControlCommand> = rx.try_iter().collect();
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(&sent[0], ControlCommand::SetInstrumentCurrency { con_id: 1, currency } if currency == "EUR"));
     }
 
     fn lmt(price: f64) -> ApiOrder {

@@ -619,6 +619,11 @@ impl HotLoop {
                 ControlCommand::SubscribePnl { req_id, account } => {
                     self.ccp.send_pnl_subscribe(req_id, &account, &mut self.ccp_conn, &mut self.hb);
                 }
+                ControlCommand::SetInstrumentCurrency { con_id, currency } => {
+                    if let Some(id) = self.context.market.instrument_by_con_id(con_id) {
+                        self.context.market.set_currency(id, &currency);
+                    }
+                }
                 ControlCommand::SubscribeAccountSummary { sr_id, tags, group } => {
                     self.ccp.send_account_summary(&sr_id, Some((&tags, &group)), &mut self.ccp_conn, &mut self.hb);
                 }

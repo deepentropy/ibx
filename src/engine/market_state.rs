@@ -39,6 +39,8 @@ pub struct MarketState {
     min_tick_scaled: [i64; MAX_INSTRUMENTS],
     /// Per-instrument symbol name. Flat array indexed by InstrumentId.
     symbols: [Option<String>; MAX_INSTRUMENTS],
+    /// Contract currency for the orders (tag 15, ibx#466).
+    currencies: [Option<String>; MAX_INSTRUMENTS],
     /// Per-instrument security type (API string, e.g. "STK"/"CASH"). Empty
     /// slot = unknown, treated as stock. Registration used to DROP this
     /// field silently (ibx#217).
@@ -59,6 +61,7 @@ impl MarketState {
             min_ticks: [0.0; MAX_INSTRUMENTS],
             min_tick_scaled: [0; MAX_INSTRUMENTS],
             symbols: std::array::from_fn(|_| None),
+            currencies: std::array::from_fn(|_| None),
             sec_types: std::array::from_fn(|_| None),
             exchanges: std::array::from_fn(|_| None),
         }
@@ -115,6 +118,7 @@ impl MarketState {
         self.instrument_to_con_id[instrument as usize] = FREE_SLOT;
         self.quotes[instrument as usize] = Quote::default();
         self.symbols[instrument as usize] = None;
+        self.currencies[instrument as usize] = None;
         self.sec_types[instrument as usize] = None;
         self.exchanges[instrument as usize] = None;
         self.min_ticks[instrument as usize] = 0.0;
@@ -184,6 +188,19 @@ impl MarketState {
     /// Set symbol name for an instrument (e.g. "AAPL"). Used for orders.
     pub fn set_symbol(&mut self, id: InstrumentId, symbol: String) {
         self.symbols[id as usize] = Some(symbol);
+    }
+
+    /// Record the contract currency of an instrument (ibx#466).
+    pub fn set_currency(&mut self, id: InstrumentId, currency: &str) {
+        if !currency.is_empty() {
+            self.currencies[id as usize] = Some(currency.to_uppercase());
+        }
+    }
+
+    /// Currency for an order on this instrument: the contract's, USD when
+    /// unknown (ibx#466).
+    pub fn currency(&self, id: InstrumentId) -> &str {
+        self.currencies[id as usize].as_deref().unwrap_or("USD")
     }
 
     /// Record the security type and requested exchange for an instrument

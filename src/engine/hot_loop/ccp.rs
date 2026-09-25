@@ -1348,6 +1348,8 @@ impl CcpState {
                 use_price_mgmt_algo,
                 trail_stop_price,
                 algo_strategy,
+                // The orderRef the server echoes (ibx#466).
+                order_ref: parsed.get(&6010).cloned().unwrap_or_default(),
                 ..Default::default()
             };
 

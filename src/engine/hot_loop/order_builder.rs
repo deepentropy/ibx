@@ -31,6 +31,10 @@ pub(crate) fn drain_and_send_orders(
     };
     for mut order_req in orders {
         let oid = order_req.order_id();
+        // The contract's currency (tag 15), USD when unknown (ibx#466).
+        let currency: String = order_req.instrument()
+            .map(|i| context.market.currency(i).to_string())
+            .unwrap_or_else(|| "USD".to_string());
         // The reference refuses a modify of an order that is no longer
         // working, or whose cancel is pending, and sends nothing (ibx#463).
         // Checked here, where the order's status is current.
@@ -90,7 +94,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),       // SecurityType = CommonStock
                     (100, &destination),
                     (6210, &destination),     // ExDestination
-                    (15, "USD"),        // Currency
+                    (15, currency.as_str()),        // Currency
                     (204, "0"),         // CustomerOrFirm
                 ])
             }
@@ -119,12 +123,13 @@ pub(crate) fn drain_and_send_orders(
                     (40, "4"),          // OrdType = Stop Limit
                     (44, &price_str),   // Limit Price
                     (99, &stop_str),    // StopPx
+                    (6117, &stop_str), // stop trigger, as the reference (ibx#466)
                     (59, "0"),          // TIF = DAY
                     (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -156,7 +161,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ];
                 if outside_rth {
@@ -200,7 +205,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),       // SecurityType
                     (100, &destination),
                     (6210, &destination),     // ExDestination
-                    (15, "USD"),        // Currency
+                    (15, currency.as_str()),        // Currency
                     (204, "0"),         // CustomerOrFirm
                 ])
             }
@@ -227,12 +232,13 @@ pub(crate) fn drain_and_send_orders(
                     (38, &qty_str),
                     (40, "3"),          // OrdType = Stop
                     (99, &stop_str),    // StopPx
+                    (6117, &stop_str), // stop trigger, as the reference (ibx#466)
                     (59, "0"),          // TIF = DAY
                     (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -259,12 +265,13 @@ pub(crate) fn drain_and_send_orders(
                     (38, &qty_str),
                     (40, "3"),          // OrdType = Stop
                     (99, &stop_str),
+                    (6117, &stop_str), // stop trigger, as the reference (ibx#466)
                     (59, "1"),          // TIF = GTC
                     (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ];
                 if outside_rth {
@@ -297,12 +304,13 @@ pub(crate) fn drain_and_send_orders(
                     (40, "4"),          // OrdType = Stop Limit
                     (44, &price_str),
                     (99, &stop_str),
+                    (6117, &stop_str), // stop trigger, as the reference (ibx#466)
                     (59, "1"),          // TIF = GTC
                     (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ];
                 if outside_rth {
@@ -338,7 +346,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -370,7 +378,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -409,7 +417,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ];
                 // Optional initial stop trigger (tag 6117), only when set
@@ -454,7 +462,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ];
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
@@ -498,7 +506,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ];
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
@@ -534,7 +542,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -566,7 +574,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -598,7 +606,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -632,7 +640,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -672,7 +680,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ]);
 
@@ -697,7 +705,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                     (6107, &parent_str),       // ParentOrderID
                     (583, &oca_group),         // OCAGroup
@@ -725,7 +733,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                     (6107, &parent_str),       // ParentOrderID
                     (583, &oca_group),         // OCAGroup
@@ -764,7 +772,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -796,7 +804,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -828,7 +836,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, sec_type_str),
                     (100, destination.clone()),
                     (6210, destination),
-                    (15, "USD".to_string()),
+                    (15, currency.clone()),
                     (204, "0".to_string()),
                 ];
                 // Parent link, OCA group and the other attributes (ibx#318).
@@ -867,7 +875,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, sec_type_str),
                     (100, destination.clone()),
                     (6210, destination),
-                    (15, "USD".to_string()),
+                    (15, currency.clone()),
                     (204, "0".to_string()),
                 ];
                 // Parent link, OCA group and the other attributes (ibx#318).
@@ -928,7 +936,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                     (6941, &ref_con_str),      // referenceContractId
                     (6938, peg_decrease_str),   // isPeggedChangeAmountDecrease
@@ -964,7 +972,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -994,7 +1002,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -1023,7 +1031,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, sec_type_str),
                     (100, destination.clone()),
                     (6210, destination),
-                    (15, "USD".to_string()),
+                    (15, currency.clone()),
                     (204, "0".to_string()),
                     (6091, "1".to_string()),         // What-If flag
                 ];
@@ -1064,7 +1072,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -1102,7 +1110,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ];
                 fields.extend(adjustable.iter().map(|(t, s)| (*t, s.as_str())));
@@ -1134,7 +1142,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -1164,7 +1172,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -1191,12 +1199,13 @@ pub(crate) fn drain_and_send_orders(
                     (38, &qty_str),
                     (40, "SP"),         // OrdType = Stop with Protection
                     (99, &stop_str),    // StopPx
+                    (6117, &stop_str), // stop trigger, as the reference (ibx#466)
                     (59, "0"),
                     (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -1226,7 +1235,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, "ISLAND"),    // Requires directed exchange
                     (6210, "ISLAND"),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ];
                 let cap_str;
@@ -1262,7 +1271,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, "ISLAND"),    // Requires directed exchange
                     (6210, "ISLAND"),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -1292,7 +1301,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, "ISLAND"),    // Requires directed exchange
                     (6210, "ISLAND"),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -1322,7 +1331,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, "ISLAND"),    // Requires directed exchange
                     (6210, "ISLAND"),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
@@ -1352,7 +1361,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, "ISLAND"),    // Requires directed exchange
                     (6210, "ISLAND"),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                 ];
                 let offset_str;
@@ -1388,7 +1397,7 @@ pub(crate) fn drain_and_send_orders(
                     (167, &sec_type_str),
                     (100, "ISLAND"),    // Requires directed exchange
                     (6210, "ISLAND"),
-                    (15, "USD"),
+                    (15, currency.as_str()),
                     (204, "0"),
                     (8403, "0.0"),      // midOffsetAtWhole — differentiates PEGMID from PEGMKT
                     (8404, "0.0"),      // midOffsetAtHalf
@@ -1780,6 +1789,8 @@ fn modify_fields(
     }
     if let Some(s) = stop_trigger { f.push((6117, s)); }
     if let Some(o) = trail_offset { f.push((6370, o)); }
+    // The orderRef, restated on every replace (ibx#466).
+    if !attrs.order_ref.is_empty() { f.push((6010, attrs.order_ref.clone())); }
     f.push((6122, "c".to_string()));
     // Outside-RTH only when the order has it: a replace without it leaves
     // the order regular-hours only (ibx#247).
@@ -1817,6 +1828,9 @@ fn push_extended_attrs(
     attrs: &crate::types::OrderAttrs,
     has_base_exec_inst: bool,
 ) {
+    if !attrs.order_ref.is_empty() {
+        fields.push((6010, attrs.order_ref.clone()));
+    }
     if attrs.display_size > 0 {
         fields.push((111, format_uint(attrs.display_size as u64).to_string()));
     }
@@ -1983,11 +1997,15 @@ fn send_order_ex(
         K::Stop { stop_price } => {
             fields.push((40, "3".to_string()));
             fields.push((99, format_price(stop_price).to_string()));
+            // Stop trigger, as the reference (ibx#466).
+            fields.push((6117, format_price(stop_price).to_string()));
         }
         K::StopLimit { price, stop_price } => {
             fields.push((40, "4".to_string()));
             fields.push((44, format_price(price).to_string()));
             fields.push((99, format_price(stop_price).to_string()));
+            // Stop trigger, as the reference (ibx#466).
+            fields.push((6117, format_price(stop_price).to_string()));
         }
         K::TrailingStop { trail_amt, trail_stop_price } => {
             // Per ib-agent#136 capture: amount-based trailing stop carries
@@ -2044,6 +2062,8 @@ fn send_order_ex(
         K::StpPrt { stop_price } => {
             fields.push((40, "SP".to_string()));
             fields.push((99, format_price(stop_price).to_string()));
+            // Stop trigger, as the reference (ibx#466).
+            fields.push((6117, format_price(stop_price).to_string()));
         }
         K::MidPrice { price_cap } => {
             fields.push((40, "MIDPX".to_string()));
@@ -2097,7 +2117,7 @@ fn send_order_ex(
     // Secondary routing field — the reference encoder always writes it
     // alongside the destination (ib-agent#165).
     fields.push((6210, destination));
-    fields.push((15, "USD".to_string()));
+    fields.push((15, context.market.currency(instrument).to_string()));
     fields.push((204, "0".to_string()));
 
     // Adjustable-stop tags in the same place as on the plain path (ibx#240).
@@ -2858,5 +2878,57 @@ mod tests {
         );
         assert_eq!(tag(&tags, 11), Some("7.1"));
         assert_eq!(tag(&tags, 6944), Some("ALL"));
+    }
+
+    // ibx#466: the orderRef rides 6010 on the order and on each replace, as
+    // the reference (captured 25/09/2026: 6010=pm0925-fill-BUY, and 6010
+    // before 6122=c on the replace).
+    #[test]
+    fn order_ref_is_sent_on_the_order_and_the_replace() {
+        let attrs = crate::types::OrderAttrs { order_ref: "pm0925-fill-BUY".into(), ..Default::default() };
+        let tags = wire_tags(OrderRequest::SubmitLimitEx {
+            order_id: 7, instrument: 0, side: Side::Buy, qty: 100, price: 337 * P, tif: b'0', attrs: attrs.clone(),
+        });
+        assert_eq!(tag(&tags, 6010), Some("pm0925-fill-BUY"));
+
+        let replace = replace_fields(7, Side::Buy, 100, crate::types::OrderKind::Limit { price: 338 * P }, b'0', attrs);
+        assert!(pos(&replace, 6010) + 1 == pos(&replace, 6122), "6010 just before 6122=c");
+    }
+
+    #[test]
+    fn the_currency_is_the_contracts() {
+        let usd = wire_tags(OrderRequest::SubmitLimit { order_id: 8, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P });
+        assert_eq!(tag(&usd, 15), Some("USD"), "USD when unknown");
+        let eur = wire_tags_with(|ctx| ctx.market.set_currency(0, "EUR"),
+            OrderRequest::SubmitLimit { order_id: 9, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P });
+        assert_eq!(tag(&eur, 15), Some("EUR"));
+        let eur_ex = wire_tags_with(|ctx| ctx.market.set_currency(0, "EUR"), OrderRequest::SubmitEx {
+            order_id: 10, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::Limit { price: 100 * P }, tif: b'0',
+            attrs: crate::types::OrderAttrs { hidden: true, ..Default::default() },
+        });
+        assert_eq!(tag(&eur_ex, 15), Some("EUR"));
+    }
+
+    // ibx#466: the reference writes the stop trigger 6117 with the stop
+    // price on STP, STP LMT and STP PRT (captured 25/09/2026:
+    // 99=235.14 ... 6117=235.14).
+    #[test]
+    fn stop_orders_carry_the_stop_trigger() {
+        let plain = wire_tags(OrderRequest::SubmitStop { order_id: 11, instrument: 0, side: Side::Sell, qty: 1, stop_price: 23514 * P / 100 });
+        assert_eq!(tag(&plain, 99), Some("235.14"));
+        assert_eq!(tag(&plain, 6117), Some("235.14"));
+        let stop_limit = wire_tags(OrderRequest::SubmitStopLimit {
+            order_id: 12, instrument: 0, side: Side::Sell, qty: 1, price: 234 * P, stop_price: 235 * P,
+        });
+        assert_eq!(tag(&stop_limit, 6117), tag(&stop_limit, 99));
+        let ex = wire_tags(OrderRequest::SubmitEx {
+            order_id: 13, instrument: 0, side: Side::Sell, qty: 1,
+            kind: crate::types::OrderKind::Stop { stop_price: 23514 * P / 100 }, tif: b'1',
+            attrs: crate::types::OrderAttrs { outside_rth: true, ..Default::default() },
+        });
+        assert_eq!(tag(&ex, 6117), Some("235.14"));
+        let mit = wire_tags(OrderRequest::SubmitMit { order_id: 14, instrument: 0, side: Side::Sell, qty: 1, stop_price: 235 * P });
+        assert_eq!(tag(&mit, 6117), None, "not on MIT");
     }
 }

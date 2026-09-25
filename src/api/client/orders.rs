@@ -36,6 +36,7 @@ impl EClient {
             &self.control_tx,
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
         )?;
+        self.core.note_currency(&self.control_tx, contract.con_id, &contract.currency);
 
         // If orderId is already tracked, this is a modification: replace it
         // with the full wanted state (ibx#247).
