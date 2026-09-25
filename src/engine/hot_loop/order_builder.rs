@@ -31,6 +31,19 @@ pub(crate) fn drain_and_send_orders(
     };
     for mut order_req in orders {
         let oid = order_req.order_id();
+        // The reference refuses a modify of an order that is no longer
+        // working, or whose cancel is pending, and sends nothing (ibx#463).
+        // Checked here, where the order's status is current.
+        if let OrderRequest::Modify { order_id, .. } = &order_req {
+            let working = context.order(*order_id)
+                .is_some_and(|o| o.status != OrderStatus::PendingCancel);
+            if !working {
+                log::warn!("Modify of order {} refused: the order is not working", order_id);
+                let (code, message) = crate::client_core::MODIFY_OF_FINISHED_ORDER;
+                shared.orders.push_order_error(*order_id, code, message.into());
+                continue;
+            }
+        }
         // Snap every price to the contract's tick grid before encoding
         // (ibx#216). The tick comes from the market-data subscription ack;
         // without one it is 0 and prices pass through unchanged.
@@ -2640,5 +2653,60 @@ mod tests {
 
         assert_eq!(context.order(8).unwrap().status, OrderStatus::Filled);
         assert!(shared.orders.drain_order_updates().is_empty());
+    }
+
+    /// Run one Modify of order 5 through `drain_and_send_orders`; return the
+    /// bytes sent and the order errors raised.
+    fn modify_of(existing: Option<Order>) -> (usize, Vec<(u64, i64, String)>) {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+
+        let mut context = Context::new();
+        context.market.register(265598);
+        if let Some(o) = existing {
+            context.insert_order(o);
+        }
+        context.pending_orders.push(OrderRequest::Modify {
+            new_order_id: 5, order_id: 5, qty: 10,
+            kind: crate::types::OrderKind::Limit { price: 101 * P },
+            tif: b'0', attrs: Default::default(),
+        });
+        let shared = Arc::new(SharedState::new());
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        drop(conn);
+
+        let mut buf = Vec::new();
+        let _ = server.read_to_end(&mut buf);
+        (buf.len(), shared.orders.drain_order_errors())
+    }
+
+    // ibx#463: the reference refuses a modify of an order that is no longer
+    // working with error 104 and sends nothing (captured 25/09/2026). The
+    // engine no longer holds a filled or cancelled order; a replace built
+    // without it went out with side BUY and no symbol.
+    #[test]
+    fn modify_of_an_order_the_engine_no_longer_holds_is_refused() {
+        let (sent, errors) = modify_of(None);
+        assert_eq!(sent, 0, "nothing is sent");
+        assert_eq!(errors, [(5, 104, "Cannot modify a filled order.".to_string())]);
+    }
+
+    #[test]
+    fn modify_of_an_order_with_a_pending_cancel_is_refused() {
+        let (sent, errors) = modify_of(Some(order(5, 0, OrderStatus::PendingCancel)));
+        assert_eq!(sent, 0, "nothing is sent");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].1, 104);
+    }
+
+    #[test]
+    fn modify_of_a_working_order_is_sent() {
+        let (sent, errors) = modify_of(Some(order(5, 0, OrderStatus::Submitted)));
+        assert!(sent > 0, "the replace is sent");
+        assert!(errors.is_empty());
     }
 }

@@ -25,7 +25,9 @@ impl EClient {
         };
 
         // Refused before sending, like the reference: error() only.
-        if let Some((code, message)) = ClientCore::refusal_before_sending(order) {
+        if let Some((code, message)) = ClientCore::refusal_before_sending(order)
+            .or_else(|| self.core.refusal_for_order_id(oid, order))
+        {
             self.shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }

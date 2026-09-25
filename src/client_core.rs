@@ -303,6 +303,11 @@ pub struct TrackedOrder {
     pub instrument: InstrumentId,
 }
 
+/// The reference's answer to a place or modify on an order id that is no
+/// longer working: filled, cancelled, or with a cancel pending. Nothing is
+/// sent (ibx#463; captured 25/09/2026).
+pub const MODIFY_OF_FINISHED_ORDER: (i64, &str) = (104, "Cannot modify a filled order.");
+
 /// What `place_order` does with an order id that is already working (ibx#247).
 pub enum ModifyPlan {
     /// Send this replace.
@@ -351,6 +356,8 @@ pub struct ClientCore {
 
     // Open order tracking
     pub open_orders: Mutex<HashMap<u64, TrackedOrder>>,
+    // Ids of tracked orders that were filled or cancelled: never sent again (ibx#463).
+    pub finished_orders: Mutex<HashSet<u64>>,
 
     // Market data type callback tracking
     pub market_data_type: AtomicI32,
@@ -387,6 +394,7 @@ impl ClientCore {
             last_portfolio: Mutex::new(None),
             executions: Mutex::new(Vec::new()),
             open_orders: Mutex::new(HashMap::new()),
+            finished_orders: Mutex::new(HashSet::new()),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
             hist_initial_complete: Mutex::new(HashSet::new()),
@@ -414,6 +422,8 @@ impl ClientCore {
         *self.last_portfolio.lock().unwrap() = None;
         self.executions.lock().unwrap().clear();
         self.open_orders.lock().unwrap().clear();
+        // `finished_orders` is kept: the server still knows those orders
+        // after a reconnect, so their ids must not be sent as new orders.
         self.market_data_type.store(1, Ordering::Relaxed);
         self.mdt_sent.lock().unwrap().clear();
         self.hist_initial_complete.lock().unwrap().clear();
@@ -788,10 +798,19 @@ impl ClientCore {
         self.open_orders.lock().unwrap().contains_key(&order_id)
     }
 
-    /// Track a newly placed order.
+    /// Track a newly placed order. For a modify of a tracked order, the
+    /// status and fill counts stay as the server last reported them: the
+    /// engine can still refuse the modify (ibx#463).
     pub fn track_order(&self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId) {
+        let mut orders = self.open_orders.lock().unwrap();
+        if let Some(o) = orders.get_mut(&order_id) {
+            o.contract = contract;
+            o.order = order;
+            o.instrument = instrument;
+            return;
+        }
         let remaining = order.total_quantity;
-        self.open_orders.lock().unwrap().insert(order_id, TrackedOrder {
+        orders.insert(order_id, TrackedOrder {
             contract, order, status: "PendingSubmit".into(), filled: 0.0, remaining, instrument,
         });
     }
@@ -800,7 +819,9 @@ impl ClientCore {
     pub fn update_order_fill(&self, order_id: u64, status: &str, filled: f64, remaining: f64) {
         let mut orders = self.open_orders.lock().unwrap();
         if remaining == 0.0 {
-            orders.remove(&order_id);
+            if orders.remove(&order_id).is_some() {
+                self.finished_orders.lock().unwrap().insert(order_id);
+            }
         } else if let Some(o) = orders.get_mut(&order_id) {
             o.status = status.into();
             o.filled = filled;
@@ -815,7 +836,26 @@ impl ClientCore {
             o.status = status.into();
             o.filled = filled;
             o.remaining = remaining;
+            if matches!(status, "Filled" | "Cancelled") {
+                self.finished_orders.lock().unwrap().insert(order_id);
+            }
         }
+    }
+
+    /// The reference's answer when `place_order` names an order this client
+    /// tracked that is filled or cancelled: error 104 and nothing sent
+    /// (ibx#463). A new order with that id would be a second real order.
+    /// A pending cancel is checked by the engine, which holds the current
+    /// status. A what-if is not a modify and is not checked.
+    pub fn refusal_for_order_id(&self, order_id: u64, order: &ApiOrder) -> Option<(i64, String)> {
+        if order.what_if {
+            return None;
+        }
+        if self.finished_orders.lock().unwrap().contains(&order_id) {
+            let (code, message) = MODIFY_OF_FINISHED_ORDER;
+            return Some((code, message.into()));
+        }
+        None
     }
 
     /// Collect open orders: merge local tracking with shared state.
@@ -2173,5 +2213,62 @@ mod tests {
         // Re-subscribing with same req_id must re-emit (cache cleared on unsubscribe).
         core.subscribe_pnl_single(7, 1);
         assert_eq!(core.poll_pnl_single(&shared).len(), 1);
+    }
+
+    fn lmt(price: f64) -> ApiOrder {
+        ApiOrder { action: "BUY".into(), order_type: "LMT".into(), total_quantity: 100.0, lmt_price: price, ..Default::default() }
+    }
+
+    // ibx#463: a filled order was forgotten, so place_order with its id sent
+    // a new order. The reference answers 104 and sends nothing (captured
+    // 25/09/2026).
+    #[test]
+    fn place_on_a_filled_order_id_is_refused() {
+        let core = ClientCore::new();
+        core.track_order(7, ApiContract::default(), lmt(100.0), 0);
+        assert!(core.refusal_for_order_id(7, &lmt(101.0)).is_none(), "working: a modify");
+        core.update_order_fill(7, "Filled", 100.0, 0.0);
+        assert_eq!(core.tracked_order_type(7), None);
+        assert_eq!(core.refusal_for_order_id(7, &lmt(101.0)),
+            Some((104, "Cannot modify a filled order.".to_string())));
+    }
+
+    #[test]
+    fn place_on_a_cancelled_order_id_is_refused() {
+        let core = ClientCore::new();
+        core.track_order(8, ApiContract::default(), lmt(100.0), 0);
+        core.update_order_status(8, "Cancelled", 0.0, 100.0);
+        assert_eq!(core.refusal_for_order_id(8, &lmt(101.0)).map(|r| r.0), Some(104));
+    }
+
+    #[test]
+    fn what_if_on_a_finished_order_id_is_not_refused() {
+        let core = ClientCore::new();
+        core.track_order(9, ApiContract::default(), lmt(100.0), 0);
+        core.update_order_fill(9, "Filled", 100.0, 0.0);
+        let what_if = ApiOrder { what_if: true, ..lmt(101.0) };
+        assert!(core.refusal_for_order_id(9, &what_if).is_none());
+    }
+
+    #[test]
+    fn finished_order_ids_survive_a_reset() {
+        let core = ClientCore::new();
+        core.track_order(10, ApiContract::default(), lmt(100.0), 0);
+        core.update_order_fill(10, "Filled", 100.0, 0.0);
+        core.reset();
+        assert!(core.refusal_for_order_id(10, &lmt(101.0)).is_some());
+    }
+
+    // A modify keeps the status the server last reported: the engine can
+    // still refuse the modify (ibx#463).
+    #[test]
+    fn a_modify_keeps_the_tracked_status() {
+        let core = ClientCore::new();
+        core.track_order(11, ApiContract::default(), lmt(100.0), 0);
+        core.update_order_status(11, "Submitted", 0.0, 100.0);
+        core.track_order(11, ApiContract::default(), lmt(101.0), 0);
+        let tracked = core.open_orders.lock().unwrap().get(&11).cloned().unwrap();
+        assert_eq!(tracked.status, "Submitted");
+        assert_eq!(tracked.order.lmt_price, 101.0);
     }
 }

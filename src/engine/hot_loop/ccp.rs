@@ -851,7 +851,16 @@ impl CcpState {
             // (ib-agent#192 A1a: PreSubmitted before and after).
             "5" => working(),
             "A" => crate::types::OrderStatus::PreSubmitted,
-            "E" => crate::types::OrderStatus::PendingReplace,
+            // Not a status the reference reports: it logs the frame and
+            // keeps the order's status (ibx#472). A fill on the same frame
+            // still counts.
+            "E" | "I" => match context.order(clord_id) {
+                Some(o) => o.status,
+                None => {
+                    log::info!("ExecReport: 39={} for order {} not tracked, no status change", ord_status, clord_id);
+                    return;
+                }
+            },
             // Pending on a replace: the reference reports nothing, so keep
             // the current status. Reporting it as PendingCancel left the
             // order looking cancelled, since nothing moves it back (ibx#247).
@@ -862,9 +871,11 @@ impl CcpState {
             "6" => crate::types::OrderStatus::PendingCancel,
             "1" => crate::types::OrderStatus::PartiallyFilled,
             "2" => crate::types::OrderStatus::Filled,
-            "4" | "C" | "D" => crate::types::OrderStatus::Cancelled,
+            "4" | "C" => crate::types::OrderStatus::Cancelled,
+            // Pending cancel: the order stays open until 39=4 or a fill
+            // (ibx#472, a server-cancelled IOC sends 39=D then 39=4).
+            "D" => crate::types::OrderStatus::PendingCancel,
             "8" => crate::types::OrderStatus::Rejected,
-            "I" => crate::types::OrderStatus::Inactive,
             _ => {
                 log::warn!("Unknown order status 39={} for order {}", ord_status, clord_id);
                 return;
@@ -2335,6 +2346,66 @@ mod tests {
         let pending = exec_report_frame(&[(11, "C42"), (39, "6"), (150, "6")]);
         ccp.handle_exec_report(&pending, &mut context, &shared, &None, "");
         assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::PendingCancel);
+    }
+
+    // ibx#472: the captured server cancel of an IOC order (25/09/2026):
+    // 39=A, 39=0, 150=D|39=D, then 150=4|39=4. The 39=D report is a pending
+    // cancel, and the order stays open, so a fill between the two reports is
+    // applied.
+    #[test]
+    fn pending_cancel_report_keeps_the_order_until_cancelled() {
+        use crate::types::OrderStatus;
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        for pairs in [
+            &[(20, "3"), (39, "A"), (150, "A")][..],
+            &[(20, "0"), (39, "0"), (150, "0"), (100, "ARCA")][..],
+            &[(20, "3"), (39, "D"), (150, "D"), (378, "5")][..],
+        ] {
+            ccp.handle_exec_report(&exec_report_frame(pairs), &mut context, &shared, &None, "");
+        }
+        assert_eq!(context.order(42).unwrap().status, OrderStatus::PendingCancel);
+        let statuses: Vec<OrderStatus> = shared.orders.drain_order_updates().iter().map(|u| u.status).collect();
+        assert_eq!(statuses, [OrderStatus::PreSubmitted, OrderStatus::Submitted, OrderStatus::PendingCancel]);
+
+        let instrument = context.order(42).unwrap().instrument;
+        let fill = exec_report_frame(&[(20, "0"), (39, "2"), (150, "F"), (17, "e1"),
+            (31, "100"), (32, "1"), (14, "1"), (151, "0"), (6, "100")]);
+        ccp.handle_exec_report(&fill, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_fills().len(), 1, "the fill after 39=D is applied");
+        assert_eq!(context.position_fixed(instrument), QTY_SCALE);
+    }
+
+    #[test]
+    fn cancelled_report_after_pending_cancel_ends_the_order() {
+        use crate::types::OrderStatus;
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        for pairs in [
+            &[(20, "0"), (39, "0"), (150, "0"), (100, "ARCA")][..],
+            &[(20, "3"), (39, "D"), (150, "D")][..],
+            &[(20, "3"), (39, "4"), (150, "4")][..],
+        ] {
+            ccp.handle_exec_report(&exec_report_frame(pairs), &mut context, &shared, &None, "");
+        }
+        assert!(context.order(42).is_none(), "a cancelled order leaves the engine");
+        let last = shared.orders.drain_order_updates().last().map(|u| u.status);
+        assert_eq!(last, Some(OrderStatus::Cancelled));
+    }
+
+    // ibx#472: the reference handles 39=E and 39=I as invalid statuses: no
+    // status change and no callback.
+    #[test]
+    fn pending_replace_and_inactive_reports_keep_the_status() {
+        use crate::types::OrderStatus;
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let routed = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA")]);
+        ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
+        shared.orders.drain_order_updates();
+        for code in ["E", "I"] {
+            let frame = exec_report_frame(&[(20, "3"), (39, code), (150, code)]);
+            ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+            assert_eq!(context.order(42).unwrap().status, OrderStatus::Submitted, "39={}", code);
+        }
+        assert!(shared.orders.drain_order_updates().is_empty());
     }
 
     // ibx#411: one portfolio message carries a row per position (ib-agent#192
