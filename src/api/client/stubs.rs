@@ -66,7 +66,8 @@ impl EClient {
     // ── Soft Dollar Tiers ──
 
     /// Request soft dollar tiers. Matches `reqSoftDollarTiers` in C++.
-    /// Gateway-local — returns tiers parsed from CCP logon tag 6560.
+    /// Gateway-local — returns tiers parsed from CCP logon tag 6522, none
+    /// when the logon has no tiers (ibx#480).
     pub fn req_soft_dollar_tiers(&self, req_id: i64, wrapper: &mut impl Wrapper) {
         let tiers = self.shared.reference.soft_dollar_tiers();
         wrapper.soft_dollar_tiers(req_id, &tiers);

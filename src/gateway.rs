@@ -416,7 +416,7 @@ pub struct Gateway {
     /// Stored for farm reconnection.
     pub hw_info: String,
     pub encoded: String,
-    /// Raw soft dollar tier data from CCP logon tag 6560.
+    /// Raw soft dollar tier data from CCP logon tag 6522 (ibx#480).
     pub raw_soft_dollar_tiers: String,
     /// Raw family code data from CCP logon tag 6823.
     pub raw_family_codes: String,
@@ -1296,7 +1296,7 @@ impl Gateway {
             }
 
             // Gateway-local init data from logon response
-            if let Some(v) = fields.get(&6560) {
+            if let Some(v) = fields.get(&6522) {
                 if raw_soft_dollar_tiers.is_empty() { raw_soft_dollar_tiers = v.clone(); }
             }
             if let Some(v) = fields.get(&6823) {
@@ -1430,7 +1430,7 @@ impl Gateway {
                         log::info!("Found account ID from init response: {}", account_id);
                     }
                 }
-            } else if part.starts_with("6560=") && raw_soft_dollar_tiers.is_empty() {
+            } else if part.starts_with("6522=") && raw_soft_dollar_tiers.is_empty() {
                 raw_soft_dollar_tiers = part[5..].to_string();
                 log::info!("Found soft dollar tiers from init response ({} bytes)", raw_soft_dollar_tiers.len());
             } else if part.starts_with("6823=") && raw_family_codes.is_empty() {
@@ -1647,7 +1647,7 @@ impl Gateway {
 
     /// Populate shared state with gateway-local init data parsed from CCP logon.
     pub fn populate_init_data(&self, shared: &SharedState) {
-        use crate::types::{SmartComponent, NewsProvider, SoftDollarTier, FamilyCode};
+        use crate::types::{SmartComponent, NewsProvider, FamilyCode};
 
         // Smart components: hardcoded US equity SMART routing exchanges.
         // Server doesn't send these in a parseable init message; they're
@@ -1693,35 +1693,9 @@ impl Gateway {
         };
         shared.reference.set_news_providers(news_providers);
 
-        // Soft dollar tiers: parse from CCP logon tag 6560, fall back to defaults.
-        let tiers = if self.raw_soft_dollar_tiers.is_empty() {
-            // Default tiers matching Gateway 10.30+
-            vec![
-                SoftDollarTier { name: "MaxRebate".into(), val: "1".into(), display_name: "Maximize Rebate".into() },
-                SoftDollarTier { name: "PreferRebate".into(), val: "9".into(), display_name: "Prefer Rebate".into() },
-                SoftDollarTier { name: "PreferFill".into(), val: "11".into(), display_name: "Prefer Fill".into() },
-                SoftDollarTier { name: "MaxFill".into(), val: "12".into(), display_name: "Maximize Fill".into() },
-                SoftDollarTier { name: "Primary".into(), val: "2".into(), display_name: "Primary Exchange".into() },
-                SoftDollarTier { name: "VRebate".into(), val: "3".into(), display_name: "Highest Volume Exchange With Rebate".into() },
-                SoftDollarTier { name: "VLowFee".into(), val: "4".into(), display_name: "High Volume Exchange With Lowest Fee".into() },
-            ]
-        } else {
-            // Parse "name1|val1|display1;name2|val2|display2" format
-            self.raw_soft_dollar_tiers.split(';').filter_map(|entry| {
-                let parts: Vec<&str> = entry.split('|').collect();
-                if parts.len() >= 3 {
-                    Some(SoftDollarTier {
-                        name: parts[0].to_string(),
-                        val: parts[1].to_string(),
-                        display_name: parts[2].to_string(),
-                    })
-                } else {
-                    log::warn!("Unexpected soft dollar tier format: {}", entry);
-                    None
-                }
-            }).collect()
-        };
-        shared.reference.set_soft_dollar_tiers(tiers);
+        // Soft dollar tiers: from CCP logon tag 6522, none when it is absent
+        // (ibx#480).
+        shared.reference.set_soft_dollar_tiers(parse_soft_dollar_tiers(&self.raw_soft_dollar_tiers));
 
         // Family codes: parse from CCP logon tag 6823.
         // Empty for paper/single accounts.
@@ -2241,5 +2215,61 @@ mod tests {
         };
         assert_eq!(config.username, "user");
         assert!(config.paper);
+    }
+}
+
+/// Soft dollar tiers as the reference reads them from logon tag 6522
+/// (ibx#480): groups `{KEY}:{tiers}` separated by `;`, tiers `{name}@{value}`
+/// separated by `,`. A later group with the same key replaces the earlier
+/// one; every tier of every key is returned. The display name is
+/// `Tier {name} ({value})`, with name + 1 when the name is an integer.
+pub(crate) fn parse_soft_dollar_tiers(raw: &str) -> Vec<crate::types::SoftDollarTier> {
+    let mut groups: Vec<(String, Vec<crate::types::SoftDollarTier>)> = Vec::new();
+    for group in raw.split(';').filter(|g| !g.is_empty()) {
+        let Some((key, list)) = group.split_once(':') else {
+            log::warn!("Unexpected soft dollar tiers format: {} in: {}", group, raw);
+            continue;
+        };
+        let tiers: Vec<crate::types::SoftDollarTier> = list.split(',').filter(|t| !t.is_empty()).filter_map(|tier| {
+            let Some((name, val)) = tier.split_once('@') else {
+                log::warn!("Unexpected soft dollar tier format: {} in: {}", tier, raw);
+                return None;
+            };
+            let shown = name.parse::<i32>().map_or_else(|_| name.to_string(), |n| n.wrapping_add(1).to_string());
+            Some(crate::types::SoftDollarTier {
+                name: name.to_string(),
+                val: val.to_string(),
+                display_name: format!("Tier {} ({})", shown, val),
+            })
+        }).collect();
+        if tiers.is_empty() { continue; }
+        let key = key.to_uppercase();
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some(existing) => existing.1 = tiers,
+            None => groups.push((key, tiers)),
+        }
+    }
+    groups.into_iter().flat_map(|(_, tiers)| tiers).collect()
+}
+
+#[cfg(test)]
+mod soft_dollar_tests {
+    use super::parse_soft_dollar_tiers;
+
+    // ibx#480: tiers come from logon tag 6522, in the reference's format.
+    #[test]
+    fn soft_dollar_tiers_from_6522() {
+        assert!(parse_soft_dollar_tiers("").is_empty());
+        let t = parse_soft_dollar_tiers("USSTK:0@ABC");
+        assert_eq!(t.len(), 1);
+        assert_eq!((t[0].name.as_str(), t[0].val.as_str(), t[0].display_name.as_str()), ("0", "ABC", "Tier 1 (ABC)"));
+
+        let t = parse_soft_dollar_tiers("usstk:1@X,Gold@Y;EUSTK:2@Z;BAD;USSTK:3@W;CASH:");
+        let shown: Vec<&str> = t.iter().map(|t| t.display_name.as_str()).collect();
+        assert_eq!(shown, ["Tier 4 (W)", "Tier 3 (Z)"], "a later group with the same key replaces the earlier one");
+
+        let t = parse_soft_dollar_tiers("USSTK:Gold@Y,nope");
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].display_name, "Tier Gold (Y)");
     }
 }
