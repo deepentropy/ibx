@@ -152,6 +152,21 @@ pub struct MarketDataState {
     depth_updates: Mutex<Vec<DepthUpdate>>,
     tick_news: Mutex<Vec<TickNews>>,
     news_bulletins: Mutex<Vec<NewsBulletin>>,
+    /// Subscriptions the market data server rejected (ibx#444, ibx#447).
+    md_rejects: Mutex<Vec<MdReject>>,
+}
+
+/// A top-of-book subscription the server rejected, and what the client
+/// reports for it (ibx#444, ibx#447).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MdReject {
+    /// Delayed data enabled and available: the subscription went on with
+    /// delayed data (marketDataType 3 and error 10167).
+    Delayed { instrument: InstrumentId },
+    /// The subscription stopped: error 354 (with the "delayed available"
+    /// text when the server says so) or 10089 (an API subscription is
+    /// needed).
+    NotSubscribed { instrument: InstrumentId, delayed_available: bool, needs_api_subscription: bool },
 }
 
 impl MarketDataState {
@@ -165,7 +180,16 @@ impl MarketDataState {
             depth_updates: Mutex::new(Vec::with_capacity(64)),
             tick_news: Mutex::new(Vec::with_capacity(32)),
             news_bulletins: Mutex::new(Vec::with_capacity(16)),
+            md_rejects: Mutex::new(Vec::new()),
         }
+    }
+
+    #[doc(hidden)] pub fn push_md_reject(&self, reject: MdReject) {
+        self.md_rejects.lock().unwrap().push(reject);
+    }
+
+    pub fn drain_md_rejects(&self) -> Vec<MdReject> {
+        self.md_rejects.lock().unwrap().drain(..).collect()
     }
 
     /// Read a quote snapshot (lock-free via SeqLock).

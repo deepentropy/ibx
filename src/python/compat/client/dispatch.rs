@@ -326,6 +326,29 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "error", (reject.order_id as i64, code, msg.as_str(), ""));
         }
 
+        // Subscriptions the server rejected (ibx#444, ibx#447).
+        for reject in shared.market.drain_md_rejects() {
+            let instrument = match reject {
+                crate::bridge::MdReject::Delayed { instrument }
+                | crate::bridge::MdReject::NotSubscribed { instrument, .. } => instrument,
+            };
+            let req_id = self.core.req_id_for_instrument(instrument);
+            if req_id < 0 { continue; }
+            let (code, text, gone) = crate::client_core::ClientCore::md_reject_error(&reject);
+            if !gone {
+                self.core.set_delayed(req_id);
+                call_wrapper!(self.wrapper, py, "market_data_type", (req_id, 3));
+            }
+            call_wrapper!(self.wrapper, py, "error", (req_id, code, text, ""));
+            if gone {
+                let (instrument, needs_news) = self.core.unregister_mkt_data(req_id);
+                if let (Some(instrument), Ok(tx)) = (instrument, self.tx()) {
+                    let _ = tx.send(ControlCommand::Unsubscribe { instrument });
+                    if needs_news { let _ = tx.send(ControlCommand::UnsubscribeNews { instrument }); }
+                }
+            }
+        }
+
         // Poll quotes for changes -> tickPrice/tickSize
         // Poll quotes via shared ClientCore (same logic as Rust dispatch)
         let instruments = self.core.snapshot_instruments();

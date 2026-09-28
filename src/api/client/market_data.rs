@@ -42,6 +42,10 @@ impl EClient {
         generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool,
         mode_9887: i32,
     ) -> Result<(), String> {
+        if let Some((code, text)) = self.core.duplicate_ticker_refusal(req_id) {
+            self.shared.orders.push_order_error(req_id as u64, code, text);
+            return Ok(());
+        }
         self.core.register_mkt_data(
             &self.shared, &self.control_tx, req_id,
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
@@ -59,6 +63,9 @@ impl EClient {
             if needs_news_unsub {
                 let _ = self.send(ControlCommand::UnsubscribeNews { instrument });
             }
+        } else {
+            // An unknown request id: error 300, as the reference (ibx#444).
+            self.shared.orders.push_order_error(req_id as u64, 300, format!("Can't find EId with tickerId:{}", req_id));
         }
         Ok(())
     }
@@ -153,14 +160,13 @@ impl EClient {
         self.shared.last_ccp_rtt()
     }
 
-    /// NOT supported end to end (ibx#234): the requested type is stored
-    /// locally but never sent to the gateway, so subscriptions always
-    /// deliver realtime data and delayed tick variants never arrive.
-    /// Requesting a non-realtime type logs a warning, and the
-    /// `market_data_type` callback reports the DELIVERED type (realtime)
-    /// rather than echoing the request.
+    /// Set the market data type (ibx#447). With 3 (delayed) or 4, a
+    /// subscription the server rejects goes on with delayed data when the
+    /// server has it: `market_data_type(reqId, 3)` then error 10167, as the
+    /// reference. Frozen data (2, and the frozen part of 4) is not
+    /// supported.
     pub fn req_market_data_type(&self, market_data_type: i32) {
-        self.core.set_market_data_type(market_data_type);
+        self.core.set_market_data_type(&self.control_tx, market_data_type);
     }
 
     /// Set news provider codes for per-contract news ticks.

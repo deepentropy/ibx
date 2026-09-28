@@ -1402,6 +1402,9 @@ pub enum ControlCommand {
     },
     /// Unsubscribe from market data for an instrument.
     Unsubscribe { instrument: InstrumentId },
+    /// The client's reqMarketDataType (1..4): 3 and 4 let a subscription the
+    /// server rejects switch to delayed data (ibx#447).
+    SetMarketDataType { market_data_type: i32 },
     /// Subscribe to tick-by-tick data via historical data connection.
     SubscribeTbt { con_id: i64, symbol: String, tbt_type: TbtType, reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>> },
     /// Unsubscribe from tick-by-tick data.

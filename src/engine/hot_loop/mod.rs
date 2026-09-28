@@ -418,6 +418,9 @@ impl HotLoop {
                         );
                     }
                 }
+                ControlCommand::SetMarketDataType { market_data_type } => {
+                    self.farm.market_data_type = market_data_type;
+                }
                 ControlCommand::Unsubscribe { instrument } => {
                     self.farm.send_mktdata_unsubscribe(
                         instrument,
@@ -1946,7 +1949,8 @@ mod tests {
         assert!(spy_sub.contains("9887=3|"), "delayed mode kept: {}", spy_sub);
         assert!(!sent.iter().any(|m| m.contains("6008=272093")), "MSFT was cancelled while down");
         assert_eq!(engine.farm.instrument_md_reqs.len(), 2);
-        assert_eq!(engine.farm.md_req_to_instrument.len(), 3);
+        // Every subscription is the 442 / 443 pair, delayed too (ibx#447).
+        assert_eq!(engine.farm.md_req_to_instrument.len(), 4);
 
         // A second drop and reconnect re-issues them again.
         engine.farm.handle_disconnect(&mut engine.context, &None);
@@ -1967,5 +1971,51 @@ mod tests {
         // Head-ts / histogram / ticks / schedule / scanner / news / fundamental:
         // no bar-stream consumer waiting for historical_data_end.
         assert!(shared.reference.drain_historical_data().is_empty());
+    }
+
+    // ibx#447 (captured 28/09/2026): the subscribe is the 442 / 443 pair
+    // with no 9839; with delayed data enabled, a reject with delayed data
+    // available asks again on new ids with 9887=1 on each entry, and the
+    // client learns it (marketDataType 3, 10167). Without it, the
+    // subscription stops (354 with the "delayed available" text).
+    #[test]
+    fn a_rejected_subscription_goes_delayed_or_stops() {
+        for market_data_type in [3, 1] {
+            let shared = Arc::new(SharedState::new());
+            let mut engine = HotLoop::new(shared.clone(), None, None);
+            let (c1, mut s1) = socket_pair();
+            engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
+            engine.farm.market_data_type = market_data_type;
+            let jp = engine.context.market.register(13905804);
+            engine.farm.send_mktdata_subscribe(13905804, "7203", "SMART", "STK", "", 0.0, "", "", jp, 0,
+                &mut engine.farm_conn, &mut engine.hb);
+            let first = farm_messages_sent(&mut s1);
+            assert_eq!(first.len(), 1);
+            assert!(first[0].contains("264=442|") && first[0].contains("264=443|"), "{}", first[0]);
+            assert!(!first[0].contains("9839=") && !first[0].contains("9887="), "{}", first[0]);
+            let ids: Vec<String> = engine.farm.md_req_to_instrument.iter().map(|(r, _)| r.to_string()).collect();
+
+            let reject = crate::protocol::fix::fix_build(&[(35, "3"), (45, "0"),
+                (58, "Error&BEST/STK/Top&BEST/STK/Top"), (262, &ids.join(";")), (9887, "1;1"),
+                (6756, "133,134;133,134"), (9888, "1;1")], 1);
+            engine.farm.process_farm_message(&reject, &mut engine.farm_conn, &mut engine.context,
+                &shared, &None, &mut engine.hb);
+
+            let rejects = shared.market.drain_md_rejects();
+            if market_data_type == 3 {
+                let again = farm_messages_sent(&mut s1);
+                assert_eq!(again.len(), 1, "{again:?}");
+                assert_eq!(again[0].matches("9887=1|").count(), 2, "{}", again[0]);
+                assert!(!ids.iter().any(|id| again[0].contains(&format!("262={}|", id))), "new ids: {}", again[0]);
+                assert_eq!(rejects, [crate::bridge::MdReject::Delayed { instrument: jp }]);
+                assert_eq!(engine.farm.instrument_md_reqs[0].1.len(), 4, "a cancel covers the rejected ids too");
+            } else {
+                assert!(farm_messages_sent(&mut s1).is_empty());
+                assert_eq!(rejects, [crate::bridge::MdReject::NotSubscribed {
+                    instrument: jp, delayed_available: true, needs_api_subscription: false }]);
+                assert!(engine.farm.instrument_md_reqs.is_empty());
+                assert!(engine.farm.md_req_to_instrument.is_empty());
+            }
+        }
     }
 }

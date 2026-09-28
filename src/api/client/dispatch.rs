@@ -195,6 +195,29 @@ impl EClient {
     // ── Quote Dispatch ──
 
     fn dispatch_quotes(&self, wrapper: &mut impl Wrapper) {
+        // Subscriptions the server rejected (ibx#444, ibx#447).
+        for reject in self.shared.market.drain_md_rejects() {
+            let instrument = match reject {
+                crate::bridge::MdReject::Delayed { instrument }
+                | crate::bridge::MdReject::NotSubscribed { instrument, .. } => instrument,
+            };
+            let req_id = self.core.req_id_for_instrument(instrument);
+            if req_id < 0 { continue; }
+            let (code, text, gone) = crate::client_core::ClientCore::md_reject_error(&reject);
+            if !gone {
+                self.core.set_delayed(req_id);
+                wrapper.market_data_type(req_id, 3);
+            }
+            wrapper.error(req_id, code, text, "");
+            if gone {
+                let (instrument, needs_news) = self.core.unregister_mkt_data(req_id);
+                if let Some(instrument) = instrument {
+                    let _ = self.control_tx.send(ControlCommand::Unsubscribe { instrument });
+                    if needs_news { let _ = self.control_tx.send(ControlCommand::UnsubscribeNews { instrument }); }
+                }
+            }
+        }
+
         // Quote polling → tick_price / tick_size (via ClientCore)
         let instruments = self.core.snapshot_instruments();
         let attrib = crate::api::types::TickAttrib::default();

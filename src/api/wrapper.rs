@@ -241,6 +241,9 @@ pub mod tests {
         fn connect_ack(&mut self) {
             self.events.push("connect_ack".into());
         }
+        fn market_data_type(&mut self, req_id: i64, market_data_type: i32) {
+            self.events.push(format!("market_data_type:{req_id}:{market_data_type}"));
+        }
         fn connection_closed(&mut self) {
             self.events.push("connection_closed".into());
         }

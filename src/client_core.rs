@@ -608,6 +608,8 @@ pub struct ClientCore {
     // Market data type callback tracking
     pub market_data_type: AtomicI32,
     pub mdt_sent: Mutex<HashSet<i64>>,
+    /// Market data requests that switched to delayed data (ibx#447).
+    pub delayed_reqs: Mutex<HashSet<i64>>,
 
     // Historical data keepUpToDate: req_ids that have completed initial batch.
     // Subsequent bars for these req_ids dispatch as historical_data_update.
@@ -619,6 +621,18 @@ pub struct ClientCore {
 
     // Contract cache for enrichment
     pub contract_cache: Mutex<HashMap<i64, ApiContract>>,
+}
+
+/// The delayed tick type of a real-time one, from the API tick type table
+/// (bid 1 -> 66, ask 2 -> 67, last 4 -> 68, sizes 0/3/5 -> 69/70/71, high
+/// 6 -> 72, low 7 -> 73, volume 8 -> 74, close 9 -> 75, open 14 -> 76);
+/// others unchanged (ibx#447).
+pub fn delayed_tick_type(tick_type: i32) -> i32 {
+    match tick_type {
+        1 => 66, 2 => 67, 4 => 68, 0 => 69, 3 => 70, 5 => 71,
+        6 => 72, 7 => 73, 8 => 74, 9 => 75, 14 => 76,
+        other => other,
+    }
 }
 
 /// requestFA on a session that is not FA: the reference's error, with its
@@ -705,6 +719,7 @@ impl ClientCore {
             finished_orders: Mutex::new(HashSet::new()),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
+            delayed_reqs: Mutex::new(HashSet::new()),
             hist_initial_complete: Mutex::new(HashSet::new()),
             news_providers: Mutex::new("BRFG*BRFUPDN".into()),
             news_instruments: Mutex::new(HashSet::new()),
@@ -739,6 +754,7 @@ impl ClientCore {
         // after a reconnect, so their ids must not be sent as new orders.
         self.market_data_type.store(1, Ordering::Relaxed);
         self.mdt_sent.lock().unwrap().clear();
+        self.delayed_reqs.lock().unwrap().clear();
         self.hist_initial_complete.lock().unwrap().clear();
         *self.news_providers.lock().unwrap() = "BRFG*BRFUPDN".into();
         self.news_instruments.lock().unwrap().clear();
@@ -998,6 +1014,7 @@ impl ClientCore {
             self.instrument_to_req.lock().unwrap().remove(&instrument);
             self.last_quotes.lock().unwrap().remove(&instrument);
             self.mdt_sent.lock().unwrap().remove(&req_id);
+            self.delayed_reqs.lock().unwrap().remove(&req_id);
             let needs_news = self.news_instruments.lock().unwrap().remove(&instrument);
             self.forget_instrument(instrument);
             (Some(instrument), needs_news)
@@ -1338,20 +1355,48 @@ impl ClientCore {
 
     // ── Market data type tracking ──
 
-    /// Store the requested market data type. NOT sent to the gateway — the
-    /// engine has no wire path for it, so subscriptions always deliver
-    /// realtime data (ibx#234). Requesting anything else warns loudly
-    /// instead of pretending.
-    pub fn set_market_data_type(&self, mdt: i32) {
-        if mdt != MDT_REALTIME {
-            log::warn!(
-                "req_market_data_type({}) is not supported: the type is not \
-                 sent to the gateway and subscriptions remain realtime; \
-                 delayed tick variants are never emitted (ibx#234)",
-                mdt,
-            );
+    /// Store the requested market data type and give it to the engine
+    /// (ibx#447). 3 and 4 enable delayed data: a subscription the server
+    /// rejects with delayed data available goes on delayed. The frozen part
+    /// of 2 and 4 is not done.
+    pub fn set_market_data_type(&self, control_tx: &Sender<ControlCommand>, mdt: i32) {
+        if matches!(mdt, 2 | 4) {
+            log::warn!("req_market_data_type({}): frozen data is not supported; delayed data is (ibx#447)", mdt);
         }
         self.market_data_type.store(mdt, Ordering::Relaxed);
+        let _ = control_tx.send(ControlCommand::SetMarketDataType { market_data_type: mdt });
+    }
+
+    /// A request switched to delayed data (ibx#447): its market data type
+    /// is reported (3), so the first data does not report realtime, and its
+    /// ticks use the delayed tick types.
+    pub fn set_delayed(&self, req_id: i64) {
+        self.mdt_sent.lock().unwrap().insert(req_id);
+        self.delayed_reqs.lock().unwrap().insert(req_id);
+    }
+
+    /// A market data request whose id is already live: error 322, as the
+    /// reference (the key is the request id only; ibx#444).
+    pub fn duplicate_ticker_refusal(&self, req_id: i64) -> Option<(i64, String)> {
+        self.req_to_instrument.lock().unwrap().contains_key(&req_id)
+            .then(|| (322, "Error processing request.-'bQ' : cause - Duplicate ticker id".to_string()))
+    }
+
+    /// The error and text a client reports for a rejected subscription, and
+    /// whether the subscription is gone (ibx#444, ibx#447). The texts are the
+    /// reference's; for 354 and 10089 on this path any contract suffix the
+    /// reference adds is not captured.
+    pub fn md_reject_error(reject: &crate::bridge::MdReject) -> (i64, &'static str, bool) {
+        use crate::bridge::MdReject;
+        match *reject {
+            MdReject::Delayed { .. } =>
+                (10167, "Requested market data is not subscribed. Displaying delayed market data.", false),
+            MdReject::NotSubscribed { needs_api_subscription: true, .. } =>
+                (10089, "Requested market data requires additional subscription for API. See link in 'Market Data Connections' dialog for more details.", true),
+            MdReject::NotSubscribed { delayed_available: true, .. } =>
+                (354, "Requested market data is not subscribed. Delayed market data is available.", true),
+            MdReject::NotSubscribed { .. } => (354, "Requested market data is not subscribed.", true),
+        }
     }
 
     /// Check if the `market_data_type` callback should fire for this req_id.
@@ -1761,6 +1806,15 @@ impl ClientCore {
         }
 
         map.insert(iid, fields);
+        drop(map);
+
+        // Delayed data comes with the delayed tick types, as the reference
+        // (captured 28/09/2026: 66-68, 72-76) (ibx#447).
+        if !ticks.is_empty() && self.delayed_reqs.lock().unwrap().contains(&req_id) {
+            for tick in &mut ticks {
+                tick.tick_type = delayed_tick_type(tick.tick_type);
+            }
+        }
 
         QuotePollResult { ticks, string_ticks, timestamp, delivered }
     }

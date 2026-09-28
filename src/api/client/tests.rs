@@ -785,6 +785,51 @@ fn fa_requests_on_a_non_fa_session_are_refused() {
     assert!(!w.events.iter().any(|e| e.contains(":321:")), "{:?}", w.events);
 }
 
+// ibx#444: a market data request id already live gets 322, a cancel of an
+// unknown id gets 300, as the reference.
+#[test]
+fn market_data_duplicate_id_and_unknown_cancel() {
+    let (client, rx, _shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(7, 0);
+    client.core.instrument_to_req.lock().unwrap().insert(0, 7);
+    client.req_mkt_data(7, &spy(), "", false, false).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    client.cancel_mkt_data(99).unwrap();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.contains(&"error:7:322:Error processing request.-'bQ' : cause - Duplicate ticker id".to_string()), "{:?}", w.events);
+    assert!(w.events.contains(&"error:99:300:Can't find EId with tickerId:99".to_string()), "{:?}", w.events);
+}
+
+// ibx#447 / ibx#444: a reject reaches the client as the reference reports
+// it: delayed -> market_data_type 3 then 10167, the subscription stays;
+// not subscribed -> 354 and the subscription is gone.
+#[test]
+fn market_data_rejects_are_reported() {
+    let (client, rx, shared) = test_client();
+    for (req, inst) in [(5i64, 0u32), (6, 1)] {
+        client.core.req_to_instrument.lock().unwrap().insert(req, inst);
+        client.core.instrument_to_req.lock().unwrap().insert(inst, req);
+    }
+    shared.market.push_md_reject(crate::bridge::MdReject::Delayed { instrument: 0 });
+    shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
+        instrument: 1, delayed_available: false, needs_api_subscription: false });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let at = |e: &str| w.events.iter().position(|x| x == e);
+    let mdt = at("market_data_type:5:3").expect("type 3");
+    let delayed = at("error:5:10167:Requested market data is not subscribed. Displaying delayed market data.").expect("10167");
+    assert!(mdt < delayed, "{:?}", w.events);
+    assert!(at("error:6:354:Requested market data is not subscribed.").is_some(), "{:?}", w.events);
+    assert!(client.core.req_to_instrument.lock().unwrap().contains_key(&5));
+    assert!(client.core.delayed_reqs.lock().unwrap().contains(&5), "its ticks are delayed ones");
+    assert_eq!(crate::client_core::delayed_tick_type(1), 66);
+    assert_eq!(crate::client_core::delayed_tick_type(14), 76);
+    assert_eq!(crate::client_core::delayed_tick_type(45), 45);
+    assert!(!client.core.req_to_instrument.lock().unwrap().contains_key(&6));
+    assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Unsubscribe { instrument: 1 })));
+}
+
 // ibx#425: customerAccount and professionalCustomer on an account whose
 // config has no CUSTACCT (the paper account) get error 145 with the
 // reference's text, and nothing is sent (captured 28/09/2026).

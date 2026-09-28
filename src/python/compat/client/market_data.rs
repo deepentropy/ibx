@@ -29,6 +29,10 @@ impl EClient {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         let shared = self.shared_state()?;
+        if let Some((code, text)) = self.core.duplicate_ticker_refusal(req_id) {
+            shared.orders.push_order_error(req_id as u64, code, text);
+            return Ok(());
+        }
 
         self.core.register_mkt_data(
             &shared, &tx, req_id,
@@ -65,6 +69,9 @@ impl EClient {
             if needs_news_unsub {
                 let _ = tx.send(ControlCommand::UnsubscribeNews { instrument });
             }
+        } else {
+            // An unknown request id: error 300, as the reference (ibx#444).
+            self.shared_state()?.orders.push_order_error(req_id as u64, 300, format!("Can't find EId with tickerId:{}", req_id));
         }
         Ok(())
     }
@@ -149,7 +156,7 @@ impl EClient {
     /// DELIVERED type (realtime) rather than echoing the request.
     fn req_market_data_type(&self, market_data_type: i32) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.core.set_market_data_type(market_data_type);
+        self.core.set_market_data_type(&self.tx()?, market_data_type);
         Ok(())
     }
 

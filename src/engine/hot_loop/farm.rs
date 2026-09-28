@@ -16,6 +16,8 @@ pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
     pub(crate) instrument_md_reqs: Vec<(InstrumentId, Vec<u32>)>,
+    /// The client's reqMarketDataType (ibx#447): 3 and 4 enable delayed data.
+    pub(crate) market_data_type: i32,
     /// Active depth subscriptions: (req_id, is_smart_depth).
     pub(crate) depth_subs: Vec<(u32, bool)>,
     /// Maps server_tag → (depth_req_id, is_smart_depth, min_tick) for active depth subscriptions.
@@ -37,6 +39,7 @@ impl FarmState {
             next_md_req_id: 1,
             md_req_to_instrument: Vec::new(),
             instrument_md_reqs: Vec::new(),
+            market_data_type: 1,
             depth_subs: Vec::new(),
             depth_tag_to_req: Vec::new(),
             depth_fanout_map: Vec::new(),
@@ -172,6 +175,7 @@ impl FarmState {
             b"UP" => super::ccp::handle_portfolio_message(msg, context, shared, event_tx),
             b"Y" => self.handle_depth_35y(msg, shared),
             b"G" => self.handle_tick_news(msg, context, shared, event_tx),
+            b"3" => self.handle_md_reject(msg, context, shared, farm_conn, hb),
             other => {
                 log::debug!("Farm unhandled 35={}: {} bytes", String::from_utf8_lossy(other), msg.len());
             }
@@ -347,30 +351,24 @@ impl FarmState {
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        // Realtime fans out into BID_ASK + LAST; frozen/delayed/delayed-frozen
-        // collapse to a single 264=1 (TOP) sub with 9887=mode_9887.
+        // Always the BID_ASK (442) + LAST (443) pair, as the reference; a
+        // frozen / delayed mode rides 9887 on each entry, never 264=1
+        // (ibx#447, captured 28/09/2026).
         let realtime = mode_9887 == 0;
         let bid_ask_id = self.next_md_req_id;
         let last_id = self.next_md_req_id + 1;
-        if realtime {
-            self.next_md_req_id += 2;
-        } else {
-            self.next_md_req_id += 1;
-        }
+        self.next_md_req_id += 2;
 
         self.md_req_to_instrument.push((bid_ask_id, instrument));
-        if realtime {
-            self.md_req_to_instrument.push((last_id, instrument));
-        }
+        self.md_req_to_instrument.push((last_id, instrument));
 
         match self.instrument_md_reqs.iter_mut().find(|(id, _)| *id == instrument) {
             Some((_, reqs)) => {
                 reqs.push(bid_ask_id);
-                if realtime { reqs.push(last_id); }
+                reqs.push(last_id);
             }
             None => {
-                let reqs = if realtime { vec![bid_ask_id, last_id] } else { vec![bid_ask_id] };
-                self.instrument_md_reqs.push((instrument, reqs));
+                self.instrument_md_reqs.push((instrument, vec![bid_ask_id, last_id]));
             }
         }
         if self.md_resub_info.iter().all(|(id, ..)| *id != instrument) {
@@ -384,8 +382,7 @@ impl FarmState {
             let mode_str = mode_9887.to_string();
             let ts = chrono_free_timestamp();
 
-            // 146 = NoRelatedSym count: 2 entries for realtime fan-out, 1 for TOP.
-            let no_related_sym = if realtime { "2" } else { "1" };
+            let no_related_sym = "2";
 
             // When con_id is known, use the proven minimal format (con_id + BEST + CS).
             // The server resolves the full contract details from con_id regardless of sec_type.
@@ -397,27 +394,15 @@ impl FarmState {
                     (263, "1"),
                     (146, no_related_sym),
                 ];
-                if realtime {
-                    for (req_str, depth) in [(&bid_ask_str, "442"), (&last_str, "443")] {
-                        tags.push((262, req_str));
-                        tags.push((6008, &con_id_str));
-                        tags.push((207, "BEST"));
-                        tags.push((167, "CS"));
-                        tags.push((264, depth));
-                        tags.push((6088, "Socket"));
-                        tags.push((9830, "1"));
-                        tags.push((9839, "1"));
-                    }
-                } else {
-                    tags.push((262, &bid_ask_str));
+                for (req_str, depth) in [(&bid_ask_str, "442"), (&last_str, "443")] {
+                    tags.push((262, req_str));
                     tags.push((6008, &con_id_str));
                     tags.push((207, "BEST"));
                     tags.push((167, "CS"));
-                    tags.push((264, "1"));
+                    tags.push((264, depth));
                     tags.push((6088, "Socket"));
+                    if !realtime { tags.push((9887, &mode_str)); }
                     tags.push((9830, "1"));
-                    tags.push((9839, "1"));
-                    tags.push((9887, &mode_str));
                 }
                 let _ = conn.send_fixcomp(&tags);
             } else {
@@ -434,11 +419,7 @@ impl FarmState {
                     (263, "1"),
                     (146, no_related_sym),
                 ];
-                let entries: &[(&String, &str)] = if realtime {
-                    &[(&bid_ask_str, "442"), (&last_str, "443")]
-                } else {
-                    &[(&bid_ask_str, "1")]
-                };
+                let entries: &[(&String, &str)] = &[(&bid_ask_str, "442"), (&last_str, "443")];
                 for (req_str, depth) in entries {
                     tags.push((262, req_str));
                     tags.push((55, symbol));
@@ -450,20 +431,75 @@ impl FarmState {
                     if !multiplier.is_empty() { tags.push((231, multiplier)); }
                     tags.push((264, depth));
                     tags.push((6088, "Socket"));
-                    tags.push((9830, "1"));
-                    tags.push((9839, "1"));
                     if !realtime { tags.push((9887, &mode_str)); }
+                    tags.push((9830, "1"));
                 }
                 let _ = conn.send_fixcomp(&tags);
             }
-            if realtime {
-                log::info!("Sent 35=V subscribe: con_id={} sec_type={} ids={},{} seq={}",
-                    con_id, sec_type, bid_ask_id, last_id, conn.seq);
-            } else {
-                log::info!("Sent 35=V subscribe (9887={}): con_id={} sec_type={} id={} seq={}",
-                    mode_9887, con_id, sec_type, bid_ask_id, conn.seq);
-            }
+            log::info!("Sent 35=V subscribe (9887={}): con_id={} sec_type={} ids={},{} seq={}",
+                mode_9887, con_id, sec_type, bid_ask_id, last_id, conn.seq);
             hb.last_farm_sent = Instant::now();
+        }
+    }
+
+    /// A market data reject (35=3) on the farm (ibx#444, ibx#447): 262 is
+    /// the `;` list of rejected request ids, 9887 the per-id "delayed data
+    /// available" flag, 6763 the per-id API access. For each top-of-book
+    /// subscription hit: with delayed data enabled (reqMarketDataType 3 or
+    /// 4) and available, it goes on with delayed data, asked again with
+    /// 9887=1 on new ids, as the reference (captured 28/09/2026); else it
+    /// stops, 354 or 10089. Other ids (depth) are left to their handlers.
+    fn handle_md_reject(
+        &mut self,
+        msg: &[u8],
+        context: &mut Context,
+        shared: &SharedState,
+        farm_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        let parsed = fix::fix_parse(msg);
+        let list = |tag: u32| -> Vec<String> {
+            parsed.get(&tag).map(|v| v.split(';').map(String::from).collect()).unwrap_or_default()
+        };
+        let ids = list(262);
+        let delayed_flags = list(9887);
+        let access = list(6763);
+        log::warn!("Farm market data reject: ids={:?} 9887={:?} 6763={:?} 58={:?}",
+            ids, delayed_flags, access, parsed.get(&58));
+        // (instrument, delayed available, API subscription needed), in order.
+        let mut hit: Vec<(InstrumentId, bool, bool)> = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            let Ok(id) = id.parse::<u32>() else { continue };
+            let Some(&(_, instrument)) = self.md_req_to_instrument.iter().find(|(r, _)| *r == id) else { continue };
+            let delayed = delayed_flags.get(i).is_some_and(|f| f == "1");
+            let needs_sub = access.get(i).is_some_and(|a| api_subscription_needed(a));
+            match hit.iter_mut().find(|(inst, ..)| *inst == instrument) {
+                Some(h) => { h.1 |= delayed; h.2 |= needs_sub; }
+                None => hit.push((instrument, delayed, needs_sub)),
+            }
+        }
+        let delayed_enabled = matches!(self.market_data_type, 3 | 4);
+        for (instrument, delayed_available, needs_api_subscription) in hit {
+            if delayed_enabled && delayed_available {
+                // Asked again with delayed data; the rejected ids stay with
+                // the subscription, so a cancel covers them too.
+                let Some(info) = self.md_resub_info.iter_mut().find(|(id, ..)| *id == instrument) else { continue };
+                info.8 = 1;
+                let (_, sym, exch, st, ltd, strike, right, mult, mode) = info.clone();
+                let Some(con_id) = context.market.con_id(instrument) else { continue };
+                self.send_mktdata_subscribe(con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, mode, farm_conn, hb);
+                shared.market.push_md_reject(crate::bridge::MdReject::Delayed { instrument });
+            } else {
+                // The subscription stops: nothing is left to cancel.
+                if let Some(idx) = self.instrument_md_reqs.iter().position(|(id, _)| *id == instrument) {
+                    let (_, reqs) = self.instrument_md_reqs.remove(idx);
+                    self.md_req_to_instrument.retain(|(r, _)| !reqs.contains(r));
+                }
+                self.md_resub_info.retain(|(id, ..)| *id != instrument);
+                shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
+                    instrument, delayed_available, needs_api_subscription,
+                });
+            }
         }
     }
 
@@ -1026,3 +1062,10 @@ impl FarmState {
     }
 }
 
+/// The reference's reading of a reject's API access value (6763), as
+/// `ApiAccess.apiRequiresSubscription`: a list (`,` or `#`) or a single
+/// number means an API subscription is needed (10089); empty or `-` does
+/// not (354) (ibx#444).
+fn api_subscription_needed(access: &str) -> bool {
+    access.contains(',') || access.contains('#') || (!access.is_empty() && access.parse::<i64>().is_ok())
+}
