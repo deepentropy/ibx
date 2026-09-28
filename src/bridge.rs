@@ -417,6 +417,8 @@ pub struct ReferenceState {
     soft_dollar_tiers: Mutex<Vec<crate::types::SoftDollarTier>>,
     family_codes: Mutex<Vec<crate::types::FamilyCode>>,
     white_branding_id: Mutex<String>,
+    /// FA session, from CCP logon tag 6108 (ibx#481).
+    fa_session: std::sync::atomic::AtomicBool,
     /// Session ID surfaced to webapp REST clients as `x-ccp-session-id`.
     ccp_session_id: Mutex<String>,
     /// Logical-name → host URL map pushed by the gateway during logon.
@@ -450,6 +452,7 @@ impl ReferenceState {
             soft_dollar_tiers: Mutex::new(Vec::new()),
             family_codes: Mutex::new(Vec::new()),
             white_branding_id: Mutex::new(String::new()),
+            fa_session: std::sync::atomic::AtomicBool::new(false),
             ccp_session_id: Mutex::new(String::new()),
             misc_urls: Mutex::new(HashMap::new()),
         }
@@ -661,6 +664,11 @@ impl ReferenceState {
         self.white_branding_id.lock().unwrap().clone()
     }
 
+    /// True when the logon says this is an FA session (tag 6108, ibx#481).
+    pub fn fa_session(&self) -> bool {
+        self.fa_session.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Session ID surfaced to webapp REST clients as the `x-ccp-session-id` header.
     /// Empty until gateway logon completes.
     pub fn ccp_session_id(&self) -> String {
@@ -697,6 +705,10 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_white_branding_id(&self, id: String) {
         *self.white_branding_id.lock().unwrap() = id;
+    }
+
+    #[doc(hidden)] pub fn set_fa_session(&self, fa: bool) {
+        self.fa_session.store(fa, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[doc(hidden)] pub fn set_ccp_session_id(&self, id: String) {

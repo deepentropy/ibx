@@ -765,6 +765,26 @@ fn place_order_trailing_stop_limit() {
 
 // ib-agent#194: a TRAIL LIMIT without trailStopPrice is refused first, with
 // the reference's text (no final period); nothing is sent.
+// ibx#481: requestFA and replaceFA on a session that is not FA get the
+// reference's error 321; nothing waits forever.
+#[test]
+fn fa_requests_on_a_non_fa_session_are_refused() {
+    let (client, _rx, shared) = test_client();
+    client.request_fa(1);
+    client.replace_fa(5, 1, "<ListOfGroups/>");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "error:2147483647:321:Error validating request.-'b9' : cause - FA data operations ignored for non FA customers."), "{:?}", w.events);
+    assert!(w.events.iter().any(|e| e == "error:5:321:Error validating request.-'b1' : cause - FA data operations ignored for non FA customers."), "{:?}", w.events);
+
+    // On an FA session there is no such error.
+    shared.reference.set_fa_session(true);
+    client.request_fa(1);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.contains(":321:")), "{:?}", w.events);
+}
+
 // ibx#469: the reference's other names for an order type give the same
 // request as ibx's name, and a modify under the other name is not a type
 // change.

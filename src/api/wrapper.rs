@@ -213,6 +213,14 @@ pub trait Wrapper {
 
     fn family_codes(&mut self, codes: &[crate::types::FamilyCode]) {}
 
+    // ── FA (Financial Advisor) ──
+
+    /// FA data (groups or profiles XML), as `receiveFA` (ibx#481).
+    fn receive_fa(&mut self, fa_data_type: i32, xml: &str) {}
+
+    /// End of a replaceFA, as `replaceFAEnd` (ibx#481).
+    fn replace_fa_end(&mut self, req_id: i64, text: &str) {}
+
     // ── User Info ──
 
     fn user_info(&mut self, req_id: i64, white_branding_id: &str) {}

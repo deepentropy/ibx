@@ -621,6 +621,16 @@ pub struct ClientCore {
     pub contract_cache: Mutex<HashMap<i64, ApiContract>>,
 }
 
+/// requestFA on a session that is not FA: the reference's error, with its
+/// request id for a request that has none (ibx#481).
+pub const REQUEST_FA_NOT_FA: (i64, i64, &str) =
+    (2147483647, 321, "Error validating request.-'b9' : cause - FA data operations ignored for non FA customers.");
+
+/// replaceFA on a session that is not FA: the reference's error code and
+/// text; the id is the request's (ibx#481).
+pub const REPLACE_FA_NOT_FA: (i64, &str) =
+    (321, "Error validating request.-'b1' : cause - FA data operations ignored for non FA customers.");
+
 /// The reference's other names for order types ibx supports, and the name
 /// ibx uses (ibx#469, from the reference's order-type map).
 const ORDER_TYPE_ALIASES: [(&str, &str); 14] = [

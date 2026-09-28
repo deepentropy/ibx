@@ -39,13 +39,26 @@ impl EClient {
 
     // ── FA (Financial Advisor) ──
 
-    /// Request FA data. Not yet implemented.
+    /// Request FA data. On a session that is not FA, error 321 as the
+    /// reference (ibx#481); the FA data exchange itself is not implemented.
     pub fn request_fa(&self, _fa_data_type: i32) {
+        if !self.shared.reference.fa_session() {
+            let (id, code, text) = crate::client_core::REQUEST_FA_NOT_FA;
+            self.shared.orders.push_order_error(id as u64, code, text.to_string());
+            return;
+        }
         log::warn!("request_fa: not yet implemented — needs FIX capture");
     }
 
-    /// Replace FA data. Not yet implemented.
-    pub fn replace_fa(&self, _req_id: i64, _fa_data_type: i32, _cxml: &str) {
+    /// Replace FA data. On a session that is not FA, error 321 for the
+    /// request as the reference (ibx#481); the FA data exchange itself is
+    /// not implemented.
+    pub fn replace_fa(&self, req_id: i64, _fa_data_type: i32, _cxml: &str) {
+        if !self.shared.reference.fa_session() {
+            let (code, text) = crate::client_core::REPLACE_FA_NOT_FA;
+            self.shared.orders.push_order_error(req_id as u64, code, text.to_string());
+            return;
+        }
         log::warn!("replace_fa: not yet implemented — needs FIX capture");
     }
 

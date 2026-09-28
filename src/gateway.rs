@@ -424,6 +424,8 @@ pub struct Gateway {
     pub raw_news_providers: String,
     /// White branding ID from CCP logon (empty for standard accounts).
     pub white_branding_id: String,
+    /// FA session: CCP logon tag 6108 is "1" (ibx#481).
+    pub fa_session: bool,
     /// Logical-name → host URL map pushed by the gateway during logon. Empty when no
     /// URL set was pushed (callers should then fall back to a documented literal,
     /// e.g. `api.ibkr.com` for `region_dam`).
@@ -1192,6 +1194,7 @@ impl Gateway {
         let mut raw_family_codes = String::new();
         let mut raw_news_providers = String::new();
         let mut white_branding_id = String::new();
+        let mut fa_session = false;
         let mut raw_misc_urls = String::new();
         // Per ib-agent#128: the auth-logon ACK tells us which farms this
         // account is routed to. Hardcoding `usfarm`/`ushmds` only works for
@@ -1307,6 +1310,11 @@ impl Gateway {
             }
             if let Some(v) = fields.get(&6571) {
                 if white_branding_id.is_empty() { white_branding_id = v.clone(); }
+            }
+            // FA session: true only for the single character "1", as the
+            // reference reads FIX booleans (ibx#481).
+            if let Some(v) = fields.get(&6108) {
+                fa_session |= v == "1";
             }
             // Tag 6321: PRIV_LAB_MISC_URLS — try parsed fields first, then raw byte search.
             // Mirrors the 8035 defensive scan because the value can carry `|` separators
@@ -1439,6 +1447,8 @@ impl Gateway {
             } else if part.starts_with("6830=") && raw_news_providers.is_empty() {
                 raw_news_providers = part[5..].to_string();
                 log::info!("Found news providers from init response ({} bytes)", raw_news_providers.len());
+            } else if part == "6108=1" {
+                fa_session = true;
             } else if part.starts_with("6571=") && white_branding_id.is_empty() {
                 white_branding_id = part[5..].to_string();
                 log::info!("Found white branding ID from init response");
@@ -1636,6 +1646,7 @@ impl Gateway {
             raw_family_codes,
             raw_news_providers,
             white_branding_id,
+            fa_session,
             misc_urls: parse_misc_urls(&raw_misc_urls),
             ccp_sign_key,
             ccp_sign_iv,
@@ -1719,6 +1730,7 @@ impl Gateway {
 
         // White branding ID (empty for standard accounts).
         shared.reference.set_white_branding_id(self.white_branding_id.clone());
+        shared.reference.set_fa_session(self.fa_session);
 
         // Webapp-REST-facing fields from the FIX logon roundtrip.
         shared.reference.set_ccp_session_id(self.server_session_id.clone());

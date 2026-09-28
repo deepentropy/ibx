@@ -64,6 +64,19 @@ def test_replace_fa_stub():
     c.replace_fa(1, 1, "<xml/>")  # should not raise
 
 
+def test_fa_on_non_fa_session_gives_321():
+    # ibx#481: a session whose logon is not FA answers requestFA and
+    # replaceFA with the reference's error 321.
+    c, w = make_client()
+    c._test_connect()
+    c.request_fa(1)
+    c.replace_fa(5, 1, "<ListOfGroups/>")
+    assert w.errors == [
+        (2147483647, 321, "Error validating request.-'b9' : cause - FA data operations ignored for non FA customers."),
+        (5, 321, "Error validating request.-'b1' : cause - FA data operations ignored for non FA customers."),
+    ]
+
+
 def test_fa_signatures():
     c, w = make_client()
     assert hasattr(c, "request_fa")

@@ -97,16 +97,29 @@ impl EClient {
 
     // ── FA (Financial Advisor) ──
 
-    fn request_fa(&self, _fa_data_type: i32) -> PyResult<()> {
+    fn request_fa(&self, py: Python<'_>, _fa_data_type: i32) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        // Not an FA session: error 321 as the reference (ibx#481).
+        if !self.shared_state()?.reference.fa_session() {
+            let (id, code, text) = crate::client_core::REQUEST_FA_NOT_FA;
+            self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+            return Ok(());
+        }
         log::warn!("request_fa: not yet implemented — needs FIX capture");
         Ok(())
     }
 
     #[pyo3(signature = (req_id, fa_data_type, cxml))]
-    fn replace_fa(&self, req_id: i64, fa_data_type: i32, cxml: &str) -> PyResult<()> {
+    fn replace_fa(&self, py: Python<'_>, req_id: i64, fa_data_type: i32, cxml: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
-        let _ = (req_id, fa_data_type, cxml);
+        // Not an FA session: error 321 for the request as the reference
+        // (ibx#481).
+        if !self.shared_state()?.reference.fa_session() {
+            let (code, text) = crate::client_core::REPLACE_FA_NOT_FA;
+            self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
+            return Ok(());
+        }
+        let _ = (fa_data_type, cxml);
         log::warn!("replace_fa: not yet implemented — needs FIX capture");
         Ok(())
     }
