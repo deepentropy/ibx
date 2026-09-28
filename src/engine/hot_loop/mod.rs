@@ -1397,16 +1397,32 @@ pub(crate) fn parse_price_tag(val: Option<&String>) -> Price {
         .unwrap_or(0)
 }
 
-/// Decode a wire TIF byte to the API TIF string. Exact inverse of
-/// `api::types::Order::tif_byte` (DTC also encodes to '6' and decodes as GTD).
-/// The old inline map decoded '7' (never emitted) as OPG and dropped
-/// OPG ('2') and AUC ('8') to "" (ibx#220).
+/// The time in force of a code, as the reference reports it (ibx#307):
+/// every code it knows by its text, "???" for any other. The inverse of
+/// `api::types::Order::tif_byte` for the values ibx sends (ibx#220).
 pub(crate) fn decode_tif(tif: u8) -> &'static str {
     match tif {
         b'0' => "DAY", b'1' => "GTC", b'2' => "OPG", b'3' => "IOC",
-        b'4' => "FOK", b'6' => "GTD", b'8' => "AUC",
-        crate::types::TIF_DTC => "DTC", _ => "",
+        b'4' => "FOK", b'5' => "GTX", b'6' => "GTD", b'8' => "AUC",
+        b'?' => "[INVALID]", b'b' => "OVERNIGHT + DAY", b'j' => "OVERNIGHT",
+        b'p' => "Minutes", crate::types::TIF_DTC => "DTC", _ => "???",
     }
+}
+
+/// The time-in-force code of an order report, as the reference reads it
+/// (ibx#307): DAY when 59 is absent; else the first character of 59, DTC
+/// for 59=1 with the DTC flag (6436=1), OVERNIGHT + DAY with 8534=1, else
+/// OVERNIGHT when the exchange (6004) is OVERNIGHT.
+pub(crate) fn report_tif(parsed: &std::collections::HashMap<u32, String>) -> u8 {
+    let Some(mut code) = parsed.get(&59).and_then(|s| s.bytes().next()) else { return b'0' };
+    let flag = |tag: u32| parsed.get(&tag).map(|s| s.as_str()) == Some("1");
+    if code == b'1' && flag(6436) { code = crate::types::TIF_DTC; }
+    if flag(8534) {
+        code = b'b';
+    } else if parsed.get(&6004).map(|s| s.as_str()) == Some("OVERNIGHT") {
+        code = b'j';
+    }
+    code
 }
 
 /// Parse a decimal quantity ("1", "0.5") into a fixed-point Qty

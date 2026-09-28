@@ -632,7 +632,7 @@ fn place_order_unknown_tif_is_rejected() {
     shared.market.set_instrument_count(1);
     let order = Order {
         action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
-        lmt_price: 100.0, tif: "GTX".into(), ..Default::default()
+        lmt_price: 100.0, tif: "XYZ".into(), ..Default::default()
     };
     let err = client.place_order(1, &spy(), &order).unwrap_err();
     assert!(err.to_string().contains("tif"), "got: {}", err);
@@ -783,6 +783,23 @@ fn fa_requests_on_a_non_fa_session_are_refused() {
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(!w.events.iter().any(|e| e.contains(":321:")), "{:?}", w.events);
+}
+
+// ibx#307: GTX and NMIN go out as GTC and the tracked order shows GTC, as
+// the reference (captured 28/09/2026: 59=1, openOrder tif GTC).
+#[test]
+fn gtx_and_nmin_go_out_as_gtc() {
+    for tif in ["GTX", "nmin"] {
+        let (client, rx, shared) = test_client();
+        shared.market.set_instrument_count(1);
+        let order = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 100.0, tif: tif.into(), ..Default::default() };
+        client.place_order(1, &spy(), &order).unwrap();
+        match rx.try_recv().unwrap() {
+            ControlCommand::Order(OrderRequest::SubmitLimitEx { tif, .. }) => assert_eq!(tif, b'1'),
+            other => panic!("expected SubmitLimitEx, got {:?}", other),
+        }
+    }
 }
 
 // ibx#469: the reference's other names for an order type give the same

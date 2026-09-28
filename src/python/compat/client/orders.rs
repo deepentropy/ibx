@@ -24,6 +24,10 @@ impl EClient {
         if let Some(name) = ClientCore::canonical_order_type(&api_order.order_type) {
             api_order.order_type = name.to_string();
         }
+        // GTX and NMIN go out as GTC, as the reference (ibx#307).
+        if let Some(name) = ClientCore::canonical_tif(&api_order.tif) {
+            api_order.tif = name.to_string();
+        }
         ClientCore::validate_order(&api_order)
             .map_err(|e| PyRuntimeError::new_err(e))?;
         ClientCore::validate_order_contract(&contract.sec_type)

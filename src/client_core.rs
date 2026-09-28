@@ -2127,10 +2127,22 @@ impl ClientCore {
     /// The order with its type under the name ibx uses (ibx#469). Copied
     /// only when the type is one of the other names.
     pub fn with_canonical_order_type(order: &ApiOrder) -> std::borrow::Cow<'_, ApiOrder> {
-        match Self::canonical_order_type(&order.order_type) {
-            Some(name) => std::borrow::Cow::Owned(ApiOrder { order_type: name.to_string(), ..order.clone() }),
-            None => std::borrow::Cow::Borrowed(order),
+        let order_type = Self::canonical_order_type(&order.order_type);
+        let tif = Self::canonical_tif(&order.tif);
+        if order_type.is_none() && tif.is_none() {
+            return std::borrow::Cow::Borrowed(order);
         }
+        let mut owned = order.clone();
+        if let Some(name) = order_type { owned.order_type = name.to_string(); }
+        if let Some(name) = tif { owned.tif = name.to_string(); }
+        std::borrow::Cow::Owned(owned)
+    }
+
+    /// The time in force the reference sends for an API value it does not
+    /// send as such: GTX and NMIN go out as GTC and read back as GTC
+    /// (captured 28/09/2026, ibx#307).
+    pub fn canonical_tif(tif: &str) -> Option<&'static str> {
+        (tif.eq_ignore_ascii_case("GTX") || tif.eq_ignore_ascii_case("NMIN")).then_some("GTC")
     }
 
     /// Pre-validate order fields that don't depend on instrument ID.

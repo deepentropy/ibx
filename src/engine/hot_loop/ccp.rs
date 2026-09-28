@@ -1230,7 +1230,6 @@ impl CcpState {
             let total_qty: f64 = parsed.get(&38).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let ord_type_tag = parsed.get(&40).map(|s| s.as_str()).unwrap_or("");
             let limit_price: f64 = parsed.get(&44).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let tif_tag = parsed.get(&59).map(|s| s.as_str()).unwrap_or("");
             let stop_px: f64 = parsed.get(&99).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let outside_rth = parsed.get(&6433).map(|s| s == "1").unwrap_or(false);
             let clearing_intent = parsed.get(&6419).cloned().unwrap_or_default();
@@ -1263,12 +1262,9 @@ impl CcpState {
                 "K" => "MTL", "R" => "REL", _ => ord_type_tag,
             };
 
-            let dtc = parsed.get(&6436).map(|s| s.as_str()) == Some("1");
-            let tif_str = match tif_tag {
-                "1" if dtc => "DTC",
-                "0" => "DAY", "1" => "GTC", "3" => "IOC", "4" => "FOK",
-                "2" => "OPG", "6" => "GTD", "8" => "AUC", _ => "DAY",
-            };
+            // As the reference: an unknown code is kept ("???"), not read
+            // as DAY; each report sets the order's time in force (ibx#307).
+            let tif_str = decode_tif(super::report_tif(&parsed));
 
             let action = match parsed.get(&54).map(|s| s.as_str()) {
                 Some("1") => "BUY",
@@ -1323,19 +1319,18 @@ impl CcpState {
                 }
             };
 
-            let (fb_action, fb_tif, fb_ord_type) = if let Some(ctx_order) = context.order(clord_id) {
+            let (fb_action, fb_ord_type) = if let Some(ctx_order) = context.order(clord_id) {
                 let a = match ctx_order.side {
                     crate::types::Side::Buy => "BUY",
                     crate::types::Side::Sell | crate::types::Side::ShortSell => "SELL",
                 };
-                let t = decode_tif(ctx_order.tif);
                 let o = match ctx_order.ord_type {
                     b'1' => "MKT", b'2' => "LMT", b'3' => "STP", b'4' => "STP LMT",
                     b'P' => "TRAIL", _ => "",
                 };
-                (a, t, o)
+                (a, o)
             } else {
-                ("", "", "")
+                ("", "")
             };
 
             // Derive 3 order-dependent fields from FIX tags
@@ -1370,7 +1365,7 @@ impl CcpState {
                 order_type: if order_type_str.is_empty() { fb_ord_type.to_string() } else { order_type_str.to_string() },
                 lmt_price: limit_price,
                 aux_price: stop_px,
-                tif: if tif_str.is_empty() { fb_tif.to_string() } else { tif_str.to_string() },
+                tif: tif_str.to_string(),
                 account: if account.is_empty() { account_id.to_string() } else { account.clone() },
                 perm_id,
                 // Filled so far, not the quantity still working (ibx#309).
@@ -3158,8 +3153,8 @@ mod tests {
         // DTC has its own code (ibx#467).
         let dtc = api::Order { tif: "DTC".to_string(), ..Default::default() };
         assert_eq!(decode_tif(dtc.tif_byte()), "DTC");
-        // Unknown bytes decode to empty, not a wrong TIF.
-        assert_eq!(decode_tif(b'7'), "");
+        // An unknown code is "???", as the reference, not a wrong TIF (ibx#307).
+        assert_eq!(decode_tif(b'7'), "???");
     }
 
     // ── ibx#227: contract-details deadline sweep ──
@@ -3740,5 +3735,26 @@ mod tests {
         let ack = exec_report_frame(&[(39, "0"), (150, "0"), (40, "2"), (59, "1")]);
         ccp.handle_exec_report(&ack, &mut context, &shared, &None, "");
         assert_eq!(shared.orders.get_order_info(42).unwrap().order.tif, "GTC");
+    }
+
+    // ibx#307: the report's time in force as the reference reads it: DAY
+    // when 59 is absent, DTC with the DTC flag, the overnight values, and
+    // an unknown code kept as "???" (not DAY).
+    #[test]
+    fn the_report_time_in_force_is_read_as_the_reference() {
+        let tif = |fields: &[(u32, &str)]| {
+            let (mut ccp, mut context, shared) = ord_status_test_state();
+            let mut all = vec![(39, "0"), (150, "0"), (40, "2")];
+            all.extend_from_slice(fields);
+            let frame = exec_report_frame(&all);
+            ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+            shared.orders.get_order_info(42).unwrap().order.tif
+        };
+        assert_eq!(tif(&[(59, "1")]), "GTC");
+        assert_eq!(tif(&[(59, "5")]), "GTX");
+        assert_eq!(tif(&[(59, "1"), (6436, "1")]), "DTC");
+        assert_eq!(tif(&[(59, "0"), (8534, "1")]), "OVERNIGHT + DAY");
+        assert_eq!(tif(&[(59, "0"), (6004, "OVERNIGHT")]), "OVERNIGHT");
+        assert_eq!(tif(&[(59, "Z")]), "???");
     }
 }
