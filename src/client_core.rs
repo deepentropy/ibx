@@ -2138,6 +2138,26 @@ impl ClientCore {
         std::borrow::Cow::Owned(owned)
     }
 
+    /// customerAccount or professionalCustomer=true on an account whose
+    /// config has no CUSTACCT: error 145 with the reference's text, nothing
+    /// sent (captured 28/09/2026, ibx#425). The customer account is checked
+    /// first. An unknown config counts as one without CUSTACCT.
+    pub fn account_config_refusal(order: &ApiOrder, features: Option<&[String]>, session_account: &str) -> Option<(i64, String)> {
+        if order.customer_account.is_empty() && !order.professional_customer {
+            return None;
+        }
+        if features.is_some_and(|f| f.iter().any(|x| x == "CUSTACCT")) {
+            return None;
+        }
+        let account = if order.account.is_empty() { session_account } else { order.account.as_str() };
+        let cause = if !order.customer_account.is_empty() {
+            format!("Account config doesn't allow to specify customer account value: {} for account {}", order.customer_account, account)
+        } else {
+            format!("Account config doesn't allow to assign 'true' value for ProfessionalCustomer for account {}", account)
+        };
+        Some((145, format!("Error in validating entry fields -{}", cause)))
+    }
+
     /// The time in force the reference sends for an API value it does not
     /// send as such: GTX and NMIN go out as GTC and read back as GTC
     /// (captured 28/09/2026, ibx#307).

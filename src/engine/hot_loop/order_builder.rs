@@ -2024,6 +2024,15 @@ fn push_extended_attrs(
     if attrs.hidden {
         fields.push((6135, "1".to_string()));
     }
+    // Customer account and professional customer, as the reference's order
+    // attributes; the account config check keeps them to accounts that
+    // allow them (ibx#425, from the code read, not captured).
+    if !attrs.customer_account.is_empty() {
+        fields.push((6207, attrs.customer_account.clone()));
+    }
+    if attrs.professional_customer {
+        fields.push((6636, "1".to_string()));
+    }
     // goodAfterTime in UTC, "YYYYMMDD-HH:MM:SS", as the reference writes
     // it (ibx#467).
     if attrs.good_after > 0 {
@@ -3366,5 +3375,19 @@ mod tests {
             order_id: 61, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P, tif: b'0',
             attrs: Default::default() });
         assert_eq!(tag(&tags, 35), Some("D"));
+    }
+
+    // ibx#425: customer account 6207 and professional customer 6636.
+    #[test]
+    fn customer_account_tags() {
+        let tags = wire_tags(OrderRequest::SubmitLimitEx {
+            order_id: 70, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P, tif: b'0',
+            attrs: crate::types::OrderAttrs { customer_account: "C123".into(), professional_customer: true, ..Default::default() } });
+        assert_eq!(tag(&tags, 6207), Some("C123"));
+        assert_eq!(tag(&tags, 6636), Some("1"));
+        let none = wire_tags(OrderRequest::SubmitLimitEx {
+            order_id: 71, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P, tif: b'0', attrs: Default::default() });
+        assert_eq!(tag(&none, 6207), None);
+        assert_eq!(tag(&none, 6636), None);
     }
 }

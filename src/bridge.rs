@@ -419,6 +419,9 @@ pub struct ReferenceState {
     white_branding_id: Mutex<String>,
     /// FA session, from CCP logon tag 6108 (ibx#481).
     fa_session: std::sync::atomic::AtomicBool,
+    /// Account config (6040=210): feature list and MiFID config id; None
+    /// until known (ibx#425).
+    account_config: Mutex<Option<(Vec<String>, String)>>,
     /// Session ID surfaced to webapp REST clients as `x-ccp-session-id`.
     ccp_session_id: Mutex<String>,
     /// Logical-name → host URL map pushed by the gateway during logon.
@@ -453,6 +456,7 @@ impl ReferenceState {
             family_codes: Mutex::new(Vec::new()),
             white_branding_id: Mutex::new(String::new()),
             fa_session: std::sync::atomic::AtomicBool::new(false),
+            account_config: Mutex::new(None),
             ccp_session_id: Mutex::new(String::new()),
             misc_urls: Mutex::new(HashMap::new()),
         }
@@ -705,6 +709,16 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_white_branding_id(&self, id: String) {
         *self.white_branding_id.lock().unwrap() = id;
+    }
+
+    /// The account's feature list from the account config (6542), None
+    /// until the config is known (ibx#425).
+    pub fn account_features(&self) -> Option<Vec<String>> {
+        self.account_config.lock().unwrap().as_ref().map(|(f, _)| f.clone())
+    }
+
+    #[doc(hidden)] pub fn set_account_config(&self, features: Vec<String>, mifid_config_id: String) {
+        *self.account_config.lock().unwrap() = Some((features, mifid_config_id));
     }
 
     #[doc(hidden)] pub fn set_fa_session(&self, fa: bool) {

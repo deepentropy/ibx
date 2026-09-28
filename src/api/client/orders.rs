@@ -29,6 +29,8 @@ impl EClient {
 
         // Refused before sending, like the reference: error() only.
         if let Some((code, message)) = ClientCore::refusal_before_sending(order)
+            .or_else(|| ClientCore::account_config_refusal(
+                order, self.shared.reference.account_features().as_deref(), &self.account_id))
             .or_else(|| self.core.refusal_for_order_id(oid, order))
         {
             self.shared.orders.push_order_error(oid, code, message);

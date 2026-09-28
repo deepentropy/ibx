@@ -45,10 +45,14 @@ impl EClient {
         };
 
         // Refused before sending, like the reference: error() only.
+        let shared = self.shared_state()?;
+        let session_account = self.account_id.lock().unwrap().clone().unwrap_or_default();
         if let Some((code, message)) = ClientCore::refusal_before_sending(&api_order)
+            .or_else(|| ClientCore::account_config_refusal(
+                &api_order, shared.reference.account_features().as_deref(), &session_account))
             .or_else(|| self.core.refusal_for_order_id(oid, &api_order))
         {
-            self.shared_state()?.orders.push_order_error(oid, code, message);
+            shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }
 

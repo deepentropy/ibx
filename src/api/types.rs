@@ -470,6 +470,8 @@ impl Order {
                 1..=4 => self.oca_type as u8,
                 _ => 0,
             },
+            customer_account: self.customer_account.clone(),
+            professional_customer: self.professional_customer,
         }
     }
 
@@ -483,6 +485,8 @@ impl Order {
             || self.outside_rth
             || !self.good_after_time.is_empty()
             || !self.good_till_date.is_empty()
+            || !self.customer_account.is_empty()
+            || self.professional_customer
             || !self.oca_group.is_empty()
             || self.parent_id > 0
             || self.discretionary_amt > 0.0

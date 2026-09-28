@@ -342,6 +342,10 @@ pub struct OrderAttrs {
     pub min_qty: u32,
     /// Hidden order — not displayed on book (IB tag 6135).
     pub hidden: bool,
+    /// Customer account (tag 6207) and professional customer (tag 6636),
+    /// sent only on an account whose config allows them (ibx#425).
+    pub customer_account: String,
+    pub professional_customer: bool,
     /// Allow trading outside regular hours (IB tag 6433).
     pub outside_rth: bool,
     /// Delay order activation until this time (FIX tag 168). 0 = not set. Unix seconds.

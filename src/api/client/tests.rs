@@ -785,6 +785,50 @@ fn fa_requests_on_a_non_fa_session_are_refused() {
     assert!(!w.events.iter().any(|e| e.contains(":321:")), "{:?}", w.events);
 }
 
+// ibx#425: customerAccount and professionalCustomer on an account whose
+// config has no CUSTACCT (the paper account) get error 145 with the
+// reference's text, and nothing is sent (captured 28/09/2026).
+#[test]
+fn customer_account_needs_the_account_config() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    shared.reference.set_account_config(vec!["OLP".into(), "EUCOSTCALC".into(), "EUILLS".into()], String::new());
+    let lmt = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 100.0, ..Default::default() };
+    client.place_order(1, &spy(), &Order { customer_account: "C123".into(), ..lmt.clone() }).unwrap();
+    client.place_order(2, &spy(), &Order { professional_customer: true, ..lmt.clone() }).unwrap();
+    assert!(rx.try_iter().all(|c| !matches!(c, ControlCommand::Order(_))), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let account = client.account_id.clone();
+    assert!(w.events.iter().any(|e| *e == format!(
+        "error:1:145:Error in validating entry fields -Account config doesn't allow to specify customer account value: C123 for account {account}")), "{:?}", w.events);
+    assert!(w.events.iter().any(|e| *e == format!(
+        "error:2:145:Error in validating entry fields -Account config doesn't allow to assign 'true' value for ProfessionalCustomer for account {account}")), "{:?}", w.events);
+
+    // An order without these fields is not checked.
+    client.place_order(3, &spy(), &lmt).unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Order(_)));
+}
+
+// ibx#425: on an account whose config has CUSTACCT the values go with the
+// order.
+#[test]
+fn customer_account_is_sent_when_the_account_config_allows_it() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    shared.reference.set_account_config(vec!["CUSTACCT".into()], String::new());
+    let order = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 100.0,
+        customer_account: "C123".into(), professional_customer: true, ..Default::default() };
+    client.place_order(1, &spy(), &order).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitLimitEx { attrs, .. }) => {
+            assert_eq!(attrs.customer_account, "C123");
+            assert!(attrs.professional_customer);
+        }
+        other => panic!("expected SubmitLimitEx, got {:?}", other),
+    }
+}
+
 // ibx#307: GTX and NMIN go out as GTC and the tracked order shows GTC, as
 // the reference (captured 28/09/2026: 59=1, openOrder tif GTC).
 #[test]

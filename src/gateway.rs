@@ -426,6 +426,9 @@ pub struct Gateway {
     pub white_branding_id: String,
     /// FA session: CCP logon tag 6108 is "1" (ibx#481).
     pub fa_session: bool,
+    /// Account config (6040=210): feature list (6542) and MiFID config id
+    /// (8234); None when the answer was not in the login burst (ibx#425).
+    pub account_config: Option<(Vec<String>, String)>,
     /// Logical-name → host URL map pushed by the gateway during logon. Empty when no
     /// URL set was pushed (callers should then fall back to a documented literal,
     /// e.g. `api.ibkr.com` for `region_dam`).
@@ -1422,6 +1425,11 @@ impl Gateway {
 
         // Scan init response for account ID and gateway-local init tags
         let init_str = String::from_utf8_lossy(&scan_data);
+        let account_config = parse_account_config(&init_str);
+        match &account_config {
+            Some((features, mifid)) => log::info!("Account config: features {:?}, MiFID config {:?}", features, mifid),
+            None => log::warn!("No account config answer in the login burst"),
+        }
         // TEMP diagnostic (ib-agent#128 follow-up): log every part containing
         // "farm" or "hmds" so we can locate the routing tags.
         for part in init_str.split('\x01') {
@@ -1647,6 +1655,7 @@ impl Gateway {
             raw_news_providers,
             white_branding_id,
             fa_session,
+            account_config,
             misc_urls: parse_misc_urls(&raw_misc_urls),
             ccp_sign_key,
             ccp_sign_iv,
@@ -1731,6 +1740,9 @@ impl Gateway {
         // White branding ID (empty for standard accounts).
         shared.reference.set_white_branding_id(self.white_branding_id.clone());
         shared.reference.set_fa_session(self.fa_session);
+        if let Some((features, mifid)) = &self.account_config {
+            shared.reference.set_account_config(features.clone(), mifid.clone());
+        }
 
         // Webapp-REST-facing fields from the FIX logon roundtrip.
         shared.reference.set_ccp_session_id(self.server_session_id.clone());
@@ -1847,6 +1859,18 @@ pub use crate::config::{chrono_free_timestamp, days_to_ymd};
 /// inflates the compressed frames itself. The copy must stay out of it: with
 /// the inflated content appended there, every compressed message of the init
 /// burst was handled twice, executions included (ibx#317).
+/// The account config answer (35=U 6040=210) of the login burst: its
+/// feature list (6542, comma separated) and MiFID config id (8234), as the
+/// reference reads them (ibx#425). Paper answer, 15/06/2026:
+/// `6040=210|6556=AcctConfig4|1=DU...|6542=OLP,EUCOSTCALC,EUILLS`.
+fn parse_account_config(init: &str) -> Option<(Vec<String>, String)> {
+    init.split("8=FIX").find(|frame| frame.contains("\x016040=210\x01")).map(|frame| {
+        let field = |tag: &str| frame.split('\x01').find_map(|p| p.strip_prefix(tag)).unwrap_or("");
+        let features = field("6542=").split(',').filter(|f| !f.is_empty()).map(String::from).collect();
+        (features, field("8234=").to_string())
+    })
+}
+
 fn init_scan_buffer(init_data: &[u8]) -> Vec<u8> {
     let mut inflated_extra: Vec<u8> = Vec::new();
     let mut cursor = 0usize;
@@ -2283,5 +2307,21 @@ mod soft_dollar_tests {
         let t = parse_soft_dollar_tiers("USSTK:Gold@Y,nope");
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].display_name, "Tier Gold (Y)");
+    }
+}
+
+#[cfg(test)]
+mod account_config_tests {
+    use super::parse_account_config;
+
+    // ibx#425: the paper answer (15/06/2026) has no CUSTACCT and no 8234.
+    #[test]
+    fn account_config_from_the_login_burst() {
+        let burst = "8=FIX.4.1\x019=10\x0135=U\x016040=75\x011=DU1\x0110=000\x01\
+                     8=FIX.4.1\x019=10\x0135=U\x016040=210\x016556=AcctConfig4\x011=DU1\x016542=OLP,EUCOSTCALC,EUILLS\x0110=000\x01";
+        let (features, mifid) = parse_account_config(burst).unwrap();
+        assert_eq!(features, ["OLP", "EUCOSTCALC", "EUILLS"]);
+        assert_eq!(mifid, "");
+        assert!(parse_account_config("8=FIX.4.1\x0135=U\x016040=75\x01").is_none());
     }
 }
