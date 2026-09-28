@@ -411,7 +411,9 @@ pub struct Gateway {
     /// Sourced from the post-auth FIX logon ACK, falling back to the locally generated
     /// session ID when the gateway does not echo one back.
     pub server_session_id: String,
-    pub ccp_token: String,
+    /// Logon tag 6386: in the reference, the object key of the settings
+    /// download; not used by ibx (ibx#483).
+    pub settings_object_key: String,
     pub heartbeat_interval: u64,
     /// Stored for farm reconnection.
     pub hw_info: String,
@@ -1192,7 +1194,7 @@ impl Gateway {
         let mut account_id = String::new();
         let mut heartbeat_interval = CCP_HEARTBEAT;
         let mut server_session_id = String::new();
-        let mut ccp_token = String::new();
+        let mut settings_object_key = String::new();
         let mut raw_soft_dollar_tiers = String::new();
         let mut raw_family_codes = String::new();
         let mut raw_news_providers = String::new();
@@ -1255,11 +1257,9 @@ impl Gateway {
                 if let Ok(hb) = v.parse() { heartbeat_interval = hb; }
             }
             if let Some(v) = fields.get(&6386) {
-                if ccp_token.is_empty() {
-                    ccp_token = v.clone();
-                    log::info!("Auth: captured ccp_token (FIX 6386, len={}, prefix={:?})",
-                        ccp_token.len(),
-                        if ccp_token.len() > 16 { &ccp_token[..16] } else { &ccp_token });
+                if settings_object_key.is_empty() {
+                    settings_object_key = v.clone();
+                    log::info!("Auth: settings object key (6386, len={})", settings_object_key.len());
                 }
             }
             // Tag 8035: try parsed fields first, then raw byte search
@@ -1311,7 +1311,8 @@ impl Gateway {
             if let Some(v) = fields.get(&6830) {
                 if raw_news_providers.is_empty() { raw_news_providers = v.clone(); }
             }
-            if let Some(v) = fields.get(&6571) {
+            // whiteBrandingId: logon tag 6593, as the reference (ibx#483).
+            if let Some(v) = fields.get(&6593) {
                 if white_branding_id.is_empty() { white_branding_id = v.clone(); }
             }
             // FA session: true only for the single character "1", as the
@@ -1457,8 +1458,8 @@ impl Gateway {
                 log::info!("Found news providers from init response ({} bytes)", raw_news_providers.len());
             } else if part == "6108=1" {
                 fa_session = true;
-            } else if part.starts_with("6571=") && white_branding_id.is_empty() {
-                white_branding_id = part[5..].to_string();
+            } else if let Some(id) = white_branding_part(part).filter(|_| white_branding_id.is_empty()) {
+                white_branding_id = id.to_string();
                 log::info!("Found white branding ID from init response");
             } else if part.starts_with("6321=") && raw_misc_urls.is_empty() {
                 raw_misc_urls = part[5..].to_string();
@@ -1646,7 +1647,7 @@ impl Gateway {
             account_id: if account_id.is_empty() { config.username.clone() } else { account_id },
             session_token: session_key,
             server_session_id,
-            ccp_token,
+            settings_object_key,
             heartbeat_interval,
             hw_info,
             encoded,
@@ -1869,6 +1870,13 @@ fn parse_account_config(init: &str) -> Option<(Vec<String>, String)> {
         let features = field("6542=").split(',').filter(|f| !f.is_empty()).map(String::from).collect();
         (features, field("8234=").to_string())
     })
+}
+
+/// The whiteBrandingId in one field of the logon data: tag 6593, as the
+/// reference (`jfix.d0.a(e3)@13-19`). Tag 6571 is an order attribute there,
+/// never a logon one (ibx#483).
+fn white_branding_part(part: &str) -> Option<&str> {
+    part.strip_prefix("6593=")
 }
 
 fn init_scan_buffer(init_data: &[u8]) -> Vec<u8> {
@@ -2313,6 +2321,13 @@ mod soft_dollar_tests {
 #[cfg(test)]
 mod account_config_tests {
     use super::parse_account_config;
+
+    // ibx#483: whiteBrandingId is logon tag 6593, not 6571.
+    #[test]
+    fn white_branding_is_tag_6593() {
+        assert_eq!(super::white_branding_part("6593=ABC"), Some("ABC"));
+        assert_eq!(super::white_branding_part("6571=X"), None);
+    }
 
     // ibx#425: the paper answer (15/06/2026) has no CUSTACCT and no 8234.
     #[test]

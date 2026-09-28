@@ -11,10 +11,10 @@ pub(super) fn phase_ccp_auth(gw: &Gateway, has_hmds: bool, connect_time: Duratio
     println!("  Account ID: {}", gw.account_id);
 
     check!(!gw.server_session_id.is_empty(), "Server session ID should be set");
-    if !gw.ccp_token.is_empty() {
-        println!("  CCP token: present");
+    if !gw.settings_object_key.is_empty() {
+        println!("  Settings object key: present");
     } else {
-        println!("  CCP token: not present (non-fatal)");
+        println!("  Settings object key: not present (non-fatal)");
     }
     check!(gw.heartbeat_interval > 0, "Heartbeat interval should be positive");
     println!("  Session ID: {}", gw.server_session_id);
