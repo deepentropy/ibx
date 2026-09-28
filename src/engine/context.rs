@@ -83,6 +83,14 @@ pub struct Context {
     /// The last limit offset, limit price and stop price the server
     /// reported for a TRAIL LIMIT order (ib-agent#194, ibx#491).
     pub(crate) trail_limit_reported: HashMap<OrderId, TrailLimitReported>,
+    /// What decides outside-RTH, by conId and order exchange (ibx#465).
+    pub(crate) rth_types: HashMap<(i64, String), crate::engine::outside_rth::RthTypes>,
+    /// Definition lookups in flight for `rth_types`: (320 id, key, deadline).
+    pub(crate) rth_lookups: Vec<(String, (i64, String), std::time::Instant)>,
+    /// Requests with outside-RTH waiting for their lookup, in order; later
+    /// requests of the same order wait behind them.
+    pub(crate) rth_parked: Vec<OrderRequest>,
+    pub(crate) next_rth_lookup: u32,
     /// Final status of orders that left the engine filled, cancelled or
     /// rejected, for the reference's refusal of a later cancel (ibx#464).
     /// Bounded: the oldest are dropped past `FINISHED_ORDERS_MAX`.
@@ -105,6 +113,10 @@ impl Context {
             last_clord: HashMap::new(),
             cancel_clord: HashMap::new(),
             trail_limit_reported: HashMap::new(),
+            rth_types: HashMap::new(),
+            rth_lookups: Vec::new(),
+            rth_parked: Vec::new(),
+            next_rth_lookup: 0,
             finished_orders: HashMap::new(),
             finished_order_ids: std::collections::VecDeque::new(),
             account: AccountState::default(),

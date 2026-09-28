@@ -31,6 +31,12 @@ pub(crate) fn drain_and_send_orders(
     };
     for mut order_req in orders {
         let oid = order_req.order_id();
+        // Outside RTH: kept only where the reference keeps it, from the
+        // contract definition of the order's exchange (ibx#465).
+        if !apply_outside_rth(&mut order_req, context, conn, hb, shared) {
+            context.rth_parked.push(order_req);
+            continue;
+        }
         // The contract's currency (tag 15), USD when unknown (ibx#466).
         let currency: String = order_req.instrument()
             .map(|i| context.market.currency(i).to_string())
@@ -1850,6 +1856,115 @@ fn modify_fields(
     f
 }
 
+/// Outside RTH on a request (ibx#465). A request of an order that already
+/// waits, or with outside-RTH whose contract definition is not known yet,
+/// waits (false): the definition is asked once. Otherwise outside-RTH is
+/// dropped where the reference drops it, with warning 2109 on a new order
+/// (none on a replace), and the request goes on (true).
+fn apply_outside_rth(
+    req: &mut OrderRequest,
+    context: &mut Context,
+    conn: &mut Connection,
+    hb: &mut HeartbeatState,
+    shared: &Arc<SharedState>,
+) -> bool {
+    use crate::engine::outside_rth as rth;
+    let oid = req.order_id();
+    // A cancel-all waits behind the waiting orders, so it reaches them.
+    if !context.rth_parked.is_empty()
+        && (matches!(req, OrderRequest::CancelAll { .. }) || context.rth_parked.iter().any(|r| r.order_id() == oid))
+    {
+        return false;
+    }
+    let is_new = !matches!(req, OrderRequest::Modify { .. });
+    let Some((instrument, kind, tif, order_kind, outside_rth)) = rth::rth_parts(req) else { return true };
+    if !*outside_rth { return true; }
+    let Some(instrument) = instrument.or_else(|| context.order(oid).map(|o| o.instrument)) else { return true };
+    let Some(con_id) = context.market.con_id(instrument) else { return true };
+    let (_, routed) = context.market.order_routing(instrument);
+    let destination = rth::order_destination(order_kind.as_ref(), routed);
+    let key = (con_id, destination);
+    let Some(types) = context.rth_types.get(&key) else {
+        if !context.rth_lookups.iter().any(|(_, k, _)| *k == key) {
+            let id = format!("ibxrth{}", context.next_rth_lookup);
+            context.next_rth_lookup = context.next_rth_lookup.wrapping_add(1);
+            let ts = chrono_free_timestamp();
+            let con_id_str = con_id.to_string();
+            // By conId for one exchange, as the reference asks for the
+            // order-type list (ib-agent#199).
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "c"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (320, &id),
+                (321, "2"),
+                (146, "1"),
+                (6008, &con_id_str),
+                (6004, &key.1),
+            ]);
+            hb.last_ccp_sent = std::time::Instant::now();
+            log::info!("Definition of con_id {} on {} asked for outside RTH ({})", con_id, key.1, id);
+            context.rth_lookups.push((id, key, std::time::Instant::now() + RTH_LOOKUP_TIMEOUT));
+        }
+        return false;
+    };
+    let exchange = if context.market.exchange(instrument) == "IBKRATS" { "IBKRATS" } else { key.1.as_str() };
+    if !rth::outside_rth_applies(kind, tif, exchange, types) {
+        *outside_rth = false;
+        if is_new {
+            shared.orders.push_order_error(oid, 2109, rth::OUTSIDE_RTH_IGNORED.to_string());
+        }
+    }
+    true
+}
+
+/// How long an order waits for the definition its outside-RTH needs; then
+/// the empty list is used, as the reference when it finds none.
+const RTH_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A definition reply for an outside-RTH lookup (ibx#465): keep what the
+/// rule needs and release the waiting requests. False when the reply is
+/// not for such a lookup.
+pub(crate) fn rth_definition_reply(context: &mut Context, req_id: &str, msg: &[u8]) -> bool {
+    let Some(idx) = context.rth_lookups.iter().position(|(id, _, _)| id == req_id) else { return false };
+    let (_, key, _) = context.rth_lookups.swap_remove(idx);
+    let tags = fix::fix_parse(msg);
+    let tokens: Vec<String> = tags.get(&6431).map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
+    let def = crate::control::contracts::parse_secdef_response(msg);
+    let types = crate::engine::outside_rth::RthTypes::from_definition(
+        &tokens,
+        tags.get(&6523).map(String::as_str).unwrap_or(""),
+        def.as_ref().map(|d| d.sec_type.to_api_str()).unwrap_or(""),
+        def.as_ref().map(|d| d.currency.as_str()).unwrap_or(""),
+    );
+    log::info!("Outside RTH definition for con_id {} on {}: {:?}", key.0, key.1, types);
+    context.rth_types.insert(key, types);
+    release_rth_parked(context);
+    true
+}
+
+/// Lookups with no reply in time: the empty list, as the reference when it
+/// finds no definition (ibx#465).
+pub(crate) fn sweep_rth_lookups(context: &mut Context) {
+    if context.rth_lookups.is_empty() { return; }
+    let now = std::time::Instant::now();
+    let mut expired = Vec::new();
+    context.rth_lookups.retain(|(id, key, deadline)| {
+        if *deadline <= now { expired.push((id.clone(), key.clone())); false } else { true }
+    });
+    if expired.is_empty() { return; }
+    for (id, key) in expired {
+        log::warn!("No definition for con_id {} on {} ({}): outside RTH uses the empty list", key.0, key.1, id);
+        context.rth_types.insert(key, crate::engine::outside_rth::RthTypes::default());
+    }
+    release_rth_parked(context);
+}
+
+/// The waiting requests go back ahead of the queue, in their order.
+fn release_rth_parked(context: &mut Context) {
+    let parked = std::mem::take(&mut context.rth_parked);
+    context.pending_orders.prepend(parked);
+}
+
 /// The limit offset of a TRAIL LIMIT set by its limit price, as the
 /// reference computes it when the order has none (ib-agent#195): the stop
 /// price minus the limit price for a sell, the limit price minus the stop
@@ -2403,6 +2518,13 @@ mod tests {
 
         let mut context = Context::new();
         context.market.register(265598);
+        // A definition that keeps outside RTH for every type, so these
+        // tests see the encoding only; the rule has its own tests (ibx#465).
+        for exch in ["BEST", "ISLAND"] {
+            context.rth_types.insert((265598, exch.to_string()), crate::engine::outside_rth::RthTypes {
+                rth: true, sec_type: "STK".into(), ..Default::default()
+            });
+        }
         setup(&mut context);
         context.pending_orders.push(req);
         let shared = Arc::new(SharedState::new());
@@ -3129,5 +3251,120 @@ mod tests {
         assert_eq!(tag(&sell, 6370), Some("4.9"));
         let buy = replace(Side::Buy, 79699 * P / 100, 79189 * P / 100);
         assert_eq!(tag(&buy, 6370), Some("5.1"));
+    }
+
+    /// Every frame the engine sends for the queued requests, split per frame.
+    fn drain_frames(context: &mut Context, shared: &Arc<SharedState>, conn: &mut Option<Connection>,
+                    server: &mut std::net::TcpStream) -> Vec<Vec<(u32, String)>> {
+        use std::io::Read;
+        drain_and_send_orders(conn, context, "DU1", &mut HeartbeatState::new(), false, shared);
+        server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+        let mut bytes = Vec::new();
+        let mut buf = vec![0u8; 16384];
+        while let Ok(n) = server.read(&mut buf) {
+            if n == 0 { break; }
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        let mut frames: Vec<Vec<(u32, String)>> = Vec::new();
+        for field in bytes.split(|&b| b == fix::SOH) {
+            let Ok(text) = std::str::from_utf8(field) else { continue };
+            let Some((t, v)) = text.split_once('=') else { continue };
+            let Ok(t) = t.parse::<u32>() else { continue };
+            if t == 8 { frames.push(Vec::new()); }
+            if let Some(f) = frames.last_mut() { f.push((t, v.to_string())); }
+        }
+        frames
+    }
+
+    // ibx#465 (ib-agent#199): a request with outside RTH waits for the
+    // definition of its exchange, asked once; then outside RTH follows the
+    // reference's rule: a STP on a US stock loses it with warning 2109, a
+    // LMT keeps it, and a replace drops it without a second warning.
+    #[test]
+    fn outside_rth_waits_for_the_definition_then_follows_the_rule() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let shared = Arc::new(SharedState::new());
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.set_symbol(0, "AAPL".to_string());
+        let rth = crate::types::OrderAttrs { outside_rth: true, ..Default::default() };
+        let stop = crate::types::OrderKind::Stop { stop_price: 200 * P };
+        context.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: 50, instrument: 0, side: Side::Sell, qty: 1, kind: stop, tif: b'1', attrs: rth.clone() });
+        context.pending_orders.push(OrderRequest::SubmitEx {
+            order_id: 51, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::Limit { price: 100 * P }, tif: b'1', attrs: rth.clone() });
+
+        // One definition request, nothing sent for the orders yet.
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(tag(&frames[0], 35), Some("c"));
+        assert_eq!(tag(&frames[0], 6008), Some("265598"));
+        assert_eq!(tag(&frames[0], 6004), Some("BEST"));
+        assert_eq!(tag(&frames[0], 146), Some("1"));
+        let id = tag(&frames[0], 320).unwrap().to_string();
+        assert_eq!(context.rth_parked.len(), 2);
+
+        // The reply (AAPL on BEST, paper 28/09/2026) releases them.
+        let reply = fix::fix_build(&[(35, "d"), (320, &id), (6008, "265598"), (55, "AAPL"), (167, "STK"),
+            (15, "USD"), (207, "BEST"), (6523, "USSTK"), (6431, "ACTIVETIM/1,AD/5,RTH/1,AON/1")], 1);
+        assert!(rth_definition_reply(&mut context, &id, &reply));
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(tag(&frames[0], 11), Some("50.0"));
+        assert_eq!(tag(&frames[0], 6433), None, "STP on a US stock: no outside RTH");
+        assert_eq!(tag(&frames[1], 11), Some("51.0"));
+        assert_eq!(tag(&frames[1], 6433), Some("1"), "LMT keeps it");
+        let errors = shared.orders.drain_order_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!((errors[0].0, errors[0].1), (50, 2109));
+        assert!(errors[0].2.starts_with("Order Event Warning:Attribute 'Outside Regular Trading Hours' is ignored"));
+
+        // The replace of the STP has no outside RTH and no second 2109.
+        context.pending_orders.push(OrderRequest::Modify {
+            new_order_id: 50, order_id: 50, qty: 1, kind: crate::types::OrderKind::Stop { stop_price: 199 * P },
+            tif: b'1', attrs: rth.clone() });
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(tag(&frames[0], 35), Some("G"));
+        assert_eq!(tag(&frames[0], 6433), None);
+        assert!(shared.orders.drain_order_errors().is_empty());
+    }
+
+    // ibx#465: no definition in time: the empty list, as the reference when
+    // it finds none, so outside RTH is dropped with 2109.
+    #[test]
+    fn outside_rth_without_a_definition_uses_the_empty_list() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let shared = Arc::new(SharedState::new());
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.set_symbol(0, "AAPL".to_string());
+        context.pending_orders.push(OrderRequest::SubmitLimitEx {
+            order_id: 60, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P, tif: b'0',
+            attrs: crate::types::OrderAttrs { outside_rth: true, ..Default::default() } });
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(tag(&frames[0], 35), Some("c"));
+        for lookup in context.rth_lookups.iter_mut() { lookup.2 = std::time::Instant::now(); }
+        sweep_rth_lookups(&mut context);
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(tag(&frames[0], 6433), None);
+        assert_eq!(shared.orders.drain_order_errors().iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(60, 2109)]);
+    }
+
+    // ibx#465: an order without outside RTH does not wait.
+    #[test]
+    fn an_order_without_outside_rth_does_not_wait() {
+        let tags = wire_tags_with(|ctx| { ctx.rth_types.clear(); }, OrderRequest::SubmitLimitEx {
+            order_id: 61, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P, tif: b'0',
+            attrs: Default::default() });
+        assert_eq!(tag(&tags, 35), Some("D"));
     }
 }

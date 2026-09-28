@@ -636,6 +636,10 @@ impl CcpState {
             "UP" => handle_portfolio_message(msg, context, shared, event_tx),
             "d" => {
                 let response_req_id = crate::control::contracts::secdef_response_req_id(msg);
+                // Asked for an order's outside RTH (ibx#465): not a user reply.
+                if let Some(rid) = response_req_id.as_deref() {
+                    if super::order_builder::rth_definition_reply(context, rid, msg) { return; }
+                }
                 let fanout_idx = response_req_id.as_ref().and_then(|rid| {
                     self.pending_fanout.iter().position(|p| {
                         p.fanout_req_ids.iter().any(|id| id == rid)

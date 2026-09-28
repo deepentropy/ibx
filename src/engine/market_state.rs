@@ -197,6 +197,12 @@ impl MarketState {
         }
     }
 
+    /// The exchange the instrument was registered with, upper case; empty
+    /// when none (SMART).
+    pub fn exchange(&self, id: InstrumentId) -> &str {
+        self.exchanges[id as usize].as_deref().unwrap_or("")
+    }
+
     /// Currency for an order on this instrument: the contract's, USD when
     /// unknown (ibx#466).
     pub fn currency(&self, id: InstrumentId) -> &str {

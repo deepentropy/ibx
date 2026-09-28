@@ -1170,6 +1170,11 @@ impl OrderBuffer {
         self.buf.drain(..)
     }
 
+    /// Put requests back ahead of the queued ones, in their order.
+    pub fn prepend(&mut self, reqs: Vec<OrderRequest>) {
+        self.buf.splice(0..0, reqs);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
