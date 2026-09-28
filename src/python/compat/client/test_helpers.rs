@@ -327,6 +327,42 @@ impl EClient {
         Ok(())
     }
 
+    /// Set an account row as the server sends it (ibx#475): the store the
+    /// account updates, the P&L keys and the portfolio read.
+    #[doc(hidden)]
+    #[pyo3(signature = (key, value, currency=""))]
+    fn _test_set_account_row(&self, key: &str, value: &str, currency: &str) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        shared.portfolio.update_account_rows(|rows| {
+            rows.set(key, currency, value);
+            rows.image_complete = true;
+        });
+        Ok(())
+    }
+
+    /// The account download is complete, so position requests answer
+    /// (ibx#477).
+    #[doc(hidden)]
+    fn _test_account_download_complete(&self) -> PyResult<()> {
+        self.shared_state()?.portfolio.set_account_download_complete();
+        Ok(())
+    }
+
+    /// Push an account summary batch as the server sends it, for the
+    /// subscription id `SR.Socket.{n}` (ibx#479).
+    #[doc(hidden)]
+    #[pyo3(signature = (sr_id, rows, end=true))]
+    fn _test_push_account_summary(&self, sr_id: &str, rows: Vec<(String, String, String)>, end: bool) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+            sr_id: sr_id.to_string(),
+            rows: rows.into_iter().map(|(key, value, currency)| crate::bridge::AccountRow { key, value, currency, ledger: false }).collect(),
+            ledger: false,
+            end,
+        });
+        Ok(())
+    }
+
     /// Push a position into SharedState.
     #[doc(hidden)]
     fn _test_set_position(&self, con_id: i64, position: i64, avg_cost: f64) -> PyResult<()> {

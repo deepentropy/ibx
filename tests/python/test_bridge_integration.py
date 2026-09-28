@@ -518,7 +518,7 @@ class TestFillDispatch:
         exec_events = [e for e in w.events if e[0] == "exec_details"]
         assert len(exec_events) == 1
         execution = exec_events[0][3]
-        assert execution.side == "SELL"
+        assert execution.side == "SLD"  # the API's execution side (ibx#474)
         assert abs(execution.price - 200.0) < 0.01
 
     def test_short_sell(self):
@@ -529,7 +529,7 @@ class TestFillDispatch:
         c._test_dispatch_once()
 
         exec_events = [e for e in w.events if e[0] == "exec_details"]
-        assert exec_events[0][3].side == "SSHORT"
+        assert exec_events[0][3].side == "SLD"  # a short sale is SLD too (ibx#474)
 
     def test_exec_details_has_required_keys(self):
         w, c = make_test_client()
@@ -585,7 +585,7 @@ class TestCancelRejectDispatch:
         errors = [e for e in w.events if e[0] == "error"]
         assert len(errors) == 1
         assert errors[0][1] == 42  # order_id
-        assert errors[0][2] == 202  # error_code for cancel reject
+        assert errors[0][2] == 10147  # a cancel reject, as the reference (ibx#464)
 
 
 class TestReqOpenOrdersOrderState:
@@ -818,7 +818,7 @@ class TestAccountDispatch:
         w, c = make_test_client("DU12345")
         # Account values follow a subscription, as in the reference.
         c.req_account_updates(True, "DU12345")
-        c._test_set_account(net_liquidation=100000.0)
+        c._test_set_account_row("NetLiquidation", "100000.00", "USD")
         c._test_dispatch_once()
 
         events = [e for e in w.events if e[0] == "update_account_value"]
@@ -831,7 +831,10 @@ class TestAccountDispatch:
     def test_pnl_dispatch(self):
         w, c = make_test_client()
         c.req_pnl(1, "TEST123")
-        c._test_set_account(daily_pnl=500.0, unrealized_pnl=300.0, realized_pnl=200.0)
+        # No priced position: the server's own P&L keys (ibx#239, ibx#478).
+        c._test_set_account_row("DailyPnL", "500", "USD")
+        c._test_set_account_row("UnrealizedPnL", "300", "USD")
+        c._test_set_account_row("RealizedPnL", "200", "USD")
         c._test_dispatch_once()
 
         events = [e for e in w.events if e[0] == "pnl"]
@@ -845,9 +848,12 @@ class TestAccountDispatch:
         """Same P&L should not fire duplicate callback."""
         w, c = make_test_client()
         c.req_pnl(1, "TEST123")
-        c._test_set_account(daily_pnl=100.0)
+        c._test_set_account_row("DailyPnL", "100", "USD")
+        c._test_set_account_row("UnrealizedPnL", "0", "USD")
+        c._test_set_account_row("RealizedPnL", "0", "USD")
         c._test_dispatch_once()
         count1 = len([e for e in w.events if e[0] == "pnl"])
+        assert count1 == 1
 
         c._test_dispatch_once()
         count2 = len([e for e in w.events if e[0] == "pnl"])
@@ -856,7 +862,9 @@ class TestAccountDispatch:
     def test_account_summary(self):
         w, c = make_test_client()
         c.req_account_summary(1, "All", "NetLiquidation,BuyingPower")
-        c._test_set_account(net_liquidation=100000.0, buying_power=200000.0)
+        # The rows the server sends for the subscription (ibx#479).
+        c._test_push_account_summary("SR.Socket.1", [
+            ("NetLiquidation", "100000.00", "USD"), ("BuyingPower", "200000.00", "USD")], end=True)
         c._test_dispatch_once()
 
         events = [e for e in w.events if e[0] == "account_summary"]
@@ -871,6 +879,7 @@ class TestAccountDispatch:
     def test_positions(self):
         w, c = make_test_client("DU12345")
         c._test_set_position(265598, 100, 150.50)
+        c._test_account_download_complete()  # positions answer then (ibx#477)
         c.req_positions()
 
         pos_events = [e for e in w.events if e[0] == "position"]
@@ -1047,7 +1056,7 @@ class TestScenarios:
 
         execs = [e for e in w.events if e[0] == "exec_details"]
         assert len(execs) == 1
-        assert execs[0][3].side == "BUY"
+        assert execs[0][3].side == "BOT"  # ibx#474
 
     def test_partial_fill_then_cancel(self):
         """Partial fill → cancel → verify statuses."""
