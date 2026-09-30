@@ -202,6 +202,9 @@ pub(crate) struct CcpState {
     /// surfaces error 200 + contract_details_end instead of hanging
     /// forever (ibx#227).
     pub(crate) pending_secdef: Vec<(u32, bool, Instant)>,
+    /// By-symbol lookups with a strike that still have their one retry
+    /// (ibx#410): (req_id, lookup, strike text of the retry).
+    pub(crate) pending_strike_retry: Vec<(u32, SymbolLookup, String)>,
     pub(crate) pending_matching_symbols: Vec<u32>,
     /// keepUpToDate historical queries routed through CCP: (query_id, req_id)
     pub(crate) pending_kut_historical: Vec<(String, u32)>,
@@ -266,6 +269,119 @@ pub(crate) struct PendingFanout {
     pub deadline: Instant,
 }
 
+/// A by-symbol contract lookup as the caller asked it.
+#[derive(Debug, Clone)]
+pub(crate) struct SymbolLookup {
+    pub symbol: String,
+    pub sec_type: String,
+    pub exchange: String,
+    pub currency: String,
+    pub filters: crate::types::SecDefFilters,
+}
+
+impl SymbolLookup {
+    /// Source code of a known identifier type (ib-agent#174); empty
+    /// otherwise.
+    fn sec_id_source(&self) -> &'static str {
+        match self.filters.sec_id_type.to_uppercase().as_str() {
+            "ISIN" => "4",
+            "CUSIP" => "1",
+            _ => "",
+        }
+    }
+
+    /// The lookup rides a known identifier instead of the symbol.
+    fn is_identifier(&self) -> bool {
+        !self.filters.sec_id.is_empty() && !self.sec_id_source().is_empty()
+    }
+}
+
+/// Fields of a by-symbol lookup, message type first, without the sending
+/// time. `strike` is the strike text (empty: none). Which fields are
+/// written, and their order, follow the reference (ibx#410): a lookup with
+/// a strike has no source name, the contract is named by the name fields
+/// the caller gave, and a contract month and a full date do not share a
+/// field.
+fn secdef_by_symbol_fields(req_id: &str, lookup: &SymbolLookup, strike: &str) -> Vec<(u32, String)> {
+    use crate::control::contracts::{lookup_symbol, TAG_IB_LOCAL_SYMBOL, TAG_IB_SOURCE, TAG_IB_TRADING_CLASS,
+        TAG_SYMBOL};
+    let f = &lookup.filters;
+    let mut fields: Vec<(u32, String)> = Vec::with_capacity(16);
+    fields.push((fix::TAG_MSG_TYPE, "c".into()));
+    fields.push((320, req_id.into()));
+    fields.push((321, "2".into()));
+    if strike.is_empty() {
+        fields.push((TAG_IB_SOURCE, "Socket".into()));
+    }
+    let identifier = lookup.is_identifier();
+    if identifier {
+        // Identifier lookup: the identifier and its source replace the
+        // symbol/secType/filters; exchange and currency still ride
+        // (ib-agent#174).
+        fields.push((22, lookup.sec_id_source().into()));
+        fields.push((48, f.sec_id.clone()));
+    } else {
+        let symbol = lookup_symbol(&lookup.symbol);
+        let has_class = !f.trading_class.is_empty();
+        let has_local = !f.local_symbol.is_empty();
+        if has_class {
+            fields.push((TAG_IB_TRADING_CLASS, f.trading_class.clone()));
+        }
+        if has_local {
+            fields.push((TAG_IB_LOCAL_SYMBOL, f.local_symbol.clone()));
+        }
+        // Trading class alone names the contract without the symbol.
+        if !symbol.is_empty() && (has_local || !has_class) {
+            fields.push((TAG_SYMBOL, symbol.into_owned()));
+        }
+        let fix_sec_type = match lookup.sec_type.as_str() {
+            "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND", other => other,
+        };
+        fields.push((167, fix_sec_type.into()));
+        let expiry = &f.last_trade_date_or_contract_month;
+        if expiry.eq_ignore_ascii_case("NOEXP") {
+            fields.push((541, "NOEXP".into()));
+        } else if expiry.len() == 6 {
+            fields.push((200, expiry.clone()));
+        } else if expiry.len() > 6 {
+            fields.push((541, expiry.clone()));
+        }
+        // Right code (ib-agent#171).
+        match f.right.to_uppercase().as_str() {
+            "C" | "CALL" => fields.push((201, "1".into())),
+            "P" | "PUT" => fields.push((201, "0".into())),
+            _ => {}
+        }
+        if !strike.is_empty() {
+            fields.push((202, strike.into()));
+        }
+        if !f.multiplier.is_empty() {
+            fields.push((231, f.multiplier.clone()));
+        }
+    }
+    // Exchange and primary exchange are two fields (ibx#229).
+    let exchange = if lookup.exchange == "SMART" { "BEST" } else { lookup.exchange.as_str() };
+    fields.push((100, exchange.into()));
+    if !identifier && !f.primary_exchange.is_empty() {
+        fields.push((207, f.primary_exchange.clone()));
+    }
+    fields.push((15, lookup.currency.clone()));
+    fields
+}
+
+/// Strike text divided by 100 by moving the decimal point, so the value
+/// is exact ("342.8" gives "3.428", "220" gives "2.2").
+fn strike_divided_by_100(strike: &str) -> String {
+    let (int, frac) = strike.split_once('.').unwrap_or((strike, ""));
+    let int = format!("{:0>3}", int);
+    let (head, moved) = int.split_at(int.len() - 2);
+    let head = head.trim_start_matches('0');
+    let head = if head.is_empty() { "0" } else { head };
+    let frac = format!("{}{}", moved, frac);
+    let frac = frac.trim_end_matches('0');
+    if frac.is_empty() { head.to_string() } else { format!("{}.{}", head, frac) }
+}
+
 impl CcpState {
     pub(crate) fn new() -> Self {
         Self {
@@ -280,6 +396,7 @@ impl CcpState {
             news_subscriptions: Vec::new(),
             disconnected: false,
             pending_secdef: Vec::new(),
+            pending_strike_retry: Vec::new(),
             pending_matching_symbols: Vec::new(),
             pending_kut_historical: Vec::new(),
             kut_ticker_map: std::collections::HashMap::new(),
@@ -714,7 +831,7 @@ impl CcpState {
                 let Some(def) = crate::control::contracts::parse_secdef_response(msg) else {
                     // No record: error 200 and no end, never a conId 0 row
                     // (ibx#400).
-                    self.no_security_definition(response_req_id.as_deref(), shared);
+                    self.no_security_definition(response_req_id.as_deref(), shared, ccp_conn, hb);
                     return;
                 };
                 {
@@ -766,6 +883,8 @@ impl CcpState {
                     };
                     if let Some(idx) = matched_idx {
                         let req_id = self.pending_secdef[idx].0;
+                        // Found: the strike retry is not needed (ibx#410).
+                        self.pending_strike_retry.retain(|(rid, _, _)| *rid != req_id);
                         // Internal sentinel req_ids (auto-fetch for cold-cache
                         // positions, scanner enrichment) start at 0xF000_0000.
                         // Their replies must populate the contract cache but
@@ -1742,6 +1861,7 @@ impl CcpState {
                 true
             }
         });
+        self.pending_strike_retry.retain(|(rid, _, _)| !expired.contains(rid));
         for req_id in expired {
             log::warn!("Contract-details timeout: req_id={} — no gateway reply within {:?}",
                 req_id, SECDEF_TIMEOUT);
@@ -1966,79 +2086,35 @@ impl CcpState {
     }
 
     pub(crate) fn send_secdef_request_by_symbol(&mut self, req_id: u32, symbol: &str, sec_type: &str, exchange: &str, currency: &str, filters: &crate::types::SecDefFilters, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        let strike = if filters.strike > 0.0 { format!("{}", filters.strike) } else { String::new() };
+        let lookup = SymbolLookup {
+            symbol: symbol.to_string(),
+            sec_type: sec_type.to_string(),
+            exchange: exchange.to_string(),
+            currency: currency.to_string(),
+            filters: filters.clone(),
+        };
+        // A lookup with a strike that finds nothing is asked once more with
+        // the strike divided by 100, as the reference (ibx#410).
+        if !strike.is_empty() && !lookup.is_identifier() {
+            self.pending_strike_retry.push((req_id, lookup.clone(), strike_divided_by_100(&strike)));
+        }
+        self.send_symbol_lookup(req_id, &lookup, &strike, ccp_conn, hb);
+    }
+
+    /// Send one by-symbol lookup with the strike text given (empty: none).
+    fn send_symbol_lookup(&mut self, req_id: u32, lookup: &SymbolLookup, strike: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         if let Some(conn) = ccp_conn.as_mut() {
             let req_id_str = req_id.to_string();
             let ts = chrono_free_timestamp();
-            let fix_exchange = if exchange == "SMART" { "BEST" } else { exchange };
-            let symbol = crate::control::contracts::lookup_symbol(symbol);
-            let symbol: &str = &symbol;
-            let fix_sec_type = match sec_type {
-                "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND", other => other,
-            };
-            // Identifier lookup (ISIN/CUSIP): SecurityIDSource is the standard FIX
-            // code, 1 = CUSIP, 4 = ISIN (ib-agent#174). When a known one is set the
-            // lookup rides the identifier and drops the symbol/secType/filters.
-            let sec_id_source = match filters.sec_id_type.to_uppercase().as_str() {
-                "ISIN" => "4",
-                "CUSIP" => "1",
-                _ => "",
-            };
-            let identifier_lookup = !filters.sec_id.is_empty() && !sec_id_source.is_empty();
-
-            let strike_str = if filters.strike > 0.0 { format!("{}", filters.strike) } else { String::new() };
-            // PutOrCall: Call = 1, Put = 0 (ib-agent#171).
-            let right_code = match filters.right.to_uppercase().as_str() {
-                "C" | "CALL" => "1",
-                "P" | "PUT" => "0",
-                _ => "",
-            };
-            // Exchange rides tag 100; primaryExchange (when set) rides tag 207 —
-            // the two were previously conflated onto 207. localSymbol replaces the
-            // plain symbol; the derivative/disambiguation filters are added only
-            // when set. Captured in ib-agent#171 (ibx#229).
-            let mut fields: Vec<(u32, &str)> = vec![
-                (fix::TAG_MSG_TYPE, "c"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (320, &req_id_str),
-                (321, "2"),
-            ];
-            if identifier_lookup {
-                // Identifier lookup: the identifier and its source replace the
-                // symbol/secType/filters; exchange and currency still ride
-                // (ib-agent#174).
-                fields.push((22, sec_id_source));
-                fields.push((48, &filters.sec_id));
-            } else {
-                if !filters.local_symbol.is_empty() {
-                    fields.push((6035, &filters.local_symbol));
-                } else {
-                    fields.push((55, symbol));
-                }
-                if !filters.trading_class.is_empty() {
-                    fields.push((6058, &filters.trading_class));
-                }
-                fields.push((167, fix_sec_type));
-                if !filters.last_trade_date_or_contract_month.is_empty() {
-                    fields.push((200, &filters.last_trade_date_or_contract_month));
-                }
-                if !right_code.is_empty() {
-                    fields.push((201, right_code));
-                }
-                if !strike_str.is_empty() {
-                    fields.push((202, &strike_str));
-                }
-                if !filters.multiplier.is_empty() {
-                    fields.push((231, &filters.multiplier));
-                }
-            }
-            fields.push((100, fix_exchange));
-            if !identifier_lookup && !filters.primary_exchange.is_empty() {
-                fields.push((207, &filters.primary_exchange));
-            }
-            fields.push((15, currency));
-            fields.push((6088, "Socket"));
+            let body = secdef_by_symbol_fields(&req_id_str, lookup, strike);
+            let mut fields: Vec<(u32, &str)> = Vec::with_capacity(body.len() + 1);
+            fields.push((fix::TAG_MSG_TYPE, "c"));
+            fields.push((fix::TAG_SENDING_TIME, &ts));
+            fields.extend(body.iter().skip(1).map(|(t, v)| (*t, v.as_str())));
             let _ = conn.send_fix(&fields);
-            log::info!("Sent secdef lookup: req_id={} symbol={} sec_type={} identifier={}", req_id, symbol, sec_type, identifier_lookup);
+            log::info!("Sent secdef lookup: req_id={} symbol={} sec_type={} identifier={}",
+                req_id, lookup.symbol, lookup.sec_type, lookup.is_identifier());
             hb.last_ccp_sent = Instant::now();
         } else {
             // See send_secdef_request: sweep converts this to a visible error.
@@ -2050,13 +2126,32 @@ impl CcpState {
         self.pending_secdef.push((req_id, false, Instant::now() + SECDEF_TIMEOUT));
     }
 
+    /// The strike retry of a lookup that found nothing (ibx#410): sent once,
+    /// in place of the error. False when the lookup has no retry left.
+    fn retry_with_divided_strike(&mut self, req_id: u32, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) -> bool {
+        let Some(pos) = self.pending_strike_retry.iter().position(|(rid, _, _)| *rid == req_id) else { return false };
+        let (_, lookup, strike) = self.pending_strike_retry.swap_remove(pos);
+        log::info!("Secdef lookup req_id={}: nothing found, retry with strike {}", req_id, strike);
+        self.send_symbol_lookup(req_id, &lookup, &strike, ccp_conn, hb);
+        true
+    }
+
     /// A definition reply with no record for a pending lookup: the lookup
     /// ends with error 200 and no contract_details_end, as the reference
     /// (ibx#400). Internal lookups end silently.
-    fn no_security_definition(&mut self, response_req_id: Option<&str>, shared: &SharedState) {
+    fn no_security_definition(
+        &mut self,
+        response_req_id: Option<&str>,
+        shared: &SharedState,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
         let Some(rid) = response_req_id.and_then(|r| r.parse::<u32>().ok()) else { return };
         let Some(idx) = self.pending_secdef.iter().position(|(pid, _, _)| *pid == rid) else { return };
         self.pending_secdef.remove(idx);
+        if self.retry_with_divided_strike(rid, ccp_conn, hb) {
+            return;
+        }
         if rid < 0xF000_0000 {
             log::info!("Secdef lookup req_id={}: no security definition", rid);
             shared.reference.push_historical_error(rid, 200, NO_SECURITY_DEFINITION.to_string());
@@ -3441,6 +3536,179 @@ mod tests {
         assert!(shared.reference.drain_historical_errors().is_empty());
         assert!(shared.reference.drain_contract_details_end().is_empty());
         assert_eq!(ccp.pending_secdef.len(), 1, "left to the deadline sweep");
+    }
+
+    // ── ibx#410: by-symbol lookup frames and the strike retry ──
+
+    fn symbol_lookup(symbol: &str, sec_type: &str, exchange: &str, filters: crate::types::SecDefFilters) -> SymbolLookup {
+        SymbolLookup {
+            symbol: symbol.into(), sec_type: sec_type.into(), exchange: exchange.into(),
+            currency: "USD".into(), filters,
+        }
+    }
+
+    fn lookup_frame(lookup: &SymbolLookup) -> String {
+        let strike = if lookup.filters.strike > 0.0 { format!("{}", lookup.filters.strike) } else { String::new() };
+        frame_text(&secdef_by_symbol_fields("7", lookup, &strike))
+    }
+
+    fn frame_text(fields: &[(u32, String)]) -> String {
+        fields.iter().map(|(t, v)| format!("{}={}", t, v)).collect::<Vec<_>>().join("|")
+    }
+
+    fn option_filters(local_symbol: &str, trading_class: &str, multiplier: &str) -> crate::types::SecDefFilters {
+        crate::types::SecDefFilters {
+            local_symbol: local_symbol.into(),
+            trading_class: trading_class.into(),
+            last_trade_date_or_contract_month: "20261005".into(),
+            strike: 342.5,
+            right: "C".into(),
+            multiplier: multiplier.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn option_lookup_frames_match_the_reference() {
+        // Trading class, local symbol and symbol, with a strike: no source.
+        let l = symbol_lookup("AAPL", "OPT", "SMART", option_filters("AAPL  261005C00342500", "AAPL", ""));
+        assert_eq!(lookup_frame(&l),
+            "35=c|320=7|321=2|6058=AAPL|6035=AAPL  261005C00342500|55=AAPL|167=OPT|541=20261005|201=1|202=342.5|100=BEST|15=USD");
+        // Symbol only, with a multiplier.
+        let l = symbol_lookup("AAPL", "OPT", "SMART", option_filters("", "", "100"));
+        assert_eq!(lookup_frame(&l),
+            "35=c|320=7|321=2|55=AAPL|167=OPT|541=20261005|201=1|202=342.5|231=100|100=BEST|15=USD");
+        // The request of the issue.
+        let mut f = option_filters("AAPL  261218C00220000", "AAPL", "100");
+        f.last_trade_date_or_contract_month = "20261218".into();
+        f.strike = 220.0;
+        let l = symbol_lookup("AAPL", "OPT", "SMART", f);
+        assert_eq!(lookup_frame(&l),
+            "35=c|320=7|321=2|6058=AAPL|6035=AAPL  261218C00220000|55=AAPL|167=OPT|541=20261218|201=1|202=220|231=100|100=BEST|15=USD");
+    }
+
+    #[test]
+    fn local_symbol_only_lookup_has_the_source_and_no_symbol() {
+        let f = crate::types::SecDefFilters { local_symbol: "AAPL  261005C00342500".into(), ..Default::default() };
+        let l = symbol_lookup("", "OPT", "SMART", f);
+        assert_eq!(lookup_frame(&l),
+            "35=c|320=7|321=2|6088=Socket|6035=AAPL  261005C00342500|167=OPT|100=BEST|15=USD");
+    }
+
+    #[test]
+    fn future_lookup_puts_the_month_and_the_date_on_different_fields() {
+        let month = crate::types::SecDefFilters { last_trade_date_or_contract_month: "202612".into(), ..Default::default() };
+        assert_eq!(lookup_frame(&symbol_lookup("MNQ", "FUT", "CME", month)),
+            "35=c|320=7|321=2|6088=Socket|55=MNQ|167=FUT|200=202612|100=CME|15=USD");
+        let date = crate::types::SecDefFilters { last_trade_date_or_contract_month: "20261218".into(), ..Default::default() };
+        assert_eq!(lookup_frame(&symbol_lookup("MNQ", "FUT", "CME", date)),
+            "35=c|320=7|321=2|6088=Socket|55=MNQ|167=FUT|541=20261218|100=CME|15=USD");
+        let noexp = crate::types::SecDefFilters { last_trade_date_or_contract_month: "noexp".into(), ..Default::default() };
+        assert_eq!(lookup_frame(&symbol_lookup("MNQ", "FUT", "CME", noexp)),
+            "35=c|320=7|321=2|6088=Socket|55=MNQ|167=FUT|541=NOEXP|100=CME|15=USD");
+        let short = crate::types::SecDefFilters { last_trade_date_or_contract_month: "2026".into(), ..Default::default() };
+        assert_eq!(lookup_frame(&symbol_lookup("MNQ", "FUT", "CME", short)),
+            "35=c|320=7|321=2|6088=Socket|55=MNQ|167=FUT|100=CME|15=USD");
+    }
+
+    #[test]
+    fn trading_class_only_lookup_has_no_symbol() {
+        let f = crate::types::SecDefFilters { trading_class: "NMS".into(), ..Default::default() };
+        assert_eq!(lookup_frame(&symbol_lookup("AAPL", "STK", "SMART", f)),
+            "35=c|320=7|321=2|6088=Socket|6058=NMS|167=CS|100=BEST|15=USD");
+    }
+
+    #[test]
+    fn stock_lookup_strips_the_slash_and_keeps_the_primary_exchange() {
+        let f = crate::types::SecDefFilters { primary_exchange: "NYSE".into(), ..Default::default() };
+        assert_eq!(lookup_frame(&symbol_lookup("BRK/A", "STK", "SMART", f)),
+            "35=c|320=7|321=2|6088=Socket|55=BRKA|167=CS|100=BEST|207=NYSE|15=USD");
+        assert_eq!(lookup_frame(&symbol_lookup("BRK A", "STK", "SMART", Default::default())),
+            "35=c|320=7|321=2|6088=Socket|55=BRK A|167=CS|100=BEST|15=USD");
+    }
+
+    #[test]
+    fn identifier_lookup_frame() {
+        let f = crate::types::SecDefFilters {
+            sec_id: "US0378331005".into(), sec_id_type: "ISIN".into(), ..Default::default()
+        };
+        assert_eq!(lookup_frame(&symbol_lookup("AAPL", "STK", "SMART", f)),
+            "35=c|320=7|321=2|6088=Socket|22=4|48=US0378331005|100=BEST|15=USD");
+    }
+
+    #[test]
+    fn strike_divided_by_100_moves_the_decimal_point() {
+        assert_eq!(strike_divided_by_100("342.8"), "3.428");
+        assert_eq!(strike_divided_by_100("342.5"), "3.425");
+        assert_eq!(strike_divided_by_100("220"), "2.2");
+        assert_eq!(strike_divided_by_100("100"), "1");
+        assert_eq!(strike_divided_by_100("5"), "0.05");
+        assert_eq!(strike_divided_by_100("0.5"), "0.005");
+        assert_eq!(strike_divided_by_100("1234.25"), "12.3425");
+    }
+
+    fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    /// Every message written to `server`, without the framing, sequence
+    /// and time fields.
+    fn ccp_messages_sent(server: &mut std::net::TcpStream) -> Vec<String> {
+        use std::io::Read;
+        server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = server.read(&mut chunk) {
+            if n == 0 { break; }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        text.split("8=FIX.4.1\x01").filter(|m| !m.is_empty()).map(|m| {
+            m.split('\x01')
+                .filter(|f| !f.is_empty())
+                .filter(|f| !["9=", "34=", "52=", "10="].iter().any(|p| f.starts_with(p)))
+                .collect::<Vec<_>>().join("|")
+        }).collect()
+    }
+
+    #[test]
+    fn empty_reply_to_a_strike_lookup_retries_once_then_gives_error_200() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        let mut f = option_filters("", "", "");
+        f.strike = 342.8;
+        ccp.send_secdef_request_by_symbol(9, "AAPL", "OPT", "SMART", "USD", &f, &mut conn, &mut hb);
+        assert_eq!(ccp_messages_sent(&mut server),
+            ["35=c|320=9|321=2|55=AAPL|167=OPT|541=20261005|201=1|202=342.8|100=BEST|15=USD"]);
+
+        ccp.process_ccp_message(&empty_secdef_reply("9"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(ccp_messages_sent(&mut server),
+            ["35=c|320=9|321=2|55=AAPL|167=OPT|541=20261005|201=1|202=3.428|100=BEST|15=USD"]);
+        assert!(shared.reference.drain_historical_errors().is_empty(), "no error before the retry answers");
+        assert_eq!(ccp.pending_secdef.len(), 1);
+
+        ccp.process_ccp_message(&empty_secdef_reply("9"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(ccp_messages_sent(&mut server).is_empty(), "one retry only");
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!((errors[0].0, errors[0].1), (9, 200));
+        assert!(shared.reference.drain_contract_details_end().is_empty());
+        assert!(ccp.pending_secdef.is_empty() && ccp.pending_strike_retry.is_empty());
+    }
+
+    #[test]
+    fn lookup_without_a_strike_has_no_retry() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let mut hb = HeartbeatState::new();
+        ccp.send_secdef_request_by_symbol(11, "ZZZZQQ", "STK", "SMART", "USD", &Default::default(), &mut None, &mut hb);
+        assert!(ccp.pending_strike_retry.is_empty());
+        ccp.process_ccp_message(&empty_secdef_reply("11"), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(shared.reference.drain_historical_errors().len(), 1);
     }
 
     // ── ibx#228: matching-symbols attribution ──
