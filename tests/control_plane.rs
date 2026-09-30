@@ -173,6 +173,7 @@ fn secdef_response_pagination() {
         &[
             (fix::TAG_MSG_TYPE, "d"),
             (TAG_SECURITY_RESPONSE_TYPE, "4"),
+            (TAG_SYMBOL, "AAPL"),
             (TAG_IB_CON_ID, "111"),
         ],
         1,
@@ -181,6 +182,7 @@ fn secdef_response_pagination() {
         &[
             (fix::TAG_MSG_TYPE, "d"),
             (TAG_SECURITY_RESPONSE_TYPE, "4"),
+            (TAG_SYMBOL, "AAPL"),
             (TAG_IB_CON_ID, "222"),
         ],
         2,
@@ -189,6 +191,7 @@ fn secdef_response_pagination() {
         &[
             (fix::TAG_MSG_TYPE, "d"),
             (TAG_SECURITY_RESPONSE_TYPE, "5"),
+            (TAG_SYMBOL, "AAPL"),
             (TAG_IB_CON_ID, "333"),
         ],
         3,

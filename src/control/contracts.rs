@@ -247,12 +247,31 @@ pub fn build_secdef_request_by_symbol(
     )
 }
 
+/// Symbol as sent in a by-symbol lookup: every '/' is removed ("BRK/A"
+/// becomes "BRKA"); '.' and spaces are kept as given (ibx#400).
+pub fn lookup_symbol(symbol: &str) -> std::borrow::Cow<'_, str> {
+    if symbol.contains('/') {
+        std::borrow::Cow::Owned(symbol.replace('/', ""))
+    } else {
+        std::borrow::Cow::Borrowed(symbol)
+    }
+}
+
 /// Parse a SecurityDefinition response into a ContractDefinition.
+///
+/// `None` when the message is not a definition reply, or when it carries no
+/// contract record (a "no such contract" answer): such a reply must give
+/// "no security definition" to the caller, never a row with conId 0
+/// (ibx#400).
 pub fn parse_secdef_response(data: &[u8]) -> Option<ContractDefinition> {
     let tags = fix::fix_parse(data);
 
     // Verify it's a security definition message
     if tags.get(&TAG_MSG_TYPE).map(|s| s.as_str()) != Some("d") {
+        return None;
+    }
+    // A record always starts with its symbol.
+    if !tags.contains_key(&TAG_SYMBOL) {
         return None;
     }
 
@@ -944,6 +963,35 @@ mod tests {
         assert_eq!(def.min_tick, 0.01);
         assert_eq!(def.valid_exchanges, vec!["SMART", "NYSE", "ARCA"]);
         assert_eq!(def.primary_exchange, "NASDAQ");
+    }
+
+    // ibx#400: '/' is removed from the symbol, '.' and spaces are kept.
+    #[test]
+    fn lookup_symbol_removes_every_slash_only() {
+        assert_eq!(lookup_symbol("BRK/A"), "BRKA");
+        assert_eq!(lookup_symbol("A/B/C"), "ABC");
+        assert_eq!(lookup_symbol("BRK.A"), "BRK.A");
+        assert_eq!(lookup_symbol("BRK A"), "BRK A");
+        assert!(matches!(lookup_symbol("AAPL"), std::borrow::Cow::Borrowed("AAPL")));
+    }
+
+    // ibx#400: a reply with no contract record is "not found", not a
+    // definition with conId 0.
+    #[test]
+    fn parse_empty_reply_is_none() {
+        let msg = fix::fix_build(
+            &[
+                (TAG_MSG_TYPE, "d"),
+                (TAG_SECURITY_REQ_ID, "1005"),
+                (322, "*"),
+                (TAG_SECURITY_RESPONSE_TYPE, "4"),
+                (6038, "Y"),
+                (TAG_MARKET_RULE_START, "0"),
+                (6344, "0"),
+            ],
+            1,
+        );
+        assert!(super::parse_secdef_response(&msg).is_none());
     }
 
     #[test]

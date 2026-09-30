@@ -22,6 +22,8 @@ use super::{HeartbeatState, emit, clone_for_event, parse_price_tag, parse_qty, d
 /// forever (ibx#227). A gateway rejection arrives in well under a second,
 /// and a full 27-exchange fan-out completes within a few.
 const SECDEF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Error 200 text for a lookup that found no contract (ibx#400).
+pub(crate) const NO_SECURITY_DEFINITION: &str = "No security definition has been found for the request";
 
 /// Number of most-recent ExecIDs retained for fill deduplication. Bounds the
 /// memory of `seen_exec_ids` while staying large enough that a server replay
@@ -514,24 +516,11 @@ impl CcpState {
             "3" => {
                 let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("unknown");
                 let ref_tag = parsed.get(&371).map(|s| s.as_str()).unwrap_or("?");
+                // The reject carries no request id: like the reference, it is
+                // only logged, and a lookup it hit gets neither an error nor
+                // an end from it (ibx#400). Such a lookup stays pending and
+                // the deadline sweep (ibx#227) still ends it.
                 log::warn!("SessionReject: reason='{}' refTag={}", reason, ref_tag);
-                // ibx#229: a rejection of an in-flight contract-details
-                // request was warn-only — the caller saw neither error()
-                // nor end (a hang until the ibx#227 sweep, and before that
-                // forever). The reject carries no request id, so attribute
-                // it only when it cannot be ambiguous: exactly one pending
-                // lookup. Otherwise the sweep bounds the damage.
-                if self.pending_secdef.len() == 1 && self.pending_fanout.is_empty() {
-                    let (req_id, _, _) = self.pending_secdef.remove(0);
-                    if req_id < 0xF000_0000 {
-                        shared.reference.push_historical_error(
-                            req_id, 200,
-                            format!("contract details request rejected: {}", reason),
-                        );
-                        shared.reference.push_contract_details_end(req_id);
-                        emit(event_tx, Event::ContractDetailsEnd(req_id));
-                    }
-                }
             }
             "U" => {
                 if let Some(comm) = parsed.get(&6040) {
@@ -722,7 +711,13 @@ impl CcpState {
                     return;
                 }
 
-                if let Some(def) = crate::control::contracts::parse_secdef_response(msg) {
+                let Some(def) = crate::control::contracts::parse_secdef_response(msg) else {
+                    // No record: error 200 and no end, never a conId 0 row
+                    // (ibx#400).
+                    self.no_security_definition(response_req_id.as_deref(), shared);
+                    return;
+                };
+                {
                     let is_last_wire = crate::control::contracts::secdef_response_is_last(msg);
                     if def.con_id != 0 {
                         let sec_type_str = def.sec_type.to_api_str();
@@ -1975,6 +1970,8 @@ impl CcpState {
             let req_id_str = req_id.to_string();
             let ts = chrono_free_timestamp();
             let fix_exchange = if exchange == "SMART" { "BEST" } else { exchange };
+            let symbol = crate::control::contracts::lookup_symbol(symbol);
+            let symbol: &str = &symbol;
             let fix_sec_type = match sec_type {
                 "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND", other => other,
             };
@@ -2051,6 +2048,19 @@ impl CcpState {
         // server never emits a 323=5/6 terminator; completion is detected
         // by counting per-exchange fan-out replies (see `pending_fanout`).
         self.pending_secdef.push((req_id, false, Instant::now() + SECDEF_TIMEOUT));
+    }
+
+    /// A definition reply with no record for a pending lookup: the lookup
+    /// ends with error 200 and no contract_details_end, as the reference
+    /// (ibx#400). Internal lookups end silently.
+    fn no_security_definition(&mut self, response_req_id: Option<&str>, shared: &SharedState) {
+        let Some(rid) = response_req_id.and_then(|r| r.parse::<u32>().ok()) else { return };
+        let Some(idx) = self.pending_secdef.iter().position(|(pid, _, _)| *pid == rid) else { return };
+        self.pending_secdef.remove(idx);
+        if rid < 0xF000_0000 {
+            log::info!("Secdef lookup req_id={}: no security definition", rid);
+            shared.reference.push_historical_error(rid, 200, NO_SECURITY_DEFINITION.to_string());
+        }
     }
 
     /// Send a per-exchange fan-out request after a by-symbol master reply.
@@ -3374,6 +3384,63 @@ mod tests {
         assert_eq!(errors[0].0, 9);
         assert_eq!(errors[0].1, 200);
         assert_eq!(shared.reference.drain_contract_details_end(), vec![9]);
+    }
+
+    // ── ibx#400: empty reply and session reject ──
+
+    fn empty_secdef_reply(req_id: &str) -> Vec<u8> {
+        crate::protocol::fix::fix_build(&[
+            (crate::protocol::fix::TAG_MSG_TYPE, "d"), (43, "N"), (320, req_id), (322, "*"),
+            (323, "4"), (6038, "Y"), (6019, "0"), (6344, "0"),
+        ], 1)
+    }
+
+    #[test]
+    fn empty_secdef_reply_gives_error_200_and_no_end() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let deadline = Instant::now() + SECDEF_TIMEOUT;
+        ccp.pending_secdef.push((1005, false, deadline));
+        ccp.pending_secdef.push((1006, true, deadline));
+
+        for rid in ["1005", "1006"] {
+            ccp.process_ccp_message(&empty_secdef_reply(rid), &mut None, &mut context, &shared, &None,
+                &mut HeartbeatState::new(), "DU1");
+        }
+
+        assert!(shared.reference.drain_contract_details().is_empty(), "no conId 0 row");
+        assert!(shared.reference.drain_contract_details_end().is_empty(), "no end after error 200");
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!(errors.len(), 2);
+        for (err, rid) in errors.iter().zip([1005, 1006]) {
+            assert_eq!((err.0, err.1, err.2.as_str()), (rid, 200, NO_SECURITY_DEFINITION));
+        }
+        assert!(ccp.pending_secdef.is_empty(), "the lookups are finished");
+    }
+
+    #[test]
+    fn empty_secdef_reply_to_an_internal_lookup_is_silent() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        ccp.pending_secdef.push((0xF000_0002, true, Instant::now() + SECDEF_TIMEOUT));
+        let rid = 0xF000_0002u32.to_string();
+        ccp.process_ccp_message(&empty_secdef_reply(&rid), &mut None, &mut context, &shared, &None,
+            &mut HeartbeatState::new(), "DU1");
+        assert!(ccp.pending_secdef.is_empty());
+        assert!(shared.reference.drain_historical_errors().is_empty());
+        assert!(shared.reference.drain_contract_details_end().is_empty());
+    }
+
+    #[test]
+    fn session_reject_sends_no_error_and_no_end() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        ccp.pending_secdef.push((1006, false, Instant::now() + SECDEF_TIMEOUT));
+        let reject = crate::protocol::fix::fix_build(&[
+            (crate::protocol::fix::TAG_MSG_TYPE, "3"), (45, "12"), (58, "Invalid value in field # 55"),
+        ], 1);
+        ccp.process_ccp_message(&reject, &mut None, &mut context, &shared, &None,
+            &mut HeartbeatState::new(), "DU1");
+        assert!(shared.reference.drain_historical_errors().is_empty());
+        assert!(shared.reference.drain_contract_details_end().is_empty());
+        assert_eq!(ccp.pending_secdef.len(), 1, "left to the deadline sweep");
     }
 
     // ── ibx#228: matching-symbols attribution ──
