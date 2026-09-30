@@ -91,6 +91,18 @@ pub struct Context {
     /// requests of the same order wait behind them.
     pub(crate) rth_parked: Vec<OrderRequest>,
     pub(crate) next_rth_lookup: u32,
+    /// The session counts US stock sizes in round lots (ibx#287).
+    pub(crate) scale_us_lots: bool,
+    /// Round lot by conId, once its definition was read (ibx#287).
+    pub(crate) round_lots: HashMap<i64, i64>,
+    /// Definition lookups in flight for a round lot: (request id, conId,
+    /// deadline).
+    pub(crate) lot_lookups: Vec<(String, i64, std::time::Instant)>,
+    /// Market data subscriptions waiting for their round lot, in order.
+    pub(crate) lot_parked: Vec<crate::engine::hot_loop::farm::MdSubscribe>,
+    /// Subscriptions whose round lot is known, to be sent.
+    pub(crate) lot_ready: Vec<crate::engine::hot_loop::farm::MdSubscribe>,
+    pub(crate) next_lot_lookup: u32,
     /// Final status of orders that left the engine filled, cancelled or
     /// rejected, for the reference's refusal of a later cancel (ibx#464).
     /// Bounded: the oldest are dropped past `FINISHED_ORDERS_MAX`.
@@ -117,6 +129,12 @@ impl Context {
             rth_lookups: Vec::new(),
             rth_parked: Vec::new(),
             next_rth_lookup: 0,
+            scale_us_lots: false,
+            round_lots: HashMap::new(),
+            lot_lookups: Vec::new(),
+            lot_parked: Vec::new(),
+            lot_ready: Vec::new(),
+            next_lot_lookup: 0,
             finished_orders: HashMap::new(),
             finished_order_ids: std::collections::VecDeque::new(),
             account: AccountState::default(),

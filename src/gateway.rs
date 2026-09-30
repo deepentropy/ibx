@@ -431,6 +431,9 @@ pub struct Gateway {
     /// Account config (6040=210): feature list (6542) and MiFID config id
     /// (8234); None when the answer was not in the login burst (ibx#425).
     pub account_config: Option<(Vec<String>, String)>,
+    /// The logon feature list asks for US stock sizes in round lots
+    /// (ibx#287).
+    pub scale_us_lots: bool,
     /// Logical-name → host URL map pushed by the gateway during logon. Empty when no
     /// URL set was pushed (callers should then fall back to a documented literal,
     /// e.g. `api.ibkr.com` for `region_dam`).
@@ -1200,6 +1203,7 @@ impl Gateway {
         let mut raw_news_providers = String::new();
         let mut white_branding_id = String::new();
         let mut fa_session = false;
+        let mut scale_us_lots = false;
         let mut raw_misc_urls = String::new();
         // Per ib-agent#128: the auth-logon ACK tells us which farms this
         // account is routed to. Hardcoding `usfarm`/`ushmds` only works for
@@ -1320,6 +1324,9 @@ impl Gateway {
             if let Some(v) = fields.get(&6108) {
                 fa_session |= v == "1";
             }
+            if let Some(v) = fields.get(&6542) {
+                scale_us_lots |= features_scale_us_lots(v);
+            }
             // Tag 6321: PRIV_LAB_MISC_URLS — try parsed fields first, then raw byte search.
             // Mirrors the 8035 defensive scan because the value can carry `|` separators
             // that confuse downstream parsers if a chunk is fragmented.
@@ -1354,8 +1361,8 @@ impl Gateway {
         }
 
         log::info!(
-            "Auth logon: account={} session_id={} hb={}s",
-            account_id, server_session_id, heartbeat_interval
+            "Auth logon: account={} session_id={} hb={}s scale_us_lots={}",
+            account_id, server_session_id, heartbeat_interval, scale_us_lots
         );
 
         // --- Post-logon init sequence ---
@@ -1657,6 +1664,7 @@ impl Gateway {
             white_branding_id,
             fa_session,
             account_config,
+            scale_us_lots,
             misc_urls: parse_misc_urls(&raw_misc_urls),
             ccp_sign_key,
             ccp_sign_iv,
@@ -1796,6 +1804,7 @@ impl Gateway {
         let mut hot_loop = HotLoop::new(shared, event_tx, core_id);
         hot_loop.set_control_rx(rx);
         hot_loop.set_account_id(self.account_id.clone());
+        hot_loop.set_scale_us_lots(self.scale_us_lots);
         hot_loop.set_reconnect_auth(reconnect_auth);
         hot_loop.farm_conn = Some(farm_conn);
         hot_loop.ccp_conn = Some(ccp_conn);
@@ -1870,6 +1879,12 @@ fn parse_account_config(init: &str) -> Option<(Vec<String>, String)> {
         let features = field("6542=").split(',').filter(|f| !f.is_empty()).map(String::from).collect();
         (features, field("8234=").to_string())
     })
+}
+
+/// The logon feature list turns on US stock sizes in round lots
+/// (ibx#287): one of its comma separated tokens is SCALEUSLOT.
+fn features_scale_us_lots(features: &str) -> bool {
+    features.split(',').any(|f| f == "SCALEUSLOT")
 }
 
 /// The whiteBrandingId in one field of the logon data: tag 6593, as the
@@ -2321,6 +2336,15 @@ mod soft_dollar_tests {
 #[cfg(test)]
 mod account_config_tests {
     use super::parse_account_config;
+
+    // ibx#287: the logon feature list turns on US stock sizes in lots.
+    #[test]
+    fn scale_us_lots_is_a_feature_token() {
+        assert!(super::features_scale_us_lots("SCALEFRAC,SCALEMOD,SCALEUSLOT,SCALEWHATIF"));
+        assert!(super::features_scale_us_lots("SCALEUSLOT"));
+        assert!(!super::features_scale_us_lots("SCALEUSLOTS,XSCALEUSLOT"));
+        assert!(!super::features_scale_us_lots(""));
+    }
 
     // ibx#483: whiteBrandingId is logon tag 6593, not 6571.
     #[test]

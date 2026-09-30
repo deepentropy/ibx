@@ -40,6 +40,10 @@ pub const TAG_MARKET_RULE_ID: u32 = 6031;    // rule ID integer
 pub const TAG_LOW_EDGE: u32 = 6023;          // price increment threshold
 pub const TAG_INCREMENT: u32 = 6027;         // tick size at that price level
 pub const TAG_MARKET_RULE_END: u32 = 6030;   // end marker
+/// Size increments of a rule (ibx#287).
+pub const TAG_SIZE_INCREMENT_COUNT: u32 = 6030;
+/// Market type of the contract, for example USSTK.
+pub const TAG_IB_MARKET_TYPE: u32 = 6523;
 
 /// Security types (IB internal encoding).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -470,6 +474,60 @@ pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
     }
 
     rules
+}
+
+/// The size increments of a definition's market rules (ibx#287), in the
+/// order they come.
+pub fn parse_size_increments(data: &[u8]) -> Vec<PriceIncrement> {
+    use crate::protocol::fix::SOH;
+
+    let mut out = Vec::new();
+    let mut remaining = 0usize;
+    let mut low_edge: Option<f64> = None;
+    for part in data.split(|&b| b == SOH) {
+        let Some(eq) = part.iter().position(|&b| b == b'=') else { continue };
+        let Ok(tag) = std::str::from_utf8(&part[..eq]).unwrap_or("").parse::<u32>() else { continue };
+        let val = std::str::from_utf8(&part[eq + 1..]).unwrap_or("");
+        match tag {
+            TAG_SIZE_INCREMENT_COUNT => {
+                remaining = val.parse().unwrap_or(0);
+                low_edge = None;
+            }
+            // A new rule ends the entries of the previous one.
+            TAG_MARKET_RULE_ID => remaining = 0,
+            TAG_LOW_EDGE if remaining > 0 => low_edge = val.parse().ok(),
+            TAG_INCREMENT if remaining > 0 => {
+                if let (Some(low_edge), Ok(increment)) = (low_edge.take(), val.parse::<f64>()) {
+                    out.push(PriceIncrement { low_edge, increment });
+                }
+                remaining -= 1;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Round lot of a contract's market data sizes (ibx#287), from its
+/// definition, as the reference: a US stock or US warrant counts in the
+/// integer part of its smallest size increment, 100 when that is missing
+/// or below 1; any other contract in 1.
+pub fn round_lot_from_secdef(data: &[u8]) -> i64 {
+    let tags = fix::fix_parse(data);
+    let sec_type = tags.get(&TAG_SECURITY_TYPE).map(String::as_str).unwrap_or("");
+    let market_type = tags.get(&TAG_IB_MARKET_TYPE).map(String::as_str).unwrap_or("");
+    let us = matches!((sec_type, market_type), ("CS" | "STK", "USSTK") | ("WAR", "USWAR"));
+    if !us {
+        return 1;
+    }
+    parse_size_increments(data)
+        .iter()
+        .map(|inc| inc.increment)
+        .filter(|inc| *inc > 0.0)
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|inc| inc.trunc() as i64)
+        .filter(|lot| *lot > 0)
+        .unwrap_or(100)
 }
 
 /// Cache of contract definitions by conId.
@@ -1340,6 +1398,60 @@ mod tests {
         );
         let rules = parse_market_rules(&msg);
         assert!(rules.is_empty());
+    }
+
+    // ── ibx#287: size increments and the round lot ──
+
+    /// An AAPL definition with the given market type, security type and
+    /// size increments (low edge, increment).
+    fn aapl_secdef(market_type: &str, sec_type: &str, size_set: &[(&str, &str)]) -> Vec<u8> {
+        let count = size_set.len().to_string();
+        let mut tags: Vec<(u32, &str)> = vec![
+            (TAG_MSG_TYPE, "d"), (TAG_IB_CON_ID, "265598"), (TAG_SYMBOL, "AAPL"),
+            (TAG_SECURITY_TYPE, sec_type), (TAG_CURRENCY, "USD"), (TAG_IB_MARKET_TYPE, market_type),
+            (TAG_MARKET_RULE_START, "1"), (TAG_MARKET_RULE_ID, "26"),
+            (6020, "0"), (6021, "0"), (6022, "1"), (TAG_LOW_EDGE, "0"), (6024, "4"), (6025, "2"),
+            (6026, "1"), (TAG_LOW_EDGE, "0"), (TAG_INCREMENT, "0.01"),
+            (6028, "0"), (6029, "1"), (TAG_LOW_EDGE, "0"), (6024, "6"), (6025, "0"),
+        ];
+        tags.push((TAG_SIZE_INCREMENT_COUNT, &count));
+        for (edge, inc) in size_set {
+            tags.push((TAG_LOW_EDGE, edge));
+            tags.push((TAG_INCREMENT, inc));
+        }
+        fix::fix_build(&tags, 1)
+    }
+
+    #[test]
+    fn size_increments_are_the_second_set_only() {
+        let msg = aapl_secdef("USSTK", "CS", &[("40", "40")]);
+        let sizes = parse_size_increments(&msg);
+        assert_eq!(sizes.len(), 1);
+        assert_eq!((sizes[0].low_edge, sizes[0].increment), (40.0, 40.0));
+        // The price increments are unchanged.
+        let def = super::parse_secdef_response(&msg).unwrap();
+        assert!((def.min_tick - 0.01).abs() < 1e-12);
+    }
+
+    #[test]
+    fn round_lot_of_a_us_stock_is_its_size_increment() {
+        assert_eq!(round_lot_from_secdef(&aapl_secdef("USSTK", "CS", &[("40", "40")])), 40);
+        // The smallest increment, integer part.
+        assert_eq!(round_lot_from_secdef(&aapl_secdef("USSTK", "CS", &[("0", "100.5"), ("1000", "10.9")])), 10);
+        // No size rule, or an increment below 1: 100.
+        assert_eq!(round_lot_from_secdef(&aapl_secdef("USSTK", "CS", &[])), 100);
+        assert_eq!(round_lot_from_secdef(&aapl_secdef("USSTK", "CS", &[("0", "0.0001")])), 100);
+        // A US warrant too.
+        assert_eq!(round_lot_from_secdef(&aapl_secdef("USWAR", "WAR", &[("0", "10")])), 10);
+    }
+
+    #[test]
+    fn round_lot_of_other_contracts_is_one() {
+        // A non-US stock, a US option, a future, a currency pair.
+        assert_eq!(round_lot_from_secdef(&aapl_secdef("DESTK", "CS", &[("0", "40")])), 1);
+        assert_eq!(round_lot_from_secdef(&aapl_secdef("USSTK", "OPT", &[("0", "40")])), 1);
+        assert_eq!(round_lot_from_secdef(&aapl_secdef("", "FUT", &[("0", "1")])), 1);
+        assert_eq!(round_lot_from_secdef(&aapl_secdef("", "CASH", &[("0", "1")])), 1);
     }
 
     #[test]

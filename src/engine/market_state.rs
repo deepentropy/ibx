@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::protocol::tick_decoder::{self as td, RawTick};
-use crate::types::{InstrumentId, Price, Qty, Quote, PRICE_SCALE, MAX_INSTRUMENTS};
+use crate::types::{InstrumentId, Price, Qty, Quote, PRICE_SCALE, QTY_SCALE, MAX_INSTRUMENTS};
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 
@@ -68,6 +68,14 @@ pub struct MarketState {
     /// Last trade time base per instrument, epoch seconds; a later delta
     /// is added to it (ibx#448).
     last_ts_base: [i64; MAX_INSTRUMENTS],
+    /// Size increment of the market data, times QTY_SCALE (ibx#287). A
+    /// wire size times this is the size in the Qty fixed point.
+    size_min_tick_scaled: [i64; MAX_INSTRUMENTS],
+    /// Round lot the bid, ask and last sizes are counted in: 1, or the
+    /// contract's lot for a US stock when the session scales US lots.
+    round_lots: [i64; MAX_INSTRUMENTS],
+    /// size_min_tick_scaled * round lot, for the bid, ask and last sizes.
+    size_scale: [i64; MAX_INSTRUMENTS],
     /// Per-instrument symbol name. Flat array indexed by InstrumentId.
     symbols: [Option<String>; MAX_INSTRUMENTS],
     /// Contract currency for the orders (tag 15, ibx#466).
@@ -92,6 +100,9 @@ impl MarketState {
             min_ticks: [0.0; MAX_INSTRUMENTS],
             min_tick_scaled: [0; MAX_INSTRUMENTS],
             last_ts_base: [0; MAX_INSTRUMENTS],
+            size_min_tick_scaled: [QTY_SCALE; MAX_INSTRUMENTS],
+            round_lots: [1; MAX_INSTRUMENTS],
+            size_scale: [QTY_SCALE; MAX_INSTRUMENTS],
             symbols: std::array::from_fn(|_| None),
             currencies: std::array::from_fn(|_| None),
             sec_types: std::array::from_fn(|_| None),
@@ -156,6 +167,9 @@ impl MarketState {
         self.min_ticks[instrument as usize] = 0.0;
         self.min_tick_scaled[instrument as usize] = 0;
         self.last_ts_base[instrument as usize] = 0;
+        self.size_min_tick_scaled[instrument as usize] = QTY_SCALE;
+        self.round_lots[instrument as usize] = 1;
+        self.size_scale[instrument as usize] = QTY_SCALE;
         self.server_tags.retain(|_, id| *id != instrument);
         self.free_ids.push(instrument);
         Some(con_id)
@@ -276,6 +290,30 @@ impl MarketState {
         self.min_tick_scaled[id as usize] = (min_tick * PRICE_SCALE as f64).round() as i64;
     }
 
+    /// Set the size increment of the market data (ibx#287). Not a
+    /// positive number: 1, as the reference uses a default for an invalid
+    /// one.
+    pub fn set_size_min_tick(&mut self, id: InstrumentId, size_min_tick: f64) {
+        let scaled = (size_min_tick * QTY_SCALE as f64).round();
+        let scaled = if scaled.is_finite() && scaled >= 1.0 { scaled as i64 } else { QTY_SCALE };
+        self.size_min_tick_scaled[id as usize] = scaled;
+        self.size_scale[id as usize] = scaled * self.round_lots[id as usize];
+    }
+
+    /// Set the round lot the bid, ask and last sizes are multiplied by
+    /// (ibx#287). Volume never is. Below 1 counts as 1.
+    pub fn set_round_lot(&mut self, id: InstrumentId, round_lot: i64) {
+        let lot = round_lot.max(1);
+        self.round_lots[id as usize] = lot;
+        self.size_scale[id as usize] = self.size_min_tick_scaled[id as usize] * lot;
+    }
+
+    /// The round lot of an instrument's sizes (1 unless set).
+    #[inline(always)]
+    pub fn round_lot(&self, id: InstrumentId) -> i64 {
+        self.round_lots[id as usize]
+    }
+
     /// Get minTick for an instrument.
     #[inline(always)]
     pub fn min_tick(&self, id: InstrumentId) -> f64 {
@@ -289,12 +327,15 @@ impl MarketState {
     }
 
     /// Apply one decoded tick to the instrument's quote (ibx#448). Prices
-    /// are the magnitude times the minimum tick. The last trade time is
+    /// are the magnitude times the minimum tick. Sizes are the magnitude
+    /// times the size increment, in the Qty fixed point, and for bid, ask
+    /// and last also times the round lot (ibx#287). The last trade time is
     /// its base, or the base plus a delta, in epoch seconds, kept in ns.
     #[inline]
     pub fn apply_tick(&mut self, id: InstrumentId, tick: &RawTick) {
         let i = id as usize;
         let mts = self.min_tick_scaled[i];
+        let sizes = self.size_scale[i];
         let m = tick.magnitude;
         let q = &mut self.quotes[i];
         match tick.tick_type {
@@ -305,24 +346,20 @@ impl MarketState {
             td::O_HIGH_PRICE => q.high = m * mts,
             td::O_LOW_PRICE => q.low = m * mts,
             td::O_OPEN_PRICE => q.open = m * mts,
-            td::O_BID_SIZE => q.bid_size = m,
-            td::O_ASK_SIZE => q.ask_size = m,
-            td::O_LAST_SIZE => q.last_size = m,
-            td::O_VOLUME => q.volume = m,
+            td::O_BID_SIZE => q.bid_size = m * sizes,
+            td::O_ASK_SIZE => q.ask_size = m * sizes,
+            td::O_LAST_SIZE => q.last_size = m * sizes,
+            td::O_VOLUME => q.volume = m * self.size_min_tick_scaled[i],
             td::O_BID_EXCH => q.bid_exch_mask = m,
             td::O_ASK_EXCH => q.ask_exch_mask = m,
             td::O_LAST_EXCH => q.last_exch_mask = m,
             // On a daily-stats block this type is the close date, not a time.
-            td::O_TIMESTAMP_BASE => {
-                if !tick.stats_block && m > 0 {
-                    self.last_ts_base[i] = m;
-                    q.timestamp_ns = m as u64 * NS_PER_SEC;
-                }
+            td::O_TIMESTAMP_BASE if !tick.stats_block && m > 0 => {
+                self.last_ts_base[i] = m;
+                q.timestamp_ns = m as u64 * NS_PER_SEC;
             }
-            td::O_TIMESTAMP_DELTA => {
-                if m > 0 {
-                    q.timestamp_ns = (self.last_ts_base[i] + m) as u64 * NS_PER_SEC;
-                }
+            td::O_TIMESTAMP_DELTA if m > 0 => {
+                q.timestamp_ns = (self.last_ts_base[i] + m) as u64 * NS_PER_SEC;
             }
             _ => {}
         }
@@ -854,9 +891,9 @@ mod tests {
         }
         let q = ms.quote(id);
         assert_eq!(q.close, 25_512 * PRICE_SCALE / 100);
-        assert_eq!(q.last_size, 3);
+        assert_eq!(q.last_size, 3 * QTY_SCALE);
         assert_eq!(q.high, 25_730 * PRICE_SCALE / 100);
-        assert_eq!(q.volume, 1466);
+        assert_eq!(q.volume, 1466 * QTY_SCALE);
         assert_eq!(q.open, 25_401 * PRICE_SCALE / 100);
         // Nothing else moved.
         assert_eq!((q.bid, q.ask, q.last, q.low), (0, 0, 0, 0));
@@ -878,7 +915,7 @@ mod tests {
         assert_eq!(q.ask, 25_502 * PRICE_SCALE / 100);
         assert_eq!(q.last, 25_501 * PRICE_SCALE / 100);
         assert_eq!(q.low, 25_300 * PRICE_SCALE / 100);
-        assert_eq!((q.bid_size, q.ask_size), (57, 12));
+        assert_eq!((q.bid_size, q.ask_size), (57 * QTY_SCALE, 12 * QTY_SCALE));
         assert_eq!((q.bid_exch_mask, q.ask_exch_mask, q.last_exch_mask), (512, 64, 8));
         // Attribute bits and the unknown int change no field.
         let before = (q.bid, q.ask, q.last, q.bid_size, q.volume, q.timestamp_ns);
@@ -887,6 +924,70 @@ mod tests {
         }
         let q = ms.quote(id);
         assert_eq!((q.bid, q.ask, q.last, q.bid_size, q.volume, q.timestamp_ns), before);
+    }
+
+    // ── ibx#287: sizes in the Qty fixed point, round lot on bid/ask/last ──
+
+    #[test]
+    fn apply_tick_sizes_are_fixed_point() {
+        let mut ms = MarketState::new();
+        let id = ms.register(551601503); // MNQ: sizes as on the wire
+        for t in [raw(4, 1), raw(5, 7), raw(6, 2), raw(10, 163)] {
+            ms.apply_tick(id, &t);
+        }
+        let q = ms.quote(id);
+        assert_eq!(q.bid_size, QTY_SCALE, "a size of 1 is 1.0, not 0.0001");
+        assert_eq!(q.ask_size, 7 * QTY_SCALE);
+        assert_eq!(q.last_size, 2 * QTY_SCALE);
+        assert_eq!(q.volume, 163 * QTY_SCALE);
+    }
+
+    #[test]
+    fn apply_tick_round_lot_scales_bid_ask_last_not_volume() {
+        let mut ms = MarketState::new();
+        let id = ms.register(265598); // AAPL, round lot 40
+        ms.set_size_min_tick(id, 1.0);
+        ms.set_round_lot(id, 40);
+        for t in [raw(4, 57), raw(5, 3), raw(6, 2), raw(10, 1466)] {
+            ms.apply_tick(id, &t);
+        }
+        let q = ms.quote(id);
+        assert_eq!(q.bid_size, 2280 * QTY_SCALE);
+        assert_eq!(q.ask_size, 120 * QTY_SCALE);
+        assert_eq!(q.last_size, 80 * QTY_SCALE);
+        assert_eq!(q.volume, 1466 * QTY_SCALE, "volume is never multiplied by the lot");
+    }
+
+    #[test]
+    fn size_min_tick_scales_every_size() {
+        let mut ms = MarketState::new();
+        let id = ms.register(1);
+        ms.set_size_min_tick(id, 0.01);
+        ms.set_round_lot(id, 100);
+        ms.apply_tick(id, &raw(4, 5));
+        ms.apply_tick(id, &raw(10, 250));
+        assert_eq!(ms.quote(id).bid_size, 5 * QTY_SCALE); // 5 x 0.01 x 100
+        assert_eq!(ms.quote(id).volume, 25 * QTY_SCALE / 10); // 250 x 0.01
+        // An invalid increment falls back to 1.
+        ms.set_size_min_tick(id, 0.0);
+        ms.set_round_lot(id, 0);
+        assert_eq!(ms.round_lot(id), 1);
+        ms.apply_tick(id, &raw(4, 5));
+        assert_eq!(ms.quote(id).bid_size, 5 * QTY_SCALE);
+    }
+
+    #[test]
+    fn unregister_resets_size_scale() {
+        let mut ms = MarketState::new();
+        let id = ms.register(265598);
+        ms.set_size_min_tick(id, 0.5);
+        ms.set_round_lot(id, 40);
+        ms.unregister(id);
+        let reused = ms.register(999);
+        assert_eq!(reused, id);
+        assert_eq!(ms.round_lot(reused), 1);
+        ms.apply_tick(reused, &raw(4, 3));
+        assert_eq!(ms.quote(reused).bid_size, 3 * QTY_SCALE);
     }
 
     #[test]

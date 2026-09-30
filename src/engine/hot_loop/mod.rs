@@ -177,6 +177,12 @@ impl HotLoop {
         self.account_id = account_id;
     }
 
+    /// The session counts US stock sizes in round lots (ibx#287): market
+    /// data sizes of those stocks are multiplied by the contract's lot.
+    pub fn set_scale_us_lots(&mut self, on: bool) {
+        self.context.scale_us_lots = on;
+    }
+
     /// Access the context (for pre-start configuration like registering instruments).
     pub fn context_mut(&mut self) -> &mut Context {
         &mut self.context
@@ -255,6 +261,65 @@ impl HotLoop {
     /// (ibx#233): no open orders, no tick-by-tick subscription, no news
     /// subscription. A reused id would repoint those references at the
     /// wrong contract, so referenced slots stay resident until released.
+    /// Round lot of a new market data subscription (ibx#287). When the
+    /// session counts US stock sizes in round lots and the contract may be
+    /// one, its definition is asked for and the subscription waits for it,
+    /// as the reference knows the contract before it subscribes: true when
+    /// parked. Otherwise the known lot (or 1) is set now.
+    fn park_for_round_lot(&mut self, sub: &farm::MdSubscribe) -> bool {
+        let id = sub.instrument;
+        if !self.context.scale_us_lots {
+            self.context.market.set_round_lot(id, 1);
+            return false;
+        }
+        if let Some(&lot) = self.context.round_lots.get(&sub.con_id) {
+            self.context.market.set_round_lot(id, lot);
+            return false;
+        }
+        let maybe_stock = matches!(sub.sec_type.to_ascii_uppercase().as_str(), "" | "STK" | "WAR");
+        if !maybe_stock || sub.con_id <= 0 {
+            self.context.market.set_round_lot(id, 1);
+            return false;
+        }
+        if !self.context.lot_lookups.iter().any(|(_, c, _)| *c == sub.con_id) {
+            let Some(conn) = self.ccp_conn.as_mut().filter(|_| !self.ccp.disconnected) else {
+                log::warn!("No auth connection to read the round lot of con_id {}: sizes as on the wire", sub.con_id);
+                self.context.market.set_round_lot(id, 1);
+                return false;
+            };
+            let req_id = format!("ibxlot{}", self.context.next_lot_lookup);
+            self.context.next_lot_lookup = self.context.next_lot_lookup.wrapping_add(1);
+            let ts = chrono_free_timestamp();
+            let con_id_str = sub.con_id.to_string();
+            let exchange = match sub.exchange.to_ascii_uppercase().as_str() {
+                "" | "SMART" => "BEST".to_string(),
+                other => other.to_string(),
+            };
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "c"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (320, &req_id),
+                (321, "2"),
+                (146, "1"),
+                (6008, &con_id_str),
+                (6004, &exchange),
+            ]);
+            self.hb.last_ccp_sent = Instant::now();
+            log::info!("Definition of con_id {} on {} asked for its round lot ({})", sub.con_id, exchange, req_id);
+            self.context.lot_lookups.push((req_id, sub.con_id, Instant::now() + farm::LOT_LOOKUP_TIMEOUT));
+        }
+        self.context.lot_parked.push(sub.clone());
+        true
+    }
+
+    /// Send the subscriptions whose round lot came in (ibx#287).
+    fn send_lot_ready(&mut self) {
+        if self.context.lot_ready.is_empty() { return; }
+        for sub in std::mem::take(&mut self.context.lot_ready) {
+            self.farm.send_md_subscribe(&sub, &mut self.farm_conn, &mut self.hb);
+        }
+    }
+
     fn try_reclaim_instrument(&mut self, instrument: InstrumentId) {
         if !self.context.open_orders_for(instrument).is_empty() {
             return;
@@ -342,6 +407,8 @@ impl HotLoop {
             self.ccp.sweep_scanner_enrichments(&self.shared);
             self.ccp.sweep_contract_details(&self.shared, &self.event_tx);
             order_builder::sweep_rth_lookups(&mut self.context);
+            farm::sweep_round_lot_lookups(&mut self.context);
+            self.send_lot_ready();
             self.hmds.sweep_pending_historical(&self.shared);
             let _ = ccp_was_ok; // reconnects are scheduled below (ibx#218)
 
@@ -409,19 +476,22 @@ impl HotLoop {
             match cmd {
                 ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, reply_tx } => {
                     if let Some(id) = self.register_or_reject(con_id, symbol.clone(), &sec_type, &exchange, &reply_tx) {
-                        self.farm.send_mktdata_subscribe(
-                            con_id, &symbol, &exchange, &sec_type,
-                            &last_trade_date, strike, &right, &multiplier,
-                            id, mode_9887,
-                            &mut self.farm_conn,
-                            &mut self.hb,
-                        );
+                        let sub = farm::MdSubscribe {
+                            con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier,
+                            instrument: id, mode_9887,
+                        };
+                        if !self.park_for_round_lot(&sub) {
+                            self.farm.send_md_subscribe(&sub, &mut self.farm_conn, &mut self.hb);
+                        }
                     }
                 }
                 ControlCommand::SetMarketDataType { market_data_type } => {
                     self.farm.market_data_type = market_data_type;
                 }
                 ControlCommand::Unsubscribe { instrument } => {
+                    // Not sent yet: nothing to cancel on the farm.
+                    self.context.lot_parked.retain(|s| s.instrument != instrument);
+                    self.context.lot_ready.retain(|s| s.instrument != instrument);
                     self.farm.send_mktdata_unsubscribe(
                         instrument,
                         &mut self.farm_conn,
@@ -1913,6 +1983,116 @@ mod tests {
             rest = &rest[len..];
         }
         out
+    }
+
+    /// Every plain message the engine wrote to `server`, `|` separated.
+    fn plain_messages_sent(server: &mut std::net::TcpStream) -> Vec<String> {
+        use std::io::Read;
+        server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = server.read(&mut chunk) {
+            if n == 0 { break; }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&buf).replace('\x01', "|")
+            .split("8=FIX").filter(|m| !m.is_empty()).map(|m| format!("8=FIX{m}")).collect()
+    }
+
+    fn subscribe_cmd(con_id: i64, sec_type: &str) -> ControlCommand {
+        ControlCommand::Subscribe {
+            con_id, symbol: String::new(), exchange: "SMART".into(), sec_type: sec_type.into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            mode_9887: 0, reply_tx: None,
+        }
+    }
+
+    // ibx#287: with the lots scaling on, a stock subscription waits for the
+    // contract's definition and goes out once the round lot is known; a
+    // second subscription of the contract uses the kept lot at once.
+    #[test]
+    fn stock_subscription_waits_for_its_round_lot() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (c1, mut farm_side) = socket_pair();
+        let (c2, mut ccp_side) = socket_pair();
+        engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
+        engine.ccp_conn = Some(Connection::new_raw(c2).unwrap());
+        engine.set_scale_us_lots(true);
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+
+        tx.send(subscribe_cmd(265598, "STK")).unwrap();
+        engine.poll_once();
+        let asked = plain_messages_sent(&mut ccp_side);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(asked[0].contains("|35=c|") && asked[0].contains("|6008=265598|") && asked[0].contains("|6004=BEST|"), "{}", asked[0]);
+        let req_id = asked[0].split('|').find_map(|p| p.strip_prefix("320=")).unwrap().to_string();
+        assert!(farm_messages_sent(&mut farm_side).is_empty(), "nothing subscribed before the lot is known");
+
+        let reply = fix::fix_build(&[(35, "d"), (320, &req_id), (6008, "265598"), (167, "CS"),
+            (6523, "USSTK"), (6030, "1"), (6023, "40"), (6027, "40")], 1);
+        assert!(farm::round_lot_reply(&mut engine.context, &req_id, &reply));
+        engine.send_lot_ready();
+        let sent = farm_messages_sent(&mut farm_side);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].contains("6008=265598|"), "{}", sent[0]);
+        let id = engine.context.market.instrument_by_con_id(265598).unwrap();
+        assert_eq!(engine.context.market.round_lot(id), 40);
+
+        // Cancelled and asked again: the lot is kept, no second lookup.
+        tx.send(ControlCommand::Unsubscribe { instrument: id }).unwrap();
+        tx.send(subscribe_cmd(265598, "STK")).unwrap();
+        engine.poll_once();
+        assert!(plain_messages_sent(&mut ccp_side).is_empty());
+        let id = engine.context.market.instrument_by_con_id(265598).unwrap();
+        assert_eq!(engine.context.market.round_lot(id), 40);
+        let sent = farm_messages_sent(&mut farm_side);
+        assert_eq!(sent.len(), 3, "two cancels, then the new subscription: {sent:?}");
+        assert!(sent[2].contains("6008=265598|"), "{}", sent[2]);
+    }
+
+    // ibx#287: no lookup for a contract that is not a stock, or when the
+    // session does not scale lots; a subscription cancelled while it
+    // waits is never sent.
+    #[test]
+    fn round_lot_lookup_only_where_it_can_apply() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (c1, mut farm_side) = socket_pair();
+        let (c2, mut ccp_side) = socket_pair();
+        engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
+        engine.ccp_conn = Some(Connection::new_raw(c2).unwrap());
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+
+        // Scaling off: sent at once, lot 1.
+        tx.send(subscribe_cmd(265598, "STK")).unwrap();
+        engine.poll_once();
+        assert!(plain_messages_sent(&mut ccp_side).is_empty());
+        assert_eq!(farm_messages_sent(&mut farm_side).len(), 1);
+
+        // Scaling on, a future: sent at once, lot 1.
+        engine.set_scale_us_lots(true);
+        tx.send(subscribe_cmd(551601503, "FUT")).unwrap();
+        engine.poll_once();
+        assert!(plain_messages_sent(&mut ccp_side).is_empty());
+        assert_eq!(farm_messages_sent(&mut farm_side).len(), 1);
+        let fut = engine.context.market.instrument_by_con_id(551601503).unwrap();
+        assert_eq!(engine.context.market.round_lot(fut), 1);
+
+        // A stock cancelled while it waits: nothing reaches the farm.
+        tx.send(subscribe_cmd(272093, "STK")).unwrap();
+        engine.poll_once();
+        assert_eq!(plain_messages_sent(&mut ccp_side).len(), 1);
+        let msft = engine.context.market.instrument_by_con_id(272093).unwrap();
+        tx.send(ControlCommand::Unsubscribe { instrument: msft }).unwrap();
+        engine.poll_once();
+        assert!(engine.context.lot_parked.is_empty());
+        engine.context.lot_lookups[0].2 = Instant::now();
+        farm::sweep_round_lot_lookups(&mut engine.context);
+        engine.send_lot_ready();
+        assert!(farm_messages_sent(&mut farm_side).is_empty());
     }
 
     // ibx#288: handle_disconnect cleared the request-id maps and reconnect

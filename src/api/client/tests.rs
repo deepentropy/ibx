@@ -2267,6 +2267,31 @@ fn process_msgs_dispatches_all_quote_fields() {
     assert!(w.events.iter().any(|e| e.starts_with("tick_size:1:8:")));   // volume
 }
 
+// ibx#287: a wire size of 1 reached the API as 0.0001, and a US stock's
+// sizes missed the round lot. AAPL, lot 40: bid 57 -> 2280, last 2 -> 80,
+// volume 1466 as on the wire.
+#[test]
+fn api_sizes_are_wire_sizes_times_the_round_lot() {
+    use crate::engine::market_state::MarketState;
+    use crate::protocol::tick_decoder::{self as td, RawTick};
+    let (client, _rx, shared) = test_client();
+    let mut ms = MarketState::new();
+    let id = ms.register(265598);
+    ms.set_round_lot(id, 40);
+    for (tick_type, magnitude) in [(td::O_BID_SIZE, 57), (td::O_ASK_SIZE, 1), (td::O_LAST_SIZE, 2), (td::O_VOLUME, 1466)] {
+        ms.apply_tick(id, &RawTick { server_tag: 1, tick_type, magnitude, stats_block: false });
+    }
+    shared.market.push_quote(id, ms.quote(id));
+    client.core.req_to_instrument.lock().unwrap().insert(1, id);
+    client.core.instrument_to_req.lock().unwrap().insert(id, 1);
+
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    for want in ["tick_size:1:0:2280", "tick_size:1:3:40", "tick_size:1:5:80", "tick_size:1:8:1466"] {
+        assert!(w.events.iter().any(|e| e == want), "{want} missing in {:?}", w.events);
+    }
+}
+
 #[test]
 fn process_msgs_multiple_instruments_independent() {
     let (client, _rx, shared) = test_client();

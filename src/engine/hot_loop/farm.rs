@@ -12,6 +12,64 @@ use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, fast_extract_msg_type, find_body_after_tag};
 
+/// A market data subscription as the control command gives it, kept while
+/// it waits for the contract's round lot (ibx#287).
+#[derive(Debug, Clone)]
+pub(crate) struct MdSubscribe {
+    pub(crate) con_id: i64,
+    pub(crate) symbol: String,
+    pub(crate) exchange: String,
+    pub(crate) sec_type: String,
+    pub(crate) last_trade_date: String,
+    pub(crate) strike: f64,
+    pub(crate) right: String,
+    pub(crate) multiplier: String,
+    pub(crate) instrument: InstrumentId,
+    pub(crate) mode_9887: i32,
+}
+
+/// How long a subscription waits for the definition its round lot needs;
+/// then it goes out with sizes as on the wire.
+pub(crate) const LOT_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A definition reply for a round-lot lookup (ibx#287): keep the lot for
+/// the conId, set it on its instruments and release their waiting
+/// subscriptions. False when the reply is not for such a lookup.
+pub(crate) fn round_lot_reply(context: &mut Context, req_id: &str, msg: &[u8]) -> bool {
+    let Some(idx) = context.lot_lookups.iter().position(|(id, _, _)| id == req_id) else { return false };
+    let (_, con_id, _) = context.lot_lookups.swap_remove(idx);
+    let lot = crate::control::contracts::round_lot_from_secdef(msg);
+    log::info!("Round lot for con_id {}: {}", con_id, lot);
+    context.round_lots.insert(con_id, lot);
+    release_lot_parked(context, con_id, lot);
+    true
+}
+
+/// Lookups with no reply in time: the subscriptions go out with a round
+/// lot of 1 (ibx#287).
+pub(crate) fn sweep_round_lot_lookups(context: &mut Context) {
+    if context.lot_lookups.is_empty() { return; }
+    let now = Instant::now();
+    let mut expired = Vec::new();
+    context.lot_lookups.retain(|(id, con_id, deadline)| {
+        if *deadline <= now { expired.push((id.clone(), *con_id)); false } else { true }
+    });
+    for (id, con_id) in expired {
+        log::warn!("No definition for con_id {} ({}): its sizes are not scaled by a round lot", con_id, id);
+        release_lot_parked(context, con_id, 1);
+    }
+}
+
+fn release_lot_parked(context: &mut Context, con_id: i64, lot: i64) {
+    let (ready, parked): (Vec<MdSubscribe>, Vec<MdSubscribe>) =
+        std::mem::take(&mut context.lot_parked).into_iter().partition(|s| s.con_id == con_id);
+    context.lot_parked = parked;
+    for sub in ready {
+        context.market.set_round_lot(sub.instrument, lot);
+        context.lot_ready.push(sub);
+    }
+}
+
 pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
@@ -293,6 +351,10 @@ impl FarmState {
 
         context.market.register_server_tag(server_tag, instrument);
         context.market.set_min_tick(instrument, min_tick);
+        // The size increment (ibx#287); absent from older acks.
+        if let Some(size_min_tick) = parts.get(8).and_then(|v| v.parse::<f64>().ok()) {
+            context.market.set_size_min_tick(instrument, size_min_tick);
+        }
         log::info!("Subscribed instrument {} -> server_tag {}, minTick {}", instrument, server_tag, min_tick);
     }
 
@@ -312,8 +374,21 @@ impl FarmState {
         if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
             context.market.register_server_tag(server_tag, instrument);
             context.market.set_min_tick(instrument, min_tick);
+            // The size increment, when present (ibx#287).
+            if let Some(size_min_tick) = parts.get(4).and_then(|v| v.parse::<f64>().ok()) {
+                context.market.set_size_min_tick(instrument, size_min_tick);
+            }
             log::info!("Ticker setup: con_id {} -> server_tag {}, minTick {}", con_id, server_tag, min_tick);
         }
+    }
+
+    /// Send a subscription kept by `MdSubscribe`.
+    pub(crate) fn send_md_subscribe(&mut self, sub: &MdSubscribe, farm_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        self.send_mktdata_subscribe(
+            sub.con_id, &sub.symbol, &sub.exchange, &sub.sec_type,
+            &sub.last_trade_date, sub.strike, &sub.right, &sub.multiplier,
+            sub.instrument, sub.mode_9887, farm_conn, hb,
+        );
     }
 
     pub(crate) fn send_mktdata_subscribe(
@@ -1053,11 +1128,13 @@ fn api_subscription_needed(access: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::PRICE_SCALE;
+    use crate::types::{PRICE_SCALE, QTY_SCALE};
 
     /// A tick message with the given blocks: (stats block, server tag,
     /// entries of (type, value)), every value on four bytes.
-    fn tick_message(blocks: &[(bool, u32, &[(u64, i64)])]) -> Vec<u8> {
+    type Block<'a> = (bool, u32, &'a [(u64, i64)]);
+
+    fn tick_message(blocks: &[Block]) -> Vec<u8> {
         let mut bits: Vec<u8> = Vec::new();
         let mut push = |v: u64, n: usize| for i in (0..n).rev() { bits.push(((v >> i) & 1) as u8) };
         for (stats, tag, entries) in blocks {
@@ -1098,12 +1175,81 @@ mod tests {
         farm.handle_tick_data(&msg, &mut context, &shared, &None);
         let q = shared.market.quote(id);
         assert_eq!(q.close, 25_512 * PRICE_SCALE / 100);
-        assert_eq!(q.last_size, 3);
+        assert_eq!(q.last_size, 3 * QTY_SCALE);
         assert_eq!(q.high, 25_730 * PRICE_SCALE / 100);
-        assert_eq!(q.volume, 1466);
+        assert_eq!(q.volume, 1466 * QTY_SCALE);
         assert_eq!(q.open, 25_401 * PRICE_SCALE / 100);
         assert_eq!(q.last, 25_501 * PRICE_SCALE / 100);
         assert_eq!(q.low, 0);
         assert_eq!(q.timestamp_ns, 1_790_159_186 * 1_000_000_000);
+    }
+
+    // ibx#287 (AAPL, captured with the lots scaling on): wire bid size 57
+    // reaches the API as 2280 with a round lot of 40; volume stays as on
+    // the wire; the size increment of the ack and of the trade stream
+    // setup multiplies every size.
+    #[test]
+    fn sizes_use_the_size_increment_and_the_round_lot() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let id = context.market.register(265598);
+        farm.md_req_to_instrument.push((5, id));
+        farm.handle_subscription_ack(b"8=O\x0135=Q\x011101,5,0.01,0,3,9c,,1,1", &mut context);
+        farm.handle_ticker_setup(b"8=O\x0135=L\x01265598,0.01,1098,,1", &mut context);
+        context.market.set_round_lot(id, 40);
+        let msg = tick_message(&[
+            (false, 1101, &[(4, 57), (5, 3)]),
+            (false, 1098, &[(6, 2), (10, 1466)]),
+        ]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+        let q = shared.market.quote(id);
+        assert_eq!(q.bid_size, 2280 * QTY_SCALE);
+        assert_eq!(q.ask_size, 120 * QTY_SCALE);
+        assert_eq!(q.last_size, 80 * QTY_SCALE);
+        assert_eq!(q.volume, 1466 * QTY_SCALE);
+
+        // A fractional size increment on the trade stream setup.
+        farm.handle_ticker_setup(b"8=O\x0135=L\x01265598,0.01,1098,,0.01", &mut context);
+        let msg = tick_message(&[(false, 1098, &[(6, 250), (10, 5000)])]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+        let q = shared.market.quote(id);
+        assert_eq!(q.last_size, 100 * QTY_SCALE); // 250 x 0.01 x 40
+        assert_eq!(q.volume, 50 * QTY_SCALE); // 5000 x 0.01
+    }
+
+    // ibx#287: a definition reply sets the round lot and releases the
+    // subscriptions that wait for it; another conId's stay.
+    #[test]
+    fn round_lot_reply_releases_the_waiting_subscriptions() {
+        let mut context = Context::new();
+        let aapl = context.market.register(265598);
+        let msft = context.market.register(272093);
+        let sub = |con_id, instrument| MdSubscribe {
+            con_id, symbol: String::new(), exchange: "SMART".into(), sec_type: "STK".into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            instrument, mode_9887: 0,
+        };
+        let deadline = Instant::now() + LOT_LOOKUP_TIMEOUT;
+        context.lot_lookups.push(("ibxlot0".into(), 265598, deadline));
+        context.lot_lookups.push(("ibxlot1".into(), 272093, deadline));
+        context.lot_parked.push(sub(265598, aapl));
+        context.lot_parked.push(sub(272093, msft));
+        let reply = crate::protocol::fix::fix_build(&[(35, "d"), (320, "ibxlot0"), (6008, "265598"), (167, "CS"),
+            (6523, "USSTK"), (6030, "1"), (6023, "40"), (6027, "40")], 1);
+        assert!(!round_lot_reply(&mut context, "other", &reply), "not a round-lot lookup");
+        assert!(round_lot_reply(&mut context, "ibxlot0", &reply));
+        assert_eq!(context.market.round_lot(aapl), 40);
+        assert_eq!(context.round_lots.get(&265598), Some(&40));
+        assert_eq!(context.lot_ready.len(), 1);
+        assert_eq!(context.lot_ready[0].instrument, aapl);
+        assert_eq!(context.lot_parked.len(), 1);
+
+        // No reply in time: sent with sizes as on the wire.
+        context.lot_lookups[0].2 = Instant::now();
+        sweep_round_lot_lookups(&mut context);
+        assert!(context.lot_lookups.is_empty() && context.lot_parked.is_empty());
+        assert_eq!(context.lot_ready.len(), 2);
+        assert_eq!(context.market.round_lot(msft), 1);
     }
 }

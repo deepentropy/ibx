@@ -639,6 +639,8 @@ impl CcpState {
                 // Asked for an order's outside RTH (ibx#465): not a user reply.
                 if let Some(rid) = response_req_id.as_deref() {
                     if super::order_builder::rth_definition_reply(context, rid, msg) { return; }
+                    // Asked for a round lot (ibx#287): not a user reply.
+                    if super::farm::round_lot_reply(context, rid, msg) { return; }
                 }
                 let fanout_idx = response_req_id.as_ref().and_then(|rid| {
                     self.pending_fanout.iter().position(|p| {
