@@ -119,6 +119,20 @@ pub(crate) fn split_exec_revision(exec_id: &str) -> (&str, u64) {
     }
 }
 
+/// What a fill report says about its execution beyond the fill numbers.
+fn fill_exec_of(parsed: &std::collections::HashMap<u32, String>, exec_id: &str) -> crate::bridge::FillExec {
+    let tag = |t: u32| parsed.get(&t).filter(|s| !s.is_empty());
+    crate::bridge::FillExec {
+        exec_id: exec_id.to_string(),
+        time_secs: tag(6699).or_else(|| tag(60)).or_else(|| tag(52))
+            .and_then(|s| fix_utc_to_unix_secs(s)),
+        exchange: tag(100).or_else(|| tag(207)).cloned().unwrap_or_default(),
+        client_id: tag(6119).and_then(|s| s.parse().ok()).unwrap_or(0),
+        model_code: tag(6700).cloned().unwrap_or_default(),
+        order_ref: tag(6010).cloned().unwrap_or_default(),
+    }
+}
+
 fn perm_id_from_fix_order_id(s: &str) -> i64 {
     // Hash only the stable prefix: "00cf16ed.000225ed.69ca0941" (drop ".0001")
     let stable = match s.rmatch_indices('.').next() {
@@ -1132,13 +1146,21 @@ impl CcpState {
         let mut fill_out: Option<(Fill, crate::bridge::FillExec)> = None;
         let mut update_out: Option<crate::types::OrderUpdate> = None;
         let mut had_fill = false;
+        let mut untracked_out: Option<(api::Execution, crate::bridge::FillExec)> = None;
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
+            let tracked = context.order(clord_id).copied();
             // A duplicate execution is not booked again, but the report still
             // runs the order state below: status, order cache, and the end
-            // of a terminal order (ibx#330).
-            if !exec_id.is_empty() && !self.record_exec_id(exec_id) {
+            // of a terminal order (ibx#330). The id of an untracked fill is
+            // recorded only once the fill is stored, so a fill that could not
+            // be booked stays replayable (ibx#314).
+            let duplicate = !exec_id.is_empty() && match tracked {
+                Some(_) => !self.record_exec_id(exec_id),
+                None => self.seen_exec_ids.contains(exec_id),
+            };
+            if duplicate {
                 log::warn!("Duplicate ExecID={}: fill not booked again", exec_id);
-            } else if let Some(order) = context.order(clord_id).copied() {
+            } else if let Some(order) = tracked {
                 context.update_order_filled_fixed(clord_id, last_shares);
                 // Order totals ride on every fill report next to the print
                 // (ib-agent#192 C3): the callback's filled and average price
@@ -1163,16 +1185,7 @@ impl CcpState {
                 };
                 context.update_position_fixed(order.instrument, delta);
                 // notify_fill inlined
-                let tag = |t: u32| parsed.get(&t).filter(|s| !s.is_empty());
-                let exec = crate::bridge::FillExec {
-                    exec_id: exec_id.to_string(),
-                    time_secs: tag(6699).or_else(|| tag(60)).or_else(|| tag(52))
-                        .and_then(|s| fix_utc_to_unix_secs(s)),
-                    exchange: tag(100).or_else(|| tag(207)).cloned().unwrap_or_default(),
-                    client_id: tag(6119).and_then(|s| s.parse().ok()).unwrap_or(0),
-                    model_code: tag(6700).cloned().unwrap_or_default(),
-                    order_ref: tag(6010).cloned().unwrap_or_default(),
-                };
+                let exec = fill_exec_of(parsed, exec_id);
                 shared.portfolio.set_position_fixed(fill.instrument, context.position_fixed(fill.instrument));
                 if let Some(con_id) = context.market.con_id(order.instrument) {
                     self.record_exec_con_id(&exec.exec_id, con_id);
@@ -1192,6 +1205,12 @@ impl CcpState {
                 }
                 fill_out = Some((fill, exec));
                 had_fill = true;
+            } else {
+                untracked_out = self.book_untracked_fill(
+                    parsed, context, shared, clord_id, exec_id, last_px, last_shares, account_id);
+                if untracked_out.is_some() && !exec_id.is_empty() {
+                    self.record_exec_id(exec_id);
+                }
             }
         }
 
@@ -1434,6 +1453,9 @@ impl CcpState {
             if con_id != 0 {
                 shared.reference.cache_contract(con_id, contract.clone());
             }
+            if let Some((execution, exec)) = untracked_out.take() {
+                shared.orders.push_untracked_execution(contract.clone(), execution, exec);
+            }
 
             shared.orders.push_order_info(clord_id, RichOrderInfo {
                 contract, order, order_state, last_exec,
@@ -1465,6 +1487,82 @@ impl CcpState {
             }
             context.finish_order(clord_id, status);
         }
+    }
+
+    /// Book a fill of an order the engine does not track (ibx#314): an
+    /// order of another client or of a previous session, one already ended
+    /// here, or a fill the server replays at session start. The execution
+    /// is kept for `req_executions` and moves the position; there is no live
+    /// fill event, which needs a known order. `None` when the report has no
+    /// contract or no side: a guessed side would move the position the
+    /// wrong way.
+    #[cold]
+    #[allow(clippy::too_many_arguments)]
+    fn book_untracked_fill(
+        &mut self,
+        parsed: &std::collections::HashMap<u32, String>,
+        context: &mut Context,
+        shared: &SharedState,
+        clord_id: u64,
+        exec_id: &str,
+        last_px: f64,
+        last_shares: Qty,
+        account_id: &str,
+    ) -> Option<(api::Execution, crate::bridge::FillExec)> {
+        let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let side = match parsed.get(&54).map(|s| s.as_str()) {
+            Some("1") => Some(Side::Buy),
+            Some("2") => Some(Side::Sell),
+            Some("5") => Some(Side::ShortSell),
+            _ => None,
+        };
+        let Some(side) = side.filter(|_| con_id != 0) else {
+            log::warn!("Fill {} of untracked order {}: no contract or side, not booked", exec_id, clord_id);
+            return None;
+        };
+        let delta = match side {
+            Side::Buy => last_shares,
+            Side::Sell | Side::ShortSell => -last_shares,
+        };
+        match context.market.try_register(con_id) {
+            Some(instrument) => {
+                shared.market.set_instrument_count(context.market.count());
+                if let Some(sym) = parsed.get(&55) {
+                    context.set_symbol(instrument, sym.clone());
+                }
+                context.update_position_fixed(instrument, delta);
+                shared.portfolio.set_position_fixed(instrument, context.position_fixed(instrument));
+            }
+            None => log::error!("Fill {} of untracked order {}: instrument table full ({} contracts), engine position of con_id {} not moved",
+                exec_id, clord_id, crate::types::MAX_INSTRUMENTS, con_id),
+        }
+        let shares = last_shares as f64 / QTY_SCALE as f64;
+        self.record_exec_con_id(exec_id, con_id);
+        let cash = match side {
+            Side::Buy => -shares * last_px,
+            Side::Sell | Side::ShortSell => shares * last_px,
+        };
+        shared.portfolio.add_money_since_seed(con_id, cash);
+        shared.portfolio.apply_fill_to_position(con_id, delta, (last_px * PRICE_SCALE as f64) as i64);
+
+        let execution = api::Execution {
+            exec_id: exec_id.to_string(),
+            acct_number: parsed.get(&1).filter(|s| !s.is_empty()).cloned()
+                .unwrap_or_else(|| account_id.to_string()),
+            side: match side { Side::Buy => "BOT", Side::Sell | Side::ShortSell => "SLD" }.to_string(),
+            shares,
+            price: last_px,
+            perm_id: parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0),
+            // The placing client's order id when the report carries it.
+            order_id: parsed.get(&6121).and_then(|s| s.parse().ok()).unwrap_or(clord_id as i64),
+            cum_qty: parsed.get(&14).and_then(|s| parse_qty(s)).unwrap_or(0) as f64 / QTY_SCALE as f64,
+            avg_price: parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            last_liquidity: parsed.get(&851).and_then(|s| s.parse().ok()).unwrap_or(0),
+            ..Default::default()
+        };
+        log::info!("Fill {} of untracked order {}: con_id={} {:?} {} @ {}, stored",
+            exec_id, clord_id, con_id, side, shares, last_px);
+        Some((execution, fill_exec_of(parsed, exec_id)))
     }
 
     fn handle_cancel_reject(
@@ -3466,6 +3564,107 @@ mod tests {
         assert_eq!(shared.orders.drain_completed_orders().len(), 1);
         let info = shared.orders.get_order_info(90).expect("order cache updated");
         assert_eq!(info.order_state.status, "Filled");
+    }
+
+    // A replayed fill of an order placed in a previous session, as the
+    // server sends it at session start: its own order id, the placing
+    // client's ids, and the fill time.
+    fn untracked_fill_frame(exec_id: &str) -> std::collections::HashMap<u32, String> {
+        [
+            (11u32, "1183455398.0"), (17, exec_id), (97, "Y"), (43, "N"),
+            (52, "20260928-09:04:56"), (60, "20260928-09:04:56"),
+            (150, "2"), (20, "0"), (39, "2"), (167, "CS"), (55, "AAPL"), (100, "MEMX"), (207, "MEMX"),
+            (38, "1"), (44, "342.22"), (32, "1"), (31, "340.52"), (14, "1"), (151, "0"), (851, "2"),
+            (6, "340.52"), (54, "1"), (37, "00cf16ed.000225ed.6ab9e9f6.0001"), (1, "DU123"),
+            (40, "2"), (6119, "261"), (6121, "15"), (59, "0"), (6008, "265598"), (15, "USD"),
+            (6010, "ref-1"),
+        ].into_iter().map(|(t, v)| (t, v.to_string())).collect()
+    }
+
+    // ibx#314: a fill of an order the engine does not track was dropped
+    // (no stored execution, no position change) and its id was consumed.
+    // It is now stored for req_executions and moves the position, with no
+    // live fill event.
+    #[test]
+    fn an_untracked_fill_is_stored_and_moves_the_position() {
+        let q = crate::types::QTY_SCALE;
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+
+        ccp.handle_exec_report(&untracked_fill_frame("0000e0d5.6ab9ea82.01.01"), &mut context, &shared, &None, "DU123");
+
+        assert!(shared.orders.drain_fills().is_empty(), "no live fill without a known order");
+        let stored = shared.orders.drain_untracked_executions();
+        assert_eq!(stored.len(), 1);
+        let (contract, exec, fe) = &stored[0];
+        assert_eq!(contract.con_id, 265598);
+        assert_eq!(contract.symbol, "AAPL");
+        assert_eq!(exec.exec_id, "0000e0d5.6ab9ea82.01.01");
+        assert_eq!(exec.side, "BOT");
+        assert_eq!((exec.shares, exec.price, exec.cum_qty, exec.avg_price), (1.0, 340.52, 1.0, 340.52));
+        assert_eq!(exec.order_id, 15, "the placing client's order id");
+        assert_eq!(exec.acct_number, "DU123");
+        assert_eq!(exec.last_liquidity, 2);
+        assert_eq!(fe.client_id, 261);
+        assert_eq!(fe.order_ref, "ref-1");
+        assert_eq!(fe.exchange, "MEMX");
+        assert_eq!(fe.time_secs, fix_utc_to_unix_secs("20260928-09:04:56"));
+
+        let instrument = context.market.instrument_by_con_id(265598).expect("contract registered");
+        assert_eq!(context.position_fixed(instrument), q);
+        assert_eq!(shared.portfolio.position_fixed(instrument), q);
+        assert_eq!(shared.portfolio.position_info(265598).unwrap().position_fixed, q);
+        assert!(ccp.seen_exec_ids.contains("0000e0d5.6ab9ea82.01.01"), "recorded once stored");
+    }
+
+    #[test]
+    fn an_untracked_fill_delivered_twice_is_stored_once() {
+        let q = crate::types::QTY_SCALE;
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+
+        let frame = untracked_fill_frame("0000e0d5.6ab9ea82.01.01");
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "DU123");
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "DU123");
+
+        assert_eq!(shared.orders.drain_untracked_executions().len(), 1);
+        assert_eq!(shared.portfolio.position_info(265598).unwrap().position_fixed, q, "moved once");
+        let instrument = context.market.instrument_by_con_id(265598).unwrap();
+        assert_eq!(context.position_fixed(instrument), q);
+    }
+
+    // A sell of an untracked order moves the position down.
+    #[test]
+    fn an_untracked_sell_moves_the_position_down() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut frame = untracked_fill_frame("e-sell");
+        frame.insert(54, "2".into());
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        let (_, exec, _) = shared.orders.drain_untracked_executions().remove(0);
+        assert_eq!(exec.side, "SLD");
+        assert_eq!(shared.portfolio.position_info(265598).unwrap().position_fixed, -crate::types::QTY_SCALE);
+    }
+
+    // Without the side the fill is not booked, and its id stays free for
+    // a later copy that carries it.
+    #[test]
+    fn an_untracked_fill_without_a_side_stays_replayable() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut frame = untracked_fill_frame("e-noside");
+        frame.remove(&54);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_untracked_executions().is_empty());
+        assert!(shared.portfolio.position_info(265598).is_none());
+        assert!(!ccp.seen_exec_ids.contains("e-noside"));
+
+        ccp.handle_exec_report(&untracked_fill_frame("e-noside"), &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_untracked_executions().len(), 1);
     }
 
     // ibx#313: fill quantities were read as whole numbers, so a fill of a

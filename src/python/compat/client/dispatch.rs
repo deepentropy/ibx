@@ -281,6 +281,16 @@ impl EClient {
             self.core.update_order_fill(fill.order_id, status, cum_qty, remaining);
         }
 
+        // Executions of orders this session does not track: stored for
+        // req_executions, with no live callback (ibx#314).
+        for (contract, mut exec, fill_exec) in shared.orders.drain_untracked_executions() {
+            let order_id = exec.order_id as u64;
+            self.core.apply_fill_exec(&mut exec, &fill_exec, order_id);
+            if let Some(cr) = self.core.push_execution(-1, contract, exec, fill_exec.time_secs) {
+                self.send_commission_report(py, &cr)?;
+            }
+        }
+
         // Commission reports, sent once their execution is known (ibx#471).
         for cr in shared.orders.drain_commission_reports() {
             if self.core.apply_commission(&cr) {

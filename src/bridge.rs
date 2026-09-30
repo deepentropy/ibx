@@ -290,6 +290,9 @@ pub struct OrderState {
     fills: Mutex<Vec<(Fill, FillExec)>>,
     /// Commission reports from the server's commission frame (ibx#471).
     commission_reports: Mutex<Vec<api::CommissionAndFeesReport>>,
+    /// Executions of orders the engine does not track, for the execution
+    /// store only: no live fill callback without a known order (ibx#314).
+    untracked_executions: Mutex<Vec<(api::Contract, api::Execution, FillExec)>>,
     order_updates: Mutex<Vec<OrderUpdate>>,
     cancel_rejects: Mutex<Vec<CancelReject>>,
     /// Order errors raised before sending, keyed by the full order id (ibx#349).
@@ -305,6 +308,7 @@ impl OrderState {
         Self {
             fills: Mutex::new(Vec::with_capacity(64)),
             commission_reports: Mutex::new(Vec::with_capacity(64)),
+            untracked_executions: Mutex::new(Vec::new()),
             order_updates: Mutex::new(Vec::with_capacity(64)),
             cancel_rejects: Mutex::new(Vec::with_capacity(16)),
             order_errors: Mutex::new(Vec::new()),
@@ -321,6 +325,12 @@ impl OrderState {
     /// Fills with their execution details (empty when injected without).
     pub fn drain_fills_with_exec(&self) -> Vec<(Fill, FillExec)> {
         self.fills.lock().unwrap().drain(..).collect()
+    }
+
+    /// Executions of untracked orders, to store for `req_executions`
+    /// (ibx#314).
+    pub fn drain_untracked_executions(&self) -> Vec<(api::Contract, api::Execution, FillExec)> {
+        self.untracked_executions.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_commission_reports(&self) -> Vec<api::CommissionAndFeesReport> {
@@ -379,6 +389,10 @@ impl OrderState {
 
     #[doc(hidden)] pub fn push_fill_with_exec(&self, fill: Fill, exec: FillExec) {
         self.fills.lock().unwrap().push((fill, exec));
+    }
+
+    #[doc(hidden)] pub fn push_untracked_execution(&self, contract: api::Contract, execution: api::Execution, exec: FillExec) {
+        self.untracked_executions.lock().unwrap().push((contract, execution, exec));
     }
 
     #[doc(hidden)] pub fn push_commission_report(&self, report: api::CommissionAndFeesReport) {

@@ -3468,6 +3468,36 @@ fn commission_report_before_its_execution_waits_for_it() {
     assert!(exec < comm, "{:?}", w.events);
 }
 
+// ibx#314: an execution of an untracked order has no live callback and is
+// returned by req_executions, with its commission report.
+#[test]
+fn an_untracked_execution_is_returned_by_req_executions_only() {
+    let (client, _rx, shared) = test_client();
+    let contract = Contract { con_id: 265598, symbol: "AAPL".into(), ..Default::default() };
+    let exec = crate::api::types::Execution {
+        exec_id: "0000e0d5.6ab5f36f.01.01".into(), side: "BOT".into(), shares: 100.0, order_id: 15,
+        ..Default::default()
+    };
+    let fe = crate::bridge::FillExec { exec_id: "0000e0d5.6ab5f36f.01.01".into(), client_id: 261, ..Default::default() };
+    shared.orders.push_untracked_execution(contract, exec, fe);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+
+    shared.orders.push_commission_report(captured_report());
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["commission:0000e0d5.6ab5f36f.01.01:1.0003:USD"]);
+
+    let mut w = RecordingWrapper::default();
+    client.req_executions(1, &crate::api::types::ExecutionFilter::default(), &mut w);
+    assert_eq!(w.events, [
+        "exec_details:1:BOT:100",
+        "commission:0000e0d5.6ab5f36f.01.01:1.0003:USD",
+        "exec_details_end:1",
+    ]);
+}
+
 // Before the commission frame, req_executions replays the execution alone.
 #[test]
 fn req_executions_without_a_commission_report_sends_the_execution_only() {
