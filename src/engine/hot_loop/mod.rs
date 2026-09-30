@@ -1432,6 +1432,10 @@ pub(crate) fn format_price(price: Price) -> StackStr {
     let whole = price / PRICE_SCALE;
     let frac = (price % PRICE_SCALE).unsigned_abs();
     let mut s = StackStr::new();
+    // Between -1 and 0 the whole part truncates to 0 and cannot carry the sign.
+    if price < 0 && whole == 0 {
+        s.push(b'-');
+    }
     s.write_i64(whole);
     if frac != 0 {
         s.push(b'.');
@@ -1642,6 +1646,21 @@ mod tests {
         assert_eq!(parse_price_tag(Some(&s("0"))), 0);
         assert_eq!(parse_price_tag(Some(&s("434.71"))), (434.71 * PRICE_SCALE as f64) as Price);
         assert_eq!(parse_price_tag(Some(&s("-1.5"))), (-1.5 * PRICE_SCALE as f64) as Price);
+    }
+
+    // ibx#332: a price between -1 and 0 lost its minus sign.
+    #[test]
+    fn format_price_keeps_sign_between_minus_one_and_zero() {
+        let p = |v: f64| format_price((v * PRICE_SCALE as f64).round() as Price);
+        assert_eq!(&*p(-0.30), "-0.3");
+        assert_eq!(&*p(-0.05), "-0.05");
+        assert_eq!(&*p(-0.01), "-0.01");
+        assert_eq!(&*p(-1.25), "-1.25");
+        assert_eq!(&*p(-1.0), "-1");
+        assert_eq!(&*p(0.0), "0");
+        assert_eq!(&*p(0.35), "0.35");
+        assert_eq!(&*p(1.5), "1.5");
+        assert_eq!(&*format_price(-1), "-0.00000001");
     }
 
     #[test]
