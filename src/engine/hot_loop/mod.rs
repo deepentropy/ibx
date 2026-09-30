@@ -10,7 +10,7 @@ use std::io;
 use crate::bridge::{Event, SharedState};
 use crate::engine::context::Context;
 use crate::config::chrono_free_timestamp;
-use crate::gateway::{connect_farm, reconnect_ccp, ReconnectAuth};
+use crate::gateway::{connect_farm, reconnect_ccp_session, CcpReconnect, ReconnectAuth};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{ControlCommand, Fill, InstrumentId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
@@ -71,7 +71,7 @@ pub struct HotLoop {
     reconnect_auth: Option<ReconnectAuth>,
     pending_farm_reconnect: Option<Receiver<io::Result<Connection>>>,
     farm_reconnect_attempt: u32,
-    pending_ccp_reconnect: Option<Receiver<io::Result<Connection>>>,
+    pending_ccp_reconnect: Option<Receiver<io::Result<CcpReconnect>>>,
     ccp_reconnect_attempt: u32,
     /// HMDS reconnect state (ibx#187). Drives a background reconnect loop with
     /// exponential backoff when the historical-data farm is down — initial
@@ -1052,7 +1052,7 @@ impl HotLoop {
         std::thread::Builder::new()
             .name(format!("ccp-reconnect-{}", attempt))
             .spawn(move || {
-                let _ = tx.send(reconnect_ccp(&auth));
+                let _ = tx.send(reconnect_ccp_session(&auth));
             })
             .ok();
         self.pending_ccp_reconnect = Some(rx);
@@ -1065,8 +1065,12 @@ impl HotLoop {
             None => return,
         };
         match rx.try_recv() {
-            Ok(Ok(conn)) => {
+            Ok(Ok(CcpReconnect { conn, session_epoch })) => {
                 log::info!("CCP auto-reconnect succeeded (attempt {})", self.ccp_reconnect_attempt);
+                // The next reconnect resumes this server session (ibx#422).
+                if let (Some(epoch), Some(auth)) = (session_epoch, self.reconnect_auth.as_mut()) {
+                    auth.session_epoch = epoch;
+                }
                 self.reconnect_ccp(conn);
                 self.ccp_reconnect_attempt = 0;
                 self.ccp_next_attempt_at = None;
@@ -1910,6 +1914,7 @@ mod tests {
             encoded: String::new(),
             hmds_host: "hmds.example".into(),
             hmds_farm: "ushmds".into(),
+            session_epoch: String::new(),
         }
     }
 

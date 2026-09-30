@@ -133,35 +133,79 @@ pub fn token_short_hash(session_token: &BigUint) -> String {
 /// currently running is no longer supported." Per ib-agent#141 the
 /// official client also keeps 6397/6947/8098, so we leave them in.
 ///
-/// Tag 6947 carries the JVM default timezone (e.g. `Europe/Paris`,
-/// `America/New_York`). The auth server doesn't validate it — `UTC` is
-/// the safe default — but `IBX_TZ` overrides for users who want to mirror
-/// their locale or comply with regional logging requirements.
+/// The time zone field carries the machine's IANA time zone name (e.g.
+/// `Europe/Paris`), as the reference client does; `IBX_TZ` overrides it and
+/// `UTC` is the fallback when the system zone has no IANA name.
 pub fn build_ccp_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32) -> Vec<u8> {
+    ccp_logon(hw_info, encoded, heartbeat, seq, "")
+}
+
+/// Logon for a reconnect of the same server session: the fresh logon plus
+/// the session epoch of the previous logon reply, in the reference order.
+/// An empty epoch gives the fresh logon (ibx#422).
+pub fn build_ccp_reconnect_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32, session_epoch: &str) -> Vec<u8> {
+    ccp_logon(hw_info, encoded, heartbeat, seq, session_epoch)
+}
+
+fn ccp_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32, session_epoch: &str) -> Vec<u8> {
     let now = chrono_free_timestamp();
-    let tz_owned = std::env::var("IBX_TZ").unwrap_or_else(|_| "UTC".to_string());
-    let tz = tz_owned.as_str();
+    let tz = machine_time_zone();
     let hb_str = heartbeat.to_string();
     let hw_field = format!("<{}|{}>", hw_info, session::get_lan_ip());
-    fix_build(
-        &[
-            (fix::TAG_MSG_TYPE, fix::MSG_LOGON),
-            (fix::TAG_SENDING_TIME, &now),
-            (fix::TAG_ENCRYPT_METHOD, "0"),
-            (fix::TAG_HEARTBEAT_INT, &hb_str),
-            (fix::TAG_RESET_SEQ_NUM, "Y"),
-            (fix::TAG_IB_BUILD, IB_BUILD),
-            (fix::TAG_IB_VERSION, IB_VERSION),
-            (6490, "dark"),
-            (6266, encoded),
-            (6351, &hw_field),
-            (6397, "1"),
-            (6947, tz),
-            (8361, "(rolling)"),
-            (8098, "0"),
-        ],
-        seq,
-    )
+    let mut fields: Vec<(u32, &str)> = Vec::with_capacity(15);
+    fields.extend_from_slice(&[
+        (fix::TAG_MSG_TYPE, fix::MSG_LOGON),
+        (fix::TAG_SENDING_TIME, &now),
+        (fix::TAG_ENCRYPT_METHOD, "0"),
+        (fix::TAG_HEARTBEAT_INT, &hb_str),
+        (fix::TAG_RESET_SEQ_NUM, "Y"),
+    ]);
+    if !session_epoch.is_empty() {
+        fields.push((TAG_SESSION_EPOCH, session_epoch));
+    }
+    fields.extend_from_slice(&[
+        (fix::TAG_IB_BUILD, IB_BUILD),
+        (fix::TAG_IB_VERSION, IB_VERSION),
+        (6490, "dark"),
+        (6266, encoded),
+        (6351, &hw_field),
+        (6397, "1"),
+        (6947, &tz),
+        (8361, "(rolling)"),
+        (8098, "0"),
+    ]);
+    fix_build(&fields, seq)
+}
+
+/// Session epoch of the server session, echoed on a reconnect logon (ibx#422).
+const TAG_SESSION_EPOCH: u32 = 6059;
+
+/// Time zone sent at logon: `IBX_TZ` when set, else the machine zone.
+fn machine_time_zone() -> String {
+    time_zone_or_system(std::env::var("IBX_TZ").ok())
+}
+
+fn time_zone_or_system(override_tz: Option<String>) -> String {
+    if let Some(tz) = override_tz.filter(|s| !s.is_empty()) {
+        return tz;
+    }
+    jiff::tz::TimeZone::try_system()
+        .ok()
+        .and_then(|tz| tz.iana_name().map(str::to_string))
+        .unwrap_or_else(|| "UTC".to_string())
+}
+
+/// The session epoch in a logon reply (plain or compressed), if any.
+fn logon_reply_epoch(response: &[u8]) -> Option<String> {
+    let mut text = response.to_vec();
+    if response.starts_with(b"8=FIXCOMP\x01") {
+        text.clear();
+        for inner in fixcomp::fixcomp_decompress(response).ok()? {
+            text.extend_from_slice(&inner);
+            text.push(SOH);
+        }
+    }
+    fix_parse(&text).remove(&TAG_SESSION_EPOCH).filter(|v| !v.is_empty())
 }
 
 /// Build encrypted farm logon message.
@@ -401,6 +445,17 @@ pub struct ReconnectAuth {
     /// Used by HMDS reconnect (ibx#187) — empty when no HMDS route was parsed.
     pub hmds_host: String,
     pub hmds_farm: String,
+    /// Session epoch of the last logon reply, sent back on a reconnect logon
+    /// so the server can resume the same session (ibx#422). Empty when the
+    /// server sent none.
+    pub session_epoch: String,
+}
+
+/// A CCP reconnect: the new connection and the session epoch of its logon
+/// reply, when the reply carried one.
+pub struct CcpReconnect {
+    pub conn: Connection,
+    pub session_epoch: Option<String>,
 }
 
 /// Full gateway connection.
@@ -446,6 +501,8 @@ pub struct Gateway {
     /// retained for HMDS reconnect (ibx#187).
     pub hmds_host: String,
     pub hmds_farm: String,
+    /// Session epoch of the logon reply, for the reconnect logon (ibx#422).
+    pub session_epoch: String,
 }
 
 /// Connect to a data farm: key exchange → encrypted logon → token auth → routing → Connection.
@@ -632,11 +689,17 @@ pub fn connect_farm(
 /// falls back to a fresh SRP handshake using the cached `username`/`password`
 /// in `ReconnectAuth` (the same path used by `Gateway::connect`).
 pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
+    reconnect_ccp_session(auth).map(|r| r.conn)
+}
+
+/// [`reconnect_ccp`], also returning the session epoch of the new logon
+/// reply so the caller can keep it for the next reconnect (ibx#422).
+pub fn reconnect_ccp_session(auth: &ReconnectAuth) -> io::Result<CcpReconnect> {
     let token_hash = token_short_hash(&auth.session_token);
     reconnect_ccp_attempt(auth, &token_hash, &auth.host, 0)
 }
 
-fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, depth: u32) -> io::Result<Connection> {
+fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, depth: u32) -> io::Result<CcpReconnect> {
     if depth > 5 {
         return Err(io::Error::new(io::ErrorKind::Other, "CCP reconnect: too many redirects"));
     }
@@ -796,8 +859,8 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         return Err(io::Error::new(io::ErrorKind::Other, "CCP reconnect: no FIX_START after auth"));
     }
 
-    // FIX Logon
-    let logon_msg = build_ccp_logon(&auth.hw_info, &auth.encoded, CCP_HEARTBEAT, 1);
+    // FIX Logon: a reconnect of the same session carries its epoch (ibx#422).
+    let logon_msg = build_ccp_reconnect_logon(&auth.hw_info, &auth.encoded, CCP_HEARTBEAT, 1, &auth.session_epoch);
     tls.write_all(&logon_msg)?;
     tls.flush()?;
 
@@ -806,8 +869,13 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     // (ibx#237, same tolerance as the farm-logon path).
     tls.get_ref().set_read_timeout(Some(Duration::from_millis(FARM_LOGON_POLL_MS)))?;
     let fix_deadline = std::time::Instant::now() + Duration::from_secs_f64(TIMEOUT_FARM_LOGON);
+    let mut session_epoch = None;
     for _ in 0..5 {
         let response = fix_read_deadline(&mut tls, fix_deadline)?;
+        if let Some(epoch) = logon_reply_epoch(&response) {
+            log::info!("CCP reconnect: session epoch {} (sent {:?})", epoch, auth.session_epoch);
+            session_epoch = Some(epoch);
+        }
         let fields = fix_parse(&response);
         let msg_type = fields.get(&35).map(|s| s.as_str()).unwrap_or("");
         match msg_type {
@@ -835,7 +903,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     let mut conn = Connection::new(tls)?;
     conn.seq = ccp_seq;
     log::info!("CCP reconnect complete (seq={})", conn.seq);
-    Ok(conn)
+    Ok(CcpReconnect { conn, session_epoch })
 }
 
 
@@ -1198,6 +1266,7 @@ impl Gateway {
         let mut heartbeat_interval = CCP_HEARTBEAT;
         let mut server_session_id = String::new();
         let mut settings_object_key = String::new();
+        let mut session_epoch = String::new();
         let mut raw_soft_dollar_tiers = String::new();
         let mut raw_family_codes = String::new();
         let mut raw_news_providers = String::new();
@@ -1265,6 +1334,12 @@ impl Gateway {
                     settings_object_key = v.clone();
                     log::info!("Auth: settings object key (6386, len={})", settings_object_key.len());
                 }
+            }
+            if let Some(v) = fields.get(&TAG_SESSION_EPOCH).filter(|v| !v.is_empty())
+                && session_epoch.is_empty()
+            {
+                session_epoch = v.clone();
+                log::info!("Auth: session epoch {}", session_epoch);
             }
             // Tag 8035: try parsed fields first, then raw byte search
             if server_session_id.is_empty() {
@@ -1670,6 +1745,7 @@ impl Gateway {
             ccp_sign_iv,
             hmds_host: hmds_host_for_gw,
             hmds_farm: hmds_farm_for_gw,
+            session_epoch,
         };
         Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
@@ -1794,6 +1870,7 @@ impl Gateway {
             encoded: self.encoded.clone(),
             hmds_host: self.hmds_host.clone(),
             hmds_farm: self.hmds_farm.clone(),
+            session_epoch: self.session_epoch.clone(),
         };
         if let Some(tx) = event_tx.as_ref() {
             let _ = tx.send(Event::GatewayLogon {
@@ -2027,6 +2104,58 @@ mod tests {
         assert_eq!(fields[&8361], "(rolling)");
         assert_eq!(fields[&8098], "0");
         assert!(fields[&6351].contains("abc123"));
+    }
+
+    fn tag_order(msg: &[u8]) -> Vec<u32> {
+        msg.split(|&b| b == SOH)
+            .filter_map(|f| f.iter().position(|&b| b == b'=').map(|i| &f[..i]))
+            .filter_map(|t| std::str::from_utf8(t).ok()?.parse().ok())
+            .collect()
+    }
+
+    // ibx#422: the reconnect logon is the fresh logon plus the session
+    // epoch, in the reference order.
+    #[test]
+    fn reconnect_logon_sends_the_session_epoch_in_reference_order() {
+        let msg = build_ccp_reconnect_logon("abc123|00:00:00:00:00:00", "17.0.10.0.101/W/en/G", 10, 1, "1790795127");
+        assert_eq!(fix_parse(&msg)[&TAG_SESSION_EPOCH], "1790795127");
+        assert_eq!(
+            tag_order(&msg),
+            [8, 9, 35, 34, 52, 98, 108, 141, 6059, 6034, 6968, 6490, 6266, 6351, 6397, 6947, 8361, 8098, 10],
+        );
+    }
+
+    #[test]
+    fn fresh_logon_has_no_session_epoch() {
+        let msg = build_ccp_logon("abc123|00:00:00:00:00:00", "17.0.10.0.101/W/en/G", 10, 1);
+        assert!(!fix_parse(&msg).contains_key(&TAG_SESSION_EPOCH));
+        let empty = build_ccp_reconnect_logon("abc123|00:00:00:00:00:00", "17.0.10.0.101/W/en/G", 10, 1, "");
+        assert_eq!(tag_order(&empty), tag_order(&msg), "no epoch known: the fresh logon");
+    }
+
+    #[test]
+    fn logon_reply_epoch_is_read_from_plain_and_compressed_replies() {
+        let reply = fix_build(&[(35, "A"), (52, "20260930-19:05:24"), (98, "0"), (108, "10"), (141, "Y"), (6059, "1790795127")], 1);
+        assert_eq!(logon_reply_epoch(&reply).as_deref(), Some("1790795127"));
+        let without = fix_build(&[(35, "A"), (52, "20260930-19:05:24"), (98, "0")], 1);
+        assert_eq!(logon_reply_epoch(&without), None);
+
+        let comp = fixcomp::fixcomp_build(&fix_build(&[(35, "A"), (6059, "1790795128")], 1));
+        assert_eq!(logon_reply_epoch(&comp).as_deref(), Some("1790795128"));
+    }
+
+    // ibx#422: the machine's IANA zone by default, the override when set.
+    #[test]
+    fn logon_time_zone_is_the_machine_zone_unless_overridden() {
+        assert_eq!(time_zone_or_system(Some("America/New_York".into())), "America/New_York");
+        let system = time_zone_or_system(None);
+        assert!(!system.is_empty());
+        assert_eq!(time_zone_or_system(Some(String::new())), system, "an empty override is ignored");
+        if let Ok(tz) = jiff::tz::TimeZone::try_system()
+            && let Some(name) = tz.iana_name()
+        {
+            assert_eq!(system, name);
+        }
     }
 
     #[test]

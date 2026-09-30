@@ -53,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         encoded: gw.encoded.clone(),
         hmds_host: gw.hmds_host.clone(),
         hmds_farm: gw.hmds_farm.clone(),
+        session_epoch: gw.session_epoch.clone(),
     };
 
     drop(ccp);
