@@ -503,6 +503,8 @@ pub struct Gateway {
     pub hmds_farm: String,
     /// Session epoch of the logon reply, for the reconnect logon (ibx#422).
     pub session_epoch: String,
+    /// Name of the market-data farm, for the farm status messages (ibx#399).
+    pub farm_name: String,
 }
 
 /// Connect to a data farm: key exchange → encrypted logon → token auth → routing → Connection.
@@ -688,15 +690,49 @@ pub fn connect_farm(
 /// If the server signals at AUTH_START that it requires full SRP, transparently
 /// falls back to a fresh SRP handshake using the cached `username`/`password`
 /// in `ReconnectAuth` (the same path used by `Gateway::connect`).
+/// The connection has the order status request already sent.
 pub fn reconnect_ccp(auth: &ReconnectAuth) -> io::Result<Connection> {
-    reconnect_ccp_session(auth).map(|r| r.conn)
+    let mut conn = reconnect_ccp_session(auth)?.conn;
+    let now = chrono_free_timestamp();
+    conn.send_fix(&[(35, "H"), (52, &now), (11, "*"), (54, "*"), (55, "*")])?;
+    Ok(conn)
 }
 
-/// [`reconnect_ccp`], also returning the session epoch of the new logon
-/// reply so the caller can keep it for the next reconnect (ibx#422).
+/// [`reconnect_ccp`] without the order status request, also returning the
+/// session epoch of the new logon reply so the caller can keep it for the
+/// next reconnect (ibx#422). The caller sends the post-logon requests.
 pub fn reconnect_ccp_session(auth: &ReconnectAuth) -> io::Result<CcpReconnect> {
+    reconnect_ccp_via(auth, &auth.host)
+}
+
+/// [`reconnect_ccp_session`] to `host`, one of [`ccp_reconnect_hosts`].
+pub fn reconnect_ccp_via(auth: &ReconnectAuth, host: &str) -> io::Result<CcpReconnect> {
     let token_hash = token_short_hash(&auth.session_token);
-    reconnect_ccp_attempt(auth, &token_hash, &auth.host, 0)
+    reconnect_ccp_attempt(auth, &token_hash, host, 0)
+}
+
+/// Hosts a CCP reconnect cycles through, as the reference does (ibx#399):
+/// the primary, then its backups `{first label}-hb1` and `{first label}-hb2`
+/// in the same domain (`cdc1.example` gives `cdc1-hb1.example`). An IP
+/// address or a single-label name has no backups.
+pub fn ccp_reconnect_hosts(host: &str) -> Vec<String> {
+    let mut hosts = vec![host.to_string()];
+    if host.parse::<std::net::IpAddr>().is_err()
+        && let Some((label, domain)) = host.split_once('.')
+        && !label.is_empty()
+        && !domain.is_empty()
+    {
+        hosts.push(format!("{}-hb1.{}", label, domain));
+        hosts.push(format!("{}-hb2.{}", label, domain));
+    }
+    hosts
+}
+
+/// Host of reconnect attempt `attempt` (1 for the first attempt).
+pub fn ccp_reconnect_host(host: &str, attempt: u32) -> String {
+    let mut hosts = ccp_reconnect_hosts(host);
+    let i = (attempt.max(1) as usize - 1) % hosts.len();
+    hosts.swap_remove(i)
 }
 
 fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, depth: u32) -> io::Result<CcpReconnect> {
@@ -892,16 +928,8 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     }
     tls.get_ref().set_read_timeout(None)?;
 
-    // Order mass status request
-    let mut ccp_seq: u32 = 1;
-    ccp_seq += 1;
-    let now = chrono_free_timestamp();
-    let status_req = fix_build(&[(35, "H"), (52, &now), (11, "*"), (54, "*"), (55, "*")], ccp_seq);
-    tls.write_all(&status_req)?;
-    tls.flush()?;
-
     let mut conn = Connection::new(tls)?;
-    conn.seq = ccp_seq;
+    conn.seq = 1; // the logon
     log::info!("CCP reconnect complete (seq={})", conn.seq);
     Ok(CcpReconnect { conn, session_epoch })
 }
@@ -1694,6 +1722,7 @@ impl Gateway {
         // below are moved into the thread::scope closures.
         let hmds_host_for_gw = mktdata_host.clone();
         let hmds_farm_for_gw = mktdata_farm.clone();
+        let farm_name = trading_farm.clone();
 
         // Parallel farm logons: validated against paper and live (each farm
         // logon is ~6 s sequentially; running them in parallel halves the
@@ -1746,6 +1775,7 @@ impl Gateway {
             hmds_host: hmds_host_for_gw,
             hmds_farm: hmds_farm_for_gw,
             session_epoch,
+            farm_name,
         };
         Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
@@ -1882,6 +1912,7 @@ impl Gateway {
         hot_loop.set_control_rx(rx);
         hot_loop.set_account_id(self.account_id.clone());
         hot_loop.set_scale_us_lots(self.scale_us_lots);
+        hot_loop.set_farm_name(self.farm_name.clone());
         hot_loop.set_reconnect_auth(reconnect_auth);
         hot_loop.farm_conn = Some(farm_conn);
         hot_loop.ccp_conn = Some(ccp_conn);
@@ -2123,6 +2154,26 @@ mod tests {
             tag_order(&msg),
             [8, 9, 35, 34, 52, 98, 108, 141, 6059, 6034, 6968, 6490, 6266, 6351, 6397, 6947, 8361, 8098, 10],
         );
+    }
+
+    // ibx#399: reconnect attempts go to the primary host and its backups in
+    // turn.
+    #[test]
+    fn reconnect_hosts_rotate_primary_and_backups() {
+        assert_eq!(ccp_reconnect_hosts("cdc1.example.com"),
+            ["cdc1.example.com", "cdc1-hb1.example.com", "cdc1-hb2.example.com"]);
+        let hosts: Vec<String> = (1..=7).map(|a| ccp_reconnect_host("cdc1.example", a)).collect();
+        assert_eq!(hosts, ["cdc1.example", "cdc1-hb1.example", "cdc1-hb2.example",
+            "cdc1.example", "cdc1-hb1.example", "cdc1-hb2.example", "cdc1.example"]);
+        assert_eq!(ccp_reconnect_host("cdc1.example", 0), "cdc1.example");
+    }
+
+    #[test]
+    fn reconnect_hosts_without_backups() {
+        assert_eq!(ccp_reconnect_hosts("127.0.0.1"), ["127.0.0.1"]);
+        assert_eq!(ccp_reconnect_hosts("::1"), ["::1"]);
+        assert_eq!(ccp_reconnect_hosts("localhost"), ["localhost"]);
+        assert_eq!(ccp_reconnect_host("localhost", 2), "localhost");
     }
 
     #[test]

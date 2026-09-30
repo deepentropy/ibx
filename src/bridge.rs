@@ -1067,6 +1067,9 @@ pub struct SharedState {
     /// (ibx#242). The `Event::Disconnected` channel path is optional; this
     /// flag is always populated.
     connection_lost: AtomicBool,
+    /// Link status messages for every client, as errors with id -1: link
+    /// lost / restored and farm broken (ibx#399). (code, message).
+    connection_notices: Mutex<Vec<(i64, String)>>,
     /// Notifier for waking consumers (e.g. Python event loop) when data arrives.
     notify_mutex: Mutex<bool>,
     notify_condvar: Condvar,
@@ -1081,6 +1084,7 @@ impl SharedState {
             portfolio: PortfolioState::new(),
             ccp_rtt_ns: AtomicU64::new(0),
             connection_lost: AtomicBool::new(false),
+            connection_notices: Mutex::new(Vec::new()),
             notify_mutex: Mutex::new(false),
             notify_condvar: Condvar::new(),
         }
@@ -1099,6 +1103,18 @@ impl SharedState {
     #[inline]
     pub fn take_connection_lost(&self) -> bool {
         self.connection_lost.swap(false, Ordering::AcqRel)
+    }
+
+    /// Queue a link status message for the clients (ibx#399). Hot-loop side.
+    #[doc(hidden)]
+    pub fn push_connection_notice(&self, code: i64, message: String) {
+        self.connection_notices.lock().unwrap().push((code, message));
+        self.notify();
+    }
+
+    /// Link status messages since the last call: (code, message), in order.
+    pub fn drain_connection_notices(&self) -> Vec<(i64, String)> {
+        std::mem::take(&mut *self.connection_notices.lock().unwrap())
     }
 
     /// Record an auth-connection RTT sample (ibx#158). Hot-loop side.

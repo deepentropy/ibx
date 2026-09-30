@@ -10,7 +10,7 @@ use std::io;
 use crate::bridge::{Event, SharedState};
 use crate::engine::context::Context;
 use crate::config::chrono_free_timestamp;
-use crate::gateway::{connect_farm, reconnect_ccp_session, CcpReconnect, ReconnectAuth};
+use crate::gateway::{ccp_reconnect_host, connect_farm, reconnect_ccp_via, CcpReconnect, ReconnectAuth};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{ControlCommand, Fill, InstrumentId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
@@ -63,6 +63,11 @@ pub struct HotLoop {
     hb: HeartbeatState,
     /// Reusable buffer for control commands (avoids per-iteration allocation).
     cmd_buf: Vec<ControlCommand>,
+    /// Connection states last reported to the clients; `None` until the
+    /// first observation (ibx#399).
+    links: Option<Links>,
+    /// Market-data farm name, for the farm status messages.
+    farm_name: String,
     // ── Subsystems ──
     pub(crate) farm: FarmState,
     pub(crate) ccp: CcpState,
@@ -164,6 +169,8 @@ impl HotLoop {
             pending_hmds_reconnect: None,
             hmds_reconnect_attempt: 0,
             hmds_next_attempt_at: None,
+            links: None,
+            farm_name: "usfarm".to_string(),
         }
     }
 
@@ -427,6 +434,10 @@ impl HotLoop {
             self.maybe_spawn_ccp_reconnect();
             self.maybe_spawn_hmds_reconnect();
 
+            // 5c. Tell the clients about lost and restored links (ibx#399)
+            self.report_link_changes();
+            self.maybe_report_restored();
+
             // 6. Wake any waiting consumers (e.g. Python event loop)
             self.shared.notify();
 
@@ -446,6 +457,71 @@ impl HotLoop {
         self.farm.disconnected
             && self.ccp.disconnected
             && (self.hmds_conn.is_none() || self.hmds.disconnected)
+    }
+
+    fn current_links(&self) -> Links {
+        Links {
+            ccp: !self.ccp.disconnected && self.ccp_conn.is_some(),
+            farm: !self.farm.disconnected && self.farm_conn.is_some(),
+            hmds: !self.hmds.disconnected && self.hmds_conn.is_some(),
+        }
+    }
+
+    fn hmds_farm_name(&self) -> &str {
+        self.reconnect_auth.as_ref()
+            .map(|a| a.hmds_farm.as_str())
+            .filter(|f| !f.is_empty())
+            .unwrap_or("ushmds")
+    }
+
+    /// A lost link is reported to every client at once, as the reference
+    /// does (ibx#399): 1100 for the auth connection, 2103 / 2105 for the
+    /// market-data and historical farms. The clients stay connected.
+    fn report_link_changes(&mut self) {
+        let now = self.current_links();
+        let Some(before) = self.links.replace(now) else { return };
+        if before == now {
+            return;
+        }
+        if before.ccp && !now.ccp {
+            self.shared.push_connection_notice(1100, LINK_LOST.to_string());
+        }
+        if before.farm && !now.farm {
+            self.shared.push_connection_notice(2103, format!("Market data farm connection is broken:{}", self.farm_name));
+        }
+        if before.hmds && !now.hmds {
+            let name = self.hmds_farm_name().to_string();
+            self.shared.push_connection_notice(2105, format!("HMDS data farm connection is broken:{}", name));
+        }
+    }
+
+    /// 1102 after a reconnect of the auth connection, once its order status
+    /// replay has ended: at once when the data farms are up, else when they
+    /// are up or after `RESTORE_FARM_WAIT`, with the farms that are not
+    /// (ibx#399).
+    fn maybe_report_restored(&mut self) {
+        let Some(end_at) = self.ccp.status_replay_end_at else { return };
+        let links = self.current_links();
+        let hmds_expected = links.hmds
+            || self.reconnect_auth.as_ref().is_some_and(|a| !a.hmds_host.is_empty());
+        let all_up = links.farm && (links.hmds || !hmds_expected);
+        if !all_up && end_at.elapsed() < RESTORE_FARM_WAIT {
+            return;
+        }
+        self.ccp.status_replay_end_at = None;
+        let mut farms = vec![(self.farm_name.clone(), links.farm)];
+        if hmds_expected {
+            farms.push((self.hmds_farm_name().to_string(), links.hmds));
+        }
+        let names = |up: bool| farms.iter().filter(|f| f.1 == up).map(|f| f.0.as_str()).collect::<Vec<_>>().join("; ");
+        let message = if all_up {
+            format!("{} All data farms are connected: {}.", LINK_RESTORED, names(true))
+        } else {
+            format!("{} The following farms are connected: {}. The following farms are not connected: {}.",
+                LINK_RESTORED, names(true), names(false))
+        };
+        log::info!("Link restored: {}", message);
+        self.shared.push_connection_notice(1102, message);
     }
 
     fn emit_hmds_unavailable(&self, req_id: u32, from_historical: bool) {
@@ -891,6 +967,13 @@ impl HotLoop {
         self.ccp.reconnect(conn, &mut self.ccp_conn, &mut self.hb, &self.account_id);
     }
 
+    /// Set the market-data farm name used in the farm status messages.
+    pub fn set_farm_name(&mut self, name: String) {
+        if !name.is_empty() {
+            self.farm_name = name;
+        }
+    }
+
     /// Set cached auth credentials for farm auto-reconnect.
     pub fn set_reconnect_auth(&mut self, auth: ReconnectAuth) {
         self.reconnect_auth = Some(auth);
@@ -926,7 +1009,7 @@ impl HotLoop {
         }
         match self.farm_next_attempt_at {
             None => {
-                let delay = reconnect_backoff(self.farm_reconnect_attempt);
+                let delay = reconnect_backoff();
                 log::info!("Farm reconnect attempt {} scheduled in {:?} (ibx#218)",
                     self.farm_reconnect_attempt + 1, delay);
                 self.farm_next_attempt_at = Some(Instant::now() + delay);
@@ -952,7 +1035,7 @@ impl HotLoop {
         }
         match self.ccp_next_attempt_at {
             None => {
-                let delay = reconnect_backoff(self.ccp_reconnect_attempt);
+                let delay = reconnect_backoff();
                 log::info!("CCP reconnect attempt {} scheduled in {:?} (ibx#218)",
                     self.ccp_reconnect_attempt + 1, delay);
                 self.ccp_next_attempt_at = Some(Instant::now() + delay);
@@ -1017,13 +1100,11 @@ impl HotLoop {
             Ok(Err(e)) => {
                 log::error!("Farm auto-reconnect failed (attempt {}): {}", self.farm_reconnect_attempt, e);
                 self.pending_farm_reconnect = None;
-                // Notify once after three straight failures; retries continue
-                // on the backoff ladder — the old 3-attempt hard cap gave up
-                // sooner than the gateway would (ibx#218).
+                // Retries continue on the backoff; the session stays open,
+                // as with the reference, whose clients learn of the loss
+                // from the farm status message (ibx#218, ibx#399).
                 if self.farm_reconnect_attempt == 3 {
-                    log::error!("Farm auto-reconnect failed 3 times — notifying (retries continue)");
-                    self.shared.set_connection_lost();
-                    emit(&self.event_tx, Event::Disconnected);
+                    log::error!("Farm auto-reconnect failed 3 times (retries continue)");
                 }
             }
             Err(crossbeam_channel::TryRecvError::Empty) => {}
@@ -1046,13 +1127,15 @@ impl HotLoop {
         };
         self.ccp_reconnect_attempt += 1;
         let attempt = self.ccp_reconnect_attempt;
-        log::info!("CCP auto-reconnect attempt {} starting (host={})", attempt, auth.host);
+        // The primary host and its backups in turn (ibx#399).
+        let host = ccp_reconnect_host(&auth.host, attempt);
+        log::info!("CCP auto-reconnect attempt {} starting (host={})", attempt, host);
 
         let (tx, rx) = crossbeam_channel::bounded(1);
         std::thread::Builder::new()
             .name(format!("ccp-reconnect-{}", attempt))
             .spawn(move || {
-                let _ = tx.send(reconnect_ccp_session(&auth));
+                let _ = tx.send(reconnect_ccp_via(&auth, &host));
             })
             .ok();
         self.pending_ccp_reconnect = Some(rx);
@@ -1080,11 +1163,10 @@ impl HotLoop {
             Ok(Err(e)) => {
                 log::error!("CCP auto-reconnect failed (attempt {}): {}", self.ccp_reconnect_attempt, e);
                 self.pending_ccp_reconnect = None;
-                // See the farm path: notify once, keep retrying (ibx#218).
+                // See the farm path: the clients had the lost-link message
+                // at once and stay connected (ibx#399).
                 if self.ccp_reconnect_attempt == 3 {
-                    log::error!("CCP auto-reconnect failed 3 times — notifying (retries continue)");
-                    self.shared.set_connection_lost();
-                    emit(&self.event_tx, Event::Disconnected);
+                    log::error!("CCP auto-reconnect failed 3 times (retries continue)");
                 }
             }
             Err(crossbeam_channel::TryRecvError::Empty) => {}
@@ -1367,24 +1449,34 @@ pub(crate) fn clone_for_event<T: Clone>(event_tx: &Option<Sender<Event>>, value:
     event_tx.as_ref().map(|_| value.clone())
 }
 
+/// Jittered reconnect delay for CCP/farm: 5 s plus up to 10 s, the same
+/// for every attempt, as the reference retries a lost link every 5 to 15 s
+/// (ibx#399; ibx#218 for the jitter). Immediate rapid-fire re-dials risk
+/// server-side rate limiting. (HMDS keeps its own schedule below.)
+pub(crate) fn reconnect_backoff() -> std::time::Duration {
+    const FLOOR_MS: u64 = 5_000;
+    const JITTER_MS: u64 = 10_000;
+    std::time::Duration::from_millis(FLOOR_MS + rand::random::<u64>() % JITTER_MS)
+}
+
+/// Up/down state of each connection, as reported to the clients.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Links {
+    ccp: bool,
+    farm: bool,
+    hmds: bool,
+}
+
+/// Longest wait for the data farms before the restored-link message.
+const RESTORE_FARM_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+const LINK_LOST: &str = "Connectivity between client and server has been lost.";
+const LINK_RESTORED: &str = "Connectivity between client and server has been restored - data maintained.";
+
 /// Backoff schedule for HMDS reconnect attempts (ibx#187, ib-agent#153).
 /// `min(64, 3 * 2^(attempt-1))` seconds — approximates the captured cadence
 /// of 3.2 / 11.4 / 18.5 / 42.7 / 63.7 s the official client uses.
 #[inline]
-/// Jittered reconnect backoff for CCP/farm (ibx#218), mirroring the
-/// gateway's ladder: delay = min(2s floor + ladder + jitter, 82s). The
-/// ladder climbs 0/5/15/30/50/60s per consecutive failure and the jitter
-/// range grows 5s -> 20s (+5s per failure). Immediate rapid-fire re-dials
-/// risk server-side rate limiting and eviction. (HMDS keeps its own
-/// capture-matched doubling schedule below.)
-pub(crate) fn reconnect_backoff(failures: u32) -> std::time::Duration {
-    const LADDER_MS: [u64; 6] = [0, 5_000, 15_000, 30_000, 50_000, 60_000];
-    let ladder = LADDER_MS[(failures as usize).min(LADDER_MS.len() - 1)];
-    let jitter_max = (5_000 + 5_000 * failures as u64).min(20_000);
-    let jitter = rand::random::<u64>() % jitter_max;
-    std::time::Duration::from_millis((2_000 + ladder + jitter).min(82_000))
-}
-
 pub(crate) fn hmds_reconnect_backoff(attempt: u32) -> std::time::Duration {
     let n = attempt.saturating_sub(1).min(31);
     let secs = (3u64.saturating_mul(1u64 << n)).min(64);
@@ -1846,25 +1938,91 @@ mod tests {
         assert!(hist[0].1.bars.is_empty());
     }
 
+    // ibx#399: every CCP/farm reconnect waits 5 to 15 s, as the reference.
     #[test]
-    // ibx#218: the CCP/farm ladder — floor 2s, ladder 0/5/15/30/50/60s,
-    // jitter range growing 5s -> 20s, ceiling 82s.
-    #[test]
-    fn reconnect_backoff_ladder_bounds() {
+    fn reconnect_backoff_is_five_to_fifteen_seconds() {
         use std::time::Duration;
-        let expect = |failures: u32, lo: u64, hi: u64| {
-            for _ in 0..50 {
-                let d = reconnect_backoff(failures);
-                assert!(d >= Duration::from_millis(lo) && d < Duration::from_millis(hi),
-                    "failures={} got {:?}, expected [{}ms, {}ms)", failures, d, lo, hi);
-            }
-        };
-        expect(0, 2_000, 7_000);    // 2s + 0 + jitter(0..5s)
-        expect(1, 7_000, 17_000);   // 2s + 5s + jitter(0..10s)
-        expect(2, 17_000, 32_000);  // 2s + 15s + jitter(0..15s)
-        expect(3, 32_000, 52_000);  // 2s + 30s + jitter(0..20s)
-        expect(5, 62_000, 82_001);  // 2s + 60s + jitter(0..20s), capped 82s
-        expect(50, 62_000, 82_001); // ladder index capped
+        let (mut lo, mut hi) = (Duration::MAX, Duration::ZERO);
+        for _ in 0..2_000 {
+            let d = reconnect_backoff();
+            assert!(d >= Duration::from_secs(5) && d < Duration::from_secs(15), "got {:?}", d);
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+        assert!(lo < Duration::from_secs(7) && hi > Duration::from_secs(13), "jittered over the range: {:?}..{:?}", lo, hi);
+    }
+
+    fn loopback_conn() -> (Connection, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (Connection::new_raw(client).unwrap(), server)
+    }
+
+    fn engine_with_links() -> (HotLoop, Arc<SharedState>, Vec<std::net::TcpStream>) {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.set_reconnect_auth(reconnect_auth_with_host("gw.example"));
+        engine.set_farm_name("usfarm".into());
+        let (ccp, s1) = loopback_conn();
+        let (farm, s2) = loopback_conn();
+        let (hmds, s3) = loopback_conn();
+        engine.ccp_conn = Some(ccp);
+        engine.farm_conn = Some(farm);
+        engine.hmds_conn = Some(hmds);
+        (engine, shared, vec![s1, s2, s3])
+    }
+
+    // ibx#399: a lost link is told to the clients at once, once, and the
+    // session stays open.
+    #[test]
+    fn lost_links_are_reported_at_once() {
+        let (mut engine, shared, _servers) = engine_with_links();
+        engine.report_link_changes();
+        assert!(shared.drain_connection_notices().is_empty(), "first look: nothing to report");
+
+        engine.ccp.disconnected = true;
+        engine.farm.disconnected = true;
+        engine.hmds.disconnected = true;
+        engine.report_link_changes();
+        assert_eq!(shared.drain_connection_notices(), vec![
+            (1100, "Connectivity between client and server has been lost.".to_string()),
+            (2103, "Market data farm connection is broken:usfarm".to_string()),
+            (2105, "HMDS data farm connection is broken:ushmds".to_string()),
+        ]);
+        engine.report_link_changes();
+        assert!(shared.drain_connection_notices().is_empty(), "reported once");
+        assert!(!shared.take_connection_lost(), "the session is not closed");
+    }
+
+    // ibx#399: 1102 after the status replay end, at once with the farms up.
+    #[test]
+    fn restored_link_is_reported_after_the_status_replay() {
+        let (mut engine, shared, _servers) = engine_with_links();
+        engine.maybe_report_restored();
+        assert!(shared.drain_connection_notices().is_empty(), "no reconnect, no message");
+
+        engine.ccp.status_replay_end_at = Some(Instant::now());
+        engine.maybe_report_restored();
+        assert_eq!(shared.drain_connection_notices(), vec![(1102,
+            "Connectivity between client and server has been restored - data maintained. All data farms are connected: usfarm; ushmds.".to_string())]);
+        engine.maybe_report_restored();
+        assert!(shared.drain_connection_notices().is_empty(), "reported once");
+    }
+
+    // With a farm still down the message waits for it, 30 s at most.
+    #[test]
+    fn restored_link_waits_for_the_farms() {
+        let (mut engine, shared, _servers) = engine_with_links();
+        engine.farm.disconnected = true;
+        engine.ccp.status_replay_end_at = Some(Instant::now());
+        engine.maybe_report_restored();
+        assert!(shared.drain_connection_notices().is_empty(), "farm down: wait");
+
+        engine.ccp.status_replay_end_at = Instant::now().checked_sub(RESTORE_FARM_WAIT);
+        engine.maybe_report_restored();
+        assert_eq!(shared.drain_connection_notices(), vec![(1102,
+            "Connectivity between client and server has been restored - data maintained. The following farms are connected: ushmds. The following farms are not connected: usfarm.".to_string())]);
     }
 
     // ibx#219: the liveness ladder must be ordered and inside the server's

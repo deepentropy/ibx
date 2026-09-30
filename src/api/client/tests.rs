@@ -3409,6 +3409,23 @@ fn connection_loss_raises_no_error_callback() {
     );
 }
 
+// ibx#399: a lost and restored link reaches the client as errors with id
+// -1, and the client stays connected.
+#[test]
+fn link_notices_are_errors_and_keep_the_client_connected() {
+    let (client, _rx, shared) = test_client();
+    let mut w = RecordingWrapper::default();
+
+    shared.push_connection_notice(1100, "lost.".into());
+    shared.push_connection_notice(2103, "broken:usfarm".into());
+    client.process_msgs(&mut w);
+    shared.push_connection_notice(1102, "restored.".into());
+    client.process_msgs(&mut w);
+
+    assert_eq!(w.events, vec!["error:-1:1100:lost.", "error:-1:2103:broken:usfarm", "error:-1:1102:restored."]);
+    assert!(client.is_connected());
+}
+
 #[test]
 fn explicit_disconnect_fires_connection_closed() {
     let (client, _rx, _shared) = test_client();

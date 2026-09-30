@@ -172,6 +172,12 @@ impl EClient {
             }
         }
 
+        // Link lost / restored and farm status (ibx#399): errors with id -1.
+        // The session stays open across a lost link.
+        for (code, msg) in shared.drain_connection_notices() {
+            call_wrapper!(self.wrapper, py, "error", (-1i64, code, msg.as_str(), ""));
+        }
+
         // Drain fills -> execDetails + orderStatus. The commission report
         // comes later, from its own server frame (ibx#471).
         let fills = shared.orders.drain_fills_with_exec();

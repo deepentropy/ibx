@@ -237,6 +237,16 @@ pub(crate) struct CcpState {
     /// con_id has been resolved via the same 35=d path that user-initiated
     /// `reqContractDetails` uses. See ibx#156, ib-agent#142.
     pub(crate) pending_scanner_enrichment: Vec<PendingScannerEnrichment>,
+    /// Last execution of the session and its server time, for the fill-up
+    /// request after a reconnect (ibx#399).
+    pub(crate) last_exec: Option<(String, String)>,
+    /// Running number of the trades requests of the session.
+    pub(crate) next_trades_request: u32,
+    /// Set by a reconnect until the end frame of the order status replay.
+    pub(crate) awaiting_status_replay: bool,
+    /// When the end frame of the post-reconnect status replay came; the
+    /// engine reports the restored link from it (ibx#399).
+    pub(crate) status_replay_end_at: Option<Instant>,
 }
 
 /// Scanner result parked for contract-detail fan-out.
@@ -447,6 +457,11 @@ impl CcpState {
             next_internal_secdef_id: 0xF000_0000,
             auto_fetched_conids: HashSet::new(),
             pending_scanner_enrichment: Vec::new(),
+            last_exec: None,
+            // The login sends the first trades request.
+            next_trades_request: 5,
+            awaiting_status_replay: false,
+            status_replay_end_at: None,
         }
     }
 
@@ -828,6 +843,22 @@ impl CcpState {
         event_tx: &Option<Sender<Event>>,
         account_id: &str,
     ) {
+        // End markers are not orders (ibx#399): the end of a trades reply
+        // (it carries the request id), and the end of the order status
+        // replay (wildcard order id).
+        if let Some(request) = parsed.get(&6556).filter(|r| !r.starts_with("PT.")) {
+            log::info!("ExecReport: end of trades request {}", request);
+            return;
+        }
+        if parsed.get(&11).map(|s| s.as_str()) == Some("*") {
+            if self.awaiting_status_replay {
+                self.awaiting_status_replay = false;
+                self.status_replay_end_at = Some(Instant::now());
+            }
+            log::debug!("ExecReport: end of order status replay");
+            return;
+        }
+
         // CCP recovery push format A (ib-agent#155, captured against live):
         // 35=8 with 150=0/39=0, tag 11 carries `<permId>.0`, the originating
         // orderId is in tag 6121. For these, prefer 6121 as the local key so
@@ -1140,6 +1171,11 @@ impl CcpState {
                 Some(_) => !self.record_exec_id(exec_id),
                 None => self.seen_exec_ids.contains(exec_id),
             };
+            if !duplicate && !exec_id.is_empty() {
+                // Last execution of the session, for the fill-up after a reconnect (ibx#399).
+                let time = parsed.get(&60).or_else(|| parsed.get(&52)).cloned().unwrap_or_default();
+                self.last_exec = Some((exec_id.to_string(), time));
+            }
             if duplicate {
                 log::warn!("Duplicate ExecID={}: fill not booked again", exec_id);
             } else if let Some(order) = tracked {
@@ -2306,6 +2342,8 @@ impl CcpState {
 
     pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {
         self.disconnected = true;
+        self.awaiting_status_replay = false;
+        self.status_replay_end_at = None;
         context.mark_orders_uncertain();
         // Don't emit Event::Disconnected — auto-reconnect handles CCP drops transparently.
         // Python is only notified if reconnect exhausts retries.
@@ -2332,18 +2370,72 @@ impl CcpState {
                 (fix::TAG_MSG_TYPE, "U"), (fix::TAG_SENDING_TIME, &ts),
                 (6040, "91"), (1, account_id), (6556, "DR.1"), (6712, "1"),
             ]);
+            // The fills of the gap come only in the answer to this request
+            // (ibx#399); they take the normal report path.
+            let fill_up = self.fill_up_request(account_id, &ts);
+            let fill_up: Vec<(u32, &str)> = fill_up.iter().map(|(t, v)| (*t, v.as_str())).collect();
+            let _ = conn.send_fix(&fill_up);
             let _ = conn.send_fix(&[
                 (fix::TAG_MSG_TYPE, "U"), (fix::TAG_SENDING_TIME, &ts),
                 (6040, "6"), (6036, "1"), (6095, account_id), (6529, "AR.3"),
             ]);
+            // Status of the working orders; its end frame starts the
+            // restored-link report.
+            let _ = conn.send_fix(&status_replay_request(&ts));
+            self.awaiting_status_replay = true;
+            self.status_replay_end_at = None;
 
-            // Resting open orders are pushed unsolicited by CCP as 35=8 with
-            // 150=0/39=0 carrying originating clientId (6119) and orderId (6121),
-            // terminated by 11='*' sentinel. See ib-agent#155, ibx#191.
             hb.last_ccp_sent = Instant::now();
-            log::info!("CCP reconnected, sent account/position re-subscribe");
+            log::info!("CCP reconnected, sent account re-subscribe, fill-up and order status requests");
         }
     }
+
+    /// The trades request after a reconnect (ibx#399): the fills since the
+    /// last execution of the session, as the reference asks for them; with
+    /// no execution yet, the fills of the day.
+    pub(crate) fn fill_up_request(&mut self, account_id: &str, now: &str) -> Vec<(u32, String)> {
+        let n = self.next_trades_request;
+        self.next_trades_request += 1;
+        let mut fields: Vec<(u32, String)> = vec![
+            (fix::TAG_MSG_TYPE, "U".into()),
+            (fix::TAG_SENDING_TIME, now.into()),
+            (6040, "72".into()),
+        ];
+        match &self.last_exec {
+            Some((exec_id, time)) => {
+                // The reference marks an execution whose commission it has.
+                let (base, _) = split_exec_revision(exec_id);
+                let exec_ref = if self.commission_revisions.contains_key(base) {
+                    format!("{}-CM", exec_id)
+                } else {
+                    exec_id.clone()
+                };
+                fields.extend([
+                    (6536, time.clone()),
+                    (6537, now.into()),
+                    (6556, format!("todayfillup{}", n)),
+                    (6538, "1".into()),
+                    (1, account_id.into()),
+                    (6539, time.clone()),
+                    (17, exec_ref),
+                ]);
+            }
+            None => {
+                let day_start = format!("{}-00:00:00", now.get(..8).unwrap_or(now));
+                fields.extend([
+                    (6536, day_start),
+                    (6537, now.into()),
+                    (6556, format!("today{}", n)),
+                ]);
+            }
+        }
+        fields
+    }
+}
+
+/// The order status replay request: every working order (ibx#399).
+pub(crate) fn status_replay_request(now: &str) -> [(u32, &str); 5] {
+    [(fix::TAG_MSG_TYPE, "H"), (fix::TAG_SENDING_TIME, now), (11, "*"), (55, "*"), (54, "*")]
 }
 
 /// Handle account update messages (cross-cutting, called from CCP message processing).
@@ -4597,5 +4689,127 @@ mod tests {
         assert_eq!(tif(&[(59, "0"), (8534, "1")]), "OVERNIGHT + DAY");
         assert_eq!(tif(&[(59, "0"), (6004, "OVERNIGHT")]), "OVERNIGHT");
         assert_eq!(tif(&[(59, "Z")]), "???");
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+
+    fn tag_order(msg: &[u8]) -> Vec<u32> {
+        msg.split(|&b| b == fix::SOH)
+            .filter_map(|f| f.iter().position(|&b| b == b'=').map(|i| &f[..i]))
+            .filter_map(|t| std::str::from_utf8(t).ok()?.parse().ok())
+            .collect()
+    }
+
+    fn build(fields: &[(u32, String)]) -> Vec<u8> {
+        let refs: Vec<(u32, &str)> = fields.iter().map(|(t, v)| (*t, v.as_str())).collect();
+        fix::fix_build(&refs, 4)
+    }
+
+    fn frame(pairs: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
+        pairs.iter().map(|(t, v)| (*t, v.to_string())).collect()
+    }
+
+    // ibx#399: after a reconnect the fills since the last execution of the
+    // session are asked for, in the reference form.
+    #[test]
+    fn fill_up_request_after_a_known_execution() {
+        let mut ccp = CcpState::new();
+        ccp.last_exec = Some(("00025b49.6abe16e9.01.01.01".into(), "20260930-19:03:49".into()));
+        let fields = ccp.fill_up_request("DU1", "20260930-19:05:26");
+        let msg = build(&fields);
+        assert_eq!(tag_order(&msg), [8, 9, 35, 34, 52, 6040, 6536, 6537, 6556, 6538, 1, 6539, 17, 10]);
+        let parsed = fix::fix_parse(&msg);
+        assert_eq!(parsed[&35], "U");
+        assert_eq!(parsed[&6040], "72");
+        assert_eq!(parsed[&6536], "20260930-19:03:49");
+        assert_eq!(parsed[&6537], "20260930-19:05:26");
+        assert_eq!(parsed[&6556], "todayfillup5");
+        assert_eq!(parsed[&6538], "1");
+        assert_eq!(parsed[&1], "DU1");
+        assert_eq!(parsed[&6539], "20260930-19:03:49");
+        assert_eq!(parsed[&17], "00025b49.6abe16e9.01.01.01", "no commission seen: no suffix");
+
+        // With its commission report, the execution id carries the suffix;
+        // the request number runs on.
+        assert!(ccp.record_commission("00025b49.6abe16e9.01.01.01"));
+        let parsed = fix::fix_parse(&build(&ccp.fill_up_request("DU1", "20260930-19:05:27")));
+        assert_eq!(parsed[&17], "00025b49.6abe16e9.01.01.01-CM");
+        assert_eq!(parsed[&6556], "todayfillup6");
+    }
+
+    #[test]
+    fn fill_up_request_without_an_execution_asks_for_the_day() {
+        let mut ccp = CcpState::new();
+        let msg = build(&ccp.fill_up_request("DU1", "20260930-19:05:26"));
+        assert_eq!(tag_order(&msg), [8, 9, 35, 34, 52, 6040, 6536, 6537, 6556, 10]);
+        let parsed = fix::fix_parse(&msg);
+        assert_eq!(parsed[&6536], "20260930-00:00:00");
+        assert_eq!(parsed[&6556], "today5");
+    }
+
+    #[test]
+    fn status_replay_request_asks_for_every_working_order() {
+        let msg = fix::fix_build(&status_replay_request("20260930-19:05:26"), 5);
+        assert_eq!(tag_order(&msg), [8, 9, 35, 34, 52, 11, 55, 54, 10]);
+        let parsed = fix::fix_parse(&msg);
+        assert_eq!((parsed[&35].as_str(), parsed[&11].as_str(), parsed[&55].as_str(), parsed[&54].as_str()), ("H", "*", "*", "*"));
+    }
+
+    // A new fill of the session is the start of the next fill-up.
+    #[test]
+    fn a_new_fill_is_the_last_execution() {
+        let mut context = Context::new();
+        let instrument = context.register_instrument(265598);
+        context.insert_order(crate::types::Order::new(42, instrument, Side::Buy, 1, 100 * PRICE_SCALE, b'2', b'0', 0));
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        let fill = frame(&[(11, "42"), (20, "0"), (39, "2"), (150, "2"), (97, "Y"), (17, "00025b49.6abe16e9.01.01.01"),
+            (31, "254.2"), (32, "1"), (14, "1"), (151, "0"), (6, "254.2"),
+            (52, "20260930-19:05:27"), (60, "20260930-19:04:31")]);
+        ccp.handle_exec_report(&fill, &mut context, &shared, &None, "DU1");
+        assert_eq!(shared.orders.drain_fills_with_exec().len(), 1, "a fill of the gap takes the normal path");
+        assert_eq!(ccp.last_exec, Some(("00025b49.6abe16e9.01.01.01".into(), "20260930-19:04:31".into())));
+        // The same execution again is a duplicate and changes nothing.
+        ccp.last_exec = None;
+        ccp.handle_exec_report(&fill, &mut context, &shared, &None, "DU1");
+        assert!(shared.orders.drain_fills_with_exec().is_empty());
+        assert_eq!(ccp.last_exec, None);
+    }
+
+    // ibx#399: the end markers of both replies create no order and no fill.
+    #[test]
+    fn end_markers_create_no_order() {
+        let mut context = Context::new();
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        ccp.awaiting_status_replay = true;
+
+        let trades_end = frame(&[(43, "N"), (52, "20260930-19:05:27"), (6556, "todayfillup88"),
+            (17, "140781.1790795127.0"), (32, "*"), (150, "0"), (39, "0"), (6008, "265598"), (38, "1")]);
+        ccp.handle_exec_report(&trades_end, &mut context, &shared, &None, "DU1");
+        assert!(ccp.status_replay_end_at.is_none(), "not the status replay end");
+
+        let status_end = frame(&[(11, "*"), (55, "*"), (37, "*"), (20, "3"), (150, "0"), (39, "0"), (6008, "265598"), (38, "1")]);
+        ccp.handle_exec_report(&status_end, &mut context, &shared, &None, "DU1");
+
+        assert!(context.order(0).is_none());
+        assert_eq!(context.market.count(), 0, "no instrument registered for a marker");
+        assert!(shared.orders.drain_fills_with_exec().is_empty());
+        assert!(shared.orders.drain_order_updates().is_empty());
+        assert!(!ccp.awaiting_status_replay);
+        assert!(ccp.status_replay_end_at.is_some(), "the status replay end is seen");
+    }
+
+    // Outside a reconnect the status replay end marks nothing.
+    #[test]
+    fn status_replay_end_outside_a_reconnect_marks_nothing() {
+        let mut context = Context::new();
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        ccp.handle_exec_report(&frame(&[(11, "*"), (55, "*")]), &mut context, &shared, &None, "DU1");
+        assert!(ccp.status_replay_end_at.is_none());
     }
 }

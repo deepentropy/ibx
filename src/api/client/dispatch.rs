@@ -33,6 +33,11 @@ impl EClient {
     /// already produced.
     fn dispatch_connection(&self, wrapper: &mut impl Wrapper) {
         use std::sync::atomic::Ordering;
+        // Link lost / restored and farm status (ibx#399): errors with id -1.
+        // The session stays open across a lost link.
+        for (code, msg) in self.shared.drain_connection_notices() {
+            wrapper.error(-1, code, &msg, "");
+        }
         if self.shared.take_connection_lost() {
             self.connected.store(false, Ordering::Release);
         }
