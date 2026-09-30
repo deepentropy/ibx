@@ -46,7 +46,8 @@ pub(crate) fn round_lot_reply(context: &mut Context, req_id: &str, msg: &[u8]) -
 }
 
 /// Lookups with no reply in time: the subscriptions go out with a round
-/// lot of 1 (ibx#287).
+/// lot of 1, the lot the reference gives a contract it holds no
+/// definition for (ibx#287).
 pub(crate) fn sweep_round_lot_lookups(context: &mut Context) {
     if context.lot_lookups.is_empty() { return; }
     let now = Instant::now();
@@ -55,7 +56,10 @@ pub(crate) fn sweep_round_lot_lookups(context: &mut Context) {
         if *deadline <= now { expired.push((id.clone(), *con_id)); false } else { true }
     });
     for (id, con_id) in expired {
-        log::warn!("No definition for con_id {} ({}): its sizes are not scaled by a round lot", con_id, id);
+        log::warn!(
+            "No definition for con_id {} within {:?} ({}): subscribing with a round lot of 1, so its bid, ask and last sizes are not in round lots",
+            con_id, LOT_LOOKUP_TIMEOUT, id,
+        );
         release_lot_parked(context, con_id, 1);
     }
 }

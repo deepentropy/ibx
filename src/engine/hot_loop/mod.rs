@@ -290,7 +290,7 @@ impl HotLoop {
         }
         if !self.context.lot_lookups.iter().any(|(_, c, _)| *c == sub.con_id) {
             let Some(conn) = self.ccp_conn.as_mut().filter(|_| !self.ccp.disconnected) else {
-                log::warn!("No auth connection to read the round lot of con_id {}: sizes as on the wire", sub.con_id);
+                log::warn!("No auth connection to read the round lot of con_id {}: subscribing with a round lot of 1", sub.con_id);
                 self.context.market.set_round_lot(id, 1);
                 return false;
             };
@@ -317,6 +317,23 @@ impl HotLoop {
         }
         self.context.lot_parked.push(sub.clone());
         true
+    }
+
+    /// Poll the auth socket once, then the timeouts of what waits on it,
+    /// and send the market data subscriptions it released (ibx#287).
+    #[inline]
+    fn poll_auth(&mut self) {
+        self.ccp.poll_executions(
+            &mut self.ccp_conn, &mut self.context, &self.shared,
+            &self.event_tx, &mut self.hb, &self.account_id,
+        );
+        self.ccp.sweep_pending_schedule_pairs(&self.shared, &self.event_tx);
+        self.ccp.sweep_scanner_enrichments(&self.shared);
+        self.ccp.sweep_contract_details(&self.shared, &self.event_tx, &mut self.ccp_conn, &mut self.hb);
+        order_builder::sweep_rth_lookups(&mut self.context);
+        farm::sweep_round_lot_lookups(&mut self.context);
+        self.send_lot_ready();
+        self.hmds.sweep_pending_historical(&self.shared);
     }
 
     /// Send the subscriptions whose round lot came in (ibx#287).
@@ -406,17 +423,7 @@ impl HotLoop {
 
             // 3. Busy-poll auth socket for execution reports
             let ccp_was_ok = !self.ccp.disconnected;
-            self.ccp.poll_executions(
-                &mut self.ccp_conn, &mut self.context, &self.shared,
-                &self.event_tx, &mut self.hb, &self.account_id,
-            );
-            self.ccp.sweep_pending_schedule_pairs(&self.shared, &self.event_tx);
-            self.ccp.sweep_scanner_enrichments(&self.shared);
-            self.ccp.sweep_contract_details(&self.shared, &self.event_tx, &mut self.ccp_conn, &mut self.hb);
-            order_builder::sweep_rth_lookups(&mut self.context);
-            farm::sweep_round_lot_lookups(&mut self.context);
-            self.send_lot_ready();
-            self.hmds.sweep_pending_historical(&self.shared);
+            self.poll_auth();
             let _ = ccp_was_ok; // reconnects are scheduled below (ibx#218)
 
             // 4. Check control_plane_rx (SPSC) for commands
@@ -1290,6 +1297,11 @@ impl HotLoop {
             &mut self.farm_conn, &mut self.context, &self.shared,
             &self.event_tx, &mut self.hb,
         );
+    }
+
+    /// Test-only: poll the auth socket once, as step 3 of the loop does.
+    pub fn poll_auth_for_test(&mut self) {
+        self.poll_auth();
     }
 
     /// Test-only: trigger farm reconnect spawn.

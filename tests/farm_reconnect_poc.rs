@@ -98,7 +98,11 @@ fn hotloop_auto_reconnect_on_farm_disconnect() {
     let acked = |hot_loop: &mut ibx::engine::hot_loop::HotLoop| {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
+            // Both sockets, as the running loop polls them: a stock
+            // subscription is sent once its definition came in on the auth
+            // connection (ibx#287).
             hot_loop.poll_farm_for_test();
+            hot_loop.poll_auth_for_test();
             if hot_loop.market_for_test().min_tick(spy) > 0.0 { return true; }
             std::thread::sleep(Duration::from_millis(5));
         }
