@@ -1133,11 +1133,12 @@ impl CcpState {
         let mut update_out: Option<crate::types::OrderUpdate> = None;
         let mut had_fill = false;
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
+            // A duplicate execution is not booked again, but the report still
+            // runs the order state below: status, order cache, and the end
+            // of a terminal order (ibx#330).
             if !exec_id.is_empty() && !self.record_exec_id(exec_id) {
-                log::warn!("Duplicate ExecID={} — skipping fill", exec_id);
-                return;
-            }
-            if let Some(order) = context.order(clord_id).copied() {
+                log::warn!("Duplicate ExecID={}: fill not booked again", exec_id);
+            } else if let Some(order) = context.order(clord_id).copied() {
                 context.update_order_filled_fixed(clord_id, last_shares);
                 // Order totals ride on every fill report next to the print
                 // (ib-agent#192 C3): the callback's filled and average price
@@ -3416,6 +3417,55 @@ mod tests {
         assert_eq!((second.cum_qty_fixed / crate::types::QTY_SCALE, second.avg_price), (200, 11 * PRICE_SCALE), "the order totals");
         let info = shared.orders.get_order_info(90).expect("order cached");
         assert_eq!(info.order.filled_quantity, 200.0);
+    }
+
+    // ibx#330: a final fill delivered twice is booked once, and the order
+    // ends Filled and leaves the open orders.
+    #[test]
+    fn a_final_fill_delivered_twice_is_booked_once_and_ends_the_order() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.try_register(1005).unwrap();
+        context.insert_order(crate::types::Order::new(90, instrument, Side::Buy, 300, 15 * PRICE_SCALE, b'2', b'0', 0));
+
+        let frame = fill_frame("e-final", 300, "10", 300, "10", 0);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+
+        assert_eq!(shared.orders.drain_fills().len(), 1, "one fill booked");
+        assert_eq!(context.position_fixed(instrument), 300 * crate::types::QTY_SCALE);
+        assert!(context.order(90).is_none(), "the order is retired");
+        assert_eq!(context.finished_status(90), Some(crate::types::OrderStatus::Filled));
+        assert_eq!(shared.orders.drain_completed_orders().len(), 1);
+    }
+
+    // ibx#330: a final fill whose execution was already seen while the order
+    // is still open (an earlier copy of a replay) was a return out of the
+    // whole report: the order stayed open forever. The report now ends the
+    // order and gives its status, with no second fill.
+    #[test]
+    fn a_duplicate_final_fill_still_ends_an_open_order() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.try_register(1005).unwrap();
+        context.insert_order(crate::types::Order::new(90, instrument, Side::Buy, 300, 15 * PRICE_SCALE, b'2', b'0', 0));
+        assert!(ccp.record_exec_id("e-final"), "seen before");
+
+        ccp.handle_exec_report(&fill_frame("e-final", 300, "10", 300, "10", 0), &mut context, &shared, &None, "");
+
+        assert!(shared.orders.drain_fills().is_empty(), "not booked again");
+        assert_eq!(context.position_fixed(instrument), 0);
+        assert!(context.order(90).is_none(), "the order is retired");
+        assert_eq!(context.finished_status(90), Some(crate::types::OrderStatus::Filled));
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.len(), 1, "the status is still reported");
+        assert_eq!(updates[0].status, crate::types::OrderStatus::Filled);
+        assert_eq!(updates[0].filled_qty_fixed, 300 * crate::types::QTY_SCALE);
+        assert_eq!(shared.orders.drain_completed_orders().len(), 1);
+        let info = shared.orders.get_order_info(90).expect("order cache updated");
+        assert_eq!(info.order_state.status, "Filled");
     }
 
     // ibx#313: fill quantities were read as whole numbers, so a fill of a
