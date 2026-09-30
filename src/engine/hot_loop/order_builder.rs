@@ -663,13 +663,18 @@ pub(crate) fn drain_and_send_orders(
                 let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let parent_str = parent_id.to_string();
-                let tp_str = tp_id.to_string();
-                let sl_str = sl_id.to_string();
+                // Order ids in the versioned form of every other order, so
+                // a cancel or a later child refers to what the server holds.
+                let clord = |id: u64| format!("{}.{}", id, context.modify_versions.get(&id).copied().unwrap_or(0));
+                let parent_str = clord(parent_id);
+                let tp_str = clord(tp_id);
+                let sl_str = clord(sl_id);
                 let entry_str = format_price(entry_price);
                 let tp_price_str = format_price(take_profit);
                 let sl_price_str = format_price(stop_loss);
-                let oca_group = format!("OCA_{}", parent_id);
+                // The children's parent link and OCA group, as the reference
+                // sends them (ibx#311, ibx#329).
+                let (parent_link, oca_group) = bracket_parent_link(context, parent_id);
 
                 // 1. Parent order: limit entry
                 context.insert_order(crate::types::Order::new(
@@ -719,9 +724,9 @@ pub(crate) fn drain_and_send_orders(
                     (6210, &destination),
                     (15, currency.as_str()),
                     (204, "0"),
-                    (6107, &parent_str),       // ParentOrderID
+                    (6107, &parent_link),      // ParentOrderID
                     (583, &oca_group),         // OCAGroup
-                    (6209, "ReduceOnFillNonBlock"), // OCA type: gateway default 3 (ibx#215)
+                    (6209, BRACKET_CHILD_OCA_TYPE),
                 ]);
 
                 // 3. Stop-loss child: stop exit, linked to parent, in OCA group
@@ -747,9 +752,9 @@ pub(crate) fn drain_and_send_orders(
                     (6210, &destination),
                     (15, currency.as_str()),
                     (204, "0"),
-                    (6107, &parent_str),       // ParentOrderID
+                    (6107, &parent_link),      // ParentOrderID
                     (583, &oca_group),         // OCAGroup
-                    (6209, "ReduceOnFillNonBlock"), // OCA type: gateway default 3 (ibx#215)
+                    (6209, BRACKET_CHILD_OCA_TYPE),
                 ])
             }
             OrderRequest::SubmitRel { order_id, instrument, side, qty, offset } => {
@@ -853,7 +858,7 @@ pub(crate) fn drain_and_send_orders(
                 ];
                 push_dtc_flag(&mut fields, tif);
                 // Parent link, OCA group and the other attributes (ibx#318).
-                push_extended_attrs(&mut fields, &attrs, true);
+                push_extended_attrs(&mut fields, context, &attrs, true);
                 fields.push((847, "Adaptive".to_string()));      // AlgoStrategy
                 fields.push((5957, "1".to_string()));            // AlgoParamCount
                 fields.push((5958, "adaptivePriority".to_string())); // AlgoParamTag
@@ -893,7 +898,7 @@ pub(crate) fn drain_and_send_orders(
                 ];
                 push_dtc_flag(&mut fields, tif);
                 // Parent link, OCA group and the other attributes (ibx#318).
-                push_extended_attrs(&mut fields, &attrs, true);
+                push_extended_attrs(&mut fields, context, &attrs, true);
                 let (algo_name, param_strs) = build_algo_tags(&algo);
                 fields.push((847, algo_name.to_string()));
                 // Tag 849 (maxPctVol) for algos that use it
@@ -1052,7 +1057,7 @@ pub(crate) fn drain_and_send_orders(
                 push_dtc_flag(&mut fields, tif);
                 // The preview is for the order as it would be placed: its
                 // time-in-force and attributes go too (ibx#318).
-                push_extended_attrs(&mut fields, &attrs, false);
+                push_extended_attrs(&mut fields, context, &attrs, false);
                 let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
                 send_new_order(conn, context, instrument, &refs)
             }
@@ -1629,6 +1634,24 @@ fn synthesize_pending_cancel(
     }
 }
 
+/// OCA type of a bracket child: its siblings are cancelled when one fills.
+/// A child with the default type is refused by the server as a mismatch
+/// with its siblings (ibx#311).
+const BRACKET_CHILD_OCA_TYPE: &str = "CancelOnFillWBlock";
+
+/// The parent link and OCA group of a bracket child (ibx#311, ibx#329):
+/// the parent's current order id, with the version of its last replace,
+/// and the id part of it as the OCA group, as the reference does. The
+/// current id is the one the server holds for the parent, else the
+/// versioned form ibx sends.
+fn bracket_parent_link(context: &Context, parent_id: crate::types::OrderId) -> (String, String) {
+    let link = context.last_clord.get(&parent_id).cloned().unwrap_or_else(|| {
+        format!("{}.{}", parent_id, context.modify_versions.get(&parent_id).copied().unwrap_or(0))
+    });
+    let group = link.split('.').next().unwrap_or(&link).to_string();
+    (link, group)
+}
+
 /// Map the OCA type code (1..=4) to its tag 6209 wire label. 0/unset and
 /// out-of-range coerce to 3 (ReduceOnFillNonBlock), the gateway default
 /// (ibx#215).
@@ -2006,6 +2029,7 @@ fn push_dtc_flag(fields: &mut Vec<(u32, String)>, tif: u8) {
 /// all-or-none.
 fn push_extended_attrs(
     fields: &mut Vec<(u32, String)>,
+    context: &Context,
     attrs: &crate::types::OrderAttrs,
     has_base_exec_inst: bool,
 ) {
@@ -2045,21 +2069,28 @@ fn push_extended_attrs(
     } else if attrs.good_till > 0 {
         fields.push((126, unix_to_ib_utc_dash(attrs.good_till)));
     }
-    let oca_str = if !attrs.oca_group_str.is_empty() {
-        attrs.oca_group_str.clone()
-    } else if attrs.oca_group > 0 {
-        format!("OCA_{}", attrs.oca_group)
-    } else {
-        String::new()
-    };
-    if !oca_str.is_empty() {
-        fields.push((583, oca_str));
-        fields.push((6209, oca_type_str(attrs.oca_type).to_string()));
-    }
     if attrs.parent_id > 0 {
-        // Match parent ClOrdID format: "{order_id}.{ver}" — assume ver=0
-        // for initial submission.
-        fields.push((6107, format!("{}.0", attrs.parent_id)));
+        // A bracket child, as the reference sends it (ibx#311, ibx#329):
+        // the OCA group is the parent's id (a caller's group name is
+        // replaced), cancel on fill unless the caller set a type, and the
+        // link is the parent's current order id.
+        let (link, group) = bracket_parent_link(context, attrs.parent_id);
+        let oca_type = if attrs.oca_type == 0 { BRACKET_CHILD_OCA_TYPE } else { oca_type_str(attrs.oca_type) };
+        fields.push((583, group));
+        fields.push((6209, oca_type.to_string()));
+        fields.push((6107, link));
+    } else {
+        let oca_str = if !attrs.oca_group_str.is_empty() {
+            attrs.oca_group_str.clone()
+        } else if attrs.oca_group > 0 {
+            format!("OCA_{}", attrs.oca_group)
+        } else {
+            String::new()
+        };
+        if !oca_str.is_empty() {
+            fields.push((583, oca_str));
+            fields.push((6209, oca_type_str(attrs.oca_type).to_string()));
+        }
     }
     if attrs.discretionary_amt > 0 {
         fields.push((9813, format_price(attrs.discretionary_amt).to_string()));
@@ -2325,7 +2356,7 @@ fn send_order_ex(
 
     // Extended attributes — same tag order as the historical SubmitLimitEx
     // block.
-    push_extended_attrs(&mut fields, attrs, has_base_exec_inst);
+    push_extended_attrs(&mut fields, context, attrs, has_base_exec_inst);
 
     let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
     send_new_order(conn, context, instrument, &refs)
@@ -2551,6 +2582,122 @@ mod tests {
             .collect()
     }
 
+    /// Encode one order request and return each sent frame's tags, for
+    /// requests that send several orders.
+    fn wire_frames(req: OrderRequest, frames: usize) -> Vec<Vec<(u32, String)>> {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.pending_orders.push(req);
+        let shared = Arc::new(SharedState::new());
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+
+        let mut out: Vec<Vec<(u32, String)>> = Vec::new();
+        let mut buf = vec![0u8; 16384];
+        let mut len = 0;
+        while out.len() < frames {
+            let n = server.read(&mut buf[len..]).unwrap();
+            assert!(n > 0, "connection closed");
+            len += n;
+            out = buf[..len].split(|&b| b == fix::SOH)
+                .filter_map(|f| {
+                    let s = std::str::from_utf8(f).ok()?;
+                    let (t, v) = s.split_once('=')?;
+                    Some((t.parse::<u32>().ok()?, v.to_string()))
+                })
+                .fold(Vec::new(), |mut acc: Vec<Vec<(u32, String)>>, field| {
+                    if field.0 == 8 { acc.push(Vec::new()); }
+                    if let Some(last) = acc.last_mut() { last.push(field); }
+                    acc
+                });
+            // A frame is whole once its checksum is read.
+            out.retain(|f| f.iter().any(|(t, _)| *t == 10));
+        }
+        out
+    }
+
+    // ibx#311 ibx#329: the bracket children carry the parent's order id
+    // with its version, the parent's id as the OCA group, and cancel on
+    // fill. The bracket's own ids are versioned like every other order.
+    #[test]
+    fn bracket_children_link_to_the_parent_like_the_reference() {
+        let frames = wire_frames(OrderRequest::SubmitBracket {
+            parent_id: 3, tp_id: 4, sl_id: 5, instrument: 0, side: Side::Buy, qty: 1,
+            entry_price: 100 * P, take_profit: 110 * P, stop_loss: 90 * P,
+        }, 3);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(tag(&frames[0], 11), Some("3.0"));
+        for absent in [583, 6107, 6209] {
+            assert!(tag(&frames[0], absent).is_none(), "parent sends no field {}", absent);
+        }
+        for (f, id) in [(&frames[1], "4.0"), (&frames[2], "5.0")] {
+            assert_eq!(tag(f, 11), Some(id));
+            assert_eq!(tag(f, 6107), Some("3.0"));
+            assert_eq!(tag(f, 583), Some("3"));
+            assert_eq!(tag(f, 6209), Some("CancelOnFillWBlock"));
+        }
+    }
+
+    fn child_of(parent_id: u64, oca_type: u8) -> OrderRequest {
+        OrderRequest::SubmitEx {
+            order_id: 7, instrument: 0, side: Side::Sell, qty: 1,
+            kind: crate::types::OrderKind::Limit { price: 110 * P }, tif: b'1',
+            attrs: crate::types::OrderAttrs {
+                parent_id, oca_group_str: "MY-GROUP".into(), oca_type, ..Default::default()
+            },
+        }
+    }
+
+    // ibx#311: a child placed after its parent was modified once refers to
+    // the parent's current version, not the first one.
+    #[test]
+    fn a_child_refers_to_the_current_version_of_its_parent() {
+        let fresh = wire_tags(child_of(100, 0));
+        assert_eq!(tag(&fresh, 6107), Some("100.0"));
+
+        let modified = wire_tags_with(|ctx| {
+            ctx.modify_versions.insert(100, 1);
+            ctx.last_clord.insert(100, "100.1".into());
+        }, child_of(100, 0));
+        assert_eq!(tag(&modified, 6107), Some("100.1"));
+        assert_eq!(tag(&modified, 583), Some("100"), "the caller's group name is replaced");
+        assert_eq!(tag(&modified, 6209), Some("CancelOnFillWBlock"), "default for a child");
+
+        // Before the server echoes the replace, the version ibx sent.
+        let pending = wire_tags_with(|ctx| { ctx.modify_versions.insert(100, 2); }, child_of(100, 0));
+        assert_eq!(tag(&pending, 6107), Some("100.2"));
+    }
+
+    // A parent held by the server under another id (an order of another
+    // session): the link and the group are that id, as the server has it.
+    #[test]
+    fn a_child_of_a_recovered_parent_uses_the_id_the_server_holds() {
+        let tags = wire_tags_with(|ctx| {
+            ctx.last_clord.insert(15, "1626578573.0".into());
+        }, child_of(15, 0));
+        assert_eq!(tag(&tags, 6107), Some("1626578573.0"));
+        assert_eq!(tag(&tags, 583), Some("1626578573"));
+    }
+
+    // An OCA type the caller sets explicitly is kept; an order in an OCA
+    // group with no parent keeps its group name and type.
+    #[test]
+    fn oca_type_and_group_without_a_parent_are_kept() {
+        let explicit = wire_tags(child_of(100, 2));
+        assert_eq!(tag(&explicit, 6209), Some("ReduceOnFillWBlock"));
+
+        let plain = wire_tags(child_of(0, 0));
+        assert_eq!(tag(&plain, 583), Some("MY-GROUP"));
+        assert_eq!(tag(&plain, 6209), Some("ReduceOnFillNonBlock"));
+        assert!(tag(&plain, 6107).is_none());
+    }
+
     fn tag<'a>(tags: &'a [(u32, String)], t: u32) -> Option<&'a str> {
         tags.iter().find(|(k, _)| *k == t).map(|(_, v)| v.as_str())
     }
@@ -2603,7 +2750,8 @@ mod tests {
         assert_eq!(tag(&tags, 99), Some("11"));
         assert_eq!(tag(&tags, 59), Some("1"));
         assert_eq!(tag(&tags, 6107), Some("100.0"));
-        assert_eq!(tag(&tags, 583), Some("BR1"));
+        // A child's OCA group is its parent's id (ibx#329).
+        assert_eq!(tag(&tags, 583), Some("100"));
         assert_eq!(tag(&tags, 6257), Some("1"));
         assert_eq!(tag(&tags, 6261), Some("3"));
         assert_eq!(tag(&tags, 6258), Some("12"));
@@ -2821,7 +2969,7 @@ mod tests {
         });
         assert_eq!(tag(&tags, 59), Some("1"));
         assert_eq!(tag(&tags, 6107), Some("9000000577.0"));
-        assert_eq!(tag(&tags, 583), Some("BR1"));
+        assert_eq!(tag(&tags, 583), Some("9000000577"));
         assert_eq!(tag(&tags, 6209), Some("CancelOnFillWBlock"));
         assert_eq!(tag(&tags, 847), Some("Twap"));
         // Unset start/end times are left out, as the reference does.
@@ -2842,7 +2990,7 @@ mod tests {
         assert_eq!(tag(&tags, 18), Some("e"));
         assert_eq!(tag(&tags, 59), Some("1"));
         assert_eq!(tag(&tags, 6107), Some("9000000577.0"));
-        assert_eq!(tag(&tags, 583), Some("BR1"));
+        assert_eq!(tag(&tags, 583), Some("9000000577"));
         assert_eq!(tag(&tags, 847), Some("Adaptive"));
     }
 

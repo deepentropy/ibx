@@ -133,6 +133,28 @@ fn fill_exec_of(parsed: &std::collections::HashMap<u32, String>, exec_id: &str) 
     }
 }
 
+/// The API order id of a report's parent (ibx#329): the parent link
+/// carries the parent's order id with its version; the id part is mapped
+/// back to the API order id of the order the server holds under it (an
+/// order recovered from another session is kept under its API id). 0 when
+/// the report has no parent. The OCA group is not a parent.
+fn parent_order_id(parsed: &std::collections::HashMap<u32, String>, context: &Context) -> i64 {
+    let Some(link) = parsed.get(&6107).filter(|s| !s.is_empty()) else {
+        return 0;
+    };
+    let id_part = link.split('.').next().unwrap_or(link);
+    let Ok(id) = id_part.parse::<u64>() else {
+        return 0;
+    };
+    let same_id = |clord: &String| clord.split('.').next() == Some(id_part);
+    if context.order(id).is_some() || context.last_clord.get(&id).is_some_and(same_id) {
+        return id as i64;
+    }
+    context.last_clord.iter()
+        .find(|(_, clord)| same_id(clord))
+        .map_or(id as i64, |(&order_id, _)| order_id as i64)
+}
+
 fn perm_id_from_fix_order_id(s: &str) -> i64 {
     // Hash only the stable prefix: "00cf16ed.000225ed.69ca0941" (drop ".0001")
     let stable = match s.rmatch_indices('.').next() {
@@ -1217,7 +1239,7 @@ impl CcpState {
         if report_status && !had_fill {
             if let Some(order) = context.order(clord_id).copied() {
                 let perm_id: i64 = parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
-                let parent_id: i64 = parsed.get(&583).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
+                let parent_id = parent_order_id(parsed, context);
                 // Average fill price rides on status reports too (ibx#315).
                 let avg_px = parsed.get(&6).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 // Filled so far as the server counts it (tag 14): an order
@@ -1390,6 +1412,7 @@ impl CcpState {
                 tif: tif_str.to_string(),
                 account: if account.is_empty() { account_id.to_string() } else { account.clone() },
                 perm_id,
+                parent_id: parent_order_id(parsed, context),
                 // Filled so far, not the quantity still working (ibx#309).
                 filled_quantity: cum_qty,
                 outside_rth,
@@ -2963,6 +2986,45 @@ mod tests {
             m.insert(*tag, val.to_string());
         }
         m
+    }
+
+    // ibx#329: the parent id came from the OCA group, so every order of an
+    // OCA group reported the same made-up parent. It comes from the parent
+    // link.
+    #[test]
+    fn parent_id_comes_from_the_parent_link_not_the_oca_group() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let child = context.market.try_register(756733).unwrap();
+        context.insert_order(crate::types::Order::new(43, child, Side::Sell, 1, 110 * PRICE_SCALE, b'2', b'1', 0));
+
+        // Plain OCA order, no parent.
+        let oca = exec_report_frame(&[(20, "0"), (39, "0"), (150, "0"), (583, "PROBE-OCA-1"),
+            (6209, "ReduceOnFillNonBlock")]);
+        ccp.handle_exec_report(&oca, &mut context, &shared, &None, "");
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.last().unwrap().parent_id, 0);
+
+        // Bracket child of order 42 whose parent was modified once.
+        let report = [
+            (11u32, "43.0"), (20, "0"), (39, "0"), (150, "0"), (583, "42"),
+            (6209, "CancelOnFillWBlock"), (6107, "42.1"),
+        ].into_iter().map(|(t, v)| (t, v.to_string())).collect();
+        ccp.handle_exec_report(&report, &mut context, &shared, &None, "");
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.last().unwrap().order_id, 43);
+        assert_eq!(updates.last().unwrap().parent_id, 42);
+        assert_eq!(shared.orders.get_order_info(43).unwrap().order.parent_id, 42);
+    }
+
+    // A parent the server holds under another id (recovered from another
+    // session) is reported by its API order id.
+    #[test]
+    fn a_parent_link_to_a_recovered_order_gives_its_order_id() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        context.last_clord.insert(15, "1626578573.1".into());
+        let report = exec_report_frame(&[(20, "0"), (39, "0"), (150, "0"), (6107, "1626578573.0")]);
+        ccp.handle_exec_report(&report, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_order_updates().last().unwrap().parent_id, 15);
     }
 
     #[test]
