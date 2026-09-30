@@ -207,8 +207,8 @@ pub(super) fn phase_cancel_historical(mut conns: Conns, gw: &Gateway, config: &G
 
 /// ibx#186: gateway rejects certain bar_size/duration combos with a QueryError
 /// XML payload on HMDS. Validates that the rejection now surfaces as a queued
-/// error (code 162) + terminal historical_data sentinel rather than leaking the
-/// pending entry forever.
+/// error (code 162) rather than leaking the pending entry forever. Like the
+/// official API, no historical_data_end follows the error (ibx#408).
 pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
     println!("--- Phase 186: HMDS QueryError surfaces (15 mins / 1 W rejection) ---");
 
@@ -243,7 +243,7 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config:
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut deadline = Instant::now() + Duration::from_secs(15);
     let mut error: Option<(u32, i32, String)> = None;
     let mut got_end_sentinel = false;
     let mut bars_seen: usize = 0;
@@ -253,6 +253,9 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config:
             if rid == REQ_ID {
                 println!("  HMDS error: code={} msg={:?}", code, msg);
                 error = Some((rid, code, msg));
+                // Keep watching briefly: an end after the error is a
+                // regression (ibx#408).
+                deadline = deadline.min(Instant::now() + Duration::from_secs(2));
             }
         }
         for (rid, resp) in shared.reference.drain_historical_data() {
@@ -261,7 +264,6 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config:
                 if resp.is_complete { got_end_sentinel = true; }
             }
         }
-        if error.is_some() && got_end_sentinel { break; }
         std::thread::sleep(Duration::from_millis(100));
     }
 
@@ -279,11 +281,15 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config:
             check_eq!(code, 162, "expected canonical HMDS error code 162");
             check!(!msg.is_empty(), "error message must not be empty");
             check!(
-                got_end_sentinel,
-                "terminal historical_data sentinel must follow the error so consumers waiting on historical_data_end unblock"
+                msg.starts_with("Historical Market Data Service error message:"),
+                "162 text must carry the service prefix, got {:?}", msg
+            );
+            check!(
+                !got_end_sentinel,
+                "no historical_data_end may follow a server rejection (ibx#408)"
             );
             check_eq!(bars_seen, 0, "no bars should be delivered for a rejected request");
-            println!("  PASS (error surfaced, end sentinel delivered)\n");
+            println!("  PASS (error surfaced, no end)\n");
         }
     }
     conns

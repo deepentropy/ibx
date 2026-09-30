@@ -561,11 +561,7 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::CancelHistorical { req_id } => {
-                    self.hmds.keep_up_to_date_reqs.remove(&req_id);
-                    if let Some(pos) = self.hmds.pending_historical.iter().position(|(_, rid, _)| *rid == req_id) {
-                        let (query_id, _, _) = self.hmds.pending_historical.remove(pos);
-                        self.hmds.send_historical_cancel(&query_id, &mut self.hmds_conn, &mut self.hb);
-                    }
+                    self.hmds.cancel_historical(req_id, &mut self.hmds_conn, &mut self.hb);
                 }
                 ControlCommand::FetchHeadTimestamp { req_id, con_id, what_to_show, use_rth } => {
                     if self.hmds_conn.is_none() {
@@ -1392,7 +1388,7 @@ pub(crate) fn hmds_reconnect_backoff(attempt: u32) -> std::time::Duration {
 }
 
 /// Surface an "HMDS unavailable" error for `req_id` when the historical-data
-/// socket isn't connected. Mirrors the QueryError surface (ibx#186): code 162
+/// socket isn't connected: code 162
 /// via `push_historical_error` for the consumer's `error()` callback, plus —
 /// for historical-bar requests only — a terminal empty-bars response so
 /// `historical_data_end` fires. Without this, requests issued while HMDS is

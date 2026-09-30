@@ -45,16 +45,35 @@ impl BarDataType {
         })
     }
 
+    /// Server data name of this type (ibx#408). BID_ASK has no single server
+    /// name: a bar request sends one query per entry of [`Self::legs`]
+    /// instead. ADJUSTED_LAST asks for the trades series; the adjustment is
+    /// not a server-side data name.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Trades => "Last",
-            Self::Midpoint => "Midpoint",
+            Self::Midpoint => "MidPoint",
             Self::Bid => "Bid",
             Self::Ask => "Ask",
             Self::BidAsk => "BidAsk",
-            Self::AdjustedLast => "AdjustedLast",
-            Self::HistoricalVolatility => "HV",
-            Self::ImpliedVolatility => "IV",
+            Self::AdjustedLast => "Last",
+            Self::HistoricalVolatility => "HistVol",
+            Self::ImpliedVolatility => "OptionImpliedVol",
+        }
+    }
+
+    /// Server queries one bar request needs: BID_ASK is answered from a Bid
+    /// query and an Ask query; every other type is one query (ibx#408).
+    pub fn legs(&self) -> &'static [BarDataType] {
+        match self {
+            Self::Trades => &[Self::Trades],
+            Self::Midpoint => &[Self::Midpoint],
+            Self::Bid => &[Self::Bid],
+            Self::Ask => &[Self::Ask],
+            Self::BidAsk => &[Self::Bid, Self::Ask],
+            Self::AdjustedLast => &[Self::AdjustedLast],
+            Self::HistoricalVolatility => &[Self::HistoricalVolatility],
+            Self::ImpliedVolatility => &[Self::ImpliedVolatility],
         }
     }
 }
@@ -775,8 +794,25 @@ mod tests {
     #[test]
     fn bar_data_type_strings() {
         assert_eq!(BarDataType::Trades.as_str(), "Last");
-        assert_eq!(BarDataType::Midpoint.as_str(), "Midpoint");
-        assert_eq!(BarDataType::BidAsk.as_str(), "BidAsk");
+        assert_eq!(BarDataType::Midpoint.as_str(), "MidPoint");
+        assert_eq!(BarDataType::Bid.as_str(), "Bid");
+        assert_eq!(BarDataType::Ask.as_str(), "Ask");
+        assert_eq!(BarDataType::AdjustedLast.as_str(), "Last");
+        assert_eq!(BarDataType::HistoricalVolatility.as_str(), "HistVol");
+        assert_eq!(BarDataType::ImpliedVolatility.as_str(), "OptionImpliedVol");
+    }
+
+    // ibx#408: BID_ASK is two queries, every other type one.
+    #[test]
+    fn bar_data_type_legs() {
+        assert_eq!(BarDataType::BidAsk.legs(), &[BarDataType::Bid, BarDataType::Ask]);
+        for dt in [
+            BarDataType::Trades, BarDataType::Midpoint, BarDataType::Bid,
+            BarDataType::Ask, BarDataType::AdjustedLast,
+            BarDataType::HistoricalVolatility, BarDataType::ImpliedVolatility,
+        ] {
+            assert_eq!(dt.legs(), &[dt]);
+        }
     }
 
     #[test]
@@ -855,6 +891,17 @@ mod tests {
         assert!(xml.contains("<step>5 mins</step>"));
         assert!(xml.contains("<useRTH>true</useRTH>"));
         assert!(xml.contains("<timeLength>1 d</timeLength>"));
+
+        // ibx#408: server data names.
+        for (dt, name) in [
+            (BarDataType::Midpoint, "MidPoint"),
+            (BarDataType::AdjustedLast, "Last"),
+            (BarDataType::HistoricalVolatility, "HistVol"),
+            (BarDataType::ImpliedVolatility, "OptionImpliedVol"),
+        ] {
+            let xml = build_query_xml(&HistoricalRequest { data_type: dt, ..req.clone() });
+            assert!(xml.contains(&format!("<data>{}</data>", name)), "{:?}: {}", dt, xml);
+        }
     }
 
     #[test]

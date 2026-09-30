@@ -313,8 +313,9 @@ impl EClient {
         }
 
         // HMDS query errors → error (ibx#186). Drain before historical_data so a
-        // QueryError that also queued an empty terminal HistoricalResponse fires
-        // wrapper.error first, then wrapper.historical_data_end.
+        // local failure that also queued an empty terminal HistoricalResponse
+        // fires wrapper.error first, then wrapper.historical_data_end. A
+        // server-side rejection queues no terminal response (ibx#408).
         for (req_id, code, msg) in self.shared.reference.drain_historical_errors() {
             wrapper.error(req_id as i64, code as i64, &msg, "");
         }
