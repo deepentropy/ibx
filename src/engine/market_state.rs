@@ -1,15 +1,39 @@
 use std::collections::HashMap;
 use crate::types::{InstrumentId, Price, Qty, Quote, PRICE_SCALE, MAX_INSTRUMENTS};
 
-/// Max server_tag value for flat lookup array. Gateway sessions assign tags
-/// monotonically and can climb well past 1024 for long-running paper accounts
-/// or thin-volume / sub-penny names (which seem to consume blocks of tags).
-/// 65536 covers a busy day on a single session at ~256 KB heap; tags that
-/// exceed this are logged and dropped.
-const MAX_SERVER_TAG: usize = 65536;
+/// Hasher for the server tag map. Tags are integers assigned by the server,
+/// not chosen by a peer, so one multiply (Fibonacci hashing) is enough: the
+/// high bits it mixes pick the control byte, the low bits stay a bijection
+/// of the tag's low bits, so consecutive tags never share a bucket.
+#[derive(Default, Clone, Copy)]
+struct TagHasher(u64);
 
-/// Sentinel value for empty server_tag slots.
-const NO_INSTRUMENT: u32 = u32::MAX;
+const TAG_HASH_MUL: u64 = 0x9E37_79B9_7F4A_7C15;
+
+impl std::hash::Hasher for TagHasher {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(TAG_HASH_MUL);
+        }
+    }
+
+    #[inline(always)]
+    fn write_u32(&mut self, n: u32) {
+        self.0 = (self.0 ^ n as u64).wrapping_mul(TAG_HASH_MUL);
+    }
+}
+
+type TagMap = HashMap<u32, InstrumentId, std::hash::BuildHasherDefault<TagHasher>>;
+
+/// Server tags pre-sized for: two per instrument (quote and trade stream)
+/// with room to spare, so the map does not grow in a normal session.
+const SERVER_TAG_CAPACITY: usize = MAX_INSTRUMENTS * 4;
 
 /// Sentinel conId marking a freed instrument slot (ibx#233). Cannot collide
 /// with a real conId (0 occurs in practice for conId-less contracts).
@@ -31,8 +55,9 @@ pub struct MarketState {
     /// Reverse map: InstrumentId → conId. Flat array lookup. `FREE_SLOT`
     /// marks a reclaimed slot.
     instrument_to_con_id: [i64; MAX_INSTRUMENTS],
-    /// O(1) server_tag → InstrumentId lookup. Server tags are small integers.
-    server_tag_table: Box<[u32; MAX_SERVER_TAG]>,
+    /// server_tag → InstrumentId. Server tags climb far past what a flat
+    /// table can hold in one session (ibx#281).
+    server_tags: TagMap,
     /// Per-instrument minTick (from 35=Q). Used to scale tick magnitudes to prices.
     min_ticks: [f64; MAX_INSTRUMENTS],
     /// Pre-computed min_tick * PRICE_SCALE as integer for hot-path price conversion.
@@ -57,7 +82,7 @@ impl MarketState {
             free_ids: Vec::new(),
             con_id_to_instrument: HashMap::new(),
             instrument_to_con_id: [0; MAX_INSTRUMENTS],
-            server_tag_table: Box::new([NO_INSTRUMENT; MAX_SERVER_TAG]),
+            server_tags: TagMap::with_capacity_and_hasher(SERVER_TAG_CAPACITY, Default::default()),
             min_ticks: [0.0; MAX_INSTRUMENTS],
             min_tick_scaled: [0; MAX_INSTRUMENTS],
             symbols: std::array::from_fn(|_| None),
@@ -123,25 +148,14 @@ impl MarketState {
         self.exchanges[instrument as usize] = None;
         self.min_ticks[instrument as usize] = 0.0;
         self.min_tick_scaled[instrument as usize] = 0;
-        for slot in self.server_tag_table.iter_mut() {
-            if *slot == instrument {
-                *slot = NO_INSTRUMENT;
-            }
-        }
+        self.server_tags.retain(|_, id| *id != instrument);
         self.free_ids.push(instrument);
         Some(con_id)
     }
 
     /// Map an IB server_tag (from 35=Q subscription ack) to an InstrumentId.
     pub fn register_server_tag(&mut self, server_tag: u32, instrument: InstrumentId) {
-        if (server_tag as usize) < MAX_SERVER_TAG {
-            self.server_tag_table[server_tag as usize] = instrument;
-        } else {
-            log::warn!(
-                "server_tag {} exceeds MAX_SERVER_TAG ({}); ticks for instrument {} will be dropped",
-                server_tag, MAX_SERVER_TAG, instrument,
-            );
-        }
+        self.server_tags.insert(server_tag, instrument);
     }
 
     /// Slot iteration bound (high-water mark). Freed slots below this count
@@ -174,15 +188,10 @@ impl MarketState {
         self.con_id_to_instrument.get(&con_id).copied()
     }
 
-    /// Look up InstrumentId by server_tag. O(1) flat array lookup.
+    /// Look up InstrumentId by server_tag. O(1) hash lookup.
     #[inline(always)]
     pub fn instrument_by_server_tag(&self, server_tag: u32) -> Option<InstrumentId> {
-        if (server_tag as usize) < MAX_SERVER_TAG {
-            let id = self.server_tag_table[server_tag as usize];
-            if id != NO_INSTRUMENT { Some(id) } else { None }
-        } else {
-            None
-        }
+        self.server_tags.get(&server_tag).copied()
     }
 
     /// Set symbol name for an instrument (e.g. "AAPL"). Used for orders.
@@ -320,7 +329,7 @@ impl MarketState {
 
     /// Clear server tag mappings (called on farm disconnect — old tags are invalid).
     pub fn clear_server_tags(&mut self) {
-        self.server_tag_table.fill(NO_INSTRUMENT);
+        self.server_tags.clear();
     }
 
     /// Zero all quote data to prevent stale price trading after farm disconnect.
@@ -555,6 +564,51 @@ mod tests {
         ms.register_server_tag(42, aapl);
         assert_eq!(ms.instrument_by_server_tag(42), Some(aapl));
         assert_eq!(ms.instrument_by_server_tag(99), None);
+    }
+
+    // ── ibx#281: server tags above 65,535 ──
+
+    #[test]
+    fn server_tag_large_values_resolve() {
+        let mut ms = MarketState::new();
+        let aapl = ms.register(265598);
+        let opt = ms.register(924059488);
+        // Quote ack tag and trade stream tag seen in one session.
+        ms.register_server_tag(419_808, aapl);
+        ms.register_server_tag(128_516, opt);
+        assert_eq!(ms.instrument_by_server_tag(419_808), Some(aapl));
+        assert_eq!(ms.instrument_by_server_tag(128_516), Some(opt));
+        // Tags that alias the old 65,536-slot table must not match.
+        assert_eq!(ms.instrument_by_server_tag(419_808 % 65_536), None);
+        assert_eq!(ms.instrument_by_server_tag(128_516 % 65_536), None);
+        // The largest tag the decoder can read.
+        ms.register_server_tag(0x7FFF_FFFF, aapl);
+        assert_eq!(ms.instrument_by_server_tag(0x7FFF_FFFF), Some(aapl));
+    }
+
+    #[test]
+    fn server_tag_large_values_cleared_and_unregistered() {
+        let mut ms = MarketState::new();
+        let a = ms.register(1);
+        let b = ms.register(2);
+        ms.register_server_tag(419_808, a);
+        ms.register_server_tag(128_516, b);
+        ms.unregister(a);
+        assert_eq!(ms.instrument_by_server_tag(419_808), None);
+        assert_eq!(ms.instrument_by_server_tag(128_516), Some(b));
+        ms.clear_server_tags();
+        assert_eq!(ms.instrument_by_server_tag(128_516), None);
+    }
+
+    #[test]
+    fn tag_hasher_spreads_consecutive_tags() {
+        use std::hash::{BuildHasher, BuildHasherDefault};
+        let bh = BuildHasherDefault::<TagHasher>::default();
+        // Consecutive tags keep distinct low bits (bucket index).
+        let mut low: Vec<u64> = (128_500u32..128_564).map(|t| bh.hash_one(t) & 63).collect();
+        low.sort_unstable();
+        low.dedup();
+        assert_eq!(low.len(), 64);
     }
 
     #[test]
