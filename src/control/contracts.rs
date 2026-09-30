@@ -136,6 +136,9 @@ pub struct ContractDefinition {
     pub valid_exchanges: Vec<String>,
     pub order_types: Vec<String>,
     pub market_rule_id: Option<u32>,
+    /// Market rule id of each valid exchange whose rule is known,
+    /// comma-joined in valid-exchange order (the API marketRuleIds).
+    pub market_rule_ids: String,
     // Options/futures specific
     pub last_trade_date: String,
     pub strike: f64,
@@ -175,6 +178,7 @@ impl Default for ContractDefinition {
             valid_exchanges: Vec::new(),
             order_types: Vec::new(),
             market_rule_id: None,
+            market_rule_ids: String::new(),
             last_trade_date: String::new(),
             strike: 0.0,
             right: None,
@@ -257,141 +261,211 @@ pub fn lookup_symbol(symbol: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Parse a SecurityDefinition response into a ContractDefinition.
+/// Parse a SecurityDefinition response into its first contract record.
 ///
 /// `None` when the message is not a definition reply, or when it carries no
 /// contract record (a "no such contract" answer): such a reply must give
 /// "no security definition" to the caller, never a row with conId 0
-/// (ibx#400).
+/// (ibx#400). See [`parse_secdef_records`] for replies with several records.
 pub fn parse_secdef_response(data: &[u8]) -> Option<ContractDefinition> {
-    let tags = fix::fix_parse(data);
+    parse_secdef_records(data)?.into_iter().next()
+}
 
-    // Verify it's a security definition message
-    if tags.get(&TAG_MSG_TYPE).map(|s| s.as_str()) != Some("d") {
-        return None;
-    }
-    // A record always starts with its symbol.
-    if !tags.contains_key(&TAG_SYMBOL) {
-        return None;
-    }
+/// Where a tag sits in a definition reply, read in wire order.
+#[derive(Clone, Copy, PartialEq)]
+enum SecdefSection {
+    Header,
+    Record,
+    Rules,
+    Details,
+    OrderTypes,
+    Industry,
+}
 
-    let mut def = ContractDefinition::default();
+/// Parse a SecurityDefinition response into one definition per contract
+/// record, in reply order (ibx#435).
+///
+/// Each record starts with its symbol; the detail blocks that follow the
+/// records are joined to them by conId, and the order-type and industry
+/// tables by their keys. `None` when the message is not a definition
+/// reply; an empty list when it has no record.
+pub fn parse_secdef_records(data: &[u8]) -> Option<Vec<ContractDefinition>> {
+    use crate::protocol::fix::SOH;
 
-    if let Some(v) = tags.get(&TAG_IB_CON_ID) {
-        def.con_id = v.parse().unwrap_or(0);
-    }
-    if let Some(v) = tags.get(&TAG_SYMBOL) {
-        def.symbol = v.clone();
-    }
-    if let Some(v) = tags.get(&TAG_SECURITY_TYPE) {
-        def.sec_type = SecurityType::from_fix(v);
-    }
-    // Tag 207 (exchange) repeats for each valid exchange — use sequential parse
-    // to get the FIRST occurrence (the contract's own exchange, usually BEST/SMART).
-    {
-        use crate::protocol::fix::SOH;
-        let needle = b"207=";
-        for part in data.split(|&b| b == SOH) {
-            if part.starts_with(needle) {
-                let val = std::str::from_utf8(&part[needle.len()..]).unwrap_or("");
-                def.exchange = exchange_from_fix(val).to_string();
-                break;
-            }
+    let mut is_secdef = false;
+    let mut section = SecdefSection::Header;
+    let mut records: Vec<Vec<(u32, &str)>> = Vec::new();
+    let mut details: Vec<(u32, Vec<(u32, &str)>)> = Vec::new();
+    let mut order_types: Vec<(&str, &str)> = Vec::new();
+    let mut industries: Vec<(&str, &str)> = Vec::new();
+    for part in data.split(|&b| b == SOH) {
+        let Ok(text) = std::str::from_utf8(part) else { continue };
+        let Some((tag, val)) = text.split_once('=') else { continue };
+        let Ok(tag) = tag.parse::<u32>() else { continue };
+        if tag == TAG_MSG_TYPE {
+            is_secdef = val == "d";
+            continue;
         }
-    }
-    if let Some(v) = tags.get(&TAG_IB_PRIMARY_EXCHANGE) {
-        def.primary_exchange = exchange_from_fix(v).to_string();
-    }
-    if let Some(v) = tags.get(&TAG_CURRENCY) {
-        def.currency = v.clone();
-    }
-    if let Some(v) = tags.get(&TAG_IB_LOCAL_SYMBOL) {
-        def.local_symbol = v.clone();
-    }
-    if let Some(v) = tags.get(&TAG_IB_TRADING_CLASS) {
-        def.trading_class = v.clone();
-    }
-    if let Some(v) = tags.get(&TAG_LONG_NAME) {
-        def.long_name = v.clone();
-    }
-    // Tag 6019 is the market-rule-block start sentinel (value "1"), NOT the
-    // literal tick increment — see TAG_MARKET_RULE_START. When the secdef
-    // carries an inline price-increment block, fix_parse keeps that sentinel,
-    // so reading 6019 as min_tick yields 1.0. Derive min_tick from the parsed
-    // increments instead: the smallest increment is the contract's minimum
-    // tick (iso ContractDetails.minTick). Absent a rule block, the default
-    // (0.01) stands.
-    if let Some(min_increment) = parse_market_rules(data)
-        .iter()
-        .flat_map(|rule| rule.price_increments.iter())
-        .map(|inc| inc.increment)
-        .filter(|inc| *inc > 0.0)
-        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-    {
-        def.min_tick = min_increment;
-    }
-    if let Some(v) = tags.get(&TAG_MULTIPLIER) {
-        def.multiplier = v.parse().unwrap_or(1.0);
-    }
-    if let Some(v) = tags.get(&TAG_IB_VALID_EXCHANGES) {
-        def.valid_exchanges = v.split(',').map(|s| exchange_from_fix(s).to_string()).collect();
-    }
-    if let Some(v) = tags.get(&TAG_IB_ORDER_TYPES) {
-        def.order_types = v.split(',').map(|s| s.to_string()).collect();
-    }
-    if let Some(v) = tags.get(&TAG_IB_MARKET_RULE_ID) {
-        def.market_rule_id = v.parse().ok();
-    }
-    if let Some(v) = tags.get(&TAG_LAST_TRADE_DATE) {
-        def.last_trade_date = v.clone();
-    }
-    if let Some(v) = tags.get(&TAG_STRIKE) {
-        def.strike = v.parse().unwrap_or(0.0);
-    }
-    if let Some(v) = tags.get(&TAG_RIGHT) {
-        def.right = match v.as_str() {
-            "C" => Some(OptionRight::Call),
-            "P" => Some(OptionRight::Put),
-            _ => None,
-        };
-    }
-    // Extended fields
-    if let Some(v) = tags.get(&8077) { // StockType
-        def.stock_type = v.clone();
-    }
-    if let Some(v) = tags.get(&6624) { // Category (pipe-delimited: "Technology|Computers|Computers")
-        def.category = v.clone();
-    }
-    if let Some(v) = tags.get(&6911) { // Country
-        def.country = v.clone();
-    }
-    if let Some(v) = tags.get(&58) { // MarketName
-        def.market_name = v.clone();
-    }
-    if let Some(v) = tags.get(&TAG_SCHEDULE_JOIN_KEY) {
-        def.join_key = v.clone();
-    }
-    // ISIN from SecurityAltID repeating group (tag 455 with source 456=4)
-    // fix_parse only keeps last value per tag, so we parse sequentially
-    {
-        use crate::protocol::fix::SOH;
-        let mut last_alt_id = String::new();
-        for part in data.split(|&b| b == SOH) {
-            let text = String::from_utf8_lossy(part);
-            if let Some(val) = text.strip_prefix("455=") {
-                last_alt_id = val.to_string();
-            } else if let Some(val) = text.strip_prefix("456=") {
-                if val == "4" { // ISIN
-                    def.isin = last_alt_id.clone();
+        use SecdefSection::*;
+        match (section, tag) {
+            (Header | Record, TAG_SYMBOL) => {
+                records.push(vec![(tag, val)]);
+                section = Record;
+            }
+            (Header | Record, 146 | 6038 | TAG_MARKET_RULE_START) => section = Rules,
+            (Rules | Details, 6344) => section = Details,
+            (Rules | Details, TAG_IB_CON_ID) => {
+                details.push((val.parse().unwrap_or(0), Vec::new()));
+                section = Details;
+            }
+            (Rules | Details | Industry, 6432) => section = OrderTypes,
+            (Rules | Details | OrderTypes, 6622) => section = Industry,
+            (Record, _) => {
+                if let Some(record) = records.last_mut() {
+                    record.push((tag, val));
                 }
             }
+            (Details, _) => {
+                if let Some((_, block)) = details.last_mut() {
+                    block.push((tag, val));
+                }
+            }
+            (OrderTypes, 6430) => order_types.push((val, "")),
+            (OrderTypes, TAG_IB_ORDER_TYPES) => {
+                if let Some(entry) = order_types.last_mut() {
+                    entry.1 = val;
+                }
+            }
+            (Industry, 6623) => industries.push((val, "")),
+            (Industry, 6624) => {
+                if let Some(entry) = industries.last_mut() {
+                    entry.1 = val;
+                }
+            }
+            _ => {}
         }
     }
-    if let Some(v) = tags.get(&8598) { // MinSizeIncrement
-        def.min_size = v.parse().unwrap_or(0.0);
+    if !is_secdef {
+        return None;
+    }
+    if records.is_empty() {
+        return Some(Vec::new());
     }
 
-    Some(def)
+    let rules = parse_market_rules(data);
+    let mut defs = Vec::with_capacity(records.len());
+    for record in &records {
+        let mut def = ContractDefinition::default();
+        let mut keys = RecordKeys::default();
+        apply_secdef_fields(&mut def, &mut keys, record);
+        for (con_id, block) in &details {
+            if *con_id == def.con_id {
+                apply_secdef_fields(&mut def, &mut keys, block);
+            }
+        }
+        // Order types: the table entry of the record's key, else the last
+        // entry, else what the record itself carries.
+        let types = order_types.iter()
+            .find(|(key, _)| !keys.order_types.is_empty() && *key == keys.order_types)
+            .or(order_types.last())
+            .map(|(_, list)| *list)
+            .filter(|list| !list.is_empty());
+        if let Some(list) = types {
+            def.order_types = list.split(',').map(|s| s.to_string()).collect();
+        }
+        if def.category.is_empty() {
+            let text = industries.iter()
+                .find(|(key, _)| !keys.industry.is_empty() && *key == keys.industry)
+                .or(industries.last())
+                .map(|(_, text)| *text);
+            if let Some(text) = text {
+                def.category = text.to_string();
+            }
+        }
+        // The rule-block start marker is NOT the tick increment (ibx#197).
+        // min_tick is the smallest increment of the record's rule (of every
+        // rule when the reply has none for it), iso ContractDetails.minTick.
+        // Absent a rule block, the default (0.01) stands.
+        let own: Vec<&MarketRule> = rules.iter()
+            .filter(|rule| def.market_rule_id.is_some_and(|id| rule.rule_id == id as i32))
+            .collect();
+        let used: Vec<&MarketRule> = if own.is_empty() { rules.iter().collect() } else { own };
+        if let Some(min_increment) = used.iter()
+            .flat_map(|rule| rule.price_increments.iter())
+            .map(|inc| inc.increment)
+            .filter(|inc| *inc > 0.0)
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            def.min_tick = min_increment;
+        }
+        defs.push(def);
+    }
+    Some(defs)
+}
+
+/// Table keys a record refers to (order types, industry).
+#[derive(Default)]
+struct RecordKeys<'a> {
+    order_types: &'a str,
+    industry: &'a str,
+}
+
+/// Apply one record block or detail block to a definition.
+fn apply_secdef_fields<'a>(def: &mut ContractDefinition, keys: &mut RecordKeys<'a>, block: &[(u32, &'a str)]) {
+    let mut last_alt_id = "";
+    for &(tag, v) in block {
+        match tag {
+            TAG_IB_CON_ID => def.con_id = v.parse().unwrap_or(0),
+            TAG_SYMBOL => def.symbol = v.to_string(),
+            TAG_SECURITY_TYPE => def.sec_type = SecurityType::from_fix(v),
+            // The record's own exchange is its first one.
+            TAG_SECURITY_EXCHANGE => {
+                if def.exchange.is_empty() {
+                    def.exchange = exchange_from_fix(v).to_string();
+                }
+            }
+            TAG_IB_PRIMARY_EXCHANGE => def.primary_exchange = exchange_from_fix(v).to_string(),
+            TAG_CURRENCY => def.currency = v.to_string(),
+            TAG_IB_LOCAL_SYMBOL => def.local_symbol = v.to_string(),
+            TAG_IB_TRADING_CLASS => def.trading_class = v.to_string(),
+            TAG_LONG_NAME => def.long_name = v.to_string(),
+            TAG_MULTIPLIER => def.multiplier = v.parse().unwrap_or(1.0),
+            TAG_IB_VALID_EXCHANGES => {
+                def.valid_exchanges = v.split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| exchange_from_fix(s).to_string())
+                    .collect();
+            }
+            TAG_IB_ORDER_TYPES => def.order_types = v.split(',').map(|s| s.to_string()).collect(),
+            6430 => keys.order_types = v,
+            6623 => keys.industry = v,
+            TAG_IB_MARKET_RULE_ID => def.market_rule_id = v.parse().ok(),
+            TAG_LAST_TRADE_DATE => def.last_trade_date = v.to_string(),
+            TAG_STRIKE => def.strike = v.parse().unwrap_or(0.0),
+            TAG_RIGHT => {
+                def.right = match v {
+                    "C" => Some(OptionRight::Call),
+                    "P" => Some(OptionRight::Put),
+                    _ => None,
+                };
+            }
+            TAG_IB_STOCK_TYPE => def.stock_type = v.to_string(),
+            // Category (pipe-delimited: "Technology|Computers|Computers")
+            6624 => def.category = v.to_string(),
+            6911 => def.country = v.to_string(), // Country
+            58 => def.market_name = v.to_string(), // MarketName
+            TAG_SCHEDULE_JOIN_KEY => def.join_key = v.to_string(),
+            // ISIN from the alternative id group
+            TAG_SECURITY_ID => last_alt_id = v,
+            TAG_SECURITY_ID_SOURCE => {
+                if v == "4" {
+                    def.isin = last_alt_id.to_string();
+                }
+            }
+            8598 => def.min_size = v.parse().unwrap_or(0.0), // MinSizeIncrement
+            _ => {}
+        }
+    }
 }
 
 /// Extract the SecurityReqID from a response to match with the original request.
@@ -882,7 +956,7 @@ pub fn parse_matching_symbols_response(data: &[u8]) -> Option<Vec<SymbolMatch>> 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -935,8 +1009,8 @@ mod tests {
                 (TAG_MSG_TYPE, "d"),
                 (TAG_SECURITY_REQ_ID, "R1"),
                 (TAG_SECURITY_RESPONSE_TYPE, "4"),
-                (TAG_IB_CON_ID, "265598"),
                 (TAG_SYMBOL, "AAPL"),
+                (TAG_IB_CON_ID, "265598"),
                 (TAG_SECURITY_TYPE, "CS"),
                 (TAG_SECURITY_EXCHANGE, "NASDAQ"),
                 (TAG_CURRENCY, "USD"),
@@ -994,6 +1068,99 @@ mod tests {
         assert!(super::parse_secdef_response(&msg).is_none());
     }
 
+    /// A message from its fields written as `tag=value|tag=value`.
+    pub(crate) fn pipe_msg(text: &str) -> Vec<u8> {
+        let fields: Vec<(u32, &str)> = text.split('|')
+            .filter(|f| !f.is_empty())
+            .map(|f| {
+                let (t, v) = f.split_once('=').unwrap();
+                (t.parse().unwrap(), v)
+            })
+            .collect();
+        fix::fix_build(&fields, 1)
+    }
+
+    /// A futures lookup with no month: five contracts in one reply, each
+    /// record followed later by its detail block (layout of a captured
+    /// reply, values trimmed).
+    pub(crate) fn five_future_records(req_id: &str, join_key: &str) -> Vec<u8> {
+        let months = [
+            ("815824267", "MNQZ6", "20261218", "202612"),
+            ("840227399", "MNQH7", "20270319", "202703"),
+            ("866514785", "MNQM7", "20270618", "202706"),
+            ("893091676", "MNQU7", "20270917", "202709"),
+            ("925800444", "MNQZ7", "20271217", "202712"),
+        ];
+        let key = if join_key.is_empty() { String::new() } else { format!("6256={}|", join_key) };
+        let mut text = format!("35=d|43=N|320={}|322=*|323=4|", req_id);
+        for (id, local, date, month) in months {
+            text += &format!(
+                "55=MNQ|167=FUT|207=CME|6008={id}|8499=1|6411=CME/FUT/GLOBEX|{key}6031=67|15=USD|58=MNQ|\
+                 6035={local}|6058=MNQ|541={date}|200={month}|6614={date}|231=2|6430=CME/FUT|"
+            );
+        }
+        text += "146=5|6038=Y|6019=1|6031=67|6023=0|6027=0.25|6030=1|6344=5|";
+        for (id, _, _, _) in months {
+            text += &format!("6008={id}|8499=1|6346=362687422|310=IND|306=Micro E-Mini Nasdaq-100 Index|6046=CME,|6523=USFUT|");
+        }
+        text += "6432=1|6430=CME/FUT|6431=LMT/3,MKT/1,STP/1|6599=IBALGO";
+        pipe_msg(&text)
+    }
+
+    // ibx#435: one definition per record, not one merged definition.
+    #[test]
+    fn parse_records_splits_a_multi_contract_reply() {
+        let defs = parse_secdef_records(&five_future_records("11", "")).unwrap();
+        assert_eq!(defs.len(), 5);
+        let ids: Vec<u32> = defs.iter().map(|d| d.con_id).collect();
+        assert_eq!(ids, [815824267, 840227399, 866514785, 893091676, 925800444]);
+        let locals: Vec<&str> = defs.iter().map(|d| d.local_symbol.as_str()).collect();
+        assert_eq!(locals, ["MNQZ6", "MNQH7", "MNQM7", "MNQU7", "MNQZ7"]);
+        let months: Vec<&str> = defs.iter().map(|d| d.last_trade_date.as_str()).collect();
+        assert_eq!(months, ["202612", "202703", "202706", "202709", "202712"]);
+        for d in &defs {
+            assert_eq!(d.symbol, "MNQ");
+            assert_eq!(d.sec_type, SecurityType::Future);
+            assert_eq!(d.exchange, "CME");
+            assert_eq!(d.currency, "USD");
+            assert_eq!(d.multiplier, 2.0);
+            assert_eq!(d.market_rule_id, Some(67));
+            assert_eq!(d.min_tick, 0.25);
+            // Detail block joined by conId, order types by the record key.
+            assert_eq!(d.long_name, "Micro E-Mini Nasdaq-100 Index");
+            assert_eq!(d.valid_exchanges, ["CME"]);
+            assert_eq!(d.order_types, ["LMT/3", "MKT/1", "STP/1"]);
+        }
+        assert_eq!(super::parse_secdef_response(&five_future_records("11", "")).unwrap().con_id, 815824267);
+    }
+
+    // A detail block goes only to the record with its conId.
+    #[test]
+    fn parse_records_joins_details_by_con_id() {
+        let msg = pipe_msg(
+            "35=d|320=1|323=4|55=AAA|167=STK|207=BEST|6008=1|15=USD|55=BBB|167=STK|207=BEST|6008=2|15=USD|\
+             146=0|6344=2|6008=2|306=BBB INC|6046=BEST,NYSE,|455=US0000000002|456=4|6008=1|306=AAA INC|6046=BEST,ARCA,|\
+             6622=1|6623=0|6624=Financial"
+        );
+        let defs = parse_secdef_records(&msg).unwrap();
+        assert_eq!(defs.len(), 2);
+        assert_eq!((defs[0].symbol.as_str(), defs[0].long_name.as_str()), ("AAA", "AAA INC"));
+        assert_eq!(defs[0].valid_exchanges, ["SMART", "ARCA"]);
+        assert_eq!(defs[0].isin, "");
+        assert_eq!((defs[1].symbol.as_str(), defs[1].long_name.as_str()), ("BBB", "BBB INC"));
+        assert_eq!(defs[1].valid_exchanges, ["SMART", "NYSE"]);
+        assert_eq!(defs[1].isin, "US0000000002");
+        assert_eq!(defs[0].exchange, "SMART");
+        assert_eq!(defs[1].category, "Financial");
+    }
+
+    #[test]
+    fn parse_records_of_an_empty_reply_is_an_empty_list() {
+        let msg = pipe_msg("35=d|43=N|320=5|322=*|323=4|6038=Y|6019=0|6344=0");
+        assert_eq!(parse_secdef_records(&msg).map(|d| d.len()), Some(0));
+        assert!(parse_secdef_records(&pipe_msg("35=A|98=0")).is_none());
+    }
+
     #[test]
     fn parse_rejects_non_secdef() {
         let msg = fix::fix_build(&[(TAG_MSG_TYPE, "A")], 1);
@@ -1009,8 +1176,8 @@ mod tests {
         let msg = fix::fix_build(
             &[
                 (TAG_MSG_TYPE, "d"),
-                (TAG_IB_CON_ID, "4726868"),
                 (TAG_SYMBOL, "AXTI"),
+                (TAG_IB_CON_ID, "4726868"),
                 (TAG_SECURITY_TYPE, "CS"),
                 (TAG_CURRENCY, "USD"),
                 // Inline market-rule block (6019="1" is the start sentinel).
@@ -1035,8 +1202,8 @@ mod tests {
         let msg = fix::fix_build(
             &[
                 (TAG_MSG_TYPE, "d"),
-                (TAG_IB_CON_ID, "265598"),
                 (TAG_SYMBOL, "AAPL"),
+                (TAG_IB_CON_ID, "265598"),
                 (TAG_SECURITY_TYPE, "CS"),
             ],
             1,
@@ -1106,8 +1273,8 @@ mod tests {
         let msg = fix::fix_build(
             &[
                 (TAG_MSG_TYPE, "d"),
-                (TAG_IB_CON_ID, "12345"),
                 (TAG_SYMBOL, "AAPL"),
+                (TAG_IB_CON_ID, "12345"),
                 (TAG_SECURITY_TYPE, "OPT"),
                 (TAG_LAST_TRADE_DATE, "20260321"),
                 (TAG_STRIKE, "200.0"),
@@ -1233,8 +1400,8 @@ mod tests {
         let msg = fix::fix_build(
             &[
                 (TAG_MSG_TYPE, "d"),
-                (TAG_IB_CON_ID, "756733"),
                 (TAG_SYMBOL, "SPY"),
+                (TAG_IB_CON_ID, "756733"),
                 (TAG_SECURITY_TYPE, "CS"),
                 (TAG_IB_MARKET_RULE_ID, "4563"),
             ],
@@ -1249,8 +1416,8 @@ mod tests {
         let msg = fix::fix_build(
             &[
                 (TAG_MSG_TYPE, "d"),
-                (TAG_IB_CON_ID, "756733"),
                 (TAG_SYMBOL, "SPY"),
+                (TAG_IB_CON_ID, "756733"),
             ],
             1,
         );
@@ -1379,8 +1546,8 @@ mod tests {
         let msg = fix::fix_build(
             &[
                 (TAG_MSG_TYPE, "d"),
-                (TAG_IB_CON_ID, "265598"),
                 (TAG_SYMBOL, "AAPL"),
+                (TAG_IB_CON_ID, "265598"),
                 // Market rule block
                 (TAG_MARKET_RULE_START, "1"),
                 (TAG_MARKET_RULE_ID, "26"),
@@ -1439,8 +1606,8 @@ mod tests {
         let msg = fix::fix_build(
             &[
                 (TAG_MSG_TYPE, "d"),
-                (TAG_IB_CON_ID, "265598"),
                 (TAG_SYMBOL, "AAPL"),
+                (TAG_IB_CON_ID, "265598"),
             ],
             1,
         );

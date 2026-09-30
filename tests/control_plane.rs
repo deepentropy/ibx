@@ -30,8 +30,8 @@ fn contract_request_response_roundtrip() {
             (fix::TAG_MSG_TYPE, "d"),
             (TAG_SECURITY_REQ_ID, "R42"),
             (TAG_SECURITY_RESPONSE_TYPE, "4"),
-            (TAG_IB_CON_ID, "265598"),
             (TAG_SYMBOL, "AAPL"),
+            (TAG_IB_CON_ID, "265598"),
             (TAG_SECURITY_TYPE, "CS"),
             (TAG_SECURITY_EXCHANGE, "NASDAQ"),
             (TAG_IB_PRIMARY_EXCHANGE, "NASDAQ"),
@@ -141,8 +141,8 @@ fn option_contract_full_workflow() {
         &[
             (fix::TAG_MSG_TYPE, "d"),
             (TAG_SECURITY_REQ_ID, "OPT1"),
-            (TAG_IB_CON_ID, "99999"),
             (TAG_SYMBOL, "AAPL"),
+            (TAG_IB_CON_ID, "99999"),
             (TAG_SECURITY_TYPE, "OPT"),
             (TAG_LAST_TRADE_DATE, "20260321"),
             (TAG_STRIKE, "200.0"),
@@ -503,8 +503,8 @@ fn fixcomp_wraps_secdef_response() {
     let inner = fix::fix_build(
         &[
             (fix::TAG_MSG_TYPE, "d"),
-            (TAG_IB_CON_ID, "265598"),
             (TAG_SYMBOL, "AAPL"),
+            (TAG_IB_CON_ID, "265598"),
             (TAG_SECURITY_TYPE, "CS"),
             (TAG_CURRENCY, "USD"),
         ],

@@ -405,7 +405,7 @@ impl HotLoop {
             );
             self.ccp.sweep_pending_schedule_pairs(&self.shared, &self.event_tx);
             self.ccp.sweep_scanner_enrichments(&self.shared);
-            self.ccp.sweep_contract_details(&self.shared, &self.event_tx);
+            self.ccp.sweep_contract_details(&self.shared, &self.event_tx, &mut self.ccp_conn, &mut self.hb);
             order_builder::sweep_rth_lookups(&mut self.context);
             farm::sweep_round_lot_lookups(&mut self.context);
             self.send_lot_ready();

@@ -202,9 +202,12 @@ pub(crate) struct CcpState {
     /// surfaces error 200 + contract_details_end instead of hanging
     /// forever (ibx#227).
     pub(crate) pending_secdef: Vec<(u32, bool, Instant)>,
-    /// By-symbol lookups with a strike that still have their one retry
-    /// (ibx#410): (req_id, lookup, strike text of the retry).
-    pub(crate) pending_strike_retry: Vec<(u32, SymbolLookup, String)>,
+    /// By-symbol lookups in flight: the request multiplier and the strike
+    /// retry (ibx#410, ibx#435).
+    pub(crate) pending_lookups: Vec<PendingLookup>,
+    /// Known market rule per (conId, exchange), from the records of every
+    /// definition reply; a fan-out asks only for the unknown ones (ibx#435).
+    pub(crate) market_rule_by_exchange: std::collections::HashMap<(u32, String), u32>,
     pub(crate) pending_matching_symbols: Vec<u32>,
     /// keepUpToDate historical queries routed through CCP: (query_id, req_id)
     pub(crate) pending_kut_historical: Vec<(String, u32)>,
@@ -220,11 +223,8 @@ pub(crate) struct CcpState {
     pub(crate) pending_schedule_pair: Vec<PendingSchedulePair>,
     /// Counter for internal schedule subscribe req IDs.
     pub(crate) next_schedule_sub_id: u32,
-    /// Fan-out state for by-symbol secdef requests. Each entry tracks the
-    /// per-exchange `35=c` requests we issued in response to the master
-    /// `35=d|320={api_req_id}|6046={list}` reply, and counts the per-exchange
-    /// `35=d` replies as they arrive. `contract_details_end` fires for
-    /// `api_req_id` once `received >= fanout_req_ids.len()`.
+    /// Fan-out state for by-symbol lookups: the records wait for the
+    /// per-exchange replies, then become the rows (ibx#435).
     pub(crate) pending_fanout: Vec<PendingFanout>,
     /// Counter for internal fan-out req IDs (tag 320 on per-exchange `35=c`).
     pub(crate) next_fanout_id: u32,
@@ -247,26 +247,39 @@ pub(crate) struct PendingScannerEnrichment {
     pub deadline: Instant,
 }
 
-/// State for a secdef reply awaiting its paired schedule reply.
+/// A contract row waiting for its trading schedule. The lookup's
+/// contract_details_end follows once none of its rows waits.
 pub(crate) struct PendingSchedulePair {
     pub api_req_id: u32,
     pub join_key: String,
     pub def: crate::control::contracts::ContractDefinition,
-    pub is_last: bool,
     pub deadline: Instant,
 }
 
-/// In-flight by-symbol fan-out: per-exchange `35=c` requests we sent after
-/// the master `35=d` reply. Each per-exchange `35=d` reply (matched by tag
-/// 320 string) is forwarded to `api_req_id` as one `contract_details`.
+/// In-flight by-symbol fan-out: the per-exchange requests sent for the
+/// records of a lookup whose market rule on that exchange is not known.
+/// Their replies only fill the market rules; the records wait here and
+/// become the rows once every request is answered (ibx#435).
 pub(crate) struct PendingFanout {
     pub api_req_id: u32,
-    pub fanout_req_ids: Vec<String>,
-    pub received: usize,
+    /// Requests not answered yet: (request id, conId, exchange).
+    pub outstanding: Vec<(String, u32, String)>,
+    /// Number of requests sent.
+    pub total: usize,
+    /// The records of the lookup, in reply order.
+    pub records: Vec<crate::control::contracts::ContractDefinition>,
     /// Idle deadline, refreshed on every per-exchange reply. One lost or
-    /// unparseable fan-out reply out of ~27 previously left the counter
-    /// short forever and contract_details_end never fired (ibx#227).
+    /// unparseable fan-out reply out of ~27 previously left the lookup
+    /// waiting forever (ibx#227).
     pub deadline: Instant,
+}
+
+/// A by-symbol lookup in flight, kept for its answer (ibx#410, ibx#435).
+pub(crate) struct PendingLookup {
+    pub req_id: u32,
+    pub lookup: SymbolLookup,
+    /// Strike text of the one retry still allowed.
+    pub retry_strike: Option<String>,
 }
 
 /// A by-symbol contract lookup as the caller asked it.
@@ -369,6 +382,29 @@ fn secdef_by_symbol_fields(req_id: &str, lookup: &SymbolLookup, strike: &str) ->
     fields
 }
 
+/// One contract_details row.
+fn push_contract_row(
+    shared: &SharedState,
+    event_tx: &Option<Sender<Event>>,
+    req_id: u32,
+    def: crate::control::contracts::ContractDefinition,
+) {
+    let for_event = clone_for_event(event_tx, &def);
+    shared.reference.push_contract_details(req_id, def);
+    if let Some(details) = for_event {
+        emit(event_tx, Event::ContractDetails { req_id, details });
+    }
+}
+
+/// Error 200 for a user lookup that found no contract, with no end, as
+/// the reference (ibx#400). Internal lookups end silently.
+fn push_not_found(req_id: u32, shared: &SharedState) {
+    if req_id < 0xF000_0000 {
+        log::info!("Secdef lookup req_id={}: no security definition", req_id);
+        shared.reference.push_historical_error(req_id, 200, NO_SECURITY_DEFINITION.to_string());
+    }
+}
+
 /// Strike text divided by 100 by moving the decimal point, so the value
 /// is exact ("342.8" gives "3.428", "220" gives "2.2").
 fn strike_divided_by_100(strike: &str) -> String {
@@ -396,7 +432,8 @@ impl CcpState {
             news_subscriptions: Vec::new(),
             disconnected: false,
             pending_secdef: Vec::new(),
-            pending_strike_retry: Vec::new(),
+            pending_lookups: Vec::new(),
+            market_rule_by_exchange: std::collections::HashMap::new(),
             pending_matching_symbols: Vec::new(),
             pending_kut_historical: Vec::new(),
             kut_ticker_map: std::collections::HashMap::new(),
@@ -776,198 +813,7 @@ impl CcpState {
             "UT" | "UM" | "RL" => handle_account_update(msg, context, shared),
             "EB" => handle_account_end(msg, shared),
             "UP" => handle_portfolio_message(msg, context, shared, event_tx),
-            "d" => {
-                let response_req_id = crate::control::contracts::secdef_response_req_id(msg);
-                // Asked for an order's outside RTH (ibx#465): not a user reply.
-                if let Some(rid) = response_req_id.as_deref() {
-                    if super::order_builder::rth_definition_reply(context, rid, msg) { return; }
-                    // Asked for a round lot (ibx#287): not a user reply.
-                    if super::farm::round_lot_reply(context, rid, msg) { return; }
-                }
-                let fanout_idx = response_req_id.as_ref().and_then(|rid| {
-                    self.pending_fanout.iter().position(|p| {
-                        p.fanout_req_ids.iter().any(|id| id == rid)
-                    })
-                });
-                if let Some(idx) = fanout_idx {
-                    if let Some(def) = crate::control::contracts::parse_secdef_response(msg) {
-                        let api_req_id = self.pending_fanout[idx].api_req_id;
-                        if def.con_id != 0 {
-                            let sec_type_str = def.sec_type.to_api_str();
-                            shared.reference.cache_contract(def.con_id as i64, api::Contract {
-                                con_id: def.con_id as i64,
-                                symbol: def.symbol.clone(),
-                                sec_type: sec_type_str.to_string(),
-                                exchange: def.exchange.clone(),
-                                currency: def.currency.clone(),
-                                local_symbol: def.local_symbol.clone(),
-                                primary_exchange: def.primary_exchange.clone(),
-                                trading_class: def.trading_class.clone(),
-                                ..Default::default()
-                            });
-                            shared.reference.cache_market_name(def.con_id as i64, &def.market_name);
-                            self.try_release_scanner_enrichments(def.con_id as i64, shared);
-                        }
-                        let for_event = clone_for_event(event_tx, &def);
-                        shared.reference.push_contract_details(api_req_id, def);
-                        if let Some(details) = for_event {
-                            emit(event_tx, Event::ContractDetails { req_id: api_req_id, details });
-                        }
-                        self.pending_fanout[idx].received += 1;
-                        self.pending_fanout[idx].deadline = Instant::now() + SECDEF_TIMEOUT;
-                        if self.pending_fanout[idx].received >= self.pending_fanout[idx].fanout_req_ids.len() {
-                            shared.reference.push_contract_details_end(api_req_id);
-                            emit(event_tx, Event::ContractDetailsEnd(api_req_id));
-                            self.pending_fanout.swap_remove(idx);
-                        }
-                    }
-                    let rules = crate::control::contracts::parse_market_rules(msg);
-                    if !rules.is_empty() {
-                        shared.reference.push_market_rules(rules);
-                    }
-                    return;
-                }
-
-                let Some(def) = crate::control::contracts::parse_secdef_response(msg) else {
-                    // No record: error 200 and no end, never a conId 0 row
-                    // (ibx#400).
-                    self.no_security_definition(response_req_id.as_deref(), shared, ccp_conn, hb);
-                    return;
-                };
-                {
-                    let is_last_wire = crate::control::contracts::secdef_response_is_last(msg);
-                    if def.con_id != 0 {
-                        let sec_type_str = def.sec_type.to_api_str();
-                        shared.reference.cache_contract(def.con_id as i64, api::Contract {
-                            con_id: def.con_id as i64,
-                            symbol: def.symbol.clone(),
-                            sec_type: sec_type_str.to_string(),
-                            exchange: def.exchange.clone(),
-                            currency: def.currency.clone(),
-                            local_symbol: def.local_symbol.clone(),
-                            primary_exchange: def.primary_exchange.clone(),
-                            trading_class: def.trading_class.clone(),
-                            ..Default::default()
-                        });
-                        shared.reference.cache_market_name(def.con_id as i64, &def.market_name);
-                        self.try_release_scanner_enrichments(def.con_id as i64, shared);
-                    }
-                    // Match the response to its originating pending_secdef entry
-                    // by tag 320 (response_req_id). Without this, an internal
-                    // auto-fetch reply (e.g. position-driven secdef for SPY)
-                    // landing while a user request is in flight would be
-                    // attributed to `pending_secdef.first()` and leak as a
-                    // bogus contract_details callback on the user's req_id.
-                    let matched_idx: Option<usize> = response_req_id.as_ref()
-                        .and_then(|rid| rid.parse::<u32>().ok())
-                        .and_then(|rid_u32| {
-                            self.pending_secdef.iter().position(|(pid, _, _)| *pid == rid_u32)
-                        });
-                    let single_shot = matched_idx
-                        .map(|i| self.pending_secdef[i].1).unwrap_or(false);
-                    let is_by_symbol = matched_idx
-                        .map(|i| !self.pending_secdef[i].1).unwrap_or(false);
-                    let is_last = is_last_wire || single_shot;
-                    // Fan-out detection: by-symbol master reply carries the full
-                    // exchange list in tag 6046. Drop SMART/BEST and dispatch
-                    // one per-exchange `35=c` per remaining entry. The per-
-                    // exchange replies arrive on new req_ids and route through
-                    // the `pending_fanout` branch above.
-                    let fanout_exchanges: Vec<String> = if is_by_symbol && !is_last_wire {
-                        def.valid_exchanges.iter()
-                            .filter(|e| !matches!(e.as_str(), "" | "SMART" | "BEST"))
-                            .cloned()
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    if let Some(idx) = matched_idx {
-                        let req_id = self.pending_secdef[idx].0;
-                        // Found: the strike retry is not needed (ibx#410).
-                        self.pending_strike_retry.retain(|(rid, _, _)| *rid != req_id);
-                        // Internal sentinel req_ids (auto-fetch for cold-cache
-                        // positions, scanner enrichment) start at 0xF000_0000.
-                        // Their replies must populate the contract cache but
-                        // never surface as user-visible contract_details
-                        // callbacks.
-                        let is_internal = req_id >= 0xF000_0000;
-                        let join_key = def.join_key.clone();
-                        if is_last {
-                            self.pending_secdef.remove(idx);
-                        }
-                        let con_id = def.con_id as i64;
-                        if join_key.is_empty() {
-                            // No join key — emit immediately without schedule data.
-                            if !is_internal {
-                                let for_event = clone_for_event(event_tx, &def);
-                                shared.reference.push_contract_details(req_id, def);
-                                if let Some(details) = for_event {
-                                    emit(event_tx, Event::ContractDetails { req_id, details });
-                                }
-                                if is_last {
-                                    shared.reference.push_contract_details_end(req_id);
-                                    emit(event_tx, Event::ContractDetailsEnd(req_id));
-                                }
-                            }
-                        } else if is_internal {
-                            // Skip schedule pairing for internal sentinels — no
-                            // user is awaiting the trading_hours enrichment.
-                        } else {
-                            self.pending_schedule_pair.push(PendingSchedulePair {
-                                api_req_id: req_id,
-                                join_key: join_key.clone(),
-                                def,
-                                is_last,
-                                deadline: Instant::now() + std::time::Duration::from_secs(3),
-                            });
-                            self.send_schedule_subscribe(&join_key, ccp_conn, hb);
-                        }
-                        // Dispatch fan-out (or fire end immediately if the
-                        // symbol resolves to a single exchange and there's
-                        // nothing to fan out to).
-                        if is_by_symbol && !is_last_wire {
-                            self.pending_secdef.retain(|(rid, ss, _)| !(*rid == req_id && !*ss));
-                            if fanout_exchanges.is_empty() || con_id == 0 {
-                                // The master row may be parked awaiting its
-                                // schedule pair; firing end now would order
-                                // end BEFORE the row (ibx#227). Defer it to
-                                // the pair's resolution (or its 3s sweep).
-                                if let Some(pair) = self.pending_schedule_pair.iter_mut()
-                                    .find(|p| p.api_req_id == req_id)
-                                {
-                                    pair.is_last = true;
-                                } else {
-                                    shared.reference.push_contract_details_end(req_id);
-                                    emit(event_tx, Event::ContractDetailsEnd(req_id));
-                                }
-                            } else {
-                                let mut fanout_req_ids = Vec::with_capacity(fanout_exchanges.len());
-                                for exch in &fanout_exchanges {
-                                    let fid = format!("ibxfan-{}-{}", req_id, self.next_fanout_id);
-                                    self.next_fanout_id = self.next_fanout_id.wrapping_add(1);
-                                    let fix_exch = if exch == "SMART" { "BEST" } else { exch.as_str() };
-                                    self.send_fanout_secdef_request(&fid, con_id, fix_exch, ccp_conn, hb);
-                                    fanout_req_ids.push(fid);
-                                }
-                                log::info!(
-                                    "Secdef by-symbol fan-out: api_req_id={} con_id={} exchanges={}",
-                                    req_id, con_id, fanout_req_ids.len(),
-                                );
-                                self.pending_fanout.push(PendingFanout {
-                                    api_req_id: req_id,
-                                    fanout_req_ids,
-                                    received: 0,
-                                    deadline: Instant::now() + SECDEF_TIMEOUT,
-                                });
-                            }
-                        }
-                    }
-                }
-                let rules = crate::control::contracts::parse_market_rules(msg);
-                if !rules.is_empty() {
-                    shared.reference.push_market_rules(rules);
-                }
-            }
+            "d" => self.handle_secdef_reply(msg, ccp_conn, context, shared, event_tx, hb),
             other => {
                 log::debug!("CCP unhandled 35={}: {} bytes", other, msg.len());
             }
@@ -1831,6 +1677,8 @@ impl CcpState {
         &mut self,
         shared: &SharedState,
         event_tx: &Option<Sender<Event>>,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
     ) {
         if self.pending_secdef.is_empty() && self.pending_fanout.is_empty() {
             return;
@@ -1849,19 +1697,28 @@ impl CcpState {
                 true
             }
         });
-        self.pending_fanout.retain(|p| {
-            if now >= p.deadline {
-                log::warn!(
-                    "Contract-details fan-out timeout: api_req_id={} received {} of {}",
-                    p.api_req_id, p.received, p.fanout_req_ids.len(),
-                );
-                expired.push(p.api_req_id);
-                false
+        let mut late: Vec<PendingFanout> = Vec::new();
+        let mut i = 0;
+        while i < self.pending_fanout.len() {
+            if now >= self.pending_fanout[i].deadline {
+                late.push(self.pending_fanout.swap_remove(i));
             } else {
-                true
+                i += 1;
             }
-        });
-        self.pending_strike_retry.retain(|(rid, _, _)| !expired.contains(rid));
+        }
+        self.pending_lookups.retain(|l| !expired.contains(&l.req_id));
+        for fanout in late {
+            log::warn!(
+                "Contract-details fan-out timeout: api_req_id={} answered {} of {}",
+                fanout.api_req_id, fanout.total - fanout.outstanding.len(), fanout.total,
+            );
+            if fanout.records.is_empty() {
+                expired.push(fanout.api_req_id);
+            } else {
+                // The rows go out with the market rules known so far.
+                self.deliver_contract_rows(fanout.api_req_id, fanout.records, shared, event_tx, ccp_conn, hb);
+            }
+        }
         for req_id in expired {
             log::warn!("Contract-details timeout: req_id={} — no gateway reply within {:?}",
                 req_id, SECDEF_TIMEOUT);
@@ -1874,84 +1731,80 @@ impl CcpState {
         }
     }
 
+    /// Rows whose schedule did not come in time go out without it.
     pub(crate) fn sweep_pending_schedule_pairs(
         &mut self,
         shared: &SharedState,
         event_tx: &Option<Sender<Event>>,
     ) {
         let now = Instant::now();
-        let mut emit_now: Vec<PendingSchedulePair> = Vec::new();
-        self.pending_schedule_pair.retain(|p| {
-            if now >= p.deadline {
-                let mut def = p.def.clone();
-                def.trading_hours = None;
-                def.liquid_hours = None;
-                def.time_zone_id = None;
-                emit_now.push(PendingSchedulePair {
-                    api_req_id: p.api_req_id,
-                    join_key: p.join_key.clone(),
-                    def,
-                    is_last: p.is_last,
-                    deadline: p.deadline,
-                });
-                log::warn!("Schedule pair timeout: api_req_id={} join_key={}",
-                    p.api_req_id, p.join_key);
-                false
-            } else {
-                true
+        if !self.pending_schedule_pair.iter().any(|p| now >= p.deadline) {
+            return;
+        }
+        let (expired, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_schedule_pair)
+            .into_iter()
+            .partition(|p| now >= p.deadline);
+        self.pending_schedule_pair = waiting;
+        let mut req_ids: Vec<u32> = Vec::new();
+        for mut p in expired {
+            log::warn!("Schedule pair timeout: api_req_id={} join_key={}", p.api_req_id, p.join_key);
+            p.def.trading_hours = None;
+            p.def.liquid_hours = None;
+            p.def.time_zone_id = None;
+            if !req_ids.contains(&p.api_req_id) {
+                req_ids.push(p.api_req_id);
             }
-        });
-        for p in emit_now {
-            let for_event = clone_for_event(event_tx, &p.def);
-            shared.reference.push_contract_details(p.api_req_id, p.def);
-            if let Some(details) = for_event {
-                emit(event_tx, Event::ContractDetails { req_id: p.api_req_id, details });
-            }
-            if p.is_last {
-                shared.reference.push_contract_details_end(p.api_req_id);
-                emit(event_tx, Event::ContractDetailsEnd(p.api_req_id));
-            }
+            push_contract_row(shared, event_tx, p.api_req_id, p.def);
+        }
+        for req_id in req_ids {
+            self.end_if_complete(req_id, shared, event_tx);
         }
     }
 
-    /// Match a 6040=107 schedule reply to a pending secdef pair and emit merged details.
+    /// Match a schedule reply to the rows waiting for its join key and
+    /// emit them with the schedule merged. One reply serves every row that
+    /// waits for that key.
     fn handle_schedule_reply(
         &mut self,
         msg: &[u8],
         shared: &SharedState,
         event_tx: &Option<Sender<Event>>,
     ) {
-        // Extract 6256 from the reply to locate the matching pair.
+        // The join key of the reply locates the waiting rows.
         let join_key = match extract_tag_value(msg, b"6256=") {
             Some(v) => v,
             None => return,
         };
-        let pos = match self.pending_schedule_pair.iter().position(|p| p.join_key == join_key) {
-            Some(p) => p,
-            None => return,
-        };
-        let mut pair = self.pending_schedule_pair.swap_remove(pos);
-        if let Some(sched) = crate::control::contracts::parse_schedule_response(msg) {
-            pair.def.time_zone_id = if sched.timezone.is_empty() {
-                None
-            } else {
-                Some(sched.timezone.clone())
-            };
-            pair.def.trading_hours = Some(
-                crate::control::contracts::format_sessions_string(&sched.trading_hours)
-            );
-            pair.def.liquid_hours = Some(
-                crate::control::contracts::format_sessions_string(&sched.liquid_hours)
-            );
+        if !self.pending_schedule_pair.iter().any(|p| p.join_key == join_key) {
+            return;
         }
-        let for_event = clone_for_event(event_tx, &pair.def);
-        shared.reference.push_contract_details(pair.api_req_id, pair.def);
-        if let Some(details) = for_event {
-            emit(event_tx, Event::ContractDetails { req_id: pair.api_req_id, details });
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_schedule_pair)
+            .into_iter()
+            .partition(|p| p.join_key == join_key);
+        self.pending_schedule_pair = waiting;
+        let sched = crate::control::contracts::parse_schedule_response(msg);
+        let mut req_ids: Vec<u32> = Vec::new();
+        for mut pair in ready {
+            if let Some(sched) = &sched {
+                pair.def.time_zone_id = if sched.timezone.is_empty() {
+                    None
+                } else {
+                    Some(sched.timezone.clone())
+                };
+                pair.def.trading_hours = Some(
+                    crate::control::contracts::format_sessions_string(&sched.trading_hours)
+                );
+                pair.def.liquid_hours = Some(
+                    crate::control::contracts::format_sessions_string(&sched.liquid_hours)
+                );
+            }
+            if !req_ids.contains(&pair.api_req_id) {
+                req_ids.push(pair.api_req_id);
+            }
+            push_contract_row(shared, event_tx, pair.api_req_id, pair.def);
         }
-        if pair.is_last {
-            shared.reference.push_contract_details_end(pair.api_req_id);
-            emit(event_tx, Event::ContractDetailsEnd(pair.api_req_id));
+        for req_id in req_ids {
+            self.end_if_complete(req_id, shared, event_tx);
         }
     }
 
@@ -2096,10 +1949,10 @@ impl CcpState {
         };
         // A lookup with a strike that finds nothing is asked once more with
         // the strike divided by 100, as the reference (ibx#410).
-        if !strike.is_empty() && !lookup.is_identifier() {
-            self.pending_strike_retry.push((req_id, lookup.clone(), strike_divided_by_100(&strike)));
-        }
+        let retry_strike = (!strike.is_empty() && !lookup.is_identifier())
+            .then(|| strike_divided_by_100(&strike));
         self.send_symbol_lookup(req_id, &lookup, &strike, ccp_conn, hb);
+        self.pending_lookups.push(PendingLookup { req_id, lookup, retry_strike });
     }
 
     /// Send one by-symbol lookup with the strike text given (empty: none).
@@ -2129,33 +1982,231 @@ impl CcpState {
     /// The strike retry of a lookup that found nothing (ibx#410): sent once,
     /// in place of the error. False when the lookup has no retry left.
     fn retry_with_divided_strike(&mut self, req_id: u32, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) -> bool {
-        let Some(pos) = self.pending_strike_retry.iter().position(|(rid, _, _)| *rid == req_id) else { return false };
-        let (_, lookup, strike) = self.pending_strike_retry.swap_remove(pos);
+        let Some(entry) = self.pending_lookups.iter_mut().find(|l| l.req_id == req_id) else { return false };
+        let Some(strike) = entry.retry_strike.take() else { return false };
+        let lookup = entry.lookup.clone();
         log::info!("Secdef lookup req_id={}: nothing found, retry with strike {}", req_id, strike);
         self.send_symbol_lookup(req_id, &lookup, &strike, ccp_conn, hb);
         true
     }
 
-    /// A definition reply with no record for a pending lookup: the lookup
-    /// ends with error 200 and no contract_details_end, as the reference
-    /// (ibx#400). Internal lookups end silently.
+    /// No record for a pending lookup: its strike retry when one is left,
+    /// else error 200 and no contract_details_end, as the reference
+    /// (ibx#400, ibx#410). Internal lookups end silently.
     fn no_security_definition(
         &mut self,
-        response_req_id: Option<&str>,
+        req_id: u32,
         shared: &SharedState,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        let Some(rid) = response_req_id.and_then(|r| r.parse::<u32>().ok()) else { return };
-        let Some(idx) = self.pending_secdef.iter().position(|(pid, _, _)| *pid == rid) else { return };
-        self.pending_secdef.remove(idx);
-        if self.retry_with_divided_strike(rid, ccp_conn, hb) {
+        if self.retry_with_divided_strike(req_id, ccp_conn, hb) {
             return;
         }
-        if rid < 0xF000_0000 {
-            log::info!("Secdef lookup req_id={}: no security definition", rid);
-            shared.reference.push_historical_error(rid, 200, NO_SECURITY_DEFINITION.to_string());
+        self.take_lookup(req_id);
+        push_not_found(req_id, shared);
+    }
+
+    /// The pending by-symbol lookup of `req_id`, removed.
+    fn take_lookup(&mut self, req_id: u32) -> Option<SymbolLookup> {
+        let pos = self.pending_lookups.iter().position(|l| l.req_id == req_id)?;
+        Some(self.pending_lookups.swap_remove(pos).lookup)
+    }
+
+    /// A definition reply (ibx#435): one row per contract record of the
+    /// reply to a lookup. The per-exchange replies of a fan-out only fill
+    /// the market rules of the waiting records; they are never rows.
+    fn handle_secdef_reply(
+        &mut self,
+        msg: &[u8],
+        ccp_conn: &mut Option<Connection>,
+        context: &mut Context,
+        shared: &SharedState,
+        event_tx: &Option<Sender<Event>>,
+        hb: &mut HeartbeatState,
+    ) {
+        use crate::control::contracts;
+        let response_req_id = contracts::secdef_response_req_id(msg);
+        // Asked for an order's outside RTH (ibx#465): not a user reply.
+        if let Some(rid) = response_req_id.as_deref() {
+            if super::order_builder::rth_definition_reply(context, rid, msg) { return; }
+            // Asked for a round lot (ibx#287): not a user reply.
+            if super::farm::round_lot_reply(context, rid, msg) { return; }
         }
+        let rules = contracts::parse_market_rules(msg);
+        if !rules.is_empty() {
+            shared.reference.push_market_rules(rules);
+        }
+        let records = contracts::parse_secdef_records(msg).unwrap_or_default();
+        for def in &records {
+            self.cache_definition(def, shared);
+        }
+        let Some(rid) = response_req_id else { return };
+
+        let fanout_idx = self.pending_fanout.iter()
+            .position(|p| p.outstanding.iter().any(|(id, _, _)| *id == rid));
+        if let Some(idx) = fanout_idx {
+            let fanout = &mut self.pending_fanout[idx];
+            let pos = fanout.outstanding.iter().position(|(id, _, _)| *id == rid).unwrap_or(0);
+            let (_, con_id, exchange) = fanout.outstanding.swap_remove(pos);
+            fanout.deadline = Instant::now() + SECDEF_TIMEOUT;
+            let done = fanout.outstanding.is_empty();
+            if let Some(rule) = records.iter().find(|d| d.con_id == con_id).and_then(|d| d.market_rule_id) {
+                self.market_rule_by_exchange.insert((con_id, exchange), rule);
+            }
+            if done {
+                let fanout = self.pending_fanout.swap_remove(idx);
+                self.deliver_contract_rows(fanout.api_req_id, fanout.records, shared, event_tx, ccp_conn, hb);
+            }
+            return;
+        }
+
+        // Match the response to its originating pending_secdef entry by the
+        // echoed request id: an internal auto-fetch reply landing while a
+        // user request is in flight must not leak onto the user's req_id.
+        let Ok(req_id) = rid.parse::<u32>() else { return };
+        let Some(idx) = self.pending_secdef.iter().position(|(pid, _, _)| *pid == req_id) else { return };
+        let (_, single_shot, _) = self.pending_secdef.remove(idx);
+        if records.is_empty() {
+            // No record: never a conId 0 row (ibx#400).
+            self.no_security_definition(req_id, shared, ccp_conn, hb);
+            return;
+        }
+        let multiplier = self.take_lookup(req_id)
+            .and_then(|l| l.filters.multiplier.parse::<f64>().ok());
+        let mut records = records;
+        // With several records, a requested multiplier keeps only the
+        // records that have it, as the reference.
+        if let (true, Some(m)) = (records.len() > 1, multiplier) {
+            records.retain(|d| d.multiplier == m);
+            if records.is_empty() {
+                push_not_found(req_id, shared);
+                return;
+            }
+        }
+        for def in records.iter().filter(|d| d.con_id != 0) {
+            if let Some(rule) = def.market_rule_id {
+                self.market_rule_by_exchange.insert((def.con_id, def.exchange.clone()), rule);
+            }
+        }
+        // Internal sentinel req_ids (auto-fetch for cold-cache positions,
+        // scanner enrichment) start at 0xF000_0000. Their replies populate
+        // the contract cache but never surface as contract_details callbacks.
+        if req_id >= 0xF000_0000 {
+            return;
+        }
+        // By-symbol lookup: each record asks for its unknown per-exchange
+        // market rules before it becomes a row.
+        let by_symbol = !single_shot && !contracts::secdef_response_is_last(msg);
+        let mut outstanding: Vec<(String, u32, String)> = Vec::new();
+        if by_symbol {
+            for def in records.iter().filter(|d| d.con_id != 0) {
+                for exch in &def.valid_exchanges {
+                    if matches!(exch.as_str(), "" | "SMART" | "BEST")
+                        || self.market_rule_by_exchange.contains_key(&(def.con_id, exch.clone()))
+                        || outstanding.iter().any(|(_, c, e)| *c == def.con_id && e == exch)
+                    {
+                        continue;
+                    }
+                    let fid = format!("ibxfan-{}-{}", req_id, self.next_fanout_id);
+                    self.next_fanout_id = self.next_fanout_id.wrapping_add(1);
+                    self.send_fanout_secdef_request(&fid, def.con_id as i64, exch, ccp_conn, hb);
+                    outstanding.push((fid, def.con_id, exch.clone()));
+                }
+            }
+        }
+        if outstanding.is_empty() {
+            self.deliver_contract_rows(req_id, records, shared, event_tx, ccp_conn, hb);
+        } else {
+            log::info!(
+                "Secdef by-symbol fan-out: api_req_id={} records={} requests={}",
+                req_id, records.len(), outstanding.len(),
+            );
+            self.pending_fanout.push(PendingFanout {
+                api_req_id: req_id,
+                total: outstanding.len(),
+                outstanding,
+                records,
+                deadline: Instant::now() + SECDEF_TIMEOUT,
+            });
+        }
+    }
+
+    /// Contract cache entry of a definition, for every reply (rows or not).
+    fn cache_definition(&mut self, def: &crate::control::contracts::ContractDefinition, shared: &SharedState) {
+        if def.con_id == 0 {
+            return;
+        }
+        shared.reference.cache_contract(def.con_id as i64, api::Contract {
+            con_id: def.con_id as i64,
+            symbol: def.symbol.clone(),
+            sec_type: def.sec_type.to_api_str().to_string(),
+            exchange: def.exchange.clone(),
+            currency: def.currency.clone(),
+            local_symbol: def.local_symbol.clone(),
+            primary_exchange: def.primary_exchange.clone(),
+            trading_class: def.trading_class.clone(),
+            ..Default::default()
+        });
+        shared.reference.cache_market_name(def.con_id as i64, &def.market_name);
+        self.try_release_scanner_enrichments(def.con_id as i64, shared);
+    }
+
+    /// The rows of a lookup, in record order (ibx#435): each record gets its
+    /// market rule ids, and waits for its trading schedule when it has a
+    /// join key (one schedule request per key). The end follows the last row.
+    fn deliver_contract_rows(
+        &mut self,
+        req_id: u32,
+        records: Vec<crate::control::contracts::ContractDefinition>,
+        shared: &SharedState,
+        event_tx: &Option<Sender<Event>>,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+        let mut subscribed: Vec<String> = Vec::new();
+        for mut def in records {
+            def.market_rule_ids = self.market_rule_ids(&def);
+            if def.join_key.is_empty() {
+                push_contract_row(shared, event_tx, req_id, def);
+            } else {
+                if !subscribed.contains(&def.join_key) {
+                    self.send_schedule_subscribe(&def.join_key, ccp_conn, hb);
+                    subscribed.push(def.join_key.clone());
+                }
+                self.pending_schedule_pair.push(PendingSchedulePair {
+                    api_req_id: req_id,
+                    join_key: def.join_key.clone(),
+                    def,
+                    deadline,
+                });
+            }
+        }
+        self.end_if_complete(req_id, shared, event_tx);
+    }
+
+    /// contract_details_end once no row of the lookup waits for its schedule.
+    fn end_if_complete(&self, req_id: u32, shared: &SharedState, event_tx: &Option<Sender<Event>>) {
+        if !self.pending_schedule_pair.iter().any(|p| p.api_req_id == req_id) {
+            shared.reference.push_contract_details_end(req_id);
+            emit(event_tx, Event::ContractDetailsEnd(req_id));
+        }
+    }
+
+    /// Market rule id of each valid exchange of a record whose rule is
+    /// known, comma-joined (ibx#435).
+    fn market_rule_ids(&self, def: &crate::control::contracts::ContractDefinition) -> String {
+        let mut ids = String::new();
+        for exch in &def.valid_exchanges {
+            if let Some(id) = self.market_rule_by_exchange.get(&(def.con_id, exch.clone())) {
+                if !ids.is_empty() {
+                    ids.push(',');
+                }
+                ids.push_str(&id.to_string());
+            }
+        }
+        ids
     }
 
     /// Send a per-exchange fan-out request after a by-symbol master reply.
@@ -3434,7 +3485,7 @@ mod tests {
         let past = Instant::now() - std::time::Duration::from_secs(1);
         ccp.pending_secdef.push((7, true, past));
 
-        ccp.sweep_contract_details(&shared, &None);
+        ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
 
         assert!(ccp.pending_secdef.is_empty(), "expired entry must be reclaimed");
         let errors = shared.reference.drain_historical_errors();
@@ -3453,7 +3504,7 @@ mod tests {
         // Internal sentinel (cache auto-fetch): no user is waiting on it.
         ccp.pending_secdef.push((0xF000_0001, true, past));
 
-        ccp.sweep_contract_details(&shared, &None);
+        ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
 
         assert!(ccp.pending_secdef.is_empty());
         assert!(shared.reference.drain_historical_errors().is_empty());
@@ -3466,12 +3517,13 @@ mod tests {
         let shared = SharedState::new();
         ccp.pending_fanout.push(PendingFanout {
             api_req_id: 9,
-            fanout_req_ids: (0..27).map(|i| format!("ibxfan-9-{i}")).collect(),
-            received: 26, // one reply lost — previously hung forever
+            outstanding: vec![("ibxfan-9-26".to_string(), 1, "IEX".to_string())],
+            total: 27, // one reply lost — previously hung forever
+            records: Vec::new(),
             deadline: Instant::now() - std::time::Duration::from_secs(1),
         });
 
-        ccp.sweep_contract_details(&shared, &None);
+        ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
 
         assert!(ccp.pending_fanout.is_empty());
         let errors = shared.reference.drain_historical_errors();
@@ -3698,7 +3750,7 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!((errors[0].0, errors[0].1), (9, 200));
         assert!(shared.reference.drain_contract_details_end().is_empty());
-        assert!(ccp.pending_secdef.is_empty() && ccp.pending_strike_retry.is_empty());
+        assert!(ccp.pending_secdef.is_empty() && ccp.pending_lookups.is_empty());
     }
 
     #[test]
@@ -3706,9 +3758,149 @@ mod tests {
         let (mut ccp, mut context, shared) = u186_test_state();
         let mut hb = HeartbeatState::new();
         ccp.send_secdef_request_by_symbol(11, "ZZZZQQ", "STK", "SMART", "USD", &Default::default(), &mut None, &mut hb);
-        assert!(ccp.pending_strike_retry.is_empty());
+        assert!(ccp.pending_lookups[0].retry_strike.is_none());
         ccp.process_ccp_message(&empty_secdef_reply("11"), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
         assert_eq!(shared.reference.drain_historical_errors().len(), 1);
+    }
+
+    // ── ibx#435: one row per record, fan-out replies are not rows ──
+
+    use crate::control::contracts::tests::{five_future_records, pipe_msg};
+
+    fn reply(ccp: &mut CcpState, context: &mut Context, shared: &SharedState, msg: &[u8]) {
+        ccp.process_ccp_message(msg, &mut None, context, shared, &None, &mut HeartbeatState::new(), "DU1");
+    }
+
+    #[test]
+    fn multi_record_reply_gives_one_row_per_record_then_end() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        ccp.send_secdef_request_by_symbol(21, "MNQ", "FUT", "CME", "USD", &Default::default(), &mut None,
+            &mut HeartbeatState::new());
+
+        reply(&mut ccp, &mut context, &shared, &five_future_records("21", ""));
+
+        let rows = shared.reference.drain_contract_details();
+        assert_eq!(rows.len(), 5, "one row per record");
+        assert!(rows.iter().all(|(rid, _)| *rid == 21));
+        let ids: Vec<u32> = rows.iter().map(|(_, d)| d.con_id).collect();
+        assert_eq!(ids, [815824267, 840227399, 866514785, 893091676, 925800444]);
+        // The record's own exchange rule is known: no fan-out.
+        assert!(ccp.pending_fanout.is_empty());
+        assert!(rows.iter().all(|(_, d)| d.market_rule_ids == "67"));
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![21]);
+        assert!(ccp.pending_secdef.is_empty() && ccp.pending_lookups.is_empty());
+    }
+
+    #[test]
+    fn records_sharing_a_join_key_ask_their_schedule_once() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        ccp.send_secdef_request_by_symbol(22, "MNQ", "FUT", "CME", "USD", &Default::default(), &mut conn, &mut hb);
+        let _ = ccp_messages_sent(&mut server);
+
+        ccp.process_ccp_message(&five_future_records("22", "CME/FUT"), &mut conn, &mut context, &shared, &None,
+            &mut hb, "DU1");
+        let sent = ccp_messages_sent(&mut server);
+        assert_eq!(sent.len(), 1, "one schedule request for the shared key: {sent:?}");
+        assert!(sent[0].contains("6256=CME/FUT"), "{}", sent[0]);
+        assert!(shared.reference.drain_contract_details().is_empty(), "rows wait for the schedule");
+        assert!(shared.reference.drain_contract_details_end().is_empty());
+
+        let schedule = pipe_msg("35=U|6040=107|6256=CME/FUT");
+        ccp.process_ccp_message(&schedule, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(shared.reference.drain_contract_details().len(), 5);
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![22]);
+        assert!(ccp.pending_schedule_pair.is_empty());
+    }
+
+    fn stock_reply(req_id: &str) -> Vec<u8> {
+        pipe_msg(&format!(
+            "35=d|43=N|320={req_id}|322=*|323=4|55=AAPL|167=STK|207=BEST|6008=265598|6031=4563|15=USD|58=NMS|\
+             6035=AAPL|6058=NMS|6430=1/STK/NASDAQ|146=1|6038=Y|6019=1|6031=4563|6023=0|6027=0.01|6030=1|6344=1|\
+             6008=265598|6470=NASDAQ|306=APPLE INC|6046=BEST,AMEX,NYSE,"
+        ))
+    }
+
+    fn exchange_reply(req_id: &str, exchange: &str, rule: &str) -> Vec<u8> {
+        pipe_msg(&format!(
+            "35=d|43=N|320={req_id}|322=*|323=4|55=AAPL|167=STK|207={exchange}|6008=265598|6031={rule}|15=USD|\
+             58=NMS|6035=AAPL|6058=NMS|146=1|6038=Y|6019=1|6031={rule}|6023=0|6027=0.01|6030=1"
+        ))
+    }
+
+    #[test]
+    fn fanout_replies_fill_the_rules_and_are_not_rows() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        ccp.send_secdef_request_by_symbol(31, "AAPL", "STK", "SMART", "USD", &Default::default(), &mut None,
+            &mut HeartbeatState::new());
+
+        reply(&mut ccp, &mut context, &shared, &stock_reply("31"));
+        assert_eq!(ccp.pending_fanout.len(), 1);
+        let asked: Vec<(u32, String)> = ccp.pending_fanout[0].outstanding.iter()
+            .map(|(_, c, e)| (*c, e.clone())).collect();
+        assert_eq!(asked, [(265598, "AMEX".to_string()), (265598, "NYSE".to_string())],
+            "only the exchanges with no known rule");
+        let ids: Vec<String> = ccp.pending_fanout[0].outstanding.iter().map(|(id, _, _)| id.clone()).collect();
+        assert!(shared.reference.drain_contract_details().is_empty(), "the row waits for the fan-out");
+
+        reply(&mut ccp, &mut context, &shared, &exchange_reply(&ids[0], "AMEX", "109"));
+        assert!(shared.reference.drain_contract_details().is_empty(), "a fan-out reply is not a row");
+        assert!(shared.reference.drain_contract_details_end().is_empty());
+        reply(&mut ccp, &mut context, &shared, &exchange_reply(&ids[1], "NYSE", "110"));
+
+        let rows = shared.reference.drain_contract_details();
+        assert_eq!(rows.len(), 1, "one row for one record");
+        let def = &rows[0].1;
+        assert_eq!((rows[0].0, def.con_id, def.exchange.as_str()), (31, 265598, "SMART"));
+        assert_eq!(def.long_name, "APPLE INC");
+        assert_eq!(def.market_rule_ids, "4563,109,110");
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![31]);
+        assert!(ccp.pending_fanout.is_empty());
+
+        // The rules are known now: the same lookup again needs no fan-out.
+        ccp.send_secdef_request_by_symbol(32, "AAPL", "STK", "SMART", "USD", &Default::default(), &mut None,
+            &mut HeartbeatState::new());
+        reply(&mut ccp, &mut context, &shared, &stock_reply("32"));
+        assert!(ccp.pending_fanout.is_empty());
+        let rows = shared.reference.drain_contract_details();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.market_rule_ids, "4563,109,110");
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![32]);
+    }
+
+    #[test]
+    fn a_request_multiplier_keeps_the_records_that_have_it() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let f = crate::types::SecDefFilters { multiplier: "100".into(), ..Default::default() };
+        ccp.send_secdef_request_by_symbol(41, "XYZ", "OPT", "SMART", "USD", &f, &mut None, &mut HeartbeatState::new());
+        let msg = pipe_msg(
+            "35=d|320=41|323=4|55=XYZ|167=OPT|207=BEST|6008=1|231=100|15=USD|55=XYZ|167=OPT|207=BEST|6008=2|231=10|15=USD"
+        );
+        reply(&mut ccp, &mut context, &shared, &msg);
+        let rows = shared.reference.drain_contract_details();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.con_id, 1);
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![41]);
+    }
+
+    #[test]
+    fn a_fanout_timeout_sends_the_waiting_rows_then_end() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        ccp.send_secdef_request_by_symbol(51, "AAPL", "STK", "SMART", "USD", &Default::default(), &mut None,
+            &mut HeartbeatState::new());
+        reply(&mut ccp, &mut context, &shared, &stock_reply("51"));
+        assert_eq!(ccp.pending_fanout.len(), 1);
+        ccp.pending_fanout[0].deadline = Instant::now() - std::time::Duration::from_secs(1);
+
+        ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
+
+        let rows = shared.reference.drain_contract_details();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.market_rule_ids, "4563", "the rules known so far");
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![51]);
+        assert!(shared.reference.drain_historical_errors().is_empty());
     }
 
     // ── ibx#228: matching-symbols attribution ──
@@ -3834,12 +4026,13 @@ mod tests {
         ccp.pending_secdef.push((7, true, future));
         ccp.pending_fanout.push(PendingFanout {
             api_req_id: 9,
-            fanout_req_ids: vec!["ibxfan-9-0".to_string()],
-            received: 0,
+            outstanding: vec![("ibxfan-9-0".to_string(), 1, "IEX".to_string())],
+            total: 1,
+            records: Vec::new(),
             deadline: future,
         });
 
-        ccp.sweep_contract_details(&shared, &None);
+        ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
 
         assert_eq!(ccp.pending_secdef.len(), 1);
         assert_eq!(ccp.pending_fanout.len(), 1);
