@@ -2074,8 +2074,13 @@ impl CcpState {
             shared.reference.push_market_rules(rules);
         }
         let records = contracts::parse_secdef_records(msg).unwrap_or_default();
-        for def in &records {
-            self.cache_definition(def, shared);
+        // A reply can list one conId once per exchange: the contract cache
+        // keeps the first record of each conId, the one on the lookup's own
+        // exchange, not the last listed exchange.
+        for (i, def) in records.iter().enumerate() {
+            if !records[..i].iter().any(|d| d.con_id == def.con_id) {
+                self.cache_definition(def, shared);
+            }
         }
         let Some(rid) = response_req_id else { return };
 
@@ -2130,6 +2135,17 @@ impl CcpState {
         // the contract cache but never surface as contract_details callbacks.
         if req_id >= 0xF000_0000 {
             return;
+        }
+        if single_shot {
+            // A lookup by conId asks for one contract, but its reply lists
+            // that contract once per exchange: only the first record is a
+            // row. The others still gave their market rules above.
+            let mut seen: Vec<u32> = Vec::with_capacity(1);
+            records.retain(|d| {
+                let first = !seen.contains(&d.con_id);
+                seen.push(d.con_id);
+                first
+            });
         }
         // By-symbol lookup: each record asks for its unknown per-exchange
         // market rules before it becomes a row.
@@ -3960,6 +3976,77 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].1.market_rule_ids, "4563,109,110");
         assert_eq!(shared.reference.drain_contract_details_end(), vec![32]);
+    }
+
+    /// One record of `symbol` on `exchange` with its schedule key and rule.
+    fn listing(symbol: &str, con_id: &str, exchange: &str, key: &str, rule: &str) -> String {
+        format!("55={symbol}|167=STK|207={exchange}|6008={con_id}|6256={key}|6031={rule}|15=USD|58=NMS|\
+                 6035={symbol}|6058=NMS|")
+    }
+
+    // Two lookups in flight at once, one by conId and one by symbol, whose
+    // replies interleave and whose rows share a schedule key: each request
+    // gets its own row only, then its end. The reply to the conId lookup
+    // lists the contract once per exchange; it is still one row.
+    #[test]
+    fn concurrent_lookups_sharing_a_schedule_key_keep_their_own_rows() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        let key = "1/STK/NASDAQ#LITE";
+        ccp.send_secdef_request(100, 756733, &mut conn, &mut hb);
+        ccp.send_secdef_request_by_symbol(101, "MSFT", "STK", "SMART", "USD", &Default::default(), &mut conn, &mut hb);
+        let _ = ccp_messages_sent(&mut server);
+
+        // The symbol lookup answers first and asks one exchange rule.
+        let msft = pipe_msg(&format!(
+            "35=d|43=N|320=101|322=*|323=4|{}146=1|6038=Y|6019=1|6031=4563|6023=0|6027=0.01|6030=1|6344=1|\
+             6008=272093|306=MICROSOFT CORP|6046=BEST,AMEX,",
+            listing("MSFT", "272093", "BEST", key, "4563"),
+        ));
+        ccp.process_ccp_message(&msft, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(ccp.pending_fanout.len(), 1);
+        let fid = ccp.pending_fanout[0].outstanding[0].0.clone();
+
+        // Then the conId lookup: the contract once per exchange.
+        let spy = pipe_msg(&format!(
+            "35=d|43=N|320=100|322=*|323=4|{}{}{}146=1|6038=Y|6019=1|6031=4563|6023=0|6027=0.01|6030=1|6344=1|\
+             6008=756733|306=SPDR S&P 500 ETF TRUST|6046=BEST,AMEX,NYSE,",
+            listing("SPY", "756733", "BEST", key, "4563"),
+            listing("SPY", "756733", "AMEX", "AMEX/STK#NOCROSS#LITE", "109"),
+            listing("SPY", "756733", "NYSE", "NYSE/STK#NOCROSS#LITE", "110"),
+        ));
+        ccp.process_ccp_message(&spy, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let sent: Vec<String> = ccp_messages_sent(&mut server).into_iter()
+            .filter(|m| m.contains("6040=106")).collect();
+        assert_eq!(sent.len(), 1, "one schedule request for the one row: {sent:?}");
+        assert!(sent[0].contains(&format!("6256={key}")), "{}", sent[0]);
+
+        // The fan-out reply of the symbol lookup, then the shared schedule.
+        let amex = pipe_msg(&format!("35=d|43=N|320={fid}|322=*|323=4|{}", listing("MSFT", "272093", "AMEX", "AMEX/STK", "109")));
+        ccp.process_ccp_message(&amex, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(shared.reference.drain_contract_details().is_empty(), "both rows wait for their schedule");
+        let schedule = pipe_msg(&format!("35=U|6040=107|6256={key}"));
+        ccp.process_ccp_message(&schedule, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+
+        let rows: Vec<(u32, u32, String, String)> = shared.reference.drain_contract_details().into_iter()
+            .map(|(rid, d)| (rid, d.con_id, d.symbol, d.market_rule_ids)).collect();
+        assert_eq!(rows, [
+            (100, 756733, "SPY".to_string(), "4563,109,110".to_string()),
+            (101, 272093, "MSFT".to_string(), "4563,109".to_string()),
+        ]);
+        let mut ends = shared.reference.drain_contract_details_end();
+        ends.sort();
+        assert_eq!(ends, [100, 101]);
+
+        // A second schedule reply for the key finds nothing waiting.
+        ccp.process_ccp_message(&schedule, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(shared.reference.drain_contract_details().is_empty());
+        assert!(shared.reference.drain_contract_details_end().is_empty());
+        assert!(ccp.pending_schedule_pair.is_empty() && ccp.pending_secdef.is_empty() && ccp.pending_fanout.is_empty());
+        // The contract cache keeps the lookup's own exchange.
+        assert_eq!(shared.reference.get_contract(756733).map(|c| c.exchange), Some("SMART".to_string()));
     }
 
     #[test]
