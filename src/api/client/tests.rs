@@ -1586,13 +1586,42 @@ fn req_head_time_stamp_sends_fetch() {
     client.req_head_time_stamp(10, &spy(), "TRADES", true, 1).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::FetchHeadTimestamp { req_id, con_id, what_to_show, use_rth } => {
+        ControlCommand::FetchHeadTimestamp { req_id, con_id, what_to_show, use_rth, .. } => {
             assert_eq!(req_id, 10);
             assert_eq!(con_id, 756733);
             assert_eq!(what_to_show, "TRADES");
             assert!(use_rth);
         }
         _ => panic!("expected FetchHeadTimestamp"),
+    }
+}
+
+// ── ibx#305: the contract's secType and exchange reach the engine ──
+
+#[test]
+fn historical_requests_carry_contract_sec_type_and_exchange() {
+    let (client, rx, _shared) = test_client();
+    let fut = Contract {
+        con_id: 815824267, symbol: "MNQ".into(), sec_type: "FUT".into(),
+        exchange: "CME".into(), ..Default::default()
+    };
+    client.req_historical_data(1, &fut, "", "1 D", "1 hour", "TRADES", false, 1, false).unwrap();
+    client.req_head_time_stamp(2, &fut, "TRADES", false, 1).unwrap();
+    client.req_historical_ticks(3, &fut, "", "20260928 20:00:00", 100, "TRADES", false).unwrap();
+    client.req_historical_schedule(4, &fut, "", "1 D", true).unwrap();
+    client.req_histogram_data(5, &fut, false, "1 week").unwrap();
+    client.req_real_time_bars(6, &fut, 5, "TRADES", false).unwrap();
+    for _ in 0..6 {
+        let (st, ex) = match rx.try_recv().unwrap() {
+            ControlCommand::FetchHistorical { sec_type, exchange, .. }
+            | ControlCommand::FetchHeadTimestamp { sec_type, exchange, .. }
+            | ControlCommand::FetchHistoricalTicks { sec_type, exchange, .. }
+            | ControlCommand::FetchHistoricalSchedule { sec_type, exchange, .. }
+            | ControlCommand::FetchHistogramData { sec_type, exchange, .. }
+            | ControlCommand::SubscribeRealTimeBar { sec_type, exchange, .. } => (sec_type, exchange),
+            other => panic!("unexpected command {:?}", other),
+        };
+        assert_eq!((st.as_str(), ex.as_str()), ("FUT", "CME"));
     }
 }
 

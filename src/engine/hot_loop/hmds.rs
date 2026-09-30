@@ -665,6 +665,8 @@ impl HmdsState {
         &mut self,
         req_id: u32,
         con_id: i64,
+        sec_type: &str,
+        exchange: &str,
         end_date_time: &str,
         duration: &str,
         bar_size: &str,
@@ -725,8 +727,8 @@ impl HmdsState {
                 query_id: query_id.clone(),
                 con_id: con_id as u32,
                 symbol: symbol.to_string(),
-                sec_type: "CS",
-                exchange: "SMART",
+                sec_type: sec_type.to_string(),
+                exchange: exchange.to_string(),
                 data_type: leg_type,
                 end_time: end_date_time.to_string(),
                 duration: duration.to_string(),
@@ -849,6 +851,8 @@ impl HmdsState {
         &mut self,
         req_id: u32,
         con_id: i64,
+        sec_type: &str,
+        exchange: &str,
         end_date_time: &str,
         duration: &str,
         bar_size: &str,
@@ -918,8 +922,8 @@ impl HmdsState {
             query_id: query_id.clone(),
             con_id: con_id as u32,
             symbol: symbol.to_string(),
-            sec_type: "CS",
-            exchange: "SMART",
+            sec_type: sec_type.to_string(),
+            exchange: exchange.to_string(),
             data_type,
             end_time: end_date_time,
             duration: duration.to_string(),
@@ -982,7 +986,7 @@ impl HmdsState {
         }
     }
 
-    pub(crate) fn send_head_timestamp_request(&mut self, req_id: u32, con_id: i64, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_head_timestamp_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // Same shared table as the bar paths — this was a third divergent
         // copy with a silent TRADES fallback (ibx#232).
         let data_type = match crate::control::historical::BarDataType::from_api_str(what_to_show) {
@@ -995,8 +999,8 @@ impl HmdsState {
         };
         let req = crate::control::historical::HeadTimestampRequest {
             con_id: con_id as u32,
-            sec_type: "CS",
-            exchange: "SMART",
+            sec_type: sec_type.to_string(),
+            exchange: exchange.to_string(),
             data_type,
             use_rth,
         };
@@ -1148,9 +1152,11 @@ impl HmdsState {
         self.pending_fundamental.push((query_id, req_id));
     }
 
-    pub(crate) fn send_histogram_request(&mut self, req_id: u32, con_id: u32, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_histogram_request(&mut self, req_id: u32, con_id: u32, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let req = crate::control::histogram::HistogramRequest {
             con_id,
+            sec_type: sec_type.to_string(),
+            exchange: exchange.to_string(),
             use_rth,
             period: period.to_string(),
             end_time: chrono_free_timestamp().to_string(),
@@ -1171,12 +1177,12 @@ impl HmdsState {
         self.pending_histogram.push((query_id, req_id));
     }
 
-    pub(crate) fn send_historical_ticks_request(&mut self, req_id: u32, con_id: i64, start_date_time: &str, end_date_time: &str, number_of_ticks: u32, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_historical_ticks_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, start_date_time: &str, end_date_time: &str, number_of_ticks: u32, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
         let query_id = format!("tk_{}", qid);
         let xml = crate::control::historical::build_tick_query_xml(
-            &query_id, con_id, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth,
+            &query_id, con_id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth,
         );
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
@@ -1191,11 +1197,11 @@ impl HmdsState {
         self.pending_ticks.push((query_id, req_id, what_to_show.to_string()));
     }
 
-    pub(crate) fn send_realtime_bar_subscribe(&mut self, req_id: u32, con_id: i64, _symbol: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_realtime_bar_subscribe(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, _symbol: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
         let query_id = format!("rt_{}", qid);
-        let xml = crate::control::historical::build_realtime_bar_xml(&query_id, con_id, what_to_show, use_rth);
+        let xml = crate::control::historical::build_realtime_bar_xml(&query_id, con_id, sec_type, exchange, what_to_show, use_rth);
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
             let _ = conn.send_fix(&[
@@ -1209,7 +1215,8 @@ impl HmdsState {
         self.rtbar_subs.push((query_id, req_id, None, 0.01));
     }
 
-    pub(crate) fn send_schedule_request(&mut self, req_id: u32, con_id: i64, end_date_time: &str, duration: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_schedule_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, end_date_time: &str, duration: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
         let duration = duration.to_lowercase();
@@ -1219,7 +1226,7 @@ impl HmdsState {
             end_date_time.to_string()
         };
         let query_id = format!("sched_{}", qid);
-        let xml = crate::control::historical::build_schedule_xml(&query_id, con_id, &end_date_time, &duration, use_rth);
+        let xml = crate::control::historical::build_schedule_xml(&query_id, con_id, sec_type, exchange, &end_date_time, &duration, use_rth);
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
             let _ = conn.send_fix(&[
@@ -1392,7 +1399,7 @@ mod tests {
     fn send_bid_ask(hmds: &mut HmdsState, shared: &SharedState, req_id: u32) -> (String, String) {
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.send_historical_request_ex(req_id, 416904, "", "3600 S", "1 min", "BID_ASK",
+        hmds.send_historical_request_ex(req_id, 416904, "IND", "CBOE", "", "3600 S", "1 min", "BID_ASK",
             true, false, "SPX", &mut conn, &mut hb, shared);
         let legs: Vec<&(String, u32, Instant)> =
             hmds.pending_historical.iter().filter(|(_, r, _)| *r == req_id).collect();
@@ -1520,7 +1527,7 @@ mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        let sent = hmds.send_historical_request_via_ccp(12, 416904, "", "3600 S", "5 secs", "BID_ASK",
+        let sent = hmds.send_historical_request_via_ccp(12, 416904, "IND", "CBOE", "", "3600 S", "5 secs", "BID_ASK",
             true, "SPX", &mut conn, &mut hb, &[], &std::sync::Mutex::new(Vec::new()), &shared);
         assert!(!sent);
         assert!(hmds.pending_historical.is_empty());
@@ -1557,7 +1564,7 @@ mod tests {
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
 
-        hmds.send_historical_request_ex(9, 756733, "", "2 d", "1 Min", "TRADES",
+        hmds.send_historical_request_ex(9, 756733, "STK", "SMART", "", "2 d", "1 Min", "TRADES",
             true, false, "SPY", &mut conn, &mut hb, &shared);
 
         assert!(hmds.pending_historical.is_empty(), "rejected request must not go pending");

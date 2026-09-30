@@ -10,6 +10,10 @@ use super::historical::TAG_HISTORICAL_XML;
 #[derive(Debug, Clone)]
 pub struct HistogramRequest {
     pub con_id: u32,
+    /// Security type of the API contract. Empty is a stock.
+    pub sec_type: String,
+    /// Exchange of the API contract. Empty is `SMART`.
+    pub exchange: String,
     pub use_rth: bool,
     /// Time period, e.g. "1 week", "3 days", "1 month".
     pub period: String,
@@ -32,8 +36,10 @@ pub fn build_histogram_request_xml(req: &HistogramRequest) -> String {
     // HMDS requires lowercase duration units
     let time_length = convert_period(&req.period).to_lowercase();
 
+    let exchange = super::historical::query_exchange(&req.exchange, &req.sec_type);
+    let sec_type = super::historical::query_sec_type(&req.sec_type);
     let id = format!(
-        "histogramQuery;;{}@BEST Histogram;;0;;{rth};;0;;U",
+        "histogramQuery;;{}@{exchange} Histogram;;0;;{rth};;0;;U",
         req.con_id,
     );
 
@@ -44,8 +50,8 @@ pub fn build_histogram_request_xml(req: &HistogramRequest) -> String {
          <id>{id}</id>\
          <useRTH>{rth}</useRTH>\
          <contractID>{con_id}</contractID>\
-         <exchange>BEST</exchange>\
-         <secType>CS</secType>\
+         <exchange>{exchange}</exchange>\
+         <secType>{sec_type}</secType>\
          <type>HistogramData</type>\
          <data>Last</data>\
          <endTime>{end_time}</endTime>\
@@ -158,6 +164,8 @@ mod tests {
     fn build_xml_structure() {
         let req = HistogramRequest {
             con_id: 265598,
+            sec_type: "STK".to_string(),
+            exchange: "SMART".to_string(),
             use_rth: true,
             period: "1 week".to_string(),
             end_time: "20260320-21:00:00".to_string(),
@@ -169,6 +177,7 @@ mod tests {
         assert!(xml.contains("<timeLength>7 d</timeLength>"));
         assert!(xml.contains("<data>Last</data>"));
         assert!(xml.contains("<exchange>BEST</exchange>"));
+        assert!(xml.contains("<secType>STK</secType>"));
         assert!(xml.contains("<endTime>20260320-21:00:00</endTime>"));
         // No <step> tag
         assert!(!xml.contains("<step>"));
@@ -178,6 +187,8 @@ mod tests {
     fn build_xml_rth_false() {
         let req = HistogramRequest {
             con_id: 100,
+            sec_type: String::new(),
+            exchange: String::new(),
             use_rth: false,
             period: "3 days".to_string(),
             end_time: "20260320-21:00:00".to_string(),
@@ -191,6 +202,8 @@ mod tests {
     fn build_fix_request() {
         let req = HistogramRequest {
             con_id: 265598,
+            sec_type: "STK".to_string(),
+            exchange: "SMART".to_string(),
             use_rth: true,
             period: "1 week".to_string(),
             end_time: "20260320-21:00:00".to_string(),

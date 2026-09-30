@@ -36,6 +36,8 @@ impl EClient {
             tx.send(ControlCommand::FetchHistoricalSchedule {
                 req_id: req_id as u32,
                 con_id: contract.con_id,
+                sec_type: contract.sec_type.clone(),
+                exchange: contract.exchange.clone(),
                 end_date_time: end_date_time.to_string(),
                 duration: duration_str.to_string(),
                 use_rth: use_rth != 0,
@@ -45,6 +47,8 @@ impl EClient {
                 req_id: req_id as u32,
                 con_id: contract.con_id,
                 symbol: contract.symbol.clone(),
+                sec_type: contract.sec_type.clone(),
+                exchange: contract.exchange.clone(),
                 end_date_time: end_date_time.to_string(),
                 duration: duration_str.to_string(),
                 bar_size: bar_size_setting.to_string(),
@@ -80,6 +84,8 @@ impl EClient {
         tx.send(ControlCommand::FetchHeadTimestamp {
             req_id: req_id as u32,
             con_id: contract.con_id,
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
             what_to_show: what_to_show.to_string(),
             use_rth: use_rth != 0,
         }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -281,6 +287,8 @@ impl EClient {
         tx.send(ControlCommand::FetchHistoricalTicks {
             req_id: req_id as u32,
             con_id: contract.con_id,
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
             start_date_time: start_date_time.to_string(),
             end_date_time: end_date_time.to_string(),
             number_of_ticks: number_of_ticks as u32,
@@ -316,6 +324,8 @@ impl EClient {
         tx.send(ControlCommand::FetchHistogramData {
             req_id: req_id as u32,
             con_id: contract.con_id as u32,
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
             use_rth,
             period: time_period.to_string(),
         }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
@@ -342,6 +352,8 @@ impl EClient {
         tx.send(ControlCommand::FetchHistoricalSchedule {
             req_id: req_id as u32,
             con_id: contract.con_id,
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
             end_date_time: end_date_time.into(),
             duration: duration_str.into(),
             use_rth,

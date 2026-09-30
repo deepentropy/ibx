@@ -19,6 +19,8 @@ impl EClient {
             req_id: req_id as u32,
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
             end_date_time: end_date_time.into(),
             duration: duration.into(),
             bar_size: bar_size.into(),
@@ -40,6 +42,8 @@ impl EClient {
         self.send(ControlCommand::FetchHeadTimestamp {
             req_id: req_id as u32,
             con_id: contract.con_id,
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
             what_to_show: what_to_show.into(),
             use_rth,
         })
@@ -185,6 +189,8 @@ impl EClient {
         self.send(ControlCommand::FetchHistogramData {
             req_id: req_id as u32,
             con_id: contract.con_id as u32,
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
             use_rth,
             period: period.into(),
         })
@@ -206,6 +212,8 @@ impl EClient {
         self.send(ControlCommand::FetchHistoricalTicks {
             req_id: req_id as u32,
             con_id: contract.con_id,
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
             start_date_time: start_date_time.into(),
             end_date_time: end_date_time.into(),
             number_of_ticks: number_of_ticks as u32,
@@ -224,6 +232,8 @@ impl EClient {
         self.send(ControlCommand::FetchHistoricalSchedule {
             req_id: req_id as u32,
             con_id: contract.con_id,
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
             end_date_time: end_date_time.into(),
             duration: duration.into(),
             use_rth,

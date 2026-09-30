@@ -217,8 +217,8 @@ fn historical_request_full_workflow() {
         query_id: "hd1;;AAPL@SMART TRADES;;1;;true;;0;;I".to_string(),
         con_id: 265598,
         symbol: "AAPL".to_string(),
-        sec_type: "CS",
-        exchange: "SMART",
+        sec_type: "STK".to_string(),
+        exchange: "SMART".to_string(),
         data_type: BarDataType::Trades,
         end_time: "20260228-16:00:00".to_string(),
         duration: "1 d".to_string(),
@@ -307,8 +307,8 @@ fn historical_streaming_subscription_flow() {
         query_id: "rt1".to_string(),
         con_id: 265598,
         symbol: "AAPL".to_string(),
-        sec_type: "CS",
-        exchange: "SMART",
+        sec_type: "STK".to_string(),
+        exchange: "SMART".to_string(),
         data_type: BarDataType::Trades,
         end_time: "".to_string(),
         duration: "1800 S".to_string(),
@@ -475,14 +475,14 @@ fn contract_lookup_feeds_historical_request() {
     let query_id = format!("hd;;{}@{}", contract.symbol, contract.exchange);
     let con_id = contract.con_id;
     let symbol = contract.symbol.clone();
-    let sec_type = contract.sec_type.to_fix();
+    let sec_type = contract.sec_type.to_api_str().to_string();
 
     let req = HistoricalRequest {
         query_id,
         con_id,
         symbol,
         sec_type,
-        exchange: "NASDAQ",
+        exchange: "NASDAQ".to_string(),
         data_type: BarDataType::Trades,
         end_time: "20260228-16:00:00".to_string(),
         duration: "1 d".to_string(),
@@ -494,7 +494,8 @@ fn contract_lookup_feeds_historical_request() {
     let msg = build_historical_request(&req, 1);
     let tags = fix::fix_parse(&msg);
     assert!(tags[&TAG_HISTORICAL_XML].contains("<contractID>265598</contractID>"));
-    assert!(tags[&TAG_HISTORICAL_XML].contains("<secType>CS</secType>"));
+    assert!(tags[&TAG_HISTORICAL_XML].contains("<secType>STK</secType>"));
+    assert!(tags[&TAG_HISTORICAL_XML].contains("<exchange>NASDAQ</exchange>"));
 }
 
 #[test]

@@ -131,6 +131,8 @@ impl EClient {
             req_id: req_id as u32,
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
+            sec_type: contract.sec_type.clone(),
+            exchange: contract.exchange.clone(),
             what_to_show: what_to_show.into(),
             use_rth,
         })

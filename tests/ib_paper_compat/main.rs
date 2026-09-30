@@ -1041,6 +1041,7 @@ fn timeout_sweeps_phase_live() {
 
     // 3. Historical bars — must complete without tripping the idle sweep.
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 6003, con_id: 756733, symbol: "SPY".into(),
         end_date_time: String::new(), duration: "5 D".into(), bar_size: "1 day".into(),
         what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false,

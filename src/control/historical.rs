@@ -185,14 +185,47 @@ pub struct HistoricalRequest {
     pub query_id: String,
     pub con_id: u32,
     pub symbol: String,
-    pub sec_type: &'static str,
-    pub exchange: &'static str,
+    /// Security type of the API contract (`STK`, `FUT`, `OPT`, `CASH`,
+    /// `IND`...). Empty is a stock.
+    pub sec_type: String,
+    /// Exchange of the API contract. Empty is `SMART`.
+    pub exchange: String,
     pub data_type: BarDataType,
     pub end_time: String,
     pub duration: String,
     pub bar_size: BarSize,
     pub use_rth: bool,
     pub keep_up_to_date: bool,
+}
+
+/// Security type of a data-service query for an API contract secType
+/// (ibx#305). An empty secType is a stock.
+pub fn query_sec_type(sec_type: &str) -> String {
+    let st = sec_type.trim().to_ascii_uppercase();
+    if st.is_empty() { "STK".to_string() } else { st }
+}
+
+/// Exchange of a data-service query for an API contract exchange and
+/// secType (ibx#305): smart routing and high-precision FX have their own
+/// data-service names; any other exchange is sent as given.
+pub fn query_exchange(exchange: &str, sec_type: &str) -> String {
+    let ex = exchange.trim().to_ascii_uppercase();
+    match (ex.as_str(), query_sec_type(sec_type).as_str()) {
+        ("" | "SMART", _) => "BEST".to_string(),
+        ("IDEALPRO", "CASH") => "FXSUBPIP".to_string(),
+        _ => ex,
+    }
+}
+
+/// Regular-trading-hours flag of a bar query (ibx#305): options, FX and
+/// indices always ask for regular hours, whatever the API request says.
+pub fn query_use_rth(sec_type: &str, use_rth: bool) -> bool {
+    use_rth || matches!(query_sec_type(sec_type).as_str(), "OPT" | "CASH" | "IND")
+}
+
+/// Whether a query asks for the exchange's own data (indices, ibx#305).
+fn query_use_native(sec_type: &str) -> bool {
+    query_sec_type(sec_type) == "IND"
 }
 
 /// A single historical OHLCV bar parsed from XML.
@@ -219,11 +252,10 @@ pub struct HistoricalResponse {
 
 /// Build the XML query for a historical bar data request.
 pub fn build_query_xml(req: &HistoricalRequest) -> String {
-    let exchange = match req.exchange {
-        "SMART" => "BEST",
-        e => e,
-    };
-    let rth = if req.use_rth { "true" } else { "false" };
+    let exchange = query_exchange(&req.exchange, &req.sec_type);
+    let sec_type = query_sec_type(&req.sec_type);
+    let rth = if query_use_rth(&req.sec_type, req.use_rth) { "true" } else { "false" };
+    let native = if query_use_native(&req.sec_type) { "<useNative>yes</useNative>" } else { "" };
 
     let data_str = req.data_type.as_str();
     // keepUpToDate uses structured ;;-delimited ID required by CCP gateway parser.
@@ -262,11 +294,11 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
          <needTotalValue>false</needTotalValue>\
          <wholeDays>false</wholeDays>\
          <delay>auto</delay>\
+         {native}\
          </Query>\
          </ListOfQueries>",
         id = query_id,
         con_id = req.con_id,
-        sec_type = req.sec_type,
         data = data_str,
         end_time = end_time_tag,
         dur = req.duration,
@@ -386,8 +418,10 @@ pub fn parse_ticker_id(xml: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub struct HeadTimestampRequest {
     pub con_id: u32,
-    pub sec_type: &'static str,
-    pub exchange: &'static str,
+    /// Security type of the API contract. Empty is a stock.
+    pub sec_type: String,
+    /// Exchange of the API contract. Empty is `SMART`.
+    pub exchange: String,
     pub data_type: BarDataType,
     pub use_rth: bool,
 }
@@ -401,20 +435,19 @@ pub struct HeadTimestampResponse {
 
 /// Build the XML query for a head timestamp request.
 pub fn build_head_timestamp_xml(req: &HeadTimestampRequest) -> String {
-    let exchange = match req.exchange {
-        "SMART" => "BEST",
-        e => e,
-    };
+    let exchange = query_exchange(&req.exchange, &req.sec_type);
+    let sec_type = query_sec_type(&req.sec_type);
     let rth = if req.use_rth { "true" } else { "false" };
     let id = format!("TickHeadClient1;;{}@{} {};;0;;{};;0;;U",
         req.con_id, exchange, req.data_type.as_str(), rth);
 
+    // The head timestamp query always asks for regular hours (ibx#305).
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
          <ListOfQueries>\
          <Query>\
          <id>{id}</id>\
-         <useRTH>{rth}</useRTH>\
+         <useRTH>true</useRTH>\
          <contractID>{con_id}</contractID>\
          <exchange>{exchange}</exchange>\
          <secType>{sec_type}</secType>\
@@ -428,7 +461,6 @@ pub fn build_head_timestamp_xml(req: &HeadTimestampRequest) -> String {
          </Query>\
          </ListOfQueries>",
         con_id = req.con_id,
-        sec_type = req.sec_type,
         data = req.data_type.as_str(),
     )
 }
@@ -445,11 +477,14 @@ fn tick_data_type(what_to_show: &str) -> &'static str {
 /// Build the XML query for a historical ticks request.
 ///
 /// Uses `<type>TickData</type>`, `<step>ticks</step>`, `<timeLength>{N} t</timeLength>`.
+#[allow(clippy::too_many_arguments)]
 pub fn build_tick_query_xml(
-    query_id: &str, con_id: i64, start_date_time: &str, end_date_time: &str,
+    query_id: &str, con_id: i64, sec_type: &str, exchange: &str,
+    start_date_time: &str, end_date_time: &str,
     number_of_ticks: u32, what_to_show: &str, use_rth: bool,
 ) -> String {
-    let exchange = "BEST";
+    let query_exchange = query_exchange(exchange, sec_type);
+    let sec_type = query_sec_type(sec_type);
     let rth = if use_rth { "true" } else { "false" };
     let data = tick_data_type(what_to_show);
 
@@ -468,7 +503,7 @@ pub fn build_tick_query_xml(
          <useRTH>{rth}</useRTH>\
          <contractID>{con_id}</contractID>\
          <exchange>{exchange}</exchange>\
-         <secType>CS</secType>\
+         <secType>{sec_type}</secType>\
          <expired>no</expired>\
          <type>TickData</type>\
          <data>{data}</data>\
@@ -481,6 +516,7 @@ pub fn build_tick_query_xml(
          </Query>\
          </ListOfQueries>",
         id = query_id,
+        exchange = query_exchange,
         n = number_of_ticks,
         time = time_tag,
     )
@@ -561,8 +597,18 @@ pub fn parse_tick_response(xml: &str, what_to_show: &str) -> Option<(String, cra
 }
 
 /// Build the XML subscription for real-time 5-second bars.
-pub fn build_realtime_bar_xml(query_id: &str, con_id: i64, what_to_show: &str, use_rth: bool) -> String {
-    let exchange = "BEST";
+///
+/// Unlike the other historical queries, the exchange is the API contract
+/// exchange as given (ibx#305); an empty one is `SMART`.
+pub fn build_realtime_bar_xml(
+    query_id: &str, con_id: i64, sec_type: &str, exchange: &str,
+    what_to_show: &str, use_rth: bool,
+) -> String {
+    let exchange = match exchange.trim() {
+        "" => "SMART",
+        e => e,
+    };
+    let sec_type = query_sec_type(sec_type);
     let rth = if use_rth { "true" } else { "false" };
     let data = match what_to_show.to_uppercase().as_str() {
         "MIDPOINT" => "Midpoint",
@@ -579,7 +625,7 @@ pub fn build_realtime_bar_xml(query_id: &str, con_id: i64, what_to_show: &str, u
          <useRTH>{rth}</useRTH>\
          <contractID>{con_id}</contractID>\
          <exchange>{exchange}</exchange>\
-         <secType>CS</secType>\
+         <secType>{sec_type}</secType>\
          <type>BarData</type>\
          <data>{data}</data>\
          <refresh>5 secs</refresh>\
@@ -693,8 +739,12 @@ pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<crate::types:
 ///
 /// Schedule requests use `<data>Schedule</data>` and `<scheduleOnly>true</scheduleOnly>`
 /// with `<type>BarData</type>`. Response is `<ResultSetSchedule>`.
-pub fn build_schedule_xml(query_id: &str, con_id: i64, end_time: &str, duration: &str, use_rth: bool) -> String {
-    let exchange = "BEST";
+pub fn build_schedule_xml(
+    query_id: &str, con_id: i64, sec_type: &str, exchange: &str,
+    end_time: &str, duration: &str, use_rth: bool,
+) -> String {
+    let exchange = query_exchange(exchange, sec_type);
+    let sec_type = query_sec_type(sec_type);
     let rth = if use_rth { "true" } else { "false" };
 
     format!(
@@ -705,7 +755,7 @@ pub fn build_schedule_xml(query_id: &str, con_id: i64, end_time: &str, duration:
          <useRTH>{rth}</useRTH>\
          <contractID>{con_id}</contractID>\
          <exchange>{exchange}</exchange>\
-         <secType>STK</secType>\
+         <secType>{sec_type}</secType>\
          <type>BarData</type>\
          <data>Schedule</data>\
          <endTime>{end}</endTime>\
@@ -874,8 +924,8 @@ mod tests {
             query_id: "q1".to_string(),
             con_id: 265598,
             symbol: "AAPL".to_string(),
-            sec_type: "CS",
-            exchange: "SMART",
+            sec_type: "STK".to_string(),
+            exchange: "SMART".to_string(),
             data_type: BarDataType::Trades,
             end_time: "20260228-15:00:00".to_string(),
             duration: "1 d".to_string(),
@@ -887,6 +937,8 @@ mod tests {
         assert!(xml.contains("<id>q1</id>"));
         assert!(xml.contains("<contractID>265598</contractID>"));
         assert!(xml.contains("<exchange>BEST</exchange>")); // SMART→BEST
+        assert!(xml.contains("<secType>STK</secType>"));
+        assert!(!xml.contains("<useNative>"));
         assert!(xml.contains("<data>Last</data>"));
         assert!(xml.contains("<step>5 mins</step>"));
         assert!(xml.contains("<useRTH>true</useRTH>"));
@@ -904,14 +956,84 @@ mod tests {
         }
     }
 
+    // ── ibx#305: secType and exchange come from the API contract ──
+
+    fn bar_req(sec_type: &str, exchange: &str, data_type: BarDataType, use_rth: bool) -> HistoricalRequest {
+        HistoricalRequest {
+            query_id: "q305".to_string(),
+            con_id: 815824267,
+            symbol: "X".to_string(),
+            sec_type: sec_type.to_string(),
+            exchange: exchange.to_string(),
+            data_type,
+            end_time: "20260928-20:00:00".to_string(),
+            duration: "1 d".to_string(),
+            bar_size: BarSize::Hour1,
+            use_rth,
+            keep_up_to_date: false,
+        }
+    }
+
+    #[test]
+    fn build_query_xml_future_keeps_its_exchange_and_rth_flag() {
+        let xml = build_query_xml(&bar_req("FUT", "CME", BarDataType::Trades, false));
+        assert!(xml.contains("<contractID>815824267</contractID><exchange>CME</exchange><secType>FUT</secType>"), "{}", xml);
+        assert!(xml.contains("<useRTH>false</useRTH>"));
+        assert!(!xml.contains("<useNative>"));
+    }
+
+    #[test]
+    fn build_query_xml_stock_keeps_rth_flag() {
+        let xml = build_query_xml(&bar_req("STK", "SMART", BarDataType::Trades, false));
+        assert!(xml.contains("<useRTH>false</useRTH>"));
+        // An empty secType and exchange are a smart-routed stock.
+        let xml = build_query_xml(&bar_req("", "", BarDataType::Trades, false));
+        assert!(xml.contains("<exchange>BEST</exchange><secType>STK</secType>"), "{}", xml);
+    }
+
+    #[test]
+    fn build_query_xml_option_forces_rth() {
+        let xml = build_query_xml(&bar_req("OPT", "SMART", BarDataType::Trades, false));
+        assert!(xml.contains("<exchange>BEST</exchange><secType>OPT</secType>"), "{}", xml);
+        assert!(xml.contains("<useRTH>true</useRTH>"));
+    }
+
+    #[test]
+    fn build_query_xml_fx_uses_high_precision_exchange_and_forces_rth() {
+        let xml = build_query_xml(&bar_req("CASH", "IDEALPRO", BarDataType::Midpoint, false));
+        assert!(xml.contains("<exchange>FXSUBPIP</exchange><secType>CASH</secType>"), "{}", xml);
+        assert!(xml.contains("<data>MidPoint</data>"));
+        assert!(xml.contains("<useRTH>true</useRTH>"));
+    }
+
+    #[test]
+    fn build_query_xml_index_keeps_exchange_forces_rth_and_asks_native() {
+        let xml = build_query_xml(&bar_req("IND", "CBOE", BarDataType::Trades, false));
+        assert!(xml.contains("<exchange>CBOE</exchange><secType>IND</secType>"), "{}", xml);
+        assert!(xml.contains("<useRTH>true</useRTH>"));
+        assert!(xml.contains("<useNative>yes</useNative>"));
+    }
+
+    #[test]
+    fn query_exchange_table() {
+        assert_eq!(query_exchange("SMART", "STK"), "BEST");
+        assert_eq!(query_exchange("smart", "OPT"), "BEST");
+        assert_eq!(query_exchange("", "STK"), "BEST");
+        assert_eq!(query_exchange("CME", "FUT"), "CME");
+        assert_eq!(query_exchange("IDEALPRO", "CASH"), "FXSUBPIP");
+        assert_eq!(query_exchange("CBOE", "IND"), "CBOE");
+        assert_eq!(query_sec_type(""), "STK");
+        assert_eq!(query_sec_type("fut"), "FUT");
+    }
+
     #[test]
     fn build_fix_request() {
         let req = HistoricalRequest {
             query_id: "q1".to_string(),
             con_id: 265598,
             symbol: "AAPL".to_string(),
-            sec_type: "CS",
-            exchange: "SMART",
+            sec_type: "STK".to_string(),
+            exchange: "SMART".to_string(),
             data_type: BarDataType::Trades,
             end_time: "20260228-15:00:00".to_string(),
             duration: "1 d".to_string(),
@@ -1041,8 +1163,8 @@ mod tests {
     fn head_timestamp_xml_structure() {
         let req = HeadTimestampRequest {
             con_id: 756733,
-            sec_type: "STK",
-            exchange: "SMART",
+            sec_type: "STK".to_string(),
+            exchange: "SMART".to_string(),
             data_type: BarDataType::Trades,
             use_rth: true,
         };
@@ -1054,6 +1176,22 @@ mod tests {
         assert!(xml.contains("<step>-1</step>"));
         assert!(xml.contains("<useRTH>true</useRTH>"));
         assert!(xml.contains("TickHeadClient1;;756733@BEST Last;;0;;true;;0;;U"));
+        assert!(xml.contains("<secType>STK</secType>"));
+    }
+
+    // ibx#305: contract secType and exchange; regular hours always.
+    #[test]
+    fn head_timestamp_xml_future_always_rth() {
+        let req = HeadTimestampRequest {
+            con_id: 815824267,
+            sec_type: "FUT".to_string(),
+            exchange: "CME".to_string(),
+            data_type: BarDataType::Trades,
+            use_rth: false,
+        };
+        let xml = build_head_timestamp_xml(&req);
+        assert!(xml.contains("<useRTH>true</useRTH>"), "{}", xml);
+        assert!(xml.contains("<exchange>CME</exchange><secType>FUT</secType><type>TickHeadTimeStamp</type>"), "{}", xml);
     }
 
     #[test]
@@ -1081,7 +1219,7 @@ mod tests {
 
     #[test]
     fn build_schedule_xml_structure() {
-        let xml = build_schedule_xml("sched_1", 756733, "20260312-19:34:06", "5 d", true);
+        let xml = build_schedule_xml("sched_1", 756733, "STK", "SMART", "20260312-19:34:06", "5 d", true);
         assert!(xml.contains("<id>sched_1</id>"));
         assert!(xml.contains("<contractID>756733</contractID>"));
         assert!(xml.contains("<data>Schedule</data>"));
@@ -1089,6 +1227,9 @@ mod tests {
         assert!(xml.contains("<step>1 day</step>"));
         assert!(xml.contains("<useRTH>true</useRTH>"));
         assert!(xml.contains("<timeLength>5 d</timeLength>"));
+        assert!(xml.contains("<exchange>BEST</exchange><secType>STK</secType>"));
+        let xml = build_schedule_xml("sched_2", 815824267, "FUT", "CME", "20260312-19:34:06", "5 d", true);
+        assert!(xml.contains("<exchange>CME</exchange><secType>FUT</secType>"), "{}", xml);
     }
 
     #[test]
@@ -1125,18 +1266,21 @@ mod tests {
 
     #[test]
     fn build_tick_query_xml_structure() {
-        let xml = build_tick_query_xml("tk_1", 265598, "", "20260312-15:00:00", 100, "TRADES", true);
+        let xml = build_tick_query_xml("tk_1", 265598, "STK", "SMART", "", "20260312-15:00:00", 100, "TRADES", true);
         assert!(xml.contains("<id>tk_1</id>"));
         assert!(xml.contains("<type>TickData</type>"));
         assert!(xml.contains("<data>AllLast</data>"));
         assert!(xml.contains("<step>ticks</step>"));
         assert!(xml.contains("<timeLength>100 t</timeLength>"));
         assert!(xml.contains("<wholeDays>true</wholeDays>"));
+        assert!(xml.contains("<exchange>BEST</exchange><secType>STK</secType>"));
+        let xml = build_tick_query_xml("tk_3", 815824267, "FUT", "CME", "", "20260312-15:00:00", 100, "TRADES", false);
+        assert!(xml.contains("<exchange>CME</exchange><secType>FUT</secType>"), "{}", xml);
     }
 
     #[test]
     fn build_tick_query_xml_bid_ask() {
-        let xml = build_tick_query_xml("tk_2", 265598, "", "20260312-15:00:00", 50, "BID_ASK", false);
+        let xml = build_tick_query_xml("tk_2", 265598, "STK", "SMART", "", "20260312-15:00:00", 50, "BID_ASK", false);
         assert!(xml.contains("<data>BidAsk</data>"));
         assert!(xml.contains("<useRTH>false</useRTH>"));
     }
@@ -1213,12 +1357,16 @@ mod tests {
 
     #[test]
     fn build_realtime_bar_xml_structure() {
-        let xml = build_realtime_bar_xml("rt_1", 265598, "TRADES", true);
+        let xml = build_realtime_bar_xml("rt_1", 265598, "STK", "SMART", "TRADES", true);
         assert!(xml.contains("<id>rt_1</id>"));
         assert!(xml.contains("<type>BarData</type>"));
         assert!(xml.contains("<data>Last</data>"));
         assert!(xml.contains("<refresh>5 secs</refresh>"));
         assert!(xml.contains("<step>5 secs</step>"));
+        // ibx#305: the exchange is the API contract exchange as given.
+        assert!(xml.contains("<exchange>SMART</exchange><secType>STK</secType>"), "{}", xml);
+        let xml = build_realtime_bar_xml("rt_2", 815824267, "FUT", "CME", "TRADES", true);
+        assert!(xml.contains("<exchange>CME</exchange><secType>FUT</secType>"), "{}", xml);
     }
 
     #[test]

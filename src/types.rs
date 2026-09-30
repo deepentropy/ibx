@@ -1438,6 +1438,10 @@ pub enum ControlCommand {
         req_id: u32,
         con_id: i64,
         symbol: String,
+        /// Security type of the API contract (ibx#305). Empty is a stock.
+        sec_type: String,
+        /// Exchange of the API contract (ibx#305). Empty is `SMART`.
+        exchange: String,
         end_date_time: String,
         duration: String,
         bar_size: String,
@@ -1455,6 +1459,10 @@ pub enum ControlCommand {
     FetchHeadTimestamp {
         req_id: u32,
         con_id: i64,
+        /// Security type of the API contract (ibx#305). Empty is a stock.
+        sec_type: String,
+        /// Exchange of the API contract (ibx#305). Empty is `SMART`.
+        exchange: String,
         what_to_show: String,
         use_rth: bool,
     },
@@ -1513,6 +1521,10 @@ pub enum ControlCommand {
     FetchHistogramData {
         req_id: u32,
         con_id: u32,
+        /// Security type of the API contract (ibx#305). Empty is a stock.
+        sec_type: String,
+        /// Exchange of the API contract (ibx#305). Empty is `SMART`.
+        exchange: String,
         use_rth: bool,
         period: String,
     },
@@ -1522,6 +1534,10 @@ pub enum ControlCommand {
     FetchHistoricalTicks {
         req_id: u32,
         con_id: i64,
+        /// Security type of the API contract (ibx#305). Empty is a stock.
+        sec_type: String,
+        /// Exchange of the API contract (ibx#305). Empty is `SMART`.
+        exchange: String,
         start_date_time: String,
         end_date_time: String,
         number_of_ticks: u32,
@@ -1533,6 +1549,10 @@ pub enum ControlCommand {
         req_id: u32,
         con_id: i64,
         symbol: String,
+        /// Security type of the API contract (ibx#305). Empty is a stock.
+        sec_type: String,
+        /// Exchange of the API contract (ibx#305). Empty is `SMART`.
+        exchange: String,
         what_to_show: String,
         use_rth: bool,
     },
@@ -1542,6 +1562,10 @@ pub enum ControlCommand {
     FetchHistoricalSchedule {
         req_id: u32,
         con_id: i64,
+        /// Security type of the API contract (ibx#305). Empty is a stock.
+        sec_type: String,
+        /// Exchange of the API contract (ibx#305). Empty is `SMART`.
+        exchange: String,
         end_date_time: String,
         duration: String,
         use_rth: bool,

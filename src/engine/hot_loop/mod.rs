@@ -547,27 +547,27 @@ impl HotLoop {
                 ControlCommand::RegisterInstrument { con_id, symbol, sec_type, exchange, reply_tx } => {
                     self.register_or_reject(con_id, symbol, &sec_type, &exchange, &reply_tx);
                 }
-                ControlCommand::FetchHistorical { req_id, con_id, symbol, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date } => {
+                ControlCommand::FetchHistorical { req_id, con_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date } => {
                     // keepUpToDate sends via CCP but bars/end arrive on HMDS — both
                     // paths require an authed HMDS socket to deliver a completion.
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, true);
                     } else if keep_up_to_date {
-                        if self.hmds.send_historical_request_via_ccp(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, &symbol, &mut self.ccp_conn, &mut self.hb, &self.ccp.ccp_sign_key, &self.ccp.ccp_sign_iv, &self.shared) {
+                        if self.hmds.send_historical_request_via_ccp(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, &symbol, &mut self.ccp_conn, &mut self.hb, &self.ccp.ccp_sign_key, &self.ccp.ccp_sign_iv, &self.shared) {
                             self.hmds.keep_up_to_date_reqs.insert(req_id);
                         }
                     } else {
-                        self.hmds.send_historical_request_ex(req_id, con_id, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, &symbol, &mut self.hmds_conn, &mut self.hb, &self.shared);
+                        self.hmds.send_historical_request_ex(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, &symbol, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
                 ControlCommand::CancelHistorical { req_id } => {
                     self.hmds.cancel_historical(req_id, &mut self.hmds_conn, &mut self.hb);
                 }
-                ControlCommand::FetchHeadTimestamp { req_id, con_id, what_to_show, use_rth } => {
+                ControlCommand::FetchHeadTimestamp { req_id, con_id, sec_type, exchange, what_to_show, use_rth } => {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_head_timestamp_request(req_id, con_id, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb, &self.shared);
+                        self.hmds.send_head_timestamp_request(req_id, con_id, &sec_type, &exchange, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
                 ControlCommand::FetchContractDetails { req_id, con_id, symbol, sec_type, exchange, currency, filters } => {
@@ -630,11 +630,11 @@ impl HotLoop {
                         self.hmds.pending_fundamental.remove(pos);
                     }
                 }
-                ControlCommand::FetchHistogramData { req_id, con_id, use_rth, period } => {
+                ControlCommand::FetchHistogramData { req_id, con_id, sec_type, exchange, use_rth, period } => {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_histogram_request(req_id, con_id, use_rth, &period, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_histogram_request(req_id, con_id, &sec_type, &exchange, use_rth, &period, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::CancelHistogramData { req_id } => {
@@ -642,18 +642,18 @@ impl HotLoop {
                         self.hmds.pending_histogram.remove(pos);
                     }
                 }
-                ControlCommand::FetchHistoricalTicks { req_id, con_id, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth } => {
+                ControlCommand::FetchHistoricalTicks { req_id, con_id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth } => {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_historical_ticks_request(req_id, con_id, &start_date_time, &end_date_time, number_of_ticks, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_historical_ticks_request(req_id, con_id, &sec_type, &exchange, &start_date_time, &end_date_time, number_of_ticks, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
-                ControlCommand::SubscribeRealTimeBar { req_id, con_id, symbol, what_to_show, use_rth } => {
+                ControlCommand::SubscribeRealTimeBar { req_id, con_id, symbol, sec_type, exchange, what_to_show, use_rth } => {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_realtime_bar_subscribe(req_id, con_id, &symbol, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_realtime_bar_subscribe(req_id, con_id, &sec_type, &exchange, &symbol, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::CancelRealTimeBar { req_id } => {
@@ -663,11 +663,11 @@ impl HotLoop {
                         self.hmds.send_historical_cancel(&cancel_id, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
-                ControlCommand::FetchHistoricalSchedule { req_id, con_id, end_date_time, duration, use_rth } => {
+                ControlCommand::FetchHistoricalSchedule { req_id, con_id, sec_type, exchange, end_date_time, duration, use_rth } => {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_schedule_request(req_id, con_id, &end_date_time, &duration, use_rth, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_schedule_request(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, use_rth, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::SubscribeDepth { req_id, con_id, exchange, sec_type, num_rows, is_smart_depth } => {

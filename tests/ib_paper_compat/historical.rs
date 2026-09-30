@@ -36,6 +36,7 @@ pub(super) fn phase_historical_data(mut conns: Conns, gw: &Gateway, config: &Gat
 
     // Step 2: Send FetchHistorical via ControlCommand
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 1100,
         con_id: 756733,
         symbol: "SPY".into(),
@@ -104,6 +105,7 @@ pub(super) fn phase_historical_daily_bars(mut conns: Conns, gw: &Gateway, config
 
     // Step 2: Send FetchHistorical via ControlCommand
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 7600,
         con_id: 756733,
         symbol: "SPY".into(),
@@ -168,6 +170,7 @@ pub(super) fn phase_cancel_historical(mut conns: Conns, gw: &Gateway, config: &G
 
     // Request 5-min bars for 5 days (multi-chunk response, cancelable)
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 7700, con_id: 756733, symbol: "SPY".into(),
         end_date_time: now_ib_timestamp(), duration: "5 D".into(),
         bar_size: "5 mins".into(), what_to_show: "TRADES".into(), use_rth: true,
@@ -236,6 +239,7 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config:
     // <QueryError>Invalid time length</QueryError>. If IB ever lifts this
     // restriction, the phase will report SKIP rather than fail.
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: REQ_ID, con_id: 756733, symbol: "SPY".into(),
         end_date_time: now_ib_timestamp(), duration: "1 W".into(),
         bar_size: "15 mins".into(), what_to_show: "TRADES".into(), use_rth: true,
@@ -311,6 +315,7 @@ pub(super) fn phase_head_timestamp(mut conns: Conns, gw: &Gateway, config: &Gate
     );
 
     control_tx.send(ControlCommand::FetchHeadTimestamp {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 7900, con_id: 756733,
         what_to_show: "TRADES".into(), use_rth: true,
     }).unwrap();
@@ -550,6 +555,7 @@ pub(super) fn phase_historical_ticks(mut conns: Conns, gw: &Gateway, config: &Ga
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let end_dt = format_utc_timestamp(now);
     control_tx.send(ControlCommand::FetchHistoricalTicks {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 2001,
         con_id: 756733,
         start_date_time: String::new(),
@@ -628,6 +634,7 @@ pub(super) fn phase_histogram_data(mut conns: Conns, gw: &Gateway, config: &Gate
     );
 
     control_tx.send(ControlCommand::FetchHistogramData {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 3001,
         con_id: 756733,
         use_rth: true,
@@ -682,6 +689,7 @@ pub(super) fn phase_historical_schedule(mut conns: Conns, gw: &Gateway, config: 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let end_dt = format_utc_timestamp(now);
     control_tx.send(ControlCommand::FetchHistoricalSchedule {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 4001,
         con_id: 756733,
         end_date_time: end_dt,
@@ -737,6 +745,7 @@ pub(super) fn phase_realtime_bars(mut conns: Conns, gw: &Gateway, config: &Gatew
     );
 
     control_tx.send(ControlCommand::SubscribeRealTimeBar {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 5001,
         con_id: 756733,
         symbol: "SPY".to_string(),
@@ -936,18 +945,21 @@ pub(super) fn phase_parallel_historical(mut conns: Conns, gw: &Gateway, config: 
 
     // Send 3 requests in quick succession
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 8001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt.clone(), duration: "1 d".to_string(),
         bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
         keep_up_to_date: false,
     }).unwrap();
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 8002, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt.clone(), duration: "5 d".to_string(),
         bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
         keep_up_to_date: false,
     }).unwrap();
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 8003, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt, duration: "1 W".to_string(),
         bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
@@ -1068,6 +1080,7 @@ pub(super) fn phase_historical_ohlc_validation(conns: Conns, _gw: &Gateway, _con
 
     let req_id = 6001u32;
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id,
         con_id: 756733,
         symbol: "SPY".into(),
@@ -1167,6 +1180,7 @@ pub(super) fn phase_large_historical_dataset(mut conns: Conns, gw: &Gateway, con
     let end_dt = format_utc_timestamp(now);
 
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 11001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt, duration: "1 Y".to_string(),
         bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
@@ -1236,6 +1250,7 @@ pub(super) fn phase_dst_boundary_historical(mut conns: Conns, gw: &Gateway, conf
     // DST 2026: March 8 (second Sunday of March) — spring forward
     // End date: March 14 2026, covering March 2-14 (spans DST)
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 12001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: "20260314-20:00:00".to_string(), duration: "2 W".to_string(),
         bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
@@ -1319,6 +1334,7 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config:
 
     // 1. FetchHistorical + CancelHistorical
     control_tx.send(ControlCommand::FetchHistorical {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 20001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: now.clone(), duration: "1 d".to_string(),
         bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
@@ -1328,6 +1344,7 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config:
 
     // 2. FetchHeadTimestamp + CancelHeadTimestamp
     control_tx.send(ControlCommand::FetchHeadTimestamp {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 20002, con_id: 756733,
         what_to_show: "TRADES".to_string(), use_rth: true,
     }).unwrap();
@@ -1341,6 +1358,7 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config:
 
     // 4. FetchHistogramData + CancelHistogramData
     control_tx.send(ControlCommand::FetchHistogramData {
+        sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 20004, con_id: 756733, use_rth: true, period: "1 week".to_string(),
     }).unwrap();
     control_tx.send(ControlCommand::CancelHistogramData { req_id: 20004 }).unwrap();
@@ -1414,6 +1432,7 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config
     let now = now_ib_timestamp();
     for i in 0..5u32 {
         control_tx.send(ControlCommand::FetchHistorical {
+            sec_type: "STK".into(), exchange: "SMART".into(),
             req_id: 30001 + i, con_id: 756733, symbol: "SPY".to_string(),
             end_date_time: now.clone(), duration: "1 d".to_string(),
             bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
