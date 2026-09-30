@@ -113,6 +113,7 @@ pub struct Quote {
     pub high: Price,
     pub low: Price,
     pub close: Price,
+    /// Last trade time, ns since the epoch (the server gives whole seconds).
     pub timestamp_ns: u64,
     /// Bid-exchange bitmask. Each set bit indexes into smart_components by bit_number.
     /// Hypothesis pending wire-format confirmation; see deepentropy/ib-agent#120.

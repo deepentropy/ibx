@@ -23,8 +23,7 @@ use ibx::bridge::{Event, SharedState};
 use ibx::engine::market_state::MarketState;
 use ibx::protocol::fix::{fix_build, fix_sign, fix_unsign};
 use ibx::protocol::fixcomp::{fixcomp_build, fixcomp_decompress};
-use ibx::protocol::tick_decoder::{self, RawTick};
-use ibx::types::Quote;
+use ibx::protocol::tick_decoder;
 
 const ITERATIONS: u64 = 1_000_000;
 const WARMUP: u64 = 100_000;
@@ -178,8 +177,7 @@ fn main() {
             let ticks = tick_decoder::decode_ticks_35p(&tick_payload);
             for tick in &ticks {
                 if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                    let mts = market.min_tick_scaled(inst);
-                    apply_tick(market.quote_mut(inst), tick, mts);
+                    market.apply_tick(inst, tick);
                 }
             }
         });
@@ -197,8 +195,7 @@ fn main() {
             let ticks = tick_decoder::decode_ticks_35p(&tick_payload_heavy);
             for tick in &ticks {
                 if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                    let mts = market.min_tick_scaled(inst);
-                    apply_tick(market.quote_mut(inst), tick, mts);
+                    market.apply_tick(inst, tick);
                 }
             }
         });
@@ -226,8 +223,7 @@ fn main() {
                 // 4. State update
                 for tick in &ticks {
                     if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                        let mts = market.min_tick_scaled(inst);
-                        apply_tick(market.quote_mut(inst), tick, mts);
+                        market.apply_tick(inst, tick);
                     }
                 }
                 // 5. SeqLock + channel notify
@@ -259,8 +255,7 @@ fn main() {
                     let ticks = tick_decoder::decode_ticks_35p(body);
                     for tick in &ticks {
                         if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                            let mts = market.min_tick_scaled(inst);
-                            apply_tick(market.quote_mut(inst), tick, mts);
+                            market.apply_tick(inst, tick);
                         }
                     }
                 }
@@ -393,8 +388,7 @@ fn main() {
                 let ticks = tick_decoder::decode_ticks_35p(body);
                 for tick in &ticks {
                     if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                        let mts = market.min_tick_scaled(inst);
-                        apply_tick(market.quote_mut(inst), tick, mts);
+                        market.apply_tick(inst, tick);
                     }
                 }
             }
@@ -446,8 +440,7 @@ fn measure_stage(stage: Stage, data: &[u8], market: &mut MarketState, _id: u32) 
                 let ticks = tick_decoder::decode_ticks_35p(data);
                 for tick in &ticks {
                     if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                        let mts = market.min_tick_scaled(inst);
-                        apply_tick(market.quote_mut(inst), tick, mts);
+                        market.apply_tick(inst, tick);
                     }
                 }
             }
@@ -462,8 +455,7 @@ fn measure_stage(stage: Stage, data: &[u8], market: &mut MarketState, _id: u32) 
                 let ticks = tick_decoder::decode_ticks_35p(data);
                 for tick in &ticks {
                     if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                        let mts = market.min_tick_scaled(inst);
-                        apply_tick(market.quote_mut(inst), tick, mts);
+                        market.apply_tick(inst, tick);
                     }
                 }
             }
@@ -490,8 +482,7 @@ fn run_full_pipeline(signed: &[u8], market: &mut MarketState, _id: u32) {
         let ticks = tick_decoder::decode_ticks_35p(body);
         for tick in &ticks {
             if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                let mts = market.min_tick_scaled(inst);
-                apply_tick(market.quote_mut(inst), tick, mts);
+                market.apply_tick(inst, tick);
             }
         }
     }
@@ -606,27 +597,6 @@ fn find_body_after_tag<'a>(msg: &'a [u8], tag_marker: &[u8]) -> Option<&'a [u8]>
     msg.windows(tag_marker.len())
         .position(|w| w == tag_marker)
         .map(|pos| &msg[pos + tag_marker.len()..])
-}
-
-#[inline]
-fn apply_tick(q: &mut Quote, tick: &RawTick, min_tick_scaled: i64) {
-    match tick.tick_type {
-        tick_decoder::O_BID_PRICE => q.bid = tick.magnitude * min_tick_scaled,
-        tick_decoder::O_ASK_PRICE => q.ask = tick.magnitude * min_tick_scaled,
-        tick_decoder::O_LAST_PRICE => q.last = tick.magnitude * min_tick_scaled,
-        tick_decoder::O_HIGH_PRICE => q.high = tick.magnitude * min_tick_scaled,
-        tick_decoder::O_LOW_PRICE => q.low = tick.magnitude * min_tick_scaled,
-        tick_decoder::O_OPEN_PRICE => q.open = tick.magnitude * min_tick_scaled,
-        tick_decoder::O_CLOSE_PRICE => q.close = tick.magnitude * min_tick_scaled,
-        tick_decoder::O_BID_SIZE => q.bid_size = tick.magnitude,
-        tick_decoder::O_ASK_SIZE => q.ask_size = tick.magnitude,
-        tick_decoder::O_LAST_SIZE => q.last_size = tick.magnitude,
-        tick_decoder::O_VOLUME => q.volume = tick.magnitude,
-        tick_decoder::O_TIMESTAMP | tick_decoder::O_LAST_TS => {
-            q.timestamp_ns = tick.magnitude as u64;
-        }
-        _ => {}
-    }
 }
 
 fn bench(label: &str, iterations: u64, mut f: impl FnMut()) {

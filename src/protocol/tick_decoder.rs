@@ -151,24 +151,26 @@ impl<'a> LsbBitReader<'a> {
     }
 }
 
-// 8=O binary tick type IDs (what comes off the wire in 35=P)
+// Binary tick type IDs, as they come off the wire.
 pub const O_BID_PRICE: u64 = 0;
 pub const O_ASK_PRICE: u64 = 1;
 pub const O_LAST_PRICE: u64 = 2;
-pub const O_HIGH_PRICE: u64 = 3;
+pub const O_CLOSE_PRICE: u64 = 3;
 pub const O_BID_SIZE: u64 = 4;
 pub const O_ASK_SIZE: u64 = 5;
-pub const O_VOLUME: u64 = 6;
-pub const O_OPEN_PRICE: u64 = 8;
+pub const O_LAST_SIZE: u64 = 6;
+pub const O_HIGH_PRICE: u64 = 8;
 pub const O_LOW_PRICE: u64 = 9;
-pub const O_TIMESTAMP: u64 = 10;
-pub const O_LAST_SIZE: u64 = 12;
-pub const O_LAST_EXCH: u64 = 13;
+pub const O_VOLUME: u64 = 10;
 pub const O_BID_EXCH: u64 = 16;
 pub const O_ASK_EXCH: u64 = 17;
 pub const O_HALTED: u64 = 18;
-pub const O_CLOSE_PRICE: u64 = 22;
-pub const O_LAST_TS: u64 = 23;
+/// Last trade time base; the close date on a daily-stats block.
+pub const O_TIMESTAMP_BASE: u64 = 20;
+/// Added to the base for the last trade time.
+pub const O_TIMESTAMP_DELTA: u64 = 21;
+pub const O_OPEN_PRICE: u64 = 22;
+pub const O_LAST_EXCH: u64 = 27;
 
 /// Volume multiplier: IB encodes volume * 10000.
 pub const VOLUME_MULT: f64 = 0.0001;
@@ -179,6 +181,8 @@ pub struct RawTick {
     pub server_tag: u32,
     pub tick_type: u64,
     pub magnitude: i64,
+    /// The tick comes from a daily-stats block.
+    pub stats_block: bool,
 }
 
 /// Decode all ticks from a 35=P binary payload.
@@ -203,11 +207,10 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
     let mut reader = BitReader::new(payload, bit_count);
 
     while reader.remaining() > 32 {
-        let cont = match reader.read_unsigned(1) {
-            Some(v) => v,
+        let stats_block = match reader.read_unsigned(1) {
+            Some(v) => v == 1,
             None => break,
         };
-        let _ = cont; // continuation flag, not used in decoding
         let server_tag = match reader.read_unsigned(31) {
             Some(v) => v as u32,
             None => break,
@@ -277,6 +280,7 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
                 server_tag,
                 tick_type,
                 magnitude,
+                stats_block,
             });
         }
     }
@@ -848,23 +852,39 @@ mod tests {
         // raw_tick_type == 31 triggers extended: 8-bit tick_type + 8-bit byte_width
         let mut b = PayloadBuilder::new();
         b.server_tag(0, 42);
-        // Extended tick with tick_type=O_CLOSE_PRICE(22), byte_width=2, value=777, positive
-        b.tick_extended(0, O_CLOSE_PRICE, 2, 777, false);
+        // Extended tick with tick_type=O_OPEN_PRICE(22), byte_width=2, value=777, positive
+        b.tick_extended(0, O_OPEN_PRICE, 2, 777, false);
         let ticks = decode_ticks_35p(&b.build());
         assert_eq!(ticks.len(), 1);
         assert_eq!(ticks[0].server_tag, 42);
-        assert_eq!(ticks[0].tick_type, O_CLOSE_PRICE);
+        assert_eq!(ticks[0].tick_type, O_OPEN_PRICE);
         assert_eq!(ticks[0].magnitude, 777);
+    }
+
+    #[test]
+    fn decode_keeps_the_block_flag() {
+        // ibx#448: each tick keeps the stats flag of its block.
+        let mut b = PayloadBuilder::new();
+        b.server_tag(1, 1098);
+        b.tick(O_TIMESTAMP_BASE, 1, 4, 20_260_922, false);
+        b.tick(O_CLOSE_PRICE, 0, 3, 25_512, false);
+        b.server_tag(0, 1098);
+        b.tick(O_TIMESTAMP_BASE, 0, 4, 1_790_159_184, false);
+        let ticks = decode_ticks_35p(&b.build());
+        assert_eq!(ticks.len(), 3);
+        assert!(ticks[0].stats_block && ticks[1].stats_block);
+        assert!(!ticks[2].stats_block);
+        assert_eq!(ticks[2].magnitude, 1_790_159_184);
     }
 
     #[test]
     fn decode_extended_tick_type_negative() {
         let mut b = PayloadBuilder::new();
         b.server_tag(0, 50);
-        b.tick_extended(0, O_LAST_TS, 3, 12345, true);
+        b.tick_extended(0, O_TIMESTAMP_DELTA, 3, 12345, true);
         let ticks = decode_ticks_35p(&b.build());
         assert_eq!(ticks.len(), 1);
-        assert_eq!(ticks[0].tick_type, O_LAST_TS);
+        assert_eq!(ticks[0].tick_type, O_TIMESTAMP_DELTA);
         assert_eq!(ticks[0].magnitude, -12345);
     }
 

@@ -219,27 +219,7 @@ impl FarmState {
                 None => continue,
             };
 
-            let mts = context.market.min_tick_scaled(instrument);
-            let q = context.market.quote_mut(instrument);
-
-            match tick.tick_type {
-                tick_decoder::O_BID_PRICE => { q.bid = tick.magnitude * mts; }
-                tick_decoder::O_ASK_PRICE => { q.ask = tick.magnitude * mts; }
-                tick_decoder::O_LAST_PRICE => { q.last = tick.magnitude * mts; }
-                tick_decoder::O_HIGH_PRICE => { q.high = tick.magnitude * mts; }
-                tick_decoder::O_LOW_PRICE => { q.low = tick.magnitude * mts; }
-                tick_decoder::O_OPEN_PRICE => { q.open = tick.magnitude * mts; }
-                tick_decoder::O_CLOSE_PRICE => { q.close = tick.magnitude * mts; }
-                tick_decoder::O_BID_SIZE => { q.bid_size = tick.magnitude; }
-                tick_decoder::O_ASK_SIZE => { q.ask_size = tick.magnitude; }
-                tick_decoder::O_LAST_SIZE => { q.last_size = tick.magnitude; }
-                tick_decoder::O_VOLUME => { q.volume = tick.magnitude; }
-                tick_decoder::O_TIMESTAMP | tick_decoder::O_LAST_TS => { q.timestamp_ns = tick.magnitude as u64; }
-                tick_decoder::O_BID_EXCH => { q.bid_exch_mask = tick.magnitude; }
-                tick_decoder::O_ASK_EXCH => { q.ask_exch_mask = tick.magnitude; }
-                tick_decoder::O_LAST_EXCH => { q.last_exch_mask = tick.magnitude; }
-                _ => {}
-            }
+            context.market.apply_tick(instrument, tick);
 
             notified[(instrument >> 6) as usize] |= 1u64 << (instrument & 63);
         }
@@ -1068,4 +1048,62 @@ impl FarmState {
 /// not (354) (ibx#444).
 fn api_subscription_needed(access: &str) -> bool {
     access.contains(',') || access.contains('#') || (!access.is_empty() && access.parse::<i64>().is_ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::PRICE_SCALE;
+
+    /// A tick message with the given blocks: (stats block, server tag,
+    /// entries of (type, value)), every value on four bytes.
+    fn tick_message(blocks: &[(bool, u32, &[(u64, i64)])]) -> Vec<u8> {
+        let mut bits: Vec<u8> = Vec::new();
+        let mut push = |v: u64, n: usize| for i in (0..n).rev() { bits.push(((v >> i) & 1) as u8) };
+        for (stats, tag, entries) in blocks {
+            push(*stats as u64, 1);
+            push(*tag as u64, 31);
+            for (k, (tick_type, value)) in entries.iter().enumerate() {
+                push(*tick_type, 5);
+                push((k + 1 < entries.len()) as u64, 1);
+                push(3, 2); // 4 bytes
+                push((*value < 0) as u64, 1);
+                push(value.unsigned_abs(), 31);
+            }
+        }
+        let mut body = vec![(bits.len() >> 8) as u8, bits.len() as u8];
+        body.resize(2 + bits.len().div_ceil(8), 0);
+        for (i, b) in bits.iter().enumerate() {
+            body[2 + i / 8] |= b << (7 - i % 8);
+        }
+        let mut msg = b"8=O\x019=0\x0135=P\x01".to_vec();
+        msg.extend_from_slice(&body);
+        msg
+    }
+
+    // ibx#448: a daily-stats block on the trade stream fills close, last
+    // size, high, volume and open, and a trade block the last trade time.
+    #[test]
+    fn stats_block_lands_in_close_last_size_high_volume_open() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let id = context.market.register(265598);
+        context.market.set_min_tick(id, 0.01);
+        context.market.register_server_tag(128_516, id);
+        let msg = tick_message(&[
+            (true, 128_516, &[(3, 25_512), (6, 3), (8, 25_730), (10, 1466), (20, 20_260_922), (22, 25_401)]),
+            (false, 128_516, &[(2, 25_501), (20, 1_790_159_184), (21, 2)]),
+        ]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+        let q = shared.market.quote(id);
+        assert_eq!(q.close, 25_512 * PRICE_SCALE / 100);
+        assert_eq!(q.last_size, 3);
+        assert_eq!(q.high, 25_730 * PRICE_SCALE / 100);
+        assert_eq!(q.volume, 1466);
+        assert_eq!(q.open, 25_401 * PRICE_SCALE / 100);
+        assert_eq!(q.last, 25_501 * PRICE_SCALE / 100);
+        assert_eq!(q.low, 0);
+        assert_eq!(q.timestamp_ns, 1_790_159_186 * 1_000_000_000);
+    }
 }
