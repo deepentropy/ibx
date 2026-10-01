@@ -365,10 +365,13 @@ pub(super) fn phase_scanner_subscription(mut conns: Conns, gw: &Gateway, config:
     control_tx.send(ControlCommand::SubscribeScanner {
         req_id: 8200,
         client_id: 0,
-        instrument: "STK".into(),
-        location_code: "STK.US.MAJOR".into(),
-        scan_code: "TOP_PERC_GAIN".into(),
-        max_items: 10,
+        subscription: ibx::control::scanner::ScannerSubscription {
+            instrument: "STK".into(),
+            location_code: "STK.US.MAJOR".into(),
+            scan_code: "TOP_PERC_GAIN".into(),
+            number_of_rows: 10,
+            filters: Vec::new(),
+        },
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -1020,10 +1023,13 @@ pub(super) fn phase_scanner_params(mut conns: Conns, gw: &Gateway, config: &Gate
     control_tx.send(ControlCommand::SubscribeScanner {
         req_id: 9001,
         client_id: 0,
-        instrument: "STK".to_string(),
-        location_code: "STK.US.MAJOR".to_string(),
-        scan_code: "HOT_BY_VOLUME".to_string(),
-        max_items: 10,
+        subscription: ibx::control::scanner::ScannerSubscription {
+            instrument: "STK".to_string(),
+            location_code: "STK.US.MAJOR".to_string(),
+            scan_code: "HOT_BY_VOLUME".to_string(),
+            number_of_rows: 10,
+            filters: Vec::new(),
+        },
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 

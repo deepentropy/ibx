@@ -162,30 +162,75 @@ impl EClient {
         Ok(())
     }
 
-    /// Request scanner subscription.
-    #[pyo3(signature = (req_id, subscription, scanner_subscription_options=Vec::new()))]
+    /// Request scanner subscription: the whole ibapi subscription, the
+    /// subscription options and the filter options (ibx#456). A local
+    /// refusal comes back through `error`.
+    #[pyo3(signature = (req_id, subscription, scanner_subscription_options=Vec::new(), scanner_subscription_filter_options=Vec::new()))]
     fn req_scanner_subscription(
         &self,
         req_id: i64,
         subscription: Py<PyAny>,
         scanner_subscription_options: Vec<Py<PyAny>>,
+        scanner_subscription_filter_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
-        let _ = scanner_subscription_options;
         let tx = self.tx()?;
         Python::attach(|py| {
-            let instrument = subscription.getattr(py, "instrument")
-                .and_then(|v| v.extract::<String>(py)).unwrap_or_else(|_| "STK".to_string());
-            let location_code = subscription.getattr(py, "locationCode")
-                .and_then(|v| v.extract::<String>(py)).unwrap_or_else(|_| "STK.US.MAJOR".to_string());
-            let scan_code = subscription.getattr(py, "scanCode")
-                .and_then(|v| v.extract::<String>(py)).unwrap_or_else(|_| "TOP_PERC_GAIN".to_string());
-            let max_items = subscription.getattr(py, "numberOfRows")
-                .and_then(|v| v.extract::<u32>(py)).unwrap_or(50);
-            let client_id = self.core.client_id.load(std::sync::atomic::Ordering::Relaxed);
-            send_cmd(py, &tx, ControlCommand::SubscribeScanner {
-                req_id: req_id as u32, client_id, instrument, location_code, scan_code, max_items,
-            })
+            let text = |name: &str, default: &str| subscription.getattr(py, name)
+                .and_then(|v| v.extract::<String>(py)).unwrap_or_else(|_| default.to_string());
+            let double = |name: &str| subscription.getattr(py, name)
+                .and_then(|v| v.extract::<f64>(py)).unwrap_or(f64::MAX);
+            let int = |name: &str| subscription.getattr(py, name)
+                .and_then(|v| v.extract::<i64>(py)).map(|v| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+                .unwrap_or(i32::MAX);
+            // A text value follows the reference's reading: 1, true or yes.
+            let exclude_convertible = subscription.getattr(py, "excludeConvertible").ok().is_some_and(|v| {
+                v.extract::<bool>(py).unwrap_or_else(|_| {
+                    v.extract::<String>(py).map(|t| matches!(t.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                        .unwrap_or(false)
+                })
+            });
+            let sub = crate::api::types::ScannerSubscription {
+                number_of_rows: subscription.getattr(py, "numberOfRows")
+                    .and_then(|v| v.extract::<i32>(py)).unwrap_or(50),
+                instrument: text("instrument", "STK"),
+                location_code: text("locationCode", "STK.US.MAJOR"),
+                scan_code: text("scanCode", "TOP_PERC_GAIN"),
+                above_price: double("abovePrice"),
+                below_price: double("belowPrice"),
+                above_volume: int("aboveVolume"),
+                market_cap_above: double("marketCapAbove"),
+                market_cap_below: double("marketCapBelow"),
+                moody_rating_above: text("moodyRatingAbove", ""),
+                moody_rating_below: text("moodyRatingBelow", ""),
+                sp_rating_above: text("spRatingAbove", ""),
+                sp_rating_below: text("spRatingBelow", ""),
+                maturity_date_above: text("maturityDateAbove", ""),
+                maturity_date_below: text("maturityDateBelow", ""),
+                coupon_rate_above: double("couponRateAbove"),
+                coupon_rate_below: double("couponRateBelow"),
+                exclude_convertible,
+                average_option_volume_above: int("averageOptionVolumeAbove"),
+                scanner_setting_pairs: text("scannerSettingPairs", ""),
+                stock_type_filter: text("stockTypeFilter", ""),
+            };
+            let tag_values = |list: &[Py<PyAny>]| -> Vec<crate::api::types::TagValue> {
+                list.iter().map(|tv| crate::api::types::TagValue {
+                    tag: tv.getattr(py, "tag").and_then(|v| v.extract::<String>(py)).unwrap_or_default(),
+                    value: tv.getattr(py, "value").and_then(|v| v.extract::<String>(py)).unwrap_or_default(),
+                }).collect()
+            };
+            let (options, filter_options) = (tag_values(&scanner_subscription_options), tag_values(&scanner_subscription_filter_options));
+            match ClientCore::scanner_request(&sub, &options, &filter_options) {
+                Ok(subscription) => {
+                    let client_id = self.core.client_id.load(std::sync::atomic::Ordering::Relaxed);
+                    send_cmd(py, &tx, ControlCommand::SubscribeScanner { req_id: req_id as u32, client_id, subscription })
+                }
+                Err((code, text)) => {
+                    self.shared_state()?.orders.push_order_error(req_id as u64, code, text);
+                    Ok(())
+                }
+            }
         })
     }
 

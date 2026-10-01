@@ -55,6 +55,8 @@ pub(crate) struct HmdsState {
     pub(crate) scanner_params: Option<String>,
     /// Client parameters requests waiting for the answer (ibx#457).
     pub(crate) scanner_params_waiting: u32,
+    /// Row limit of each scan type, from the scanner parameters (ibx#456).
+    pub(crate) scan_size_limits: std::collections::HashMap<String, u32>,
     /// Live scanner subscriptions, matched to results by their id (ibx#457).
     pub(crate) pending_scanner: Vec<ScannerSub>,
     pub(crate) pending_news: Vec<(String, u32)>,
@@ -118,8 +120,10 @@ pub(crate) struct PendingHistogram {
 pub(crate) struct ScannerSub {
     pub(crate) scan_id: String,
     pub(crate) req_id: u32,
-    /// The subscribe message body, sent again after a reconnect.
-    pub(crate) xml: String,
+    pub(crate) request: crate::control::scanner::ScannerSubscription,
+    /// The subscribe message body, built once the scanner parameters are
+    /// known (ibx#456), sent again after a reconnect.
+    pub(crate) xml: Option<String>,
     /// The subscribe went out on the current connection.
     pub(crate) sent: bool,
 }
@@ -182,6 +186,7 @@ impl HmdsState {
             pending_scanner_params: false,
             scanner_params: None,
             scanner_params_waiting: 0,
+            scan_size_limits: std::collections::HashMap::new(),
             pending_scanner: Vec::new(),
             pending_news: Vec::new(),
             pending_articles: Vec::new(),
@@ -564,7 +569,7 @@ impl HmdsState {
                     match comm.as_str() {
                         "10002" => {
                             if let Some(xml) = parsed.get(&6118) {
-                                self.on_scanner_params(xml, shared);
+                                self.on_scanner_params(xml, hmds_conn, hb, shared);
                             }
                         }
                         "10005" => {
@@ -1256,12 +1261,39 @@ impl HmdsState {
         }
     }
 
-    fn on_scanner_params(&mut self, xml: &str, shared: &SharedState) {
+    fn on_scanner_params(&mut self, xml: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         self.pending_scanner_params = false;
         for _ in 0..std::mem::take(&mut self.scanner_params_waiting) {
             shared.reference.push_scanner_params(xml.to_string());
         }
+        self.scan_size_limits = crate::control::scanner::scan_size_limits(xml);
         self.scanner_params = Some(xml.to_string());
+        self.send_waiting_scanners(hmds_conn, hb);
+    }
+
+    /// Send the subscriptions that are not on the wire yet. A subscription
+    /// goes out only once the scanner parameters are known, as the
+    /// reference does: its row count depends on the scan type's limit
+    /// there (ibx#456).
+    fn send_waiting_scanners(&mut self, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        if self.scanner_params.is_none() {
+            return;
+        }
+        for i in 0..self.pending_scanner.len() {
+            if self.pending_scanner[i].sent {
+                continue;
+            }
+            let sub = &mut self.pending_scanner[i];
+            let xml = sub.xml.get_or_insert_with(|| {
+                let limit = self.scan_size_limits.get(&sub.request.scan_code).copied();
+                let max_items = crate::control::scanner::scanner_max_items(sub.request.number_of_rows, limit);
+                crate::control::scanner::build_scanner_subscribe_xml(&sub.request, &sub.scan_id, max_items)
+            });
+            sub.sent = Self::send_scanner_xml(xml, hmds_conn, hb);
+            if sub.sent {
+                log::info!("Sent scanner subscribe: req_id={} scan_code={}", sub.req_id, sub.request.scan_code);
+            }
+        }
     }
 
     /// Running scanner sessions for the concurrent limit: the
@@ -1286,6 +1318,14 @@ impl HmdsState {
         if !result.warning_text.is_empty() {
             shared.reference.push_historical_error(req_id, 165,
                 format!("Historical Market Data Service query message:{}", result.warning_text));
+        }
+        // The rows are cut to the asked count (ibx#456).
+        let mut result = result;
+        if let Ok(rows) = usize::try_from(self.pending_scanner[pos].request.number_of_rows) {
+            if rows > 0 && result.entries.len() > rows {
+                result.entries.truncate(rows);
+                result.con_ids = result.entries.iter().map(|e| e.con_id).filter(|c| *c != 0).collect();
+            }
         }
         // A result carries conIds only; the contract fields come from a
         // contract lookup on the auth connection. Results with conIds not
@@ -1315,20 +1355,16 @@ impl HmdsState {
         true
     }
 
-    pub(crate) fn send_scanner_subscribe(&mut self, req_id: u32, client_id: i64, instrument: &str, location_code: &str, scan_code: &str, max_items: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        let sub = crate::control::scanner::ScannerSubscription {
-            instrument: instrument.to_string(),
-            location_code: location_code.to_string(),
-            scan_code: scan_code.to_string(),
-            max_items,
-        };
+    /// Start a scanner subscription (ibx#456): sent at once when the
+    /// scanner parameters are known, else after they arrive.
+    pub(crate) fn send_scanner_subscribe(&mut self, req_id: u32, client_id: i64, request: crate::control::scanner::ScannerSubscription, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let scan_id = crate::control::scanner::scanner_subscription_id(client_id, req_id);
-        let xml = crate::control::scanner::build_scanner_subscribe_xml(&sub, &scan_id);
-        let sent = Self::send_scanner_xml(&xml, hmds_conn, hb);
-        if sent {
-            log::info!("Sent scanner subscribe: req_id={} scan_code={}", req_id, scan_code);
+        self.pending_scanner.push(ScannerSub { scan_id, req_id, request, xml: None, sent: false });
+        if self.scanner_params.is_some() {
+            self.send_waiting_scanners(hmds_conn, hb);
+        } else if !self.pending_scanner_params {
+            self.send_scanner_params_request(hmds_conn, hb);
         }
-        self.pending_scanner.push(ScannerSub { scan_id, req_id, xml, sent });
     }
 
     pub(crate) fn send_scanner_cancel(&mut self, scan_id: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
@@ -1391,10 +1427,13 @@ impl HmdsState {
         for i in 0..self.pending_scanner.len() {
             let req_id = self.pending_scanner[i].req_id;
             shared.reference.push_historical_error(req_id, 165, SCANNER_LINK_RESTORED.to_string());
-            let sent = Self::send_scanner_xml(&self.pending_scanner[i].xml, hmds_conn, hb);
-            self.pending_scanner[i].sent = sent;
+            if let Some(xml) = &self.pending_scanner[i].xml {
+                let sent = Self::send_scanner_xml(xml, hmds_conn, hb);
+                self.pending_scanner[i].sent = sent;
+            }
         }
-        if self.scanner_params_waiting > 0 && !self.pending_scanner_params {
+        let waiting = self.scanner_params_waiting > 0 || self.pending_scanner.iter().any(|s| !s.sent);
+        if waiting && self.scanner_params.is_none() && !self.pending_scanner_params {
             self.send_scanner_params_request(hmds_conn, hb);
         }
     }

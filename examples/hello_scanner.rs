@@ -51,7 +51,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let req_id = 1;
     println!("subscribing TOP_PERC_GAIN, STK.US.MAJOR…");
-    client.req_scanner_subscription(req_id, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 25)?;
+    let sub = ibx::api::ScannerSubscription {
+        instrument: "STK".into(),
+        location_code: "STK.US.MAJOR".into(),
+        scan_code: "TOP_PERC_GAIN".into(),
+        number_of_rows: 25,
+        ..Default::default()
+    };
+    client.req_scanner_subscription(req_id, &sub, &[], &[])?;
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {

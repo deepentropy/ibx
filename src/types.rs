@@ -1639,10 +1639,8 @@ pub enum ControlCommand {
         req_id: u32,
         /// Client id of the session, part of the subscription id (ibx#457).
         client_id: i64,
-        instrument: String,
-        location_code: String,
-        scan_code: String,
-        max_items: u32,
+        /// The checked request, with its filters (ibx#456).
+        subscription: crate::control::scanner::ScannerSubscription,
     },
     /// Cancel a scanner subscription.
     CancelScanner { req_id: u32 },

@@ -2,7 +2,7 @@
 
 use crate::types::*;
 
-use super::{Contract, EClient};
+use super::{Contract, EClient, TagValue};
 use crate::client_core::ClientCore;
 
 impl EClient {
@@ -153,19 +153,25 @@ impl EClient {
         self.send(ControlCommand::FetchScannerParams)
     }
 
-    /// Subscribe to a market scanner. Matches `reqScannerSubscription` in C++.
+    /// Subscribe to a market scanner. Matches `reqScannerSubscription` in C++:
+    /// the whole subscription, the subscription options and the filter
+    /// options (ibx#456). A local refusal comes back through `error`.
     pub fn req_scanner_subscription(
-        &self, req_id: i64, instrument: &str, location_code: &str,
-        scan_code: &str, max_items: u32,
+        &self, req_id: i64, subscription: &crate::api::types::ScannerSubscription,
+        scanner_subscription_options: &[TagValue],
+        scanner_subscription_filter_options: &[TagValue],
     ) -> Result<(), String> {
-        self.send(ControlCommand::SubscribeScanner {
-            req_id: req_id as u32,
-            client_id: self.core.client_id.load(std::sync::atomic::Ordering::Relaxed),
-            instrument: instrument.into(),
-            location_code: location_code.into(),
-            scan_code: scan_code.into(),
-            max_items,
-        })
+        match ClientCore::scanner_request(subscription, scanner_subscription_options, scanner_subscription_filter_options) {
+            Ok(subscription) => self.send(ControlCommand::SubscribeScanner {
+                req_id: req_id as u32,
+                client_id: self.core.client_id.load(std::sync::atomic::Ordering::Relaxed),
+                subscription,
+            }),
+            Err((code, text)) => {
+                self.shared.orders.push_order_error(req_id as u64, code, text);
+                Ok(())
+            }
+        }
     }
 
     /// Cancel a scanner subscription. Matches `cancelScannerSubscription` in C++.

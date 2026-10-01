@@ -793,13 +793,13 @@ impl HotLoop {
                 ControlCommand::FetchScannerParams => {
                     self.hmds.req_scanner_params(&mut self.hmds_conn, &mut self.hb, &self.shared);
                 }
-                ControlCommand::SubscribeScanner { req_id, client_id, instrument, location_code, scan_code, max_items } => {
+                ControlCommand::SubscribeScanner { req_id, client_id, subscription } => {
                     if let Some(text) = scanner_refusal(&self.hmds, req_id) {
                         self.shared.reference.push_historical_error(req_id, 322, text);
                     } else if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_scanner_subscribe(req_id, client_id, &instrument, &location_code, &scan_code, max_items, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_scanner_subscribe(req_id, client_id, subscription, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::CancelScanner { req_id } => {
@@ -2537,9 +2537,22 @@ mod tests {
 
     fn scanner_cmd(req_id: u32, client_id: i64, scan_code: &str) -> ControlCommand {
         ControlCommand::SubscribeScanner {
-            req_id, client_id, instrument: "STK".into(), location_code: "STK.US.MAJOR".into(),
-            scan_code: scan_code.into(), max_items: 10,
+            req_id, client_id,
+            subscription: crate::control::scanner::ScannerSubscription {
+                instrument: "STK".into(), location_code: "STK.US.MAJOR".into(),
+                scan_code: scan_code.into(), number_of_rows: 10, filters: Vec::new(),
+            },
         }
+    }
+
+    fn load_scanner_params(engine: &mut HotLoop, server: &mut std::net::TcpStream, xml: &str) {
+        load_scanner_params_keep(engine, xml);
+        let _ = plain_messages_sent(server);
+    }
+
+    fn load_scanner_params_keep(engine: &mut HotLoop, xml: &str) {
+        let reply = crate::protocol::fix::fix_build(&[(35, "U"), (6040, "10002"), (6118, xml)], 1);
+        engine.inject_hmds_message(&reply);
     }
 
     fn errors(shared: &SharedState) -> Vec<String> {
@@ -2547,10 +2560,12 @@ mod tests {
             .map(|(r, c, m)| format!("{r}:{c}:{m}")).collect()
     }
 
-    // ibx#457 (reference scenario scanner_two, 26/09/2026): two scanners
-    // open at once; each result goes to the subscription its id names,
-    // the ids are client id and request id; each cancel gives the local
-    // 162 then its desubscribe; an unknown cancel gives 365 only.
+    // ibx#457 / ibx#456 (reference scenario scanner_two, 26/09/2026): two
+    // scanners open at once; the subscriptions wait for the scanner
+    // parameters, then go out with the asked rows; each result goes to
+    // the subscription its id names, the ids are client id and request
+    // id; each cancel gives the local 162 then its desubscribe; an
+    // unknown cancel gives 365 only.
     #[test]
     fn two_scanners_get_their_own_results() {
         let shared = Arc::new(SharedState::new());
@@ -2559,13 +2574,17 @@ mod tests {
         tx.send(scanner_cmd(9006, 198, "MOST_ACTIVE")).unwrap();
         engine.poll_control_commands();
         let sent = plain_messages_sent(&mut server);
-        assert!(sent.iter().any(|m| m.contains("<id>APISCAN198:9005</id>") && m.contains("TOP_PERC_GAIN")), "{sent:?}");
-        assert!(sent.iter().any(|m| m.contains("<id>APISCAN198:9006</id>") && m.contains("MOST_ACTIVE")), "{sent:?}");
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].contains("6040=10001|"), "parameters first: {sent:?}");
 
         for msg in fixture_hmds_messages("20260926b/scanner_two.jsonl") {
-            if msg.windows(11).any(|w| w == b"6040=10005\x01") {
-                engine.inject_hmds_message(&msg);
-            }
+            engine.inject_hmds_message(&msg);
+        }
+        let sent = plain_messages_sent(&mut server);
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        for (m, id, code) in [(&sent[0], "APISCAN198:9005", "TOP_PERC_GAIN"), (&sent[1], "APISCAN198:9006", "MOST_ACTIVE")] {
+            assert!(m.contains(&format!("<id>{id}</id>")) && m.contains(&format!("<scanCode>{code}</scanCode>")), "{m}");
+            assert!(m.contains("<maxItems>10</maxItems><suspend>no</suspend>"), "as the reference: {m}");
         }
         let got: Vec<(u32, u32, usize)> = engine.hmds.cold_scanner_results.iter()
             .map(|(r, res)| (*r, res.con_ids[0], res.con_ids.len())).collect();
@@ -2620,6 +2639,7 @@ mod tests {
         let shared = Arc::new(SharedState::new());
         let (mut engine, mut server, tx) = scanner_engine(&shared);
         engine.hmds.max_real_time_requests = 20;
+        load_scanner_params(&mut engine, &mut server, "<ScanParameterResponse/>");
         tx.send(scanner_cmd(1, 0, "A")).unwrap();
         tx.send(scanner_cmd(1, 0, "A")).unwrap();
         tx.send(scanner_cmd(2, 0, "B")).unwrap();
@@ -2658,12 +2678,55 @@ mod tests {
         assert_eq!(plain_messages_sent(&mut server).len(), 1, "asked again");
     }
 
+    // ibx#456: the row count follows the scan type's limit in the
+    // parameters, the rows are cut to the asked count, and a cancel
+    // before the parameters arrive sends nothing.
+    #[test]
+    fn scanner_rows_follow_the_scan_type_limit() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, mut server, tx) = scanner_engine(&shared);
+        engine.hmds.max_real_time_requests = 100;
+        let cmd = |req_id: u32, code: &str, rows: i32| ControlCommand::SubscribeScanner {
+            req_id, client_id: 5,
+            subscription: crate::control::scanner::ScannerSubscription {
+                instrument: "STK".into(), location_code: "STK.US.MAJOR".into(),
+                scan_code: code.into(), number_of_rows: rows, filters: Vec::new(),
+            },
+        };
+        tx.send(cmd(1, "HIGH_DIVIDEND_YIELD_IB", 100)).unwrap();
+        tx.send(cmd(2, "TOP_PERC_GAIN", 100)).unwrap();
+        tx.send(cmd(3, "TOP_PERC_GAIN", -1)).unwrap();
+        tx.send(cmd(4, "TOP_PERC_GAIN", 3)).unwrap();
+        tx.send(cmd(5, "TOP_PERC_GAIN", 3)).unwrap();
+        tx.send(ControlCommand::CancelScanner { req_id: 5 }).unwrap();
+        engine.poll_control_commands();
+        assert_eq!(plain_messages_sent(&mut server).len(), 1, "parameters request only");
+        assert_eq!(errors(&shared), ["5:162:Historical Market Data Service error message:API scanner subscription cancelled: 5"]);
+        load_scanner_params_keep(&mut engine, "<ScanParameterResponse><ScanTypeList><ScanType>\
+            <scanCode>HIGH_DIVIDEND_YIELD_IB</scanCode><respSizeLimit>750</respSizeLimit></ScanType>\
+            </ScanTypeList></ScanParameterResponse>");
+        let sent = plain_messages_sent(&mut server);
+        let items: Vec<&str> = sent.iter().map(|m| {
+            let a = m.find("<maxItems>").unwrap() + 10;
+            &m[a..a + m[a..].find('<').unwrap()]
+        }).collect();
+        assert_eq!(items, ["100", "50", "50", "3"]);
+
+        let rows: String = (1..=5).map(|c| format!("<Contract><contractID>{c}</contractID></Contract>")).collect();
+        let xml = format!("<ScanResponse><id>APISCAN5:4</id><Contracts>{rows}</Contracts></ScanResponse>");
+        engine.inject_hmds_message(&crate::protocol::fix::fix_build(&[(35, "U"), (6040, "10005"), (6118, &xml)], 1));
+        let (_, result) = &engine.hmds.cold_scanner_results[0];
+        assert_eq!(result.con_ids, [1, 2, 3]);
+        assert_eq!(result.entries.len(), 3);
+    }
+
     // ibx#457: a lost and restored link is told to every live scanner
     // with 165, and the subscription is sent again.
     #[test]
     fn scanner_link_notices_and_resubscribe() {
         let shared = Arc::new(SharedState::new());
         let (mut engine, mut server, tx) = scanner_engine(&shared);
+        load_scanner_params(&mut engine, &mut server, "<ScanParameterResponse/>");
         tx.send(scanner_cmd(4, 1, "TOP_PERC_GAIN")).unwrap();
         engine.poll_control_commands();
         assert_eq!(plain_messages_sent(&mut server).len(), 1);

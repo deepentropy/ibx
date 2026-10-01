@@ -2111,15 +2111,71 @@ fn req_scanner_parameters_sends_fetch() {
 #[test]
 fn req_scanner_subscription_sends_subscribe() {
     let (client, rx, _shared) = test_client();
-    client.req_scanner_subscription(3, "STK", "STK.US.MAJOR", "TOP_PERC_GAIN", 25).unwrap();
+    let sub = crate::api::types::ScannerSubscription {
+        instrument: "STK".into(), location_code: "STK.US.MAJOR".into(),
+        scan_code: "TOP_PERC_GAIN".into(), number_of_rows: 25, ..Default::default()
+    };
+    client.req_scanner_subscription(3, &sub, &[], &[]).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::SubscribeScanner { req_id, scan_code, max_items, .. } => {
+        ControlCommand::SubscribeScanner { req_id, subscription, .. } => {
             assert_eq!(req_id, 3);
-            assert_eq!(scan_code, "TOP_PERC_GAIN");
-            assert_eq!(max_items, 25);
+            assert_eq!(subscription.scan_code, "TOP_PERC_GAIN");
+            assert_eq!(subscription.number_of_rows, 25);
+            assert!(subscription.filters.is_empty(), "unset fields give no filter");
         }
         _ => panic!("expected SubscribeScanner"),
+    }
+}
+
+// ibx#456: the set fields become filters with the reference codes, order
+// and number text; a filter option replaces a field and moves to the end.
+#[test]
+fn req_scanner_subscription_filters() {
+    let (client, rx, _shared) = test_client();
+    let sub = crate::api::types::ScannerSubscription {
+        instrument: "STK".into(), location_code: "STK.US.MAJOR".into(), scan_code: "TOP_PERC_GAIN".into(),
+        above_price: 10.0, below_price: -1.0, above_volume: 1_000_000, market_cap_above: 1e7,
+        moody_rating_above: "A".into(), coupon_rate_below: 5.5, exclude_convertible: true,
+        average_option_volume_above: i32::MAX, stock_type_filter: "Stock".into(),
+        ..Default::default()
+    };
+    let opts = [TagValue { tag: "volumeAbove".into(), value: "500".into() },
+                TagValue { tag: "usdPriceAbove".into(), value: "2".into() }];
+    client.req_scanner_subscription(1, &sub, &[], &opts).unwrap();
+    let Ok(ControlCommand::SubscribeScanner { subscription, .. }) = rx.try_recv() else { panic!("expected SubscribeScanner") };
+    let got: Vec<String> = subscription.filters.iter().map(|(c, v)| format!("{c}={v}")).collect();
+    assert_eq!(got, ["priceAbove=10.0", "marketCapAbove1e6=1.0E7", "moodyRatingAbove=A", "couponRateBelow=5.5",
+                     "excludeConvertible=true", "stkTypes=exc:ETF", "volumeAbove=500", "usdPriceAbove=2"]);
+
+    for (t, want) in [("ETF", "inc:ETF"), ("reit", "inc:REIT"), ("ALL", ""), ("junk", "")] {
+        let s = crate::api::types::ScannerSubscription { stock_type_filter: t.into(), ..Default::default() };
+        let r = crate::client_core::ClientCore::scanner_request(&s, &[], &[]).unwrap();
+        let v = r.filters.iter().find(|(c, _)| c == "stkTypes").map(|(_, v)| v.as_str()).unwrap_or("");
+        assert_eq!(v, want, "{t}");
+    }
+}
+
+// ibx#456: refusals of the reference, in its order.
+#[test]
+fn req_scanner_subscription_refusals() {
+    let (client, rx, _shared) = test_client();
+    let sub = crate::api::types::ScannerSubscription::default();
+    let tv = |t: &str, v: &str| TagValue { tag: t.into(), value: v.into() };
+    client.req_scanner_subscription(1, &sub, &[], &[tv("priceAbove", "")]).unwrap();
+    client.req_scanner_subscription(2, &sub, &[tv("foo", "1")], &[]).unwrap();
+    client.req_scanner_subscription(3, &sub, &[tv("manual", "2")], &[]).unwrap();
+    client.req_scanner_subscription(4, &sub, &[tv("manual", "1")], &[]).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    for want in [
+        "error:1:320:Error reading request:Not a key-value pair in generic options list: priceAbove=",
+        "error:2:10337:Misc options key=foo is invalid in ReqScannerSubscription(22) request. Valid keys are: manual",
+        "error:3:10338:Misc options value=2 is invalid for key=manual in ReqScannerSubscription(22) request. Valid values are: 0, 1",
+        "error:4:321:Error validating request.-'co' : cause - Historical data: 'manual' requires Verified API.",
+    ] {
+        assert!(w.events.iter().any(|e| e == want), "{want} not in {:?}", w.events);
     }
 }
 

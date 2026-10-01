@@ -751,14 +751,20 @@ def req_matching_symbols(req_id, pattern)
 
 #### `req_scanner_subscription`
 
-Request scanner subscription.
+Request scanner subscription: the whole ibapi subscription, the subscription options and the filter options. A local refusal comes back through `error`.
 
 ```python
-def req_scanner_subscription(req_id, subscription, scanner_subscription_options=Vec::new()))
+def req_scanner_subscription(req_id, subscription, scanner_subscription_options=Vec::new(), scanner_subscription_filter_options=Vec::new()))
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `subscription` | `Py<PyAny>` | Scanner subscription parameters. |
+| `scanner_subscription_options` | `list` |  |
+| `scanner_subscription_filter_options` | `list` |  |
+
+-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `subscription` | `Py<PyAny>` | Scanner subscription parameters. |
 | `scanner_subscription_options` | `list` |  |

@@ -1014,14 +1014,22 @@ pub fn req_scanner_parameters(&self) -> Result<(), String>
 
 #### `req_scanner_subscription`
 
-Subscribe to a market scanner.
+Subscribe to a market scanner: the whole subscription, the subscription options and the filter options. A local refusal comes back through `error`.
 
 ```rust
-pub fn req_scanner_subscription( &self, req_id: i64, instrument: &str, location_code: &str, scan_code: &str, max_items: u32, ) -> Result<(), String>
+pub fn req_scanner_subscription( &self, req_id: i64, subscription: &ScannerSubscription, scanner_subscription_options: &[TagValue], scanner_subscription_filter_options: &[TagValue], ) -> Result<(), String>
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `subscription` | `&ScannerSubscription` | Instrument, location, scan code, rows (`-1` = not set) and the filter fields (unset: `f64::MAX`, `i32::MAX`, empty text). |
+| `scanner_subscription_options` | `&[TagValue]` | Subscription options; only `manual` is a known key. |
+| `scanner_subscription_filter_options` | `&[TagValue]` | Extra filters, code and value; a code also set by a field replaces it. |
+
+**Returns:** `Result<(), String>`
+
+-----------|------|-------------|
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 | `instrument` | `&str` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
 | `location_code` | `&str` | Scanner location (e.g. `"STK.US.MAJOR"`). |

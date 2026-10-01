@@ -2523,6 +2523,93 @@ impl ClientCore {
         Ok(())
     }
 
+    /// Check and translate a scanner subscription as the reference reads
+    /// it (ibx#456): the client fields that are set become filters in the
+    /// reference's code map and order, then the filter options are added
+    /// in client order (a code already present is replaced and moves to
+    /// the end). Refusals in the reference's order: 320 for a filter
+    /// option that is not a key and value pair, 10337 / 10338 for a bad
+    /// subscription option, then 321 for any subscription option, since
+    /// its only key needs a verified session.
+    pub fn scanner_request(
+        sub: &crate::api::types::ScannerSubscription,
+        options: &[crate::api::types::TagValue],
+        filter_options: &[crate::api::types::TagValue],
+    ) -> Result<crate::control::scanner::ScannerSubscription, (i64, String)> {
+        use crate::control::scanner::java_double_text;
+        fn put(filters: &mut Vec<(String, String)>, code: &str, value: String) {
+            filters.retain(|(c, _)| c != code);
+            if !code.is_empty() && !value.is_empty() {
+                filters.push((code.to_string(), value));
+            }
+        }
+        // Unset: the ibapi marker or a negative number.
+        let double = |v: f64| (v >= 0.0 && v != f64::MAX).then(|| java_double_text(v)).unwrap_or_default();
+        let int = |v: i32| (v >= 0 && v != i32::MAX).then(|| v.to_string()).unwrap_or_default();
+
+        let mut filters: Vec<(String, String)> = Vec::new();
+        put(&mut filters, "priceAbove", double(sub.above_price));
+        put(&mut filters, "priceBelow", double(sub.below_price));
+        put(&mut filters, "volumeAbove", int(sub.above_volume));
+        put(&mut filters, "marketCapAbove1e6", double(sub.market_cap_above));
+        put(&mut filters, "marketCapBelow1e6", double(sub.market_cap_below));
+        put(&mut filters, "moodyRatingAbove", sub.moody_rating_above.clone());
+        put(&mut filters, "moodyRatingBelow", sub.moody_rating_below.clone());
+        put(&mut filters, "spRatingAbove", sub.sp_rating_above.clone());
+        put(&mut filters, "spRatingBelow", sub.sp_rating_below.clone());
+        put(&mut filters, "maturityDateAbove", sub.maturity_date_above.clone());
+        put(&mut filters, "maturityDateBelow", sub.maturity_date_below.clone());
+        put(&mut filters, "couponRateAbove", double(sub.coupon_rate_above));
+        put(&mut filters, "couponRateBelow", double(sub.coupon_rate_below));
+        if sub.exclude_convertible {
+            put(&mut filters, "excludeConvertible", "true".into());
+        }
+        put(&mut filters, "avgOptVolumeAbove", int(sub.average_option_volume_above));
+        let stock_types = match sub.stock_type_filter.trim().to_ascii_uppercase().as_str() {
+            "STOCK" => "exc:ETF".to_string(),
+            t @ ("ETF" | "CORP" | "ADR" | "REIT" | "CEF") => format!("inc:{}", t),
+            _ => String::new(),
+        };
+        put(&mut filters, "stkTypes", stock_types);
+
+        // The client sends each option list as `tag=value;` items.
+        let items = |list: &[crate::api::types::TagValue]| -> Vec<String> {
+            let text: String = list.iter().map(|tv| format!("{}={};", tv.tag, tv.value)).collect();
+            text.split(';').filter(|i| !i.is_empty()).map(str::to_string).collect()
+        };
+        for item in items(filter_options) {
+            let parts: Vec<&str> = item.split('=').filter(|p| !p.is_empty()).collect();
+            if parts.len() < 2 {
+                return Err((320, format!("Error reading request:Not a key-value pair in generic options list: {}", item)));
+            }
+            put(&mut filters, parts[0], parts[1].to_string());
+        }
+
+        let options = items(options);
+        for item in &options {
+            let Some((key, value)) = item.split_once('=') else { continue };
+            if key != "manual" {
+                return Err((10337, format!(
+                    "Misc options key={} is invalid in ReqScannerSubscription(22) request. Valid keys are: manual", key)));
+            }
+            if value != "0" && value != "1" {
+                return Err((10338, format!(
+                    "Misc options value={} is invalid for key=manual in ReqScannerSubscription(22) request. Valid values are: 0, 1", value)));
+            }
+        }
+        if !options.is_empty() {
+            return Err((321, "Error validating request.-'co' : cause - Historical data: 'manual' requires Verified API.".into()));
+        }
+
+        Ok(crate::control::scanner::ScannerSubscription {
+            instrument: sub.instrument.clone(),
+            location_code: sub.location_code.clone(),
+            scan_code: sub.scan_code.clone(),
+            number_of_rows: sub.number_of_rows,
+            filters,
+        })
+    }
+
     /// Validate historical-request arguments before anything reaches the
     /// engine (ibx#232): an unrecognized bar_size previously fell back to
     /// 5-minute bars silently (via TWO divergent tables), and an

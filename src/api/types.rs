@@ -517,6 +517,63 @@ pub struct TagValue {
     pub value: String,
 }
 
+// ── ScannerSubscription ──
+
+/// ibapi-compatible scanner subscription (ibx#456). Unset values are the
+/// ibapi ones: `-1` rows, `f64::MAX` / `i32::MAX` numbers, empty texts.
+#[derive(Clone, Debug)]
+pub struct ScannerSubscription {
+    pub number_of_rows: i32,
+    pub instrument: String,
+    pub location_code: String,
+    pub scan_code: String,
+    pub above_price: f64,
+    pub below_price: f64,
+    pub above_volume: i32,
+    pub market_cap_above: f64,
+    pub market_cap_below: f64,
+    pub moody_rating_above: String,
+    pub moody_rating_below: String,
+    pub sp_rating_above: String,
+    pub sp_rating_below: String,
+    pub maturity_date_above: String,
+    pub maturity_date_below: String,
+    pub coupon_rate_above: f64,
+    pub coupon_rate_below: f64,
+    pub exclude_convertible: bool,
+    pub average_option_volume_above: i32,
+    pub scanner_setting_pairs: String,
+    pub stock_type_filter: String,
+}
+
+impl Default for ScannerSubscription {
+    fn default() -> Self {
+        Self {
+            number_of_rows: -1,
+            instrument: String::new(),
+            location_code: String::new(),
+            scan_code: String::new(),
+            above_price: f64::MAX,
+            below_price: f64::MAX,
+            above_volume: i32::MAX,
+            market_cap_above: f64::MAX,
+            market_cap_below: f64::MAX,
+            moody_rating_above: String::new(),
+            moody_rating_below: String::new(),
+            sp_rating_above: String::new(),
+            sp_rating_below: String::new(),
+            maturity_date_above: String::new(),
+            maturity_date_below: String::new(),
+            coupon_rate_above: f64::MAX,
+            coupon_rate_below: f64::MAX,
+            exclude_convertible: false,
+            average_option_volume_above: i32::MAX,
+            scanner_setting_pairs: String::new(),
+            stock_type_filter: String::new(),
+        }
+    }
+}
+
 // ── OrderState ──
 
 /// Per-account allocation for grouped/allocation orders (ibapi-compatible).
