@@ -64,6 +64,9 @@ pub struct EClient {
     pub(crate) _test_control_rx: Mutex<Option<crossbeam_channel::Receiver<ControlCommand>>>,
     /// Shared subscription tracking and dispatch preparation.
     pub(crate) core: ClientCore,
+    /// Connection time of the session; set by connect(), cleared by
+    /// disconnect() (ibx#426).
+    pub(crate) connection_time: Mutex<Option<String>>,
 }
 
 impl Drop for EClient {
@@ -103,6 +106,7 @@ impl EClient {
             _test_event_tx: Mutex::new(None),
             _test_control_rx: Mutex::new(None),
             core: ClientCore::new(),
+            connection_time: Mutex::new(None),
         }
     }
 
@@ -184,6 +188,7 @@ impl EClient {
         *self.event_rx.lock().unwrap() = Some(event_rx);
         self.next_order_id.store(start_id, Ordering::Relaxed);
         *self._thread.lock().unwrap() = Some(handle);
+        *self.connection_time.lock().unwrap() = Some(crate::client_core::connection_time_now());
         self.connected.store(true, Ordering::Release);
 
         let _ = port; // unused but kept for ibapi signature compat
@@ -219,8 +224,21 @@ impl EClient {
         *self.control_tx.lock().unwrap() = None;
         *self.event_rx.lock().unwrap() = None;
         *self.account_id.lock().unwrap() = None;
+        *self.connection_time.lock().unwrap() = None;
         self.core.reset();
         Ok(())
+    }
+
+    /// API level of the session: 214, the level the reference gives a
+    /// current client; None when not connected (ibx#426).
+    fn server_version(&self) -> Option<i32> {
+        self.connection_time.lock().unwrap().as_ref().map(|_| crate::client_core::SERVER_VERSION)
+    }
+
+    /// Time the session started, as `yyyyMMdd HH:mm:ss {zone}` in the
+    /// machine's local time; None when not connected (ibx#426).
+    fn tws_connection_time(&self) -> Option<String> {
+        self.connection_time.lock().unwrap().clone()
     }
 
     /// Check if connected.

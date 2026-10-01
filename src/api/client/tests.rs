@@ -4872,3 +4872,14 @@ fn news_bulletin_delivery_modes() {
     client.req_news_bulletins(true);
     assert_eq!(events(&client), ["news_bulletin:6:6:m6:X"], "the store holds the new day only");
 }
+
+// ibx#426: version-gated client code can read the session level and the
+// connection time.
+#[test]
+fn server_version_and_connection_time() {
+    let (client, _rx, _shared) = test_client();
+    assert_eq!(client.server_version(), 214);
+    let time = client.tws_connection_time();
+    assert_eq!(time.split(' ').next().map(str::len), Some(8), "{}", time);
+    assert_eq!(time, client.tws_connection_time(), "fixed at connect");
+}

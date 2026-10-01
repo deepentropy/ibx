@@ -139,6 +139,8 @@ pub struct EClient {
     pub(crate) core: ClientCore,
     pub(crate) session_token_bytes: Vec<u8>,
     pub(crate) token_type: String,
+    /// Connection time, fixed when the session started (ibx#426).
+    pub(crate) connection_time: String,
 }
 
 impl Drop for EClient {
@@ -231,6 +233,7 @@ impl EClient {
             core: ClientCore::new(),
             session_token_bytes,
             token_type,
+            connection_time: crate::client_core::connection_time_now(),
         })
     }
 
@@ -257,6 +260,7 @@ impl EClient {
             core: ClientCore::new(),
             session_token_bytes: Vec::new(),
             token_type: String::new(),
+            connection_time: crate::client_core::connection_time_now(),
         }
     }
 
@@ -292,6 +296,20 @@ impl EClient {
     }
 
     // ── Connection ──
+
+    /// API level the session follows: 214, the level the reference gives a
+    /// current client (ibx#426). Matches `serverVersion()` in C++, for code
+    /// that tests it before using a feature.
+    pub fn server_version(&self) -> i32 {
+        crate::client_core::SERVER_VERSION
+    }
+
+    /// Time the session started, as `yyyyMMdd HH:mm:ss {zone}` in the
+    /// machine's local time (ibx#426). The connection time of the C++
+    /// client.
+    pub fn tws_connection_time(&self) -> String {
+        self.connection_time.clone()
+    }
 
     /// False after [`disconnect()`](EClient::disconnect), and after a
     /// `process_msgs()` call that observed the engine stopping (ibx#242).

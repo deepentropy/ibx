@@ -164,6 +164,26 @@ fn pnl_account_refusal(class: &str, account: &str, own_account: &str) -> Result<
     Err((321, format!("Error validating request.-'{}' : cause - {}", class, cause)))
 }
 
+/// API level of a session (ibx#426). The reference speaks levels 100 to
+/// 214 and answers the lower of 214 and the client's highest level; the
+/// current clients offer more than 214, so they get 214. Requests of higher
+/// levels are not implemented.
+pub const SERVER_VERSION: i32 = 214;
+
+/// Connection time of a session in the reference's form
+/// `yyyyMMdd HH:mm:ss {zone}`, local time of the machine (ibx#426). The zone
+/// is the machine zone of the session (`IBX_TZ` when set).
+pub fn connection_time_now() -> String {
+    let zone = crate::gateway::machine_time_zone();
+    let tz = jiff::tz::TimeZone::get(&zone).unwrap_or_else(|_| jiff::tz::TimeZone::system());
+    connection_time(&jiff::Timestamp::now().to_zoned(tz), &zone)
+}
+
+/// `connection_time_now` for a given time and zone name.
+pub fn connection_time(at: &jiff::Zoned, zone: &str) -> String {
+    format!("{} {}", at.strftime("%Y%m%d %H:%M:%S"), zone)
+}
+
 /// Pattern of a matching symbols request as the reference checks and
 /// sends it (ibx#439): an empty or blank pattern, or one with a character
 /// that is neither a printable ASCII character nor a space, gives 321; the
@@ -4017,5 +4037,30 @@ mod tests {
         assert_eq!(offset(&snap(f64::MAX)), 0, "unset");
         let prim = ApiOrder { order_type: "SNAP PRIM".into(), aux_price: 0.10, outside_rth: true, ..lmt(0.0) };
         assert!(matches!(ClientCore::order_kind(&prim), Ok(OrderKind::SnapPri { offset }) if offset == (0.10 * PRICE_SCALE_F) as i64));
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    // ibx#426: the level the reference answers a current client.
+    #[test]
+    fn server_version_is_the_reference_level() {
+        assert_eq!(SERVER_VERSION, 214);
+    }
+
+    // ibx#426: `yyyyMMdd HH:mm:ss {zone}`, local time.
+    #[test]
+    fn connection_time_in_the_reference_form() {
+        let tz = jiff::tz::TimeZone::get("Europe/Paris").unwrap();
+        let at = jiff::civil::date(2026, 5, 9).at(21, 3, 19, 0).to_zoned(tz).unwrap();
+        assert_eq!(connection_time(&at, "Europe/Paris"), "20260509 21:03:19 Europe/Paris");
+        let now = connection_time_now();
+        let (date, rest) = now.split_once(' ').unwrap();
+        let (time, zone) = rest.split_once(' ').unwrap();
+        assert!(date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()), "{}", now);
+        assert!(time.len() == 8 && time.as_bytes()[2] == b':' && time.as_bytes()[5] == b':', "{}", now);
+        assert!(!zone.is_empty());
     }
 }

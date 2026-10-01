@@ -38,6 +38,7 @@ impl EClient {
         // must not fail as "Engine stopped".
         *self._test_control_rx.lock().unwrap() = Some(rx);
         self.next_order_id.store(1000, Ordering::Relaxed);
+        *self.connection_time.lock().unwrap() = Some(crate::client_core::connection_time_now());
         self.connected.store(true, Ordering::Release);
         Ok(())
     }
