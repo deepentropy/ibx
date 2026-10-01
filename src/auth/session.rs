@@ -204,6 +204,73 @@ pub fn get_lan_ip() -> String {
         .unwrap_or_else(|_| "127.0.0.1".into())
 }
 
+/// Send a protocol message in clear: the framed text, not encrypted.
+pub fn send_plain<W: Write>(stream: &mut W, text: &[u8]) -> io::Result<()> {
+    let mut msg = Vec::with_capacity(8 + text.len());
+    msg.extend_from_slice(NS_MAGIC);
+    msg.extend_from_slice(&(text.len() as u32).to_be_bytes());
+    msg.extend_from_slice(text);
+    stream.write_all(&msg)
+}
+
+/// Send a protocol message encrypted when the session is `secure`, in clear
+/// after the server refused the encryption (ibx#423).
+pub fn send_ns<W: Write>(stream: &mut W, channel: &mut SecureChannel, secure: bool, text: &[u8]) -> io::Result<()> {
+    if secure {
+        send_secure(stream, channel, text)
+    } else {
+        send_plain(stream, text)
+    }
+}
+
+/// Read the answer to the key exchange request. `true`: the session is
+/// encrypted from now on. `false`: the server refused the encryption and
+/// lets the login go on in clear (ibx#423). An error answer, a refusal
+/// without that permission and any other message are errors.
+pub fn read_key_exchange_answer<R: Read>(stream: &mut R, channel: &mut SecureChannel) -> io::Result<bool> {
+    let (payload, _) = ns::ns_recv(stream)?;
+    let text = String::from_utf8_lossy(&payload);
+    let parts: Vec<&str> = text.split(';').collect();
+    let msg_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    if msg_type == NS_SECURE_ERROR || msg_type == NS_ERROR_RESPONSE {
+        let err = ns_error(msg_type, parts.get(2..).unwrap_or(&[]));
+        if proceeds_in_clear(&err) {
+            return Ok(false);
+        }
+        return Err(err);
+    }
+    if msg_type != NS_SECURE_CONNECTION_START {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Expected 533, got {}", msg_type),
+        ));
+    }
+    channel.process_server_hello(&parts[2..])?;
+    Ok(true)
+}
+
+/// [`recv_auth_start`], for the auth connection: when the server refuses the
+/// encryption and lets the login go on, the session goes on in clear
+/// (`secure` is cleared) and the connect request `connect_req` is sent
+/// again in clear, as the reference does (ibx#423).
+pub fn recv_auth_start_ccp<S: Read + Write>(
+    stream: &mut S,
+    channel: &mut SecureChannel,
+    secure: &mut bool,
+    connect_req: &[u8],
+) -> io::Result<AuthStart> {
+    loop {
+        match recv_auth_start(stream, channel) {
+            Err(e) if proceeds_in_clear(&e) => {
+                *secure = false;
+                send_plain(stream, connect_req)?;
+                log::info!("Connect request sent again in clear");
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Send an encrypted protocol message.
 pub fn send_secure<W: Write>(
     stream: &mut W,
@@ -349,18 +416,43 @@ pub fn login_error(e: &io::Error) -> Option<&LoginError> {
     e.get_ref()?.downcast_ref::<LoginError>()
 }
 
+/// A secure-error answer that lets the login go on: the server refused the
+/// encrypted session and the login continues in clear, as the reference
+/// does (ibx#423). Carried inside an `io::Error`; read it with
+/// [`proceeds_in_clear`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProceedInClear {
+    /// Server text.
+    pub text: String,
+}
+
+impl std::fmt::Display for ProceedInClear {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "secure connection refused by the server, the login goes on in clear: {}", self.text)
+    }
+}
+
+impl std::error::Error for ProceedInClear {}
+
+/// True when `e` is a secure-error answer that lets the login go on in
+/// clear (ibx#423).
+pub fn proceeds_in_clear(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<ProceedInClear>())
+}
+
 /// Error for an error answer (`NS_ERROR_RESPONSE`) or a secure-error answer
 /// (`NS_SECURE_ERROR`); `fields` are the fields after the message type.
 ///
-/// A secure-error answer can let the reference go on without the
-/// encryption; that fallback is not supported here, so it always refuses.
+/// A secure-error answer whose proceed flag is `1` gives [`ProceedInClear`]:
+/// the caller goes on without the encryption, as the reference does. Any
+/// other flag is an authorization failure (ibx#423).
 pub fn ns_error(msg_type: u32, fields: &[&str]) -> io::Error {
     let field = |i: usize| fields.get(i).copied().unwrap_or("").to_string();
     if msg_type == NS_SECURE_ERROR {
-        let proceed = field(1) == "1";
-        let mut text = field(0);
-        if proceed {
-            text.push_str(" (the server allows an unencrypted login, which is not supported)");
+        let text = field(0);
+        if field(1) == "1" {
+            log::warn!("Secure connection refused by the server, going on in clear: {}", text);
+            return io::Error::new(io::ErrorKind::Other, ProceedInClear { text });
         }
         return LoginError { kind: LoginErrorKind::SecureConnectionRefused, code: None, text }.into();
     }
@@ -1901,18 +1993,86 @@ mod tests {
         assert_eq!(login.unwrap(), LoginError { kind: LoginErrorKind::SiteDown, code: Some(4), text: "site down".into() });
     }
 
-    // ibx#423: a secure-error answer refuses with either proceed flag; the
-    // unencrypted fallback is not supported.
+    // ibx#423: a secure-error answer with the proceed flag 1 lets the login
+    // go on in clear; any other flag is an authorization failure.
     #[test]
-    fn recv_secure_secure_error_refuses_with_either_flag() {
-        for (frame, says_fallback) in [("50;535;text;1;", true), ("50;535;text;0;", false)] {
+    fn recv_secure_secure_error_proceeds_only_with_flag_one() {
+        let (err, login) = recv_secure_login_error(&["50;535;text;1;"]);
+        assert!(login.is_none());
+        assert!(proceeds_in_clear(&err), "{err}");
+        for frame in ["50;535;text;0;", "50;535;text;;", "50;535;text;"] {
             let (err, login) = recv_secure_login_error(&[frame]);
             let login = login.unwrap();
-            assert_eq!(login.kind, LoginErrorKind::SecureConnectionRefused);
+            assert_eq!(login.kind, LoginErrorKind::SecureConnectionRefused, "{frame}");
             assert!(!login.kind.is_retryable());
             assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-            assert_eq!(err.to_string().contains("not supported"), says_fallback, "{err}");
+            assert!(!proceeds_in_clear(&err));
         }
+    }
+
+    /// A stream that reads `frames` and records what is written.
+    struct Duplex {
+        input: io::Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl Duplex {
+        fn new(frames: &[&str]) -> Self {
+            let mut wire = Vec::new();
+            for f in frames {
+                wire.extend_from_slice(&build_ns_frame(f));
+            }
+            Self { input: io::Cursor::new(wire), output: Vec::new() }
+        }
+    }
+
+    impl Read for Duplex {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.input.read(buf) }
+    }
+
+    impl Write for Duplex {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.output.extend_from_slice(buf); Ok(buf.len()) }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    // ibx#423: the answer to the key exchange request.
+    #[test]
+    fn key_exchange_answer_refused_with_proceed_goes_on_in_clear() {
+        let mut channel = SecureChannel::new();
+        assert!(!read_key_exchange_answer(&mut Duplex::new(&["50;535;no crypto;1;"]), &mut channel).unwrap());
+        let err = read_key_exchange_answer(&mut Duplex::new(&["50;535;no crypto;0;"]), &mut channel).unwrap_err();
+        assert_eq!(login_error(&err).unwrap().kind, LoginErrorKind::SecureConnectionRefused);
+        let err = read_key_exchange_answer(&mut Duplex::new(&["50;519;4;site down;"]), &mut channel).unwrap_err();
+        assert_eq!(login_error(&err).unwrap().kind, LoginErrorKind::SiteDown);
+        let err = read_key_exchange_answer(&mut Duplex::new(&["50;520;x;"]), &mut channel).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    // ibx#423: a refusal with proceed while waiting for the auth start sends
+    // the connect request again in clear and waits on; the auth start can
+    // then come in clear.
+    #[test]
+    fn auth_start_wait_sends_the_connect_request_again_in_clear() {
+        let mut stream = Duplex::new(&["50;535;no crypto;1;", "50;520;0;1;;0;"]);
+        let mut channel = SecureChannel::new();
+        let mut secure = true;
+        let start = recv_auth_start_ccp(&mut stream, &mut channel, &mut secure, b"38;521;user;").unwrap();
+        assert!(!secure);
+        assert!(start.password_required);
+        assert_eq!(stream.output, build_ns_frame("38;521;user;"), "the connect request, in clear");
+
+        let mut stream = Duplex::new(&["50;535;no crypto;0;"]);
+        let mut secure = true;
+        let err = recv_auth_start_ccp(&mut stream, &mut channel, &mut secure, b"38;521;user;").unwrap_err();
+        assert_eq!(login_error(&err).unwrap().kind, LoginErrorKind::SecureConnectionRefused);
+        assert!(secure && stream.output.is_empty());
+    }
+
+    #[test]
+    fn send_ns_in_clear_is_the_framed_text() {
+        let mut out = Vec::new();
+        send_ns(&mut out, &mut SecureChannel::new(), false, b"38;526;0;;2;0;").unwrap();
+        assert_eq!(out, build_ns_frame("38;526;0;;2;0;"));
     }
 
     // ibx#423: a backup-host notice is skipped; the next message is read.

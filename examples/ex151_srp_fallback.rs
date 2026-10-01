@@ -56,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         farm_host: gw.farm_host.clone(),
         farm_name: gw.farm_name.clone(),
         session_epoch: gw.session_epoch.clone(),
+        ns_secure_refused: gw.ns_secure_refused,
     };
 
     drop(ccp);

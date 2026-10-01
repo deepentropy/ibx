@@ -12,7 +12,7 @@ use std::io;
 use crate::bridge::{Event, SharedState};
 use crate::engine::context::Context;
 use crate::config::chrono_free_timestamp;
-use crate::gateway::{ccp_reconnect_host, connect_farm, reconnect_ccp_via, CcpReconnect, ReconnectAuth};
+use crate::gateway::{ccp_reconnect_host, reconnect_ccp_via, CcpReconnect, ReconnectAuth};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{ControlCommand, Fill, InstrumentId, ReqId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
@@ -1645,9 +1645,10 @@ impl HotLoop {
         let spawned = std::thread::Builder::new()
             .name(format!("{}-connect", name))
             .spawn(move || {
-                let result = crate::gateway::connect_farm_ex(
+                let result = crate::gateway::connect_farm_opts(
                     &host, &name, &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key, &auth.hw_info, &auth.encoded, slot, false,
+                    !auth.ns_secure_refused,
                 ).map(|(conn, _)| conn);
                 let _ = tx.send(result);
             });
@@ -1771,12 +1772,12 @@ impl HotLoop {
         std::thread::Builder::new()
             .name(format!("farm-reconnect-{}", attempt))
             .spawn(move || {
-                let result = connect_farm(
+                let result = crate::gateway::connect_farm_opts(
                     &farm_host, &farm_name,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
-                    &auth.hw_info, &auth.encoded, 18,
-                );
+                    &auth.hw_info, &auth.encoded, 18, true, !auth.ns_secure_refused,
+                ).map(|(conn, _)| conn);
                 let _ = tx.send(result);
             })
             .ok();
@@ -1848,11 +1849,16 @@ impl HotLoop {
             None => return,
         };
         match rx.try_recv() {
-            Ok(Ok(CcpReconnect { conn, session_epoch })) => {
+            Ok(Ok(CcpReconnect { conn, session_epoch, ns_secure_refused })) => {
                 log::info!("CCP auto-reconnect succeeded (attempt {})", self.ccp_reconnect_attempt);
                 // The next reconnect resumes this server session (ibx#422).
                 if let (Some(epoch), Some(auth)) = (session_epoch, self.reconnect_auth.as_mut()) {
                     auth.session_epoch = epoch;
+                }
+                // Farms opened from now on follow this login: in clear when
+                // the server refused its encryption (ibx#423).
+                if let Some(auth) = self.reconnect_auth.as_mut() {
+                    auth.ns_secure_refused = ns_secure_refused;
                 }
                 self.reconnect_ccp(conn);
                 self.ccp_reconnect_attempt = 0;
@@ -1908,12 +1914,12 @@ impl HotLoop {
         std::thread::Builder::new()
             .name(format!("hmds-reconnect-{}", attempt))
             .spawn(move || {
-                let result = connect_farm(
+                let result = crate::gateway::connect_farm_opts(
                     &auth.hmds_host, &auth.hmds_farm,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
-                    &auth.hw_info, &auth.encoded, 17,
-                );
+                    &auth.hw_info, &auth.encoded, 17, true, !auth.ns_secure_refused,
+                ).map(|(conn, _)| conn);
                 let _ = tx.send(result);
             })
             .ok();
@@ -3028,6 +3034,7 @@ mod tests {
             farm_host: String::new(),
             farm_name: String::new(),
             session_epoch: String::new(),
+            ns_secure_refused: false,
         }
     }
 

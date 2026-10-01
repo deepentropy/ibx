@@ -213,6 +213,34 @@ fn logon_reply_epoch(response: &[u8]) -> Option<String> {
 pub fn build_farm_encrypted_logon(
     channel: &mut SecureChannel,
     username: &str,
+    paper: bool,
+    farm_name: &str,
+    session_id: &str,
+    session_token: &BigUint,
+    hw_info: &str,
+    encoded: &str,
+    slot: u32,
+) -> Vec<u8> {
+    let inner = build_farm_logon(username, paper, farm_name, session_id, session_token, hw_info, encoded, slot);
+    let encrypted_raw = channel.encrypt(&inner);
+    let b64_str = B64.encode(&encrypted_raw);
+
+    // Outer wrapper: 8=FIX.4.1|9=<bodylen>|90=<b64_len>|91=<b64>|10=<cksum>
+    let b64_len_str = b64_str.len().to_string();
+    let body = format!("90={}\x0191={}\x01", b64_len_str, b64_str);
+    let header = format!("8=FIX.4.1\x019={:04}\x01", body.len());
+    let pre_cksum = format!("{}{}", header, body);
+    let cksum = fix::fix_checksum(pre_cksum.as_bytes());
+    let mut wrapper = pre_cksum.into_bytes();
+    wrapper.extend_from_slice(format!("10={}\x01", cksum).as_bytes());
+    wrapper
+}
+
+/// The farm logon message, not encrypted: what goes inside the encrypted
+/// logon, and what is sent as it is when the farm session runs in clear
+/// (ibx#423).
+pub fn build_farm_logon(
+    username: &str,
     _paper: bool,
     farm_name: &str,
     session_id: &str,
@@ -256,18 +284,7 @@ pub fn build_farm_encrypted_logon(
         inner.len(),
         String::from_utf8_lossy(&inner).replace('\x01', "|"),
     );
-    let encrypted_raw = channel.encrypt(&inner);
-    let b64_str = B64.encode(&encrypted_raw);
-
-    // Outer wrapper: 8=FIX.4.1|9=<bodylen>|90=<b64_len>|91=<b64>|10=<cksum>
-    let b64_len_str = b64_str.len().to_string();
-    let body = format!("90={}\x0191={}\x01", b64_len_str, b64_str);
-    let header = format!("8=FIX.4.1\x019={:04}\x01", body.len());
-    let pre_cksum = format!("{}{}", header, body);
-    let cksum = fix::fix_checksum(pre_cksum.as_bytes());
-    let mut wrapper = pre_cksum.into_bytes();
-    wrapper.extend_from_slice(format!("10={}\x01", cksum).as_bytes());
-    wrapper
+    inner
 }
 
 /// Execute farm logon exchange.
@@ -326,7 +343,8 @@ pub fn farm_logon_exchange(
         if msg.starts_with(b"8=FIX.4.1\x01") {
             // A signed frame is verified; on a mismatch the logon fails and
             // the IV is not advanced, as in the reference (ibx#275).
-            let parsed_msg = if fix::is_signed(&msg) {
+            // A farm session in clear has no signing key (ibx#423).
+            let parsed_msg = if fix::is_signed(&msg) && !read_mac_key.is_empty() {
                 let (unsigned, new_iv, valid) = fix::fix_unsign(&msg, read_mac_key, &read_iv);
                 if !valid {
                     return Err(io::Error::new(
@@ -341,20 +359,28 @@ pub fn farm_logon_exchange(
             };
             let fields = fix_parse(&parsed_msg);
 
-            // Check for encrypted content (tags 91/96)
+            // Check for encrypted content (tags 91/96). A farm session in
+            // clear sends its auth start as it is (ibx#423).
             let enc_tag = fields.get(&91).or_else(|| fields.get(&96));
-            if let Some(b64_data) = enc_tag {
-                let encrypted = B64.decode(b64_data).map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, e.to_string())
-                })?;
-                let decrypted = channel.decrypt(&encrypted).map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, e)
-                })?;
+            let plain_auth_start = enc_tag.is_none() && fields.get(&35).map(|s| s.as_str()) == Some("S");
+            if enc_tag.is_some() || plain_auth_start {
+                let decrypted = match enc_tag {
+                    Some(b64_data) => {
+                        let encrypted = B64.decode(b64_data).map_err(|e| {
+                            io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+                        })?;
+                        let decrypted = channel.decrypt(&encrypted).map_err(|e| {
+                            io::Error::new(io::ErrorKind::InvalidData, e)
+                        })?;
 
-                // Sync HMAC read IV with AES read IV after decryption (CBC chaining)
-                if let Some(iv) = channel.read_iv() {
-                    read_iv = iv.to_vec();
-                }
+                        // Sync HMAC read IV with AES read IV after decryption (CBC chaining)
+                        if let Some(iv) = channel.read_iv() {
+                            read_iv = iv.to_vec();
+                        }
+                        decrypted
+                    }
+                    None => parsed_msg.clone(),
+                };
 
                 // Check for auth challenge → respond with token, fall back to SRP if rejected.
                 // Outcome asymmetry (ib-agent#153, ibx#187):
@@ -462,6 +488,10 @@ pub struct ReconnectAuth {
     /// so the server can resume the same session (ibx#422). Empty when the
     /// server sent none.
     pub session_epoch: String,
+    /// The server refused the encryption of the last auth login, which went
+    /// on in clear: farms opened after it log on in clear, as in the
+    /// reference (ibx#423).
+    pub ns_secure_refused: bool,
 }
 
 /// A CCP reconnect: the new connection and the session epoch of its logon
@@ -469,6 +499,9 @@ pub struct ReconnectAuth {
 pub struct CcpReconnect {
     pub conn: Connection,
     pub session_epoch: Option<String>,
+    /// The server refused the encryption of this login, which went on in
+    /// clear: the farms opened after it log on in clear (ibx#423).
+    pub ns_secure_refused: bool,
 }
 
 /// Full gateway connection.
@@ -544,6 +577,9 @@ pub struct Gateway {
     /// with the logon (#445). A table that comes later is read by the loop.
     pub md_routing: Option<String>,
     pub hmds_routing: Option<String>,
+    /// The server refused the encryption of the auth login, which went on
+    /// in clear (ibx#423).
+    pub ns_secure_refused: bool,
 }
 
 /// Request ids of the routing-table requests: one process-wide counter
@@ -588,6 +624,29 @@ pub fn connect_farm_ex(
     slot: u32,
     routing: bool,
 ) -> io::Result<(Connection, Option<String>)> {
+    connect_farm_opts(host, farm_id, username, password, paper, server_session_id, session_key,
+        hw_info, encoded, slot, routing, true)
+}
+
+/// [`connect_farm_ex`], with the key exchange only when `ns_secure` is set.
+/// The reference does not ask a farm for the encryption after the server
+/// refused it on the auth login, and goes on in clear when a farm refuses
+/// it with the permission to go on (ibx#423); the logon is then sent in
+/// clear and the session is not signed.
+pub fn connect_farm_opts(
+    host: &str,
+    farm_id: &str,
+    username: &str,
+    password: &str,
+    paper: bool,
+    server_session_id: &str,
+    session_key: &BigUint,
+    hw_info: &str,
+    encoded: &str,
+    slot: u32,
+    routing: bool,
+    ns_secure: bool,
+) -> io::Result<(Connection, Option<String>)> {
     let port = misc_port();
     let farm_host = farm_host_override().unwrap_or_else(|| host.to_string());
     log::info!("Connecting to {} {}:{}", farm_id, farm_host, port);
@@ -599,39 +658,64 @@ pub fn connect_farm_ex(
         .map_err(|e| io::Error::new(e.kind(), format!("{} TCP connect: {}", farm_id, e)))?;
     farm_tcp.set_nodelay(true)?;
     farm_tcp.set_read_timeout(Some(Duration::from_secs(TIMEOUT_FARM_CONNECT)))?;
+    farm_session(farm_tcp, farm_id, username, password, paper, server_session_id, session_key,
+        hw_info, encoded, slot, routing, ns_secure)
+}
 
-    // Key exchange (raw TCP)
+/// The farm session on a connected socket: key exchange when `ns_secure`,
+/// logon, token auth, routing table.
+fn farm_session(
+    farm_tcp: TcpStream,
+    farm_id: &str,
+    username: &str,
+    password: &str,
+    paper: bool,
+    server_session_id: &str,
+    session_key: &BigUint,
+    hw_info: &str,
+    encoded: &str,
+    slot: u32,
+    routing: bool,
+    ns_secure: bool,
+) -> io::Result<(Connection, Option<String>)> {
+    // Key exchange (raw TCP). Any failure, an error answer included,
+    // drops the socket and the farm is tried again, as in the reference.
     let mut channel = SecureChannel::new();
-    let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
     let mut stream = farm_tcp;
-    stream.write_all(&dh_msg)?;
+    let secure = if ns_secure {
+        let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
+        stream.write_all(&dh_msg)?;
+        let secure = session::read_key_exchange_answer(&mut stream, &mut channel)
+            .map_err(|e| io::Error::new(e.kind(), format!("{} key exchange: {}", farm_id, e)))?;
+        if secure {
+            log::info!("{} key exchange complete", farm_id);
+        }
+        secure
+    } else {
+        log::info!("{}: no key exchange, the auth login runs in clear", farm_id);
+        false
+    };
 
-    let (payload, _) = ns::ns_recv(&mut stream)?;
-    let text = String::from_utf8_lossy(&payload);
-    let parts: Vec<&str> = text.split(';').collect();
-    let msg_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    if msg_type != ns::NS_SECURE_CONNECTION_START {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{} DH: expected 533, got {}", farm_id, msg_type),
-        ));
-    }
-    channel.process_server_hello(&parts[2..])
-        .map_err(|e| io::Error::new(e.kind(), format!("{} {}", farm_id, e)))?;
-    log::info!("{} key exchange complete", farm_id);
-
-    // Encrypted logon
+    // Logon: encrypted, or in clear without a key exchange (ibx#423).
     let farm_session_id = if server_session_id.is_empty() {
         session::get_session_id()
     } else {
         server_session_id.to_string()
     };
-    let logon_bytes = build_farm_encrypted_logon(
-        &mut channel, username, paper, farm_id,
-        &farm_session_id, session_key, hw_info, encoded, slot,
-    );
-    stream.write_all(&logon_bytes)?;
-    log::info!("{} encrypted logon sent", farm_id);
+    if secure {
+        let logon_bytes = build_farm_encrypted_logon(
+            &mut channel, username, paper, farm_id,
+            &farm_session_id, session_key, hw_info, encoded, slot,
+        );
+        stream.write_all(&logon_bytes)?;
+        log::info!("{} encrypted logon sent", farm_id);
+    } else {
+        let logon_bytes = build_farm_logon(
+            username, paper, farm_id, &farm_session_id, session_key, hw_info, encoded, slot,
+        );
+        stream.write_all(&logon_bytes)?;
+        log::info!("{} logon sent in clear", farm_id);
+    }
 
     // Logon exchange: challenge → token auth → logon ACK
     let read_mac_key = channel.key_block().map(|kb| kb[84..104].to_vec()).unwrap_or_default();
@@ -851,21 +935,9 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
     tls.write_all(&dh_msg)?;
 
-    let (payload, _) = ns::ns_recv(&mut tls)?;
-    let text = String::from_utf8_lossy(&payload);
-    let parts: Vec<&str> = text.split(';').collect();
-    let msg_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    if msg_type == ns::NS_SECURE_ERROR || msg_type == ns::NS_ERROR_RESPONSE {
-        return Err(session::ns_error(msg_type, &parts[2..]));
-    }
-    if msg_type != ns::NS_SECURE_CONNECTION_START {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("CCP reconnect DH: expected 533, got {}", msg_type),
-        ));
-    }
-    channel.process_server_hello(&parts[2..])
-        .map_err(|e| io::Error::new(e.kind(), format!("CCP reconnect {}", e)))?;
+    // A refused encryption lets the login go on in clear (ibx#423).
+    let mut secure = session::read_key_exchange_answer(&mut tls, &mut channel)
+        .map_err(|e| if session::login_error(&e).is_some() { e } else { io::Error::new(e.kind(), format!("CCP reconnect {}", e)) })?;
 
     // CONNECT_REQUEST with SOFT_TOKEN flag + token hash (field 9)
     let flags = session::FLAG_OK_TO_REDIRECT
@@ -894,11 +966,11 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         auth.encoded,
         token_hash,
     );
-    session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
+    session::send_ns(&mut tls, &mut channel, secure, connect_req.as_bytes())?;
     log::info!("CCP reconnect CONNECT_REQUEST sent (session={}, hash={})", auth.server_session_id, token_hash);
 
     // Receive AUTH_START — may get NS_REDIRECT instead
-    let auth_start = match session::recv_auth_start(&mut tls, &mut channel) {
+    let auth_start = match session::recv_auth_start_ccp(&mut tls, &mut channel, &mut secure, connect_req.as_bytes()) {
         Ok(start) => start,
         Err(e) if e.to_string().starts_with("REDIRECT:") => {
             let target = e.to_string().replace("REDIRECT:", "");
@@ -972,7 +1044,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
 
         if msg_type == ns::NS_CONNECT_RESPONSE {
             let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
-            session::send_secure(&mut tls, &mut channel, newcomm.as_bytes())?;
+            session::send_ns(&mut tls, &mut channel, secure, newcomm.as_bytes())?;
         } else if msg_type == ns::NS_FIX_START {
             fix_ready = true;
             break;
@@ -1022,7 +1094,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     let mut conn = Connection::new(tls)?;
     conn.seq = 1; // the logon
     log::info!("CCP reconnect complete (seq={})", conn.seq);
-    Ok(CcpReconnect { conn, session_epoch })
+    Ok(CcpReconnect { conn, session_epoch, ns_secure_refused: !secure })
 }
 
 
@@ -1179,21 +1251,13 @@ impl Gateway {
         let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
         tls.write_all(&dh_msg)?;
 
-        let (payload, _) = ns::ns_recv(&mut tls)?;
-        let text = String::from_utf8_lossy(&payload);
-        let parts: Vec<&str> = text.split(';').collect();
-        let msg_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        if msg_type == ns::NS_SECURE_ERROR || msg_type == ns::NS_ERROR_RESPONSE {
-            return Err(session::ns_error(msg_type, &parts[2..]));
+        // The server may refuse the encryption and let the login go on in
+        // clear; the farms of the session then log on in clear too, as the
+        // reference does (ibx#423).
+        let mut secure = session::read_key_exchange_answer(&mut tls, &mut channel)?;
+        if secure {
+            log::info!("Auth key exchange complete");
         }
-        if msg_type != ns::NS_SECURE_CONNECTION_START {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Expected 533, got {}", msg_type),
-            ));
-        }
-        channel.process_server_hello(&parts[2..])?;
-        log::info!("Auth key exchange complete");
 
         // Send CONNECT_REQUEST (encrypted)
         let flags = session::FLAG_OK_TO_REDIRECT
@@ -1221,10 +1285,10 @@ impl Gateway {
             session_id,
             encoded
         );
-        session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
+        session::send_ns(&mut tls, &mut channel, secure, connect_req.as_bytes())?;
 
         // Receive AUTH_START (may get a redirect instead for paper accounts)
-        let auth_start = match session::recv_auth_start(&mut tls, &mut channel) {
+        let auth_start = match session::recv_auth_start_ccp(&mut tls, &mut channel, &mut secure, connect_req.as_bytes()) {
             Ok(start) => start,
             Err(e) if e.to_string().starts_with("REDIRECT:") => {
                 let target = e.to_string().strip_prefix("REDIRECT:").unwrap().to_string();
@@ -1371,7 +1435,7 @@ impl Gateway {
                 log::info!("Post-auth: connect response received");
                 // Send port type change (required before data start)
                 let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
-                session::send_secure(&mut tls, &mut channel, newcomm.as_bytes())?;
+                session::send_ns(&mut tls, &mut channel, secure, newcomm.as_bytes())?;
                 log::info!("Port type change sent");
             } else if msg_type == ns::NS_FIX_START {
                 log::info!("Data start: {}", inner_text);
@@ -1905,12 +1969,12 @@ impl Gateway {
             let hw = &hw_info;
             let enc = &encoded;
             let trading_handle = scope.spawn(move || {
-                connect_farm_ex(&trading_host, &trading_farm, username, password,
-                    paper, ssid, token, hw, enc, 18, true)
+                connect_farm_opts(&trading_host, &trading_farm, username, password,
+                    paper, ssid, token, hw, enc, 18, true, secure)
             });
             let mktdata_handle = scope.spawn(move || {
-                connect_farm_ex(&mktdata_host, &mktdata_farm, username, password,
-                    paper, ssid, token, hw, enc, 17, true)
+                connect_farm_opts(&mktdata_host, &mktdata_farm, username, password,
+                    paper, ssid, token, hw, enc, 17, true, secure)
             });
             let trading = trading_handle.join().expect("trading farm thread panicked");
             let mktdata = mktdata_handle.join().expect("mktdata farm thread panicked");
@@ -1957,6 +2021,7 @@ impl Gateway {
             farm_host,
             md_routing,
             hmds_routing,
+            ns_secure_refused: !secure,
         };
         Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
@@ -2076,6 +2141,7 @@ impl Gateway {
             farm_host: self.farm_host.clone(),
             farm_name: self.farm_name.clone(),
             session_epoch: self.session_epoch.clone(),
+            ns_secure_refused: self.ns_secure_refused,
         };
         if let Some(tx) = event_tx.as_ref() {
             let _ = tx.send(Event::GatewayLogon {
@@ -2284,6 +2350,85 @@ fn init_scan_buffer(init_data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A farm server on a local socket: answers the key exchange request
+    /// with `key_answer` (none when no request is expected), then reads the
+    /// logon and acknowledges it. Returns the bytes the client sent.
+    fn clear_farm_server(key_answer: Option<&'static str>) -> (TcpStream, std::thread::JoinHandle<Vec<u8>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut got = Vec::new();
+            if let Some(answer) = key_answer {
+                let (request, _) = ns::ns_recv(&mut sock).unwrap();
+                got.extend_from_slice(&request);
+                let fields: Vec<&str> = answer.split(';').collect();
+                sock.write_all(&ns::ns_build(50, fields[0].parse().unwrap(), &fields[1..], "")).unwrap();
+            }
+            let mut buf = [0u8; 4096];
+            while !got.windows(4).any(|w| w == b"\x0110=") {
+                let n = sock.read(&mut buf).unwrap();
+                assert!(n > 0, "closed before the logon");
+                got.extend_from_slice(&buf[..n]);
+            }
+            sock.write_all(&fix::fix_build(&[(fix::TAG_MSG_TYPE, "A"), (fix::TAG_SENDING_TIME, "20261001-10:00:00")], 1)).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            got
+        });
+        (client, server)
+    }
+
+    fn logon_in_clear(sent: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(sent);
+        text.contains("8=FIX.4.1\x01") && text.contains("\x0135=A\x01") && text.contains("\x0196=Suser/18/usfarm\x01")
+    }
+
+    // ibx#423: after the auth login went on in clear, a farm is not asked
+    // for the encryption: the logon goes in clear and the session is not
+    // signed.
+    #[test]
+    fn farm_after_a_refused_auth_encryption_logs_on_in_clear() {
+        let (client, server) = clear_farm_server(None);
+        let (conn, table) = farm_session(client, "usfarm", "user", "pass", true, "sid", &BigUint::from(7u32),
+            "hw", "enc", 18, false, false).unwrap();
+        assert!(table.is_none());
+        drop(conn);
+        let sent = server.join().unwrap();
+        assert!(!sent.starts_with(ns::NS_MAGIC), "no key exchange request");
+        assert!(logon_in_clear(&sent), "{}", String::from_utf8_lossy(&sent));
+    }
+
+    // ibx#423: a farm that refuses the encryption with the permission to go
+    // on gets its logon in clear; any other refusal drops the farm.
+    #[test]
+    fn farm_refusing_the_encryption_with_proceed_goes_on_in_clear() {
+        let (client, server) = clear_farm_server(Some("535;no crypto;1"));
+        farm_session(client, "usfarm", "user", "pass", true, "sid", &BigUint::from(7u32),
+            "hw", "enc", 18, false, true).unwrap();
+        let sent = server.join().unwrap();
+        assert!(String::from_utf8_lossy(&sent).contains(";532;"), "key exchange asked first");
+        assert!(logon_in_clear(&sent[sent.windows(9).position(|w| w == b"8=FIX.4.1").unwrap()..]));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let _ = ns::ns_recv(&mut sock).unwrap();
+            sock.write_all(&ns::ns_build(50, ns::NS_SECURE_ERROR, &["no crypto", "0"], "")).unwrap();
+        });
+        let err = farm_session(client, "usfarm", "user", "pass", true, "sid", &BigUint::from(7u32),
+            "hw", "enc", 18, false, true).err().expect("refused");
+        assert!(err.to_string().contains("usfarm key exchange"), "{err}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn encrypted_farm_logon_wraps_the_clear_one() {
+        let clear = build_farm_logon("user", true, "usfarm", "sid", &BigUint::from(7u32), "hw", "enc", 18);
+        assert!(logon_in_clear(&clear));
+    }
 
     // ibx#263: the algo definition answers of the login burst are kept,
     // one XML each; other frames are not.
