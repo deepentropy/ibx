@@ -555,6 +555,10 @@ pub struct ReferenceState {
     /// Gateway-local init data (populated during connection, read-only after).
     smart_components: Mutex<Vec<crate::types::SmartComponent>>,
     news_providers: Mutex<Vec<crate::types::NewsProvider>>,
+    /// Subscribed API news source codes of the logon, in logon order
+    /// (ibx#460): the provider check and the all-subscribed form of the
+    /// historical news request use them.
+    news_sources: Mutex<Vec<String>>,
     soft_dollar_tiers: Mutex<Vec<crate::types::SoftDollarTier>>,
     family_codes: Mutex<Vec<crate::types::FamilyCode>>,
     white_branding_id: Mutex<String>,
@@ -599,6 +603,7 @@ impl ReferenceState {
             time_zone_ids: Mutex::new(HashMap::new()),
             smart_components: Mutex::new(Vec::new()),
             news_providers: Mutex::new(Vec::new()),
+            news_sources: Mutex::new(Vec::new()),
             soft_dollar_tiers: Mutex::new(Vec::new()),
             family_codes: Mutex::new(Vec::new()),
             white_branding_id: Mutex::new(String::new()),
@@ -817,6 +822,11 @@ impl ReferenceState {
         self.news_providers.lock().unwrap().clone()
     }
 
+    /// Subscribed API news source codes of the logon (ibx#460).
+    pub fn news_sources(&self) -> Vec<String> {
+        self.news_sources.lock().unwrap().clone()
+    }
+
     pub fn soft_dollar_tiers(&self) -> Vec<crate::types::SoftDollarTier> {
         self.soft_dollar_tiers.lock().unwrap().clone()
     }
@@ -858,6 +868,10 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_news_providers(&self, providers: Vec<crate::types::NewsProvider>) {
         *self.news_providers.lock().unwrap() = providers;
+    }
+
+    #[doc(hidden)] pub fn set_news_sources(&self, codes: Vec<String>) {
+        *self.news_sources.lock().unwrap() = codes;
     }
 
     #[doc(hidden)] pub fn set_soft_dollar_tiers(&self, tiers: Vec<crate::types::SoftDollarTier>) {

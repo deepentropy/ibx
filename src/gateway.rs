@@ -492,6 +492,12 @@ pub struct Gateway {
     pub raw_family_codes: String,
     /// Raw news provider data from CCP logon tag 6830.
     pub raw_news_providers: String,
+    /// Raw API news source list from the CCP logon (ibx#460).
+    pub raw_news_sources: String,
+    /// Raw news source capabilities from the CCP logon (ibx#460).
+    pub raw_news_capabilities: String,
+    /// The logon feature list denies news: no API news source (ibx#460).
+    pub deny_news: bool,
     /// White branding ID from CCP logon (empty for standard accounts).
     pub white_branding_id: String,
     /// FA session: CCP logon tag 6108 is "1" (ibx#481).
@@ -1368,6 +1374,9 @@ impl Gateway {
         let mut raw_soft_dollar_tiers = String::new();
         let mut raw_family_codes = String::new();
         let mut raw_news_providers = String::new();
+        let mut raw_news_sources = String::new();
+        let mut raw_news_capabilities = String::new();
+        let mut deny_news = false;
         let mut white_branding_id = String::new();
         let mut fa_session = false;
         let mut scale_us_lots = false;
@@ -1493,6 +1502,12 @@ impl Gateway {
             if let Some(v) = fields.get(&6830) {
                 if raw_news_providers.is_empty() { raw_news_providers = v.clone(); }
             }
+            if let Some(v) = fields.get(&6988) {
+                if raw_news_sources.is_empty() { raw_news_sources = v.clone(); }
+            }
+            if let Some(v) = fields.get(&6969) {
+                if raw_news_capabilities.is_empty() { raw_news_capabilities = v.clone(); }
+            }
             // whiteBrandingId: logon tag 6593, as the reference (ibx#483).
             if let Some(v) = fields.get(&6593) {
                 if white_branding_id.is_empty() { white_branding_id = v.clone(); }
@@ -1505,6 +1520,7 @@ impl Gateway {
             if let Some(v) = fields.get(&6542) {
                 scale_us_lots |= features_scale_us_lots(v);
                 tick_by_tick_off |= features_have(v, "NOTICKBYTICK");
+                deny_news |= features_have(v, "DENYNEWS");
             }
             for (slot, tag) in tbt_limit_fields.iter_mut().zip([8421u32, 8422, 6594, 6848]) {
                 if slot.is_none() { *slot = fields.get(&tag).cloned(); }
@@ -1651,6 +1667,12 @@ impl Gateway {
             } else if part.starts_with("6830=") && raw_news_providers.is_empty() {
                 raw_news_providers = part[5..].to_string();
                 log::info!("Found news providers from init response ({} bytes)", raw_news_providers.len());
+            } else if part.starts_with("6988=") && raw_news_sources.is_empty() {
+                raw_news_sources = part[5..].to_string();
+                log::info!("Found API news sources from init response ({} bytes)", raw_news_sources.len());
+            } else if part.starts_with("6969=") && raw_news_capabilities.is_empty() {
+                raw_news_capabilities = part[5..].to_string();
+                log::info!("Found news capabilities from init response ({} bytes)", raw_news_capabilities.len());
             } else if part == "6108=1" {
                 fa_session = true;
             } else if let Some(id) = white_branding_part(part).filter(|_| white_branding_id.is_empty()) {
@@ -1851,6 +1873,9 @@ impl Gateway {
             raw_soft_dollar_tiers,
             raw_family_codes,
             raw_news_providers,
+            raw_news_sources,
+            raw_news_capabilities,
+            deny_news,
             white_branding_id,
             fa_session,
             account_config,
@@ -1872,7 +1897,7 @@ impl Gateway {
 
     /// Populate shared state with gateway-local init data parsed from CCP logon.
     pub fn populate_init_data(&self, shared: &SharedState) {
-        use crate::types::{SmartComponent, NewsProvider, FamilyCode};
+        use crate::types::{SmartComponent, FamilyCode};
 
         // Smart components: hardcoded US equity SMART routing exchanges.
         // Server doesn't send these in a parseable init message; they're
@@ -1889,33 +1914,20 @@ impl Gateway {
         }).collect();
         shared.reference.set_smart_components(smart_components);
 
-        // News providers: parse from CCP logon tag 6830, fall back to defaults.
-        // Wire format: "code1,name1;code2,name2;..." (tag value capped at 155 entries).
-        let news_providers: Vec<NewsProvider> = if self.raw_news_providers.is_empty() {
-            // Default list — only used when account-specific entitlement data is unavailable.
-            [
-                ("BRFG", "Briefing.com General Market Columns"),
-                ("BRFUPDN", "Briefing.com Analyst Actions"),
-                ("DJ-N", "Dow Jones Global Equity Trader"),
-                ("DJ-RTA", "Dow Jones Top Stories Asia Pacific"),
-                ("DJ-RTE", "Dow Jones Top Stories Europe"),
-                ("DJ-RTG", "Dow Jones Top Stories Global"),
-                ("DJ-RTPRO", "Dow Jones Top Stories Pro"),
-                ("DJNL", "Dow Jones Newsletters"),
-            ].iter().map(|(code, name)| NewsProvider {
-                code: code.to_string(), name: name.to_string(),
-            }).collect()
+        // News providers: the API source list of the logon (ibx#460).
+        let sources = if self.deny_news {
+            log::info!("News denied by the logon feature list: no news provider");
+            Vec::new()
         } else {
-            self.raw_news_providers.split(';').filter_map(|entry| {
-                let entry = entry.trim();
-                if entry.is_empty() { return None; }
-                let (code, name) = entry.split_once(',')?;
-                Some(NewsProvider {
-                    code: code.trim().to_string(),
-                    name: name.trim().to_string(),
-                })
-            }).collect()
+            parse_news_sources(&self.raw_news_sources)
         };
+        if sources.is_empty() && !self.deny_news {
+            log::warn!("No API news source in the logon: the news provider list is empty");
+        }
+        let news_providers = news_providers_from_logon(&sources, &self.raw_news_providers, &self.raw_news_capabilities);
+        shared.reference.set_news_sources(
+            sources.iter().filter(|s| s.subscribed).map(|s| s.code.clone()).collect(),
+        );
         shared.reference.set_news_providers(news_providers);
 
         // Soft dollar tiers: from CCP logon tag 6522, none when it is absent
@@ -2596,6 +2608,99 @@ mod tests {
         };
         assert_eq!(config.username, "user");
         assert!(config.paper);
+    }
+}
+
+/// One API news source of the logon. It is subscribed only when it has
+/// no service id (ibx#460).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NewsSource {
+    pub(crate) code: String,
+    pub(crate) subscribed: bool,
+}
+
+/// The API news sources of the logon, in logon order (ibx#460).
+pub(crate) fn parse_news_sources(raw: &str) -> Vec<NewsSource> {
+    raw.split(',').filter_map(|entry| {
+        let entry = entry.trim();
+        if entry.is_empty() { return None; }
+        let (code, ids) = match entry.split_once(':') {
+            Some((c, ids)) => (c, ids),
+            None => (entry, ""),
+        };
+        if code.is_empty() { return None; }
+        Some(NewsSource {
+            code: code.to_string(),
+            subscribed: ids.split(';').all(|id| id.trim().is_empty()),
+        })
+    }).collect()
+}
+
+/// Look up `code` in a logon list of code and value items (names,
+/// capabilities).
+fn news_list_value<'a>(raw: &'a str, code: &str) -> Option<&'a str> {
+    raw.split(',').find_map(|item| {
+        let (c, v) = item.split_once('/')?;
+        c.trim().eq_ignore_ascii_case(code).then_some(v.trim())
+    })
+}
+
+/// The reqNewsProviders answer built from the logon (ibx#460): the
+/// subscribed API sources whose capabilities include news, in source
+/// order, named from the logon name list or by their code. A source with
+/// no capability entry is not used.
+pub(crate) fn news_providers_from_logon(
+    sources: &[NewsSource],
+    raw_names: &str,
+    raw_capabilities: &str,
+) -> Vec<crate::types::NewsProvider> {
+    sources.iter().filter(|s| s.subscribed).filter_map(|s| {
+        let caps = news_list_value(raw_capabilities, &s.code).filter(|c| !c.is_empty());
+        let Some(caps) = caps else {
+            log::warn!("News source {} has empty capabilities and is not processed", s.code);
+            return None;
+        };
+        if !caps.contains('N') { return None; }
+        let name = news_list_value(raw_names, &s.code).filter(|n| !n.is_empty()).unwrap_or(&s.code);
+        Some(crate::types::NewsProvider { code: s.code.clone(), name: name.to_string() })
+    }).collect()
+}
+
+#[cfg(test)]
+mod news_provider_tests {
+    use super::*;
+
+    // ibx#460: the captured paper logon gives the 8 providers the API
+    // client received, in logon order, with their names.
+    #[test]
+    fn providers_from_the_paper_logon() {
+        let sources = "BRFG,BRFUPDN,DJ-N,DJ-RTA,DJ-RTE,DJ-RTG,DJ-RTPRO,DJNL,BZ:706,DJTOP:557;558;559,FLY:698";
+        let names = "ABSTR/Absolute Strategy Research,BRFG/Briefing.com General Market Columns,\
+                     BRFUPDN/Briefing.com Analyst Actions,BZ/Benzinga,DJ-N/Dow Jones Global Equity Trader,\
+                     DJ-RTA/Dow Jones Top Stories Asia Pacific,DJ-RTE/Dow Jones Top Stories Europe,\
+                     DJ-RTG/Dow Jones Top Stories Global,DJ-RTPRO/Dow Jones Top Stories Pro,\
+                     DJNL/Dow Jones Newsletters,DJTOP/Dow Jones,FLY/The Fly";
+        let caps = "ABSTR/RNP,BRFG/RNM,BRFUPDN/RNPU,BZ/N,DJ-N/N,DJ-RTA/N,DJ-RTE/N,DJ-RTG/N,\
+                    DJ-RTPRO/N,DJNL/N,DJTOP/T,FLY/N";
+        let parsed = parse_news_sources(sources);
+        assert_eq!(parsed.len(), 11);
+        assert!(!parsed[8].subscribed && !parsed[9].subscribed && !parsed[10].subscribed);
+        let p = news_providers_from_logon(&parsed, names, caps);
+        let codes: Vec<&str> = p.iter().map(|p| p.code.as_str()).collect();
+        assert_eq!(codes, ["BRFG", "BRFUPDN", "DJ-N", "DJ-RTA", "DJ-RTE", "DJ-RTG", "DJ-RTPRO", "DJNL"]);
+        assert_eq!(p[0].name, "Briefing.com General Market Columns");
+        assert_eq!(p[7].name, "Dow Jones Newsletters");
+    }
+
+    #[test]
+    fn providers_filter_and_names() {
+        let parsed = parse_news_sources("AAA,BBB,CCC,DDD:");
+        assert!(parsed[3].subscribed, "an empty service id list is subscribed");
+        // BBB has no news capability, CCC has no capability entry, DDD no name.
+        let p = news_providers_from_logon(&parsed, "AAA/Alpha", "AAA/RN,BBB/T,DDD/N");
+        let got: Vec<(&str, &str)> = p.iter().map(|p| (p.code.as_str(), p.name.as_str())).collect();
+        assert_eq!(got, [("AAA", "Alpha"), ("DDD", "DDD")]);
+        assert!(news_providers_from_logon(&parse_news_sources(""), "AAA/Alpha", "AAA/N").is_empty());
     }
 }
 
