@@ -4,6 +4,7 @@ pub mod hmds;
 pub(crate) mod pool;
 pub mod order_builder;
 pub mod liveness;
+pub(crate) mod optcalc;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -641,6 +642,7 @@ impl HotLoop {
         self.ccp.sweep_scanner_enrichments(&self.shared);
         self.ccp.sweep_contract_details(&self.shared, &self.event_tx, &mut self.ccp_conn, &mut self.hb);
         self.ccp.sweep_contract_resolves(&self.shared);
+        self.ccp.optcalc.progress(&mut self.ccp_conn, &mut self.hb, &self.shared);
         order_builder::sweep_rth_lookups(&mut self.context);
         farm::sweep_md_lookups(&mut self.context, &self.shared);
         self.send_md_resolved();
@@ -1222,6 +1224,9 @@ impl HotLoop {
                             }
                         }
                     }
+                }
+                ControlCommand::CalcOption { req_id, con_id, kind, under_price } => {
+                    self.ccp.optcalc.start(req_id, con_id, kind, under_price, &mut self.ccp_conn, &mut self.hb, &self.shared);
                 }
                 ControlCommand::CancelFundamentalData { req_id } => {
                     if let Some((id, xml)) = self.hmds.cancel_fundamental(req_id) {

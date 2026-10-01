@@ -5,28 +5,52 @@ use pyo3::prelude::*;
 use super::EClient;
 use super::super::contract::{Contract, NewsProviderPy, SmartComponentPy, SoftDollarTierPy};
 
-#[pymethods]
 impl EClient {
-    // ── Options Calculations (stubs) ──
-
-    #[pyo3(signature = (req_id, contract, option_price, under_price, implied_vol_options=Vec::new()))]
-    fn calculate_implied_volatility(
-        &self, req_id: i64, contract: &Contract, option_price: f64,
-        under_price: f64, implied_vol_options: Vec<Py<PyAny>>,
+    fn calculate_option(
+        &self, py: Python<'_>, req_id: i64, contract: &Contract,
+        kind: crate::control::optcalc::CalcKind, under_price: f64,
     ) -> PyResult<()> {
-        let _ = (req_id, contract, option_price, under_price, implied_vol_options);
-        log::warn!("calculate_implied_volatility: not yet implemented in engine");
+        if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("calculate_option", &[req_id, contract.con_id]) { return Ok(()); }
+        let shared = self.shared_state()?;
+        let api = contract.to_api();
+        let price = matches!(kind, crate::control::optcalc::CalcKind::Price { .. });
+        let features = shared.reference.account_features();
+        if let Some((code, text)) = crate::client_core::ClientCore::option_calc_refusal(&api, price, features.as_deref()) {
+            shared.orders.push_order_error(req_id, code, text);
+            return Ok(());
+        }
+        let tx = self.tx()?;
+        let request = crate::types::ControlCommand::CalcOption { req_id, con_id: contract.con_id, kind, under_price };
+        super::send_cmd(py, &tx, crate::client_core::ClientCore::resolve_first(req_id, &api, request))?;
         Ok(())
     }
+}
 
+#[pymethods]
+impl EClient {
+    // ── Options Calculations ──
+
+    /// Implied volatility of an option price, computed locally by the
+    /// option model as the reference (ibx#442). The options are not used.
+    #[pyo3(signature = (req_id, contract, option_price, under_price, implied_vol_options=Vec::new()))]
+    fn calculate_implied_volatility(
+        &self, py: Python<'_>, req_id: i64, contract: &Contract, option_price: f64,
+        under_price: f64, implied_vol_options: Vec<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let _ = implied_vol_options;
+        self.calculate_option(py, req_id, contract, crate::control::optcalc::CalcKind::ImpliedVol { option_price }, under_price)
+    }
+
+    /// Price and greeks of an option at a volatility, computed locally by
+    /// the option model as the reference (ibx#442). The options are not used.
     #[pyo3(signature = (req_id, contract, volatility, under_price, opt_prc_options=Vec::new()))]
     fn calculate_option_price(
-        &self, req_id: i64, contract: &Contract, volatility: f64,
+        &self, py: Python<'_>, req_id: i64, contract: &Contract, volatility: f64,
         under_price: f64, opt_prc_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
-        let _ = (req_id, contract, volatility, under_price, opt_prc_options);
-        log::warn!("calculate_option_price: not yet implemented in engine");
-        Ok(())
+        let _ = opt_prc_options;
+        self.calculate_option(py, req_id, contract, crate::control::optcalc::CalcKind::Price { volatility }, under_price)
     }
 
     fn cancel_calculate_implied_volatility(&self, req_id: i64) -> PyResult<()> {

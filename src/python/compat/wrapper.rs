@@ -188,8 +188,8 @@ impl EWrapper {
 
     fn tick_option_computation(
         &self, _req_id: i64, _tick_type: i32, _tick_attrib: i32,
-        _implied_vol: f64, _delta: f64, _opt_price: f64, _pv_dividend: f64,
-        _gamma: f64, _vega: f64, _theta: f64, _und_price: f64,
+        _implied_vol: Option<f64>, _delta: Option<f64>, _opt_price: Option<f64>, _pv_dividend: Option<f64>,
+        _gamma: Option<f64>, _vega: Option<f64>, _theta: Option<f64>, _und_price: Option<f64>,
     ) {}
 
     fn security_definition_option_parameter(

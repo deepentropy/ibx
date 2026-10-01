@@ -437,6 +437,12 @@ impl EClient {
         if let Some(descriptions) = self.shared.reference.drain_depth_exchanges() {
             wrapper.mkt_depth_exchanges(&descriptions);
         }
+        for a in self.shared.reference.drain_option_computations() {
+            wrapper.tick_option_computation(
+                a.req_id, a.tick_type, a.tick_attrib, a.implied_vol, a.delta, a.opt_price,
+                a.pv_dividend, a.gamma, a.vega, a.theta, a.und_price,
+            );
+        }
         for (req_id, data) in self.shared.reference.drain_fundamental_data() {
             wrapper.fundamental_data(req_id, &data);
         }

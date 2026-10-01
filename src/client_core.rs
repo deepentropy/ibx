@@ -2762,6 +2762,54 @@ impl ClientCore {
         None
     }
 
+    /// The reference's local checks of an option calculation (ibx#442):
+    /// 321 with its text, before any lookup. `price` is a price calculation
+    /// (else an implied volatility one); `features` is the account feature
+    /// list.
+    pub fn option_calc_refusal(contract: &crate::api::types::Contract, price: bool, features: Option<&[String]>) -> Option<(i64, String)> {
+        let class = if price { "bJ" } else { "bI" };
+        let refuse = |cause: &str| Some((321, format!("Error validating request.-'{}' : cause - {}", class, cause)));
+        if contract.exchange.is_empty() {
+            return refuse("Please enter exchange");
+        }
+        let sec_type = contract.sec_type.as_str();
+        let option_type = matches!(sec_type, "OPT" | "FOP" | "IOPT");
+        let con_id_set = contract.con_id != 0;
+        if !con_id_set && !option_type {
+            return refuse(if price {
+                "Calculation of Option Price supported for option securities only"
+            } else {
+                "Calculation of Implied Volatility supported for option securities only"
+            });
+        }
+        if !price {
+            return None;
+        }
+        if !con_id_set || sec_type == "BAG" {
+            if contract.symbol.is_empty() {
+                return refuse("The symbol or the local-symbol must be entered");
+            }
+            if contract.symbol.chars().any(|c| c as u32 >= 128) {
+                return refuse("Symbol should contain valid non-unicode characters only");
+            }
+            if matches!(sec_type, "" | "UNK" | "All" | "*") {
+                return refuse("Please enter a valid security type");
+            }
+        }
+        let expiry_empty = contract.last_trade_date_or_contract_month.is_empty();
+        if sec_type == "OPT" && !con_id_set {
+            let zero_strike_ok = features.map(|f| f.iter().any(|x| x == "ZEROSTRKOPT")).unwrap_or(false);
+            let right_set = matches!(contract.right.chars().next(), Some('P') | Some('C'));
+            if expiry_empty || (contract.strike == 0.0 && !zero_strike_ok) || !right_set {
+                return refuse("When the local symbol field is empty, please fill all option fields (right, strike, expiry)");
+            }
+        }
+        if !con_id_set && matches!(sec_type, "OPT" | "FOP" | "IOPT" | "FUT" | "FWD") && expiry_empty {
+            return refuse("Please enter a local symbol or an expiry");
+        }
+        None
+    }
+
     /// The reference's local checks of a news article request (ibx#459),
     /// both 321.
     pub fn news_article_refusal(provider_code: &str, article_id: &str, sources: &[String]) -> Option<(i64, String)> {

@@ -75,13 +75,7 @@ impl Default for Greeks {
 impl Greeks {
     /// Store a delta, held inside (-1, 1).
     fn set_delta(&mut self, d: f64) {
-        self.delta = if d > DELTA_MAX {
-            DELTA_MAX
-        } else if d < DELTA_MIN {
-            DELTA_MIN
-        } else {
-            d
-        };
+        self.delta = d.clamp(DELTA_MIN, DELTA_MAX);
     }
 }
 
@@ -150,6 +144,7 @@ pub fn european_put(s: f64, pv: f64, k: f64, r: f64, t: f64, vol: f64, q: f64) -
 }
 
 /// European price with its greeks.
+#[allow(clippy::too_many_arguments)]
 pub fn european_with_greeks(
     right: Right, s: f64, pv: f64, k: f64, r: f64, t: f64, vol: f64, q: f64, g: &mut Greeks,
 ) -> f64 {
@@ -164,7 +159,8 @@ pub fn european_with_greeks(
     let n2 = norm_cdf(d2);
     let (cn1, cn2) = if call { (n1, n2) } else { (1.0 - n1, 1.0 - n2) };
     let f = fwd_factor * sx;
-    let (mut price, mut delta, mut gamma, mut vega, mut theta) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut price;
+    let (mut delta, mut gamma, mut vega, mut theta) = (0.0, 0.0, 0.0, 0.0);
     if vol == 0.0 {
         price = if call { disc * (f - k) } else { disc * (k - f) };
         if price > 0.0 {
@@ -286,7 +282,7 @@ fn tree_terminal(a: &mut TreeArrays, s: f64, k: f64, u: f64, sign: f64) {
     let len = a.stock.len();
     let mid = len / 2;
     a.stock[mid] = s - a.divs[0];
-    if len % 2 == 0 {
+    if len.is_multiple_of(2) {
         a.stock[mid] *= u;
     }
     for i in mid + 1..len {

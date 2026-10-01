@@ -668,6 +668,16 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "news_article", (req_id, article_type, text.as_str()));
         }
 
+        // Drain option calculations -> tickOptionComputation; a field that
+        // is not computed is None, as the official Python client gives it.
+        for a in shared.reference.drain_option_computations() {
+            let v = |x: f64| (x != f64::MAX).then_some(x);
+            call_wrapper!(self.wrapper, py, "tick_option_computation", (
+                a.req_id, a.tick_type, a.tick_attrib, v(a.implied_vol), v(a.delta), v(a.opt_price),
+                v(a.pv_dividend), v(a.gamma), v(a.vega), v(a.theta), v(a.und_price),
+            ));
+        }
+
         // Drain fundamental data -> fundamentalData
         let fundamentals = shared.reference.drain_fundamental_data();
         for (req_id, data) in fundamentals {

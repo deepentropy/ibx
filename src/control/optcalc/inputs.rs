@@ -2,7 +2,7 @@
 //! dividend schedule the server sends as reference-data XML, the model
 //! clock, and the time to expiry.
 
-use super::model::{self, TreeDividend, YEAR_MS};
+use super::model::{self, TreeDividend};
 
 /// Milliseconds in a day.
 pub const DAY_MS: i64 = 86_400_000;
@@ -92,7 +92,7 @@ pub fn parse_yyyymmdd(text: &str) -> Option<jiff::civil::Date> {
 }
 
 fn tz(name: &str) -> jiff::tz::TimeZone {
-    jiff::tz::TimeZone::get(name).unwrap_or_else(|_| jiff::tz::TimeZone::UTC)
+    jiff::tz::TimeZone::get(name).unwrap_or(jiff::tz::TimeZone::UTC)
 }
 
 /// Midnight of a date in a time zone, in milliseconds.
@@ -298,10 +298,8 @@ pub fn expiry_end(last_trade_date: &str, last_trade_time: &str, trading_hours: O
         let m: i8 = last_trade_time[2..4].parse().ok()?;
         return Some(ExpiryEnd::At(local_ms(date, h, m, zone)));
     }
-    if let Some(hours) = trading_hours {
-        if let Some(end) = session_end(hours, date, zone) {
-            return Some(ExpiryEnd::At(end));
-        }
+    if let Some(end) = trading_hours.and_then(|hours| session_end(hours, date, zone)) {
+        return Some(ExpiryEnd::At(end));
     }
     Some(ExpiryEnd::DateOnly(midnight_ms(date, zone)))
 }

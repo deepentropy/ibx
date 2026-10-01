@@ -1755,6 +1755,14 @@ pub enum ControlCommand {
     },
     /// Cancel fundamental data request.
     CancelFundamentalData { req_id: ReqId },
+    /// Option calculation (implied volatility or price) of an option by
+    /// conId, answered by the local option model.
+    CalcOption {
+        req_id: ReqId,
+        con_id: i64,
+        kind: crate::control::optcalc::CalcKind,
+        under_price: f64,
+    },
     /// Request histogram data via historical data connection.
     FetchHistogramData {
         req_id: ReqId,

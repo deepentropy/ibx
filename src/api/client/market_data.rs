@@ -68,6 +68,53 @@ impl EClient {
         Ok(())
     }
 
+    // ── Option calculations ──
+
+    /// Implied volatility of an option price. Matches
+    /// `calculateImpliedVolatility` in C++. Computed locally by the option
+    /// model, as the reference: one `tick_option_computation` with tick type
+    /// 53, or nothing when no volatility is found within 5 seconds. The
+    /// options are read and not used, as the reference.
+    pub fn calculate_implied_volatility(
+        &self, req_id: i64, contract: &Contract, option_price: f64, under_price: f64,
+        _implied_vol_options: &[crate::api::types::TagValue],
+    ) -> Result<(), String> {
+        self.calculate_option(req_id, contract, crate::control::optcalc::CalcKind::ImpliedVol { option_price }, under_price)
+    }
+
+    /// Price and greeks of an option at a volatility. Matches
+    /// `calculateOptionPrice` in C++: one `tick_option_computation` with tick
+    /// type 53; after 30 seconds without a price, the tick has no price and no
+    /// greeks, as the reference.
+    pub fn calculate_option_price(
+        &self, req_id: i64, contract: &Contract, volatility: f64, under_price: f64,
+        _opt_prc_options: &[crate::api::types::TagValue],
+    ) -> Result<(), String> {
+        self.calculate_option(req_id, contract, crate::control::optcalc::CalcKind::Price { volatility }, under_price)
+    }
+
+    fn calculate_option(
+        &self, req_id: i64, contract: &Contract, kind: crate::control::optcalc::CalcKind, under_price: f64,
+    ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("calculate_option", &[req_id, contract.con_id]) { return Ok(()); }
+        let price = matches!(kind, crate::control::optcalc::CalcKind::Price { .. });
+        let features = self.shared.reference.account_features();
+        if let Some((code, text)) = crate::client_core::ClientCore::option_calc_refusal(contract, price, features.as_deref()) {
+            self.shared.orders.push_order_error(req_id, code, text);
+            return Ok(());
+        }
+        let request = crate::types::ControlCommand::CalcOption { req_id, con_id: contract.con_id, kind, under_price };
+        self.send(crate::client_core::ClientCore::resolve_first(req_id, contract, request))
+    }
+
+    /// Matches `cancelCalculateImpliedVolatility` in C++. Does nothing, as
+    /// the reference: a running calculation still answers.
+    pub fn cancel_calculate_implied_volatility(&self, _req_id: i64) {}
+
+    /// Matches `cancelCalculateOptionPrice` in C++. Does nothing, as the
+    /// reference: a running calculation still answers.
+    pub fn cancel_calculate_option_price(&self, _req_id: i64) {}
+
     /// Cancel market data. Matches `cancelMktData` in C++.
     pub fn cancel_mkt_data(&self, req_id: i64) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("cancel_mkt_data", &[req_id]) { return Ok(()); }

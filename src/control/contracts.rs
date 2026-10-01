@@ -166,6 +166,16 @@ pub struct ContractDefinition {
     /// Exchange-path join key (tag 6256) used to pair secdef ↔ schedule replies.
     /// Internal — not exposed on the public API surface.
     pub join_key: String,
+    /// conId of the underlying (the API underConId), 0 when absent.
+    pub under_con_id: i64,
+    /// Exercise style of an option: 1 American, 2 European, 0 unknown.
+    pub exercise_style: u8,
+    /// Last trading time of a derivative, `HHMM`, empty when absent.
+    pub last_trade_time: String,
+    /// API security type of the underlying, empty when absent.
+    pub under_sec_type: String,
+    /// Security type as the wire names it (`CS`, `OPT`, `FOP`, ...).
+    pub wire_sec_type: String,
 }
 
 impl Default for ContractDefinition {
@@ -199,6 +209,11 @@ impl Default for ContractDefinition {
             liquid_hours: None,
             time_zone_id: None,
             join_key: String::new(),
+            under_con_id: 0,
+            exercise_style: 0,
+            last_trade_time: String::new(),
+            under_sec_type: String::new(),
+            wire_sec_type: String::new(),
         }
     }
 }
@@ -424,7 +439,10 @@ fn apply_secdef_fields<'a>(def: &mut ContractDefinition, keys: &mut RecordKeys<'
         match tag {
             TAG_IB_CON_ID => def.con_id = v.parse().unwrap_or(0),
             TAG_SYMBOL => def.symbol = v.to_string(),
-            TAG_SECURITY_TYPE => def.sec_type = SecurityType::from_fix(v),
+            TAG_SECURITY_TYPE => {
+                def.sec_type = SecurityType::from_fix(v);
+                def.wire_sec_type = v.to_string();
+            }
             // The record's own exchange is its first one.
             TAG_SECURITY_EXCHANGE => {
                 if def.exchange.is_empty() {
@@ -470,6 +488,10 @@ fn apply_secdef_fields<'a>(def: &mut ContractDefinition, keys: &mut RecordKeys<'
                 }
             }
             8598 => def.min_size = v.parse().unwrap_or(0.0), // MinSizeIncrement
+            6346 => def.under_con_id = v.parse().unwrap_or(0),
+            6659 => def.exercise_style = v.parse().unwrap_or(0),
+            6850 => def.last_trade_time = v.to_string(),
+            310 => def.under_sec_type = SecurityType::from_fix(v).to_api_str().to_string(),
             _ => {}
         }
     }

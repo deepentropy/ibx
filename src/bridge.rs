@@ -591,6 +591,7 @@ pub struct ReferenceState {
     historical_news: Mutex<Vec<(ReqId, Vec<NewsHeadline>, bool)>>,
     news_articles: Mutex<Vec<(ReqId, i32, String)>>,
     fundamental_data: Mutex<Vec<(ReqId, String)>>,
+    option_computations: Mutex<Vec<crate::control::optcalc::OptionComputation>>,
     histogram_data: Mutex<Vec<(ReqId, Vec<HistogramEntry>)>>,
     historical_ticks: Mutex<Vec<(ReqId, HistoricalTickData, String, bool)>>,
     historical_schedules: Mutex<Vec<(ReqId, HistoricalScheduleResponse)>>,
@@ -653,6 +654,7 @@ impl ReferenceState {
             historical_news: Mutex::new(Vec::with_capacity(8)),
             news_articles: Mutex::new(Vec::with_capacity(8)),
             fundamental_data: Mutex::new(Vec::with_capacity(4)),
+            option_computations: Mutex::new(Vec::new()),
             histogram_data: Mutex::new(Vec::with_capacity(4)),
             historical_ticks: Mutex::new(Vec::with_capacity(4)),
             historical_schedules: Mutex::new(Vec::with_capacity(4)),
@@ -720,6 +722,11 @@ impl ReferenceState {
 
     pub fn drain_fundamental_data(&self) -> Vec<(ReqId, String)> {
         self.fundamental_data.lock().unwrap().drain(..).collect()
+    }
+
+    /// Answers of option calculations, in arrival order.
+    pub fn drain_option_computations(&self) -> Vec<crate::control::optcalc::OptionComputation> {
+        self.option_computations.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_histogram_data(&self) -> Vec<(ReqId, Vec<HistogramEntry>)> {
@@ -818,6 +825,10 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn push_news_article(&self, req_id: ReqId, article_type: i32, article_text: String) {
         self.news_articles.lock().unwrap().push((req_id, article_type, article_text));
+    }
+
+    #[doc(hidden)] pub fn push_option_computation(&self, answer: crate::control::optcalc::OptionComputation) {
+        self.option_computations.lock().unwrap().push(answer);
     }
 
     #[doc(hidden)] pub fn push_fundamental_data(&self, req_id: ReqId, data: String) {

@@ -239,6 +239,8 @@ pub(crate) struct CcpState {
     pub(crate) next_fanout_id: u32,
     /// Counter for internal secdef req IDs (auto-fetch on cold-cache positions).
     pub(crate) next_internal_secdef_id: u32,
+    /// Option calculations and their model inputs (ibx#442).
+    pub(crate) optcalc: super::optcalc::OptCalc,
     /// conIds we've already auto-fetched secdef for, keyed by con_id (dedup).
     pub(crate) auto_fetched_conids: HashSet<i64>,
     /// Scanner results awaiting per-conId contract-detail enrichment.
@@ -297,6 +299,8 @@ pub(crate) fn request_with_con_id(request: crate::types::ControlCommand, con_id:
             C::FetchHistoricalSchedule { req_id, con_id, sec_type, exchange, end_date_time, duration, use_rth },
         C::FetchFundamentalData { req_id, report_type, .. } =>
             C::FetchFundamentalData { req_id, con_id, report_type },
+        C::CalcOption { req_id, kind, under_price, .. } =>
+            C::CalcOption { req_id, con_id, kind, under_price },
         other => other,
     }
 }
@@ -516,6 +520,7 @@ impl CcpState {
             news_subscriptions: Vec::new(),
             disconnected: false,
             pending_secdef: Vec::new(),
+            optcalc: super::optcalc::OptCalc::default(),
             pending_lookups: Vec::new(),
             market_rule_by_exchange: std::collections::HashMap::new(),
             pending_matching_symbols: Vec::new(),
@@ -797,6 +802,13 @@ impl CcpState {
                         "143" => {
                             // P&L midnight seed — store for client-side daily P&L computation
                             handle_pnl_response(msg, shared);
+                        }
+                        "20" => {
+                            // Reference-data answer: inputs of the option model (ibx#442).
+                            if let (Some(id), Some(xml)) = (parsed.get(&320), parsed.get(&6118)) {
+                                let (id, xml) = (id.clone(), xml.clone());
+                                self.optcalc.xml_reply(&id, &xml, ccp_conn, hb, shared);
+                            }
                         }
                         "186" => {
                             if let Some(matches) = crate::control::contracts::parse_matching_symbols_response(msg) {
@@ -2220,6 +2232,8 @@ impl CcpState {
             if super::farm::md_contract_reply(context, shared, rid, msg) { return; }
             // Asked for the conId of a historical-data request (ibx#427).
             if self.contract_resolve_reply(rid, msg, shared) { return; }
+            // Asked for the option of an option calculation (ibx#442).
+            if self.optcalc.secdef_reply(rid, msg, ccp_conn, hb, shared) { return; }
         }
         let rules = contracts::parse_market_rules(msg);
         if !rules.is_empty() {
