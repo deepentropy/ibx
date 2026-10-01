@@ -911,6 +911,11 @@ impl HotLoop {
     /// replay has ended: at once when the data farms are up, else when they
     /// are up or after `RESTORE_FARM_WAIT`, with the farms that are not
     /// (ibx#399).
+    ///
+    /// The reference gives 1101 (data lost) instead only when the contract
+    /// requests it makes for its own saved settings were not all answered
+    /// at the drop. This client makes no such requests, so after a relogin
+    /// the answer is always 1102 (ibx#251).
     fn maybe_report_restored(&mut self) {
         let Some(end_at) = self.ccp.status_replay_end_at else { return };
         let links = self.current_links();
