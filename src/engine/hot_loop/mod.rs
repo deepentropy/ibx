@@ -818,11 +818,11 @@ impl HotLoop {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_histogram_request(req_id, con_id, &sec_type, &exchange, use_rth, &period, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_histogram_request(req_id, con_id, &sec_type, &exchange, use_rth, &period, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
                 ControlCommand::CancelHistogramData { req_id } => {
-                    if let Some(pos) = self.hmds.pending_histogram.iter().position(|(_, rid, _)| *rid == req_id) {
+                    if let Some(pos) = self.hmds.pending_histogram.iter().position(|h| h.req_id == req_id) {
                         self.hmds.pending_histogram.remove(pos);
                     }
                 }

@@ -35,9 +35,12 @@ pub struct HistogramEntry {
 pub fn build_histogram_request_xml(req: &HistogramRequest) -> String {
     let rth = if req.use_rth { "true" } else { "false" };
 
-    // Convert period: "1 week" → "1 w", "3 days" → "3 d"
-    // HMDS requires lowercase duration units
-    let time_length = convert_period(&req.period).to_lowercase();
+    // The period in the reference form (ibx#433). The engine refuses an
+    // unreadable period before building the query.
+    let time_length = match parse_period(&req.period) {
+        Some((n, unit)) => format!("{} {}", n, unit),
+        None => req.period.clone(),
+    };
 
     let exchange = super::historical::query_exchange(&req.exchange, &req.sec_type);
     let sec_type = super::historical::query_sec_type(&req.sec_type);
@@ -126,25 +129,135 @@ pub fn parse_histogram_response(xml: &str) -> Option<Vec<HistogramEntry>> {
     Some(entries)
 }
 
-/// Convert human-readable period to HMDS timeLength format.
-/// HMDS accepts: S (seconds), D (days), M (months), Y (years) — NOT W (weeks).
-/// Weeks are converted to days: "1 week" → "7 D", "2 weeks" → "14 D".
-fn convert_period(period: &str) -> String {
-    let parts: Vec<&str> = period.trim().split_whitespace().collect();
-    if parts.len() != 2 {
-        return period.to_string();
+/// Time units of a histogram period, in the reference order: name and the
+/// unit text of the query.
+const PERIOD_UNITS: [(&str, &str); 8] = [
+    ("seconds", "S"),
+    ("minutes", "min"),
+    ("hours", "h"),
+    ("days", "d"),
+    ("weeks", "W"),
+    ("months", "m"),
+    ("quarters", "q"),
+    ("years", "y"),
+];
+
+/// Read a histogram period as the reference does (ibx#433): spaces
+/// removed, a leading number above 0, then a unit named by a prefix of
+/// exactly one unit name (`1 week`, `3 days`, `2 mo`; `2 wk` and `1 m`
+/// are refused). Seconds and minutes that make whole hours or minutes
+/// are given in the larger unit. Gives the number and the unit text of
+/// the query.
+pub fn parse_period(period: &str) -> Option<(u64, &'static str)> {
+    let s: String = period.chars().filter(|c| !c.is_whitespace()).collect();
+    let digits = s.chars().take_while(|c| c.is_ascii_digit()).count();
+    let n: u64 = s[..digits].parse().ok()?;
+    if n == 0 {
+        return None;
     }
-    let num: u32 = match parts[0].parse() {
-        Ok(n) => n,
-        Err(_) => return period.to_string(),
-    };
-    match parts[1].to_lowercase().as_str() {
-        "second" | "seconds" | "secs" | "sec" | "s" => format!("{} S", num),
-        "day" | "days" | "d" => format!("{} D", num),
-        "week" | "weeks" | "w" => format!("{} D", num * 7),
-        "month" | "months" | "m" => format!("{} M", num),
-        "year" | "years" | "y" => format!("{} Y", num),
-        _ => period.to_string(),
+    let rest = s[digits..].to_ascii_lowercase();
+    if rest.is_empty() {
+        return None;
+    }
+    let mut found = None;
+    for (i, (name, _)) in PERIOD_UNITS.iter().enumerate() {
+        if name.starts_with(rest.as_str()) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(i);
+        }
+    }
+    let mut unit = found?;
+    let mut n = n;
+    if unit == 0 && n % 3600 == 0 {
+        n /= 3600;
+        unit = 2;
+    } else if unit == 0 && n % 60 == 0 {
+        n /= 60;
+        unit = 1;
+    }
+    if unit == 1 && n % 60 == 0 {
+        n /= 60;
+        unit = 2;
+    }
+    Some((n, PERIOD_UNITS[unit].1))
+}
+
+/// One histogram reply frame: the server sends one per trading day
+/// (ibx#433).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistogramFrame {
+    /// Price increment of the reply; 0 when absent.
+    pub min_tick: f64,
+    /// Size unit of the reply; 1 when absent.
+    pub size_min_tick: f64,
+    /// Last frame of the reply.
+    pub is_complete: bool,
+    /// (price, size) of every row, sizes as sent.
+    pub ticks: Vec<(f64, f64)>,
+}
+
+/// Parse one histogram reply frame.
+pub fn parse_histogram_frame(xml: &str) -> Option<HistogramFrame> {
+    if !xml.contains("<ResultSetHistogram>") {
+        return None;
+    }
+    let num = |x: &str, tag: &str| extract_xml_tag(x, tag).and_then(|s| s.trim().parse::<f64>().ok());
+    let mut ticks = Vec::new();
+    let mut search_start = 0;
+    while let Some(tick_start) = xml[search_start..].find("<Tick>") {
+        let abs_start = search_start + tick_start;
+        let tick_end = match xml[abs_start..].find("</Tick>") {
+            Some(e) => abs_start + e + 7,
+            None => break,
+        };
+        let tick_xml = &xml[abs_start..tick_end];
+        ticks.push((num(tick_xml, "price").unwrap_or(0.0), num(tick_xml, "size").unwrap_or(0.0)));
+        search_start = tick_end;
+    }
+    Some(HistogramFrame {
+        min_tick: num(xml, "minTick").filter(|t| *t > 0.0).unwrap_or(0.0),
+        size_min_tick: num(xml, "sizeMinTick").filter(|t| *t > 0.0).unwrap_or(1.0),
+        is_complete: extract_xml_tag(xml, "eoq").map(|s| s.trim() == "true").unwrap_or(false),
+        ticks,
+    })
+}
+
+/// The histogram of one request, summed over every frame of its reply
+/// (ibx#433): each price is put in the bucket of the price increment of
+/// the reply, and the bucket adds size times the size unit. The reference
+/// buckets by the contract's market rule; the increment of the reply is
+/// used here.
+#[derive(Debug, Clone, Default)]
+pub struct HistogramSum {
+    buckets: std::collections::BTreeMap<i64, f64>,
+}
+
+impl HistogramSum {
+    /// Price grid of the bucket keys (1e-8).
+    const KEY_SCALE: f64 = 1e8;
+
+    pub fn add(&mut self, frame: &HistogramFrame) {
+        for &(price, size) in &frame.ticks {
+            let bucket = if frame.min_tick > 0.0 {
+                (price / frame.min_tick).round() * frame.min_tick
+            } else {
+                price
+            };
+            let key = (bucket * Self::KEY_SCALE).round() as i64;
+            *self.buckets.entry(key).or_insert(0.0) += size * frame.size_min_tick;
+        }
+    }
+
+    /// One entry per bucket, by price.
+    pub fn entries(&self) -> Vec<HistogramEntry> {
+        self.buckets.iter()
+            .map(|(&key, &size)| HistogramEntry {
+                price: key as f64 / Self::KEY_SCALE,
+                count: size.round() as i64,
+            })
+            .collect()
     }
 }
 
@@ -152,16 +265,51 @@ fn convert_period(period: &str) -> String {
 mod tests {
     use super::*;
 
+    // ibx#433: the period as the reference reads and writes it.
     #[test]
-    fn convert_period_variants() {
-        assert_eq!(convert_period("1 week"), "7 D");
-        assert_eq!(convert_period("2 weeks"), "14 D");
-        assert_eq!(convert_period("3 days"), "3 D");
-        assert_eq!(convert_period("2 months"), "2 M");
-        assert_eq!(convert_period("1 year"), "1 Y");
-        assert_eq!(convert_period("30 seconds"), "30 S");
-        // passthrough for unknown
-        assert_eq!(convert_period("foo"), "foo");
+    fn parse_period_reference_rules() {
+        assert_eq!(parse_period("1 week"), Some((1, "W")));
+        assert_eq!(parse_period("2 weeks"), Some((2, "W")));
+        assert_eq!(parse_period("3 days"), Some((3, "d")));
+        assert_eq!(parse_period("2 months"), Some((2, "m")));
+        assert_eq!(parse_period("2 mo"), Some((2, "m")));
+        assert_eq!(parse_period("1 year"), Some((1, "y")));
+        assert_eq!(parse_period("1 quarter"), Some((1, "q")));
+        assert_eq!(parse_period("30 seconds"), Some((30, "S")));
+        assert_eq!(parse_period("120 seconds"), Some((2, "min")));
+        assert_eq!(parse_period("7200 s"), Some((2, "h")));
+        assert_eq!(parse_period("120 min"), Some((2, "h")));
+        assert_eq!(parse_period("1weeks"), Some((1, "W")));
+        assert_eq!(parse_period("1 Week"), Some((1, "W")));
+        for bad in ["abc", "", "1", "week", "0 days", "2 wk", "1 m", "1 weekss"] {
+            assert_eq!(parse_period(bad), None, "{:?}", bad);
+        }
+    }
+
+    #[test]
+    fn histogram_sum_adds_every_frame_into_buckets() {
+        let day1 = r#"<ResultSetHistogram><id>histogramQuery0;;265598@BEST Histogram;;0;;true;;0;;U</id>
+            <eoq>false</eoq><minTick>0.01</minTick><sizeMinTick>1</sizeMinTick><Events>
+            <Tick><time>20260227-14:30:00</time><price>270.50</price><size>1500</size></Tick>
+            <Tick><time>20260227-14:30:00</time><price>271.00</price><size>2300</size></Tick>
+            </Events></ResultSetHistogram>"#;
+        let day2 = r#"<ResultSetHistogram><id>histogramQuery0;;265598@BEST Histogram;;0;;true;;0;;U</id>
+            <eoq>true</eoq><minTick>0.01</minTick><sizeMinTick>100</sizeMinTick><Events>
+            <Tick><time>20260226-14:30:00</time><price>270.5000001</price><size>2</size></Tick>
+            <Tick><time>20260226-14:30:00</time><price>269.75</price><size>8</size></Tick>
+            </Events></ResultSetHistogram>"#;
+        let f1 = parse_histogram_frame(day1).unwrap();
+        let f2 = parse_histogram_frame(day2).unwrap();
+        assert!(!f1.is_complete && f2.is_complete);
+        assert_eq!(f1.ticks.len(), 2);
+        let mut sum = HistogramSum::default();
+        sum.add(&f1);
+        sum.add(&f2);
+        assert_eq!(sum.entries(), vec![
+            HistogramEntry { price: 269.75, count: 800 },
+            HistogramEntry { price: 270.5, count: 1700 },
+            HistogramEntry { price: 271.0, count: 2300 },
+        ]);
     }
 
     #[test]
@@ -179,7 +327,7 @@ mod tests {
         assert!(xml.contains("<type>HistogramData</type>"));
         assert!(xml.contains("<contractID>265598</contractID>"));
         assert!(xml.contains("<useRTH>true</useRTH>"));
-        assert!(xml.contains("<timeLength>7 d</timeLength>"));
+        assert!(xml.contains("<timeLength>1 W</timeLength>"), "{}", xml);
         assert!(xml.contains("<data>Last</data>"));
         assert!(xml.contains("<exchange>BEST</exchange>"));
         assert!(xml.contains("<secType>STK</secType>"));
@@ -202,7 +350,7 @@ mod tests {
         };
         let xml = build_histogram_request_xml(&req);
         assert!(xml.contains("<useRTH>false</useRTH>"));
-        assert!(xml.contains("<timeLength>3 d</timeLength>"));
+        assert!(xml.contains("<timeLength>3 d</timeLength>"), "{}", xml);
     }
 
     #[test]

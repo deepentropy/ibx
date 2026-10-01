@@ -54,8 +54,9 @@ pub(crate) struct HmdsState {
     pub(crate) pending_news: Vec<(String, u32)>,
     pub(crate) pending_articles: Vec<(String, u32)>,
     pub(crate) pending_fundamental: Vec<(String, u32)>,
-    /// In-flight histogram queries: (window id, req_id, idle deadline).
-    pub(crate) pending_histogram: Vec<(String, u32, Instant)>,
+    /// In-flight histogram queries, summed over their frames until the
+    /// last one (ibx#433).
+    pub(crate) pending_histogram: Vec<PendingHistogram>,
     pub(crate) pending_schedule: Vec<(String, u32)>,
     pub(crate) pending_ticks: Vec<(String, u32, String)>,
     pub(crate) rtbar_subs: Vec<(String, u32, Option<u32>, f64)>,
@@ -70,6 +71,16 @@ pub(crate) struct HmdsState {
     /// Drained by the engine top-level after each hmds.poll, then handed to
     /// `CcpState::start_scanner_enrichment`.
     pub(crate) cold_scanner_results: Vec<(u32, crate::control::scanner::ScannerResult)>,
+}
+
+/// A histogram request in flight (ibx#428, ibx#433).
+#[derive(Debug)]
+pub(crate) struct PendingHistogram {
+    pub(crate) window_id: String,
+    pub(crate) req_id: u32,
+    /// Idle deadline, pushed out by every frame.
+    pub(crate) deadline: Instant,
+    pub(crate) sum: crate::control::histogram::HistogramSum,
 }
 
 /// State of one leg of a multi-query bar request (ibx#408).
@@ -332,11 +343,18 @@ impl HmdsState {
                             log::warn!("HMDS head timestamp reply for no pending request: id={:?}", wid);
                         }
                     }
-                    else if let Some(entries) = crate::control::histogram::parse_histogram_response(xml_tag) {
+                    else if let Some(frame) = crate::control::histogram::parse_histogram_frame(xml_tag) {
+                        // One frame per trading day: all are summed, and the
+                        // histogram goes out once, after the last (ibx#433).
                         let wid = reply_window_id(xml_tag);
-                        if let Some(pos) = self.pending_histogram.iter().position(|(q, _, _)| q == wid) {
-                            let (_, req_id, _) = self.pending_histogram.remove(pos);
-                            shared.reference.push_histogram_data(req_id, entries);
+                        if let Some(pos) = self.pending_histogram.iter().position(|h| h.window_id == wid) {
+                            let h = &mut self.pending_histogram[pos];
+                            h.sum.add(&frame);
+                            h.deadline = Instant::now() + HISTORICAL_IDLE_TIMEOUT;
+                            if frame.is_complete {
+                                let h = self.pending_histogram.remove(pos);
+                                shared.reference.push_histogram_data(h.req_id, h.sum.entries());
+                            }
                         } else {
                             log::warn!("HMDS histogram reply for no pending request: id={:?}", wid);
                         }
@@ -420,8 +438,8 @@ impl HmdsState {
                             } else if let Some(pos) = self.pending_head_ts.iter().position(|(q, _, _)| q == wid) {
                                 let (_, req_id, _) = self.pending_head_ts.remove(pos);
                                 released = Some((req_id, 162, historical_service_error(&error_msg)));
-                            } else if let Some(pos) = self.pending_histogram.iter().position(|(q, _, _)| q == wid) {
-                                let (_, req_id, _) = self.pending_histogram.remove(pos);
+                            } else if let Some(pos) = self.pending_histogram.iter().position(|h| h.window_id == wid) {
+                                let req_id = self.pending_histogram.remove(pos).req_id;
                                 released = Some((req_id, 10188, crate::control::historical::join_error_text(HISTOGRAM_ERROR, &error_msg)));
                             } else if let Some(pos) = self.pending_ticks.iter().position(|(q, _, _)| q == wid) {
                                 let (_, req_id, _) = self.pending_ticks.remove(pos);
@@ -1267,7 +1285,17 @@ impl HmdsState {
         self.pending_fundamental.push((window_id, req_id));
     }
 
-    pub(crate) fn send_histogram_request(&mut self, req_id: u32, con_id: u32, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_histogram_request(&mut self, req_id: u32, con_id: u32, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+        // An unreadable period is refused locally, as the reference (ibx#433).
+        if crate::control::histogram::parse_period(period).is_none() {
+            log::error!("histogram req_id={}: invalid time period {:?}", req_id, period);
+            shared.reference.push_historical_error(
+                req_id, 321,
+                "Error validating request.-'bO' : cause - Invalid time period".to_string(),
+            );
+            return;
+        }
         let window_id = format!("histogramQuery{}", self.next_histogram_window);
         self.next_histogram_window = self.next_histogram_window.wrapping_add(1);
         let req = crate::control::histogram::HistogramRequest {
@@ -1290,7 +1318,12 @@ impl HmdsState {
             hb.last_hmds_sent = Instant::now();
             log::info!("Sent histogram request: req_id={} con_id={}", req_id, con_id);
         }
-        self.pending_histogram.push((window_id, req_id, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+        self.pending_histogram.push(PendingHistogram {
+            window_id,
+            req_id,
+            deadline: Instant::now() + HISTORICAL_IDLE_TIMEOUT,
+            sum: Default::default(),
+        });
     }
 
     pub(crate) fn send_historical_ticks_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, start_date_time: &str, end_date_time: &str, number_of_ticks: u32, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
@@ -1430,10 +1463,10 @@ impl HmdsState {
                 true
             }
         });
-        self.pending_histogram.retain(|(wid, req_id, deadline)| {
-            if now >= *deadline {
-                log::warn!("HMDS histogram timeout: req_id={} id={}", req_id, wid);
-                expired.push((*req_id, 10188, crate::control::historical::join_error_text(
+        self.pending_histogram.retain(|h| {
+            if now >= h.deadline {
+                log::warn!("HMDS histogram timeout: req_id={} id={}", h.req_id, h.window_id);
+                expired.push((h.req_id, 10188, crate::control::historical::join_error_text(
                     HISTOGRAM_ERROR, "histogram request timed out — no response from the gateway")));
                 false
             } else {
@@ -1852,9 +1885,9 @@ mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.send_histogram_request(3, 265598, "STK", "SMART", true, "1 week", &mut conn, &mut hb);
+        hmds.send_histogram_request(3, 265598, "STK", "SMART", true, "1 week", &mut conn, &mut hb, &shared);
         hmds.send_historical_ticks_request(4, 265598, "STK", "SMART", "", "20260312-15:00:00", 100, "TRADES", true, &mut conn, &mut hb);
-        let hg = hmds.pending_histogram[0].0.clone();
+        let hg = hmds.pending_histogram[0].window_id.clone();
         let tk = hmds.pending_ticks[0].0.clone();
         assert_eq!(hg, "histogramQuery0");
 
@@ -1913,8 +1946,11 @@ mod tests {
         let shared = SharedState::new();
         let past = Instant::now() - std::time::Duration::from_secs(1);
         hmds.pending_head_ts.push(("TickHeadClient1".to_string(), 1, past));
-        hmds.pending_histogram.push(("histogramQuery0".to_string(), 2, past));
-        hmds.pending_histogram.push(("histogramQuery1".to_string(), 3, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+        let pending = |w: &str, req_id: u32, deadline: Instant| PendingHistogram {
+            window_id: w.to_string(), req_id, deadline, sum: Default::default(),
+        };
+        hmds.pending_histogram.push(pending("histogramQuery0", 2, past));
+        hmds.pending_histogram.push(pending("histogramQuery1", 3, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
         hmds.sweep_pending_historical(&shared);
         let errors = shared.reference.drain_historical_errors();
         assert_eq!(errors.len(), 2);
@@ -1924,6 +1960,60 @@ mod tests {
         assert!(hmds.pending_head_ts.is_empty());
         assert_eq!(hmds.pending_histogram.len(), 1);
         assert!(shared.reference.drain_historical_data().is_empty(), "no bar end for these requests");
+    }
+
+    // ── ibx#433: a histogram is summed over all frames, sent once ──
+
+    #[test]
+    fn histogram_frames_are_summed_and_sent_once_at_the_end() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.send_histogram_request(7, 265598, "STK", "SMART", true, "1 week", &mut conn, &mut hb, &shared);
+        let frame = |eoq: bool, ticks: &[(f64, u32)]| {
+            let mut xml = format!(
+                "<ResultSetHistogram><id>histogramQuery0;;265598@BEST Histogram;;0;;true;;0;;U</id>\
+                 <eoq>{}</eoq><data>Last</data><minTick>0.01</minTick><sizeMinTick>1</sizeMinTick><Events>", eoq);
+            for (p, s) in ticks {
+                xml.push_str(&format!("<Tick><time>20260227-14:30:00</time><price>{}</price><size>{}</size></Tick>", p, s));
+            }
+            xml.push_str("</Events></ResultSetHistogram>");
+            make_w_msg(&xml)
+        };
+        // Five trading days, newest first, the last one with the end flag.
+        let days: [&[(f64, u32)]; 5] = [
+            &[(270.5, 100), (271.0, 10)],
+            &[(270.5, 200)],
+            &[(269.0, 5)],
+            &[(271.0, 20), (272.0, 1)],
+            &[(270.5, 300)],
+        ];
+        for (i, ticks) in days.iter().enumerate() {
+            hmds.process_hmds_message(&frame(i == 4, ticks), &mut conn, &shared, &None, &mut hb);
+            if i < 4 {
+                assert!(shared.reference.drain_histogram_data().is_empty(), "nothing before the last frame");
+            }
+        }
+        let got = shared.reference.drain_histogram_data();
+        assert_eq!(got.len(), 1, "one answer");
+        assert_eq!(got[0].0, 7);
+        let entries: Vec<(f64, i64)> = got[0].1.iter().map(|e| (e.price, e.count)).collect();
+        assert_eq!(entries, vec![(269.0, 5), (270.5, 600), (271.0, 30), (272.0, 1)]);
+        assert!(hmds.pending_histogram.is_empty());
+    }
+
+    #[test]
+    fn histogram_with_an_unreadable_period_is_refused_with_321() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.send_histogram_request(8, 265598, "STK", "SMART", true, "abc", &mut conn, &mut hb, &shared);
+        assert!(hmds.pending_histogram.is_empty(), "no query");
+        assert_eq!(shared.reference.drain_historical_errors(), vec![(
+            8, 321, "Error validating request.-'bO' : cause - Invalid time period".to_string(),
+        )]);
     }
 
     // ── ibx#232: unknown bar_size rejects at the engine too (backstop for
