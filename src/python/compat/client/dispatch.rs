@@ -13,7 +13,7 @@ use crate::api::types::{
     Contract as ApiContract, Execution as ApiExecution,
     CommissionAndFeesReport as ApiCommissionAndFeesReport,
 };
-use super::EClient;
+use super::{send_cmd, EClient};
 use super::super::contract::{Contract, ContractDescription, ContractDetails, BarData, CommissionAndFeesReport, DepthMktDataDescriptionPy, Execution, Order, OrderState};
 use super::super::tick_types::*;
 use super::super::super::types::{PRICE_SCALE_F, QTY_SCALE_F};
@@ -374,8 +374,8 @@ impl EClient {
             if gone {
                 let (instrument, needs_news) = self.core.unregister_mkt_data(req_id);
                 if let (Some(instrument), Ok(tx)) = (instrument, self.tx()) {
-                    let _ = tx.send(ControlCommand::Unsubscribe { instrument });
-                    if needs_news { let _ = tx.send(ControlCommand::UnsubscribeNews { instrument }); }
+                    let _ = send_cmd(py, &tx, ControlCommand::Unsubscribe { instrument });
+                    if needs_news { let _ = send_cmd(py, &tx, ControlCommand::UnsubscribeNews { instrument }); }
                 }
             }
         }
@@ -414,7 +414,7 @@ impl EClient {
             }
         }
         for req_id in snapshot_done {
-            self.cancel_mkt_data(req_id)?;
+            self.cancel_mkt_data(py, req_id)?;
         }
 
         // Drain TBT trades -> tickByTickAllLast
@@ -796,8 +796,12 @@ impl EClient {
         // P&L dispatch (via ClientCore)
         // Quotes the P&L needs, subscribed by ibx itself when the caller has
         // none; they never reach the tick callbacks.
-        if let Ok(tx) = self.tx() {
-            self.core.maintain_pnl_quotes(shared, &tx);
+        // Its sends may wait: interpreter lock released, and only when a
+        // P&L request is running (ibx#271).
+        if !self.core.pnl_quotes_idle() {
+            if let Ok(tx) = self.tx() {
+                py.detach(|| self.core.maintain_pnl_quotes(shared, &tx));
+            }
         }
         for update in self.core.poll_pnl(shared) {
             call_wrapper!(self.wrapper, py, "pnl", (update.req_id, update.daily_pnl, update.unrealized_pnl, update.realized_pnl));

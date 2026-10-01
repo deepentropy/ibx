@@ -15,14 +15,18 @@ use super::EClient;
 #[pymethods]
 impl EClient {
     /// Create a fake "connected" EClient backed by a SharedState + crossbeam channel.
+    /// `control_capacity` bounds the command channel (unbounded by default).
     #[doc(hidden)]
-    #[pyo3(signature = (account_id="TEST123".to_string()))]
-    fn _test_connect(&self, account_id: String) -> PyResult<()> {
+    #[pyo3(signature = (account_id="TEST123".to_string(), control_capacity=None))]
+    fn _test_connect(&self, account_id: String, control_capacity: Option<usize>) -> PyResult<()> {
         if self.connected.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("Already connected"));
         }
         let shared = Arc::new(SharedState::new());
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = match control_capacity {
+            Some(n) => crossbeam_channel::bounded(n),
+            None => crossbeam_channel::unbounded(),
+        };
         let (event_tx, event_rx) = crossbeam_channel::bounded(256);
         *self.shared.lock().unwrap() = Some(shared);
         *self.control_tx.lock().unwrap() = Some(tx);
@@ -390,6 +394,27 @@ impl EClient {
         let tx = self._test_event_tx.lock().unwrap();
         let tx = tx.as_ref().ok_or_else(|| PyRuntimeError::new_err("No event channel"))?;
         tx.send(Event::Disconnected).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))
+    }
+
+    /// Act as the engine after `delay_ms` (test-only): a background thread
+    /// takes the queued commands and answers each registration with
+    /// instrument 0, until no command comes for 500 ms.
+    #[doc(hidden)]
+    fn _test_serve_commands_after(&self, delay_ms: u64) -> PyResult<()> {
+        let rx = self._test_control_rx.lock().unwrap().clone()
+            .ok_or_else(|| PyRuntimeError::new_err("No test command channel"))?;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            while let Ok(cmd) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                match cmd {
+                    ControlCommand::RegisterInstrument { reply_tx: Some(r), .. }
+                    | ControlCommand::Subscribe { reply_tx: Some(r), .. }
+                    | ControlCommand::SubscribeTbt { reply_tx: Some(r), .. } => { let _ = r.send(Ok(0)); }
+                    _ => {}
+                }
+            }
+        });
+        Ok(())
     }
 
     /// Queue a link status notice, as the engine does (test-only).

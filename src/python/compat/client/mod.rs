@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, SendError, Sender, TrySendError};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
@@ -68,11 +68,20 @@ pub struct EClient {
 
 impl Drop for EClient {
     fn drop(&mut self) {
-        if let Some(tx) = self.control_tx.lock().unwrap().as_ref() {
-            let _ = tx.send(ControlCommand::Shutdown);
-        }
-        if let Some(h) = self._thread.lock().unwrap().take() {
-            let _ = h.join();
+        let tx = self.control_tx.get_mut().unwrap().take();
+        let mut handle = self._thread.get_mut().unwrap().take();
+        let mut stop = || {
+            if let Some(tx) = &tx {
+                let _ = tx.send(ControlCommand::Shutdown);
+            }
+            if let Some(h) = handle.take() {
+                let _ = h.join();
+            }
+        };
+        // Dropped from Python, the interpreter lock is held: wait for the
+        // engine with it released (ibx#271).
+        if Python::try_attach(|py| py.detach(&mut stop)).is_none() {
+            stop();
         }
     }
 }
@@ -191,13 +200,19 @@ impl EClient {
     }
 
     /// Disconnect from IB.
-    fn disconnect(&self) -> PyResult<()> {
-        if let Some(tx) = self.control_tx.lock().unwrap().as_ref() {
-            let _ = tx.send(ControlCommand::Shutdown);
-        }
-        if let Some(h) = self._thread.lock().unwrap().take() {
-            let _ = h.join();
-        }
+    fn disconnect(&self, py: Python<'_>) -> PyResult<()> {
+        let tx = self.control_tx.lock().unwrap().clone();
+        let handle = self._thread.lock().unwrap().take();
+        // Stop the engine with the interpreter lock released: a slow engine
+        // stalls only this caller (ibx#271).
+        py.detach(|| {
+            if let Some(tx) = &tx {
+                let _ = tx.send(ControlCommand::Shutdown);
+            }
+            if let Some(h) = handle {
+                let _ = h.join();
+            }
+        });
         self.connected.store(false, Ordering::Release);
         // Reset per-session state so connect() can be called again.
         *self.shared.lock().unwrap() = None;
@@ -286,14 +301,37 @@ impl EClient {
         self.account_id.lock().unwrap().clone().unwrap_or_default()
     }
 
-    /// Find instrument ID for a contract, registering if needed.
-    pub(crate) fn find_or_register_instrument(&self, contract: &Contract) -> PyResult<u32> {
+    /// Find instrument ID for a contract, registering if needed. A known
+    /// contract is a lookup; a registration waits for the engine with the
+    /// interpreter lock released (ibx#271).
+    pub(crate) fn find_or_register_instrument(&self, py: Python<'_>, contract: &Contract) -> PyResult<u32> {
         let tx = self.tx()?;
-        self.core.find_or_register_instrument(
+        if let Some(&id) = self.core.con_id_to_instrument.lock().unwrap().get(&contract.con_id) {
+            return Ok(id);
+        }
+        py.detach(|| self.core.find_or_register_instrument(
             &tx,
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
-        ).map_err(|e| PyRuntimeError::new_err(e))
+        )).map_err(|e| PyRuntimeError::new_err(e))
     }
+}
+
+/// Send a command to the engine. With room in the channel this neither
+/// blocks nor releases the interpreter lock; a full channel is waited on
+/// with the lock released, so a slow engine stalls only this caller, not
+/// every Python thread (ibx#271). Hold no mutex guard across this call.
+#[inline]
+pub(crate) fn send_cmd(py: Python<'_>, tx: &Sender<ControlCommand>, cmd: ControlCommand) -> PyResult<()> {
+    match tx.try_send(cmd) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(cmd)) => py.detach(|| tx.send(cmd)).map_err(engine_stopped),
+        Err(TrySendError::Disconnected(cmd)) => Err(engine_stopped(SendError(cmd))),
+    }
+}
+
+#[cold]
+fn engine_stopped(e: SendError<ControlCommand>) -> PyErr {
+    PyRuntimeError::new_err(format!("Engine stopped: {}", e))
 }
 
 /// Register EClient on the module.

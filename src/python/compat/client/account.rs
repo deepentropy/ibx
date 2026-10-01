@@ -1,17 +1,16 @@
 //! Account-related methods: positions, PnL, account summary/updates.
 
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::types::*;
-use super::EClient;
+use super::{send_cmd, EClient};
 use super::super::super::types::PRICE_SCALE_F;
 
 #[pymethods]
 impl EClient {
     /// Request P&L updates for the account.
     #[pyo3(signature = (req_id, account, model_code=""))]
-    fn req_pnl(&self, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
+    fn req_pnl(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         // Several requests can run; an empty or unknown account gives 321, a
         // request id already running gives 102 (ibx#478).
@@ -20,14 +19,13 @@ impl EClient {
             return Ok(());
         }
         let tx = self.tx()?;
-        tx.send(ControlCommand::SubscribePnl { req_id, account: account.to_string() })
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        send_cmd(py, &tx, ControlCommand::SubscribePnl { req_id, account: account.to_string() })?;
         let _ = model_code;
         Ok(())
     }
 
     /// Cancel P&L subscription.
-    fn cancel_pnl(&self, req_id: i64) -> PyResult<()> {
+    fn cancel_pnl(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         // A request id not running gives 10185 (ibx#478).
         if let Some((code, message)) = self.core.cancel_pnl_request(req_id) {
@@ -35,7 +33,7 @@ impl EClient {
             return Ok(());
         }
         let tx = self.tx()?;
-        let _ = tx.send(ControlCommand::CancelPnl { req_id });
+        let _ = send_cmd(py, &tx, ControlCommand::CancelPnl { req_id });
         Ok(())
     }
 
@@ -63,7 +61,7 @@ impl EClient {
 
     /// Request account summary.
     #[pyo3(signature = (req_id, group_name, tags))]
-    fn req_account_summary(&self, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
+    fn req_account_summary(&self, py: Python<'_>, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         // A server subscription: the rows come as the server sends them, each
         // batch ends with account_summary_end, until the cancel (ibx#479).
@@ -71,9 +69,9 @@ impl EClient {
             Ok(plan) => {
                 let tx = self.tx()?;
                 if let Some(sr_id) = plan.cancel_sr_id {
-                    let _ = tx.send(ControlCommand::CancelAccountSummary { sr_id });
+                    let _ = send_cmd(py, &tx, ControlCommand::CancelAccountSummary { sr_id });
                 }
-                let _ = tx.send(ControlCommand::SubscribeAccountSummary {
+                let _ = send_cmd(py, &tx, ControlCommand::SubscribeAccountSummary {
                     sr_id: plan.sr_id, tags: plan.wire_tags, group: plan.group,
                 });
             }
@@ -83,10 +81,10 @@ impl EClient {
     }
 
     /// Cancel account summary.
-    fn cancel_account_summary(&self, req_id: i64) -> PyResult<()> {
+    fn cancel_account_summary(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         if let Some(sr_id) = self.core.unsubscribe_account_summary(req_id) {
-            let _ = self.tx()?.send(ControlCommand::CancelAccountSummary { sr_id });
+            let _ = send_cmd(py, &self.tx()?, ControlCommand::CancelAccountSummary { sr_id });
         }
         Ok(())
     }

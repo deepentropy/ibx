@@ -10,7 +10,7 @@ use crate::api::types::{
 };
 use crate::client_core::{ClientCore, ModifyPlan};
 use crate::types::*;
-use super::EClient;
+use super::{send_cmd, EClient};
 use super::super::contract::{Contract, Order, CommissionAndFeesReport, Execution};
 
 #[pymethods]
@@ -58,8 +58,12 @@ impl EClient {
             return Ok(());
         }
 
-        let instrument = self.find_or_register_instrument(contract)?;
-        self.core.note_currency(&tx, contract.con_id, &contract.currency);
+        let instrument = self.find_or_register_instrument(py, contract)?;
+        // A send only for a new currency, then with the interpreter lock
+        // released (ibx#271).
+        if !self.core.currency_noted(contract.con_id, &contract.currency) {
+            py.detach(|| self.core.note_currency(&tx, contract.con_id, &contract.currency));
+        }
 
         // If orderId is already tracked, this is a modification: replace it
         // with the full wanted state (ibx#247).
@@ -79,8 +83,7 @@ impl EClient {
             ClientCore::build_order_request(&api_order, oid, instrument)
                 .map_err(|e| PyRuntimeError::new_err(e))?
         };
-        tx.send(cmd)
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        send_cmd(py, &tx, cmd)?;
 
         // Track order in shared core
         let api_contract = ApiContract {
@@ -101,23 +104,22 @@ impl EClient {
 
     /// Cancel an order.
     #[pyo3(signature = (order_id, manual_order_cancel_time=""))]
-    fn cancel_order(&self, order_id: i64, manual_order_cancel_time: &str) -> PyResult<()> {
+    fn cancel_order(&self, py: Python<'_>, order_id: i64, manual_order_cancel_time: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
-        tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: order_id as u64 }))
-            .map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
+        send_cmd(py, &tx, ControlCommand::Order(OrderRequest::Cancel { order_id: order_id as u64 }))?;
         let _ = manual_order_cancel_time;
         Ok(())
     }
 
     /// Cancel all orders globally.
-    fn req_global_cancel(&self) -> PyResult<()> {
+    fn req_global_cancel(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         let shared = self.shared_state()?;
         let count = shared.market.instrument_count();
         for instrument in 0..count {
-            let _ = tx.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }));
+            let _ = send_cmd(py, &tx, ControlCommand::Order(OrderRequest::CancelAll { instrument }));
         }
         Ok(())
     }

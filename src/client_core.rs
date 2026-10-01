@@ -827,6 +827,12 @@ impl ClientCore {
         }
     }
 
+    /// True when `note_currency` has nothing to send for this contract.
+    pub fn currency_noted(&self, con_id: i64, currency: &str) -> bool {
+        currency.is_empty() || con_id == 0
+            || self.currency_sent.lock().unwrap().get(&con_id).map(String::as_str) == Some(currency)
+    }
+
     pub fn find_or_register_instrument(
         &self,
         control_tx: &Sender<ControlCommand>,
@@ -954,6 +960,17 @@ impl ClientCore {
             self.news_instruments.lock().unwrap().insert(instrument_id);
         }
         Ok(instrument_id)
+    }
+
+    /// True when no P&L request runs and no P&L quote is held:
+    /// `maintain_pnl_quotes` then has nothing to do.
+    pub fn pnl_quotes_idle(&self) -> bool {
+        self.pnl_reqs.lock().unwrap().is_empty()
+            && self.pnl_single_reqs.lock().unwrap().is_empty()
+            && {
+                let q = self.pnl_quotes.lock().unwrap();
+                q.active.is_empty() && q.pending.is_empty()
+            }
     }
 
     /// Keep a quote for each stock position the running P&L requests need
@@ -3394,6 +3411,29 @@ mod tests {
         assert_eq!(refused("20260930 16:00:00 Nowhere/Zone", None), Some(343));
         let machine = crate::gateway::machine_time_zone();
         assert_eq!(refused(&format!("20260930 16:00:00 {machine}"), Some("US/Eastern")), None);
+    }
+
+    // ibx#271: the pre-checks the Python client makes before it releases
+    // the interpreter lock agree with what the calls would do.
+    #[test]
+    fn currency_noted_and_pnl_quotes_idle() {
+        let core = ClientCore::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        assert!(core.currency_noted(1, ""));
+        assert!(core.currency_noted(0, "EUR"));
+        assert!(!core.currency_noted(1, "EUR"));
+        core.note_currency(&tx, 1, "EUR");
+        assert!(core.currency_noted(1, "EUR"));
+        assert!(!core.currency_noted(1, "USD"));
+
+        assert!(core.pnl_quotes_idle());
+        core.subscribe_pnl(5);
+        assert!(!core.pnl_quotes_idle());
+        core.unsubscribe_pnl(5);
+        core.subscribe_pnl_single(6, 1);
+        assert!(!core.pnl_quotes_idle());
+        core.unsubscribe_pnl_single(6);
+        assert!(core.pnl_quotes_idle());
     }
 
     // ibx#468: two local refusals of the reference.
