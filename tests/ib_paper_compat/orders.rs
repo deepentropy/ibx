@@ -1187,16 +1187,21 @@ pub(super) fn phase_what_if_order(conns: Conns) -> Conns {
         let mut w = RecordingWrapper::default();
         eclient.process_msgs(&mut w);
 
+        // A what-if is answered with open_order only, as the reference
+        // (ibx#462): the margin fields are numbers, and no order_status.
         let open_event = w.events.iter().find(|e| e.starts_with(&format!("open_order:{}:", order_id)));
-        let status_event = w.events.iter().find(|e|
-            e.starts_with(&format!("order_status:{}:PreSubmitted", order_id)));
-        match (open_event, status_event) {
-            (Some(oe), Some(_)) => {
+        let margins_ok = open_event.is_some_and(|e| {
+            let values: Vec<&str> = e.split(':').filter_map(|f| f.split_once('=').map(|(_, v)| v)).collect();
+            values.len() == 10 && values.iter().all(|v| v.parse::<f64>().is_ok())
+        });
+        let status_event = w.events.iter().find(|e| e.starts_with(&format!("order_status:{}:", order_id)));
+        match (open_event, margins_ok, status_event) {
+            (Some(oe), true, None) => {
                 println!("  Dispatcher: open_order fired with state: {}", oe);
                 true
             }
             _ => {
-                println!("  Dispatcher: FAIL — open_order or order_status missing. events={:?}", w.events);
+                println!("  Dispatcher: FAIL — open_order with the margin fields missing, or an order_status sent. events={:?}", w.events);
                 false
             }
         }
@@ -1210,7 +1215,7 @@ pub(super) fn phase_what_if_order(conns: Conns) -> Conns {
     let commission = response_snapshot.map(|r| r.commission).unwrap_or(0);
     if commission > 0 {
         println!("  Commission: ${:.2}", commission as f64 / PRICE_SCALE as f64);
-        check!(dispatcher_validated, "Dispatcher path (open_order + order_status) failed validation");
+        check!(dispatcher_validated, "Dispatcher path (open_order only, with the margin fields) failed validation");
         println!("  PASS\n");
     } else {
         println!("  SKIP: Commission=0 (pre-market / no active quote)\n");
