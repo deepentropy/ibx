@@ -264,10 +264,6 @@ impl HotLoop {
         }
     }
 
-    /// Reclaim an instrument slot if nothing references it any more
-    /// (ibx#233): no open orders, no tick-by-tick subscription, no news
-    /// subscription. A reused id would repoint those references at the
-    /// wrong contract, so referenced slots stay resident until released.
     /// Round lot of a new market data subscription (ibx#287). When the
     /// session counts US stock sizes in round lots and the contract may be
     /// one, its definition is asked for and the subscription waits for it,
@@ -344,8 +340,20 @@ impl HotLoop {
         }
     }
 
+    /// Reclaim an instrument slot if nothing references it any more
+    /// (ibx#233): no open orders, no market data subscription, no
+    /// tick-by-tick subscription, no news subscription. A reused id would
+    /// repoint those references at the wrong contract, so referenced slots
+    /// stay resident until released. As the reference keeps a contract's
+    /// market data while any observer still needs it, dropping one consumer
+    /// leaves the others' data running (ibx#291).
     fn try_reclaim_instrument(&mut self, instrument: InstrumentId) {
         if !self.context.open_orders_for(instrument).is_empty() {
+            return;
+        }
+        if self.farm.has_md_subscription(instrument)
+            || self.context.lot_parked.iter().chain(&self.context.lot_ready).any(|s| s.instrument == instrument)
+        {
             return;
         }
         if self.hmds.tbt_subscriptions.iter().any(|(id, _, _)| *id == instrument) {
@@ -2397,6 +2405,38 @@ mod tests {
         let sent = farm_messages_sent(&mut farm_side);
         assert_eq!(sent.len(), 3, "two cancels, then the new subscription: {sent:?}");
         assert!(sent[2].contains("6008=265598|"), "{}", sent[2]);
+    }
+
+    // ibx#291: dropping the tick-by-tick or news consumer of a contract
+    // keeps the slot while its market data runs, also while the farm is
+    // down; the market data cancel then frees it.
+    #[test]
+    fn a_live_market_data_subscription_keeps_its_slot() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+        tx.send(subscribe_cmd(265598, "STK")).unwrap();
+        tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), tbt_type: crate::types::TbtType::BidAsk, reply_tx: None }).unwrap();
+        tx.send(ControlCommand::SubscribeNews { con_id: 265598, symbol: String::new(), providers: String::new(), reply_tx: None }).unwrap();
+        engine.poll_once();
+        let id = engine.context.market.instrument_by_con_id(265598).unwrap();
+
+        tx.send(ControlCommand::UnsubscribeTbt { instrument: id }).unwrap();
+        tx.send(ControlCommand::UnsubscribeNews { instrument: id }).unwrap();
+        engine.poll_once();
+        assert_eq!(engine.context.market.con_id(id), Some(265598));
+
+        // Farm down: the subscription waits for the reconnect, the slot stays.
+        engine.farm.handle_disconnect(&mut engine.context, &None);
+        tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), tbt_type: crate::types::TbtType::BidAsk, reply_tx: None }).unwrap();
+        tx.send(ControlCommand::UnsubscribeTbt { instrument: id }).unwrap();
+        engine.poll_once();
+        assert_eq!(engine.context.market.con_id(id), Some(265598));
+
+        tx.send(ControlCommand::Unsubscribe { instrument: id }).unwrap();
+        engine.poll_once();
+        assert_eq!(engine.context.market.con_id(id), None, "freed once nothing uses it");
     }
 
     // ibx#287: no lookup for a contract that is not a stock, or when the

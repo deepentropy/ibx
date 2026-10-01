@@ -401,6 +401,13 @@ impl FarmState {
         }
     }
 
+    /// A live market data subscription uses the instrument: sent, or kept
+    /// for the next reconnect while the farm is down (ibx#291).
+    pub(crate) fn has_md_subscription(&self, instrument: InstrumentId) -> bool {
+        self.instrument_md_reqs.iter().any(|(id, _)| *id == instrument)
+            || self.md_resub_info.iter().any(|(id, ..)| *id == instrument)
+    }
+
     /// Send a subscription kept by `MdSubscribe`.
     pub(crate) fn send_md_subscribe(&mut self, sub: &MdSubscribe, farm_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         self.send_mktdata_subscribe(
