@@ -741,7 +741,7 @@ fn run_submit_cancel_phase_inner(
     };
 
     control_tx.send(ControlCommand::Order(order_req)).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
+    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, snapshot: false, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
     let sent_at = Instant::now();

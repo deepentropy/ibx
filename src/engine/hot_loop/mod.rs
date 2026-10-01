@@ -978,7 +978,7 @@ impl HotLoop {
             .collect();
         for cmd in cmds {
             match cmd {
-                ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, reply_tx } => {
+                ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, snapshot, reply_tx } => {
                     // No conId: resolved first, as the reference (ibx#278).
                     let key = (con_id != 0).then_some(con_id);
                     if let Some(id) = self.register_slot_or_reject(key, symbol.clone(), &sec_type, &exchange, &reply_tx) {
@@ -988,7 +988,7 @@ impl HotLoop {
                         };
                         let sub = farm::MdSubscribe {
                             con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier,
-                            instrument: id, mode_9887,
+                            instrument: id, mode_9887, snapshot,
                         };
                         if con_id == 0 {
                             self.lookup_md_contract(sub, String::new(), filters);
@@ -1001,7 +1001,7 @@ impl HotLoop {
                     if let Some(id) = self.register_slot_or_reject(Some(con_id), symbol.clone(), &sec_type, &exchange, &reply_tx) {
                         let sub = farm::MdSubscribe {
                             con_id, symbol, exchange, sec_type, last_trade_date: String::new(), strike: 0.0,
-                            right: String::new(), multiplier: String::new(), instrument: id, mode_9887: 0,
+                            right: String::new(), multiplier: String::new(), instrument: id, mode_9887: 0, snapshot: false,
                         };
                         if let Some(farm_id) = self.md_target(&sub) {
                             if let Some(f) = self.pool.get_mut(farm_id) {
@@ -1017,13 +1017,13 @@ impl HotLoop {
                     self.farm.drop_snapshot(instrument);
                     self.try_reclaim_instrument(instrument);
                 }
-                ControlCommand::SubscribeBySymbol { symbol, sec_type, exchange, currency, filters, mode_9887, reply_tx } => {
+                ControlCommand::SubscribeBySymbol { symbol, sec_type, exchange, currency, filters, mode_9887, snapshot, reply_tx } => {
                     if let Some(id) = self.register_slot_or_reject(None, symbol.clone(), &sec_type, &exchange, &reply_tx) {
                         let sub = farm::MdSubscribe {
                             con_id: 0, symbol, exchange, sec_type,
                             last_trade_date: filters.last_trade_date_or_contract_month.clone(),
                             strike: filters.strike, right: filters.right.clone(), multiplier: filters.multiplier.clone(),
-                            instrument: id, mode_9887,
+                            instrument: id, mode_9887, snapshot,
                         };
                         self.lookup_md_contract(sub, currency, filters);
                     }
@@ -3641,7 +3641,7 @@ mod tests {
         ControlCommand::Subscribe {
             con_id, symbol: String::new(), exchange: "SMART".into(), sec_type: sec_type.into(),
             last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
-            mode_9887: 0, reply_tx: None,
+            mode_9887: 0, snapshot: false, reply_tx: None,
         }
     }
 
@@ -3709,7 +3709,7 @@ mod tests {
         let by_symbol = |symbol: &str, sec_type: &str, reply: crossbeam_channel::Sender<Result<InstrumentId, String>>| {
             ControlCommand::SubscribeBySymbol {
                 symbol: symbol.into(), sec_type: sec_type.into(), exchange: "SMART".into(), currency: "USD".into(),
-                filters: Default::default(), mode_9887: 0, reply_tx: Some(reply),
+                filters: Default::default(), mode_9887: 0, snapshot: false, reply_tx: Some(reply),
             }
         };
         let (r1, a1) = crossbeam_channel::bounded(1);
@@ -4011,7 +4011,7 @@ mod routing_tests {
         farm::MdSubscribe {
             con_id, symbol: symbol.into(), exchange: exchange.into(), sec_type: sec_type.into(),
             last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
-            instrument: 0, mode_9887: 0,
+            instrument: 0, mode_9887: 0, snapshot: false,
         }
     }
 
@@ -4122,7 +4122,7 @@ mod routing_tests {
         tx.send(ControlCommand::Subscribe {
             con_id: 14094, symbol: "BMW".into(), exchange: "SMART".into(), sec_type: "STK".into(),
             last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
-            mode_9887: 0, reply_tx: None,
+            mode_9887: 0, snapshot: false, reply_tx: None,
         }).unwrap();
         engine.poll_once();
         use std::io::Read;
@@ -4193,7 +4193,7 @@ mod tag_cleaner_tests {
         let sub = farm::MdSubscribe {
             con_id, symbol: String::new(), exchange: "SMART".into(), sec_type: "STK".into(),
             last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
-            instrument, mode_9887: 0,
+            instrument, mode_9887: 0, snapshot: false,
         };
         engine.route_md_subscribe(&sub);
         (instrument, engine.farm.next_md_req_id - 2)

@@ -123,6 +123,7 @@ impl BenchSession {
                 right: String::new(),
                 multiplier: String::new(),
                 mode_9887: 0,
+                snapshot: false,
                 reply_tx: None,
             })
             .unwrap();

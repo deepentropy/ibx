@@ -91,7 +91,7 @@ fn hotloop_auto_reconnect_on_farm_disconnect() {
     control_tx.send(ibx::types::ControlCommand::Subscribe {
         con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(),
         last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
-        mode_9887: 0, reply_tx: None,
+        mode_9887: 0, snapshot: false, reply_tx: None,
     }).unwrap();
     hot_loop.poll_once();
     let spy = hot_loop.market_for_test().instrument_by_con_id(756733).expect("SPY registered");

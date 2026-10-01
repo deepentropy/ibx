@@ -1613,10 +1613,12 @@ pub enum ControlCommand {
     /// `mode_9887` is the per-request market-data mode sent on each entry
     /// of the bid/ask and last pair: 0 = REALTIME (none sent), 1 = DELAYED,
     /// 2 = FROZEN, 3 = DELAYED_FROZEN (`MarketDataModes::entry_mode`).
+    /// `snapshot` asks the pair once, as a snapshot, instead of a stream
+    /// (ibx#446).
     Subscribe {
         con_id: i64, symbol: String, exchange: String, sec_type: String,
         last_trade_date: String, strike: f64, right: String, multiplier: String,
-        mode_9887: i32,
+        mode_9887: i32, snapshot: bool,
         reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>>,
     },
     /// Subscribe to market data for a contract given without a conId
@@ -1627,7 +1629,7 @@ pub enum ControlCommand {
     SubscribeBySymbol {
         symbol: String, sec_type: String, exchange: String, currency: String,
         filters: SecDefFilters,
-        mode_9887: i32,
+        mode_9887: i32, snapshot: bool,
         reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>>,
     },
     /// Unsubscribe from market data for an instrument.
@@ -2373,7 +2375,7 @@ mod tests {
 
     #[test]
     fn control_command_subscribe() {
-        let cmd = ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None };
+        let cmd = ControlCommand::Subscribe { con_id: 265598, symbol: "AAPL".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, snapshot: false, reply_tx: None };
         match cmd {
             ControlCommand::Subscribe { con_id, .. } => assert_eq!(con_id, 265598),
             _ => panic!("wrong variant"),
@@ -2403,7 +2405,7 @@ mod tests {
 
     #[test]
     fn control_command_clone() {
-        let cmd = ControlCommand::Subscribe { con_id: 42, symbol: "TEST".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None };
+        let cmd = ControlCommand::Subscribe { con_id: 42, symbol: "TEST".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, snapshot: false, reply_tx: None };
         let cmd2 = cmd.clone();
         match cmd2 {
             ControlCommand::Subscribe { con_id, .. } => assert_eq!(con_id, 42),

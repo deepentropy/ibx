@@ -1031,7 +1031,7 @@ impl ClientCore {
                 exchange: exchange.to_string(),
                 currency: currency.to_string(),
                 filters: filters.clone(),
-                mode_9887,
+                mode_9887, snapshot,
                 reply_tx: Some(reply_tx),
             }).map_err(|e| format!("Engine stopped: {}", e))?;
             let instrument_id = Self::recv_registration(reply_rx)?;
@@ -1080,7 +1080,7 @@ impl ClientCore {
             strike,
             right: right.to_string(),
             multiplier: multiplier.to_string(),
-            mode_9887,
+            mode_9887, snapshot,
             reply_tx: Some(reply_tx),
         }).map_err(|e| format!("Engine stopped: {}", e))?;
 
@@ -1262,7 +1262,7 @@ impl ClientCore {
             }).and_then(|_| control_tx.send(ControlCommand::Subscribe {
                 con_id, symbol, exchange: "SMART".into(), sec_type: "STK".into(),
                 last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
-                mode_9887: 0, reply_tx: Some(reply_tx),
+                mode_9887: 0, snapshot: false, reply_tx: Some(reply_tx),
             }));
             if registered.is_ok() {
                 q.pending.insert(con_id, reply_rx);

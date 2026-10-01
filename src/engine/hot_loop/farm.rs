@@ -27,6 +27,8 @@ pub(crate) struct MdSubscribe {
     pub(crate) multiplier: String,
     pub(crate) instrument: InstrumentId,
     pub(crate) mode_9887: i32,
+    /// Asked once, as a snapshot, instead of a stream (ibx#446).
+    pub(crate) snapshot: bool,
 }
 
 /// How long a subscription waits for the definition its round lot needs;
@@ -232,8 +234,8 @@ pub(crate) struct FarmState {
     depth_fanout_map: Vec<(u32, ReqId)>,
     /// Depth requests of the client and their entries (#452).
     pub(crate) depth_reqs: Vec<DepthReq>,
-    /// Option resub info: (instrument, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887).
-    md_resub_info: Vec<(InstrumentId, String, String, String, String, f64, String, String, i32)>,
+    /// Option resub info: (instrument, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, snapshot).
+    md_resub_info: Vec<(InstrumentId, String, String, String, String, f64, String, String, i32, bool)>,
     pub(crate) disconnected: bool,
     pub(crate) tick_buf: Vec<tick_decoder::RawTick>,
     pub(crate) farm_msg_buf: Vec<Vec<u8>>,
@@ -620,7 +622,7 @@ impl FarmState {
         let sub = MdSubscribe {
             con_id, symbol: symbol.to_string(), exchange: exchange.to_string(), sec_type: sec_type.to_string(),
             last_trade_date: last_trade_date.to_string(), strike, right: right.to_string(),
-            multiplier: multiplier.to_string(), instrument, mode_9887,
+            multiplier: multiplier.to_string(), instrument, mode_9887, snapshot: false,
         };
         self.subscribe_top(&sub, PRIMARY_MD, farm_conn, hb);
     }
@@ -657,7 +659,7 @@ impl FarmState {
         }
         if self.md_resub_info.iter().all(|(id, ..)| *id != instrument) {
             self.md_resub_info.push((instrument, sub.symbol.clone(), sub.exchange.clone(), sub.sec_type.clone(),
-                sub.last_trade_date.clone(), sub.strike, sub.right.clone(), sub.multiplier.clone(), mode_9887));
+                sub.last_trade_date.clone(), sub.strike, sub.right.clone(), sub.multiplier.clone(), mode_9887, sub.snapshot));
         }
 
         let con_id_str = con_id.to_string();
@@ -677,10 +679,12 @@ impl FarmState {
         let ids: Vec<String> = entries.iter().map(|(r, ..)| r.to_string()).collect();
         let mode_str = mode_9887.to_string();
         let ts = chrono_free_timestamp();
+        // A snapshot is asked with the snapshot action and without the
+        // streaming-client mark, as the reference asks it (ibx#446).
         let mut tags: Vec<(u32, &str)> = vec![
             (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
             (fix::TAG_SENDING_TIME, &ts),
-            (263, "1"),
+            (263, if sub.snapshot { "3" } else { "1" }),
             (146, "2"),
         ];
         for ((_, exch, req_type), id) in entries.iter().zip(&ids) {
@@ -689,12 +693,13 @@ impl FarmState {
             tags.push((207, exch));
             tags.push((167, sec_type));
             tags.push((264, req_type));
-            tags.push((6088, "Socket"));
+            if !sub.snapshot { tags.push((6088, "Socket")); }
             if !realtime { tags.push((9887, &mode_str)); }
             tags.push((9830, "1"));
         }
         if sink.send_comp(&tags) {
-            log::info!("Sent 35=V subscribe (9887={}) on farm {}: con_id={} {} {} ids={},{}",
+            log::info!("Sent 35=V {} (9887={}) on farm {}: con_id={} {} {} ids={},{}",
+                if sub.snapshot { "snapshot" } else { "subscribe" },
                 mode_9887, farm, con_id, exchange, sec_type, bid_ask_id, last_id);
             if farm == PRIMARY_MD {
                 hb.last_farm_sent = Instant::now();
@@ -756,11 +761,11 @@ impl FarmState {
     pub(crate) fn unsent_subscriptions(&self, context: &Context) -> Vec<MdSubscribe> {
         self.md_resub_info.iter()
             .filter(|(id, ..)| self.instrument_md_reqs.iter().all(|(i, _)| i != id))
-            .filter_map(|(id, symbol, exchange, sec_type, ltd, strike, right, mult, mode)| {
+            .filter_map(|(id, symbol, exchange, sec_type, ltd, strike, right, mult, mode, snapshot)| {
                 context.market.con_id(*id).map(|con_id| MdSubscribe {
                     con_id, symbol: symbol.clone(), exchange: exchange.clone(), sec_type: sec_type.clone(),
                     last_trade_date: ltd.clone(), strike: *strike, right: right.clone(), multiplier: mult.clone(),
-                    instrument: *id, mode_9887: *mode,
+                    instrument: *id, mode_9887: *mode, snapshot: *snapshot,
                 })
             })
             .collect()
@@ -834,10 +839,10 @@ impl FarmState {
                 // 4 too: when the reference asks for delayed-frozen data
                 // instead is not known (ibx#447).
                 info.8 = crate::types::MarketDataModes::entry_mode(false, true);
-                let (_, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887) = info.clone();
+                let (_, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, snapshot) = info.clone();
                 let Some(con_id) = context.market.con_id(instrument) else { continue };
                 let sub = MdSubscribe {
-                    con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, instrument, mode_9887,
+                    con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, instrument, mode_9887, snapshot,
                 };
                 // Asked again on the farm that rejected it.
                 self.subscribe_top(&sub, self.rx_farm, farm_conn, hb);
@@ -1590,7 +1595,7 @@ mod tests {
         let sub = MdSubscribe {
             con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "STK".into(),
             last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
-            instrument: id, mode_9887: 0,
+            instrument: id, mode_9887: 0, snapshot: false,
         };
         let mut sink = RecordingSink(Vec::new());
         let mut hb = HeartbeatState::new();
@@ -1649,6 +1654,51 @@ mod tests {
     // ibx#449: the bid/ask ack gives the request parameters, with the
     // reference's rules for the BBO exchange (the captured values of AAPL,
     // MNQ and EUR.USD); the last ack gives none.
+    // ibx#446: a plain snapshot asks the bid/ask and last pair with the
+    // snapshot action and without the streaming mark, as the reference
+    // frames captured on 18/06/2026; its acks give the request parameters
+    // as a stream's do, and its cancel repeats the entries.
+    #[test]
+    fn plain_snapshot_request_ack_and_cancel() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let id = context.market.register(265598);
+        context.market.set_routing(id, "STK", "");
+        let sub = MdSubscribe {
+            con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            instrument: id, mode_9887: 0, snapshot: true,
+        };
+        let mut sink = RecordingSink(Vec::new());
+        let mut hb = HeartbeatState::new();
+        farm.subscribe_top(&sub, PRIMARY_MD, &mut sink, &mut hb);
+        let body = |msg: &Vec<(u32, String)>| -> String {
+            msg.iter().filter(|(t, _)| *t != 52).map(|(t, v)| format!("{t}={v}|")).collect()
+        };
+        let (a, b) = (farm.next_md_req_id - 2, farm.next_md_req_id - 1);
+        // Captured: 35=V|263=3|146=2|262=5|6008=265598|207=BEST|167=CS|264=442|9830=1|262=6|...|264=443|9830=1
+        assert_eq!(body(&sink.0[0]), format!(
+            "35=V|263=3|146=2|262={a}|6008=265598|207=BEST|167=CS|264=442|9830=1|262={b}|6008=265598|207=BEST|167=CS|264=443|9830=1|"));
+        for r in [a, b] {
+            let ack = format!("8=O\x0135=Q\x0154,{r},0.01,0,3,9c,,1,1");
+            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+        }
+        assert!(shared.market.drain_snapshot_acks().is_empty());
+        let params = shared.market.drain_tick_req_params();
+        assert_eq!(params.len(), 1);
+        assert_eq!((params[0].instrument, params[0].bbo_exchange.as_str(), params[0].snapshot_permissions), (id, "9c0001", 3));
+        // Captured cancel of a snapshot: 263=2 with the same entries.
+        let cancel = farm.unsubscribe_top(id);
+        assert_eq!(body(&cancel[0].1), format!(
+            "35=V|263=2|146=2|262={a}|6008=265598|207=BEST|167=CS|264=442|9830=1|262={b}|6008=265598|207=BEST|167=CS|264=443|9830=1|"));
+        // A stream keeps the streaming mark and the subscribe action.
+        let mut sink = RecordingSink(Vec::new());
+        farm.subscribe_top(&MdSubscribe { snapshot: false, ..sub }, PRIMARY_MD, &mut sink, &mut hb);
+        let stream = body(&sink.0[0]);
+        assert!(stream.starts_with("35=V|263=1|146=2|") && stream.matches("6088=Socket|").count() == 2, "{stream}");
+    }
+
     #[test]
     fn bid_ask_ack_gives_the_request_parameters() {
         let shared = SharedState::new();
@@ -1711,7 +1761,7 @@ mod tests {
         let sub = |con_id, instrument| MdSubscribe {
             con_id, symbol: String::new(), exchange: "SMART".into(), sec_type: "STK".into(),
             last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
-            instrument, mode_9887: 0,
+            instrument, mode_9887: 0, snapshot: false,
         };
         let deadline = Instant::now() + LOT_LOOKUP_TIMEOUT;
         context.lot_lookups.push(("ibxlot0".into(), 265598, deadline));
