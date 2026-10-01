@@ -6,6 +6,25 @@ use ibx::protocol::fix;
 use ibx::protocol::fixcomp;
 use ibx::protocol::connection::Frame;
 
+/// Register a contract with the engine as the clients do before an order
+/// on it: conId, symbol, security type and exchange, then the currency.
+/// The reply carries the instrument id once the hot loop runs.
+fn register_as_client(
+    control_tx: &crossbeam_channel::Sender<ControlCommand>,
+    con_id: i64,
+    symbol: &str,
+    sec_type: &str,
+    exchange: &str,
+    currency: &str,
+) -> crossbeam_channel::Receiver<Result<InstrumentId, String>> {
+    let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+    control_tx.send(ControlCommand::RegisterInstrument {
+        con_id, symbol: symbol.into(), sec_type: sec_type.into(), exchange: exchange.into(), reply_tx: Some(reply_tx),
+    }).unwrap();
+    control_tx.send(ControlCommand::SetInstrumentCurrency { con_id, currency: currency.into() }).unwrap();
+    reply_rx
+}
+
 pub(super) fn phase_forex_order(conns: Conns) -> Conns {
     phase!("--- Phase 98: Forex Order Lifecycle (EUR.USD) ---");
 
@@ -70,17 +89,23 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
-    let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
-    let inst = hot_loop.context_mut().register_instrument(fx_con_id);
-    hot_loop.context_mut().set_symbol(inst, "EUR".to_string());
+    // The contract as the client gives it to the engine for an order:
+    // security type, exchange and currency, not the conId alone.
+    let inst = register_as_client(&control_tx, fx_con_id, "EUR", "CASH", "IDEALPRO", "USD");
+    let join = run_hot_loop(hot_loop);
+    let Some(inst) = inst.recv_timeout(Duration::from_secs(5)).ok().and_then(Result::ok) else {
+        let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+        record_failure("Phase 98: the engine did not register the forex contract");
+        return conns;
+    };
 
     let oid = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
         order_id: oid, instrument: inst, side: Side::Buy, qty: 20000, price: 50_000_000, outside_rth: true,
     })).unwrap();
-    let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut order_acked = false;
@@ -113,7 +138,7 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Forex order rejected (may need trading permissions)");
+        record_rejection("Forex order rejected (may need trading permissions)", &shared);
     } else {
         if skip_unacked_if_closed(order_acked) { return conns; }
         check!(order_acked, "Forex order should be acknowledged");
@@ -193,17 +218,21 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
-    let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
-    let inst = hot_loop.context_mut().register_instrument(fut_def.con_id);
-    hot_loop.context_mut().set_symbol(inst, "MES".to_string());
+    let inst = register_as_client(&control_tx, fut_def.con_id, "MES", "FUT", "CME", "USD");
+    let join = run_hot_loop(hot_loop);
+    let Some(inst) = inst.recv_timeout(Duration::from_secs(5)).ok().and_then(Result::ok) else {
+        let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+        record_failure("Phase 99: the engine did not register the futures contract");
+        return conns;
+    };
 
     let oid = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {
         order_id: oid, instrument: inst, side: Side::Buy, qty: 1, price: 100_00_000_000, outside_rth: true,
     })).unwrap();
-    let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut order_acked = false;
@@ -236,7 +265,7 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Futures order rejected (may need trading permissions)");
+        record_rejection("Futures order rejected (may need trading permissions)", &shared);
     } else {
         if skip_unacked_if_closed(order_acked) { return conns; }
         check!(order_acked, "Futures order should be acknowledged");
@@ -326,7 +355,7 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
     let inst = hot_loop.context_mut().register_instrument(opt_con_id);
     hot_loop.context_mut().set_symbol(inst, "SPY".to_string());
@@ -368,7 +397,7 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Option order rejected (may need trading permissions)");
+        record_rejection("Option order rejected (may need trading permissions)", &shared);
     } else {
         if skip_unacked_if_closed(order_acked) { return conns; }
         check!(order_acked, "Option order should be acknowledged");
@@ -385,7 +414,7 @@ pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
     // Register SPY
@@ -447,7 +476,7 @@ pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if rejected {
-        record_rejection("One or more orders rejected");
+        record_rejection("One or more orders rejected", &shared);
         return conns;
     }
 

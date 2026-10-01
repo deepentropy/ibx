@@ -190,7 +190,7 @@ pub(super) fn phase_position_tracking(conns: Conns) -> Conns {
             }
             Ok(Event::OrderUpdate(update)) => {
                 if update.status == OrderStatus::Rejected {
-                    record_rejection("Order rejected — market closed");
+                    record_rejection("Order rejected — market closed", &shared);
                     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
                     return conns;
                 }
@@ -802,7 +802,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
                 break;
             }
             Ok(Event::OrderUpdate(u)) if u.status == OrderStatus::Rejected => {
-                record_rejection("Order rejected");
+                record_rejection("Order rejected", &shared);
                 let conns = shutdown_and_reclaim(&control_tx, join, account_id);
                 return conns;
             }

@@ -11,7 +11,7 @@ pub(super) fn phase_market_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
@@ -79,7 +79,7 @@ pub(super) fn phase_market_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Order rejected — market may be closed");
+        record_rejection("Order rejected — market may be closed", &shared);
         return conns;
     }
     if buy_price == 0 {
@@ -104,7 +104,7 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
     let inst_id = hot_loop.context_mut().register_instrument(756733);
@@ -168,7 +168,7 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Order rejected — market may be closed");
+        record_rejection("Order rejected — market may be closed", &shared);
         return conns;
     }
 
@@ -253,7 +253,7 @@ pub(super) fn phase_modify_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Modify test rejected");
+        record_rejection("Modify test rejected", &shared);
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
@@ -292,7 +292,7 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -339,7 +339,7 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Order rejected — extended hours may not be active");
+        record_rejection("Order rejected — extended hours may not be active", &shared);
         return conns;
     }
     if buy_price == 0 {
@@ -373,7 +373,7 @@ pub(super) fn phase_outside_rth_stop(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -414,7 +414,7 @@ pub(super) fn phase_outside_rth_stop(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("GTC stop outside RTH rejected");
+        record_rejection("GTC stop outside RTH rejected", &shared);
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
@@ -483,7 +483,7 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Modify qty test rejected");
+        record_rejection("Modify qty test rejected", &shared);
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
@@ -522,7 +522,7 @@ pub(super) fn phase_limit_ioc(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -554,7 +554,7 @@ pub(super) fn phase_limit_ioc(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("IOC order rejected");
+        record_rejection("IOC order rejected", &shared);
         return conns;
     }
     check!(order_cancelled, "IOC order was not cancelled (should expire immediately at $1)");
@@ -564,6 +564,15 @@ pub(super) fn phase_limit_ioc(conns: Conns) -> Conns {
 
 // ─── Phase 22: Limit FOK ───
 
+/// The server's reason for a FOK order on a US stock routed SMART, as the
+/// reference gets it (ib-agent ORDER-SUBMIT.md 3.3).
+const FOK_REFERENCE_REJECT: &str = "The time-in-force FOK is invalid for this combination of exchange and security type";
+
+/// The server's reason for an auction order on a US stock routed SMART, as
+/// the reference gets it (captured 28/09/2026, AAPL SMART pre-market:
+/// ib-agent ORDER-SUBMIT.md 3.3, captures/0928).
+const AUC_REFERENCE_REJECT: &str = "The time-in-force AUC is invalid for this combination of exchange and security type";
+
 pub(super) fn phase_limit_fok(conns: Conns) -> Conns {
     phase!("--- Phase 22: Limit FOK Order (SPY) ---");
 
@@ -571,12 +580,16 @@ pub(super) fn phase_limit_fok(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
 
     let order_id = next_order_id();
+    // FOK goes out from the reference too and the server refuses it for a
+    // US stock on SMART (captured on paper 25/09/2026 and 28/09/2026, AAPL
+    // SMART pre-market: ib-agent ORDER-SUBMIT.md 3.3, captures/0928), so
+    // that reject is the reference's answer as well.
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitFok {
         order_id, instrument: inst_id, side: Side::Buy, qty: 1, price: 1_00_000_000,
     })).unwrap();
@@ -603,7 +616,14 @@ pub(super) fn phase_limit_fok(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("FOK order rejected");
+        let errors: Vec<(i64, String)> = shared.orders.drain_order_errors()
+            .into_iter().map(|(_, code, text)| (code, text)).collect();
+        if is_reference_reject(&errors, FOK_REFERENCE_REJECT) {
+            println!("  PASS (rejected by the server as the reference: {})
+", FOK_REFERENCE_REJECT);
+        } else {
+            record_rejection_with("FOK order rejected", &errors);
+        }
         return conns;
     }
     check!(order_cancelled, "FOK order was not cancelled (should expire immediately at $1)");
@@ -674,7 +694,7 @@ pub(super) fn phase_bracket_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -721,7 +741,7 @@ pub(super) fn phase_bracket_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if any_rejected {
-        record_rejection("Bracket order rejected");
+        record_rejection("Bracket order rejected", &shared);
         return conns;
     }
     if skip_unacked_if_closed(parent_acked) { return conns; }
@@ -762,9 +782,13 @@ pub(super) fn phase_limit_opg(conns: Conns) -> Conns {
 
 pub(super) fn phase_iceberg_order(conns: Conns) -> Conns {
     let oid = next_order_id();
-    run_submit_cancel_phase(conns, "Phase 33: Iceberg Order (SPY)",
+    // The reference sends the display size in the same field and the paper
+    // server refuses every value it was given (ib-agent captures/192 B6:
+    // display size 1, 5, 100, 300), so that reject is the reference's
+    // answer as well.
+    run_submit_cancel_phase_or_server_reject(conns, "Phase 33: Iceberg Order (SPY)",
         OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 10, price: 1_00_000_000, tif: b'1', attrs: OrderAttrs { display_size: 1, outside_rth: true, ..OrderAttrs::default() } },
-        false)
+        false, "Display size should be a multiple of lot size")
 }
 
 // ─── Phase 34: Hidden ───
@@ -806,7 +830,7 @@ pub(super) fn phase_oca_group(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -859,7 +883,7 @@ pub(super) fn phase_oca_group(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if any_rejected {
-        record_rejection("OCA order rejected");
+        record_rejection("OCA order rejected", &shared);
         return conns;
     }
     if skip_unacked_if_closed(order1_acked && order2_acked) { return conns; }
@@ -883,18 +907,22 @@ pub(super) fn phase_mtl_order(conns: Conns) -> Conns {
 
 pub(super) fn phase_mkt_prt_order(conns: Conns) -> Conns {
     let oid = next_order_id();
-    run_submit_cancel_phase(conns, "Phase 39: Market with Protection Order (SPY)",
+    // The reference refuses this type locally with 387 when the contract's
+    // order-type list for the exchange lacks its key (MKTPROT); the SPY list
+    // on SMART lacks it (paper, 01/10/2026).
+    run_submit_cancel_phase_or_refused(conns, "Phase 39: Market with Protection Order (SPY)",
         OrderRequest::SubmitMktPrt { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 },
-        true)
+        true, Some(387))
 }
 
 // ─── Phase 40: Stop with Protection ───
 
 pub(super) fn phase_stp_prt_order(conns: Conns) -> Conns {
     let oid = next_order_id();
-    run_submit_cancel_phase(conns, "Phase 40: Stop with Protection Order (SPY)",
+    // As phase 39, key STPPROT.
+    run_submit_cancel_phase_or_refused(conns, "Phase 40: Stop with Protection Order (SPY)",
         OrderRequest::SubmitStpPrt { order_id: oid, instrument: 0, side: Side::Sell, qty: 1, stop_price: 1_00_000_000 },
-        false)
+        false, Some(387))
 }
 
 // ─── Phase 41: Mid-Price ───
@@ -957,8 +985,12 @@ pub(super) fn phase_peg_mid_order(conns: Conns) -> Conns {
 
 pub(super) fn phase_discretionary_order(conns: Conns) -> Conns {
     let oid = next_order_id();
+    // $0.05 on a $1 limit: the server refuses a discretionary amount over
+    // 10% of the limit price ("Can't accept the discretionary amount over
+    // 10% of the limit price.", paper 01/10/2026); the reference has no
+    // local check of it and sends such an order as it is.
     run_submit_cancel_phase(conns, "Phase 47: Discretionary Amount Order (SPY)",
-        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1', attrs: OrderAttrs { discretionary_amt: 50_000_000, outside_rth: true, ..OrderAttrs::default() } },
+        OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1', attrs: OrderAttrs { discretionary_amt: 5_000_000, outside_rth: true, ..OrderAttrs::default() } },
         false)
 }
 
@@ -1003,9 +1035,17 @@ pub(super) fn phase_price_condition_order(conns: Conns) -> Conns {
 
 pub(super) fn phase_time_condition_order(conns: Conns) -> Conns {
     let oid = next_order_id();
+    // A time one day ahead, the order to work after it. The server refuses
+    // a time of 2099 as an invalid value and a condition already met,
+    // before a time to come ("Invalid conditional order") (paper,
+    // 01/10/2026, ibx#416, ibx#493). The reference has no local
+    // check of either and sends the time as it is given (ib-agent
+    // ORDER-SUBMIT.md 4.4), so it gets the same rejects.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let time = format_utc_timestamp(now + 86_400);
     run_submit_cancel_phase(conns, "Phase 58: Time Condition Order (SPY)",
         OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1',
-            attrs: OrderAttrs { outside_rth: true, conditions: vec![OrderCondition::Time { time: "20991231-23:59:59".into(), is_more: false }], ..OrderAttrs::default() } },
+            attrs: OrderAttrs { outside_rth: true, conditions: vec![OrderCondition::Time { time, is_more: true }], ..OrderAttrs::default() } },
         false)
 }
 
@@ -1110,18 +1150,18 @@ pub(super) fn phase_peg_bench_order(conns: Conns) -> Conns {
 
 pub(super) fn phase_limit_auc_order(conns: Conns) -> Conns {
     let oid = next_order_id();
-    run_submit_cancel_phase(conns, "Phase 69: Limit Auction Order (SPY)",
+    run_submit_cancel_phase_or_server_reject(conns, "Phase 69: Limit Auction Order (SPY)",
         OrderRequest::SubmitLimitAuc { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000 },
-        false)
+        false, AUC_REFERENCE_REJECT)
 }
 
 // ─── Phase 70: MTL Auction ───
 
 pub(super) fn phase_mtl_auc_order(conns: Conns) -> Conns {
     let oid = next_order_id();
-    run_submit_cancel_phase(conns, "Phase 70: Market-to-Limit Auction Order (SPY)",
+    run_submit_cancel_phase_or_server_reject(conns, "Phase 70: Market-to-Limit Auction Order (SPY)",
         OrderRequest::SubmitMtlAuc { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 },
-        false)
+        false, AUC_REFERENCE_REJECT)
 }
 
 // ─── Phase 71: Box Top (wire-identical to MTL) ───
@@ -1237,7 +1277,7 @@ pub(super) fn phase_cash_qty_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -1279,7 +1319,7 @@ pub(super) fn phase_cash_qty_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Cash qty rejected (expected on paper account)");
+        record_rejection("Cash qty rejected (expected on paper account)", &shared);
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
@@ -1397,7 +1437,7 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if any_rejected {
-        record_rejection("Bracket fill cascade rejected");
+        record_rejection("Bracket fill cascade rejected", &shared);
         return conns;
     }
     println!("  Entry filled: {}, TP active: {}, SL active: {}", entry_filled, tp_active, sl_active);
@@ -1488,7 +1528,7 @@ pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    if order_rejected { record_rejection("Order rejected"); return conns; }
+    if order_rejected { record_rejection("Order rejected", &shared); return conns; }
     if !buy_filled { println!("  SKIP: No fill — market may not have liquidity\n"); return conns; }
 
     println!("  Buy filled: {}, Sell filled: {}", buy_filled, sell_filled);
@@ -1581,7 +1621,7 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -1646,7 +1686,7 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
         acked.len(), cancelled.len(), rejected.len(), duplicate_acks);
 
     if rejected.len() == order_ids.len() {
-        record_rejection("All orders rejected");
+        record_rejection("All orders rejected", &shared);
         return conns;
     }
 
@@ -1718,7 +1758,7 @@ pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Order rejected");
+        record_rejection("Order rejected", &shared);
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
@@ -1796,7 +1836,7 @@ pub(super) fn phase_double_modify(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Order rejected");
+        record_rejection("Order rejected", &shared);
         return conns;
     }
     if skip_unacked_if_closed(phase >= 3) { return conns; }
@@ -1815,7 +1855,7 @@ pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -1867,7 +1907,7 @@ pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Order rejected");
+        record_rejection("Order rejected", &shared);
         return conns;
     }
     if skip_unacked_if_closed(order_acked) { return conns; }
@@ -1887,7 +1927,7 @@ pub(super) fn phase_global_cancel(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
     let inst_id = hot_loop.context_mut().register_instrument(756733);
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
@@ -1940,7 +1980,7 @@ pub(super) fn phase_global_cancel(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        record_rejection("Order rejected");
+        record_rejection("Order rejected", &shared);
         return conns;
     }
     if skip_unacked_if_closed(cancel_all_sent) { return conns; }
@@ -1960,7 +2000,7 @@ pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
+        shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
@@ -2046,7 +2086,7 @@ pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if got_order_reject {
-        record_rejection("Order rejected — market closed");
+        record_rejection("Order rejected — market closed", &shared);
         return conns;
     }
     if phase < 2 {

@@ -517,6 +517,74 @@ fn query_error_phase_live() {
     let _ = connection::phase_graceful_shutdown(conns);
 }
 
+/// Focused live entry for the order phases the server rejected in the run of
+/// 01/10/2026 (ibx#493): each rejection prints the server's reason. Run:
+///   cargo test --test ib_paper_compat server_reject_phases_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn server_reject_phases_live() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    println!("=== server reject phases (session={:?}) ===
+", market_session().0);
+    let (mut gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
+        .expect("Gateway::connect() failed");
+    let mut conns = Conns { farm: farm_conn, ccp: ccp_conn, hmds: hmds_conn, account_id: gw.account_id.clone() };
+    let phases: [fn(Conns) -> Conns; 10] = [
+        orders::phase_limit_fok,
+        orders::phase_iceberg_order,
+        orders::phase_mkt_prt_order,
+        orders::phase_stp_prt_order,
+        orders::phase_discretionary_order,
+        orders::phase_time_condition_order,
+        orders::phase_limit_auc_order,
+        orders::phase_mtl_auc_order,
+        multi_asset::phase_forex_order,
+        multi_asset::phase_futures_order,
+    ];
+    for phase in phases {
+        conns = phase(conns);
+        conns = ensure_ccp_alive(conns, &mut gw, &config);
+    }
+    let _ = connection::phase_graceful_shutdown(conns);
+    let rejected = take_rejections();
+    assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
+}
+
+/// Focused live entry for the order phases with conditions (ibx#416,
+/// ibx#493). Run:
+///   cargo test --test ib_paper_compat condition_phases_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn condition_phases_live() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    println!("=== condition phases (session={:?}) ===
+", market_session().0);
+    let (mut gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
+        .expect("Gateway::connect() failed");
+    let mut conns = Conns { farm: farm_conn, ccp: ccp_conn, hmds: hmds_conn, account_id: gw.account_id.clone() };
+    let phases: [fn(Conns) -> Conns; 4] = [
+        orders::phase_price_condition_order,
+        orders::phase_time_condition_order,
+        orders::phase_volume_condition_order,
+        orders::phase_multi_condition_order,
+    ];
+    for phase in phases {
+        conns = phase(conns);
+        conns = ensure_ccp_alive(conns, &mut gw, &config);
+    }
+    let _ = connection::phase_graceful_shutdown(conns);
+    let rejected = take_rejections();
+    assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
+}
+
 /// Focused live entry for the tick-by-tick unsubscribe phase (ibx#404). Needs a
 /// live market for ticks. Run:
 ///   cargo test --test ib_paper_compat tbt_unsubscribe_phase_live -- --ignored --nocapture

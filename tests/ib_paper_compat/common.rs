@@ -41,12 +41,25 @@ fn count_phase_failure() {
     PHASE_FAILURES.with(|c| c.set(c.get() + 1));
 }
 
-/// Record a rejection as a failure. The server's reason is in the
-/// "ExecReport REJECTED" log line (run with RUST_LOG=warn).
-pub(super) fn record_rejection(what: &str) {
-    println!("  FAIL: {} (rejected by the server)
-", what);
-    REJECTIONS.lock().unwrap().push(what.to_string());
+/// Record a rejection as a failure, with the server's reason: the reject
+/// reaches the order error queue as error 201 "Order rejected - reason:...",
+/// as the reference shows it to an API client. Drains that queue.
+pub(super) fn record_rejection(what: &str, shared: &SharedState) {
+    let errors: Vec<(i64, String)> = shared.orders.drain_order_errors()
+        .into_iter().map(|(_, code, text)| (code, text)).collect();
+    record_rejection_with(what, &errors);
+}
+
+/// Record a rejection as a failure, with the order errors already drained.
+/// The reasons are the error 201 texts; with none, every error is shown.
+pub(super) fn record_rejection_with(what: &str, errors: &[(i64, String)]) {
+    let rejects: Vec<&(i64, String)> = errors.iter().filter(|(code, _)| *code == 201).collect();
+    let shown: Vec<String> = if rejects.is_empty() { errors.iter().collect::<Vec<_>>() } else { rejects }
+        .iter().map(|(code, text)| format!("{} {}", code, text)).collect();
+    let reason = if shown.is_empty() { "no reason received".to_string() } else { shown.join(" | ") };
+    println!("  FAIL: {} (rejected by the server: {})
+", what, reason);
+    REJECTIONS.lock().unwrap().push(format!("{} ({})", what, reason));
     count_phase_failure();
 }
 
@@ -625,6 +638,38 @@ pub(super) fn run_submit_cancel_phase_or_refused(
     fill_or_cancel: bool,
     accepted_refusal: Option<i64>,
 ) -> Conns {
+    run_submit_cancel_phase_inner(conns, phase_name, order_req, fill_or_cancel, accepted_refusal, None)
+}
+
+/// Same as `run_submit_cancel_phase`, but `reference_reject` is the reason
+/// of a server reject the reference gets for the same order (captured): the
+/// reference sends the order and the server refuses it, so that reject, with
+/// exactly that reason, is also a correct answer. Any other reject fails.
+pub(super) fn run_submit_cancel_phase_or_server_reject(
+    conns: Conns,
+    phase_name: &str,
+    order_req: OrderRequest,
+    fill_or_cancel: bool,
+    reference_reject: &str,
+) -> Conns {
+    run_submit_cancel_phase_inner(conns, phase_name, order_req, fill_or_cancel, None, Some(reference_reject))
+}
+
+/// True when the order errors hold the server reject (201) with exactly the
+/// reason the reference gets.
+pub(super) fn is_reference_reject(errors: &[(i64, String)], reason: &str) -> bool {
+    let want = format!("Order rejected - reason:{}", reason);
+    errors.iter().any(|(code, text)| *code == 201 && *text == want)
+}
+
+fn run_submit_cancel_phase_inner(
+    conns: Conns,
+    phase_name: &str,
+    order_req: OrderRequest,
+    fill_or_cancel: bool,
+    accepted_refusal: Option<i64>,
+    reference_reject: Option<&str>,
+) -> Conns {
     phase!("--- {} ---", phase_name);
 
     let account_id = conns.account_id;
@@ -742,6 +787,11 @@ pub(super) fn run_submit_cancel_phase_or_refused(
     }
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+    // The loop stops on the Rejected update, before it drains the error the
+    // reject came with: take what is left.
+    for (oid, code, text) in shared_view.orders.drain_order_errors() {
+        if oid == order_id { order_errors.push((code, text)); }
+    }
 
     if refused_as_reference {
         let (code, text) = order_errors.iter().find(|(code, _)| Some(*code) == accepted_refusal).unwrap();
@@ -750,7 +800,12 @@ pub(super) fn run_submit_cancel_phase_or_refused(
         return conns;
     }
     if order_rejected {
-        record_rejection(phase_name);
+        if let Some(reason) = reference_reject.filter(|r| is_reference_reject(&order_errors, r)) {
+            println!("  PASS (rejected by the server as the reference: 201 Order rejected - reason:{})
+", reason);
+        } else {
+            record_rejection_with(phase_name, &order_errors);
+        }
         return conns;
     }
     if fill_or_cancel {
