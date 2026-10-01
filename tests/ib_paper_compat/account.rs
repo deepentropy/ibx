@@ -94,7 +94,12 @@ pub(super) fn phase_account_pnl(conns: Conns) -> Conns {
     let mut net_liq = 0i64;
     let mut probe_done = false;
 
-    while Instant::now() < deadline && !probe_done {
+    // The account values come from the server's account push after the
+    // probe order, about 1.4 s after the start on paper (01/10/2026), when
+    // the login's account answer is long consumed, as in the suite. The
+    // probe order is cancelled in about 0.5 s: the wait for the account
+    // values does not end with it.
+    while Instant::now() < deadline && !(probe_done && account_received) {
         // Account state is written straight into SharedState by the account-summary
         // handler, which emits no Event — so poll it every iteration instead of only
         // when one arrives. Checking it inside the Tick/OrderUpdate arms meant a
@@ -106,6 +111,7 @@ pub(super) fn phase_account_pnl(conns: Conns) -> Conns {
             if acct.net_liquidation != 0 {
                 net_liq = acct.net_liquidation;
                 account_received = true;
+                println!("  account values after {:.1}s", (Instant::now() + Duration::from_secs(15)).duration_since(deadline).as_secs_f64());
             }
         }
         match event_rx.recv_timeout(Duration::from_millis(100)) {

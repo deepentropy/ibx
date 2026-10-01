@@ -585,6 +585,32 @@ fn condition_phases_live() {
     assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
 }
 
+/// Focused live entry for the account PnL phase (ibx#493). Run:
+///   cargo test --test ib_paper_compat account_pnl_phase_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn account_pnl_phase_live() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let (gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
+        .expect("Gateway::connect() failed");
+    let mut conns = Conns { farm: farm_conn, ccp: ccp_conn, hmds: hmds_conn, account_id: gw.account_id.clone() };
+    // As in the suite, where phases run before it: the login's answers left
+    // in the connection are dropped first, the late ones too.
+    let drain_until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < drain_until {
+        ccp_keepalive(&mut conns.ccp);
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let conns = account::phase_account_pnl(conns);
+    let _ = connection::phase_graceful_shutdown(conns);
+    let rejected = take_rejections();
+    assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
+}
+
 /// Focused live entry for the tick-by-tick unsubscribe phase (ibx#404). Needs a
 /// live market for ticks. Run:
 ///   cargo test --test ib_paper_compat tbt_unsubscribe_phase_live -- --ignored --nocapture
