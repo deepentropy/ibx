@@ -1018,31 +1018,18 @@ impl CcpState {
             return;
         }
 
-        // CCP recovery push format A (ib-agent#155, captured against live):
-        // 35=8 with 150=0/39=0, tag 11 carries `<permId>.0`, the originating
-        // orderId is in tag 6121. For these, prefer 6121 as the local key so
-        // cancel_order(<prior-session orderId>) finds the right ClOrdID.
-        // Format B (paper account, observed live): tag 11 carries the
-        // originating orderId directly with `.0` suffix, tags 6119/6121
-        // absent — the existing tag-11 split below already gives the right
-        // value. The unwrap_or_else fallback handles both.
-        let recovery_origin_order_id: Option<u64> = if parsed.get(&150).map(|s| s.as_str()) == Some("0")
-            && parsed.get(&39).map(|s| s.as_str()) == Some("0")
-            && parsed.contains_key(&6121)
-        {
-            parsed.get(&6121).and_then(|s| s.parse::<u64>().ok())
-        } else {
-            None
-        };
-
-        let clord_id = recovery_origin_order_id.unwrap_or_else(|| {
-            parsed.get(&11).and_then(|s| {
-                let stripped = s.strip_prefix('C').unwrap_or(s);
-                // Strip versioned suffix (.0, .1, .2) from modify-chained ClOrdIDs
-                let base = stripped.split('.').next().unwrap_or(stripped);
-                base.parse::<u64>().ok()
-            }).unwrap_or(0)
-        });
+        // Orders are looked up by the server's order id, the part of the
+        // ClOrdID before its version, as the reference does (ibx#466). An
+        // order of an earlier session is kept under the API order id its
+        // report gives, so cancel_order(<that id>) finds it; its reports
+        // all come under the server's id.
+        let server_id = parsed.get(&11).and_then(|s| {
+            let stripped = s.strip_prefix('C').unwrap_or(s);
+            // Strip versioned suffix (.0, .1, .2) from modify-chained ClOrdIDs
+            let base = stripped.split('.').next().unwrap_or(stripped);
+            base.parse::<u64>().ok()
+        }).unwrap_or(0);
+        let mut clord_id = context.recovered_keys.get(&server_id).copied().unwrap_or(server_id);
 
         // Recovery insert: a 35=8 with status New/New (150=0/39=0) for an order
         // that is NOT in this session's context is a cross-session recovery entry
@@ -1052,6 +1039,15 @@ impl CcpState {
         let is_new_ack = parsed.get(&150).map(|s| s.as_str()) == Some("0")
             && parsed.get(&39).map(|s| s.as_str()) == Some("0");
         if is_new_ack && context.order(clord_id).is_none() {
+            // The API order id only names the order to the caller (ibx#466):
+            // taken when no order of this session has it.
+            let api_id = parsed.get(&6121).and_then(|s| s.parse::<u64>().ok())
+                .filter(|&id| id != 0 && id != server_id && context.order(id).is_none()
+                    && !context.recovered_keys.values().any(|&k| k == id));
+            if let Some(api_id) = api_id {
+                context.recovered_keys.insert(server_id, api_id);
+                clord_id = api_id;
+            }
             let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
             let side = match parsed.get(&54).map(|s| s.as_str()) {
                 Some("1") => Side::Buy,
@@ -3734,9 +3730,9 @@ mod tests {
         }
         assert!(context.order(42).is_none(), "a cancelled order leaves the engine");
         // Its state stays known for a later cancel (ibx#464).
-        assert_eq!(context.finished_status(42), Some(OrderStatus::Cancelled));
+        assert_eq!(context.finished_status(42), Some(crate::types::OrderStatus::Cancelled));
         let last = shared.orders.drain_order_updates().last().map(|u| u.status);
-        assert_eq!(last, Some(OrderStatus::Cancelled));
+        assert_eq!(last, Some(crate::types::OrderStatus::Cancelled));
     }
 
     // ibx#464: a cancel now carries the order's next ClOrdID version, not a
@@ -3801,7 +3797,7 @@ mod tests {
 
         let cancelled = pipe_frame("8=FIX.4.1|9=000518|35=8|34=000769|43=N|52=20260923-10:09:51|11=1626578655.0|17=140781.1790158191.3|150=4|20=3|378=5|39=4|167=CS|55=AAPL|6210=BEST|38=1|44=509.62|32=0|31=0.00|14=0|151=0|6=0|54=2|37=00cf16ed.000225ed.6ab35319.0001|1=DU1|60=20260923-10:09:51|6571=20260923-10:09:51|6596=20261231-21:00:00|583=1626578654|6209=ReduceOnFillNonBlock|40=2|6119=192|6121=118|59=1|6008=265598|15=USD|6004=BEST|6122=c|6107=1626578654.0|6531=11/1/-7625079|6205=1|6236=CHILD|198=NONE|6115=0|6088=Socket|6035=AAPL|6817=20260923-10:09:46|10=052|");
         ccp.process_ccp_message(&cancelled, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
-        assert_eq!(context.finished_status(1626578655), Some(OrderStatus::Cancelled));
+        assert_eq!(context.finished_status(1626578655), Some(crate::types::OrderStatus::Cancelled));
         shared.orders.drain_order_updates();
         shared.orders.drain_order_errors();
 
@@ -3816,7 +3812,7 @@ mod tests {
         ccp.process_ccp_message(&answer, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
         assert!(shared.orders.drain_order_errors().is_empty(), "no 201 and no 202");
         assert!(shared.orders.drain_order_updates().iter().all(|u| u.status != OrderStatus::Rejected));
-        assert_eq!(context.finished_status(1626578655), Some(OrderStatus::Cancelled));
+        assert_eq!(context.finished_status(1626578655), Some(crate::types::OrderStatus::Cancelled));
         let info = shared.orders.get_order_info(1626578655).unwrap();
         assert_eq!(info.order_state.status, "Cancelled");
     }
@@ -4836,6 +4832,37 @@ mod tests {
             (6008, con_id.to_string()), (55, "TEST".into()), (54, "1".into()),
             (38, "1".into()), (44, "1".into()), (40, "2".into()), (59, "1".into()),
         ].into_iter().collect()
+    }
+
+    // ibx#466: an order of an earlier session is looked up by the server's
+    // order id in every report; the API order id it carries only names it.
+    #[test]
+    fn recovered_orders_are_found_by_the_server_order_id() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut entry = recovery_frame(900_001, 1_005);
+        entry.insert(6121, "15".into());
+        entry.insert(6119, "7".into());
+        ccp.handle_exec_report(&entry, &mut context, &shared, &None, "");
+        assert!(context.order(15).is_some(), "kept under its API order id");
+        assert!(context.order(900_001).is_none());
+
+        // A later report of the server's id reaches the same order.
+        let mut cancelled = recovery_frame(900_001, 1_005);
+        cancelled.insert(150, "4".into());
+        cancelled.insert(39, "4".into());
+        cancelled.insert(11, "900001.0".into());
+        ccp.handle_exec_report(&cancelled, &mut context, &shared, &None, "");
+        assert_eq!(context.finished_status(15), Some(crate::types::OrderStatus::Cancelled));
+        assert!(context.order(900_001).is_none(), "no second order");
+
+        // An API order id an order of this session has is not taken.
+        context.insert_order(crate::types::Order::new(16, 0, Side::Buy, 1, 0, b'2', b'0', 0));
+        let mut other = recovery_frame(900_002, 1_005);
+        other.insert(6121, "16".into());
+        ccp.handle_exec_report(&other, &mut context, &shared, &None, "");
+        assert!(context.order(900_002).is_some(), "kept under the server's id");
     }
 
     // ibx#257: a recovered order on a new contract, with the instrument table

@@ -76,6 +76,9 @@ pub struct Context {
     /// it appeared on the wire. Used as the OrigClOrdID on cancel/modify so that
     /// legacy orders recorded without a `.{ver}` suffix still match — see ibx#179.
     pub(crate) last_clord: HashMap<OrderId, String>,
+    /// Orders of an earlier session kept under their API order id: the
+    /// server's order id to that key (ibx#466).
+    pub(crate) recovered_keys: HashMap<u64, OrderId>,
     /// ClOrdID of the cancel sent for each order, until the order ends or
     /// the cancel is rejected. Reports carrying it are about the cancel, not
     /// a new version of the order (ibx#464).
@@ -144,6 +147,7 @@ impl Context {
             pending_orders: OrderBuffer::new(),
             modify_versions: HashMap::new(),
             last_clord: HashMap::new(),
+            recovered_keys: HashMap::new(),
             cancel_clord: HashMap::new(),
             status_queries: std::collections::HashSet::new(),
             trail_limit_reported: HashMap::new(),
