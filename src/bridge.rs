@@ -10,9 +10,8 @@
 //! - The HotLoop pushes to SharedState sub-containers directly.
 //! - External callers read snapshots and poll events without blocking the hot loop.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
-use std::cell::UnsafeCell;
 
 use std::collections::HashMap;
 use crate::control::historical::{HistoricalResponse, HeadTimestampResponse};
@@ -96,34 +95,83 @@ pub enum Event {
     },
 }
 
-/// SeqLock-protected quote slot. Writer (hot loop) never blocks.
-/// Reader retries if it catches a write in progress.
-#[repr(C)]
-pub struct SeqQuote {
-    version: AtomicU64,
-    data: UnsafeCell<Quote>,
+/// Number of 8-byte words in a `Quote` payload (its fields, not its padding).
+const QUOTE_WORDS: usize = 15;
+
+/// Lists every `Quote` field once with its word slot. The load side builds
+/// the `Quote` with a struct literal, so a field missing here fails to compile.
+macro_rules! quote_words {
+    ($m:ident) => {
+        $m!(
+            0 bid i64, 1 ask i64, 2 last i64,
+            3 bid_size i64, 4 ask_size i64, 5 last_size i64, 6 volume i64,
+            7 open i64, 8 high i64, 9 low i64, 10 close i64,
+            11 timestamp_ns u64,
+            12 bid_exch_mask i64, 13 ask_exch_mask i64, 14 last_exch_mask i64
+        )
+    };
 }
 
-// SAFETY: SeqQuote is designed for single-writer (hot loop) + multiple-reader (Python).
-// The version counter ensures readers see consistent data.
-unsafe impl Sync for SeqQuote {}
-unsafe impl Send for SeqQuote {}
+/// SeqLock-protected quote slot. Writer (hot loop) never blocks.
+/// Reader retries if it catches a write in progress.
+///
+/// The payload is held as atomic words accessed with `Relaxed` ordering. On
+/// the usual targets these compile to plain loads and stores; a reader that
+/// overlaps a write reads stale or mixed words, which the version check
+/// rejects, instead of racing a non-atomic access.
+///
+/// Ordering (single writer, any number of readers):
+/// - writer: odd version (Relaxed), Release fence, payload (Relaxed), even
+///   version (Release). The fence keeps the payload stores after the odd mark.
+/// - reader: version v1 (Acquire), payload (Relaxed), Acquire fence, version
+///   v2 (Relaxed). If any payload word read comes from a write in progress,
+///   the fence pair makes that write's odd mark visible to the v2 load, so
+///   v2 != v1 and the snapshot is retried. An accepted snapshot (v1 even and
+///   v1 == v2) is the full payload of one write.
+#[repr(C, align(64))]
+pub struct SeqQuote {
+    version: AtomicU64,
+    data: [AtomicU64; QUOTE_WORDS],
+}
 
 impl SeqQuote {
     pub fn new() -> Self {
-        Self {
+        let s = Self {
             version: AtomicU64::new(0),
-            data: UnsafeCell::new(Quote::default()),
-        }
+            data: std::array::from_fn(|_| AtomicU64::new(0)),
+        };
+        s.store_payload(&Quote::default());
+        s
     }
 
-    /// Write a quote (hot loop side). Never blocks.
+    #[inline(always)]
+    fn store_payload(&self, q: &Quote) {
+        macro_rules! store {
+            ($($i:literal $f:ident $t:ty),*) => {
+                $( self.data[$i].store(q.$f as u64, Ordering::Relaxed); )*
+            };
+        }
+        quote_words!(store);
+    }
+
+    #[inline(always)]
+    fn load_payload(&self) -> Quote {
+        macro_rules! load {
+            ($($i:literal $f:ident $t:ty),*) => {
+                Quote { $( $f: self.data[$i].load(Ordering::Relaxed) as $t, )* }
+            };
+        }
+        quote_words!(load)
+    }
+
+    /// Write a quote (hot loop side). Never blocks. Single writer only.
     #[inline]
     pub fn write(&self, quote: &Quote) {
         let v = self.version.load(Ordering::Relaxed);
-        self.version.store(v + 1, Ordering::Release); // odd = writing
-        unsafe { *self.data.get() = *quote; }
-        self.version.store(v + 2, Ordering::Release); // even = stable
+        self.version.store(v.wrapping_add(1), Ordering::Relaxed); // odd = writing
+        fence(Ordering::Release);
+        self.store_payload(quote);
+        self.version.store(v.wrapping_add(2), Ordering::Release); // even = stable
     }
 
     /// Read a consistent quote snapshot (reader side). Spins on conflict.
@@ -131,9 +179,13 @@ impl SeqQuote {
     pub fn read(&self) -> Quote {
         loop {
             let v1 = self.version.load(Ordering::Acquire);
-            if v1 & 1 != 0 { continue; } // writer active
-            let q = unsafe { *self.data.get() };
-            let v2 = self.version.load(Ordering::Acquire);
+            if v1 & 1 != 0 { // writer active
+                std::hint::spin_loop();
+                continue;
+            }
+            let q = self.load_payload();
+            fence(Ordering::Acquire);
+            let v2 = self.version.load(Ordering::Relaxed);
             if v1 == v2 { return q; }
         }
     }
@@ -1324,5 +1376,74 @@ mod tests {
 
         writer.join().unwrap();
         reader.join().unwrap();
+    }
+
+    /// One writer and several readers hammer one slot. Every field of a
+    /// written quote derives from the same sequence number, so a torn
+    /// snapshot shows up as fields from two writes; a reader must also never
+    /// see the sequence go backwards.
+    #[test]
+    fn seqquote_stress_one_writer_many_readers() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        use std::thread;
+
+        fn quote_for(n: i64) -> Quote {
+            Quote {
+                bid: n, ask: n + 1, last: n + 2,
+                bid_size: n + 3, ask_size: n + 4, last_size: n + 5, volume: n + 6,
+                open: n + 7, high: n + 8, low: n + 9, close: n + 10,
+                timestamp_ns: (n + 11) as u64,
+                bid_exch_mask: n + 12, ask_exch_mask: n + 13, last_exch_mask: !n,
+            }
+        }
+
+        const WRITES: i64 = 1_000_000;
+        const READERS: usize = 4;
+        let sq = Arc::new(SeqQuote::new());
+        let done = Arc::new(AtomicBool::new(false));
+
+        let readers: Vec<_> = (0..READERS).map(|_| {
+            let sq = sq.clone();
+            let done = done.clone();
+            thread::spawn(move || {
+                let mut last_seen = 0i64;
+                let mut reads = 0u64;
+                loop {
+                    let finished = done.load(Ordering::Acquire);
+                    let q = sq.read();
+                    let n = q.bid;
+                    let expect = if n == 0 { Quote::default() } else { quote_for(n) };
+                    assert!(
+                        q.ask == expect.ask && q.last == expect.last
+                            && q.bid_size == expect.bid_size && q.ask_size == expect.ask_size
+                            && q.last_size == expect.last_size && q.volume == expect.volume
+                            && q.open == expect.open && q.high == expect.high
+                            && q.low == expect.low && q.close == expect.close
+                            && q.timestamp_ns == expect.timestamp_ns
+                            && q.bid_exch_mask == expect.bid_exch_mask
+                            && q.ask_exch_mask == expect.ask_exch_mask
+                            && q.last_exch_mask == expect.last_exch_mask,
+                        "torn quote at sequence {n}"
+                    );
+                    assert!(n >= last_seen, "sequence went back: {n} after {last_seen}");
+                    last_seen = n;
+                    reads += 1;
+                    if finished { break; }
+                }
+                (last_seen, reads)
+            })
+        }).collect();
+
+        for n in 1..=WRITES {
+            sq.write(&quote_for(n));
+        }
+        done.store(true, Ordering::Release);
+
+        for r in readers {
+            let (last_seen, reads) = r.join().unwrap();
+            assert_eq!(last_seen, WRITES, "a read after the last write sees it");
+            assert!(reads > 0);
+        }
     }
 }
