@@ -5,4 +5,5 @@ pub mod fundamental;
 pub mod histogram;
 pub mod historical;
 pub mod news;
+pub mod optcalc;
 pub mod scanner;
