@@ -28,6 +28,7 @@ impl EClient {
         mkt_data_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_mkt_data", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         let shared = self.shared_state()?;
         if let Some((code, text)) = self.core.duplicate_ticker_refusal(req_id) {
@@ -78,6 +79,7 @@ impl EClient {
     /// Cancel market data.
     pub fn cancel_mkt_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_mkt_data", &[req_id]) { return Ok(()); }
         let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
         if let Some(instrument) = instrument {
             let tx = self.tx()?;
@@ -104,6 +106,7 @@ impl EClient {
         ignore_size: bool,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_tick_by_tick_data", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
 
         // The reference's checks: 321 for a bad type or a combo, 10189 when
@@ -137,6 +140,7 @@ impl EClient {
     /// Cancel tick-by-tick data.
     fn cancel_tick_by_tick_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_tick_by_tick_data", &[req_id]) { return Ok(()); }
         if let Some(instrument) = self.core.unregister_tbt(req_id) {
             let tx = self.tx()?;
             send_cmd(py, &tx, ControlCommand::UnsubscribeTbt { instrument })?;
@@ -192,6 +196,7 @@ impl EClient {
         mkt_depth_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_mkt_depth", &[req_id, contract.con_id]) { return Ok(()); }
         let _ = mkt_depth_options;
         // An empty exchange is refused by the engine, as the reference
         // refuses it (#452).
@@ -213,6 +218,7 @@ impl EClient {
     #[pyo3(signature = (req_id, is_smart_depth=false))]
     fn cancel_mkt_depth(&self, py: Python<'_>, req_id: i64, is_smart_depth: bool) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_mkt_depth", &[req_id]) { return Ok(()); }
         let _ = is_smart_depth;
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::UnsubscribeDepth { req_id })?;
@@ -232,6 +238,7 @@ impl EClient {
         real_time_bars_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_real_time_bars", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         let _ = (bar_size, real_time_bars_options);
         send_cmd(py, &tx, ControlCommand::SubscribeRealTimeBar {
@@ -249,6 +256,7 @@ impl EClient {
     /// Cancel real-time bars.
     fn cancel_real_time_bars(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_real_time_bars", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::CancelRealTimeBar { req_id })?;
         Ok(())

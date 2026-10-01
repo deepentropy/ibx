@@ -43,6 +43,7 @@ impl EClient {
         generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool,
         mode_9887: i32,
     ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_mkt_data_ex", &[req_id, contract.con_id]) { return Ok(()); }
         if let Some((code, text)) = self.core.duplicate_ticker_refusal(req_id) {
             self.shared.orders.push_order_error(req_id, code, text);
             return Ok(());
@@ -69,6 +70,7 @@ impl EClient {
 
     /// Cancel market data. Matches `cancelMktData` in C++.
     pub fn cancel_mkt_data(&self, req_id: i64) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("cancel_mkt_data", &[req_id]) { return Ok(()); }
         let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
         if let Some(instrument) = instrument {
             self.send(ControlCommand::Unsubscribe { instrument })?;
@@ -91,6 +93,7 @@ impl EClient {
         &self, req_id: i64, contract: &Contract, tick_type: &str,
         number_of_ticks: i32, ignore_size: bool,
     ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_tick_by_tick_data", &[req_id, contract.con_id]) { return Ok(()); }
         let local_symbol = if contract.local_symbol.is_empty() { &contract.symbol } else { &contract.local_symbol };
         let tbt_type = match self.core.tbt_refusal(&self.shared, contract.con_id, &contract.sec_type, tick_type, local_symbol) {
             Ok(t) => t,
@@ -109,6 +112,7 @@ impl EClient {
 
     /// Cancel tick-by-tick data. Matches `cancelTickByTickData` in C++.
     pub fn cancel_tick_by_tick_data(&self, req_id: i64) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("cancel_tick_by_tick_data", &[req_id]) { return Ok(()); }
         if let Some(instrument) = self.core.unregister_tbt(req_id) {
             self.send(ControlCommand::UnsubscribeTbt { instrument })?;
         }
@@ -122,6 +126,7 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         num_rows: i32, is_smart_depth: bool,
     ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_mkt_depth", &[req_id, contract.con_id]) { return Ok(()); }
         // An empty exchange is refused by the engine, as the reference
         // refuses it (#452).
         let exchange = contract.exchange.clone();
@@ -138,6 +143,7 @@ impl EClient {
 
     /// Cancel market depth. Matches `cancelMktDepth` in C++.
     pub fn cancel_mkt_depth(&self, req_id: i64) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("cancel_mkt_depth", &[req_id]) { return Ok(()); }
         self.send(ControlCommand::UnsubscribeDepth { req_id })
     }
 
@@ -148,6 +154,7 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         _bar_size: i32, what_to_show: &str, use_rth: bool,
     ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_real_time_bars", &[req_id, contract.con_id]) { return Ok(()); }
         self.send(ControlCommand::SubscribeRealTimeBar {
             req_id,
             con_id: contract.con_id,
@@ -161,6 +168,7 @@ impl EClient {
 
     /// Cancel real-time bars. Matches `cancelRealTimeBars` in C++.
     pub fn cancel_real_time_bars(&self, req_id: i64) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("cancel_real_time_bars", &[req_id]) { return Ok(()); }
         self.send(ControlCommand::CancelRealTimeBar { req_id })
     }
 

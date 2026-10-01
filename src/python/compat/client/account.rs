@@ -12,6 +12,7 @@ impl EClient {
     #[pyo3(signature = (req_id, account, model_code=""))]
     fn req_pnl(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_pnl", &[req_id]) { return Ok(()); }
         // Several requests can run; an empty or unknown account gives 321, a
         // request id already running gives 102 (ibx#478).
         if let Err((code, message)) = self.core.request_pnl(req_id, account, &self.account()) {
@@ -27,6 +28,7 @@ impl EClient {
     /// Cancel P&L subscription.
     fn cancel_pnl(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_pnl", &[req_id]) { return Ok(()); }
         // A request id not running gives 10185 (ibx#478).
         if let Some((code, message)) = self.core.cancel_pnl_request(req_id) {
             self.shared_state()?.orders.push_order_error(req_id, code, message);
@@ -41,6 +43,7 @@ impl EClient {
     #[pyo3(signature = (req_id, account, model_code, con_id))]
     fn req_pnl_single(&self, req_id: i64, account: &str, model_code: &str, con_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_pnl_single", &[req_id, con_id]) { return Ok(()); }
         // Same checks as req_pnl (ibx#478).
         if let Err((code, message)) = self.core.request_pnl_single(req_id, account, &self.account(), con_id) {
             self.shared_state()?.orders.push_order_error(req_id, code, message);
@@ -52,6 +55,7 @@ impl EClient {
     /// Cancel single-position P&L subscription.
     fn cancel_pnl_single(&self, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_pnl_single", &[req_id]) { return Ok(()); }
         // A request id not running gives 10186 (ibx#478).
         if let Some((code, message)) = self.core.cancel_pnl_single_request(req_id) {
             self.shared_state()?.orders.push_order_error(req_id, code, message);
@@ -63,6 +67,7 @@ impl EClient {
     #[pyo3(signature = (req_id, group_name, tags))]
     fn req_account_summary(&self, py: Python<'_>, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_account_summary", &[req_id]) { return Ok(()); }
         // A server subscription: the rows come as the server sends them, each
         // batch ends with account_summary_end, until the cancel (ibx#479).
         match self.core.subscribe_account_summary(req_id, group_name, tags) {
@@ -83,6 +88,7 @@ impl EClient {
     /// Cancel account summary.
     fn cancel_account_summary(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_account_summary", &[req_id]) { return Ok(()); }
         if let Some(sr_id) = self.core.unsubscribe_account_summary(req_id) {
             let _ = send_cmd(py, &self.tx()?, ControlCommand::CancelAccountSummary { sr_id });
         }
@@ -132,6 +138,7 @@ impl EClient {
         &self, py: Python<'_>, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_account_updates_multi", &[req_id]) { return Ok(()); }
         let shared = self.shared_state()?;
         if let Err((code, message)) = self.core.subscribe_account_multi(req_id, account, model_code, ledger_and_nlv) {
             shared.orders.push_order_error(req_id, code, message);
@@ -143,6 +150,7 @@ impl EClient {
     /// Cancel multi-account updates.
     fn cancel_account_updates_multi(&self, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_account_updates_multi", &[req_id]) { return Ok(()); }
         self.core.unsubscribe_account_multi(req_id);
         Ok(())
     }
@@ -152,6 +160,7 @@ impl EClient {
     #[pyo3(signature = (req_id, account, model_code))]
     fn req_positions_multi(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_positions_multi", &[req_id]) { return Ok(()); }
         self.core.subscribe_positions_multi(req_id, account, model_code);
         let shared = self.shared_state()?;
         self.dispatch_multi(py, &shared)
@@ -160,6 +169,7 @@ impl EClient {
     /// Cancel multi-account positions.
     fn cancel_positions_multi(&self, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_positions_multi", &[req_id]) { return Ok(()); }
         self.core.unsubscribe_positions_multi(req_id);
         Ok(())
     }

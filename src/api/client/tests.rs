@@ -4971,3 +4971,28 @@ fn a_negative_request_id_round_trips_through_the_engine_queues() {
     assert!(w.events.iter().any(|e| e == "error:-3:162:no data"), "{:?}", w.events);
     assert!(w.events.iter().any(|e| e == "contract_details_end:-5"), "{:?}", w.events);
 }
+
+// ibx#285: the reference reads ids as 32-bit ints; a request with an id
+// outside that range does not decode there and is dropped with no error.
+// The ends of the range are kept.
+#[test]
+fn ids_outside_the_reference_range_drop_the_request() {
+    let (client, rx, shared) = test_client();
+    for id in [i64::from(i32::MIN), i64::from(i32::MAX)] {
+        client.cancel_historical_data(id).unwrap();
+        match rx.try_recv() {
+            Ok(ControlCommand::CancelHistorical { req_id }) => assert_eq!(req_id, id),
+            other => panic!("expected the cancel of {id}, got {:?}", other),
+        }
+    }
+    client.cancel_historical_data(i64::from(i32::MAX) + 1).unwrap();
+    client.cancel_historical_data(i64::from(i32::MIN) - 1).unwrap();
+    let wide = Contract { con_id: 1 << 32, ..spy() };
+    client.req_mkt_depth(7, &wide, 5, false).unwrap();
+    client.cancel_mkt_data(1 << 40).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("error:")), "no error: {:?}", w.events);
+    assert!(shared.orders.drain_order_errors().is_empty());
+}

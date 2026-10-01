@@ -126,6 +126,15 @@ fn cache_reconnect_credentials(hot_loop: &mut crate::engine::hot_loop::HotLoop, 
 /// [`is_connected()`](EClient::is_connected) turns false. No error callback is
 /// raised for this: the connectivity error codes are pushed by the server, not
 /// synthesized locally (ibx#242).
+///
+/// # Ids
+///
+/// Request, ticker and order ids and conIds are `i64` everywhere: in the
+/// methods, the [`Wrapper`](crate::api::wrapper::Wrapper) callbacks and the
+/// [`Event`]s. Negative ids are kept as given; `-1` is the id of an error that
+/// belongs to no request. The reference reads request ids, ticker ids and
+/// conIds as 32-bit ints, so a request with one outside that range is dropped
+/// with a log line and no error, as the reference drops it (ibx#285).
 pub struct EClient {
     pub(crate) shared: Arc<SharedState>,
     pub(crate) control_tx: Sender<ControlCommand>,

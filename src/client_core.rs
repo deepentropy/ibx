@@ -776,6 +776,22 @@ fn reported_trail_limit(order: &mut ApiOrder, reported: &ApiOrder) {
 }
 
 impl ClientCore {
+    /// The reference reads request ids, ticker ids and conIds as 32-bit
+    /// ints: a request with one outside that range does not decode there
+    /// and is dropped, with a log line and no error (ibx#285). False for
+    /// such a request. Order ids are not checked here: the order ids this
+    /// client hands out (next_valid_id) are wider, and an order id outside
+    /// the range is only left out of the order (ibx#466).
+    pub fn ids_fit(request: &str, ids: &[i64]) -> bool {
+        match ids.iter().find(|&&id| i32::try_from(id).is_err()) {
+            None => true,
+            Some(id) => {
+                log::warn!("{request}: id {id} is outside the 32-bit range of the reference, request dropped");
+                false
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             req_to_instrument: Mutex::new(HashMap::new()),

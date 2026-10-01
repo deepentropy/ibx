@@ -111,6 +111,7 @@ impl EClient {
     #[pyo3(signature = (req_id, fa_data_type, cxml))]
     fn replace_fa(&self, py: Python<'_>, req_id: i64, fa_data_type: i32, cxml: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("replace_fa", &[req_id]) { return Ok(()); }
         // Not an FA session: error 321 for the request as the reference
         // (ibx#481).
         if !self.shared_state()?.reference.fa_session() {
@@ -127,6 +128,7 @@ impl EClient {
 
     fn query_display_groups(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("query_display_groups", &[req_id]) { return Ok(()); }
         self.wrapper.call_method1(py, "display_group_list", (req_id, ""))?;
         Ok(())
     }
@@ -153,6 +155,7 @@ impl EClient {
 
     fn req_smart_components(&self, py: Python<'_>, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_smart_components", &[req_id]) { return Ok(()); }
         let _ = bbo_exchange;
         let shared = self.shared_state()?;
         let sc = shared.reference.smart_components();
@@ -189,6 +192,7 @@ impl EClient {
 
     fn req_soft_dollar_tiers(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_soft_dollar_tiers", &[req_id]) { return Ok(()); }
         let shared = self.shared_state()?;
         let tiers = shared.reference.soft_dollar_tiers();
         let mut objs: Vec<Py<SoftDollarTierPy>> = Vec::with_capacity(tiers.len());
@@ -242,6 +246,7 @@ impl EClient {
 
     fn req_user_info(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_user_info", &[req_id]) { return Ok(()); }
         let shared = self.shared_state()?;
         let id = shared.reference.white_branding_id();
         self.wrapper.call_method1(py, "user_info", (req_id, id))?;

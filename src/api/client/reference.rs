@@ -17,6 +17,7 @@ impl EClient {
         end_date_time: &str, duration: &str, bar_size: &str,
         what_to_show: &str, use_rth: bool, format_date: i32, keep_up_to_date: bool,
     ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_historical_data", &[req_id, contract.con_id]) { return Ok(()); }
         if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration, bar_size, what_to_show, format_date) {
             self.shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
@@ -51,6 +52,7 @@ impl EClient {
 
     /// Cancel historical data. Matches `cancelHistoricalData` in C++.
     pub fn cancel_historical_data(&self, req_id: i64) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("cancel_historical_data", &[req_id]) { return Ok(()); }
         self.send(ControlCommand::CancelHistorical { req_id })
     }
 
@@ -58,6 +60,7 @@ impl EClient {
     pub fn req_head_time_stamp(
         &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool, _format_date: i32,
     ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_head_time_stamp", &[req_id, contract.con_id]) { return Ok(()); }
         self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHeadTimestamp {
             req_id,
             con_id: contract.con_id,
@@ -72,6 +75,7 @@ impl EClient {
 
     /// Request contract details. Matches `reqContractDetails` in C++.
     pub fn req_contract_details(&self, req_id: i64, contract: &Contract) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_contract_details", &[req_id, contract.con_id]) { return Ok(()); }
         self.send(ControlCommand::FetchContractDetails {
             req_id,
             con_id: contract.con_id,
@@ -103,6 +107,7 @@ impl EClient {
     /// An empty or invalid pattern gives 321 and nothing is sent; the
     /// pattern is sent trimmed (ibx#439).
     pub fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_matching_symbols", &[req_id]) { return Ok(()); }
         let pattern = match crate::client_core::matching_symbols_pattern(pattern) {
             Ok(pattern) => pattern,
             Err((code, message)) => {
@@ -118,6 +123,7 @@ impl EClient {
 
     /// Cancel head timestamp request. Matches `cancelHeadTimestamp` in C++.
     pub fn cancel_head_time_stamp(&self, req_id: i64) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("cancel_head_time_stamp", &[req_id]) { return Ok(()); }
         self.send(ControlCommand::CancelHeadTimestamp { req_id })
     }
 
@@ -162,6 +168,7 @@ impl EClient {
         scanner_subscription_options: &[TagValue],
         scanner_subscription_filter_options: &[TagValue],
     ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_scanner_subscription", &[req_id]) { return Ok(()); }
         match ClientCore::scanner_request(subscription, scanner_subscription_options, scanner_subscription_filter_options) {
             Ok(subscription) => self.send(ControlCommand::SubscribeScanner {
                 req_id,
@@ -177,6 +184,7 @@ impl EClient {
 
     /// Cancel a scanner subscription. Matches `cancelScannerSubscription` in C++.
     pub fn cancel_scanner_subscription(&self, req_id: i64) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("cancel_scanner_subscription", &[req_id]) { return Ok(()); }
         self.send(ControlCommand::CancelScanner { req_id })
     }
 
@@ -189,6 +197,7 @@ impl EClient {
         &self, req_id: i64, con_id: i64, provider_codes: &str,
         start_time: &str, end_time: &str, max_results: u32,
     ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_historical_news", &[req_id, con_id]) { return Ok(()); }
         let sources = self.shared.reference.news_sources();
         if let Some((code, text)) = ClientCore::historical_news_refusal(provider_codes, max_results as i64, &sources) {
             self.shared.orders.push_order_error(req_id, code, text);
@@ -207,6 +216,7 @@ impl EClient {
     /// Request a news article by provider and article ID. Matches `reqNewsArticle` in C++.
     /// A local refusal comes back through `error`.
     pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &str) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_news_article", &[req_id]) { return Ok(()); }
         let sources = self.shared.reference.news_sources();
         if let Some((code, text)) = ClientCore::news_article_refusal(provider_code, article_id, &sources) {
             self.shared.orders.push_order_error(req_id, code, text);
@@ -223,6 +233,7 @@ impl EClient {
 
     /// Request fundamental data (e.g. ReportSnapshot, ReportsFinSummary). Matches `reqFundamentalData` in C++.
     pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_fundamental_data", &[req_id, contract.con_id]) { return Ok(()); }
         if let Some((code, text)) = ClientCore::fundamental_refusal(&contract.sec_type) {
             self.shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
@@ -236,6 +247,7 @@ impl EClient {
 
     /// Cancel fundamental data. Matches `cancelFundamentalData` in C++.
     pub fn cancel_fundamental_data(&self, req_id: i64) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("cancel_fundamental_data", &[req_id]) { return Ok(()); }
         self.send(ControlCommand::CancelFundamentalData { req_id })
     }
 
@@ -243,6 +255,7 @@ impl EClient {
 
     /// Request price histogram data. Matches `reqHistogramData` in C++.
     pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_histogram_data", &[req_id, contract.con_id]) { return Ok(()); }
         self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistogramData {
             req_id,
             con_id: contract.con_id,
@@ -255,6 +268,7 @@ impl EClient {
 
     /// Cancel histogram data. Matches `cancelHistogramData` in C++.
     pub fn cancel_histogram_data(&self, req_id: i64) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("cancel_histogram_data", &[req_id]) { return Ok(()); }
         self.send(ControlCommand::CancelHistogramData { req_id })
     }
 
@@ -266,6 +280,7 @@ impl EClient {
         start_date_time: &str, end_date_time: &str,
         number_of_ticks: i32, what_to_show: &str, use_rth: bool,
     ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_historical_ticks", &[req_id, contract.con_id]) { return Ok(()); }
         self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistoricalTicks {
             req_id,
             con_id: contract.con_id,
@@ -286,6 +301,7 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, use_rth: bool,
     ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_historical_schedule", &[req_id, contract.con_id]) { return Ok(()); }
         self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistoricalSchedule {
             req_id,
             con_id: contract.con_id,

@@ -27,6 +27,7 @@ impl EClient {
         chart_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_historical_data", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         let _ = chart_options;
         // A request the reference refuses locally gets its error (321 or
@@ -69,6 +70,7 @@ impl EClient {
     /// Cancel historical data.
     fn cancel_historical_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_historical_data", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::CancelHistorical { req_id })?;
         Ok(())
@@ -86,6 +88,7 @@ impl EClient {
         format_date: i32,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_head_time_stamp", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ClientCore::resolve_first(req_id, &contract.to_api(), ControlCommand::FetchHeadTimestamp {
             req_id,
@@ -102,6 +105,7 @@ impl EClient {
     /// Cancel head timestamp request.
     fn cancel_head_time_stamp(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_head_time_stamp", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::CancelHeadTimestamp { req_id })?;
         Ok(())
@@ -110,6 +114,7 @@ impl EClient {
     /// Request contract details.
     fn req_contract_details(&self, py: Python<'_>, req_id: i64, contract: &Contract) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_contract_details", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::FetchContractDetails {
             req_id,
@@ -145,6 +150,7 @@ impl EClient {
     /// Search for matching symbols.
     fn req_matching_symbols(&self, py: Python<'_>, req_id: i64, pattern: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_matching_symbols", &[req_id]) { return Ok(()); }
         // An empty or invalid pattern gives 321 and nothing is sent; the
         // pattern is sent trimmed (ibx#439).
         let pattern = match crate::client_core::matching_symbols_pattern(pattern) {
@@ -174,6 +180,7 @@ impl EClient {
         scanner_subscription_filter_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_scanner_subscription", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
         Python::attach(|py| {
             let text = |name: &str, default: &str| subscription.getattr(py, name)
@@ -237,6 +244,7 @@ impl EClient {
     /// Cancel scanner subscription.
     fn cancel_scanner_subscription(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_scanner_subscription", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::CancelScanner { req_id })?;
         Ok(())
@@ -261,6 +269,7 @@ impl EClient {
         news_article_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_news_article", &[req_id]) { return Ok(()); }
         let _ = news_article_options;
         let tx = self.tx()?;
         let shared = self.shared_state()?;
@@ -290,6 +299,7 @@ impl EClient {
         historical_news_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_historical_news", &[req_id, con_id]) { return Ok(()); }
         let _ = historical_news_options;
         let tx = self.tx()?;
         let shared = self.shared_state()?;
@@ -319,6 +329,7 @@ impl EClient {
         fundamental_data_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_fundamental_data", &[req_id, contract.con_id]) { return Ok(()); }
         let _ = fundamental_data_options;
         if let Some((code, text)) = ClientCore::fundamental_refusal(&contract.sec_type) {
             self.shared_state()?.reference.push_historical_error(req_id, code, text);
@@ -336,6 +347,7 @@ impl EClient {
     /// Cancel fundamental data.
     fn cancel_fundamental_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_fundamental_data", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::CancelFundamentalData { req_id })?;
         Ok(())
@@ -357,6 +369,7 @@ impl EClient {
         misc_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_historical_ticks", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         let _ = (ignore_size, misc_options);
         send_cmd(py, &tx, ClientCore::resolve_first(req_id, &contract.to_api(), ControlCommand::FetchHistoricalTicks {
@@ -398,6 +411,7 @@ impl EClient {
     #[pyo3(signature = (req_id, contract, use_rth, time_period))]
     fn req_histogram_data(&self, py: Python<'_>, req_id: i64, contract: &Contract, use_rth: bool, time_period: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_histogram_data", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ClientCore::resolve_first(req_id, &contract.to_api(), ControlCommand::FetchHistogramData {
             req_id,
@@ -413,6 +427,7 @@ impl EClient {
     /// Cancel histogram data.
     fn cancel_histogram_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("cancel_histogram_data", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::CancelHistogramData { req_id })?;
         Ok(())
@@ -425,6 +440,7 @@ impl EClient {
         end_date_time: &str, duration_str: &str, use_rth: bool,
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_historical_schedule", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ClientCore::resolve_first(req_id, &contract.to_api(), ControlCommand::FetchHistoricalSchedule {
             req_id,

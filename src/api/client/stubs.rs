@@ -12,6 +12,7 @@ impl EClient {
     /// Request smart routing components for a BBO exchange. Matches `reqSmartComponents` in C++.
     /// Gateway-local — returns component exchanges from init data.
     pub fn req_smart_components(&self, req_id: i64, _bbo_exchange: &str, wrapper: &mut impl Wrapper) {
+        if !crate::client_core::ClientCore::ids_fit("req_smart_components", &[req_id]) { return; }
         let components = self.shared.reference.smart_components();
         wrapper.smart_components(req_id, &components);
     }
@@ -54,6 +55,7 @@ impl EClient {
     /// request as the reference (ibx#481); the FA data exchange itself is
     /// not implemented.
     pub fn replace_fa(&self, req_id: i64, _fa_data_type: i32, _cxml: &str) {
+        if !crate::client_core::ClientCore::ids_fit("replace_fa", &[req_id]) { return; }
         if !self.shared.reference.fa_session() {
             let (code, text) = crate::client_core::REPLACE_FA_NOT_FA;
             self.shared.orders.push_order_error(req_id, code, text.to_string());
@@ -82,6 +84,7 @@ impl EClient {
     /// Gateway-local — returns tiers parsed from CCP logon tag 6522, none
     /// when the logon has no tiers (ibx#480).
     pub fn req_soft_dollar_tiers(&self, req_id: i64, wrapper: &mut impl Wrapper) {
+        if !crate::client_core::ClientCore::ids_fit("req_soft_dollar_tiers", &[req_id]) { return; }
         let tiers = self.shared.reference.soft_dollar_tiers();
         wrapper.soft_dollar_tiers(req_id, &tiers);
     }
@@ -115,6 +118,7 @@ impl EClient {
     /// Request user info. Matches `reqUserInfo` in C++.
     /// Gateway-local — returns whiteBrandingId from CCP logon.
     pub fn req_user_info(&self, req_id: i64, wrapper: &mut impl Wrapper) {
+        if !crate::client_core::ClientCore::ids_fit("req_user_info", &[req_id]) { return; }
         let id = self.shared.reference.white_branding_id();
         wrapper.user_info(req_id, &id);
     }
