@@ -532,7 +532,8 @@ impl FarmState {
         let server_tag: u32 = match parts[2].parse() { Ok(v) => v, Err(_) => return };
 
         if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
-            context.market.register_farm_tag(self.rx_farm, server_tag, instrument);
+            // A trade stream tag, kept apart from the quote tags (#292).
+            context.market.register_trade_tag(self.rx_farm, server_tag, instrument);
             context.market.set_min_tick(instrument, min_tick);
             // The size increment, when present (ibx#287).
             if let Some(size_min_tick) = parts.get(4).and_then(|v| v.parse::<f64>().ok()) {
@@ -1277,7 +1278,12 @@ impl FarmState {
         if tick_type != 0x1E90 { return; }
 
         let server_tag = u32::from_be_bytes([body[2], body[3], body[4], body[5]]);
-        let instrument = context.market.instrument_by_farm_tag(self.rx_farm, server_tag).unwrap_or(0);
+        // A tag of no known request is dropped, as the reference does: it
+        // is never given to another contract (#292).
+        let Some(instrument) = context.market.instrument_by_farm_tag(self.rx_farm, server_tag) else {
+            log::warn!("News tick for server tag {} of no known request: dropped", server_tag);
+            return;
+        };
 
         let batch_count = u32::from_be_bytes([body[8], body[9], body[10], body[11]]) as usize;
         let mut pos = 12;

@@ -75,6 +75,11 @@ pub struct HotLoop {
     pub(crate) hmds: HmdsState,
     /// Data farms opened on demand by the routing table (#445).
     pub(crate) pool: FarmPool,
+    /// Instruments whose market data record nobody uses, since when, and
+    /// whether their quote tags were freed (#292).
+    tag_marks: Vec<(InstrumentId, Instant, bool)>,
+    /// Next run of the server tag cleaner (#292).
+    next_tag_clean: Instant,
     // ── Auto-reconnect ──
     reconnect_auth: Option<ReconnectAuth>,
     pending_farm_reconnect: Option<Receiver<io::Result<Connection>>>,
@@ -114,6 +119,8 @@ impl HotLoop {
             ccp: CcpState::new(),
             hmds: HmdsState::new(),
             pool: FarmPool::new(Instant::now()),
+            tag_marks: Vec::new(),
+            next_tag_clean: Instant::now() + TAG_CLEAN_PERIOD,
             reconnect_auth: None,
             pending_farm_reconnect: None,
             ccp_next_attempt_at: None,
@@ -401,6 +408,42 @@ impl HotLoop {
         }
     }
 
+    /// The server tag cleaner (#292), as the reference runs it every 60 s:
+    /// the market data record of an instrument with no live top-of-book
+    /// request is marked with the time (the mark goes when it is used
+    /// again); a record marked for 300 s or more has its quote tags freed,
+    /// at most 100 per run, with no age test when more than 1000 wait. The
+    /// trade stream tags stay with the contract until its last slot goes.
+    fn clean_server_tags(&mut self, now: Instant) {
+        if now < self.next_tag_clean {
+            return;
+        }
+        self.next_tag_clean = now + TAG_CLEAN_PERIOD;
+        let active: Vec<InstrumentId> = self.context.market.active_instruments().map(|(id, _)| id).collect();
+        self.tag_marks.retain(|(id, ..)| active.contains(id));
+        for id in active {
+            let used = self.farm.has_md_subscription(id);
+            let pos = self.tag_marks.iter().position(|(m, ..)| *m == id);
+            match (used, pos) {
+                (true, Some(p)) => { self.tag_marks.remove(p); }
+                (false, None) => self.tag_marks.push((id, now, false)),
+                _ => {}
+            }
+        }
+        let waiting: Vec<usize> = (0..self.tag_marks.len()).filter(|&i| !self.tag_marks[i].2).collect();
+        let skip_age = waiting.len() > TAG_CLEAN_SKIP_AGE_ABOVE;
+        let mut due: Vec<usize> = waiting.into_iter()
+            .filter(|&i| skip_age || now.duration_since(self.tag_marks[i].1) >= TAG_UNUSED_FOR)
+            .collect();
+        due.sort_by_key(|&i| self.tag_marks[i].1);
+        for i in due.into_iter().take(TAG_CLEAN_MAX_PER_RUN) {
+            let id = self.tag_marks[i].0;
+            let freed = self.context.market.drop_quote_tags(id);
+            self.tag_marks[i].2 = true;
+            log::debug!("Market data record of instrument {} unused: {} quote tags freed", id, freed);
+        }
+    }
+
     /// Send again, each to the farm of its route, the subscriptions that
     /// lost their entries with their farm (#445, ibx#288).
     fn resend_unsent_subscriptions(&mut self) {
@@ -558,6 +601,9 @@ impl HotLoop {
                 &mut self.hmds_conn, &self.shared,
                 &self.event_tx, &mut self.hb,
             );
+
+            // 1b''. The server tag cleaner (#292), once a minute.
+            self.clean_server_tags(Instant::now());
 
             // 1b'. Farms opened on demand (#445): read, then connect,
             //      heartbeat and close them by their rules.
@@ -1899,6 +1945,14 @@ struct Links {
     farm: bool,
     hmds: bool,
 }
+
+/// Period of the server tag cleaner, how long a market data record stays
+/// unused before its quote tags go, most records torn down per run, and the
+/// number of waiting records above which the age is not checked (#292).
+const TAG_CLEAN_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
+const TAG_UNUSED_FOR: std::time::Duration = std::time::Duration::from_secs(300);
+const TAG_CLEAN_MAX_PER_RUN: usize = 100;
+const TAG_CLEAN_SKIP_AGE_ABOVE: usize = 1000;
 
 /// Longest wait for the data farms before the restored-link message.
 const RESTORE_FARM_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -3820,5 +3874,107 @@ mod routing_tests {
         let again = sent(&mut side);
         assert_eq!(again.len(), 1, "{again:?}");
         assert!(again[0].contains("|207=CME|167=FUT|264=442|"));
+    }
+}
+
+#[cfg(test)]
+mod tag_cleaner_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use crate::bridge::SharedState;
+
+    fn subscribe(engine: &mut HotLoop, con_id: i64) -> (InstrumentId, u32) {
+        let instrument = engine.context.market.register(con_id);
+        let sub = farm::MdSubscribe {
+            con_id, symbol: String::new(), exchange: "SMART".into(), sec_type: "STK".into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            instrument, mode_9887: 0,
+        };
+        engine.route_md_subscribe(&sub);
+        (instrument, engine.farm.next_md_req_id - 2)
+    }
+
+    // #292: quote and trade tags are kept apart. The cleaner runs every
+    // 60 s; the quote tags of an instrument with no live top-of-book
+    // request go once it was unused for 300 s (a request in between clears
+    // the mark); its trade stream tags stay while the slot stays, and go
+    // with the contract's last slot.
+    #[test]
+    fn quote_tags_freed_after_five_unused_minutes_trade_tags_with_the_slot() {
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let t0 = Instant::now();
+        let (id, first) = subscribe(&mut engine, 265598);
+        engine.inject_farm_message(format!("8=O\x0135=Q\x011101,{},0.01,0,3,9c,,1,1", first).as_bytes());
+        engine.inject_farm_message(b"8=O\x0135=L\x01265598,0.01,1098,,1");
+        assert_eq!(engine.context.market.tag_counts(), (1, 1));
+        assert_eq!(engine.context.market.instrument_by_server_tag(1098), Some(id), "trade tag found");
+
+        // The slot stays (pinned, as by an open order) after the cancel.
+        engine.route_md_cancel(id);
+        assert_eq!(engine.context.market.instrument_by_server_tag(1101), Some(id), "kept after the cancel");
+
+        engine.clean_server_tags(t0 + Duration::from_secs(30));
+        assert_eq!(engine.context.market.tag_counts(), (1, 1), "first run at 60 s");
+        engine.clean_server_tags(t0 + Duration::from_secs(60)); // marked
+        engine.clean_server_tags(t0 + Duration::from_secs(300));
+        assert_eq!(engine.context.market.tag_counts(), (1, 1), "unused for 240 s only");
+        engine.clean_server_tags(t0 + Duration::from_secs(360));
+        assert_eq!(engine.context.market.tag_counts(), (0, 1), "quote tags freed, trade tags kept");
+        assert_eq!(engine.context.market.instrument_by_server_tag(1101), None);
+
+        // Used again: the mark is cleared, nothing more is freed.
+        let (_, second) = subscribe(&mut engine, 265598);
+        engine.inject_farm_message(format!("8=O\x0135=Q\x011102,{},0.01,0,3,9c,,1,1", second).as_bytes());
+        engine.clean_server_tags(t0 + Duration::from_secs(420));
+        engine.clean_server_tags(t0 + Duration::from_secs(900));
+        assert_eq!(engine.context.market.instrument_by_server_tag(1102), Some(id));
+
+        // The last slot of the contract goes: its trade tags go too.
+        engine.route_md_cancel(id);
+        engine.context.market.unregister(id);
+        assert_eq!(engine.context.market.tag_counts(), (0, 0));
+    }
+
+    // #292: the trade tags of a contract with two slots stay while one
+    // remains.
+    #[test]
+    fn trade_tags_follow_the_last_slot_of_the_contract() {
+        let mut m = crate::engine::market_state::MarketState::new();
+        let a = m.register(265598);
+        let b = m.try_register_unresolved().unwrap();
+        m.resolve_con_id(b, 265598);
+        m.register_trade_tag(0, 1098, a);
+        m.unregister(a);
+        assert_eq!(m.instrument_by_server_tag(1098), Some(b));
+        m.unregister(b);
+        assert_eq!(m.instrument_by_server_tag(1098), None);
+    }
+
+    // #292: a news tick for a tag of no known request is dropped, never
+    // given to slot 0.
+    #[test]
+    fn news_tick_of_an_unknown_tag_is_dropped() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.context.market.register(265598);
+        let mut body = vec![0x1E, 0x90, 0, 0, 0x30, 0x39, 0, 0, 0, 0, 0, 1];
+        body.extend_from_slice(&3u32.to_be_bytes());
+        body.extend_from_slice(b"BRF");
+        body.extend_from_slice(&[0; 4]);
+        body.extend_from_slice(&2u16.to_be_bytes());
+        body.extend_from_slice(b"a1");
+        body.extend_from_slice(&[0; 8]);
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(b"h");
+        let mut msg = b"8=O\x0135=G\x01".to_vec();
+        msg.extend_from_slice(&body);
+        engine.inject_farm_message(&msg);
+        assert!(shared.market.drain_tick_news().is_empty());
+        // The same tick once the tag is known is delivered.
+        let id = engine.context.market.instrument_by_con_id(265598).unwrap();
+        engine.context.market.register_trade_tag(0, 12345, id);
+        engine.inject_farm_message(&msg);
+        assert_eq!(shared.market.drain_tick_news().len(), 1);
     }
 }

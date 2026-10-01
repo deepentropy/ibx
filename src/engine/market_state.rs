@@ -73,6 +73,10 @@ pub struct MarketState {
     /// server_tag → InstrumentId. Server tags climb far past what a flat
     /// table can hold in one session (ibx#281).
     server_tags: TagMap,
+    /// Trade stream tags: kept apart from the quote tags, as the reference
+    /// keeps them, and freed only when the last slot of the contract goes
+    /// (#292).
+    trade_tags: TagMap,
     /// Per-instrument minTick (from 35=Q). Used to scale tick magnitudes to prices.
     min_ticks: [f64; MAX_INSTRUMENTS],
     /// Pre-computed min_tick * PRICE_SCALE as integer for hot-path price conversion.
@@ -109,6 +113,7 @@ impl MarketState {
             con_id_to_instrument: HashMap::new(),
             instrument_to_con_id: [0; MAX_INSTRUMENTS],
             server_tags: TagMap::with_capacity_and_hasher(SERVER_TAG_CAPACITY, Default::default()),
+            trade_tags: TagMap::with_capacity_and_hasher(MAX_INSTRUMENTS * 2, Default::default()),
             min_ticks: [0.0; MAX_INSTRUMENTS],
             min_tick_scaled: [0; MAX_INSTRUMENTS],
             last_ts_base: [0; MAX_INSTRUMENTS],
@@ -217,6 +222,15 @@ impl MarketState {
         self.round_lots[instrument as usize] = 1;
         self.size_scale[instrument as usize] = QTY_SCALE;
         self.server_tags.retain(|_, id| *id != instrument);
+        // The trade stream tags belong to the contract: they go with its
+        // last slot (#292).
+        let other = (con_id != 0)
+            .then(|| (0..self.active_count).find(|i| self.instrument_to_con_id[*i as usize] == con_id))
+            .flatten();
+        match other {
+            Some(other) => self.trade_tags.values_mut().filter(|id| **id == instrument).for_each(|id| *id = other),
+            None => self.trade_tags.retain(|_, id| *id != instrument),
+        }
         self.free_ids.push(instrument);
         Some(con_id)
     }
@@ -226,9 +240,28 @@ impl MarketState {
         self.register_farm_tag(0, server_tag, instrument);
     }
 
-    /// Map a server tag of a farm to an instrument (#445).
+    /// Map a quote tag (subscription acknowledgement) of a farm to an
+    /// instrument (#445).
     pub fn register_farm_tag(&mut self, farm: u8, server_tag: u32, instrument: InstrumentId) {
         self.server_tags.insert(tag_key(farm, server_tag), instrument);
+    }
+
+    /// Map a trade stream tag of a farm to an instrument (#292).
+    pub fn register_trade_tag(&mut self, farm: u8, server_tag: u32, instrument: InstrumentId) {
+        self.trade_tags.insert(tag_key(farm, server_tag), instrument);
+    }
+
+    /// Free the quote tags of an instrument whose market data record is no
+    /// longer used (#292); its trade stream tags stay with the contract.
+    pub fn drop_quote_tags(&mut self, instrument: InstrumentId) -> usize {
+        let before = self.server_tags.len();
+        self.server_tags.retain(|_, id| *id != instrument);
+        before - self.server_tags.len()
+    }
+
+    /// Number of quote and trade tags held.
+    pub fn tag_counts(&self) -> (usize, usize) {
+        (self.server_tags.len(), self.trade_tags.len())
     }
 
     /// Slot iteration bound (high-water mark). Freed slots below this count
@@ -271,7 +304,11 @@ impl MarketState {
     /// Look up the instrument of a server tag of a farm (#445).
     #[inline(always)]
     pub fn instrument_by_farm_tag(&self, farm: u8, server_tag: u32) -> Option<InstrumentId> {
-        self.server_tags.get(&tag_key(farm, server_tag)).copied()
+        let key = tag_key(farm, server_tag);
+        match self.server_tags.get(&key) {
+            Some(id) => Some(*id),
+            None => self.trade_tags.get(&key).copied(),
+        }
     }
 
     /// Set symbol name for an instrument (e.g. "AAPL"). Used for orders.
@@ -483,11 +520,13 @@ impl MarketState {
     /// Clear server tag mappings (called on farm disconnect — old tags are invalid).
     pub fn clear_server_tags(&mut self) {
         self.server_tags.clear();
+        self.trade_tags.clear();
     }
 
     /// Clear the server tags of one farm, whose connection was lost (#445).
     pub fn clear_farm_tags(&mut self, farm: u8) {
         self.server_tags.retain(|k, _| (k >> 32) as u8 != farm);
+        self.trade_tags.retain(|k, _| (k >> 32) as u8 != farm);
     }
 
     /// Zero the quote of one instrument, whose farm was lost (#445).
