@@ -4537,6 +4537,55 @@ mod tests {
         ], 1)
     }
 
+    /// The event channel gets the row and then the end of a plain lookup by
+    /// conId (its row waits for its schedule) and of a plain lookup by
+    /// symbol (named request id), while a historical-data lookup is still
+    /// waiting: that lookup is not answered by these replies.
+    #[test]
+    fn plain_lookups_give_their_row_and_end_on_the_event_channel() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let event_tx = Some(event_tx);
+        let mut hb = HeartbeatState::new();
+        ccp.pending_resolves.push(PendingResolve {
+            lookup_id: HIST_LOOKUP_FIRST_ID,
+            req_id: 77,
+            request: crate::types::ControlCommand::Shutdown,
+            deadline: Instant::now() + SECDEF_TIMEOUT,
+        });
+        let key = "1/STK/ARCA#LITE";
+        ccp.send_secdef_request(1001, 756733, &mut None, &mut hb);
+        ccp.send_secdef_request_by_symbol(1002, "AAPL", "STK", "SMART", "USD", &Default::default(), &mut None, &mut hb);
+
+        let spy = pipe_msg(&format!(
+            "35=d|43=N|320=1001|322=*|323=4|{}{}146=1|6038=Y|6019=1|6031=4563|6026=1|6023=0|6027=0.01|6030=1|6344=1|\
+             6008=756733|306=SPDR S&P 500 ETF TRUST|6046=BEST,ARCA,",
+            listing("SPY", "756733", "BEST", key, "4563"),
+            listing("SPY", "756733", "ARCA", "ARCA/STK#NOCROSS#LITE", "109"),
+        ));
+        ccp.process_ccp_message(&spy, &mut None, &mut context, &shared, &event_tx, &mut hb, "DU1");
+        let aapl = pipe_msg(
+            "35=d|43=N|320=FixSecDefReqBySymbol1002|322=*|323=4|55=AAPL|167=STK|207=BEST|6008=265598|6031=4563|15=USD|\
+             146=1|6038=Y|6019=1|6031=4563|6026=1|6023=0|6027=0.01|6030=1|6344=1|6008=265598|306=APPLE INC|6046=BEST,",
+        );
+        ccp.process_ccp_message(&aapl, &mut None, &mut context, &shared, &event_tx, &mut hb, "DU1");
+        let schedule = pipe_msg(&format!("35=U|6040=107|6256={key}"));
+        ccp.process_ccp_message(&schedule, &mut None, &mut context, &shared, &event_tx, &mut hb, "DU1");
+
+        let events: Vec<String> = event_rx.try_iter().filter_map(|e| match e {
+            Event::ContractDetails { req_id, details } => Some(format!("row:{}:{}:{}", req_id, details.symbol, details.con_id)),
+            Event::ContractDetailsEnd(req_id) => Some(format!("end:{}", req_id)),
+            _ => None,
+        }).collect();
+        assert_eq!(events, [
+            "row:1002:AAPL:265598", "end:1002",
+            "row:1001:SPY:756733", "end:1001",
+        ]);
+        assert!(shared.reference.drain_historical_errors().is_empty());
+        assert_eq!(ccp.pending_resolves.len(), 1, "the historical-data lookup still waits");
+        assert!(ccp.pending_secdef.is_empty() && ccp.pending_schedule_pair.is_empty());
+    }
+
     fn u186_test_state() -> (CcpState, Context, SharedState) {
         (CcpState::new(), Context::new(), SharedState::new())
     }

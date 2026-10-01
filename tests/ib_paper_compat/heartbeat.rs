@@ -70,7 +70,10 @@ pub(super) fn phase_heartbeat_timeout_detection(conns: Conns) -> Conns {
     let client = std::net::TcpStream::connect(addr).expect("connect to localhost");
     let _server = listener.accept().expect("accept dead socket").0;
     let dead_ccp = Connection::new_raw(client).expect("wrap dead socket as Connection");
-    let real_ccp = conns.ccp;
+    // The real session is not used by the loop of this phase; it is kept
+    // alive meanwhile, or the server stops serving it during the 30 s wait
+    // and the next phases run on a session that no longer answers.
+    let mut real_ccp = conns.ccp;
 
     let shared = Arc::new(SharedState::new());
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
@@ -81,7 +84,12 @@ pub(super) fn phase_heartbeat_timeout_detection(conns: Conns) -> Conns {
 
     let start = Instant::now();
     let mut disconnect_count = 0u32;
+    let mut last_keepalive = Instant::now();
     while start.elapsed() < Duration::from_secs(30) {
+        if last_keepalive.elapsed() >= Duration::from_secs(5) {
+            ccp_keepalive(&mut real_ccp);
+            last_keepalive = Instant::now();
+        }
         match event_rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Event::Disconnected) => { disconnect_count += 1; break; }
             _ => {}
@@ -94,6 +102,7 @@ pub(super) fn phase_heartbeat_timeout_detection(conns: Conns) -> Conns {
         "Disconnect at {:.1}s — expected 18-28s (10+1+10=21s theoretical)", elapsed.as_secs_f64());
 
     let reclaimed = shutdown_and_reclaim(&control_tx, join, account_id.clone());
+    ccp_keepalive(&mut real_ccp);
 
     println!("  Timeout at {:.1}s (expected ~21s)", elapsed.as_secs_f64());
     println!("  on_disconnect emitted at least once");
