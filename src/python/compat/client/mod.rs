@@ -113,18 +113,28 @@ impl EClient {
     /// Connect to IB and start the engine.
     ///
     /// Live logins (``paper=False``) enter a second-factor approval window and
-    /// **block** until the factor is approved (mobile push) or the deadline
-    /// fires (``ib_key_timeout_secs``, default ~18 min). This is a human
-    /// approval gate, not a hang. To bound or avoid it: use ``paper=True``, pass
-    /// a smaller ``ib_key_timeout_secs``, or run ``connect()`` on a worker
-    /// thread with your own timeout. Paper logins skip the gate entirely. Set
+    /// **block** until the factor is approved (mobile push) or the server ends
+    /// the wait. As in the reference there is no client timeout by default:
+    /// the server closes the login after about 18 min. The keepalives of the
+    /// server are answered during the whole wait. This is a human approval
+    /// gate, not a hang. To bound or avoid it: use ``paper=True``, pass an
+    /// ``ib_key_timeout_secs``, or run ``connect()`` on a worker thread with
+    /// your own timeout. Paper logins skip the gate entirely. Set
     /// ``RUST_LOG=info`` to see a log line when the wait begins.
+    ///
+    /// ``code_provider``: a callable used for the typed-code variant of the
+    /// second factor. When the server sends the challenge it is called once,
+    /// during ``connect()``, with a dict ``{"display_id": str, "avth_url":
+    /// str}``, and must return the code as a ``str``; an exception it raises
+    /// ends the login. It runs on its own thread while the login keeps
+    /// answering the keepalives. ``None`` (default): wait for the mobile push
+    /// approval.
     ///
     /// Multiple ``EClient`` instances can run concurrently in one process; each
     /// owns its own state, sockets, and engine thread, and ``connect()`` does
     /// not serialize across instances. If you pin engines via ``core_id``, give
     /// each a distinct value. See ibx#203 / ibx#207.
-    #[pyo3(signature = (host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None))]
+    #[pyo3(signature = (host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None, code_provider=None))]
     fn connect(
         &self,
         py: Python<'_>,
@@ -137,6 +147,7 @@ impl EClient {
         core_id: Option<usize>,
         ib_key_timeout_secs: Option<u64>,
         ib_key_token_sub_type: Option<String>,
+        code_provider: Option<Py<PyAny>>,
     ) -> PyResult<()> {
         if self.connected.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("Already connected"));
@@ -152,7 +163,7 @@ impl EClient {
                 .unwrap_or(crate::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS),
             ib_key_token_sub_type: ib_key_token_sub_type
                 .unwrap_or_else(|| crate::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into()),
-            code_provider: None,
+            code_provider: code_provider.map(python_code_provider),
         };
 
         let result = py.detach(|| Gateway::connect(&config));
@@ -336,6 +347,22 @@ impl EClient {
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
         )).map_err(|e| PyRuntimeError::new_err(e))
     }
+}
+
+/// A second-factor code provider calling a Python callable (ibx#208). The
+/// login runs with the interpreter lock released, so the call takes it on
+/// the provider's own thread. The callable gets a dict with the challenge
+/// and returns the code; an exception becomes the login error.
+fn python_code_provider(callable: Py<PyAny>) -> crate::auth::session::CodeProvider {
+    Arc::new(move |challenge: crate::auth::session::IbKeyChallenge| {
+        Python::attach(|py| {
+            let info = pyo3::types::PyDict::new(py);
+            info.set_item("display_id", challenge.display_id.as_str())?;
+            info.set_item("avth_url", challenge.avth_url.as_str())?;
+            callable.call1(py, (info,))?.extract::<String>(py)
+        })
+        .map_err(|e: PyErr| std::io::Error::other(format!("code_provider raised: {}", e)))
+    })
 }
 
 /// Send a command to the engine. With room in the channel this neither

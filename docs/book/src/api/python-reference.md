@@ -30,10 +30,10 @@ def new(wrapper))
 
 #### `connect`
 
-Connect to IB and start the engine.  Live logins (``paper=False``) enter a second-factor approval window and **block** until the factor is approved (mobile push) or the deadline fires (``ib_key_timeout_secs``, default ~18 min). This is a human approval gate, not a hang. To bound or avoid it: use ``paper=True``, pass a smaller ``ib_key_timeout_secs``, or run ``connect()`` on a worker thread with your own timeout. Paper logins skip the gate entirely. Set ``RUST_LOG=info`` to see a log line when the wait begins.  Multiple ``EClient`` instances can run concurrently in one process; each owns its own state, sockets, and engine thread, and ``connect()`` does not serialize across instances. If you pin engines via ``core_id``, give each a distinct value. See ibx#203 / ibx#207.
+Connect to IB and start the engine.  Live logins (``paper=False``) enter a second-factor approval window and **block** until the factor is approved (mobile push) or the server ends the wait. As in the reference there is no client timeout by default: the server closes the login after about 18 min. The keepalives of the server are answered during the whole wait. This is a human approval gate, not a hang. To bound or avoid it: use ``paper=True``, pass an ``ib_key_timeout_secs``, or run ``connect()`` on a worker thread with your own timeout. Paper logins skip the gate entirely. Set ``RUST_LOG=info`` to see a log line when the wait begins.  ``code_provider``: a callable used for the typed-code variant of the second factor. When the server sends the challenge it is called once, during ``connect()``, with a dict ``{"display_id": str, "avth_url": str}``, and must return the code as a ``str``; an exception it raises ends the login. It runs on its own thread while the login keeps answering the keepalives. ``None`` (default): wait for the mobile push approval.  Multiple ``EClient`` instances can run concurrently in one process; each owns its own state, sockets, and engine thread, and ``connect()`` does not serialize across instances. If you pin engines via ``core_id``, give each a distinct value. See ibx#203 / ibx#207.
 
 ```python
-def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None))
+def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None, code_provider=None))
 ```
 
 | Parameter | Type | Description |
@@ -45,8 +45,9 @@ def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".
 | `password` | `str` | Account password. |
 | `paper` | `bool` | If `true`, connect to paper trading. If `false`, connect blocks on the live second-factor approval window (see method note). |
 | `core_id` | `usize or None` | CPU core affinity for the hot loop thread. Use a distinct value per engine when running several in one process. |
-| `ib_key_timeout_secs` | `int or None` | Live second-factor approval timeout in seconds (default ~18 min). Lower it to fail fast on unattended live logins; ignored for paper. |
+| `ib_key_timeout_secs` | `int or None` | Live second-factor approval timeout in seconds. Default: no client timeout, the wait ends when the server answers or closes the login (about 18 min). Set it to fail fast on unattended live logins; ignored for paper. |
 | `ib_key_token_sub_type` | `str or None` | Override of the second-factor token sub-type. Default: the value the server lists for the session. Ignored for paper. |
+| `code_provider` | `callable or None` | Callable for the typed-code second factor: called once during `connect()` with a dict `{"display_id", "avth_url"}`, returns the code as `str`. Default: wait for the mobile push approval. Ignored for paper. |
 
 ---
 

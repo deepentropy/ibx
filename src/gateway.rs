@@ -1163,10 +1163,12 @@ pub struct GatewayConfig {
     /// Accept invalid TLS certificates during auth. Default: `false` (secure).
     /// Only set to `true` for local testing against self-signed gateways.
     pub accept_invalid_certs: bool,
-    /// Per-session second-factor approval timeout. Defaults to
-    /// [`session::IB_KEY_DEFAULT_TIMEOUT_SECS`] (~18 min, matching the
-    /// server-side deadline). Set lower to fail fast for unattended logins.
-    /// Only consulted on non-paper logins; paper logins skip the gate entirely.
+    /// Per-session second-factor approval timeout in seconds; `0` (the
+    /// default, [`session::IB_KEY_DEFAULT_TIMEOUT_SECS`]) is no client
+    /// timeout, as in the reference: the wait ends with the server's answer
+    /// or its close of the socket after about 18 min (ibx#208). Set a value
+    /// to fail fast for unattended logins. Only consulted on non-paper
+    /// logins; paper logins skip the gate entirely.
     pub ib_key_timeout_secs: u64,
     /// Override of the second-factor token sub-type sent in the SWCR_TOKEN
     /// state=1 init body (`M.D` field). Empty (the default,
@@ -1326,25 +1328,29 @@ impl Gateway {
             token
         };
         if let Some(token_sub_type) = second_factor {
-            let deadline = std::time::Instant::now()
-                + std::time::Duration::from_secs(config.ib_key_timeout_secs);
+            // No client deadline unless one is set, as in the reference: the
+            // wait ends with the server's answer or its close of the socket
+            // (ibx#208).
+            let deadline = session::ib_key_deadline(config.ib_key_timeout_secs);
+            let bound = if deadline.is_some() {
+                format!("up to {}s", config.ib_key_timeout_secs)
+            } else {
+                "until the server answers or closes (about 18 min)".to_string()
+            };
             // Live logins enter a human-approval window here: connect() blocks
-            // until the second factor is approved (mobile push) or this deadline
-            // fires. Announce it up front so a stalled connect() reads as
+            // until the second factor is approved (mobile push) or the wait
+            // ends. Announce it up front so a stalled connect() reads as
             // "waiting for approval" rather than a hang (ibx#203 / ibx#207).
             // Accounts with no second factor fall straight through (Skipped).
             if config.code_provider.is_none() {
                 log::info!(
-                    "Live login for {}: waiting for second-factor approval (mobile push); \
-                     connect() blocks up to {}s. Use paper=true, a lower ib_key_timeout_secs, \
-                     or a code_provider to avoid this.",
-                    config.username, config.ib_key_timeout_secs,
+                    "Live login for {}: waiting for second-factor approval (mobile push);                      connect() blocks {}. Use paper=true, an ib_key_timeout_secs,                      or a code_provider to avoid this.",
+                    config.username, bound,
                 );
             } else {
                 log::info!(
-                    "Live login for {}: second-factor via code_provider (Challenge/Response); \
-                     connect() blocks up to {}s awaiting the challenge.",
-                    config.username, config.ib_key_timeout_secs,
+                    "Live login for {}: second-factor via code_provider (Challenge/Response);                      connect() blocks {} awaiting the challenge.",
+                    config.username, bound,
                 );
             }
             // Short read timeout: the wait checks the code provider and the

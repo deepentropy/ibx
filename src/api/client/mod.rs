@@ -69,9 +69,10 @@ pub use orders::parse_algo_params;
 ///
 /// With `paper: false`, [`connect()`](EClient::connect) enters a second-factor
 /// approval window and **blocks** until the factor is approved (mobile push) or
-/// the server-side deadline fires (~18 min). This is expected — it is a human
-/// approval gate, not a hang. Bound or avoid it by using `paper: true`, lowering
-/// the timeout (via [`GatewayConfig::ib_key_timeout_secs`] when building through
+/// the server ends the wait (~18 min); as in the reference there is no client
+/// timeout by default. This is expected — it is a human
+/// approval gate, not a hang. Bound or avoid it by using `paper: true`, setting
+/// a timeout (via [`GatewayConfig::ib_key_timeout_secs`] when building through
 /// the lower-level API), or supplying a `code_provider`. Paper logins skip the
 /// gate entirely. An `info`-level log line is emitted when the wait begins
 /// (`RUST_LOG=info`). See ibx#203 / ibx#207.

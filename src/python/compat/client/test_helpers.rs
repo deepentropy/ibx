@@ -109,6 +109,18 @@ impl EClient {
         Ok(())
     }
 
+    /// Run the second-factor code provider built from `callable` the way the
+    /// login runs it: on its own thread, with the interpreter lock released
+    /// by the caller (ibx#208).
+    #[doc(hidden)]
+    fn _test_code_provider(&self, py: Python<'_>, callable: Py<PyAny>, display_id: String, avth_url: String) -> PyResult<String> {
+        let provider = super::python_code_provider(callable);
+        let challenge = crate::auth::session::IbKeyChallenge { display_id, avth_url };
+        py.detach(|| std::thread::spawn(move || provider(challenge)).join())
+            .map_err(|_| PyRuntimeError::new_err("code provider thread panicked"))?
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Hold or release the open-order requests, as a lost auth link and the
     /// end of the order replay do (ibx#251).
     #[doc(hidden)]

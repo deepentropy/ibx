@@ -1093,8 +1093,10 @@ pub struct IbKeyChallenge {
 /// secrets vault, etc.) or return an `io::Error` to abort the login.
 ///
 /// The callback runs on its own thread: the login keeps reading the socket
-/// and answering the server keepalives while it waits (ibx#244). The login
-/// deadline still applies; when it fires first the login fails and a later
+/// and answering the server keepalives while it waits (ibx#244). There is
+/// no client deadline by default, as in the reference: the wait ends with
+/// the server's answer or when the server closes the socket (ibx#208). When
+/// a client deadline is set and fires first, the login fails and a later
 /// answer of the callback is dropped.
 pub type CodeProvider = std::sync::Arc<
     dyn Fn(IbKeyChallenge) -> io::Result<String> + Send + Sync,
@@ -1105,9 +1107,20 @@ fn hex_dump(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
 }
 
-/// Default deadline for the second-factor gate, matching the server-side
-/// timeout measured in capture run B (~18 min).
-pub const IB_KEY_DEFAULT_TIMEOUT_SECS: u64 = 1080;
+/// Default client deadline for the second-factor gate: none (`0`). The
+/// reference has no client timeout there; the server closes the socket
+/// after about 18 minutes (ibx#208). A value above 0 is a deadline in
+/// seconds.
+pub const IB_KEY_DEFAULT_TIMEOUT_SECS: u64 = 0;
+
+/// The client deadline of the second-factor gate for a timeout in seconds:
+/// none for `0` (ibx#208).
+pub fn ib_key_deadline(timeout_secs: u64) -> Option<std::time::Instant> {
+    if timeout_secs == 0 {
+        return None;
+    }
+    std::time::Instant::now().checked_add(std::time::Duration::from_secs(timeout_secs))
+}
 
 /// Default of [`crate::gateway::GatewayConfig::ib_key_token_sub_type`]:
 /// empty, so the token sub-type sent in the SWCR_TOKEN state=1 body comes
@@ -1128,7 +1141,8 @@ const IB_KEY_HEARTBEAT_CADENCE_SECS: u64 = 20;
 ///    `approval_url` / `session_id`, keep looping
 /// 3. An `NS_TEST_REQUEST` (530) arrives → reply with `NS_HEART_BEAT` (531),
 ///    keep looping
-/// 4. `deadline` expires → `TimedOut` error
+/// 4. `deadline`, when given, expires → `TimedOut` error (no deadline by
+///    default, as in the reference, ibx#208)
 /// 5. Underlying socket close → `ConnectionAborted` error (server's deadline)
 ///
 /// With a `code_provider` the code is asked on a worker thread at state=2 and
@@ -1144,10 +1158,11 @@ const IB_KEY_HEARTBEAT_CADENCE_SECS: u64 = 20;
 pub fn do_ib_key_2fa<S: Read + Write>(
     stream: &mut S,
     token_sub_type: &str,
-    deadline: std::time::Instant,
+    deadline: impl Into<Option<std::time::Instant>>,
     code_provider: Option<&CodeProvider>,
 ) -> io::Result<IbKeyOutcome> {
     use std::time::Instant;
+    let deadline: Option<Instant> = deadline.into();
 
     // Send SWCR_TOKEN state=1. The username slot is empty in state=1; the
     // tokenSubType (account-specific, typically "2a") is the only non-empty
@@ -1173,7 +1188,7 @@ pub fn do_ib_key_2fa<S: Read + Write>(
     let mut frames = NsFramePoller::default();
 
     loop {
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(ib_key_err(
                 io::ErrorKind::TimedOut,
                 "2FA approval timed out (client deadline)",
@@ -2336,6 +2351,21 @@ mod tests {
 
     fn far_future_deadline() -> std::time::Instant {
         std::time::Instant::now() + std::time::Duration::from_secs(60)
+    }
+
+    // ibx#208: no client deadline by default, as in the reference; a set
+    // timeout is a deadline.
+    #[test]
+    fn ib_key_wait_has_no_client_deadline_by_default() {
+        assert_eq!(IB_KEY_DEFAULT_TIMEOUT_SECS, 0);
+        assert!(ib_key_deadline(IB_KEY_DEFAULT_TIMEOUT_SECS).is_none());
+        assert!(ib_key_deadline(30).is_some_and(|d| d > std::time::Instant::now()));
+        let challenge = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 2, "user", &["", "580 820", "https://www.example.com/s"]);
+        let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 5, "user", &["PASSED"]);
+        let mut incoming = frame_xyz(&challenge);
+        incoming.extend_from_slice(&frame_xyz(&auth_finish));
+        let outcome = do_ib_key_2fa(&mut ScriptedStream::new(incoming), "2a", None, None).unwrap();
+        assert!(matches!(outcome, IbKeyOutcome::Approved { .. }), "{outcome:?}");
     }
 
     #[test]
