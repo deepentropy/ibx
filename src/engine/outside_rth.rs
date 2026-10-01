@@ -85,8 +85,8 @@ impl RthKind {
             OrderKind::StopLimit { .. } | OrderKind::TrailingStopLimit { .. }
             | OrderKind::Lit { .. } => (false, true, false),
             OrderKind::Moc | OrderKind::Loc { .. } => (false, false, true),
-            OrderKind::Limit { .. } | OrderKind::MktPrt | OrderKind::SnapMkt | OrderKind::SnapMid
-            | OrderKind::SnapPri | OrderKind::Rel { .. } => (false, false, false),
+            OrderKind::Limit { .. } | OrderKind::MktPrt | OrderKind::SnapMkt { .. } | OrderKind::SnapMid { .. }
+            | OrderKind::SnapPri { .. } | OrderKind::Rel { .. } => (false, false, false),
         };
         RthKind { market_like, stop_or_touched, moc_loc }
     }
@@ -147,11 +147,11 @@ pub(crate) fn rth_parts(req: &mut OrderRequest) -> Option<(Option<u32>, RthKind,
 }
 
 /// The exchange an order goes to: the instrument's routing, except the
-/// types that need a directed exchange (ibx#217).
+/// types that need a directed exchange (ibx#217). The snap types keep the
+/// instrument's routing (ibx#413).
 pub(crate) fn order_destination(kind: Option<&OrderKind>, routed: String) -> String {
     match kind {
-        Some(OrderKind::MidPrice { .. } | OrderKind::SnapMkt | OrderKind::SnapMid | OrderKind::SnapPri
-            | OrderKind::PegMkt { .. } | OrderKind::PegMid { .. }) => "ISLAND".to_string(),
+        Some(OrderKind::MidPrice { .. } | OrderKind::PegMkt { .. } | OrderKind::PegMid { .. }) => "ISLAND".to_string(),
         _ => routed,
     }
 }

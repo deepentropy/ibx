@@ -8,7 +8,7 @@ use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{AlgoParams, OrderCondition, OrderRequest, OrderStatus, OrderUpdate, Side};
 
-use super::{HeartbeatState, format_price, format_qty, format_uint};
+use super::{HeartbeatState, format_price, format_price_ref, format_qty, format_uint};
 
 pub(crate) fn drain_and_send_orders(
     ccp_conn: &mut Option<Connection>,
@@ -1265,92 +1265,107 @@ pub(crate) fn drain_and_send_orders(
                 }
                 send_new_order(conn, context, instrument, &fields)
             }
-            OrderRequest::SubmitSnapMkt { order_id, instrument, side, qty } => {
+            OrderRequest::SubmitSnapMkt { order_id, instrument, side, qty, offset } => {
                 context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MKT, b'0', 0,
+                    order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MKT, b'0', offset,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
+                // The offset in both price fields, 0.00 when unset, and the
+                // contract's own routing, as the reference (ibx#413).
+                let offset_str = format_price_ref(offset);
                 let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
+                let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
                 send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
+                    (99, &offset_str),
                     (1, account_id),
                     (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "SMKT"),       // OrdType = Snap to Market
+                    (211, &offset_str),
                     (59, "0"),
                     (60, &now),
                     (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
+                    (100, &destination),
+                    (6210, &destination),
                     (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
-            OrderRequest::SubmitSnapMid { order_id, instrument, side, qty } => {
+            OrderRequest::SubmitSnapMid { order_id, instrument, side, qty, offset } => {
                 context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MID, b'0', 0,
+                    order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MID, b'0', offset,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
+                // The offset in both price fields, 0.00 when unset, and the
+                // contract's own routing, as the reference (ibx#413).
+                let offset_str = format_price_ref(offset);
                 let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
+                let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
                 send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
+                    (99, &offset_str),
                     (1, account_id),
                     (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "SMID"),       // OrdType = Snap to Midpoint
+                    (211, &offset_str),
                     (59, "0"),
                     (60, &now),
                     (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
+                    (100, &destination),
+                    (6210, &destination),
                     (15, currency.as_str()),
                     (204, "0"),
                 ])
             }
-            OrderRequest::SubmitSnapPri { order_id, instrument, side, qty } => {
+            OrderRequest::SubmitSnapPri { order_id, instrument, side, qty, offset } => {
                 context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_PRI, b'0', 0,
+                    order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_PRI, b'0', offset,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
+                // The offset in both price fields, 0.00 when unset, and the
+                // contract's own routing, as the reference (ibx#413).
+                let offset_str = format_price_ref(offset);
                 let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
+                let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
                 send_new_order(conn, context, instrument, &[
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
+                    (99, &offset_str),
                     (1, account_id),
                     (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "SREL"),       // OrdType = Snap to Primary
+                    (211, &offset_str),
                     (59, "0"),
                     (60, &now),
                     (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
+                    (100, &destination),
+                    (6210, &destination),
                     (15, currency.as_str()),
                     (204, "0"),
                 ])
@@ -1814,9 +1829,11 @@ fn modify_fields(
             if price_cap > 0 { before_account.push((44, p(price_cap))); }
             "MIDPX"
         }
-        K::SnapMkt => "SMKT",
-        K::SnapMid => "SMID",
-        K::SnapPri => "SREL",
+        K::SnapMkt { offset } | K::SnapMid { offset } | K::SnapPri { offset } => {
+            before_account.push((99, format_price_ref(offset).to_string()));
+            after_type.push((211, format_price_ref(offset).to_string()));
+            match kind { K::SnapMkt { .. } => "SMKT", K::SnapMid { .. } => "SMID", _ => "SREL" }
+        }
         K::PegMkt { offset } => {
             if offset > 0 { after_type.push((211, p(offset))); }
             "E"
@@ -2174,9 +2191,9 @@ fn send_order_ex(
         K::MktPrt => (b'U', 0, 0),
         K::StpPrt { stop_price } => (crate::types::ORD_STP_PRT, 0, stop_price),
         K::MidPrice { price_cap } => (crate::types::ORD_MIDPX, price_cap, 0),
-        K::SnapMkt => (crate::types::ORD_SNAP_MKT, 0, 0),
-        K::SnapMid => (crate::types::ORD_SNAP_MID, 0, 0),
-        K::SnapPri => (crate::types::ORD_SNAP_PRI, 0, 0),
+        K::SnapMkt { offset } => (crate::types::ORD_SNAP_MKT, 0, offset),
+        K::SnapMid { offset } => (crate::types::ORD_SNAP_MID, 0, offset),
+        K::SnapPri { offset } => (crate::types::ORD_SNAP_PRI, 0, offset),
         K::PegMkt { offset } => (crate::types::ORD_PEG_MKT, 0, offset),
         K::PegMid { offset } => (crate::types::ORD_PEG_MID, 0, offset),
         K::Rel { offset } => (b'R', 0, offset),
@@ -2295,9 +2312,14 @@ fn send_order_ex(
                 fields.push((44, format_price(price_cap).to_string()));
             }
         }
-        K::SnapMkt => fields.push((40, "SMKT".to_string())),
-        K::SnapMid => fields.push((40, "SMID".to_string())),
-        K::SnapPri => fields.push((40, "SREL".to_string())),
+        K::SnapMkt { offset } | K::SnapMid { offset } | K::SnapPri { offset } => {
+            // The offset in both price fields, 0.00 when unset (ibx#413).
+            let code = match kind { K::SnapMkt { .. } => "SMKT", K::SnapMid { .. } => "SMID", _ => "SREL" };
+            let o = format_price_ref(offset).to_string();
+            fields.push((40, code.to_string()));
+            fields.push((99, o.clone()));
+            fields.push((211, o));
+        }
         K::PegMkt { offset } => {
             fields.push((40, "E".to_string()));
             if offset > 0 {
@@ -2331,11 +2353,11 @@ fn send_order_ex(
     push_dtc_flag(&mut fields, tif);
     fields.push((60, now));
     fields.push((167, sec_type_str.clone()));
-    // MIDPX / SNAP* / PEG* require a directed exchange; everything else
-    // routes per the instrument's registered routing (ibx#217).
+    // MIDPX / PEG* require a directed exchange; everything else routes per
+    // the instrument's registered routing (ibx#217). The snap types keep
+    // the contract's routing, as the reference (ibx#413).
     let destination = match kind {
-        K::MidPrice { .. } | K::SnapMkt | K::SnapMid | K::SnapPri
-        | K::PegMkt { .. } | K::PegMid { .. } => "ISLAND".to_string(),
+        K::MidPrice { .. } | K::PegMkt { .. } | K::PegMid { .. } => "ISLAND".to_string(),
         _ => destination,
     };
     fields.push((100, destination.clone()));
@@ -3523,6 +3545,63 @@ mod tests {
             order_id: 61, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P, tif: b'0',
             attrs: Default::default() });
         assert_eq!(tag(&tags, 35), Some("D"));
+    }
+
+    /// The captured frame's fields named in `tags`, in its order.
+    fn captured(frame: &str, tags: &[u32]) -> Vec<(u32, String)> {
+        parse_frame(frame).into_iter().filter(|(t, _)| tags.contains(t)).collect()
+    }
+
+    /// Our frame's fields named in `tags`, in the order of `want`.
+    fn ours_as(ours: &[(u32, String)], want: &[(u32, String)]) -> Vec<(u32, String)> {
+        want.iter().map(|(t, _)| (*t, tag(ours, *t).unwrap_or("<absent>").to_string())).collect()
+    }
+
+    // ibx#413 (captured 25/09/2026, BUY 1 AAPL SMART, account masked): the
+    // reference writes the offset in both price fields, 0.00 when the
+    // caller gives none, and keeps the contract's routing.
+    const SNAP_MKT_005: &str = "35=D|11=x|99=0.05|1=DU1|6122=c|6121=45|6119=250|38=1|40=SMKT|211=0.05|55=AAPL|167=STK|231=1.00|54=1|59=1|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+
+    #[test]
+    fn snap_orders_carry_the_offset_in_both_price_fields_like_the_reference() {
+        const PRICE_TAGS: [u32; 7] = [40, 99, 211, 44, 18, 100, 6210];
+        for (code, offset, ex) in [("SMKT", 5 * P / 100, false), ("SMID", 5 * P / 100, true),
+                                   ("SREL", 0, false), ("SMKT", 0, true)] {
+            let reference = SNAP_MKT_005.replace("40=SMKT", &format!("40={code}"))
+                .replace("=0.05", if offset == 0 { "=0.00" } else { "=0.05" });
+            let want = captured(&reference, &PRICE_TAGS);
+            let req = if ex {
+                let kind = match code {
+                    "SMKT" => crate::types::OrderKind::SnapMkt { offset },
+                    "SMID" => crate::types::OrderKind::SnapMid { offset },
+                    _ => crate::types::OrderKind::SnapPri { offset },
+                };
+                OrderRequest::SubmitEx { order_id: 80, instrument: 0, side: Side::Buy, qty: 1, kind, tif: b'1',
+                    attrs: Default::default() }
+            } else {
+                match code {
+                    "SMKT" => OrderRequest::SubmitSnapMkt { order_id: 80, instrument: 0, side: Side::Buy, qty: 1, offset },
+                    "SMID" => OrderRequest::SubmitSnapMid { order_id: 80, instrument: 0, side: Side::Buy, qty: 1, offset },
+                    _ => OrderRequest::SubmitSnapPri { order_id: 80, instrument: 0, side: Side::Buy, qty: 1, offset },
+                }
+            };
+            let ours = wire_tags(req);
+            assert_eq!(ours_as(&ours, &want), want, "{code} offset {offset} extended {ex}");
+            for absent in [44, 18] {
+                assert!(tag(&ours, absent).is_none(), "{code}: field {absent} is not sent");
+            }
+        }
+    }
+
+    // A replace of a snap order restates the offset in both fields.
+    #[test]
+    fn snap_replace_restates_the_offset() {
+        let ours = replace_fields(81, Side::Buy, 1, crate::types::OrderKind::SnapMid { offset: 10 * P / 100 },
+            b'0', Default::default());
+        assert_eq!(tag(&ours, 40), Some("SMID"));
+        assert_eq!(tag(&ours, 99), Some("0.10"));
+        assert_eq!(tag(&ours, 211), Some("0.10"));
+        assert!(pos(&ours, 99) < pos(&ours, 1) && pos(&ours, 211) == pos(&ours, 40) + 1);
     }
 
     // ibx#425: customer account 6207 and professional customer 6636.

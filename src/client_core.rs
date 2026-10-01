@@ -713,6 +713,11 @@ If no time-zone is specified, local time-zone is assumed(deprecated).\n\
 You can also provide yyyymmddd-hh:mm:ss time is in UTC.\n\
 Note that there is a dash between the date and time in UTC notation.";
 
+/// An API price field with its unset value (the maximum double) read as 0.
+fn aux_or_zero(v: f64) -> f64 {
+    if v == f64::MAX { 0.0 } else { v }
+}
+
 /// A TRAIL LIMIT's limit price, offset and stop price are what the server
 /// reports (44, 6370, 6117), as the reference's openOrder (ib-agent#194,
 /// ibx#491).
@@ -2623,9 +2628,9 @@ impl ClientCore {
             "PEG MKT" => OrderKind::PegMkt { offset: scale(order.aux_price) },
             "PEG MID" | "PEG MIDPT" => OrderKind::PegMid { offset: scale(order.aux_price) },
             "MIDPX" | "MIDPRICE" => OrderKind::MidPrice { price_cap: scale(order.lmt_price) },
-            "SNAP MKT" => OrderKind::SnapMkt,
-            "SNAP MID" | "SNAP MIDPT" => OrderKind::SnapMid,
-            "SNAP PRI" | "SNAP PRIM" => OrderKind::SnapPri,
+            "SNAP MKT" => OrderKind::SnapMkt { offset: scale(aux_or_zero(order.aux_price)) },
+            "SNAP MID" | "SNAP MIDPT" => OrderKind::SnapMid { offset: scale(aux_or_zero(order.aux_price)) },
+            "SNAP PRI" | "SNAP PRIM" => OrderKind::SnapPri { offset: scale(aux_or_zero(order.aux_price)) },
             _ => return Err(format!("Unsupported order type: '{}'", order.order_type)),
         })
     }
@@ -2881,17 +2886,21 @@ impl ClientCore {
                 if extended { ex(OrderKind::MidPrice { price_cap: cap }) }
                 else { OrderRequest::SubmitMidPrice { order_id, instrument, side, qty, price_cap: cap } }
             }
+            // The offset is the API auxPrice, 0.00 when unset (ibx#413).
             "SNAP MKT" => {
-                if extended { ex(OrderKind::SnapMkt) }
-                else { OrderRequest::SubmitSnapMkt { order_id, instrument, side, qty } }
+                let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;
+                if extended { ex(OrderKind::SnapMkt { offset }) }
+                else { OrderRequest::SubmitSnapMkt { order_id, instrument, side, qty, offset } }
             }
             "SNAP MID" | "SNAP MIDPT" => {
-                if extended { ex(OrderKind::SnapMid) }
-                else { OrderRequest::SubmitSnapMid { order_id, instrument, side, qty } }
+                let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;
+                if extended { ex(OrderKind::SnapMid { offset }) }
+                else { OrderRequest::SubmitSnapMid { order_id, instrument, side, qty, offset } }
             }
             "SNAP PRI" | "SNAP PRIM" => {
-                if extended { ex(OrderKind::SnapPri) }
-                else { OrderRequest::SubmitSnapPri { order_id, instrument, side, qty } }
+                let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;
+                if extended { ex(OrderKind::SnapPri { offset }) }
+                else { OrderRequest::SubmitSnapPri { order_id, instrument, side, qty, offset } }
             }
             _ => return Err(format!("Unsupported order type: '{}'", order.order_type)),
         };
@@ -3541,5 +3550,20 @@ mod tests {
         let tracked = core.open_orders.lock().unwrap().get(&11).cloned().unwrap();
         assert_eq!(tracked.status, "Submitted");
         assert_eq!(tracked.order.lmt_price, 101.0);
+    }
+
+    // ibx#413: a snap order takes its offset from auxPrice, 0 when unset.
+    #[test]
+    fn snap_orders_take_the_offset_from_aux_price() {
+        let snap = |aux_price: f64| ApiOrder { order_type: "SNAP MKT".into(), aux_price, ..lmt(0.0) };
+        let offset = |o: &ApiOrder| match ClientCore::build_order_request(o, 1, 0) {
+            Ok(ControlCommand::Order(OrderRequest::SubmitSnapMkt { offset, .. })) => offset,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(offset(&snap(0.05)), (0.05 * PRICE_SCALE_F) as i64);
+        assert_eq!(offset(&snap(0.0)), 0);
+        assert_eq!(offset(&snap(f64::MAX)), 0, "unset");
+        let prim = ApiOrder { order_type: "SNAP PRIM".into(), aux_price: 0.10, outside_rth: true, ..lmt(0.0) };
+        assert!(matches!(ClientCore::order_kind(&prim), Ok(OrderKind::SnapPri { offset }) if offset == (0.10 * PRICE_SCALE_F) as i64));
     }
 }

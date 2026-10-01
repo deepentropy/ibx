@@ -1566,6 +1566,19 @@ pub(crate) fn format_price(price: Price) -> StackStr {
     s
 }
 
+/// A price in the reference's number form for its price fields: at least
+/// two decimals, at most eight (`0.00`, `0.05`, `272.885`). Zero alloc.
+pub(crate) fn format_price_ref(price: Price) -> StackStr {
+    let mut s = format_price(price);
+    let len = s.len as usize;
+    match s.buf[..len].iter().position(|&b| b == b'.') {
+        None => { s.push(b'.'); s.push(b'0'); s.push(b'0'); }
+        Some(dot) if len - dot == 2 => s.push(b'0'),
+        Some(_) => {}
+    }
+    s
+}
+
 /// Parse a FIX tag value as a Price (fixed-point). Returns 0 if absent,
 /// unparseable, or non-finite. Rust's f64 parser accepts "nan"/"inf", but on
 /// the wire those are not-available sentinels, not values: the gateway's own
@@ -1765,6 +1778,19 @@ mod tests {
         assert_eq!(&*p(0.35), "0.35");
         assert_eq!(&*p(1.5), "1.5");
         assert_eq!(&*format_price(-1), "-0.00000001");
+    }
+
+    // The reference writes its price fields with two decimals at least.
+    #[test]
+    fn format_price_ref_has_two_decimals_at_least() {
+        let p = |v: f64| format_price_ref((v * PRICE_SCALE as f64).round() as Price);
+        assert_eq!(&*p(0.0), "0.00");
+        assert_eq!(&*p(0.05), "0.05");
+        assert_eq!(&*p(0.5), "0.50");
+        assert_eq!(&*p(-0.5), "-0.50");
+        assert_eq!(&*p(272.88), "272.88");
+        assert_eq!(&*p(721.0), "721.00");
+        assert_eq!(&*p(272.885), "272.885");
     }
 
     #[test]

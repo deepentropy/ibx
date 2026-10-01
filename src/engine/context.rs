@@ -717,44 +717,50 @@ impl Context {
         id
     }
 
+    /// `offset` is the snap offset (the API auxPrice), 0 when unset.
     pub fn submit_snap_mkt(
         &mut self,
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+        offset: Price,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitSnapMkt {
-            order_id: id, instrument, side, qty,
+            order_id: id, instrument, side, qty, offset,
         });
         id
     }
 
+    /// `offset` is the snap offset (the API auxPrice), 0 when unset.
     pub fn submit_snap_mid(
         &mut self,
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+        offset: Price,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitSnapMid {
-            order_id: id, instrument, side, qty,
+            order_id: id, instrument, side, qty, offset,
         });
         id
     }
 
+    /// `offset` is the snap offset (the API auxPrice), 0 when unset.
     pub fn submit_snap_pri(
         &mut self,
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+        offset: Price,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitSnapPri {
-            order_id: id, instrument, side, qty,
+            order_id: id, instrument, side, qty, offset,
         });
         id
     }

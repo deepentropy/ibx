@@ -551,9 +551,11 @@ pub enum OrderKind {
     MktPrt,
     StpPrt { stop_price: Price },
     MidPrice { price_cap: Price },
-    SnapMkt,
-    SnapMid,
-    SnapPri,
+    /// The snap types carry their offset (the API auxPrice) in both price
+    /// fields, 0 when unset (ibx#413).
+    SnapMkt { offset: Price },
+    SnapMid { offset: Price },
+    SnapPri { offset: Price },
     PegMkt { offset: Price },
     PegMid { offset: Price },
     Rel { offset: Price },
@@ -580,8 +582,7 @@ impl OrderKind {
         }
         let s = |p: &mut Price| *p = snap_to_tick(*p, tick);
         match self {
-            OrderKind::Market | OrderKind::Moc | OrderKind::Mtl | OrderKind::MktPrt
-            | OrderKind::SnapMkt | OrderKind::SnapMid | OrderKind::SnapPri => {}
+            OrderKind::Market | OrderKind::Moc | OrderKind::Mtl | OrderKind::MktPrt => {}
             OrderKind::TrailPct { trail_stop_price, .. } => s(trail_stop_price),
             OrderKind::Limit { price } | OrderKind::Loc { price } => s(price),
             OrderKind::Stop { stop_price }
@@ -595,7 +596,8 @@ impl OrderKind {
             }
             OrderKind::MidPrice { price_cap } => s(price_cap),
             OrderKind::PegMkt { offset } | OrderKind::PegMid { offset }
-            | OrderKind::Rel { offset } => s(offset),
+            | OrderKind::Rel { offset } | OrderKind::SnapMkt { offset }
+            | OrderKind::SnapMid { offset } | OrderKind::SnapPri { offset } => s(offset),
             OrderKind::AdjustableStop {
                 stop_price, trigger_price, adjusted_stop_price, adjusted_stop_limit_price,
                 adjusted_trailing_amount, adjustable_trailing_unit, ..
@@ -853,6 +855,7 @@ pub enum OrderRequest {
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+        offset: Price, // the API auxPrice, 0 = unset
     },
     /// Snap to Midpoint: snaps to midpoint. OrdType SMID.
     SubmitSnapMid {
@@ -860,6 +863,7 @@ pub enum OrderRequest {
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+        offset: Price, // the API auxPrice, 0 = unset
     },
     /// Snap to Primary: snaps to primary (NBBO). OrdType SREL.
     SubmitSnapPri {
@@ -867,6 +871,7 @@ pub enum OrderRequest {
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+        offset: Price, // the API auxPrice, 0 = unset
     },
     /// Pegged to Market: pegs to market with optional offset. OrdType E + ExecInst P.
     SubmitPegMkt {
@@ -1101,8 +1106,7 @@ impl OrderRequest {
             Self::Cancel { .. } | Self::CancelAll { .. }
             | Self::SubmitMarket { .. } | Self::SubmitMoc { .. }
             | Self::SubmitMtl { .. } | Self::SubmitMktPrt { .. }
-            | Self::SubmitSnapMkt { .. } | Self::SubmitSnapMid { .. }
-            | Self::SubmitSnapPri { .. } | Self::SubmitMtlAuc { .. } => {}
+            | Self::SubmitMtlAuc { .. } => {}
             Self::Modify { kind, .. } => kind.snap_prices(tick),
             Self::SubmitLimit { price, .. }
             | Self::SubmitLimitGtc { price, .. }
@@ -1132,7 +1136,10 @@ impl OrderRequest {
             Self::SubmitMidPrice { price_cap, .. } => s(price_cap),
             Self::SubmitRel { offset, .. }
             | Self::SubmitPegMkt { offset, .. }
-            | Self::SubmitPegMid { offset, .. } => s(offset),
+            | Self::SubmitPegMid { offset, .. }
+            | Self::SubmitSnapMkt { offset, .. }
+            | Self::SubmitSnapMid { offset, .. }
+            | Self::SubmitSnapPri { offset, .. } => s(offset),
             Self::SubmitBracket { entry_price, take_profit, stop_loss, .. } => {
                 s(entry_price); s(take_profit); s(stop_loss);
             }
