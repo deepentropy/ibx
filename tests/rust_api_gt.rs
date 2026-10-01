@@ -945,13 +945,15 @@ fn api_gt_suite() {
         print!("  req_fundamental_data (AAPL ReportSnapshot)... ");
         wrapper.drain();
         client.req_fundamental_data(470, &aapl(), "ReportSnapshot").unwrap();
+        // Only this request's errors: the scanner cancel above is acknowledged
+        // with its own error 162 under its request id, as the reference does.
         poll_until(&client, &mut wrapper,
-            |cbs| cbs.iter().any(|c| matches!(c, Cb::FundamentalData { .. } | Cb::Error { .. })),
+            |cbs| cbs.iter().any(|c| matches!(c, Cb::FundamentalData { .. } | Cb::Error { req_id: 470, .. })),
             Duration::from_secs(15));
         let cbs = wrapper.drain();
 
         let fd: Vec<_> = cbs.iter().filter_map(|c| if let Cb::FundamentalData { has_data, .. } = c { Some(*has_data) } else { None }).collect();
-        let errors: Vec<_> = cbs.iter().filter_map(|c| if let Cb::Error { msg, .. } = c { Some(msg.clone()) } else { None }).collect();
+        let errors: Vec<_> = cbs.iter().filter_map(|c| if let Cb::Error { req_id: 470, msg, .. } = c { Some(msg.clone()) } else { None }).collect();
 
         if !fd.is_empty() {
             if fd[0] { println!("PASS (data received)"); pass_count += 1; }

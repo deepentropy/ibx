@@ -2831,6 +2831,43 @@ mod tests {
         assert!(engine.hmds.pending_news.is_empty() && engine.hmds.pending_articles.is_empty());
     }
 
+    // A scanner and a fundamentals request in flight at once, replies
+    // interleaved: each reply goes to its own request, and the scanner
+    // cancel acknowledgement carries the scanner's request id only.
+    #[test]
+    fn scanner_and_fundamentals_replies_interleaved() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, mut server, tx) = scanner_engine(&shared);
+        load_scanner_params(&mut engine, &mut server, "<ScanParameterResponse/>");
+        tx.send(scanner_cmd(460, 0, "TOP_PERC_GAIN")).unwrap();
+        tx.send(ControlCommand::FetchFundamentalData { req_id: 470, con_id: 265598, report_type: "ReportSnapshot".into() }).unwrap();
+        engine.poll_control_commands();
+        let sent = plain_messages_sent(&mut server);
+        let fund = sent.iter().find(|m| m.contains("6040=10010|")).expect("fundamentals request sent");
+        let a = fund.find("<id>").unwrap() + 4;
+        let fund_id = &fund[a..a + fund[a..].find("</id>").unwrap()];
+
+        let scan = |rows: &str| crate::protocol::fix::fix_build(&[(35, "U"), (6040, "10005"),
+            (6118, &format!("<ScanResponse><id>APISCAN0:460</id><Contracts>{rows}</Contracts></ScanResponse>"))], 1);
+        let fund_reply = crate::protocol::fix::fix_build(&[(35, "U"), (6040, "10012"),
+            (6118, &format!("<FundResponse><id>{fund_id}</id></FundResponse>"))], 1);
+        engine.inject_hmds_message(&scan("<Contract><contractID>1</contractID></Contract>"));
+        engine.inject_hmds_message(&fund_reply);
+        engine.inject_hmds_message(&scan("<Contract><contractID>2</contractID></Contract>"));
+        let rows: Vec<(u32, u32)> = engine.hmds.cold_scanner_results.iter().map(|(r, res)| (*r, res.con_ids[0])).collect();
+        assert_eq!(rows, [(460, 1), (460, 2)]);
+        assert!(errors(&shared).is_empty());
+        tx.send(ControlCommand::CancelScanner { req_id: 460 }).unwrap();
+        engine.poll_control_commands();
+
+        let fund: Vec<u32> = shared.reference.drain_fundamental_data().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(fund, [470]);
+        assert!(engine.hmds.pending_fundamental.is_empty());
+        let rows: Vec<u32> = engine.hmds.cold_scanner_results.iter().map(|(r, _)| *r).collect();
+        assert!(rows.is_empty(), "the cancel drops the parked rows: {rows:?}");
+        assert_eq!(errors(&shared), ["460:162:Historical Market Data Service error message:API scanner subscription cancelled: 460"]);
+    }
+
     fn subscribe_cmd(con_id: i64, sec_type: &str) -> ControlCommand {
         ControlCommand::Subscribe {
             con_id, symbol: String::new(), exchange: "SMART".into(), sec_type: sec_type.into(),
