@@ -195,11 +195,20 @@ pub fn decode_ticks_35p(body: &[u8]) -> Vec<RawTick> {
     ticks
 }
 
+/// Widest tick value ibx accepts: the widest that still fits an `i64`;
+/// a wider one is an oversized value (ibx#272).
+pub const MAX_VALUE_BYTES: u64 = 8;
+
 /// Decode ticks into a caller-supplied buffer (avoids heap allocation on hot path).
-pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
+///
+/// A malformed block (cut short, or with an oversized value) is dropped
+/// with all its ticks and decoding stops,
+/// as the reference ends its loop on such a block; the ticks of the blocks
+/// before it are kept. Returns true when a block was dropped (ibx#272).
+pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) -> bool {
     ticks.clear();
     if body.len() < 4 {
-        return;
+        return false;
     }
 
     let bit_count = ((body[0] as usize) << 8) | (body[1] as usize);
@@ -207,6 +216,7 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
     let mut reader = BitReader::new(payload, bit_count);
 
     while reader.remaining() > 32 {
+        let block_start = ticks.len();
         let stats_block = match reader.read_unsigned(1) {
             Some(v) => v == 1,
             None => break,
@@ -217,7 +227,12 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
         };
 
         let mut has_more = 1u64;
-        while has_more == 1 && reader.remaining() >= 8 {
+        while has_more == 1 {
+            if reader.remaining() < 8 {
+                // The block announced one more entry that is not there.
+                ticks.truncate(block_start);
+                return true;
+            }
             let tick_type;
             let byte_width;
 
@@ -237,15 +252,16 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
             if raw_tick_type == 31 {
                 // Extended format
                 if reader.remaining() < 16 {
-                    return;
+                    ticks.truncate(block_start);
+                    return true;
                 }
                 tick_type = match reader.read_unsigned(8) {
                     Some(v) => v,
-                    None => return,
+                    None => { ticks.truncate(block_start); return true; }
                 };
                 byte_width = match reader.read_unsigned(8) {
                     Some(v) => v,
-                    None => return,
+                    None => { ticks.truncate(block_start); return true; }
                 };
             } else {
                 tick_type = raw_tick_type;
@@ -253,21 +269,18 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
             }
 
             let total_value_bits = (8 * byte_width) as usize;
-            if reader.remaining() < total_value_bits {
-                return;
+            if byte_width == 0 || byte_width > MAX_VALUE_BYTES || reader.remaining() < total_value_bits {
+                ticks.truncate(block_start);
+                return true;
             }
 
             let sign = match reader.read_unsigned(1) {
                 Some(v) => v,
-                None => return,
+                None => { ticks.truncate(block_start); return true; }
             };
-            let magnitude_unsigned = if total_value_bits > 1 {
-                match reader.read_unsigned(total_value_bits - 1) {
-                    Some(v) => v as i64,
-                    None => return,
-                }
-            } else {
-                0i64
+            let magnitude_unsigned = match reader.read_unsigned(total_value_bits - 1) {
+                Some(v) => v as i64,
+                None => { ticks.truncate(block_start); return true; }
             };
 
             let magnitude = if sign == 1 {
@@ -284,6 +297,26 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) {
             });
         }
     }
+    false
+}
+
+/// Longest VLQ read: the longest whose value still fits an `i64`; a
+/// longer or unterminated run is malformed (ibx#272).
+pub const MAX_VLQ_BYTES: usize = 9;
+
+/// A VLQ at `pos` that is terminated within [`MAX_VLQ_BYTES`]:
+/// (value, num_bytes). None for an oversized or unterminated run (ibx#272).
+#[inline]
+pub fn read_vlq_bounded(data: &[u8], pos: usize) -> Option<(u64, usize)> {
+    let end = data.len().min(pos.saturating_add(MAX_VLQ_BYTES));
+    let mut val: u64 = 0;
+    for (i, &b) in data.get(pos..end)?.iter().enumerate() {
+        val = (val << 7) | (b as u64 & 0x7F);
+        if b & 0x80 != 0 {
+            return Some((val, i + 1));
+        }
+    }
+    None
 }
 
 /// Read a VLQ-encoded unsigned integer (hi-bit terminated).
@@ -307,11 +340,17 @@ pub fn read_vlq(data: &[u8], pos: usize) -> (u64, usize) {
 }
 
 /// Convert VLQ value to signed (upper half of range = negative).
+/// An empty or oversized `num_bytes` has no signed meaning and gives 0
+/// (ibx#272).
 pub fn vlq_signed(val: u64, num_bytes: usize) -> i64 {
+    if num_bytes == 0 || num_bytes > MAX_VLQ_BYTES {
+        return 0;
+    }
     let bits = 7 * num_bytes;
     let half: u64 = 1 << (bits - 1);
     if val >= half {
-        val as i64 - (1i64 << bits)
+        // Exact for the longest run too, whose range is half of an i64.
+        (val as i64).wrapping_sub(1i64.wrapping_shl(bits as u32))
     } else {
         val as i64
     }
@@ -470,19 +509,16 @@ pub fn decode_ticks_35e(body: &[u8]) -> Vec<TbtEntry> {
 
         match marker {
             TBT_MARKER_ALL_LAST => {
-                if pos >= body.len() { break; }
-                let (ts, n) = read_vlq(body, pos);
+                // A malformed number ends the decode without the entry
+                // (ibx#272).
+                let Some((ts, n)) = read_vlq_bounded(body, pos) else { break };
                 pos += n;
-                if pos >= body.len() { break; }
-                let (price_raw, n) = read_vlq(body, pos);
+                let Some((price_raw, n)) = read_vlq_bounded(body, pos) else { break };
                 let price_delta = vlq_signed(price_raw, n);
                 pos += n;
-                if pos >= body.len() { break; }
-                let (attribs, n) = read_vlq(body, pos);
-                let _ = attribs; // reserved
+                let Some((_attribs, n)) = read_vlq_bounded(body, pos) else { break };
                 pos += n;
-                if pos >= body.len() { break; }
-                let (size, n) = read_vlq(body, pos);
+                let Some((size, n)) = read_vlq_bounded(body, pos) else { break };
                 pos += n;
                 if pos >= body.len() { break; }
                 let (exchange, n) = read_hibit_str(body, pos);
@@ -500,26 +536,19 @@ pub fn decode_ticks_35e(body: &[u8]) -> Vec<TbtEntry> {
                 });
             }
             TBT_MARKER_BID_ASK => {
-                if pos >= body.len() { break; }
-                let (ts, n) = read_vlq(body, pos);
+                let Some((ts, n)) = read_vlq_bounded(body, pos) else { break };
                 pos += n;
-                if pos >= body.len() { break; }
-                let (bid_raw, n) = read_vlq(body, pos);
+                let Some((bid_raw, n)) = read_vlq_bounded(body, pos) else { break };
                 let bid_delta = vlq_signed(bid_raw, n);
                 pos += n;
-                if pos >= body.len() { break; }
-                let (ask_raw, n) = read_vlq(body, pos);
+                let Some((ask_raw, n)) = read_vlq_bounded(body, pos) else { break };
                 let ask_delta = vlq_signed(ask_raw, n);
                 pos += n;
-                if pos >= body.len() { break; }
-                let (attribs, n) = read_vlq(body, pos);
-                let _ = attribs;
+                let Some((_attribs, n)) = read_vlq_bounded(body, pos) else { break };
                 pos += n;
-                if pos >= body.len() { break; }
-                let (bid_size, n) = read_vlq(body, pos);
+                let Some((bid_size, n)) = read_vlq_bounded(body, pos) else { break };
                 pos += n;
-                if pos >= body.len() { break; }
-                let (ask_size, n) = read_vlq(body, pos);
+                let Some((ask_size, n)) = read_vlq_bounded(body, pos) else { break };
                 pos += n;
 
                 entries.push(TbtEntry::Quote {
@@ -1021,6 +1050,78 @@ mod tests {
         assert_eq!(ticks[0].magnitude, 1);
         assert_eq!(ticks[1].tick_type, O_BID_PRICE);
         assert_eq!(ticks[1].magnitude, 99);
+    }
+
+    // ibx#272: an oversized value, or a block cut short after
+    // some of its ticks, drops the whole block and ends the decode; the
+    // blocks before it are kept.
+    #[test]
+    fn malformed_block_is_dropped_with_its_ticks() {
+        // An oversized value.
+        let mut b = PayloadBuilder::new();
+        b.server_tag(0, 5);
+        b.tick(O_BID_SIZE, 0, 1, 42, false);
+        b.server_tag(0, 6);
+        b.tick(O_ASK_SIZE, 1, 1, 7, false);
+        b.push(31, 5);
+        b.push(0, 1);
+        b.push(0, 2);
+        b.push(O_BID_PRICE, 8);
+        b.push(9, 8);
+        b.push(0, 36);
+        b.push(0, 36);
+        let mut ticks = Vec::new();
+        assert!(decode_ticks_35p_into(&b.build(), &mut ticks));
+        assert_eq!(ticks.len(), 1);
+        assert_eq!((ticks[0].server_tag, ticks[0].magnitude), (5, 42));
+
+        // A block that announces one more tick than it holds.
+        let mut b = PayloadBuilder::new();
+        b.server_tag(0, 5);
+        b.tick(O_BID_SIZE, 0, 1, 42, false);
+        b.server_tag(0, 6);
+        b.tick(O_ASK_SIZE, 1, 1, 7, false);
+        b.push(O_BID_PRICE, 5);
+        b.push(0, 1);
+        b.push(3, 2);
+        b.push(0, 8);
+        assert!(decode_ticks_35p_into(&b.build(), &mut ticks));
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].server_tag, 5);
+
+        // The widest value accepted decodes.
+        let mut b = PayloadBuilder::new();
+        b.server_tag(0, 5);
+        b.tick_extended(0, O_VOLUME, 8, i64::MAX as u64, false);
+        assert!(!decode_ticks_35p_into(&b.build(), &mut ticks));
+        assert_eq!(ticks[0].magnitude, i64::MAX);
+    }
+
+    // ibx#272: an oversized or unterminated length is refused; the
+    // signed reading never shifts out of range.
+    #[test]
+    fn vlq_widths_are_bounded() {
+        assert_eq!(read_vlq_bounded(&[0x85], 0), Some((5, 1)));
+        assert_eq!(read_vlq_bounded(&[0x01, 0x80], 0), Some((128, 2)));
+        assert_eq!(read_vlq_bounded(&[0x01; 11], 0), None, "unterminated");
+        let mut ten = [0x01u8; 10];
+        ten[9] = 0x81;
+        assert_eq!(read_vlq_bounded(&ten, 0), None, "too long");
+        let mut nine = [0x7Fu8; 9];
+        nine[8] = 0xFF;
+        let (v, n) = read_vlq_bounded(&nine, 0).unwrap();
+        assert_eq!((v, n), ((1u64 << 63) - 1, 9));
+        assert_eq!(vlq_signed(v, n), -1);
+        assert_eq!(vlq_signed(1 << 62, 9), -(1 << 62));
+        assert_eq!(vlq_signed(5, 0), 0);
+        assert_eq!(vlq_signed(5, 11), 0);
+        assert_eq!(read_vlq_bounded(&[0x85], 1), None);
+        assert_eq!(read_vlq_bounded(&[0x85], 5), None);
+
+        // A tick-by-tick entry with an unterminated price is not decoded.
+        let mut body = vec![TBT_MARKER_ALL_LAST, 0x85];
+        body.extend_from_slice(&[0x01; 12]);
+        assert!(decode_ticks_35e(&body).is_empty());
     }
 
     #[test]

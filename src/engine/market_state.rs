@@ -331,35 +331,45 @@ impl MarketState {
     /// times the size increment, in the Qty fixed point, and for bid, ask
     /// and last also times the round lot (ibx#287). The last trade time is
     /// its base, or the base plus a delta, in epoch seconds, kept in ns.
+    /// A value whose scaling overflows is not stored: the field keeps its
+    /// last value rather than a wrapped number (ibx#272).
     #[inline]
     pub fn apply_tick(&mut self, id: InstrumentId, tick: &RawTick) {
+        #[inline(always)]
+        fn set(field: &mut i64, value: Option<i64>) {
+            if let Some(v) = value { *field = v; }
+        }
         let i = id as usize;
         let mts = self.min_tick_scaled[i];
         let sizes = self.size_scale[i];
         let m = tick.magnitude;
         let q = &mut self.quotes[i];
         match tick.tick_type {
-            td::O_BID_PRICE => q.bid = m * mts,
-            td::O_ASK_PRICE => q.ask = m * mts,
-            td::O_LAST_PRICE => q.last = m * mts,
-            td::O_CLOSE_PRICE => q.close = m * mts,
-            td::O_HIGH_PRICE => q.high = m * mts,
-            td::O_LOW_PRICE => q.low = m * mts,
-            td::O_OPEN_PRICE => q.open = m * mts,
-            td::O_BID_SIZE => q.bid_size = m * sizes,
-            td::O_ASK_SIZE => q.ask_size = m * sizes,
-            td::O_LAST_SIZE => q.last_size = m * sizes,
-            td::O_VOLUME => q.volume = m * self.size_min_tick_scaled[i],
+            td::O_BID_PRICE => set(&mut q.bid, m.checked_mul(mts)),
+            td::O_ASK_PRICE => set(&mut q.ask, m.checked_mul(mts)),
+            td::O_LAST_PRICE => set(&mut q.last, m.checked_mul(mts)),
+            td::O_CLOSE_PRICE => set(&mut q.close, m.checked_mul(mts)),
+            td::O_HIGH_PRICE => set(&mut q.high, m.checked_mul(mts)),
+            td::O_LOW_PRICE => set(&mut q.low, m.checked_mul(mts)),
+            td::O_OPEN_PRICE => set(&mut q.open, m.checked_mul(mts)),
+            td::O_BID_SIZE => set(&mut q.bid_size, m.checked_mul(sizes)),
+            td::O_ASK_SIZE => set(&mut q.ask_size, m.checked_mul(sizes)),
+            td::O_LAST_SIZE => set(&mut q.last_size, m.checked_mul(sizes)),
+            td::O_VOLUME => set(&mut q.volume, m.checked_mul(self.size_min_tick_scaled[i])),
             td::O_BID_EXCH => q.bid_exch_mask = m,
             td::O_ASK_EXCH => q.ask_exch_mask = m,
             td::O_LAST_EXCH => q.last_exch_mask = m,
             // On a daily-stats block this type is the close date, not a time.
             td::O_TIMESTAMP_BASE if !tick.stats_block && m > 0 => {
-                self.last_ts_base[i] = m;
-                q.timestamp_ns = m as u64 * NS_PER_SEC;
+                if let Some(ns) = (m as u64).checked_mul(NS_PER_SEC) {
+                    self.last_ts_base[i] = m;
+                    q.timestamp_ns = ns;
+                }
             }
             td::O_TIMESTAMP_DELTA if m > 0 => {
-                q.timestamp_ns = (self.last_ts_base[i] + m) as u64 * NS_PER_SEC;
+                if let Some(ns) = self.last_ts_base[i].checked_add(m).and_then(|s| (s as u64).checked_mul(NS_PER_SEC)) {
+                    q.timestamp_ns = ns;
+                }
             }
             _ => {}
         }
@@ -899,6 +909,26 @@ mod tests {
         assert_eq!((q.bid, q.ask, q.last, q.low), (0, 0, 0, 0));
         assert_eq!((q.bid_size, q.ask_size), (0, 0));
         assert_eq!(q.timestamp_ns, 0);
+    }
+
+    // ibx#272: a magnitude whose scaling overflows leaves the field as it
+    // was, in debug and release alike.
+    #[test]
+    fn apply_tick_overflow_keeps_the_last_value() {
+        let mut ms = MarketState::new();
+        let id = ms.register(265598);
+        ms.set_min_tick(id, 0.01);
+        ms.apply_tick(id, &raw(0, 25_500));
+        ms.apply_tick(id, &raw(4, 57));
+        ms.apply_tick(id, &raw(20, 1_790_159_184));
+        for t in [raw(0, i64::MAX), raw(4, i64::MAX), raw(10, i64::MIN), raw(20, i64::MAX), raw(21, i64::MAX)] {
+            ms.apply_tick(id, &t);
+        }
+        let q = ms.quote(id);
+        assert_eq!(q.bid, 25_500 * PRICE_SCALE / 100);
+        assert_eq!(q.bid_size, 57 * QTY_SCALE);
+        assert_eq!(q.volume, 0);
+        assert_eq!(q.timestamp_ns, 1_790_159_184 * NS_PER_SEC);
     }
 
     #[test]

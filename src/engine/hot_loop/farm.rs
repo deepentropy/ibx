@@ -286,7 +286,10 @@ impl FarmState {
         }
 
         let mut ticks = std::mem::take(&mut self.tick_buf);
-        tick_decoder::decode_ticks_35p_into(body, &mut ticks);
+        if tick_decoder::decode_ticks_35p_into(body, &mut ticks) {
+            // The session goes on, as the reference's (ibx#272).
+            log::warn!("Farm tick message: malformed block dropped, {} ticks of earlier blocks kept", ticks.len());
+        }
         let mut notified = [0u64; crate::types::MAX_INSTRUMENTS / 64];
 
         // Phase 1: Apply all ticks to internal quotes before publishing.
