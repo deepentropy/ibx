@@ -418,9 +418,11 @@ pub(super) fn phase_fundamental_data(mut conns: Conns, gw: &Gateway, config: &Ga
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
-    let (hot_loop, control_tx) = HotLoop::with_connections(
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
     );
+    // The fundamentals route names their own farm, opened on demand (#434).
+    as_client_session(&mut hot_loop, gw, config);
 
     control_tx.send(ControlCommand::FetchFundamentalData {
         req_id: 8300, con_id: 265598,
@@ -893,9 +895,11 @@ pub(super) fn phase_fundamental_data_channel(mut conns: Conns, gw: &Gateway, con
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
-    let (hot_loop, control_tx) = HotLoop::with_connections(
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
     );
+    // The fundamentals route names their own farm, opened on demand (#434).
+    as_client_session(&mut hot_loop, gw, config);
 
     control_tx.send(ControlCommand::FetchFundamentalData {
         req_id: 7001,

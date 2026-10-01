@@ -233,13 +233,13 @@ pub(super) fn phase_subscribe_unsubscribe(conns: Conns) -> Conns {
     conns
 }
 
-pub(super) fn phase_market_depth(conns: Conns) -> Conns {
+pub(super) fn phase_market_depth(conns: Conns, gw: &gateway::Gateway, config: &GatewayConfig) -> Conns {
     println!("--- Phase 130: Market Depth Subscribe/Unsubscribe (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
     let (event_tx, _event_rx) = crossbeam_channel::unbounded();
-    let (hot_loop, control_tx) = HotLoop::with_connections(
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(),
         Some(event_tx),
         account_id.clone(),
@@ -248,6 +248,9 @@ pub(super) fn phase_market_depth(conns: Conns) -> Conns {
         conns.hmds,
         None,
     );
+    // SmartDepth takes its exchanges from the contract and the routing
+    // table, as the real clients give it (#452).
+    as_client_session(&mut hot_loop, gw, config);
     let join = run_hot_loop(hot_loop);
 
     let req_id = 93001u32;

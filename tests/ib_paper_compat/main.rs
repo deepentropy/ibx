@@ -314,7 +314,7 @@ fn compat_suite() {
     }
 
     conns = market_data::phase_subscribe_unsubscribe(conns);
-    conns = market_data::phase_market_depth(conns);
+    conns = market_data::phase_market_depth(conns, &gw, &config);
     conns = market_data::phase_news_ticks(conns);
     conns = heartbeat::phase_heartbeat_keepalive(conns);
     conns = heartbeat::phase_farm_heartbeat_keepalive(conns);

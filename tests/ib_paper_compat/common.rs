@@ -122,6 +122,37 @@ pub(super) struct Conns {
     pub(super) account_id: String,
 }
 
+/// Give a hot loop built from bare connections what the real clients give
+/// it (#445): the routing tables of the logon, which pick the farm of each
+/// request, and the session's credentials, with which a farm a request
+/// routes to is opened on demand. Without them the engine has no route to a
+/// farm other than the two of the logon and cannot open one.
+pub(super) fn as_client_session(hot_loop: &mut HotLoop, gw: &gateway::Gateway, config: &GatewayConfig) {
+    if let Some(text) = &gw.md_routing {
+        hot_loop.set_routing_table(ibx::engine::routing::TableKind::MarketData, text);
+    }
+    if let Some(text) = &gw.hmds_routing {
+        hot_loop.set_routing_table(ibx::engine::routing::TableKind::Historical, text);
+    }
+    hot_loop.set_farm_name(gw.farm_name.clone());
+    hot_loop.set_reconnect_auth(gateway::ReconnectAuth {
+        host: config.host.clone(),
+        username: config.username.clone(),
+        password: config.password.clone(),
+        paper: config.paper,
+        session_key: gw.session_token.clone(),
+        session_token: gw.session_token.clone(),
+        server_session_id: gw.server_session_id.clone(),
+        hw_info: gw.hw_info.clone(),
+        encoded: gw.encoded.clone(),
+        hmds_host: gw.hmds_host.clone(),
+        hmds_farm: gw.hmds_farm.clone(),
+        farm_host: gw.farm_host.clone(),
+        farm_name: gw.farm_name.clone(),
+        session_epoch: gw.session_epoch.clone(),
+    });
+}
+
 /// Run a hot loop in a background thread, returning the HotLoop for connection reclamation.
 pub(super) fn run_hot_loop(hot_loop: HotLoop) -> std::thread::JoinHandle<HotLoop> {
     std::thread::spawn(move || {
