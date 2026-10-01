@@ -803,13 +803,11 @@ pub fn format_sessions_string(sessions: &[ScheduleSession]) -> String {
     for (i, s) in sessions.iter().enumerate() {
         if i > 0 { out.push(';'); }
         if s.start == s.end {
-            let date = if s.trade_date.len() >= 8 {
-                &s.trade_date[..8]
-            } else if s.start.len() >= 8 {
-                &s.start[..8]
-            } else {
-                s.start.as_str()
-            };
+            // A short or non-ASCII field is kept whole rather than cut
+            // inside a character (ibx#258).
+            let date = s.trade_date.get(..8)
+                .or_else(|| s.start.get(..8))
+                .unwrap_or(s.start.as_str());
             out.push_str(date);
             out.push_str(":CLOSED");
         } else {
@@ -822,10 +820,12 @@ pub fn format_sessions_string(sessions: &[ScheduleSession]) -> String {
 }
 
 /// Convert wire `YYYYMMDD-HH:MM:SS` to compact `YYYYMMDD:HHMM`.
-/// Returns the input unchanged if the format does not match.
+/// Returns the input unchanged if the format does not match, including a
+/// non-ASCII value, whose byte positions are not character positions
+/// (ibx#258).
 fn trim_session_endpoint(s: &str) -> String {
     let bytes = s.as_bytes();
-    if bytes.len() >= 14 && bytes[8] == b'-' && bytes[11] == b':' {
+    if s.is_ascii() && bytes.len() >= 14 && bytes[8] == b'-' && bytes[11] == b':' {
         let mut out = String::with_capacity(13);
         out.push_str(&s[..8]);
         out.push(':');
@@ -1380,6 +1380,27 @@ pub(crate) mod tests {
     #[test]
     fn format_sessions_string_empty() {
         assert_eq!(format_sessions_string(&[]), "");
+    }
+
+    /// ibx#258: a non-ASCII or short date never panics; the value is kept.
+    #[test]
+    fn format_sessions_string_keeps_non_ascii_and_short_dates() {
+        // A replacement character (3 bytes) puts byte 12 inside a character.
+        let bad = "20260427-13:3\u{FFFD}0:00".to_string();
+        assert_eq!(bad.as_bytes()[8], b'-');
+        assert_eq!(bad.as_bytes()[11], b':');
+        let open = ScheduleSession { start: bad.clone(), end: "20260427-20:00:00".into(), trade_date: "20260427".into() };
+        assert_eq!(format_sessions_string(&[open]), format!("{}-20260427:2000", bad));
+
+        // Closed day with a short trade date and a non-ASCII start.
+        let closed = ScheduleSession { start: "2026\u{FFFD}".into(), end: "2026\u{FFFD}".into(), trade_date: "2026".into() };
+        assert_eq!(format_sessions_string(&[closed]), "2026\u{FFFD}:CLOSED");
+        // A non-ASCII trade date cut inside a character falls back to the start.
+        let closed = ScheduleSession { start: "20260427".into(), end: "20260427".into(), trade_date: "2026042\u{FFFD}".into() };
+        assert_eq!(format_sessions_string(&[closed]), "20260427:CLOSED");
+        // Short values on both sides.
+        let closed = ScheduleSession { start: "".into(), end: "".into(), trade_date: "".into() };
+        assert_eq!(format_sessions_string(&[closed]), ":CLOSED");
     }
 
     #[test]
