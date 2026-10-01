@@ -992,6 +992,16 @@ pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
         tbt_before
     );
 
+    // Events already delivered when the unsubscribe is sent are not "after":
+    // one frame holds several entries, so some wait in the channel.
+    let mut tbt_queued = 0u32;
+    while let Ok(ev) = event_rx.try_recv() {
+        if matches!(ev, Event::TbtTrade(_) | Event::TbtQuote(_)) {
+            tbt_queued += 1;
+        }
+    }
+    println!("  Step 1b: {} TBT events already delivered when the unsubscribe is sent", tbt_queued);
+
     // Step 2: Unsubscribe — instrument 0 is the first registered (SPY)
     control_tx
         .send(ControlCommand::UnsubscribeTbt { instrument: 0 })

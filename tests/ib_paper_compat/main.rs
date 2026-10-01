@@ -496,6 +496,26 @@ fn query_error_phase_live() {
     let _ = connection::phase_graceful_shutdown(conns);
 }
 
+/// Focused live entry for the tick-by-tick unsubscribe phase (ibx#404). Needs a
+/// live market for ticks. Run:
+///   cargo test --test ib_paper_compat tbt_unsubscribe_phase_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn tbt_unsubscribe_phase_live() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let (gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
+        .expect("Gateway::connect() failed");
+    let conns = Conns { farm: farm_conn, ccp: ccp_conn, hmds: hmds_conn, account_id: gw.account_id.clone() };
+    let conns = market_data::phase_tbt_unsubscribe(conns);
+    let _ = connection::phase_graceful_shutdown(conns);
+    let rejected = take_rejections();
+    assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
+}
+
 /// ibx#191 PR A focused live entry — validates that after a full disconnect,
 /// a fresh `Gateway::connect` receives the CCP recovery push (35=8 with
 /// 150=0/39=0 per ib-agent#155) and that a subsequent
