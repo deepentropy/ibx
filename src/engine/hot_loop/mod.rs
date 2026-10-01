@@ -581,6 +581,10 @@ impl HotLoop {
         if before.hmds && !now.hmds {
             let name = self.hmds_farm_name().to_string();
             self.shared.push_connection_notice(2105, format!("HMDS data farm connection is broken:{}", name));
+            self.hmds.scanner_link_lost(&self.shared);
+        }
+        if !before.hmds && now.hmds {
+            self.hmds.scanner_link_restored(&mut self.hmds_conn, &mut self.hb, &self.shared);
         }
         if !before.hmds && now.hmds {
             let name = self.hmds_farm_name().to_string();
@@ -787,19 +791,20 @@ impl HotLoop {
                     self.ccp.send_mkt_depth_exchanges_request(&mut self.ccp_conn, &mut self.hb, &self.shared);
                 }
                 ControlCommand::FetchScannerParams => {
-                    self.hmds.send_scanner_params_request(&mut self.hmds_conn, &mut self.hb);
+                    self.hmds.req_scanner_params(&mut self.hmds_conn, &mut self.hb, &self.shared);
                 }
-                ControlCommand::SubscribeScanner { req_id, instrument, location_code, scan_code, max_items } => {
-                    if self.hmds_conn.is_none() {
+                ControlCommand::SubscribeScanner { req_id, client_id, instrument, location_code, scan_code, max_items } => {
+                    if let Some(text) = scanner_refusal(&self.hmds, req_id) {
+                        self.shared.reference.push_historical_error(req_id, 322, text);
+                    } else if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_scanner_subscribe(req_id, &instrument, &location_code, &scan_code, max_items, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_scanner_subscribe(req_id, client_id, &instrument, &location_code, &scan_code, max_items, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::CancelScanner { req_id } => {
-                    if let Some(pos) = self.hmds.pending_scanner.iter().position(|(_, rid)| *rid == req_id) {
-                        let (scan_id, _) = self.hmds.pending_scanner.remove(pos);
-                        self.hmds.send_scanner_cancel(&scan_id, &mut self.hmds_conn, &mut self.hb);
+                    if self.hmds.cancel_scanner(req_id, &mut self.hmds_conn, &mut self.hb, &self.shared) {
+                        self.ccp.pending_scanner_enrichment.retain(|p| p.api_req_id != req_id);
                     }
                 }
                 ControlCommand::FetchHistoricalNews { req_id, con_id, provider_codes, start_time, end_time, max_results } => {
@@ -1370,6 +1375,7 @@ impl HotLoop {
                     self.hmds_reconnect_attempt, HMDS_MAX_RECONNECT_ATTEMPTS, e,
                 );
                 self.pending_hmds_reconnect = None;
+                self.hmds.scanner_connect_failed(&self.shared);
                 if self.hmds_reconnect_attempt >= HMDS_MAX_RECONNECT_ATTEMPTS {
                     log::error!(
                         "HMDS reconnect exhausted {} attempts — historical data unavailable for this session",
@@ -1620,6 +1626,22 @@ pub(crate) fn hmds_reconnect_backoff(attempt: u32) -> std::time::Duration {
     let n = attempt.saturating_sub(1).min(31);
     let secs = (3u64.saturating_mul(1u64 << n)).min(64);
     std::time::Duration::from_secs(secs)
+}
+
+/// The reference's local refusals of a scanner subscription (ibx#457), in
+/// its order: the concurrent limit (a tenth of the ticker limit), then a
+/// request id that is already live. Both are 322.
+fn scanner_refusal(hmds: &HmdsState, req_id: u32) -> Option<String> {
+    let cause = |c: &str| format!("Error processing request.-'co' : cause - {}", c);
+    // The ticker limit of the logon, the one real-time bars use too.
+    let max = hmds.max_real_time_requests / 10;
+    if hmds.scanner_sessions() >= max as usize {
+        return Some(cause(&format!("Only {} simultaneous API scanner subscriptions are allowed.", max)));
+    }
+    if hmds.pending_scanner.iter().any(|s| s.req_id == req_id) {
+        return Some(cause("Duplicate ticker ID for API scanner subscription"));
+    }
+    None
 }
 
 /// Surface an "HMDS unavailable" error for `req_id` when the historical-data
@@ -2484,6 +2506,178 @@ mod tests {
         }
         String::from_utf8_lossy(&buf).replace('\x01', "|")
             .split("8=FIX").filter(|m| !m.is_empty()).map(|m| format!("8=FIX{m}")).collect()
+    }
+
+    /// Inbound historical-data messages of a recorded reference scenario,
+    /// decompressed, in recorded order.
+    fn fixture_hmds_messages(scenario: &str) -> Vec<Vec<u8>> {
+        use base64::Engine as _;
+        let path = format!("{}/tests/fixtures/gw1040/scenarios/{}", env!("CARGO_MANIFEST_DIR"), scenario);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut out = Vec::new();
+        for line in text.lines().skip(1) {
+            let rec: serde_json::Value = serde_json::from_str(line).unwrap();
+            if rec["leg"] != "fix_in" || rec["conn"] != "ushmds" { continue; }
+            let raw = base64::engine::general_purpose::STANDARD.decode(rec["raw_b64"].as_str().unwrap()).unwrap();
+            if raw.starts_with(b"8=FIXCOMP") {
+                out.extend(crate::protocol::fixcomp::fixcomp_decompress(&raw).unwrap());
+            }
+        }
+        out
+    }
+
+    fn scanner_engine(shared: &Arc<SharedState>) -> (HotLoop, std::net::TcpStream, Sender<ControlCommand>) {
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (c, server) = socket_pair();
+        engine.hmds_conn = Some(Connection::new_raw(c).unwrap());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        engine.set_control_rx(rx);
+        (engine, server, tx)
+    }
+
+    fn scanner_cmd(req_id: u32, client_id: i64, scan_code: &str) -> ControlCommand {
+        ControlCommand::SubscribeScanner {
+            req_id, client_id, instrument: "STK".into(), location_code: "STK.US.MAJOR".into(),
+            scan_code: scan_code.into(), max_items: 10,
+        }
+    }
+
+    fn errors(shared: &SharedState) -> Vec<String> {
+        shared.reference.drain_historical_errors().into_iter()
+            .map(|(r, c, m)| format!("{r}:{c}:{m}")).collect()
+    }
+
+    // ibx#457 (reference scenario scanner_two, 26/09/2026): two scanners
+    // open at once; each result goes to the subscription its id names,
+    // the ids are client id and request id; each cancel gives the local
+    // 162 then its desubscribe; an unknown cancel gives 365 only.
+    #[test]
+    fn two_scanners_get_their_own_results() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, mut server, tx) = scanner_engine(&shared);
+        tx.send(scanner_cmd(9005, 198, "TOP_PERC_GAIN")).unwrap();
+        tx.send(scanner_cmd(9006, 198, "MOST_ACTIVE")).unwrap();
+        engine.poll_control_commands();
+        let sent = plain_messages_sent(&mut server);
+        assert!(sent.iter().any(|m| m.contains("<id>APISCAN198:9005</id>") && m.contains("TOP_PERC_GAIN")), "{sent:?}");
+        assert!(sent.iter().any(|m| m.contains("<id>APISCAN198:9006</id>") && m.contains("MOST_ACTIVE")), "{sent:?}");
+
+        for msg in fixture_hmds_messages("20260926b/scanner_two.jsonl") {
+            if msg.windows(11).any(|w| w == b"6040=10005\x01") {
+                engine.inject_hmds_message(&msg);
+            }
+        }
+        let got: Vec<(u32, u32, usize)> = engine.hmds.cold_scanner_results.iter()
+            .map(|(r, res)| (*r, res.con_ids[0], res.con_ids.len())).collect();
+        assert_eq!(got, [(9006, 911617323, 10), (9005, 909360667, 10)]);
+
+        for req_id in [9005, 9006, 99] {
+            tx.send(ControlCommand::CancelScanner { req_id }).unwrap();
+        }
+        engine.poll_control_commands();
+        assert_eq!(errors(&shared), [
+            "9005:162:Historical Market Data Service error message:API scanner subscription cancelled: 9005",
+            "9006:162:Historical Market Data Service error message:API scanner subscription cancelled: 9006",
+            "99:365:No scanner subscription found for ticker id:99",
+        ]);
+        let sent = plain_messages_sent(&mut server);
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent[0].contains("6040=10004|") && sent[0].contains("<id>APISCAN198:9005</id>"));
+        assert!(sent[1].contains("<id>APISCAN198:9006</id>"));
+        assert!(engine.hmds.cold_scanner_results.is_empty());
+        assert!(engine.hmds.pending_scanner.is_empty());
+    }
+
+    // ibx#457: a result whose id is not live is dropped; a refusal text
+    // ends the subscription with 162; a warning text gives 165 and the rows.
+    #[test]
+    fn scanner_result_texts() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, _server, tx) = scanner_engine(&shared);
+        tx.send(scanner_cmd(1, 7, "TOP_PERC_GAIN")).unwrap();
+        tx.send(scanner_cmd(2, 7, "MOST_ACTIVE")).unwrap();
+        engine.poll_control_commands();
+        let result = |xml: &str| crate::protocol::fix::fix_build(&[(35, "U"), (6040, "10005"), (6118, xml)], 1);
+        engine.inject_hmds_message(&result("<ScanResponse><id>APISCAN3:1</id><Contracts>\
+            <Contract><contractID>1</contractID></Contract></Contracts></ScanResponse>"));
+        engine.inject_hmds_message(&result("<ScanResponse><id>APISCAN7:1</id>\
+            <errorText>Scanner type with code X is disabled</errorText></ScanResponse>"));
+        engine.inject_hmds_message(&result("<ScanResponse><id>APISCAN7:2</id><warningText>delayed</warningText>\
+            <Contracts><Contract><contractID>2</contractID></Contract></Contracts></ScanResponse>"));
+        assert_eq!(errors(&shared), [
+            "1:162:Historical Market Data Service error message:Scanner type with code X is disabled",
+            "2:165:Historical Market Data Service query message:delayed",
+        ]);
+        let rows: Vec<u32> = engine.hmds.cold_scanner_results.iter().map(|(r, _)| *r).collect();
+        assert_eq!(rows, [2]);
+        assert_eq!(engine.hmds.pending_scanner.iter().map(|s| s.req_id).collect::<Vec<_>>(), [2]);
+    }
+
+    // ibx#457: a tenth of the ticker limit runs at once, and a live
+    // request id is refused, both with 322 and nothing sent.
+    #[test]
+    fn scanner_limit_and_duplicate_id() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, mut server, tx) = scanner_engine(&shared);
+        engine.hmds.max_real_time_requests = 20;
+        tx.send(scanner_cmd(1, 0, "A")).unwrap();
+        tx.send(scanner_cmd(1, 0, "A")).unwrap();
+        tx.send(scanner_cmd(2, 0, "B")).unwrap();
+        tx.send(scanner_cmd(3, 0, "C")).unwrap();
+        engine.poll_control_commands();
+        assert_eq!(errors(&shared), [
+            "1:322:Error processing request.-'co' : cause - Duplicate ticker ID for API scanner subscription",
+            "3:322:Error processing request.-'co' : cause - Only 2 simultaneous API scanner subscriptions are allowed.",
+        ]);
+        assert_eq!(plain_messages_sent(&mut server).len(), 2);
+    }
+
+    // ibx#457: the scanner parameters are asked once per connection; the
+    // requests waiting for them all get the answer, later ones are served
+    // from the cache; a lost link clears it.
+    #[test]
+    fn scanner_parameters_are_cached() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, mut server, tx) = scanner_engine(&shared);
+        tx.send(ControlCommand::FetchScannerParams).unwrap();
+        tx.send(ControlCommand::FetchScannerParams).unwrap();
+        engine.poll_control_commands();
+        let sent = plain_messages_sent(&mut server);
+        assert_eq!(sent.iter().filter(|m| m.contains("6040=10001|")).count(), 1, "{sent:?}");
+        let reply = crate::protocol::fix::fix_build(&[(35, "U"), (6040, "10002"), (6118, "<ScanParameterResponse/>")], 1);
+        engine.inject_hmds_message(&reply);
+        assert_eq!(shared.reference.drain_scanner_params().len(), 2);
+        tx.send(ControlCommand::FetchScannerParams).unwrap();
+        engine.poll_control_commands();
+        assert_eq!(shared.reference.drain_scanner_params(), ["<ScanParameterResponse/>"]);
+        assert!(plain_messages_sent(&mut server).is_empty(), "answered from the cache");
+        engine.hmds.scanner_link_lost(&shared);
+        tx.send(ControlCommand::FetchScannerParams).unwrap();
+        engine.poll_control_commands();
+        assert!(shared.reference.drain_scanner_params().is_empty());
+        assert_eq!(plain_messages_sent(&mut server).len(), 1, "asked again");
+    }
+
+    // ibx#457: a lost and restored link is told to every live scanner
+    // with 165, and the subscription is sent again.
+    #[test]
+    fn scanner_link_notices_and_resubscribe() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, mut server, tx) = scanner_engine(&shared);
+        tx.send(scanner_cmd(4, 1, "TOP_PERC_GAIN")).unwrap();
+        engine.poll_control_commands();
+        assert_eq!(plain_messages_sent(&mut server).len(), 1);
+        engine.hmds.scanner_link_lost(&shared);
+        engine.hmds.scanner_connect_failed(&shared);
+        engine.hmds.scanner_link_restored(&mut engine.hmds_conn, &mut engine.hb, &shared);
+        assert_eq!(errors(&shared), [
+            "4:165:HMDS server disconnect occurred.  Attempting reconnection...",
+            "4:165:HMDS connection attempt failed.  Connection will be re-attempted...",
+            "4:165:HMDS server connection was successful.",
+        ]);
+        let sent = plain_messages_sent(&mut server);
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("<id>APISCAN1:4</id>"));
     }
 
     fn subscribe_cmd(con_id: i64, sec_type: &str) -> ControlCommand {

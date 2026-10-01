@@ -2974,6 +2974,7 @@ fn process_msgs_dispatches_scanner_data() {
             ScannerEntry { con_id: 756733, ..Default::default() },
         ],
         scan_time: "2026-03-13".into(),
+        ..Default::default()
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);

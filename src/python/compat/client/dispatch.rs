@@ -640,7 +640,8 @@ impl EClient {
                     }
                 }
                 let cd_py = Py::new(py, cd)?.into_any();
-                call_wrapper!(self.wrapper, py, "scanner_data", (req_id as i64, rank as i32, &cd_py, "", "", "", ""));
+                call_wrapper!(self.wrapper, py, "scanner_data", (req_id as i64, rank as i32, &cd_py,
+                    entry.distance.as_str(), entry.benchmark.as_str(), entry.projection.as_str(), entry.legs.as_str()));
             }
             call_wrapper!(self.wrapper, py, "scanner_data_end", (req_id as i64,));
         }

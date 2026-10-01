@@ -160,6 +160,7 @@ impl EClient {
     ) -> Result<(), String> {
         self.send(ControlCommand::SubscribeScanner {
             req_id: req_id as u32,
+            client_id: self.core.client_id.load(std::sync::atomic::Ordering::Relaxed),
             instrument: instrument.into(),
             location_code: location_code.into(),
             scan_code: scan_code.into(),

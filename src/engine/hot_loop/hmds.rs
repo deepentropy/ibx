@@ -48,9 +48,15 @@ pub(crate) struct HmdsState {
     pub(crate) next_head_ts_window: u32,
     pub(crate) next_histogram_window: u32,
     pub(crate) next_fundamental_window: u32,
+    /// A scanner parameters request is on the wire.
     pub(crate) pending_scanner_params: bool,
-    pub(crate) pending_scanner: Vec<(String, u32)>,
-    pub(crate) next_scanner_id: u32,
+    /// Scanner parameters of this connection: one request, then every
+    /// client request is answered from here (ibx#457).
+    pub(crate) scanner_params: Option<String>,
+    /// Client parameters requests waiting for the answer (ibx#457).
+    pub(crate) scanner_params_waiting: u32,
+    /// Live scanner subscriptions, matched to results by their id (ibx#457).
+    pub(crate) pending_scanner: Vec<ScannerSub>,
     pub(crate) pending_news: Vec<(String, u32)>,
     pub(crate) pending_articles: Vec<(String, u32)>,
     pub(crate) pending_fundamental: Vec<(String, u32)>,
@@ -107,6 +113,23 @@ pub(crate) struct PendingHistogram {
     pub(crate) sum: crate::control::histogram::HistogramSum,
 }
 
+/// One live scanner subscription (ibx#457).
+#[derive(Debug, Clone)]
+pub(crate) struct ScannerSub {
+    pub(crate) scan_id: String,
+    pub(crate) req_id: u32,
+    /// The subscribe message body, sent again after a reconnect.
+    pub(crate) xml: String,
+    /// The subscribe went out on the current connection.
+    pub(crate) sent: bool,
+}
+
+/// Scanner notices of the historical data link, as the reference words
+/// them (ibx#457).
+const SCANNER_LINK_LOST: &str = "HMDS server disconnect occurred.  Attempting reconnection...";
+const SCANNER_LINK_RESTORED: &str = "HMDS server connection was successful.";
+const SCANNER_CONNECT_FAILED: &str = "HMDS connection attempt failed.  Connection will be re-attempted...";
+
 /// State of one leg of a multi-query bar request (ibx#408).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegState {
@@ -157,8 +180,9 @@ impl HmdsState {
             next_histogram_window: 0,
             next_fundamental_window: 1,
             pending_scanner_params: false,
+            scanner_params: None,
+            scanner_params_waiting: 0,
             pending_scanner: Vec::new(),
-            next_scanner_id: 1,
             pending_news: Vec::new(),
             pending_articles: Vec::new(),
             pending_fundamental: Vec::new(),
@@ -491,8 +515,8 @@ impl HmdsState {
                                 // text, and the request ends (ibx#454).
                                 let req_id = self.rtbar_subs.remove(pos).req_id;
                                 released = Some((req_id, 420, crate::control::historical::join_error_text(INVALID_REAL_TIME_QUERY, &error_msg)));
-                            } else if let Some(pos) = self.pending_scanner.iter().position(|(q, _)| q == qid) {
-                                let (_, req_id) = self.pending_scanner.remove(pos);
+                            } else if let Some(pos) = self.pending_scanner.iter().position(|s| s.scan_id == *qid) {
+                                let req_id = self.pending_scanner.remove(pos).req_id;
                                 released = Some((req_id, 162, error_msg.clone()));
                             } else if let Some(pos) = self.tbt_subscriptions.iter().position(|(_, q, _)| q == qid) {
                                 // A refused tick-by-tick request ends with
@@ -540,28 +564,13 @@ impl HmdsState {
                     match comm.as_str() {
                         "10002" => {
                             if let Some(xml) = parsed.get(&6118) {
-                                self.pending_scanner_params = false;
-                                shared.reference.push_scanner_params(xml.clone());
+                                self.on_scanner_params(xml, shared);
                             }
                         }
                         "10005" => {
                             if let Some(xml) = parsed.get(&6118) {
                                 if let Some(result) = crate::control::scanner::parse_scanner_response(xml) {
-                                    if let Some((_, req_id)) = self.pending_scanner.first() {
-                                        let req_id = *req_id;
-                                        // ScanResponse only carries con_ids; contract metadata must be
-                                        // resolved via 35=c on CCP. Park results with cache-miss con_ids
-                                        // for the engine to enrich before dispatch (see ibx#156, ib-agent#142).
-                                        let any_cold = result.entries.iter().any(|e| {
-                                            e.con_id != 0
-                                                && shared.reference.get_contract(e.con_id as i64).is_none()
-                                        });
-                                        if any_cold {
-                                            self.cold_scanner_results.push((req_id, result));
-                                        } else {
-                                            shared.reference.push_scanner_data(req_id, result);
-                                        }
-                                    }
+                                    self.on_scanner_result(result, shared);
                                 }
                             }
                         }
@@ -1233,28 +1242,93 @@ impl HmdsState {
         }
     }
 
-    pub(crate) fn send_scanner_subscribe(&mut self, req_id: u32, instrument: &str, location_code: &str, scan_code: &str, max_items: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    /// A client asks for the scanner parameters (ibx#457): answered from
+    /// the cache of this connection, else one request goes out and every
+    /// waiting client gets its answer.
+    pub(crate) fn req_scanner_params(&mut self, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+        if let Some(xml) = &self.scanner_params {
+            shared.reference.push_scanner_params(xml.clone());
+            return;
+        }
+        self.scanner_params_waiting += 1;
+        if !self.pending_scanner_params {
+            self.send_scanner_params_request(hmds_conn, hb);
+        }
+    }
+
+    fn on_scanner_params(&mut self, xml: &str, shared: &SharedState) {
+        self.pending_scanner_params = false;
+        for _ in 0..std::mem::take(&mut self.scanner_params_waiting) {
+            shared.reference.push_scanner_params(xml.to_string());
+        }
+        self.scanner_params = Some(xml.to_string());
+    }
+
+    /// Running scanner sessions for the concurrent limit: the
+    /// subscriptions, plus one for parameters requests in progress
+    /// (ibx#457).
+    pub(crate) fn scanner_sessions(&self) -> usize {
+        self.pending_scanner.len() + usize::from(self.scanner_params_waiting > 0)
+    }
+
+    /// A result of a scanner subscription, matched by its id (ibx#457).
+    fn on_scanner_result(&mut self, result: crate::control::scanner::ScannerResult, shared: &SharedState) {
+        let Some(pos) = self.pending_scanner.iter().position(|s| s.scan_id == result.id) else {
+            log::info!("Received scan msg after window closed: id={:?}", result.id);
+            return;
+        };
+        let req_id = self.pending_scanner[pos].req_id;
+        if !result.error_text.is_empty() {
+            self.pending_scanner.remove(pos);
+            shared.reference.push_historical_error(req_id, 162, historical_service_error(&result.error_text));
+            return;
+        }
+        if !result.warning_text.is_empty() {
+            shared.reference.push_historical_error(req_id, 165,
+                format!("Historical Market Data Service query message:{}", result.warning_text));
+        }
+        // A result carries conIds only; the contract fields come from a
+        // contract lookup on the auth connection. Results with conIds not
+        // in the cache are parked for the engine to enrich before dispatch
+        // (ibx#156).
+        let any_cold = result.entries.iter().any(|e| {
+            e.con_id != 0
+                && shared.reference.get_contract(e.con_id as i64).is_none()
+        });
+        if any_cold {
+            self.cold_scanner_results.push((req_id, result));
+        } else {
+            shared.reference.push_scanner_data(req_id, result);
+        }
+    }
+
+    fn send_scanner_xml(xml: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) -> bool {
+        let Some(conn) = hmds_conn.as_mut() else { return false };
+        let ts = chrono_free_timestamp();
+        let _ = conn.send_fix(&[
+            (fix::TAG_MSG_TYPE, "U"),
+            (fix::TAG_SENDING_TIME, &ts),
+            (6040, "10003"),
+            (6118, xml),
+        ]);
+        hb.last_hmds_sent = Instant::now();
+        true
+    }
+
+    pub(crate) fn send_scanner_subscribe(&mut self, req_id: u32, client_id: i64, instrument: &str, location_code: &str, scan_code: &str, max_items: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let sub = crate::control::scanner::ScannerSubscription {
             instrument: instrument.to_string(),
             location_code: location_code.to_string(),
             scan_code: scan_code.to_string(),
             max_items,
         };
-        let scan_id = format!("APISCAN{}:{}", self.next_scanner_id, req_id);
-        self.next_scanner_id += 1;
+        let scan_id = crate::control::scanner::scanner_subscription_id(client_id, req_id);
         let xml = crate::control::scanner::build_scanner_subscribe_xml(&sub, &scan_id);
-        if let Some(conn) = hmds_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "U"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6040, "10003"),
-                (6118, &xml),
-            ]);
-            hb.last_hmds_sent = Instant::now();
+        let sent = Self::send_scanner_xml(&xml, hmds_conn, hb);
+        if sent {
             log::info!("Sent scanner subscribe: req_id={} scan_code={}", req_id, scan_code);
         }
-        self.pending_scanner.push((scan_id, req_id));
+        self.pending_scanner.push(ScannerSub { scan_id, req_id, xml, sent });
     }
 
     pub(crate) fn send_scanner_cancel(&mut self, scan_id: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
@@ -1269,6 +1343,59 @@ impl HmdsState {
             ]);
             hb.last_hmds_sent = Instant::now();
             log::info!("Sent scanner cancel: scan_id={}", scan_id);
+        }
+    }
+
+    /// Cancel a scanner subscription as the reference does (ibx#457): the
+    /// local 162 first, then the desubscribe when a subscribe went out; an
+    /// unknown request id gets 365 and nothing is sent. Returns true when
+    /// the request id was live.
+    pub(crate) fn cancel_scanner(&mut self, req_id: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) -> bool {
+        let Some(pos) = self.pending_scanner.iter().position(|s| s.req_id == req_id) else {
+            shared.reference.push_historical_error(req_id, 365,
+                format!("No scanner subscription found for ticker id:{}", req_id));
+            return false;
+        };
+        let sub = self.pending_scanner.remove(pos);
+        shared.reference.push_historical_error(req_id, 162,
+            historical_service_error(&format!("API scanner subscription cancelled: {}", req_id)));
+        if sub.sent {
+            self.send_scanner_cancel(&sub.scan_id, hmds_conn, hb);
+        }
+        self.cold_scanner_results.retain(|(r, _)| *r != req_id);
+        shared.reference.discard_scanner_data(req_id);
+        true
+    }
+
+    /// The historical data link is down (ibx#457): every live scanner is
+    /// told, and the parameters are asked again on the next connection.
+    pub(crate) fn scanner_link_lost(&mut self, shared: &SharedState) {
+        self.scanner_params = None;
+        self.pending_scanner_params = false;
+        for sub in &mut self.pending_scanner {
+            sub.sent = false;
+            shared.reference.push_historical_error(sub.req_id, 165, SCANNER_LINK_LOST.to_string());
+        }
+    }
+
+    /// A reconnect attempt of the historical data link failed (ibx#457).
+    pub(crate) fn scanner_connect_failed(&self, shared: &SharedState) {
+        for sub in &self.pending_scanner {
+            shared.reference.push_historical_error(sub.req_id, 165, SCANNER_CONNECT_FAILED.to_string());
+        }
+    }
+
+    /// The historical data link is back (ibx#457): every live scanner is
+    /// told and subscribed again; waiting parameters requests go out.
+    pub(crate) fn scanner_link_restored(&mut self, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+        for i in 0..self.pending_scanner.len() {
+            let req_id = self.pending_scanner[i].req_id;
+            shared.reference.push_historical_error(req_id, 165, SCANNER_LINK_RESTORED.to_string());
+            let sent = Self::send_scanner_xml(&self.pending_scanner[i].xml, hmds_conn, hb);
+            self.pending_scanner[i].sent = sent;
+        }
+        if self.scanner_params_waiting > 0 && !self.pending_scanner_params {
+            self.send_scanner_params_request(hmds_conn, hb);
         }
     }
 

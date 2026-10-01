@@ -23,14 +23,33 @@ pub struct ScannerEntry {
     pub sec_type: String,
     pub exchange: String,
     pub currency: String,
+    /// Row values passed to the client as they come (ibx#457).
+    pub distance: String,
+    pub benchmark: String,
+    pub projection: String,
+    /// Combo legs of the row, in the client form (`|` between the parts
+    /// of a leg) (ibx#457).
+    pub legs: String,
 }
 
 /// Parsed scanner subscription response.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScannerResult {
+    /// Subscription id echoed by the server (ibx#457).
+    pub id: String,
     pub con_ids: Vec<u32>,
     pub entries: Vec<ScannerEntry>,
     pub scan_time: String,
+    /// Server refusal text: the subscription ends (ibx#457).
+    pub error_text: String,
+    /// Server warning text: the rows are still used (ibx#457).
+    pub warning_text: String,
+}
+
+/// The subscription id of a client scanner: client id, then request id
+/// (ibx#457).
+pub fn scanner_subscription_id(client_id: i64, req_id: u32) -> String {
+    format!("APISCAN{}:{}", client_id, req_id)
 }
 
 /// Build a scanner parameters request (no XML payload).
@@ -86,13 +105,32 @@ fn extract_xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     Some(&xml[start..end])
 }
 
-/// Parse a ScanResponse XML into contract IDs and scan time.
+/// Replace the five predefined XML entities.
+fn xml_unescape(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
+        .replace("&apos;", "'").replace("&amp;", "&")
+}
+
+/// Text of an element, unescaped; empty when absent.
+fn xml_text(xml: &str, tag: &str) -> String {
+    extract_xml_tag(xml, tag).map(|v| xml_unescape(v.trim())).unwrap_or_default()
+}
+
+/// Parse a ScanResponse XML into its id, texts and rows.
 pub fn parse_scanner_response(xml: &str) -> Option<ScannerResult> {
     if !xml.contains("<ScanResponse>") {
         return None;
     }
 
-    let scan_time = extract_xml_tag(xml, "scanTime").unwrap_or("").to_string();
+    // Response-level elements come before the row list.
+    let head = &xml[..xml.find("<Contracts>").unwrap_or(xml.len())];
+    let id = xml_text(head, "id");
+    let error_text = xml_text(head, "errorText");
+    let warning_text = xml_text(head, "warningText");
+    let scan_time = extract_xml_tag(head, "scanTime").unwrap_or("").to_string();
 
     let mut con_ids = Vec::new();
     let mut entries = Vec::new();
@@ -111,11 +149,18 @@ pub fn parse_scanner_response(xml: &str) -> Option<ScannerResult> {
         if con_id != 0 {
             con_ids.push(con_id);
         }
-        entries.push(ScannerEntry { con_id, ..Default::default() });
+        entries.push(ScannerEntry {
+            con_id,
+            distance: xml_text(contract_xml, "distance"),
+            benchmark: xml_text(contract_xml, "benchmark"),
+            projection: xml_text(contract_xml, "projection"),
+            legs: xml_text(contract_xml, "legs").replace('/', "|"),
+            ..Default::default()
+        });
         search_start = c_end;
     }
 
-    Some(ScannerResult { con_ids, entries, scan_time })
+    Some(ScannerResult { id, con_ids, entries, scan_time, error_text, warning_text })
 }
 
 #[cfg(test)]
@@ -177,6 +222,28 @@ mod tests {
         assert_eq!(result.con_ids.len(), 2);
         assert_eq!(result.con_ids[0], 592977497);
         assert_eq!(result.con_ids[1], 265598);
+    }
+
+    // ibx#457: the id, the server texts and the row values are read.
+    #[test]
+    fn parse_scanner_response_texts_and_row_values() {
+        let xml = "<ScanResponse><id>APISCAN198:9005</id><errorText>bad &amp; worse</errorText>\
+                   <warningText>late</warningText><scanTime>20260926-20:16:34</scanTime><Contracts>\
+                   <Contract><contractID>4815747</contractID><distance>1.5</distance>\
+                   <benchmark>SPX</benchmark><projection>2</projection>\
+                   <legs>4815747/1/BUY/SMART,270639/1/SELL/SMART</legs></Contract>\
+                   <Contract><contractID>270639</contractID><frozen>yes</frozen></Contract>\
+                   </Contracts></ScanResponse>";
+        let r = parse_scanner_response(xml).unwrap();
+        assert_eq!(r.id, "APISCAN198:9005");
+        assert_eq!(r.error_text, "bad & worse");
+        assert_eq!(r.warning_text, "late");
+        assert_eq!(r.entries.len(), 2);
+        let e = &r.entries[0];
+        assert_eq!((e.distance.as_str(), e.benchmark.as_str(), e.projection.as_str()), ("1.5", "SPX", "2"));
+        assert_eq!(e.legs, "4815747|1|BUY|SMART,270639|1|SELL|SMART");
+        assert_eq!(r.entries[1].distance, "");
+        assert_eq!(scanner_subscription_id(198, 9005), "APISCAN198:9005");
     }
 
     #[test]

@@ -410,7 +410,8 @@ impl EClient {
                     contract.trading_class = ac.trading_class;
                 }
                 let details = ContractDetails { contract, ..Default::default() };
-                wrapper.scanner_data(req_id as i64, rank as i32, &details, "", "", "", "");
+                wrapper.scanner_data(req_id as i64, rank as i32, &details,
+                    &entry.distance, &entry.benchmark, &entry.projection, &entry.legs);
             }
             wrapper.scanner_data_end(req_id as i64);
         }

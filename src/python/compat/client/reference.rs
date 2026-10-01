@@ -182,8 +182,9 @@ impl EClient {
                 .and_then(|v| v.extract::<String>(py)).unwrap_or_else(|_| "TOP_PERC_GAIN".to_string());
             let max_items = subscription.getattr(py, "numberOfRows")
                 .and_then(|v| v.extract::<u32>(py)).unwrap_or(50);
+            let client_id = self.core.client_id.load(std::sync::atomic::Ordering::Relaxed);
             send_cmd(py, &tx, ControlCommand::SubscribeScanner {
-                req_id: req_id as u32, instrument, location_code, scan_code, max_items,
+                req_id: req_id as u32, client_id, instrument, location_code, scan_code, max_items,
             })
         })
     }

@@ -741,6 +741,11 @@ impl ReferenceState {
         self.scanner_data.lock().unwrap().push((req_id, result));
     }
 
+    /// Drop the queued results of a cancelled scanner (ibx#457).
+    #[doc(hidden)] pub fn discard_scanner_data(&self, req_id: u32) {
+        self.scanner_data.lock().unwrap().retain(|(r, _)| *r != req_id);
+    }
+
     #[doc(hidden)] pub fn push_historical_news(&self, req_id: u32, headlines: Vec<NewsHeadline>, has_more: bool) {
         self.historical_news.lock().unwrap().push((req_id, headlines, has_more));
     }

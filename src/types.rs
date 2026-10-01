@@ -1637,6 +1637,8 @@ pub enum ControlCommand {
     /// Subscribe to a scanner scan via historical data connection.
     SubscribeScanner {
         req_id: u32,
+        /// Client id of the session, part of the subscription id (ibx#457).
+        client_id: i64,
         instrument: String,
         location_code: String,
         scan_code: String,
