@@ -407,6 +407,10 @@ impl Order {
             // (ibx#467).
             "DTC" => crate::types::TIF_DTC,
             "AUC" => b'8',
+            // The overnight values keep their own codes; both go out as
+            // DAY (ibx#467).
+            "OVERNIGHT" => b'j',
+            "OVERNIGHT + DAY" => b'b',
             _ => b'0', // DAY
         }
     }
@@ -473,6 +477,7 @@ impl Order {
             customer_account: self.customer_account.clone(),
             professional_customer: self.professional_customer,
             reference_exchange: self.reference_exchange_id.clone(),
+            include_overnight: self.include_overnight,
         }
     }
 
@@ -498,6 +503,8 @@ impl Order {
             // An order whose only extra is conditions went down a path that
             // sends none, and was routed at once (ibx#325).
             || !self.conditions.is_empty()
+            // includeOvernight rides the attributes (ibx#467).
+            || self.include_overnight
     }
 }
 

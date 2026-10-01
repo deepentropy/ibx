@@ -714,6 +714,10 @@ If no time-zone is specified, local time-zone is assumed(deprecated).\n\
 You can also provide yyyymmddd-hh:mm:ss time is in UTC.\n\
 Note that there is a dash between the date and time in UTC notation.";
 
+/// The API's overnight time-in-force values (ibx#467).
+const TIF_OVERNIGHT: &str = "OVERNIGHT";
+const TIF_OVERNIGHT_DAY: &str = "OVERNIGHT + DAY";
+
 /// An API price field with its unset value (the maximum double) read as 0.
 fn aux_or_zero(v: f64) -> f64 {
     if v == f64::MAX { 0.0 } else { v }
@@ -1613,7 +1617,10 @@ impl ClientCore {
     /// Track a newly placed order. For a modify of a tracked order, the
     /// status and fill counts stay as the server last reported them: the
     /// engine can still refuse the modify (ibx#463).
-    pub fn track_order(&self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId) {
+    pub fn track_order(&self, order_id: u64, contract: ApiContract, mut order: ApiOrder, instrument: InstrumentId) {
+        // Kept with the time in force the reference reports for it, which
+        // a modify must restate (ibx#467).
+        order.tif = Self::held_tif(&order).to_string();
         let mut orders = self.open_orders.lock().unwrap();
         if let Some(o) = orders.get_mut(&order_id) {
             o.contract = contract;
@@ -2300,10 +2307,11 @@ impl ClientCore {
 
         // An unrecognized tif would otherwise be sent as DAY silently.
         match order.tif.as_str() {
-            "" | "DAY" | "GTC" | "IOC" | "FOK" | "OPG" | "GTD" | "DTC" | "AUC" => {}
+            "" | "DAY" | "GTC" | "IOC" | "FOK" | "OPG" | "GTD" | "DTC" | "AUC"
+            | TIF_OVERNIGHT | TIF_OVERNIGHT_DAY => {}
             other => {
                 return Err(format!(
-                    "Unsupported tif '{}': use DAY, GTC, IOC, FOK, OPG, GTD, DTC or AUC",
+                    "Unsupported tif '{}': use DAY, GTC, IOC, FOK, OPG, GTD, DTC, AUC, OVERNIGHT or OVERNIGHT + DAY",
                     other
                 ));
             }
@@ -2659,6 +2667,32 @@ impl ClientCore {
         }
     }
 
+    /// The time in force the reference holds and reports for a placed
+    /// order (captured 26/09/2026 and 28/09/2026, ibx#467): OVERNIGHT and
+    /// OVERNIGHT + DAY go out and are held as DAY; a DAY order with
+    /// includeOvernight is held as OVERNIGHT + DAY. Any other value as is.
+    pub fn held_tif(order: &ApiOrder) -> &str {
+        match order.tif.as_str() {
+            "" | "DAY" | TIF_OVERNIGHT_DAY if order.include_overnight => TIF_OVERNIGHT_DAY,
+            TIF_OVERNIGHT | TIF_OVERNIGHT_DAY => "DAY",
+            other => other,
+        }
+    }
+
+    /// The reference's refusal of a modify whose time in force is not the
+    /// one it holds for the order, where it was seen (captured 28/09/2026,
+    /// ibx#467): a modify that restates OVERNIGHT or OVERNIGHT + DAY on an
+    /// order held as DAY, and any other time in force on an order held as
+    /// OVERNIGHT + DAY. Error 462 with the new time in force; other changes
+    /// (DAY to GTC, ib-agent#192 A4a) go out. `held` is the tracked order's.
+    pub fn modify_tif_refusal(order: &ApiOrder, held: &str) -> Option<(i64, String)> {
+        let new = if order.tif.is_empty() { "DAY" } else { order.tif.as_str() };
+        let overnight = |t: &str| t == TIF_OVERNIGHT || t == TIF_OVERNIGHT_DAY;
+        (new != held && (overnight(new) || overnight(held))).then(|| {
+            (462, format!("Order modify failed. Cannot change to the new Time in Force.{}", new))
+        })
+    }
+
     /// The reference's refusals of a modify that changes what an order
     /// cannot change (ibx#463), in the order it checks them: the side
     /// (105), the OCA group when both are set (10326), the OCA type when
@@ -2701,6 +2735,9 @@ impl ClientCore {
                     order.order_type.to_uppercase(),
                 ),
             });
+        }
+        if let Some((code, message)) = Self::modify_tif_refusal(order, &working.tif) {
+            return Ok(ModifyPlan::Refused { code, message });
         }
         Ok(ModifyPlan::Send(ControlCommand::Order(OrderRequest::Modify {
             new_order_id: order_id,

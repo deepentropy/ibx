@@ -3148,6 +3148,40 @@ fn modify_of_side_or_oca_is_refused_before_sending() {
     }
 }
 
+// ibx#467 (captured 28/09/2026): the reference holds an OVERNIGHT or
+// OVERNIGHT + DAY order as DAY and a DAY order with includeOvernight as
+// OVERNIGHT + DAY, reports that time in force, and refuses with 462 a
+// modify that restates another one. A modify with the held one goes out.
+#[test]
+fn modify_must_restate_the_held_overnight_time_in_force() {
+    let lmt = |tif: &str, include_overnight: bool, price: f64| Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: price,
+        tif: tif.into(), include_overnight, ..Default::default()
+    };
+    let cases = [
+        ("OVERNIGHT", false, "DAY", "Order modify failed. Cannot change to the new Time in Force.OVERNIGHT"),
+        ("OVERNIGHT + DAY", false, "DAY", "Order modify failed. Cannot change to the new Time in Force.OVERNIGHT + DAY"),
+        ("DAY", true, "OVERNIGHT + DAY", "Order modify failed. Cannot change to the new Time in Force.DAY"),
+    ];
+    for (tif, include_overnight, held, text) in cases {
+        let (client, rx, shared) = test_client();
+        shared.market.set_instrument_count(1);
+        client.place_order(72, &spy(), &lmt(tif, include_overnight, 600.0)).unwrap();
+        while rx.try_recv().is_ok() {}
+        assert_eq!(client.core.tracked_order(72).map(|o| o.tif).as_deref(), Some(held), "{tif}");
+
+        // The placed time in force again: refused, nothing sent.
+        client.place_order(72, &spy(), &lmt(tif, include_overnight, 600.1)).unwrap();
+        assert!(rx.try_recv().is_err(), "{tif}: no replace");
+        assert_eq!(shared.orders.drain_order_errors(), [(72, 462, text.to_string())]);
+
+        // The held one: the replace goes out.
+        client.place_order(72, &spy(), &lmt(held, include_overnight, 600.1)).unwrap();
+        assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::Modify { order_id: 72, .. }))), "{tif}");
+        assert!(shared.orders.drain_order_errors().is_empty());
+    }
+}
+
 #[test]
 fn modify_order_type_lmt_to_stp() {
     let (client, rx, shared) = test_client();

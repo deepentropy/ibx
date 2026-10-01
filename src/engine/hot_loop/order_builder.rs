@@ -2058,9 +2058,11 @@ fn computed_trail_limit_offset(kind: crate::types::OrderKind, side: Option<Side>
     }
 }
 
-/// The time-in-force byte as its wire string. DTC goes out as GTC.
+/// The time-in-force byte as its wire string. DTC goes out as GTC, and
+/// OVERNIGHT and OVERNIGHT + DAY as DAY, as the reference (ibx#467).
 fn tif_str(tif: u8) -> String {
     if tif == crate::types::TIF_DTC { return "1".to_string(); }
+    if matches!(tif, b'j' | b'b') { return "0".to_string(); }
     let b = [tif];
     std::str::from_utf8(&b).unwrap_or("0").to_string()
 }
@@ -2099,6 +2101,11 @@ fn push_extended_attrs(
     }
     if attrs.hidden {
         fields.push((6135, "1".to_string()));
+    }
+    // includeOvernight, an order attribute of the reference (captured
+    // 28/09/2026, ibx#467).
+    if attrs.include_overnight {
+        fields.push((8534, "1".to_string()));
     }
     // Customer account and professional customer, as the reference's order
     // attributes; the account config check keeps them to accounts that
@@ -3726,6 +3733,33 @@ mod tests {
         assert_eq!(ours_as(&ours, &want), want);
         for absent in [44, 6941, 6942] {
             assert!(tag(&ours, absent).is_none(), "field {absent} is not restated");
+        }
+    }
+
+    // ibx#467 (captured 28/09/2026 in the overnight session, SPY BUY 1 LMT
+    // 600 SMART, account masked): OVERNIGHT and OVERNIGHT + DAY go out as
+    // a DAY order; DAY with includeOvernight adds the overnight attribute.
+    #[test]
+    fn overnight_orders_are_sent_like_the_reference() {
+        const OV: &str = "35=D|11=x|44=600.00|1=DU1|6010=ib196-ov_smart|6122=c|8339=1|6121=1|6119=260|38=1|40=2|55=SPY|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=756733|6088=Socket|15=USD|6211=|6238=";
+        const INCL: &str = "35=D|11=x|44=600.00|1=DU1|6010=ib196-day_incl|6122=c|8534=1|8339=1|6121=4|6119=260|38=1|40=2|55=SPY|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=756733|6088=Socket|15=USD|6211=|6238=";
+        // The limit price is written without trailing zeros by ibx (not
+        // part of this change), so it is compared as a number.
+        const TAGS: [u32; 5] = [40, 59, 8534, 100, 6210];
+        let cases = [("OVERNIGHT", false, OV), ("OVERNIGHT + DAY", false, OV), ("DAY", true, INCL)];
+        for (tif, include_overnight, reference) in cases {
+            let order = crate::api::types::Order {
+                action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 600.0,
+                tif: tif.into(), include_overnight, ..Default::default()
+            };
+            crate::client_core::ClientCore::validate_order(&order).unwrap();
+            let ours = wire_tags(api_request(&order, 86));
+            let want = captured(reference, &TAGS);
+            assert_eq!(ours_as(&ours, &want), want, "{tif} includeOvernight {include_overnight}");
+            assert_eq!(tag(&ours, 44).and_then(|v| v.parse::<f64>().ok()), Some(600.0));
+            if !include_overnight {
+                assert!(tag(&ours, 8534).is_none(), "{tif}: no overnight attribute");
+            }
         }
     }
 

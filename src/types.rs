@@ -393,6 +393,9 @@ pub struct OrderAttrs {
     /// Reference exchange of a pegged-to-benchmark order; empty = not set
     /// (ibx#415). Not sent for other order types.
     pub reference_exchange: String,
+    /// Work the order in the overnight session too (API includeOvernight),
+    /// sent as an order attribute (ibx#467).
+    pub include_overnight: bool,
 }
 
 /// A condition that must be met before an order activates.
