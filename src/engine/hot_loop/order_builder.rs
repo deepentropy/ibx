@@ -3963,7 +3963,7 @@ mod tests {
     }
 
     // Pegged to market (from the code read, not captured on the wire:
-    // jclient.pe.o / pe.gI, ORDER-SUBMIT.md 3.5): the limit price when
+    // ORDER-SUBMIT.md 3.5): the limit price when
     // given, the offset in the stop price and the offset fields, the
     // market instruction.
     #[test]

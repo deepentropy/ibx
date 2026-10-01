@@ -3451,7 +3451,7 @@ fn modify_price_and_qty_simultaneously() {
 
 // ibx#463: the reference refuses a modify that changes the side (105),
 // the OCA group (10326) or the OCA type (10327) before sending anything
-// (jextend.bH.d(pe)@165, @836, @905). The order stays as placed.
+// (from the code read, ORDER-MODIFY.md 5). The order stays as placed.
 #[test]
 fn modify_of_side_or_oca_is_refused_before_sending() {
     let placed = Order {
@@ -3522,6 +3522,31 @@ fn modify_must_restate_the_held_overnight_time_in_force() {
         client.place_order(72, &spy(), &lmt(held, include_overnight, 600.1)).unwrap();
         assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::Modify { order_id: 72, .. }))), "{tif}");
         assert!(shared.orders.drain_order_errors().is_empty());
+    }
+}
+
+// The reference checks the side before the order type (from the code
+// read: both side checks of a modify run before its order-type check): a
+// BUY LMT modified into a BUY STP gets 329 (captured, ib-agent#192 A4b),
+// into a SELL STP gets 105. Nothing is sent either way.
+#[test]
+fn modify_type_change_gets_329_and_a_side_change_105_first() {
+    for (action, code) in [("BUY", 329), ("SELL", 105)] {
+        let (client, rx, shared) = test_client();
+        shared.market.set_instrument_count(1);
+        let placed = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 200.0, ..Default::default()
+        };
+        client.place_order(1790835066344, &spy(), &placed).unwrap();
+        while rx.try_recv().is_ok() {}
+        let stp = Order {
+            action: action.into(), total_quantity: 1.0, order_type: "STP".into(), aux_price: 195.0, ..Default::default()
+        };
+        client.place_order(1790835066344, &spy(), &stp).unwrap();
+        assert!(rx.try_recv().is_err(), "{action}: nothing sent");
+        let errors = shared.orders.drain_order_errors();
+        assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(1790835066344, code)], "{action}");
+        assert_eq!(client.core.tracked_order(1790835066344).map(|o| o.order_type).as_deref(), Some("LMT"));
     }
 }
 

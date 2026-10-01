@@ -328,11 +328,13 @@ fn modifies(paper: &mut Paper, base: i64) {
     }
 
     // A change of order type is refused before sending, with error 329.
+    // Same side as the placed order, as the reference capture
+    // (ib-agent#192 A4b): a side change is refused first, with 105.
     let id = base + 20;
     println!("  modify, LMT -> STP refused (order {})", id);
     paper.place(id, &lmt(200.0, false, "DAY"));
     if paper.wait_working(&[id]) {
-        paper.place(id, &stp(195.0));
+        paper.place(id, &Order { action: "BUY".into(), ..stp(195.0) });
         let got = paper.pump(5, |s| s.errors.iter().any(|(r, c, _)| *r == id && *c == 329));
         paper.check(got, "modify LMT -> STP: error 329 on the right order id");
         paper.check(frames(true, "G", &format!("{}.1", id)).is_empty(), "modify LMT -> STP: nothing sent");
