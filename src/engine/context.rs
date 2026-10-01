@@ -112,6 +112,14 @@ pub struct Context {
     pub(crate) next_rth_lookup: u32,
     /// The session counts US stock sizes in round lots (ibx#287).
     pub(crate) scale_us_lots: bool,
+    /// The bracket key of each order that has one (ibx#248).
+    pub(crate) bracket_keys: HashMap<OrderId, crate::engine::bracket::BracketKey>,
+    /// The next child index of each bracket parent (ibx#248).
+    pub(crate) bracket_next_child: HashMap<OrderId, u32>,
+    /// The last bracket group number given or seen on a report (ibx#248).
+    pub(crate) bracket_groups: u32,
+    /// State of the bracket colour generator (ibx#248).
+    pub(crate) bracket_rng: u64,
     /// Round lot by conId, once its definition was read (ibx#287).
     pub(crate) round_lots: HashMap<i64, i64>,
     /// Requests waiting for their contract's definition, by conId, and the
@@ -174,6 +182,10 @@ impl Context {
             api_client_id: 0,
             next_what_if: 0,
             scale_us_lots: false,
+            bracket_keys: HashMap::new(),
+            bracket_next_child: HashMap::new(),
+            bracket_groups: 0,
+            bracket_rng: crate::engine::bracket::seed(),
             round_lots: HashMap::new(),
             agg_groups: HashMap::new(),
             listing_exchanges: HashMap::new(),
@@ -1149,6 +1161,16 @@ impl Context {
         }
     }
 
+    /// The session's bracket keys and counters (ibx#248).
+    pub(crate) fn brackets(&mut self) -> crate::engine::bracket::Brackets<'_> {
+        crate::engine::bracket::Brackets {
+            keys: &mut self.bracket_keys,
+            next_child: &mut self.bracket_next_child,
+            groups: &mut self.bracket_groups,
+            rng: &mut self.bracket_rng,
+        }
+    }
+
     pub fn remove_order(&mut self, order_id: OrderId) {
         self.open_orders.remove(&order_id);
     }
@@ -1162,6 +1184,8 @@ impl Context {
         self.cancel_clord.remove(&order_id);
         self.status_queries.remove(&order_id);
         self.trail_limit_reported.remove(&order_id);
+        self.bracket_keys.remove(&order_id);
+        self.bracket_next_child.remove(&order_id);
         if self.finished_orders.insert(order_id, status).is_none() {
             self.finished_order_ids.push_back(order_id);
             while self.finished_order_ids.len() > FINISHED_ORDERS_MAX {

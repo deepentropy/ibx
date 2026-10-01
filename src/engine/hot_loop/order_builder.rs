@@ -693,6 +693,10 @@ pub(crate) fn drain_and_send_orders(
                 // The children's parent link and OCA group, as the reference
                 // sends them (ibx#311, ibx#329).
                 let (parent_link, oca_group) = bracket_parent_link(context, parent_id);
+                // The bracket key of the three orders (ibx#248).
+                let tp_key = context.brackets().attach_child(parent_id, tp_id).to_string();
+                let sl_key = context.brackets().attach_child(parent_id, sl_id).to_string();
+                let parent_key = context.bracket_keys.get(&parent_id).map(|k| k.to_string()).unwrap_or_default();
 
                 // 1. Parent order: limit entry
                 context.insert_order(crate::types::Order::new(
@@ -704,6 +708,7 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &parent_str),
                     (1, account_id),
+                    (6531, &parent_key),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -726,6 +731,7 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &tp_str),
                     (1, account_id),
+                    (6531, &tp_key),
                     (55, &symbol),
                     (54, exit_side_str),
                     (38, &qty_str),
@@ -751,6 +757,7 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &sl_str),
                     (1, account_id),
+                    (6531, &sl_key),
                     (55, &symbol),
                     (54, exit_side_str),
                     (38, &qty_str),
@@ -858,6 +865,7 @@ pub(crate) fn drain_and_send_orders(
                     (15, currency.clone()),
                 ];
                 push_dtc_flag(&mut fields, tif);
+                push_bracket_key(&mut fields, context, order_id, &attrs);
                 // Parent link, OCA group and the other attributes (ibx#318).
                 push_extended_attrs(&mut fields, context, &attrs, true);
                 fields.push((847, "Adaptive".to_string()));      // AlgoStrategy
@@ -895,6 +903,7 @@ pub(crate) fn drain_and_send_orders(
                     (15, currency.clone()),
                 ];
                 push_dtc_flag(&mut fields, tif);
+                push_bracket_key(&mut fields, context, order_id, &attrs);
                 // Parent link, OCA group and the other attributes (ibx#318).
                 push_extended_attrs(&mut fields, context, &attrs, true);
                 let (algo_name, param_strs) = build_algo_tags(&algo);
@@ -1406,9 +1415,11 @@ pub(crate) fn drain_and_send_orders(
                         computed
                     }
                 };
+                let bracket_key = context.bracket_keys.get(&order_id).map(|k| k.to_string());
                 let fields = modify_fields(
                     &clord_str, &orig_clord, account_id, qty, side_str, &symbol,
-                    &sec_type_str, &con_id_str, kind, tif, &attrs, trail_limit_offset);
+                    &sec_type_str, &con_id_str, kind, tif, &attrs, trail_limit_offset,
+                    bracket_key.as_deref());
                 let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
                 conn.send_fix(&refs)
             }
@@ -1647,6 +1658,20 @@ fn bracket_parent_link(context: &Context, parent_id: crate::types::OrderId) -> (
     (link, group)
 }
 
+/// The bracket key of a new child order (ibx#248): the parent's group with
+/// the parent's next child index, the parent getting its key when it has
+/// none. A preview takes no key.
+fn push_bracket_key(
+    fields: &mut Vec<(u32, String)>,
+    context: &mut Context,
+    order_id: crate::types::OrderId,
+    attrs: &crate::types::OrderAttrs,
+) {
+    if attrs.parent_id <= 0 || context.what_if_send.is_some() { return; }
+    let key = context.brackets().attach_child(attrs.parent_id, order_id);
+    fields.push((6531, key.to_string()));
+}
+
 /// Map the OCA type code (1..=4) to its tag 6209 wire label. 0/unset and
 /// out-of-range coerce to 3 (ReduceOnFillNonBlock), the gateway default
 /// (ibx#215).
@@ -1750,26 +1775,29 @@ fn reference_rank(tag: u32) -> u16 {
         583 => 70,
         6010 => 71,
         6122 => 72,
-        6433 => 73,
-        6115 => 74,
-        6370 => 75,
-        6268 => 76,
-        6269 => 77,
-        111 => 78,
-        110 => 79,
-        6135 => 80,
-        8534 => 81,
-        6207 => 82,
-        6636 => 83,
-        168 => 84,
-        9813 => 85,
-        6102 => 86,
-        5920 => 87,
-        6941 => 88,
-        6938 => 89,
-        6939 => 90,
-        6580 => 91,
-        6942 => 92,
+        // The bracket key, after the origin (ib-agent captures/pd-orders,
+        // 01/10/2026).
+        6531 => 73,
+        6433 => 75,
+        6115 => 76,
+        6370 => 77,
+        6268 => 78,
+        6269 => 79,
+        111 => 80,
+        110 => 81,
+        6135 => 82,
+        8534 => 83,
+        6207 => 84,
+        6636 => 85,
+        168 => 86,
+        9813 => 87,
+        6102 => 88,
+        5920 => 89,
+        6941 => 90,
+        6938 => 91,
+        6939 => 92,
+        6580 => 93,
+        6942 => 94,
         // Algo: its strategy fields, then the parameter group.
         849 => 100,
         847 => 101,
@@ -1912,6 +1940,7 @@ fn modify_fields(
     tif: u8,
     attrs: &crate::types::OrderAttrs,
     trail_limit_offset: Option<crate::types::Price>,
+    bracket_key: Option<&str>,
 ) -> Vec<(u32, String)> {
     use crate::types::OrderKind as K;
     let p = |v: crate::types::Price| format_price(v).to_string();
@@ -2035,6 +2064,9 @@ fn modify_fields(
     // The orderRef, restated on every replace (ibx#466).
     if !attrs.order_ref.is_empty() { f.push((6010, attrs.order_ref.clone())); }
     f.push((6122, "c".to_string()));
+    // The bracket key, restated on every replace (ibx#248), as the
+    // reference.
+    if let Some(key) = bracket_key { f.push((6531, key.to_string())); }
     // Outside-RTH only when the order has it: a replace without it leaves
     // the order regular-hours only (ibx#247).
     if attrs.outside_rth { f.push((6433, "1".to_string())); }
@@ -2587,6 +2619,7 @@ fn send_order_ex(
             pegged_change_amount, ref_change_amount, &attrs.reference_exchange, true));
     }
 
+    push_bracket_key(&mut fields, context, order_id, attrs);
     // Extended attributes — same tag order as the historical SubmitLimitEx
     // block.
     push_extended_attrs(&mut fields, context, attrs, has_base_exec_inst);
@@ -4515,4 +4548,127 @@ mod tests {
         assert!(errors.is_empty());
         assert_eq!(tag(&frames[0], 38), Some("2"));
     }
+
+    /// Encode several requests in one session and return the sent frames
+    /// (frame count given) and the engine state after them.
+    fn session_frames(
+        setup: impl FnOnce(&mut Context),
+        reqs: Vec<OrderRequest>,
+        frames: usize,
+    ) -> (Vec<Vec<(u32, String)>>, Context) {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        let mut context = Context::new();
+        context.market.register(265598);
+        setup(&mut context);
+        let shared = Arc::new(SharedState::new());
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        for req in reqs {
+            context.pending_orders.push(req);
+            drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        }
+        let mut out: Vec<Vec<(u32, String)>> = Vec::new();
+        let mut buf = vec![0u8; 65536];
+        let mut len = 0;
+        while out.len() < frames {
+            let n = server.read(&mut buf[len..]).unwrap();
+            assert!(n > 0, "connection closed");
+            len += n;
+            out = buf[..len].split(|&b| b == fix::SOH)
+                .filter_map(|f| {
+                    let s = std::str::from_utf8(f).ok()?;
+                    let (t, v) = s.split_once('=')?;
+                    Some((t.parse::<u32>().ok()?, v.to_string()))
+                })
+                .fold(Vec::new(), |mut acc: Vec<Vec<(u32, String)>>, field| {
+                    if field.0 == 8 { acc.push(Vec::new()); }
+                    if let Some(last) = acc.last_mut() { last.push(field); }
+                    acc
+                });
+            out.retain(|f| f.iter().any(|(t, _)| *t == 10));
+        }
+        (out, context)
+    }
+
+    fn limit_ex(order_id: OrderId, side: Side, price: i64, attrs: crate::types::OrderAttrs) -> OrderRequest {
+        OrderRequest::SubmitLimitEx { order_id, instrument: 0, side, qty: 1, price, tif: b'1', attrs }
+    }
+
+    fn modify_limit(order_id: OrderId, price: i64, attrs: crate::types::OrderAttrs) -> OrderRequest {
+        OrderRequest::Modify {
+            new_order_id: order_id, order_id, qty: 1,
+            kind: crate::types::OrderKind::Limit { price }, tif: b'1', attrs,
+        }
+    }
+
+    fn key_of(frame: &[(u32, String)]) -> Option<crate::engine::bracket::BracketKey> {
+        tag(frame, 6531).and_then(crate::engine::bracket::BracketKey::parse)
+    }
+
+    // ibx#248: the bracket of three gets one key, the parent index 0 and
+    // the children 1 and 2, right after the origin field, as the
+    // reference's bracket (ib-agent captures/192 A5, pd-orders).
+    #[test]
+    fn bracket_orders_carry_one_key_with_their_index() {
+        let frames = wire_frames(OrderRequest::SubmitBracket {
+            parent_id: 3, tp_id: 4, sl_id: 5, instrument: 0, side: Side::Buy, qty: 1,
+            entry_price: 100 * P, take_profit: 110 * P, stop_loss: 90 * P,
+        }, 3);
+        let keys: Vec<_> = frames.iter().map(|f| key_of(f).expect("key")).collect();
+        assert_eq!(keys.iter().map(|k| k.child).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert!(keys.iter().all(|k| k.group == 1 && k.rgb == keys[0].rgb));
+        for f in &frames {
+            assert_eq!(pos(f, 6531), pos(f, 6122) + 1, "{f:?}");
+        }
+    }
+
+    // ibx#248, captured 01/10/2026 (ib-agent captures/pd-orders,
+    // pd_parent_child_modify): a parent sent alone has no key; its child
+    // gets the next group with index 1; the parent's replace restates
+    // group/0 and the child's replace its own key, with no parent or OCA
+    // field.
+    #[test]
+    fn children_of_a_sent_parent_and_their_replaces_carry_the_key() {
+        let child = || crate::types::OrderAttrs { parent_id: 11, ..Default::default() };
+        let (frames, _) = session_frames(|_| {}, vec![
+            limit_ex(11, Side::Buy, 230 * P, Default::default()),
+            limit_ex(12, Side::Sell, 494 * P, child()),
+            limit_ex(13, Side::Sell, 495 * P, child()),
+            modify_limit(11, 231 * P, Default::default()),
+            modify_limit(12, 497 * P, child()),
+        ], 5);
+        assert!(key_of(&frames[0]).is_none(), "the parent's new order has no key");
+        let (c1, c2) = (key_of(&frames[1]).unwrap(), key_of(&frames[2]).unwrap());
+        assert_eq!((c1.group, c1.child, c2.group, c2.child), (1, 1, 1, 2));
+        assert_eq!(c1.rgb, c2.rgb);
+        let parent_replace = key_of(&frames[3]).unwrap();
+        assert_eq!(tag(&frames[3], 35), Some("G"));
+        assert_eq!((parent_replace.group, parent_replace.child, parent_replace.rgb), (1, 0, c1.rgb));
+        assert_eq!(tag(&frames[4], 35), Some("G"));
+        assert_eq!(key_of(&frames[4]), Some(c1));
+        for absent in [583, 6107, 6209] {
+            assert!(tag(&frames[4], absent).is_none(), "a child's replace leaves out {absent}");
+        }
+        assert_eq!(pos(&frames[4], 6531), pos(&frames[4], 6122) + 1);
+    }
+
+    // ibx#248 (ib-agent captures/192 A5, pd-orders pd_bracket_keys): a
+    // child added to a working bracket gets the next index of its group.
+    #[test]
+    fn a_child_added_to_a_working_bracket_gets_the_next_index() {
+        let (frames, _) = session_frames(|_| {}, vec![
+            OrderRequest::SubmitBracket {
+                parent_id: 3, tp_id: 4, sl_id: 5, instrument: 0, side: Side::Buy, qty: 1,
+                entry_price: 100 * P, take_profit: 110 * P, stop_loss: 90 * P,
+            },
+            limit_ex(6, Side::Sell, 120 * P, crate::types::OrderAttrs { parent_id: 3, ..Default::default() }),
+        ], 4);
+        let late = key_of(&frames[3]).unwrap();
+        assert_eq!((late.group, late.child), (1, 3));
+        assert_eq!(late.rgb, key_of(&frames[0]).unwrap().rgb);
+    }
+
 }

@@ -1156,6 +1156,17 @@ impl CcpState {
                 parsed.get(&103).map(|s| s.as_str()).unwrap_or(""));
         }
 
+        // A bracket key on a report: kept for an order that has none, and
+        // the next bracket group goes past it, as the reference (ibx#248).
+        if let Some(key) = parsed.get(&6531).and_then(|k| crate::engine::bracket::BracketKey::parse(k)) {
+            let parent = parent_order_id(parsed, context);
+            if context.order(clord_id).is_some() {
+                context.brackets().reported(clord_id, (parent > 0).then_some(parent), key);
+            } else {
+                context.bracket_groups = context.bracket_groups.max(key.group);
+            }
+        }
+
         // 39=0 is New on the wire, but the gateway reports PreSubmitted
         // until the order is actually routed to and acknowledged by an
         // exchange (for example a limit order resting pre-market). Routing
@@ -4813,6 +4824,19 @@ mod tests {
             (6008, con_id.to_string()), (55, "TEST".into()), (54, "1".into()),
             (38, "1".into()), (44, "1".into()), (40, "2".into()), (59, "1".into()),
         ].into_iter().collect()
+    }
+
+    // ibx#248: a reported bracket key is kept and moves the group counter.
+    #[test]
+    fn reports_give_the_bracket_key() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut entry = recovery_frame(900_010, 1_005);
+        entry.insert(6531, "7/0/-6183061".into());
+        ccp.handle_exec_report(&entry, &mut context, &shared, &None, "");
+        assert_eq!(context.bracket_keys.get(&900_010).map(|k| k.to_string()).as_deref(), Some("7/0/-6183061"));
+        assert_eq!(context.bracket_groups, 7);
     }
 
     // ibx#466: an order of an earlier session is looked up by the server's
