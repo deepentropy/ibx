@@ -396,6 +396,40 @@ pub struct OrderAttrs {
     /// Work the order in the overnight session too (API includeOvernight),
     /// sent as an order attribute (ibx#467).
     pub include_overnight: bool,
+    /// The API clearingIntent: empty, IB, Away or PTA (ibx#417). A
+    /// clearing away from the broker lets a short-side order pass the
+    /// reference's side check.
+    pub clearing_intent: String,
+    /// The short-sale instructions of a short-side order (ibx#417).
+    pub short_sale: ShortSale,
+}
+
+/// The short-sale instructions of an order (ibx#417): the API
+/// shortSaleSlot, designatedLocation and exemptCode. The default is the
+/// API's: no slot, no location, no exempt code (-1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortSale {
+    /// 1 = the broker holds the shares, 2 = delivered from elsewhere,
+    /// 0 = not set.
+    pub slot: i32,
+    /// Where the shares are held, needed with slot 2.
+    pub location: String,
+    /// Exempt reason code, -1 = none.
+    pub exempt_code: i32,
+}
+
+impl Default for ShortSale {
+    fn default() -> Self {
+        Self { slot: 0, location: String::new(), exempt_code: -1 }
+    }
+}
+
+impl ShortSale {
+    /// The exempt code names a reason of the reference's reason table:
+    /// -2 and 0 to 9. -1 and any other code are no reason.
+    pub fn exempt_reason_given(&self) -> bool {
+        matches!(self.exempt_code, -2 | 0..=9)
+    }
 }
 
 /// A condition that must be met before an order activates.
@@ -1114,6 +1148,53 @@ impl OrderRequest {
             | Self::SubmitEx { instrument, .. }
             | Self::SubmitBracket { instrument, .. } => Some(*instrument),
             Self::SubmitWhatIf { request } => request.instrument(),
+        }
+    }
+
+    /// The side of a new order and its attributes when it carries them.
+    /// None for a cancel or a replace. A bracket gives its parent's side.
+    pub fn new_order_side(&self) -> Option<(Side, Option<&OrderAttrs>)> {
+        match self {
+            Self::Cancel { .. } | Self::CancelAll { .. } | Self::Modify { .. } => None,
+            Self::SubmitWhatIf { request } => request.new_order_side(),
+            Self::SubmitTrailingStopPctEx { side, attrs, .. }
+            | Self::SubmitLimitEx { side, attrs, .. }
+            | Self::SubmitEx { side, attrs, .. }
+            | Self::SubmitAdaptive { side, attrs, .. }
+            | Self::SubmitAlgo { side, attrs, .. } => Some((*side, Some(attrs))),
+            Self::SubmitLimit { side, .. }
+            | Self::SubmitMarket { side, .. }
+            | Self::SubmitStop { side, .. }
+            | Self::SubmitStopLimit { side, .. }
+            | Self::SubmitLimitGtc { side, .. }
+            | Self::SubmitStopGtc { side, .. }
+            | Self::SubmitStopLimitGtc { side, .. }
+            | Self::SubmitLimitIoc { side, .. }
+            | Self::SubmitLimitFok { side, .. }
+            | Self::SubmitTrailingStop { side, .. }
+            | Self::SubmitTrailingStopLimit { side, .. }
+            | Self::SubmitTrailingStopPct { side, .. }
+            | Self::SubmitMoc { side, .. }
+            | Self::SubmitLoc { side, .. }
+            | Self::SubmitMit { side, .. }
+            | Self::SubmitLit { side, .. }
+            | Self::SubmitBracket { side, .. }
+            | Self::SubmitRel { side, .. }
+            | Self::SubmitLimitOpg { side, .. }
+            | Self::SubmitMtl { side, .. }
+            | Self::SubmitMktPrt { side, .. }
+            | Self::SubmitStpPrt { side, .. }
+            | Self::SubmitMidPrice { side, .. }
+            | Self::SubmitSnapMkt { side, .. }
+            | Self::SubmitSnapMid { side, .. }
+            | Self::SubmitSnapPri { side, .. }
+            | Self::SubmitPegMkt { side, .. }
+            | Self::SubmitPegMid { side, .. }
+            | Self::SubmitPegBench { side, .. }
+            | Self::SubmitLimitAuc { side, .. }
+            | Self::SubmitMtlAuc { side, .. }
+            | Self::SubmitLimitFractional { side, .. }
+            | Self::SubmitAdjustableStop { side, .. } => Some((*side, None)),
         }
     }
 

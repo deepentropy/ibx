@@ -1582,6 +1582,11 @@ impl Order {
             perm_id: self.perm_id,
             client_id: self.client_id,
             order_ref: self.order_ref.clone(),
+            // The side check and the short-sale fields read these (ibx#417).
+            clearing_intent: self.clearing_intent.clone(),
+            short_sale_slot: self.short_sale_slot,
+            designated_location: self.designated_location.clone(),
+            exempt_code: self.exempt_code,
             ..Default::default()
         }
     }

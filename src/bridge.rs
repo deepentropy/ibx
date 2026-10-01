@@ -600,6 +600,10 @@ pub struct ReferenceState {
     white_branding_id: Mutex<String>,
     /// FA session, from CCP logon tag 6108 (ibx#481).
     fa_session: std::sync::atomic::AtomicBool,
+    /// The logon's super user and omnibus flags (ibx#417): either one lets
+    /// a short-side order pass the side check.
+    super_user: AtomicBool,
+    omnibus: AtomicBool,
     /// Most contracts with tick-by-tick data at once, from the logon;
     /// u64::MAX until known (ibx#455).
     tick_by_tick_limit: AtomicU64,
@@ -644,6 +648,8 @@ impl ReferenceState {
             family_codes: Mutex::new(Vec::new()),
             white_branding_id: Mutex::new(String::new()),
             fa_session: std::sync::atomic::AtomicBool::new(false),
+            super_user: AtomicBool::new(false),
+            omnibus: AtomicBool::new(false),
             tick_by_tick_limit: AtomicU64::new(u64::MAX),
             tick_by_tick_off: AtomicBool::new(false),
             account_config: Mutex::new(None),
@@ -952,6 +958,16 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_fa_session(&self, fa: bool) {
         self.fa_session.store(fa, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The logon's super user and omnibus flags (ibx#417).
+    pub fn short_sale_flags(&self) -> (bool, bool) {
+        (self.super_user.load(Ordering::Relaxed), self.omnibus.load(Ordering::Relaxed))
+    }
+
+    #[doc(hidden)] pub fn set_short_sale_flags(&self, super_user: bool, omnibus: bool) {
+        self.super_user.store(super_user, Ordering::Relaxed);
+        self.omnibus.store(omnibus, Ordering::Relaxed);
     }
 
     #[doc(hidden)] pub fn set_ccp_session_id(&self, id: String) {

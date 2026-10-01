@@ -502,6 +502,9 @@ pub struct Gateway {
     pub white_branding_id: String,
     /// FA session: CCP logon tag 6108 is "1" (ibx#481).
     pub fa_session: bool,
+    /// The logon's super user and omnibus flags (ibx#417).
+    pub super_user: bool,
+    pub omnibus: bool,
     /// Account config (6040=210): feature list (6542) and MiFID config id
     /// (8234); None when the answer was not in the login burst (ibx#425).
     pub account_config: Option<(Vec<String>, String)>,
@@ -1379,6 +1382,8 @@ impl Gateway {
         let mut deny_news = false;
         let mut white_branding_id = String::new();
         let mut fa_session = false;
+        let mut super_user = false;
+        let mut omnibus = false;
         let mut scale_us_lots = false;
         // Tick-by-tick limit fields, first value seen (ibx#455).
         let mut tbt_limit_fields: [Option<String>; 4] = Default::default();
@@ -1517,6 +1522,9 @@ impl Gateway {
             if let Some(v) = fields.get(&6108) {
                 fa_session |= v == "1";
             }
+            // Super user and omnibus, read the same way (ibx#417).
+            super_user |= fields.get(&6130).is_some_and(|v| v == "1");
+            omnibus |= fields.get(&9826).is_some_and(|v| v == "1");
             if let Some(v) = fields.get(&6542) {
                 scale_us_lots |= features_scale_us_lots(v);
                 tick_by_tick_off |= features_have(v, "NOTICKBYTICK");
@@ -1675,6 +1683,10 @@ impl Gateway {
                 log::info!("Found news capabilities from init response ({} bytes)", raw_news_capabilities.len());
             } else if part == "6108=1" {
                 fa_session = true;
+            } else if part == "6130=1" {
+                super_user = true;
+            } else if part == "9826=1" {
+                omnibus = true;
             } else if let Some(id) = white_branding_part(part).filter(|_| white_branding_id.is_empty()) {
                 white_branding_id = id.to_string();
                 log::info!("Found white branding ID from init response");
@@ -1878,6 +1890,8 @@ impl Gateway {
             deny_news,
             white_branding_id,
             fa_session,
+            super_user,
+            omnibus,
             account_config,
             scale_us_lots,
             tick_by_tick_limit: tick_by_tick_limit(&tbt_limit_fields),
@@ -1957,6 +1971,7 @@ impl Gateway {
         // White branding ID (empty for standard accounts).
         shared.reference.set_white_branding_id(self.white_branding_id.clone());
         shared.reference.set_fa_session(self.fa_session);
+        shared.reference.set_short_sale_flags(self.super_user, self.omnibus);
         shared.reference.set_tick_by_tick_limits(self.tick_by_tick_limit, self.tick_by_tick_off);
         if let Some((features, mifid)) = &self.account_config {
             shared.reference.set_account_config(features.clone(), mifid.clone());

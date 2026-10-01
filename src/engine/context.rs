@@ -96,6 +96,9 @@ pub struct Context {
     pub(crate) what_ifs: HashMap<String, (OrderId, InstrumentId)>,
     /// Set while a what-if is encoded: the ClOrdID it goes out under.
     pub(crate) what_if_send: Option<String>,
+    /// Set while a short-side order is encoded: its short-sale fields
+    /// (ibx#417).
+    pub(crate) short_sale_send: Option<crate::types::ShortSale>,
     /// Sequence of the what-if ClOrdIDs of this session.
     pub(crate) next_what_if: u32,
     /// Requests with outside-RTH waiting for their lookup, in order; later
@@ -150,6 +153,7 @@ impl Context {
             next_rth_lookup: 0,
             what_ifs: HashMap::new(),
             what_if_send: None,
+            short_sale_send: None,
             next_what_if: 0,
             scale_us_lots: false,
             round_lots: HashMap::new(),

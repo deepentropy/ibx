@@ -478,6 +478,12 @@ impl Order {
             professional_customer: self.professional_customer,
             reference_exchange: self.reference_exchange_id.clone(),
             include_overnight: self.include_overnight,
+            clearing_intent: self.clearing_intent.clone(),
+            short_sale: ShortSale {
+                slot: self.short_sale_slot,
+                location: self.designated_location.clone(),
+                exempt_code: self.exempt_code,
+            },
         }
     }
 
@@ -505,6 +511,12 @@ impl Order {
             || !self.conditions.is_empty()
             // includeOvernight rides the attributes (ibx#467).
             || self.include_overnight
+            // The clearing intent and the short-sale instructions reach the
+            // side check and the short-sale fields (ibx#417).
+            || !self.clearing_intent.is_empty()
+            || self.short_sale_slot != 0
+            || !self.designated_location.is_empty()
+            || self.exempt_code != -1
     }
 }
 
@@ -875,6 +887,23 @@ mod tests {
         assert_eq!(o.side().unwrap(), Side::Buy);
         o.action = "S".into();
         assert_eq!(o.side().unwrap(), Side::Sell);
+    }
+
+    // ibx#417: the clearing intent and the short-sale instructions reach
+    // the engine, through the extended path.
+    #[test]
+    fn short_sale_instructions_reach_the_attributes() {
+        let plain = Order { action: "SSHORT".into(), ..Default::default() };
+        assert!(!plain.has_extended_attrs());
+        assert_eq!(plain.attrs().short_sale, ShortSale::default());
+        let o = Order {
+            action: "SSHORT".into(), clearing_intent: "Away".into(), short_sale_slot: 2,
+            designated_location: "XYZ".into(), exempt_code: 3, ..Default::default()
+        };
+        assert!(o.has_extended_attrs());
+        let a = o.attrs();
+        assert_eq!(a.clearing_intent, "Away");
+        assert_eq!(a.short_sale, ShortSale { slot: 2, location: "XYZ".into(), exempt_code: 3 });
     }
 
     #[test]

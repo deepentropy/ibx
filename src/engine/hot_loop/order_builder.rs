@@ -49,6 +49,22 @@ pub(crate) fn drain_and_send_orders(
             log::warn!("What-if of order {} dropped: only a single new order can be previewed", oid);
             continue;
         }
+        // A short-side order: refused with 321 and nothing sent, as the
+        // reference, or sent with its short-sale fields (ibx#417).
+        context.short_sale_send = None;
+        if let Some((Side::ShortSell, attrs)) = order_req.new_order_side() {
+            let (super_user, omnibus) = shared.reference.short_sale_flags();
+            let unset = crate::types::OrderAttrs::default();
+            match short_sale_check(attrs.unwrap_or(&unset), account_id, super_user, omnibus) {
+                Ok(short_sale) => context.short_sale_send = Some(short_sale),
+                Err(cause) => {
+                    log::warn!("Order {} refused: {}", oid, cause);
+                    shared.orders.push_order_error(oid, 321,
+                        format!("Error validating request.-'bH' : cause - {}", cause));
+                    continue;
+                }
+            }
+        }
         // A pegged type the contract's list does not allow on the order's
         // exchange is refused, as the reference (ibx#414).
         match pegged_type_refusal(&order_req, context, conn, hb, shared) {
@@ -1490,6 +1506,7 @@ pub(crate) fn drain_and_send_orders(
                 conn.send_fix(&refs)
             }
         };
+        context.short_sale_send = None;
         if let Some((order, version)) = held {
             let clord = context.what_if_send.take().unwrap_or_default();
             match order {
@@ -1591,6 +1608,82 @@ fn cancel_refusal(context: &Context, order_id: crate::types::OrderId) -> Option<
     ))
 }
 
+/// The rule texts of the reference's short-side checks (ibx#417), sent as
+/// the cause of a 321 refusal.
+const INVALID_SIDE: &str = "Invalid side field was entered";
+const NOT_INSTITUTIONAL: &str = "Not an institutional account, or an away clearing order";
+const BAD_SHORT_SLOT: &str = "Short sale slot value must be 1 (broker holds shares) or 2 (delivered from elsewhere)";
+const NOT_SHORT_SALE_EXEMPT: &str = "Order not a short sale exempt -- type must be SSHORTX to specify short sale slot.";
+const SLOT_2_NEEDS_LOCATION: &str = "Short sale slot value of 2 (delivered from elsewhere) requires location.";
+const SLOT_1_NO_LOCATION: &str = "Short sale slot value of 1 requires no location be specified.";
+
+/// The clearing of an order is away from the broker (ibx#417): an Away or
+/// PTA intent. An order without one takes Away for a super user, for an
+/// account id that starts with T, and for one with G as its second or
+/// third character; else the broker's own clearing, as the reference.
+fn clearing_away(intent: &str, account_id: &str, super_user: bool) -> bool {
+    if !intent.is_empty() {
+        return !intent.eq_ignore_ascii_case("IB");
+    }
+    let id = account_id.as_bytes();
+    super_user || id.first() == Some(&b'T') || id.get(1) == Some(&b'G') || id.get(2) == Some(&b'G')
+}
+
+/// The reference's checks of a short-side order (ibx#417), in its order:
+/// the side is refused unless the logon is a super user or omnibus logon,
+/// or the order clears away; then the short-sale slot rules. Ok with the
+/// short-sale instructions the order carries, or the rule text.
+fn short_sale_check(
+    attrs: &crate::types::OrderAttrs,
+    account_id: &str,
+    super_user: bool,
+    omnibus: bool,
+) -> Result<crate::types::ShortSale, &'static str> {
+    let away = clearing_away(&attrs.clearing_intent, account_id, super_user);
+    if !(super_user || omnibus || away) {
+        return Err(INVALID_SIDE);
+    }
+    let s = &attrs.short_sale;
+    if !super_user && !away {
+        // An omnibus logon only: no slot and no location may be given,
+        // and then no other slot rule applies.
+        if s.slot != 0 || !s.location.is_empty() {
+            return Err(NOT_INSTITUTIONAL);
+        }
+        return Ok(s.clone());
+    }
+    if s.exempt_reason_given() {
+        return Err(NOT_SHORT_SALE_EXEMPT);
+    }
+    if !matches!(s.slot, 1 | 2) {
+        return Err(BAD_SHORT_SLOT);
+    }
+    if s.slot == 1 && !s.location.is_empty() {
+        return Err(SLOT_1_NO_LOCATION);
+    }
+    if s.slot == 2 && s.location.is_empty() {
+        return Err(SLOT_2_NEEDS_LOCATION);
+    }
+    Ok(s.clone())
+}
+
+/// The short-sale fields of a short-side order, as the reference writes
+/// them (ibx#417): the located flag (Y when the shares are at one of the
+/// two broker locations), the location for slot 2, the slot, and the
+/// exempt code when it names a reason.
+fn short_sale_fields(s: &crate::types::ShortSale) -> Fields {
+    let located = matches!(s.location.as_str(), "IBKR" | "TMBR");
+    let mut fields = vec![(114, if located { "Y" } else { "N" }.to_string())];
+    if s.slot == 2 {
+        fields.push((5700, s.location.clone()));
+    }
+    fields.push((6086, s.slot.to_string()));
+    if s.exempt_reason_given() {
+        fields.push((1688, s.exempt_code.to_string()));
+    }
+    fields
+}
+
 /// Convert Side to FIX tag 54 value.
 fn fix_side(side: Side) -> &'static str {
     match side {
@@ -1669,6 +1762,23 @@ fn send_new_order(
     instrument: crate::types::InstrumentId,
     fields: &[(u32, &str)],
 ) -> std::io::Result<()> {
+    // The short-sale fields of a short-side order follow the account and
+    // its expiry fields, as the reference writes them (ibx#417).
+    let short_sale: Fields = match &context.short_sale_send {
+        Some(s) if fields.iter().any(|&(t, v)| t == 54 && v == "5") => short_sale_fields(s),
+        _ => Vec::new(),
+    };
+    let with_short;
+    let fields = if short_sale.is_empty() {
+        fields
+    } else {
+        let at = fields.iter().rposition(|&(t, _)| matches!(t, 1 | 126 | 432)).map_or(fields.len(), |i| i + 1);
+        let mut out: Vec<(u32, &str)> = fields[..at].to_vec();
+        out.extend(short_sale.iter().map(|(t, v)| (*t, v.as_str())));
+        out.extend_from_slice(&fields[at..]);
+        with_short = out;
+        &with_short[..]
+    };
     let con_id = context.market.con_id(instrument).unwrap_or(0);
     if let Some(clord) = context.what_if_send.as_deref() {
         let preview = what_if_fields(fields, clord, con_id);
@@ -4071,5 +4181,139 @@ mod tests {
             order_id: 71, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P, tif: b'0', attrs: Default::default() });
         assert_eq!(tag(&none, 6207), None);
         assert_eq!(tag(&none, 6636), None);
+    }
+
+    /// Drain one request on a session with the given logon flags and
+    /// account: the frames sent and the errors given.
+    fn short_sale_run(super_user: bool, omnibus: bool, account: &str, req: OrderRequest)
+        -> (Vec<Vec<(u32, String)>>, Vec<(u64, i64, String)>)
+    {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let shared = Arc::new(SharedState::new());
+        shared.reference.set_short_sale_flags(super_user, omnibus);
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.pending_orders.push(req);
+        drain_and_send_orders(&mut conn, &mut context, account, &mut HeartbeatState::new(), false, &shared);
+        server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+        let mut bytes = Vec::new();
+        let mut buf = vec![0u8; 16384];
+        while let Ok(n) = server.read(&mut buf) {
+            if n == 0 { break; }
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        let mut frames: Vec<Vec<(u32, String)>> = Vec::new();
+        for field in bytes.split(|&b| b == fix::SOH) {
+            let Ok(text) = std::str::from_utf8(field) else { continue };
+            let Some((t, v)) = text.split_once('=') else { continue };
+            let Ok(t) = t.parse::<u32>() else { continue };
+            if t == 8 { frames.push(Vec::new()); }
+            if let Some(f) = frames.last_mut() { f.push((t, v.to_string())); }
+        }
+        (frames, shared.orders.drain_order_errors())
+    }
+
+    fn short_limit(order_id: u64, attrs: crate::types::OrderAttrs) -> OrderRequest {
+        OrderRequest::SubmitLimitEx { order_id, instrument: 0, side: Side::ShortSell, qty: 1,
+            price: 100 * P, tif: b'0', attrs }
+    }
+
+    fn short_attrs(intent: &str, slot: i32, location: &str, exempt_code: i32) -> crate::types::OrderAttrs {
+        crate::types::OrderAttrs {
+            clearing_intent: intent.into(),
+            short_sale: crate::types::ShortSale { slot, location: location.into(), exempt_code },
+            ..Default::default()
+        }
+    }
+
+    fn side_refusal(order_id: u64, cause: &str) -> Vec<(u64, i64, String)> {
+        vec![(order_id, 321, format!("Error validating request.-'bH' : cause - {}", cause))]
+    }
+
+    // ibx#417: a retail or paper session (no super user, no omnibus, an
+    // account id of the broker's clearing) refuses the short side with
+    // 321 and sends nothing, on every order path.
+    #[test]
+    fn short_side_is_refused_without_the_logon_flags_or_an_away_clearing() {
+        for req in [
+            short_limit(1, Default::default()),
+            OrderRequest::SubmitMarket { order_id: 1, instrument: 0, side: Side::ShortSell, qty: 1 },
+            short_limit(1, short_attrs("IB", 1, "", -1)),
+            OrderRequest::SubmitWhatIf { request: Box::new(short_limit(1, Default::default())) },
+        ] {
+            let (frames, errors) = short_sale_run(false, false, "DU1", req);
+            assert!(frames.is_empty(), "nothing sent: {frames:?}");
+            assert_eq!(errors, side_refusal(1, INVALID_SIDE));
+        }
+        // A plain sell is not checked.
+        let (frames, errors) = short_sale_run(false, false, "DU1",
+            OrderRequest::SubmitMarket { order_id: 2, instrument: 0, side: Side::Sell, qty: 1 });
+        assert_eq!(frames.len(), 1);
+        assert!(errors.is_empty());
+        assert!(tag(&frames[0], 114).is_none() && tag(&frames[0], 6086).is_none(), "no short-sale fields on a sell");
+    }
+
+    // ibx#417: the clearing decides for an order without intent: Away for
+    // an account id starting with T or with G second or third.
+    #[test]
+    fn clearing_away_follows_the_intent_and_the_account_id() {
+        assert!(clearing_away("Away", "DU1", false));
+        assert!(clearing_away("PTA", "DU1", false));
+        assert!(clearing_away("away", "DU1", false));
+        assert!(!clearing_away("IB", "T123", true));
+        assert!(!clearing_away("", "DU1", false));
+        assert!(!clearing_away("", "U1234", false));
+        assert!(clearing_away("", "DU1", true));
+        assert!(clearing_away("", "T1234", false));
+        assert!(clearing_away("", "UG123", false));
+        assert!(clearing_away("", "UXG12", false));
+    }
+
+    // ibx#417: an away clearing passes the side check; the slot rules then
+    // apply, each refused with its rule text, nothing sent.
+    #[test]
+    fn short_sale_slot_rules_follow_the_reference() {
+        let cases = [
+            (short_attrs("Away", 0, "", -1), BAD_SHORT_SLOT),
+            (short_attrs("Away", 3, "", -1), BAD_SHORT_SLOT),
+            (short_attrs("Away", 1, "", 0), NOT_SHORT_SALE_EXEMPT),
+            (short_attrs("Away", 1, "IBKR", -1), SLOT_1_NO_LOCATION),
+            (short_attrs("Away", 2, "", -1), SLOT_2_NEEDS_LOCATION),
+        ];
+        for (attrs, cause) in cases {
+            let (frames, errors) = short_sale_run(false, false, "DU1", short_limit(5, attrs));
+            assert!(frames.is_empty(), "{cause}: nothing sent");
+            assert_eq!(errors, side_refusal(5, cause));
+        }
+        // An omnibus logon only: no slot and no location may be given.
+        let (frames, errors) = short_sale_run(false, true, "DU1", short_limit(6, short_attrs("", 1, "", -1)));
+        assert!(frames.is_empty());
+        assert_eq!(errors, side_refusal(6, NOT_INSTITUTIONAL));
+    }
+
+    // ibx#417: an allowed short side goes out as the short side with the
+    // short-sale fields.
+    #[test]
+    fn allowed_short_side_carries_the_short_sale_fields() {
+        let (frames, errors) = short_sale_run(false, false, "DU1", short_limit(7, short_attrs("Away", 1, "", -1)));
+        assert!(errors.is_empty(), "{errors:?}");
+        let f = &frames[0];
+        assert_eq!((tag(f, 54), tag(f, 114), tag(f, 6086), tag(f, 5700), tag(f, 1688)),
+            (Some("5"), Some("N"), Some("1"), None, None));
+
+        let (frames, _) = short_sale_run(true, false, "DU1", short_limit(8, short_attrs("", 2, "TMBR", -1)));
+        let f = &frames[0];
+        assert_eq!((tag(f, 114), tag(f, 5700), tag(f, 6086)), (Some("Y"), Some("TMBR"), Some("2")));
+        assert!(pos(f, 114) < pos(f, 5700) && pos(f, 5700) < pos(f, 6086));
+
+        // An omnibus logon with no slot: sent with slot 0.
+        let (frames, errors) = short_sale_run(false, true, "DU1",
+            OrderRequest::SubmitMarket { order_id: 9, instrument: 0, side: Side::ShortSell, qty: 1 });
+        assert!(errors.is_empty());
+        assert_eq!((tag(&frames[0], 54), tag(&frames[0], 114), tag(&frames[0], 6086)), (Some("5"), Some("N"), Some("0")));
     }
 }

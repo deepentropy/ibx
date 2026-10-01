@@ -778,11 +778,14 @@ pub(super) fn phase_hidden_order(conns: Conns) -> Conns {
 
 // ─── Phase 35: Short Sell ───
 
+// The paper logon is neither a super user nor an omnibus logon and the
+// order does not clear away, so the reference refuses the short side
+// locally with 321 and sends nothing (ibx#417).
 pub(super) fn phase_short_sell(conns: Conns) -> Conns {
     let oid = next_order_id();
-    run_submit_cancel_phase(conns, "Phase 35: Short Sell Limit Order (SPY)",
+    run_submit_cancel_phase_or_refused(conns, "Phase 35: Short Sell Limit Order (SPY)",
         OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::ShortSell, qty: 1, price: 1_00_000_000, tif: b'0', attrs: OrderAttrs::default() },
-        false)
+        false, Some(321))
 }
 
 // ─── Phase 36: Trailing Stop Percent ───
