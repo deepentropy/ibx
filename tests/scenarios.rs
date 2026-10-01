@@ -284,7 +284,9 @@ fn order_lifecycle_algo_vwap_partial_fills() {
     assert_eq!(exec_count, 4);
 }
 
-/// Cancel reject: attempt to cancel already-filled order.
+/// Cancel reject: attempt to cancel already-filled order. The server's
+/// reject of the cancel gives no callback, as the reference: no error and
+/// no status, the order stays Filled.
 #[test]
 fn order_lifecycle_cancel_reject_on_filled_order() {
     let (client, _rx, shared) = test_client();
@@ -307,7 +309,8 @@ fn order_lifecycle_cancel_reject_on_filled_order() {
     });
     w.events.clear();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("error:120:202:")));
+    assert!(!w.events.iter().any(|e| e.starts_with("error:")), "{:?}", w.events);
+    assert!(!w.events.iter().any(|e| e.starts_with("order_status:")), "{:?}", w.events);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

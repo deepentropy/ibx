@@ -577,15 +577,14 @@ class TestOrderUpdateDispatch:
 
 class TestCancelRejectDispatch:
 
-    def test_cancel_reject_fires_error(self):
+    def test_cancel_reject_gives_no_callback(self):
+        # A server reject of a cancel or modify gives no error and no
+        # status, as the reference (ibx#252).
         w, c = make_test_client()
         c._test_push_cancel_reject(42, 0, 1)  # reason 1 = unknown order
         c._test_dispatch_once()
 
-        errors = [e for e in w.events if e[0] == "error"]
-        assert len(errors) == 1
-        assert errors[0][1] == 42  # order_id
-        assert errors[0][2] == 10147  # a cancel reject, as the reference (ibx#464)
+        assert w.events == []
 
 
 class TestReqOpenOrdersOrderState:
@@ -1112,7 +1111,7 @@ class TestScenarios:
         fills = [e for e in w.events if e[0] == "order_status"]
         errors = [e for e in w.events if e[0] == "error"]
         assert len(fills) >= 1
-        assert len(errors) == 1
+        assert len(errors) == 0  # a cancel reject gives no error (ibx#252)
 
     def test_multi_instrument_fills(self):
         """Fills on different instruments dispatch independently."""

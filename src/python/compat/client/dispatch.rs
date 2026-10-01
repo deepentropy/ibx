@@ -347,15 +347,10 @@ impl EClient {
             self.core.update_order_status(update.order_id, status, filled, remaining);
         }
 
-        // Drain cancel rejects -> error
-        let rejects = shared.orders.drain_cancel_rejects();
-        for reject in rejects {
-            // 202 is the cancel notice (ibx#465); a server reject of a
-            // cancel or modify is 10147.
-            let code = 10147i64;
-            let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
-            call_wrapper!(self.wrapper, py, "error", (reject.order_id, code, msg.as_str(), ""));
-        }
+        // A server reject of a cancel or modify gives no callback, as the
+        // reference: no error, no status; the order status that answers the
+        // engine's status request sets the state (ibx#252).
+        shared.orders.drain_cancel_rejects();
 
         // Subscriptions the server rejected (ibx#444, ibx#447).
         for reject in shared.market.drain_md_rejects() {

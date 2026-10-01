@@ -2655,27 +2655,29 @@ fn process_msgs_dispatches_order_updates() {
     assert!(w.events.iter().any(|e| e.starts_with("order_status:45:Inactive")));
 }
 
+// A server reject of a cancel or modify gives no error and no status, as
+// the reference (ibx#252): the status request it triggers sets the state.
 #[test]
-fn process_msgs_dispatches_cancel_reject_type_1() {
+fn process_msgs_cancel_reject_type_1_gives_no_callback() {
     let (client, _rx, shared) = test_client();
     shared.orders.push_cancel_reject(CancelReject {
         order_id: 44, instrument: 0, reject_type: 1, reason_code: 0, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    // 202 is the cancel notice (ibx#465): a reject is 10147.
-    assert!(w.events.iter().any(|e| e.starts_with("error:44:10147:")), "{:?}", w.events);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+    assert!(shared.orders.drain_cancel_rejects().is_empty(), "the reject is consumed");
 }
 
 #[test]
-fn process_msgs_dispatches_cancel_reject_type_2() {
+fn process_msgs_cancel_reject_type_2_gives_no_callback() {
     let (client, _rx, shared) = test_client();
     shared.orders.push_cancel_reject(CancelReject {
         order_id: 44, instrument: 0, reject_type: 2, reason_code: 5, timestamp_ns: 0,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("error:44:10147:")));
+    assert!(w.events.is_empty(), "{:?}", w.events);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -3381,8 +3383,10 @@ fn cancel_during_modify_no_panic() {
     assert!(has_cancel, "Cancel command should be sent");
 }
 
+// A server reject of a modify gives no error and no status, as the reference
+// (ibx#252); a modify of a filled order is refused before anything is sent.
 #[test]
-fn modify_filled_order_receives_cancel_reject() {
+fn modify_reject_of_a_filled_order_gives_no_callback() {
     let (client, _rx, shared) = test_client();
     client.map_req_instrument(1, 0);
     shared.orders.push_fill(Fill {
@@ -3400,8 +3404,7 @@ fn modify_filled_order_receives_cancel_reject() {
     });
     w.events.clear();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("error:120:")),
-        "Modify reject should generate error callback, got: {:?}", w.events);
+    assert!(w.events.is_empty(), "a modify reject gives no callback, got: {:?}", w.events);
 }
 
 #[test]

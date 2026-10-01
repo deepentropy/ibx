@@ -169,14 +169,10 @@ impl EClient {
             self.core.update_order_status(update.order_id, status, filled_f, remaining_f);
         }
 
-        // Cancel rejects → error
-        for reject in self.shared.orders.drain_cancel_rejects() {
-            // 202 is the cancel notice (ibx#465); a server reject of a
-            // cancel or modify is 10147.
-            let code = 10147;
-            let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
-            wrapper.error(reject.order_id, code, &msg, "");
-        }
+        // A server reject of a cancel or modify gives no callback, as the
+        // reference: no error, no status; the order status that answers the
+        // engine's status request sets the state (ibx#252).
+        self.shared.orders.drain_cancel_rejects();
 
         // What-if → open_order(contract, order, OrderState) only, as the
         // reference answers a preview (ibx#462).
