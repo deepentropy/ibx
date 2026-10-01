@@ -516,6 +516,8 @@ pub struct Gateway {
     /// Most contracts with tick-by-tick data at once, from the logon's
     /// limits (ibx#455).
     pub tick_by_tick_limit: usize,
+    /// Most contracts with API depth at once, from the logon (#452).
+    pub depth_limit: usize,
     /// The logon feature list turns tick-by-tick data off (ibx#455).
     pub tick_by_tick_off: bool,
     /// Most real-time bar requests at once, from the logon (ibx#454).
@@ -1422,6 +1424,8 @@ impl Gateway {
         let mut scale_us_lots = false;
         // Tick-by-tick limit fields, first value seen (ibx#455).
         let mut tbt_limit_fields: [Option<String>; 4] = Default::default();
+        // Logon values of the depth limit (#452).
+        let mut depth_limit_fields: [Option<String>; 5] = Default::default();
         let mut tick_by_tick_off = false;
         // Logon values of the real-time bar limit (ibx#454).
         let mut ticker_limit_tags: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
@@ -1566,6 +1570,9 @@ impl Gateway {
                 deny_news |= features_have(v, "DENYNEWS");
             }
             for (slot, tag) in tbt_limit_fields.iter_mut().zip([8421u32, 8422, 6594, 6848]) {
+                if slot.is_none() { *slot = fields.get(&tag).cloned(); }
+            }
+            for (slot, tag) in depth_limit_fields.iter_mut().zip([6849u32, 6848, 8421, 8422, 6594]) {
                 if slot.is_none() { *slot = fields.get(&tag).cloned(); }
             }
             for tag in [6847u32, 6846, 8421, 8422, 6083] {
@@ -1937,6 +1944,7 @@ impl Gateway {
             algo_definitions,
             scale_us_lots,
             tick_by_tick_limit: tick_by_tick_limit(&tbt_limit_fields),
+            depth_limit: depth_limit(&depth_limit_fields),
             tick_by_tick_off,
             max_real_time_requests,
             misc_urls: parse_misc_urls(&raw_misc_urls),
@@ -2080,6 +2088,7 @@ impl Gateway {
         hot_loop.set_account_id(self.account_id.clone());
         hot_loop.set_scale_us_lots(self.scale_us_lots);
         hot_loop.set_max_real_time_requests(self.max_real_time_requests);
+        hot_loop.set_depth_limit(self.depth_limit);
         hot_loop.set_farm_name(self.farm_name.clone());
         hot_loop.set_reconnect_auth(reconnect_auth);
         hot_loop.farm_conn = Some(farm_conn);
@@ -2205,6 +2214,23 @@ fn features_have(features: &str, feature: &str) -> bool {
 /// collects them: the second field when the first two are both present,
 /// else the third; the fourth when that one is missing or negative; at
 /// least 3, and 3 when none is given.
+/// The API depth limit of the logon, as the reference reads it (#452): the
+/// API value, else the total value; with neither, the deep slot count (the
+/// second of the two slot values when both are given, else the older one),
+/// at least 3.
+fn depth_limit(fields: &[Option<String>; 5]) -> usize {
+    let int = |v: &Option<String>| v.as_deref().and_then(|s| s.trim().parse::<i64>().ok());
+    let value = match (int(&fields[0]), int(&fields[1])) {
+        (Some(api), _) => Some(api),
+        (None, Some(total)) => Some(total),
+        (None, None) => {
+            let slots = if fields[2].is_some() && fields[3].is_some() { int(&fields[3]) } else { int(&fields[4]) };
+            return slots.map_or(3, |v| v.max(3) as usize);
+        }
+    };
+    value.map_or(3, |v| v.max(0) as usize)
+}
+
 fn tick_by_tick_limit(fields: &[Option<String>; 4]) -> usize {
     let int = |v: &Option<String>| v.as_deref().and_then(|s| s.trim().parse::<i64>().ok());
     let mut value = if fields[0].is_some() && fields[1].is_some() { int(&fields[1]) } else { int(&fields[2]) };
@@ -2892,6 +2918,18 @@ mod account_config_tests {
     use super::parse_account_config;
 
     // ibx#287: the logon feature list turns on US stock sizes in lots.
+    #[test]
+    // #452: the API depth limit of the logon (captured paper logon: API 3,
+    // total 3).
+    fn depth_limit_follows_the_reference_rule() {
+        let f = |v: [Option<&str>; 5]| super::depth_limit(&v.map(|x| x.map(String::from)));
+        assert_eq!(f([Some("3"), Some("3"), Some("100"), Some("5"), None]), 3);
+        assert_eq!(f([None, Some("4"), None, None, None]), 4);
+        assert_eq!(f([None, None, Some("100"), Some("5"), Some("9")]), 5);
+        assert_eq!(f([None, None, None, None, Some("2")]), 3);
+        assert_eq!(f([None, None, None, None, None]), 3);
+    }
+
     #[test]
     fn tick_by_tick_limit_follows_the_reference_rule() {
         let f = |a: Option<&str>, b: Option<&str>, c: Option<&str>, d: Option<&str>| {

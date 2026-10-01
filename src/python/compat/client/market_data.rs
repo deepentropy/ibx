@@ -193,7 +193,9 @@ impl EClient {
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = mkt_depth_options;
-        let exchange = if contract.exchange.is_empty() { "SMART".to_string() } else { contract.exchange.clone() };
+        // An empty exchange is refused by the engine, as the reference
+        // refuses it (#452).
+        let exchange = contract.exchange.clone();
         let sec_type = if contract.sec_type.is_empty() { "STK".to_string() } else { contract.sec_type.clone() };
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::SubscribeDepth {

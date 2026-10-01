@@ -122,7 +122,9 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         num_rows: i32, is_smart_depth: bool,
     ) -> Result<(), String> {
-        let exchange = if contract.exchange.is_empty() { "SMART".to_string() } else { contract.exchange.clone() };
+        // An empty exchange is refused by the engine, as the reference
+        // refuses it (#452).
+        let exchange = contract.exchange.clone();
         let sec_type = if contract.sec_type.is_empty() { "STK".to_string() } else { contract.sec_type.clone() };
         self.send(ControlCommand::SubscribeDepth {
             req_id: req_id as u32,

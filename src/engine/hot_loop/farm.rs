@@ -52,6 +52,11 @@ pub(crate) fn round_lot_reply(context: &mut Context, req_id: &str, msg: &[u8]) -
 pub(crate) fn note_definition(context: &mut Context, con_id: i64, msg: &[u8]) {
     let group = crate::control::contracts::agg_group_from_secdef(msg).unwrap_or(-1);
     context.agg_groups.insert(con_id, group);
+    if let Some(listing) = crate::protocol::fix::fix_parse(msg).get(&crate::control::contracts::TAG_IB_PRIMARY_EXCHANGE)
+        .filter(|v| !v.is_empty())
+    {
+        context.listing_exchanges.insert(con_id, listing.clone());
+    }
     let components = crate::control::contracts::smart_components_from_secdef(msg);
     if !components.is_empty() {
         context.smart_components.insert(con_id, components);
@@ -187,6 +192,30 @@ fn bid_ask_exchange<'a>(exchange: &'a str, sec_type: &str) -> &'a str {
     if sec_type == "CASH" && exchange == "IDEALPRO" { "FXSUBPIP" } else { exchange }
 }
 
+/// One entry of a depth request (#452): a book on an exchange, or one
+/// half of a top-of-book pair for a SmartDepth component without a book.
+#[derive(Debug, Clone)]
+pub(crate) struct DepthEntry {
+    pub(crate) farm_req: u32,
+    pub(crate) farm: FarmId,
+    pub(crate) con_id: String,
+    pub(crate) exchange: String,
+    pub(crate) sec_type: String,
+    pub(crate) req_type: &'static str,
+    /// On the wire now (false while its farm is down).
+    pub(crate) live: bool,
+}
+
+/// A depth request of the client (#452).
+#[derive(Debug, Clone)]
+pub(crate) struct DepthReq {
+    pub(crate) req_id: u32,
+    pub(crate) con_id: i64,
+    pub(crate) smart: bool,
+    pub(crate) num_rows: i32,
+    pub(crate) entries: Vec<DepthEntry>,
+}
+
 pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
@@ -195,12 +224,12 @@ pub(crate) struct FarmState {
     pub(crate) md_modes: crate::types::MarketDataModes,
     /// Active depth subscriptions: (req_id, is_smart_depth).
     pub(crate) depth_subs: Vec<(u32, bool)>,
-    /// Maps server_tag → (depth_req_id, is_smart_depth, min_tick) for active depth subscriptions.
-    pub(crate) depth_tag_to_req: Vec<(u32, u32, bool, f64)>,
+    /// Maps (server_tag, farm) → (depth_req_id, is_smart_depth, min_tick) for active depth subscriptions.
+    pub(crate) depth_tag_to_req: Vec<(u32, u32, bool, f64, FarmId)>,
     /// SmartDepth fan-out: maps internal sub_req → user's original req_id.
     depth_fanout_map: Vec<(u32, u32)>,
-    /// Primary depth subscription params for reconnect: (req_id, con_id, exchange, sec_type, num_rows, is_smart_depth).
-    depth_resub_info: Vec<(u32, i64, String, String, i32, bool)>,
+    /// Depth requests of the client and their entries (#452).
+    pub(crate) depth_reqs: Vec<DepthReq>,
     /// Option resub info: (instrument, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887).
     md_resub_info: Vec<(InstrumentId, String, String, String, String, f64, String, String, i32)>,
     pub(crate) disconnected: bool,
@@ -226,7 +255,7 @@ impl FarmState {
             depth_subs: Vec::new(),
             depth_tag_to_req: Vec::new(),
             depth_fanout_map: Vec::new(),
-            depth_resub_info: Vec::new(),
+            depth_reqs: Vec::new(),
             md_resub_info: Vec::new(),
             disconnected: false,
             tick_buf: Vec::with_capacity(16),
@@ -404,7 +433,7 @@ impl FarmState {
             while off + 3 < body.len() {
                 if body[off] == 0x00 {
                     let stag = ((body[off+1] as u32) << 16) | ((body[off+2] as u32) << 8) | (body[off+3] as u32);
-                    if self.depth_tag_to_req.iter().any(|(s, _, _, _)| *s == stag) {
+                    if self.depth_tag_to_req.iter().any(|(s, .., f)| *s == stag && *f == self.rx_farm) {
                         has_depth = true;
                         break;
                     }
@@ -482,7 +511,7 @@ impl FarmState {
                 .find(|(sub, _)| *sub == req_id)
                 .map(|(_, user)| *user)
                 .unwrap_or(req_id);
-            self.depth_tag_to_req.push((server_tag, user_req, is_smart, min_tick));
+            self.depth_tag_to_req.push((server_tag, user_req, is_smart, min_tick, self.rx_farm));
             log::info!("Depth ack: server_tag {} -> req_id {} (levels={}, smart={}, min_tick={})",
                 server_tag, user_req, depth_levels, is_smart, min_tick);
             return;
@@ -724,7 +753,12 @@ impl FarmState {
         let mut hit: Vec<(InstrumentId, bool, bool)> = Vec::new();
         for (i, id) in ids.iter().enumerate() {
             let Ok(id) = id.parse::<u32>() else { continue };
-            let Some(&(_, instrument)) = self.md_req_to_instrument.iter().find(|(r, _)| *r == id) else { continue };
+            let Some(&(_, instrument)) = self.md_req_to_instrument.iter().find(|(r, _)| *r == id) else {
+                // A depth entry (#452).
+                let needs_sub = access.get(i).is_some_and(|a| api_subscription_needed(a));
+                self.depth_rejected(id, needs_sub, shared);
+                continue;
+            };
             let delayed = delayed_flags.get(i).is_some_and(|f| f == "1");
             let needs_sub = access.get(i).is_some_and(|a| api_subscription_needed(a));
             match hit.iter_mut().find(|(inst, ..)| *inst == instrument) {
@@ -834,141 +868,182 @@ impl FarmState {
         out
     }
 
-    pub(crate) fn send_depth_subscribe(
+    /// Start a depth request (#452) with its entries, each on the farm of
+    /// its route: a book entry for each `deep` exchange, a top-of-book
+    /// pair for each `top` exchange (SmartDepth components with no book).
+    /// The caller made the local checks and picked the farms.
+    pub(crate) fn start_depth(
         &mut self,
         req_id: u32,
         con_id: i64,
-        exchange: &str,
         sec_type: &str,
-        _num_rows: i32,
-        is_smart_depth: bool,
-        farm_conn: &mut Option<Connection>,
-        hb: &mut HeartbeatState,
-    ) {
-        let fix_sec_type = match sec_type {
-            "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND",
-            "CASH" => "CASH", other => other,
+        smart: bool,
+        num_rows: i32,
+        entries: Vec<(FarmId, String, bool)>,
+    ) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        let mut req = DepthReq {
+            req_id, con_id, smart, num_rows, entries: Vec::new(),
         };
-        self.depth_subs.push((req_id, is_smart_depth));
-        self.depth_resub_info.push((req_id, con_id, exchange.to_string(), sec_type.to_string(), _num_rows, is_smart_depth));
+        let fix_type = fix_sec_type(sec_type).to_string();
+        for (farm, exchange, book) in entries {
+            let kinds: &[&'static str] = if book { &["0"] } else { &["442", "443"] };
+            for kind in kinds {
+                req.entries.push(DepthEntry {
+                    farm_req: 0, farm, con_id: (con_id as u32).to_string(), exchange: exchange.clone(),
+                    sec_type: fix_type.clone(), req_type: kind, live: false,
+                });
+            }
+        }
+        self.depth_reqs.push(req);
+        let idx = self.depth_reqs.len() - 1;
+        self.depth_messages(idx, None)
+    }
 
-        // SmartDepth requires per-exchange fan-out. The server ACKs a BEST/SMART
-        // subscribe but never sends data for it. Data only arrives for individual exchanges.
-        // Auto-enable fan-out when exchange is SMART/BEST (aggregated routing), since
-        // single-exchange depth to SMART returns nothing.
-        let needs_fanout = is_smart_depth || matches!(exchange, "SMART" | "BEST" | "");
-        let exchanges: &[&str] = if needs_fanout {
-            // US equity exchanges that the gateway fans out to
-            &["NASDAQ", "IEX", "BATS", "ARCA", "BEX", "NYSE", "BYX", "NYSENAT", "T24X",
-              "DRCTEDGE", "MEMX", "PEARL", "AMEX", "CHX", "LTSE", "PSX", "ISE", "EDGEA"]
-        } else {
-            // Single exchange subscribe
-            static SINGLE: [&str; 0] = [];
-            &SINGLE
-        };
-
-        if let Some(conn) = farm_conn.as_mut() {
-            let con_id_str = (con_id as u32).to_string();
-
-            if !exchanges.is_empty() {
-                // SmartDepth: fan-out to individual exchanges.
-                // Each sub gets a unique req_id tracked as a depth subscription.
-                for exch in exchanges {
-                    let sub_req = self.next_md_req_id;
-                    self.next_md_req_id += 1;
-                    self.depth_subs.push((sub_req, true));
-                    self.depth_fanout_map.push((sub_req, req_id));
-                    let sub_req_str = sub_req.to_string();
-                    self.send_depth_one(conn, &sub_req_str, &con_id_str, exch, fix_sec_type);
+    /// Send the entries of a depth request that are not on the wire (all of
+    /// them, or those of one farm after it came back), with new farm ids;
+    /// one message per farm, for the caller to send.
+    fn depth_messages(&mut self, idx: usize, only_farm: Option<FarmId>) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        let mut out = Vec::new();
+        let (user_req, smart) = (self.depth_reqs[idx].req_id, self.depth_reqs[idx].smart);
+        let mut farms: Vec<FarmId> = self.depth_reqs[idx].entries.iter()
+            .filter(|e| !e.live && only_farm.is_none_or(|f| f == e.farm))
+            .map(|e| e.farm).collect();
+        farms.sort_unstable();
+        farms.dedup();
+        for farm in farms {
+            let mut msg: Vec<(u32, String)> = vec![
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
+                (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
+                (263, "1".into()),
+            ];
+            let mut body: Vec<(u32, String)> = Vec::new();
+            let mut count = 0;
+            for e in self.depth_reqs[idx].entries.iter_mut().filter(|e| !e.live && e.farm == farm) {
+                let id = self.next_md_req_id;
+                self.next_md_req_id += 1;
+                e.farm_req = id;
+                e.live = true;
+                count += 1;
+                self.depth_subs.push((id, smart));
+                self.depth_fanout_map.push((id, user_req));
+                body.push((262, id.to_string()));
+                body.push((6008, e.con_id.clone()));
+                body.push((207, e.exchange.clone()));
+                body.push((167, e.sec_type.clone()));
+                body.push((264, e.req_type.to_string()));
+                if e.req_type != "0" {
+                    body.push((6088, "Socket".into()));
                 }
-                log::info!("SmartDepth fan-out: req={} con_id={} -> {} exchanges", req_id, con_id, exchanges.len());
-            } else {
-                // Single exchange
-                let fix_exchange = match exchange {
-                    "ISLAND" => "NASDAQ",
-                    other => other,
-                };
-                let req_id_str = req_id.to_string();
-                self.send_depth_one(conn, &req_id_str, &con_id_str, fix_exchange, fix_sec_type);
-                log::info!("Depth subscribe: req={} con_id={} exchange={}", req_id, con_id, fix_exchange);
+                body.push((9830, "1".into()));
             }
-            hb.last_farm_sent = Instant::now();
+            msg.push((146, count.to_string()));
+            msg.extend(body);
+            log::info!("Depth req {}: {} entries for farm {}", user_req, count, farm);
+            out.push((farm, msg));
         }
+        out
     }
 
-    pub(crate) fn send_depth_unsubscribe(
-        &mut self,
-        req_id: u32,
-        farm_conn: &mut Option<Connection>,
-        hb: &mut HeartbeatState,
-    ) {
-        let found = match self.depth_subs.iter().position(|(id, _)| *id == req_id) {
-            Some(idx) => {
-                self.depth_subs.remove(idx);
-                true
-            }
-            None => false,
-        };
-        if !found { return; }
+    /// Contracts with a depth request, for the reference's limit (#452).
+    pub(crate) fn depth_contracts(&self) -> Vec<i64> {
+        let mut c: Vec<i64> = self.depth_reqs.iter().map(|r| r.con_id).collect();
+        c.sort_unstable();
+        c.dedup();
+        c
+    }
 
-        // Remove reconnect params
-        self.depth_resub_info.retain(|(id, _, _, _, _, _)| *id != req_id);
+    /// A depth request of that id and kind is live (#452).
+    pub(crate) fn has_depth_req(&self, req_id: u32, smart: bool) -> bool {
+        self.depth_reqs.iter().any(|r| r.req_id == req_id && r.smart == smart)
+    }
 
-        // Collect SmartDepth fan-out sub_reqs that map to this user req_id
-        let fanout_reqs: Vec<u32> = self.depth_fanout_map.iter()
-            .filter(|(_, user)| *user == req_id)
-            .map(|(sub, _)| *sub)
-            .collect();
+    /// Whether a live depth entry uses `farm`.
+    pub(crate) fn depth_uses_farm(&self, farm: FarmId) -> bool {
+        self.depth_reqs.iter().any(|r| r.entries.iter().any(|e| e.farm == farm))
+    }
 
-        // Remove fan-out entries from depth_subs and depth_fanout_map
-        self.depth_subs.retain(|(id, _)| !fanout_reqs.contains(id));
+    /// End a depth request: its cancels, one message per farm with the
+    /// entries that were sent, as the reference cancels (#452). None for
+    /// an unknown request id.
+    pub(crate) fn stop_depth(&mut self, req_id: u32) -> Option<Vec<(FarmId, Vec<(u32, String)>)>> {
+        let pos = self.depth_reqs.iter().position(|r| r.req_id == req_id)?;
+        let req = self.depth_reqs.remove(pos);
+        let ids: Vec<u32> = req.entries.iter().filter(|e| e.live).map(|e| e.farm_req).collect();
+        self.depth_subs.retain(|(id, _)| !ids.contains(id));
         self.depth_fanout_map.retain(|(_, user)| *user != req_id);
-
-        // Clear server_tag mappings for this req_id
-        self.depth_tag_to_req.retain(|(_, rid, _, _)| *rid != req_id);
-
-        if let Some(conn) = farm_conn.as_mut() {
-            // Send unsub for each fan-out sub_req (SmartDepth per-exchange)
-            for sub_req in &fanout_reqs {
-                let sub_req_str = sub_req.to_string();
-                let _ = conn.send_fixcomp(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                    (262, &sub_req_str),
-                    (263, "2"),
-                ]);
+        self.depth_tag_to_req.retain(|(_, rid, ..)| *rid != req_id);
+        let mut farms: Vec<FarmId> = req.entries.iter().filter(|e| e.live).map(|e| e.farm).collect();
+        farms.sort_unstable();
+        farms.dedup();
+        let mut out = Vec::new();
+        for farm in farms {
+            let mine: Vec<&DepthEntry> = req.entries.iter().filter(|e| e.live && e.farm == farm).collect();
+            let mut msg: Vec<(u32, String)> = vec![
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
+                (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
+                (263, "2".into()),
+                (146, mine.len().to_string()),
+            ];
+            for e in mine {
+                msg.push((262, e.farm_req.to_string()));
+                msg.push((6008, e.con_id.clone()));
+                msg.push((207, e.exchange.clone()));
+                msg.push((167, e.sec_type.clone()));
+                msg.push((264, e.req_type.to_string()));
+                msg.push((9830, "1".into()));
             }
-            // Send unsub for the primary req_id
-            let req_id_str = req_id.to_string();
-            let _ = conn.send_fixcomp(&[
-                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                (262, &req_id_str),
-                (263, "2"),
-            ]);
-            hb.last_farm_sent = Instant::now();
-            log::info!("Sent depth unsubscribe: req_id={} (+ {} fan-out)", req_id, fanout_reqs.len());
+            out.push((farm, msg));
         }
+        Some(out)
     }
 
-    /// Send a single depth subscribe for one exchange.
-    fn send_depth_one(&self, conn: &mut Connection, req_id_str: &str, con_id_str: &str, exchange: &str, sec_type: &str) {
-        let is_direct = matches!(exchange, "NASDAQ" | "BATS" | "ARCA" | "BEX" | "NYSE" | "IEX"
-            | "BYX" | "NYSENAT" | "T24X");
-        if is_direct {
-            let _ = conn.send_fixcomp(&[
-                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                (263, "1"), (146, "1"), (262, req_id_str),
-                (6008, con_id_str), (207, exchange), (167, sec_type),
-                (264, "0"), (9830, "1"),
-            ]);
-        } else {
-            // Socket exchanges (DRCTEDGE, MEMX, PEARL, AMEX, CHX, LTSE, PSX, ISE, EDGEA, etc.)
-            let _ = conn.send_fixcomp(&[
-                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                (263, "1"), (146, "1"), (262, req_id_str),
-                (6008, con_id_str), (207, exchange), (167, sec_type),
-                (264, "442"), (6088, "Socket"), (9830, "1"),
-            ]);
+    /// A farm's connection was lost: its depth entries are no longer on the
+    /// wire and go out again when it is back (`resend_depth`).
+    pub(crate) fn depth_farm_lost(&mut self, farm: FarmId) {
+        let mut gone = Vec::new();
+        for r in &mut self.depth_reqs {
+            for e in r.entries.iter_mut().filter(|e| e.farm == farm && e.live) {
+                e.live = false;
+                gone.push(e.farm_req);
+            }
         }
+        self.depth_subs.retain(|(id, _)| !gone.contains(id));
+        self.depth_fanout_map.retain(|(id, _)| !gone.contains(id));
+        self.depth_tag_to_req.retain(|(.., f)| *f != farm);
+    }
+
+    /// Send again the depth entries of a farm that came back.
+    pub(crate) fn resend_depth(&mut self, farm: FarmId) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        (0..self.depth_reqs.len()).flat_map(|idx| self.depth_messages(idx, Some(farm))).collect()
+    }
+
+    /// A depth entry the farm refused (#452): a single-exchange request ends
+    /// with 354, or 10089 when an API subscription is needed, as the
+    /// reference; a SmartDepth component is dropped from its request.
+    fn depth_rejected(&mut self, farm_req: u32, needs_api_subscription: bool, shared: &SharedState) -> bool {
+        let Some(pos) = self.depth_reqs.iter().position(|r| r.entries.iter().any(|e| e.live && e.farm_req == farm_req)) else {
+            return false;
+        };
+        let req = &mut self.depth_reqs[pos];
+        if req.smart {
+            req.entries.retain(|e| e.farm_req != farm_req);
+            self.depth_subs.retain(|(id, _)| *id != farm_req);
+            self.depth_fanout_map.retain(|(id, _)| *id != farm_req);
+            log::warn!("SmartDepth req {}: a component was refused", req.req_id);
+            return true;
+        }
+        let req = self.depth_reqs.remove(pos);
+        let ids: Vec<u32> = req.entries.iter().map(|e| e.farm_req).collect();
+        self.depth_subs.retain(|(id, _)| !ids.contains(id));
+        self.depth_fanout_map.retain(|(_, user)| *user != req.req_id);
+        self.depth_tag_to_req.retain(|(_, rid, ..)| *rid != req.req_id);
+        let (code, text) = if needs_api_subscription {
+            (10089, "Requested market data requires additional subscription for API. See link in 'Market Data Connections' dialog for more details.")
+        } else {
+            (354, "Requested market data is not subscribed.")
+        };
+        shared.orders.push_order_error(req.req_id as u64, code, text.to_string());
+        true
     }
 
     /// Parse 35=P depth entries (byte-aligned: [00][3B stag][field tags...][58 terminator]).
@@ -989,8 +1064,8 @@ impl FarmState {
             pos += 3;
 
             let (req_id, is_smart, min_tick) = match self.depth_tag_to_req.iter()
-                .find(|(s, _, _, _)| *s == stag)
-                .map(|(_, r, sm, mt)| (*r, *sm, *mt))
+                .find(|(s, .., f)| *s == stag && *f == self.rx_farm)
+                .map(|(_, r, sm, mt, _)| (*r, *sm, *mt))
             {
                 Some(v) => v,
                 None => { continue; }
@@ -1166,8 +1241,8 @@ impl FarmState {
     /// Look up a depth server_tag → (req_id, is_smart, min_tick).
     fn lookup_depth_stag(&self, stag: u32) -> Option<(u32, bool, f64)> {
         self.depth_tag_to_req.iter()
-            .find(|(s, _, _, _)| *s == stag)
-            .map(|(_, r, sm, mt)| (*r, *sm, *mt))
+            .find(|(s, .., f)| *s == stag && *f == self.rx_farm)
+            .map(|(_, r, sm, mt, _)| (*r, *sm, *mt))
     }
 
     /// Parse one price + one size field tag pair. Returns (price, size, side, is_snapshot).
@@ -1229,11 +1304,8 @@ impl FarmState {
         self.disconnected = true;
         // Entries and tags of the farms opened on demand stay (#445).
         self.farm_lost(PRIMARY_MD, context);
-        // Clear depth wire-state (server_tags become invalid after disconnect).
-        // depth_resub_info is preserved for resubscription on reconnect.
-        self.depth_subs.clear();
-        self.depth_tag_to_req.clear();
-        self.depth_fanout_map.clear();
+        // Its depth entries go out again when it is back (#452).
+        self.depth_farm_lost(PRIMARY_MD);
         // Don't emit Event::Disconnected — auto-reconnect handles farm drops transparently.
         // Python is only notified if reconnect exhausts retries.
     }
@@ -1259,17 +1331,7 @@ impl FarmState {
         // (`unsent_subscriptions`, #445, ibx#288).
         let _ = context;
 
-        // Re-subscribe depth subscriptions (depth_resub_info survived disconnect)
-        let depth_params: Vec<_> = self.depth_resub_info.drain(..).collect();
-        let depth_count = depth_params.len();
-        for (req_id, con_id, exchange, sec_type, num_rows, is_smart_depth) in depth_params {
-            self.send_depth_subscribe(
-                req_id, con_id, &exchange, &sec_type, num_rows, is_smart_depth,
-                farm_conn, hb,
-            );
-        }
-
-        log::info!("Farm reconnected, re-subscribed {} depth", depth_count);
+        log::info!("Farm reconnected");
     }
 
     fn handle_tick_news(&mut self, msg: &[u8], context: &Context, shared: &SharedState, event_tx: &Option<Sender<Event>>) {

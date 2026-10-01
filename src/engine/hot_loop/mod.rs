@@ -80,6 +80,8 @@ pub struct HotLoop {
     tag_marks: Vec<(InstrumentId, Instant, bool)>,
     /// Next run of the server tag cleaner (#292).
     next_tag_clean: Instant,
+    /// Most contracts with API depth at once, from the logon (#452).
+    depth_limit: usize,
     // ── Auto-reconnect ──
     reconnect_auth: Option<ReconnectAuth>,
     pending_farm_reconnect: Option<Receiver<io::Result<Connection>>>,
@@ -121,6 +123,7 @@ impl HotLoop {
             pool: FarmPool::new(Instant::now()),
             tag_marks: Vec::new(),
             next_tag_clean: Instant::now() + TAG_CLEAN_PERIOD,
+            depth_limit: 3,
             reconnect_auth: None,
             pending_farm_reconnect: None,
             ccp_next_attempt_at: None,
@@ -161,6 +164,11 @@ impl HotLoop {
             crate::engine::routing::TableKind::MarketData => self.farm.routing = Some(table),
             crate::engine::routing::TableKind::Historical => self.hmds.routing = Some(table),
         }
+    }
+
+    /// Most contracts with API depth at once, from the logon (#452).
+    pub fn set_depth_limit(&mut self, limit: usize) {
+        self.depth_limit = limit;
     }
 
     /// Most real-time bar requests at once, from the logon (ibx#454).
@@ -491,6 +499,116 @@ impl HotLoop {
             self.tag_marks[i].2 = true;
             log::debug!("Market data record of instrument {} unused: {} quote tags freed", id, freed);
         }
+    }
+
+    /// Send market data messages, each to its farm.
+    fn send_farm_messages(&mut self, msgs: Vec<(pool::FarmId, Vec<(u32, String)>)>) {
+        let now = Instant::now();
+        for (id, msg) in msgs {
+            let fields: Vec<(u32, &str)> = msg.iter().map(|(t, v)| (*t, v.as_str())).collect();
+            if let Some(f) = self.pool.get_mut(id) {
+                f.note_request(now);
+            }
+            if let Some(sink) = farm_sink!(self, id) {
+                if sink.send_comp(&fields) && id == PRIMARY_MD {
+                    self.hb.last_farm_sent = now;
+                }
+            }
+        }
+    }
+
+    /// The farm of a market data route: the primary farm, or one opened on
+    /// demand.
+    fn md_farm_of(&mut self, route: &crate::engine::routing::Route) -> pool::FarmId {
+        if route.farm == self.farm_name {
+            PRIMARY_MD
+        } else {
+            let (name, host) = (route.farm.clone(), route.host.clone());
+            self.pool.ensure(&name, &host, FarmKind::MarketData, Instant::now())
+        }
+    }
+
+    /// The farm of the book of a contract on an exchange (#452): the first
+    /// of the aggregate, level-two, extended and plain depth routes, as the
+    /// reference tries them. The aggregate rows are taken only with a known
+    /// listing exchange.
+    fn depth_route(&mut self, con_id: i64, exchange: &str, sec_type: &str) -> Option<pool::FarmId> {
+        use crate::engine::routing::DataType;
+        let route_exchange = farm::routing_exchange(exchange, sec_type);
+        let agg_group = self.agg_group_for(con_id, route_exchange);
+        let listing = self.context.listing_exchanges.get(&con_id).cloned();
+        let table = self.farm.routing.as_ref()?;
+        let route = [DataType::AggDeep, DataType::Deep2, DataType::DeepX, DataType::Deep].into_iter()
+            .filter(|dt| *dt != DataType::AggDeep || listing.is_some())
+            .find_map(|dt| table.lookup(route_exchange, agg_group, sec_type, dt, listing.as_deref().unwrap_or("*")))?
+            .clone();
+        Some(self.md_farm_of(&route))
+    }
+
+    /// A depth request (#452), as the reference handles it: the local
+    /// refusals (321 for no exchange, a combo or no rows, 322 for a live
+    /// request id of the same kind, 309 past the logon's limit of
+    /// contracts), then SmartDepth from the contract's SMART component
+    /// exchanges (a book where a depth route exists, else the top of book
+    /// where a top route exists, else nothing), or the book of its own
+    /// exchange (10092 when no depth route serves it); each entry goes to
+    /// the farm of its route.
+    fn route_depth_subscribe(&mut self, req_id: u32, con_id: i64, exchange: String, sec_type: String, num_rows: i32, is_smart_depth: bool) {
+        let refuse = |shared: &SharedState, code: i64, text: String| shared.orders.push_order_error(req_id as u64, code, text);
+        let invalid = |cause: &str| format!("Error validating request.-'bR' : cause - {}", cause);
+        if exchange.trim().is_empty() {
+            return refuse(&self.shared, 321, invalid("Please enter exchange."));
+        }
+        if sec_type == "BAG" {
+            return refuse(&self.shared, 321, invalid("Market depth does not support combos."));
+        }
+        if num_rows <= 0 {
+            return refuse(&self.shared, 321, invalid("Market depth rows requested must be greater than zero."));
+        }
+        if self.farm.has_depth_req(req_id, is_smart_depth) {
+            return refuse(&self.shared, 322, "Error processing request.-'bR' : cause - Duplicate ticker id".into());
+        }
+        let contracts = self.farm.depth_contracts();
+        if !contracts.contains(&con_id) && contracts.len() >= self.depth_limit {
+            return refuse(&self.shared, 309, format!("Max number ({}) of market depth requests has been reached", self.depth_limit));
+        }
+        let st = if sec_type.is_empty() { "STK".to_string() } else { sec_type.clone() };
+        // The reference knows the contract (its SMART components, listing
+        // exchange, aggregate group) first: wait for its definition.
+        if self.farm.routing.is_some() && con_id > 0 && !self.context.agg_groups.contains_key(&con_id) {
+            let again = ControlCommand::SubscribeDepth {
+                req_id, con_id, exchange: exchange.clone(), sec_type: sec_type.clone(), num_rows, is_smart_depth,
+            };
+            if self.ask_definition(con_id, &exchange) {
+                self.context.def_parked.push((con_id, again));
+                return;
+            }
+        }
+        let mut entries: Vec<(pool::FarmId, String, bool)> = Vec::new();
+        if self.farm.routing.is_none() {
+            // No routing table: the book of the exchange on the primary farm.
+            entries.push((PRIMARY_MD, farm::routing_exchange(&exchange, &st).to_string(), true));
+        } else {
+            let components = self.context.smart_components.get(&con_id).cloned().unwrap_or_default();
+            if is_smart_depth && !components.is_empty() && st == "STK" {
+                for exch in components {
+                    if let Some(farm_id) = self.depth_route(con_id, &exch, &st) {
+                        entries.push((farm_id, exch, true));
+                    } else if let Some(route) = self.farm.routing.as_ref()
+                        .and_then(|t| t.lookup(&exch, -1, &st, crate::engine::routing::DataType::Top, "*")).cloned()
+                    {
+                        let farm_id = self.md_farm_of(&route);
+                        entries.push((farm_id, exch, false));
+                    }
+                }
+            } else if let Some(farm_id) = self.depth_route(con_id, &exchange, &st) {
+                entries.push((farm_id, farm::routing_exchange(&exchange, &st).to_string(), true));
+            } else {
+                return refuse(&self.shared, 10092, "Deep market data is not supported for this combination of security type/exchange".into());
+            }
+        }
+        let msgs = self.farm.start_depth(req_id, con_id, &st, is_smart_depth, num_rows, entries);
+        self.send_farm_messages(msgs);
     }
 
     /// Send again, each to the farm of its route, the subscriptions that
@@ -1140,18 +1258,15 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::SubscribeDepth { req_id, con_id, exchange, sec_type, num_rows, is_smart_depth } => {
-                    self.farm.send_depth_subscribe(
-                        req_id, con_id, &exchange, &sec_type, num_rows, is_smart_depth,
-                        &mut self.farm_conn,
-                        &mut self.hb,
-                    );
+                    self.route_depth_subscribe(req_id, con_id, exchange, sec_type, num_rows, is_smart_depth);
                 }
                 ControlCommand::UnsubscribeDepth { req_id } => {
-                    self.farm.send_depth_unsubscribe(
-                        req_id,
-                        &mut self.farm_conn,
-                        &mut self.hb,
-                    );
+                    match self.farm.stop_depth(req_id) {
+                        // An unknown request id: 310, as the reference.
+                        None => self.shared.orders.push_order_error(req_id as u64, 310,
+                            format!("Can't find the subscribed market depth with tickerId:{}", req_id)),
+                        Some(msgs) => self.send_farm_messages(msgs),
+                    }
                     // Purge any already-buffered depth updates so callers never see stale data
                     self.shared.market.purge_depth_updates(req_id);
                 }
@@ -1384,6 +1499,8 @@ impl HotLoop {
             &mut self.context, &mut self.hb,
         );
         self.resend_unsent_subscriptions();
+        let msgs = self.farm.resend_depth(PRIMARY_MD);
+        self.send_farm_messages(msgs);
     }
 
     /// Read the farms opened on demand and hand their messages to the
@@ -1431,9 +1548,10 @@ impl HotLoop {
     /// it (#445).
     fn pool_farm_lost(&mut self, id: pool::FarmId) {
         let Some(kind) = self.pool.get(id).map(|f| f.kind) else { return };
-        let wanted = kind == FarmKind::MarketData && self.farm.uses_farm(id);
+        let wanted = kind == FarmKind::MarketData && (self.farm.uses_farm(id) || self.farm.depth_uses_farm(id));
         if kind == FarmKind::MarketData {
             self.farm.farm_lost(id, &mut self.context);
+            self.farm.depth_farm_lost(id);
         }
         let event = self.pool.on_lost(id, wanted, Instant::now());
         self.pool_notice(&event);
@@ -1471,6 +1589,8 @@ impl HotLoop {
                     self.pool_notice(&event);
                     if self.pool.get(id).is_some_and(|f| f.kind == FarmKind::MarketData) {
                         self.resend_unsent_subscriptions();
+                        let msgs = self.farm.resend_depth(id);
+                        self.send_farm_messages(msgs);
                     }
                 }
                 Err(e) => {
@@ -1487,7 +1607,7 @@ impl HotLoop {
         }
         let others_up = usize::from(!self.farm.disconnected && self.farm_conn.is_some());
         let farm = &self.farm;
-        for id in self.pool.md_activity_check(now, others_up, |id| farm.uses_farm(id)) {
+        for id in self.pool.md_activity_check(now, others_up, |id| farm.uses_farm(id) || farm.depth_uses_farm(id)) {
             let event = self.pool.close_idle(id);
             self.pool_notice(&event);
         }
@@ -4382,5 +4502,156 @@ mod bars_routing_tests {
         tx.send(ControlCommand::CancelHistorical { req_id: 1 }).unwrap();
         engine.poll_once();
         assert_eq!(engine.pool.get(day).unwrap().queued(), 2, "the cancel goes to the same farm");
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use crate::bridge::SharedState;
+    use crate::engine::routing::TableKind;
+
+    const MD_TABLE: &str = "NASDAQ,STK,Top|Deep2|Deep,-1,*,cdc1.example,4000,usfarm;\
+        IEX,STK,Top|Deep,-1,*,cdc1.example,4000,usfarm;\
+        MEMX,STK,Top,-1,*,cdc1.example,4000,usfarm;\
+        BEST,STK,Top,1,*,cdc1.example,4000,usfarm;\
+        CME,FUT,Top|Deep,-1,*,cdc1.example,4000,usfuture";
+
+    fn loopback() -> (Connection, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (Connection::new_raw(client).unwrap(), server)
+    }
+
+    fn sent(server: &mut std::net::TcpStream) -> Vec<String> {
+        use std::io::Read;
+        server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = server.read(&mut chunk) {
+            if n == 0 { break; }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let mut out = Vec::new();
+        let mut rest = &buf[..];
+        while let Some(len) = crate::protocol::fixcomp::fixcomp_length(rest) {
+            for m in crate::protocol::fixcomp::fixcomp_decompress(&rest[..len]).unwrap() {
+                out.push(String::from_utf8_lossy(&m).replace('\x01', "|"));
+            }
+            rest = &rest[len..];
+        }
+        out
+    }
+
+    fn depth(req_id: u32, con_id: i64, exchange: &str, sec_type: &str, rows: i32, smart: bool) -> ControlCommand {
+        ControlCommand::SubscribeDepth {
+            req_id, con_id, exchange: exchange.into(), sec_type: sec_type.into(), num_rows: rows, is_smart_depth: smart,
+        }
+    }
+
+    /// An engine with the table, and the definitions of the contracts
+    /// known (group and components).
+    fn engine() -> (HotLoop, Arc<SharedState>, std::net::TcpStream, crossbeam_channel::Sender<ControlCommand>) {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.set_farm_name("usfarm".into());
+        let (farm, side) = loopback();
+        engine.farm_conn = Some(farm);
+        engine.set_routing_table(TableKind::MarketData, MD_TABLE);
+        for con_id in [265598, 272093, 4391, 9999, 815824267] {
+            engine.context.agg_groups.insert(con_id, if con_id == 815824267 { -1 } else { 1 });
+        }
+        engine.context.smart_components.insert(265598, vec!["NASDAQ".into(), "MEMX".into(), "IEX".into(), "ZZZ".into()]);
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        engine.set_control_rx(rx);
+        (engine, shared, side, tx)
+    }
+
+    fn errors(shared: &SharedState) -> Vec<String> {
+        shared.orders.drain_order_errors().into_iter().map(|(id, code, text)| format!("{}:{}:{}", id, code, text)).collect()
+    }
+
+    // #452: the reference's local refusals, in its order.
+    #[test]
+    fn local_refusals() {
+        let (mut engine, shared, mut side, tx) = engine();
+        tx.send(depth(1, 265598, "", "STK", 5, false)).unwrap();
+        tx.send(depth(2, 265598, "NASDAQ", "BAG", 5, false)).unwrap();
+        tx.send(depth(3, 265598, "NASDAQ", "STK", 0, false)).unwrap();
+        tx.send(depth(4, 265598, "NASDAQ", "STK", 5, false)).unwrap();
+        tx.send(depth(4, 265598, "IEX", "STK", 5, false)).unwrap();
+        tx.send(depth(5, 272093, "NASDAQ", "STK", 5, false)).unwrap();
+        tx.send(depth(6, 4391, "NASDAQ", "STK", 5, false)).unwrap();
+        tx.send(depth(7, 9999, "NASDAQ", "STK", 5, false)).unwrap();
+        tx.send(depth(8, 4391, "MEMX", "STK", 5, false)).unwrap();
+        tx.send(ControlCommand::UnsubscribeDepth { req_id: 77 }).unwrap();
+        engine.poll_once();
+        assert_eq!(errors(&shared), [
+            "1:321:Error validating request.-'bR' : cause - Please enter exchange.",
+            "2:321:Error validating request.-'bR' : cause - Market depth does not support combos.",
+            "3:321:Error validating request.-'bR' : cause - Market depth rows requested must be greater than zero.",
+            "4:322:Error processing request.-'bR' : cause - Duplicate ticker id",
+            "7:309:Max number (3) of market depth requests has been reached",
+            "8:10092:Deep market data is not supported for this combination of security type/exchange",
+            "77:310:Can't find the subscribed market depth with tickerId:77",
+        ]);
+        assert_eq!(sent(&mut side).len(), 3, "three books");
+    }
+
+    // #452: a single book: one depth entry on the farm of its route, with
+    // its own request id; the cancel repeats the entry; a farm refusal ends
+    // the request with 354, then its cancel is 310.
+    #[test]
+    fn single_book_entry_cancel_and_refusal() {
+        let (mut engine, shared, mut side, tx) = engine();
+        tx.send(depth(9, 265598, "NASDAQ", "STK", 5, false)).unwrap();
+        engine.poll_once();
+        let msgs = sent(&mut side);
+        assert_eq!(msgs.len(), 1);
+        let id = engine.farm.next_md_req_id - 1;
+        assert!(msgs[0].contains(&format!("|263=1|146=1|262={id}|6008=265598|207=NASDAQ|167=CS|264=0|9830=1|")), "{}", msgs[0]);
+        tx.send(ControlCommand::UnsubscribeDepth { req_id: 9 }).unwrap();
+        engine.poll_once();
+        let msgs = sent(&mut side);
+        assert!(msgs[0].contains(&format!("|263=2|146=1|262={id}|6008=265598|207=NASDAQ|167=CS|264=0|9830=1|")), "{}", msgs[0]);
+
+        tx.send(depth(10, 815824267, "CME", "FUT", 5, false)).unwrap();
+        engine.poll_once();
+        let farm = engine.pool.find("usfuture").expect("the future's book farm");
+        let id = engine.farm.next_md_req_id - 1;
+        engine.farm.rx_farm = farm;
+        engine.inject_farm_message(&fix::fix_build(&[(35, "3"), (262, &id.to_string()), (58, "Error")], 1));
+        engine.farm.rx_farm = pool::PRIMARY_MD;
+        tx.send(ControlCommand::UnsubscribeDepth { req_id: 10 }).unwrap();
+        engine.poll_once();
+        assert_eq!(errors(&shared), [
+            "10:354:Requested market data is not subscribed.".to_string(),
+            "10:310:Can't find the subscribed market depth with tickerId:10".to_string(),
+        ]);
+    }
+
+    // #452: SmartDepth takes the contract's SMART component exchanges: a
+    // book where a depth route exists, the top of book where only a top
+    // route exists, nothing for the others. The depth acknowledgement of a
+    // component maps its tag to the client's request.
+    #[test]
+    fn smart_depth_from_the_components() {
+        let (mut engine, _shared, mut side, tx) = engine();
+        tx.send(depth(11, 265598, "SMART", "STK", 5, true)).unwrap();
+        engine.poll_once();
+        let msgs = sent(&mut side);
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        let m = &msgs[0];
+        assert!(m.contains("|146=4|"), "{m}");
+        assert!(m.contains("|207=NASDAQ|167=CS|264=0|9830=1|"), "{m}");
+        assert!(m.contains("|207=IEX|167=CS|264=0|9830=1|"), "{m}");
+        assert!(m.contains("|207=MEMX|167=CS|264=442|6088=Socket|9830=1|") && m.contains("|207=MEMX|167=CS|264=443|"), "{m}");
+        assert!(!m.contains("ZZZ"), "{m}");
+        let first: u32 = m.split("|262=").nth(1).unwrap().split('|').next().unwrap().parse().unwrap();
+        engine.inject_farm_message(format!("8=O\x0135=Q\x01777,{first},0.01,0,0").as_bytes());
+        assert!(engine.farm.depth_tag_to_req.iter().any(|(t, r, smart, _, f)| *t == 777 && *r == 11 && *smart && *f == pool::PRIMARY_MD));
     }
 }

@@ -118,6 +118,8 @@ pub struct Context {
     /// ones whose definition came, to be handled again (ibx#404).
     pub(crate) def_parked: Vec<(i64, crate::types::ControlCommand)>,
     pub(crate) def_ready: Vec<crate::types::ControlCommand>,
+    /// Listing exchange by conId, once its definition was read (#452).
+    pub(crate) listing_exchanges: HashMap<i64, String>,
     /// Aggregate group by conId, once its definition was read (#445).
     pub(crate) agg_groups: HashMap<i64, i32>,
     /// SMART component exchanges by conId, once its definition was read
@@ -174,6 +176,7 @@ impl Context {
             scale_us_lots: false,
             round_lots: HashMap::new(),
             agg_groups: HashMap::new(),
+            listing_exchanges: HashMap::new(),
             def_parked: Vec::new(),
             def_ready: Vec::new(),
             smart_components: HashMap::new(),
