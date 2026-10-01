@@ -1476,3 +1476,95 @@ fn api_gt_suite() {
         pass_count, fail_count, skip_count, suite_start.elapsed().as_secs_f64());
     assert_eq!(fail_count, 0, "Some API GT tests failed");
 }
+
+// ── Plain snapshot (ibx#446), focused ──
+
+#[derive(Default)]
+struct SnapWrapper {
+    start: Option<Instant>,
+    events: Vec<(u128, String)>,
+}
+
+impl SnapWrapper {
+    fn at(&mut self, what: String) {
+        let ms = self.start.map(|s| s.elapsed().as_millis()).unwrap_or(0);
+        self.events.push((ms, what));
+    }
+}
+
+impl Wrapper for SnapWrapper {
+    fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) { self.at(format!("error {req_id} {code} {text}")); }
+    fn tick_price(&mut self, req_id: i64, tt: i32, p: f64, _: &TickAttrib) { self.at(format!("price {req_id} {tt} {p}")); }
+    fn tick_size(&mut self, req_id: i64, tt: i32, s: f64) { self.at(format!("size {req_id} {tt} {s}")); }
+    fn tick_string(&mut self, req_id: i64, tt: i32, v: &str) { self.at(format!("string {req_id} {tt} {v}")); }
+    fn tick_req_params(&mut self, req_id: i64, min_tick: f64, bbo: &str, perms: i64) {
+        self.at(format!("params {req_id} {min_tick} {bbo} {perms}"));
+    }
+    fn market_data_type(&mut self, req_id: i64, t: i32) { self.at(format!("mdt {req_id} {t}")); }
+    fn tick_snapshot_end(&mut self, req_id: i64) { self.at(format!("end {req_id}")); }
+}
+
+/// Snapshots of a stock, an ETF and a currency pair: each tick type at
+/// most once, the end within the time limit; a snapshot with generic
+/// ticks is refused; a cancel after the end is for an unknown request.
+/// Run with: cargo test --test rust_api_gt api_snapshot_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_snapshot_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = SnapWrapper::default();
+    let settle = Instant::now();
+    while settle.elapsed() < Duration::from_secs(3) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    w.events.clear();
+    w.start = Some(Instant::now());
+    let eurusd = Contract { con_id: 12087792, symbol: "EUR".into(), sec_type: "CASH".into(),
+        exchange: "IDEALPRO".into(), currency: "USD".into(), ..Default::default() };
+    client.req_mkt_data(701, &spy(), "", true, false).unwrap();
+    client.req_mkt_data(702, &aapl(), "", true, false).unwrap();
+    client.req_mkt_data(703, &eurusd, "", true, false).unwrap();
+    client.req_mkt_data(704, &spy(), "233", true, false).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        client.process_msgs(&mut w);
+        let ends = w.events.iter().filter(|(_, e)| e.starts_with("end ")).count();
+        if ends == 3 { break; }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.cancel_mkt_data(701).unwrap();
+    let after = Instant::now();
+    while after.elapsed() < Duration::from_secs(1) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for (ms, e) in &w.events {
+        println!("  {ms:>6} ms  {e}");
+    }
+    client.disconnect();
+
+    let refusal = "error 704 321 Error validating request.-'bQ' : cause - Snapshot market data subscription is not applicable to generic ticks";
+    assert!(w.events.iter().any(|(_, e)| e == refusal), "no generic tick refusal");
+    for req in [701, 702, 703] {
+        let end = w.events.iter().find(|(_, e)| *e == format!("end {req}")).map(|(ms, _)| *ms);
+        assert!(end.is_some_and(|ms| ms <= 12_500), "req {req}: end {end:?}");
+        let mut seen = std::collections::HashSet::new();
+        for (_, e) in &w.events {
+            let parts: Vec<&str> = e.split(' ').collect();
+            if matches!(parts[0], "price" | "size" | "string") && parts[1] == req.to_string() {
+                assert!(seen.insert((parts[0].to_string(), parts[2].to_string())), "req {req}: {e} twice");
+            }
+        }
+    }
+    assert!(w.events.iter().any(|(_, e)| e.starts_with("error 701 300 ")), "cancel after the end: no 300");
+}
