@@ -514,6 +514,14 @@ pub struct Gateway {
     pub farm_name: String,
 }
 
+/// Request ids of the routing-table requests: one process-wide counter
+/// starting at 1, as in the reference, whatever the farm (ibx#253).
+static ROUTING_REQUEST_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn next_routing_request_id() -> u32 {
+    ROUTING_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Connect to a data farm: key exchange → encrypted logon → token auth → routing → Connection.
 pub fn connect_farm(
     host: &str,
@@ -583,21 +591,23 @@ pub fn connect_farm(
 
     let sign_mac_key = channel.key_block().map(|kb| kb[64..84].to_vec()).unwrap_or_default();
 
-    // Send routing table request after logon.
-    let channel_id = if farm_id == "ushmds" { "2" } else { "1" };
+    // Send routing table request after logon. Its request id is a unique
+    // counter, as in the reference; it is not derived from the farm name
+    // (ibx#253).
+    let request_id = next_routing_request_id().to_string();
     let now = chrono_free_timestamp();
     let routing_msg = fix_build(&[
         (fix::TAG_MSG_TYPE, "U"),
         (fix::TAG_SENDING_TIME, &now),
         (6040, "112"),
-        (6556, channel_id),
+        (6556, &request_id),
     ], 1);
     let wrapped = fixcomp::fixcomp_build(&routing_msg);
 
     let (signed, new_sign_iv) = fix::fix_sign(&wrapped, &sign_mac_key, &sign_iv);
     stream.write_all(&signed)?;
     let final_sign_iv = new_sign_iv;
-    log::info!("{} sent routing request (6556={})", farm_id, channel_id);
+    log::info!("{} sent routing request (6556={})", farm_id, request_id);
 
     // Read routing response. Frame-based termination: poll with a short
     // timeout, break as soon as we have at least one complete FIXCOMP frame
@@ -2121,6 +2131,17 @@ mod tests {
         let t1 = BigUint::from(111u64);
         let t2 = BigUint::from(222u64);
         assert_ne!(token_short_hash(&t1), token_short_hash(&t2));
+    }
+
+    // ibx#253: each routing request gets a new id from one counter, not an
+    // id chosen by the farm name.
+    #[test]
+    fn routing_request_ids_are_unique_and_increasing() {
+        let ids: Vec<u32> = (0..5).map(|_| next_routing_request_id()).collect();
+        assert!(ids[0] >= 1);
+        for w in ids.windows(2) {
+            assert!(w[1] > w[0], "{ids:?}");
+        }
     }
 
     #[test]
