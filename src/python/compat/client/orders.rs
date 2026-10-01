@@ -224,10 +224,10 @@ impl EClient {
             ExecutionFilter::default()
         };
 
-        let indices = self.core.filter_executions(&filter);
-        let execs = self.core.executions.lock().unwrap();
-        for i in indices {
-            let se = &execs[i];
+        // No lock is held during the callbacks (ibx#265). As the reference:
+        // every execution, then the commission reports, then the end.
+        let execs = self.core.matching_executions(&filter);
+        for se in &execs {
             let c_py = Py::new(py, Contract {
                 con_id: se.contract.con_id,
                 symbol: se.contract.symbol.clone(),
@@ -265,20 +265,19 @@ impl EClient {
                 (req_id, &c_py, &exec_py),
                 None,
             )?;
-
-            // The report exists once the server's commission frame came (ibx#471).
-            if let Some(cr) = &se.commission_and_fees {
-                let report = CommissionAndFeesReport {
-                    exec_id: cr.exec_id.clone(),
-                    commission_and_fees: cr.commission_and_fees,
-                    currency: cr.currency.clone(),
-                    realized_pnl: cr.realized_pnl,
-                    yield_amount: cr.yield_amount,
-                    yield_redemption_date: cr.yield_redemption_date.clone(),
-                };
-                let report_py = Py::new(py, report)?.into_any();
-                self.wrapper.call_method1(py, "commission_and_fees_report", (&report_py,))?;
-            }
+        }
+        // The report exists once the server's commission frame came (ibx#471).
+        for cr in execs.iter().filter_map(|se| se.commission_and_fees.as_ref()) {
+            let report = CommissionAndFeesReport {
+                exec_id: cr.exec_id.clone(),
+                commission_and_fees: cr.commission_and_fees,
+                currency: cr.currency.clone(),
+                realized_pnl: cr.realized_pnl,
+                yield_amount: cr.yield_amount,
+                yield_redemption_date: cr.yield_redemption_date.clone(),
+            };
+            let report_py = Py::new(py, report)?.into_any();
+            self.wrapper.call_method1(py, "commission_and_fees_report", (&report_py,))?;
         }
         self.wrapper.call_method1(py, "exec_details_end", (req_id,))?;
         Ok(())

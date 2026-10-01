@@ -179,14 +179,14 @@ impl EClient {
     /// Replays stored executions (optionally filtered), firing `exec_details` +
     /// `commission_and_fees_report` for each, then `exec_details_end`.
     pub fn req_executions(&self, req_id: i64, filter: &ExecutionFilter, wrapper: &mut impl Wrapper) {
-        let indices = self.core.filter_executions(filter);
-        let execs = self.core.executions.lock().unwrap();
-        for i in indices {
-            let se = &execs[i];
+        // No lock is held during the callbacks (ibx#265). As the reference:
+        // every execution, then the commission reports, then the end.
+        let execs = self.core.matching_executions(filter);
+        for se in &execs {
             wrapper.exec_details(req_id, &se.contract, &se.execution);
-            if let Some(report) = &se.commission_and_fees {
-                wrapper.commission_and_fees_report(report);
-            }
+        }
+        for report in execs.iter().filter_map(|se| se.commission_and_fees.as_ref()) {
+            wrapper.commission_and_fees_report(report);
         }
         wrapper.exec_details_end(req_id);
     }

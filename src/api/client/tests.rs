@@ -3606,6 +3606,45 @@ fn req_executions_without_a_commission_report_sends_the_execution_only() {
     assert_eq!(w.events, ["exec_details:1:BOT:100", "exec_details_end:1"]);
 }
 
+// ibx#265: as the reference, every execution first, then the commission
+// reports, then the end; no lock is held while the callbacks run, so a
+// callback can use the client.
+#[test]
+fn req_executions_sends_executions_then_reports_with_no_lock_held() {
+    let (client, _rx, shared) = test_client();
+    for (order_id, exec_id) in [(7, "0000e0d5.6ab5f36f.01.01"), (8, "0000e0d5.6ab5f370.01.01")] {
+        shared.orders.push_fill_with_exec(aapl_fill(order_id), crate::bridge::FillExec { exec_id: exec_id.into(), ..Default::default() });
+        shared.orders.push_commission_report(crate::api::types::CommissionAndFeesReport {
+            exec_id: exec_id.into(), ..captured_report()
+        });
+    }
+    client.process_msgs(&mut RecordingWrapper::default());
+
+    struct Reentrant<'a> { core: &'a ClientCore, events: Vec<String> }
+    impl Wrapper for Reentrant<'_> {
+        fn exec_details(&mut self, _req_id: i64, _c: &Contract, e: &crate::api::types::Execution) {
+            let free = self.core.executions.try_lock().is_ok();
+            self.events.push(format!("exec:{}:{}", e.exec_id, free));
+        }
+        fn commission_and_fees_report(&mut self, r: &crate::api::types::CommissionAndFeesReport) {
+            let free = self.core.executions.try_lock().is_ok();
+            self.events.push(format!("commission:{}:{}", r.exec_id, free));
+        }
+        fn exec_details_end(&mut self, req_id: i64) {
+            self.events.push(format!("end:{}", req_id));
+        }
+    }
+    let mut w = Reentrant { core: &client.core, events: Vec::new() };
+    client.req_executions(1, &crate::api::types::ExecutionFilter::default(), &mut w);
+    assert_eq!(w.events, [
+        "exec:0000e0d5.6ab5f36f.01.01:true",
+        "exec:0000e0d5.6ab5f370.01.01:true",
+        "commission:0000e0d5.6ab5f36f.01.01:true",
+        "commission:0000e0d5.6ab5f370.01.01:true",
+        "end:1",
+    ]);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  exec_details fields and the req_executions filter (ibx#474)
 // ═══════════════════════════════════════════════════════════════════

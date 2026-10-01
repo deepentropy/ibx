@@ -452,6 +452,7 @@ pub fn format_exec_time(unix_secs: i64) -> String {
 /// A stored execution and its commission report for `req_executions` replay.
 /// Shared between Rust and Python adapters via `ClientCore`. The report
 /// comes from its own server frame after the fill; `None` until then (ibx#471).
+#[derive(Clone)]
 pub struct StoredExecution {
     pub req_id: i64,
     pub contract: ApiContract,
@@ -1495,13 +1496,15 @@ impl ClientCore {
         }
     }
 
-    /// Return executions matching the given filter.
+    /// Copies of the executions matching the given filter, taken under one
+    /// short lock: the caller sends its callbacks after the lock is released
+    /// (ibx#265), as the reference builds its list before writing.
     ///
     /// As the reference (ibx#474): symbol, secType and exchange match
     /// exactly; the side is read as buy or sell, so `BUY` matches `BOT`;
     /// clientId 0 is every client; the time keeps executions at or after it.
     /// A time that does not parse is logged and not applied.
-    pub fn filter_executions(&self, filter: &ExecutionFilter) -> Vec<usize> {
+    pub fn matching_executions(&self, filter: &ExecutionFilter) -> Vec<StoredExecution> {
         let side = if filter.side.is_empty() { None } else { Some(side_is_buy(&filter.side)) };
         let since = if filter.time.trim().is_empty() {
             None
@@ -1515,7 +1518,7 @@ impl ClientCore {
             }
         };
         let execs = self.executions.lock().unwrap();
-        execs.iter().enumerate().filter_map(|(i, se)| {
+        execs.iter().filter_map(|se| {
             if !filter.symbol.is_empty() && se.contract.symbol != filter.symbol {
                 return None;
             }
@@ -1541,7 +1544,7 @@ impl ClientCore {
             if filter.client_id != 0 && se.execution.client_id != filter.client_id {
                 return None;
             }
-            Some(i)
+            Some(se.clone())
         }).collect()
     }
 
