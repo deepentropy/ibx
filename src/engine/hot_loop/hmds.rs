@@ -59,7 +59,11 @@ pub(crate) struct HmdsState {
     pub(crate) pending_histogram: Vec<PendingHistogram>,
     pub(crate) pending_schedule: Vec<(String, u32)>,
     pub(crate) pending_ticks: Vec<(String, u32, String)>,
-    pub(crate) rtbar_subs: Vec<(String, u32, Option<u32>, f64)>,
+    /// Real-time bar subscriptions, and the keepUpToDate queries whose
+    /// ticker id came: 5-second bars are routed by ticker id.
+    pub(crate) rtbar_subs: Vec<RtBarSub>,
+    /// Most real-time bar requests at once (ibx#454), from the logon.
+    pub(crate) max_real_time_requests: u32,
     /// req_ids that should keep streaming after initial batch (keepUpToDate=True).
     pub(crate) keep_up_to_date_reqs: std::collections::HashSet<u32>,
     /// Bar requests answered from more than one server query (BID_ASK is a
@@ -72,6 +76,26 @@ pub(crate) struct HmdsState {
     /// `CcpState::start_scanner_enrichment`.
     pub(crate) cold_scanner_results: Vec<(u32, crate::control::scanner::ScannerResult)>,
 }
+
+/// A stream of 5-second bars (ibx#454).
+#[derive(Debug, Clone)]
+pub(crate) struct RtBarSub {
+    /// Window id of the query.
+    pub(crate) query_id: String,
+    pub(crate) req_id: u32,
+    /// Ticker id given by the server's acknowledgement.
+    pub(crate) ticker_id: Option<u32>,
+    pub(crate) min_tick: f64,
+    /// A keepUpToDate bar query, not a real-time bar request.
+    pub(crate) keep_up_to_date: bool,
+}
+
+/// Most real-time bar requests when the logon gives no limit, as the
+/// reference (ibx#454).
+pub(crate) const DEFAULT_MAX_REAL_TIME_REQUESTS: u32 = 40;
+
+/// Error text of a rejected real-time bar query (420).
+const INVALID_REAL_TIME_QUERY: &str = "Invalid Real-time Query";
 
 /// A histogram request in flight (ibx#428, ibx#433).
 #[derive(Debug)]
@@ -142,6 +166,7 @@ impl HmdsState {
             pending_schedule: Vec::new(),
             pending_ticks: Vec::new(),
             rtbar_subs: Vec::new(),
+            max_real_time_requests: DEFAULT_MAX_REAL_TIME_REQUESTS,
             keep_up_to_date_reqs: std::collections::HashSet::new(),
             multi_leg: Vec::new(),
             cold_scanner_results: Vec::new(),
@@ -387,15 +412,23 @@ impl HmdsState {
                         let min_tick = crate::control::historical::extract_xml_tag(xml_tag, "minTick")
                             .and_then(|s| s.parse::<f64>().ok())
                             .unwrap_or(0.01);
-                        let ticker_id: u32 = ticker_id_str.parse().unwrap_or(0);
+                        let ticker_id: u32 = ticker_id_str.trim().parse().unwrap_or(0);
                         let mut matched = false;
-                        for sub in &mut self.rtbar_subs {
-                            if xml_tag.contains(&sub.0) {
-                                sub.2 = Some(ticker_id);
-                                sub.3 = min_tick;
-                                log::info!("HMDS rtbar ticker_id={} min_tick={} for req_id={}", ticker_id, min_tick, sub.1);
-                                matched = true;
-                                break;
+                        // The acknowledgement of a real-time bar request, by the
+                        // exact window id (ibx#454). A ticker id that is not
+                        // above 0 is error 420 and ends the request.
+                        let wid = reply_window_id(xml_tag);
+                        if let Some(pos) = self.rtbar_subs.iter().position(|s| !s.keep_up_to_date && s.query_id == wid) {
+                            matched = true;
+                            if ticker_id == 0 {
+                                let sub = self.rtbar_subs.remove(pos);
+                                log::warn!("HMDS rtbar req_id={}: invalid ticker id {:?}", sub.req_id, ticker_id_str);
+                                shared.reference.push_historical_error(sub.req_id, 420, INVALID_REAL_TIME_QUERY.to_string());
+                            } else {
+                                let sub = &mut self.rtbar_subs[pos];
+                                sub.ticker_id = Some(ticker_id);
+                                sub.min_tick = min_tick;
+                                log::info!("HMDS rtbar ticker_id={} min_tick={} for req_id={}", ticker_id, min_tick, sub.req_id);
                             }
                         }
                         if !matched {
@@ -404,7 +437,13 @@ impl HmdsState {
                             for (qid, req_id, _) in &self.pending_historical {
                                 if qid == wid && self.keep_up_to_date_reqs.contains(req_id) {
                                     // Store as rtbar subscription so 35=G bars get dispatched
-                                    self.rtbar_subs.push((qid.clone(), *req_id, Some(ticker_id), min_tick));
+                                    self.rtbar_subs.push(RtBarSub {
+                                        query_id: qid.clone(),
+                                        req_id: *req_id,
+                                        ticker_id: Some(ticker_id),
+                                        min_tick,
+                                        keep_up_to_date: true,
+                                    });
                                     matched = true;
                                     break;
                                 }
@@ -447,6 +486,11 @@ impl HmdsState {
                             } else if let Some(pos) = self.pending_schedule.iter().position(|(q, _)| q == wid) {
                                 let (_, req_id) = self.pending_schedule.remove(pos);
                                 released = Some((req_id, 162, historical_service_error(&error_msg)));
+                            } else if let Some(pos) = self.rtbar_subs.iter().position(|s| !s.keep_up_to_date && s.query_id == wid) {
+                                // A rejected real-time bar query: 420 with the server
+                                // text, and the request ends (ibx#454).
+                                let req_id = self.rtbar_subs.remove(pos).req_id;
+                                released = Some((req_id, 420, crate::control::historical::join_error_text(INVALID_REAL_TIME_QUERY, &error_msg)));
                             } else if let Some(pos) = self.pending_scanner.iter().position(|(q, _)| q == qid) {
                                 let (_, req_id) = self.pending_scanner.remove(pos);
                                 released = Some((req_id, 162, error_msg.clone()));
@@ -576,7 +620,7 @@ impl HmdsState {
                     }
                 }
             }
-            "G" => self.handle_rtbar_data(msg, shared),
+            "G" => self.handle_rtbar_data(msg, shared, hmds_conn, hb),
             other => {
                 // ibx#183 follow-up: was a silent _ => {} arm — log unhandled
                 // msg_types so we can catch frames that bypass the W cascade
@@ -642,27 +686,36 @@ impl HmdsState {
         }
     }
 
-    fn handle_rtbar_data(&mut self, msg: &[u8], shared: &SharedState) {
+    /// A 5-second bar frame holds several bars (ibx#454). A bar for a
+    /// ticker id with no subscription is answered with a cancel of that
+    /// ticker id, as the reference.
+    fn handle_rtbar_data(&mut self, msg: &[u8], shared: &SharedState, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let body = match find_body_after_tag(msg, b"35=G\x01") {
             Some(b) => b,
             None => return,
         };
         let sig_pos = body.windows(6).position(|w| w == b"\x018349=");
         let body = if let Some(pos) = sig_pos { &body[..pos] } else { body };
-        if body.len() < 11 { return; }
-        let ticker_id = u32::from_be_bytes([body[2], body[3], body[4], body[5]]);
-        let timestamp = u32::from_be_bytes([body[6], body[7], body[8], body[9]]);
-        let payload_len = body[10] as usize;
-        if body.len() < 11 + payload_len { return; }
-        let sub = self.rtbar_subs.iter().find(|(_, _, tid, _)| *tid == Some(ticker_id));
-        let (req_id, min_tick) = match sub {
-            Some((_, rid, _, mt)) => (*rid, *mt),
-            None => return,
-        };
-        let payload = &body[11..11 + payload_len];
-        if let Some(mut bar) = crate::control::historical::decode_bar_payload(payload, min_tick) {
-            bar.timestamp = timestamp;
-            shared.market.push_real_time_bar(req_id, bar);
+        let mut unknown: Vec<u32> = Vec::new();
+        for (ticker_id, timestamp, payload) in rtbar_entries(body) {
+            let sub = self.rtbar_subs.iter().find(|s| s.ticker_id == Some(ticker_id));
+            let (req_id, min_tick) = match sub {
+                Some(s) => (s.req_id, s.min_tick),
+                None => {
+                    if !unknown.contains(&ticker_id) {
+                        unknown.push(ticker_id);
+                    }
+                    continue;
+                }
+            };
+            if let Some(mut bar) = crate::control::historical::decode_bar_payload(payload, min_tick) {
+                bar.timestamp = timestamp;
+                shared.market.push_real_time_bar(req_id, bar);
+            }
+        }
+        for ticker_id in unknown {
+            log::info!("HMDS 5-second bar for unknown ticker id {}: cancelling it", ticker_id);
+            self.send_historical_cancel(&ticker_id.to_string(), hmds_conn, hb);
         }
     }
 
@@ -1356,7 +1409,26 @@ impl HmdsState {
         self.pending_ticks.push((query_id, req_id, what_to_show.to_string()));
     }
 
-    pub(crate) fn send_realtime_bar_subscribe(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, _symbol: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_realtime_bar_subscribe(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, _symbol: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+        // The reference checks, in its order (ibx#454): whatToShow (321),
+        // a request id already streaming (102), the request limit (456).
+        if crate::control::historical::realtime_bar_data(what_to_show).is_none() {
+            log::error!("rtbar req_id={}: whatToShow {:?} refused", req_id, what_to_show);
+            shared.reference.push_historical_error(req_id, 321,
+                "Error validating request.-'bS' : cause - What to show field is missing or incorrect.".to_string());
+            return;
+        }
+        if self.rtbar_subs.iter().any(|s| !s.keep_up_to_date && s.req_id == req_id) {
+            shared.reference.push_historical_error(req_id, 102, "Duplicate ticker id".to_string());
+            return;
+        }
+        if self.rtbar_subs.len() as u64 + 1 > self.max_real_time_requests as u64 {
+            log::warn!("rtbar req_id={}: {} streams of {} allowed", req_id, self.rtbar_subs.len(), self.max_real_time_requests);
+            shared.reference.push_historical_error(req_id, 456,
+                "Max number of real time requests has been reached".to_string());
+            return;
+        }
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
         let query_id = format!("rt_{}", qid);
@@ -1371,7 +1443,13 @@ impl HmdsState {
             hb.last_hmds_sent = Instant::now();
             log::info!("Sent rtbar subscribe: req_id={} con_id={} what={}", req_id, con_id, what_to_show);
         }
-        self.rtbar_subs.push((query_id, req_id, None, 0.01));
+        self.rtbar_subs.push(RtBarSub {
+            query_id,
+            req_id,
+            ticker_id: None,
+            min_tick: 0.01,
+            keep_up_to_date: false,
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1490,6 +1568,34 @@ impl HmdsState {
             shared.reference.push_historical_error(req_id, code, text);
         }
     }
+}
+
+/// The bars of a 5-second bar frame body, read as the reference reads
+/// them (ibx#454): ticker id, bar time and payload of each.
+fn rtbar_entries(body: &[u8]) -> Vec<(u32, u32, &[u8])> {
+    let mut entries = Vec::new();
+    if body.len() < 2 {
+        return entries;
+    }
+    let mut bits = u16::from_be_bytes([body[0], body[1]]) as usize;
+    let available = (body.len() - 2) * 8;
+    while bits + 65536 <= available {
+        bits += 65536;
+    }
+    let end = (2 + bits.div_ceil(8)).min(body.len());
+    let mut pos = 2;
+    while pos + 9 <= end {
+        let ticker_id = u32::from_be_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
+        let time = u32::from_be_bytes([body[pos + 4], body[pos + 5], body[pos + 6], body[pos + 7]]);
+        let len = body[pos + 8] as usize;
+        let start = pos + 9;
+        if start + len > end {
+            break;
+        }
+        entries.push((ticker_id, time, &body[start..start + len]));
+        pos = start + len;
+    }
+    entries
 }
 
 /// Window id of the `<id>` of a reply (ibx#428).
@@ -2027,6 +2133,135 @@ mod tests {
         assert_eq!(shared.reference.drain_historical_errors(), vec![(
             8, 321, "Error validating request.-'bO' : cause - Invalid time period".to_string(),
         )]);
+    }
+
+    // ── ibx#454: real-time bars ──
+
+    fn rtbar_frame(entries: &[(u32, u32, &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (tid, time, payload) in entries {
+            body.extend_from_slice(&tid.to_be_bytes());
+            body.extend_from_slice(&time.to_be_bytes());
+            body.push(payload.len() as u8);
+            body.extend_from_slice(payload);
+        }
+        let bits = (body.len() * 8) as u16;
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"35=G\x01");
+        msg.extend_from_slice(&bits.to_be_bytes());
+        msg.extend_from_slice(&body);
+        msg
+    }
+
+    fn rt_sub(query_id: &str, req_id: u32, ticker_id: Option<u32>) -> RtBarSub {
+        RtBarSub { query_id: query_id.to_string(), req_id, ticker_id, min_tick: 0.01, keep_up_to_date: false }
+    }
+
+    #[test]
+    fn rtbar_entries_reads_every_entry_of_a_frame() {
+        let p1: &[u8] = &[1, 2, 3, 4];
+        let p2: &[u8] = &[9, 9, 9, 9, 9, 9, 9, 9];
+        let msg = rtbar_frame(&[(5, 1_781_772_220, p1), (6, 1_781_772_220, p2), (5, 1_781_772_225, p1)]);
+        let body = &msg[5..];
+        let got = rtbar_entries(body);
+        assert_eq!(got.len(), 3);
+        assert_eq!((got[0].0, got[0].1, got[0].2), (5, 1_781_772_220, p1));
+        assert_eq!((got[1].0, got[1].2.len()), (6, 8));
+        assert_eq!((got[2].0, got[2].1), (5, 1_781_772_225));
+        // Bytes past the declared length are padding, not a bar.
+        let mut padded = body.to_vec();
+        padded.extend_from_slice(&[0u8; 12]);
+        let bits = (body.len() - 2) * 8;
+        padded[0..2].copy_from_slice(&(bits as u16).to_be_bytes());
+        assert_eq!(rtbar_entries(&padded).len(), 3);
+    }
+
+    #[test]
+    fn rtbar_frame_with_two_tickers_feeds_both_requests_and_skips_an_unknown_one() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.rtbar_subs.push(rt_sub("rt_1", 11, Some(5)));
+        hmds.rtbar_subs.push(rt_sub("rt_2", 12, Some(6)));
+        // A bar with one trade at 150.00, volume 100.
+        let payload = single_price_payload(15000, 100);
+        let msg = rtbar_frame(&[(5, 100, &payload), (6, 105, &payload), (7, 110, &payload)]);
+        hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+        let bars = shared.market.drain_real_time_bars();
+        let got: Vec<(u32, u32)> = bars.iter().map(|(r, b)| (*r, b.timestamp)).collect();
+        assert_eq!(got, vec![(11, 100), (12, 105)]);
+        assert!((bars[0].1.close - 150.0).abs() < 1e-9, "{:?}", bars[0].1);
+    }
+
+    /// Payload of a bar with one trade, at `low_ticks` price increments
+    /// and `volume`.
+    fn single_price_payload(low_ticks: u32, volume: u32) -> Vec<u8> {
+        let mut bits: Vec<u8> = Vec::new();
+        let mut put = |v: u32, n: usize| for i in 0..n { bits.push(((v >> i) & 1) as u8) };
+        put(0, 4);
+        put(1, 1);
+        put(1, 8);
+        put(low_ticks, 31);
+        put(1, 1);
+        put(volume, 16);
+        let mut bytes = vec![0u8; bits.len().div_ceil(32) * 4];
+        for (i, b) in bits.iter().enumerate() {
+            bytes[i / 8] |= b << (i % 8);
+        }
+        bytes.chunks(4).flat_map(|c| c.iter().rev().copied().collect::<Vec<_>>()).collect()
+    }
+
+    #[test]
+    fn rtbar_ack_matches_the_exact_window_id_and_refuses_ticker_zero() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.rtbar_subs.push(rt_sub("rt_1", 1, None));
+        hmds.rtbar_subs.push(rt_sub("rt_12", 2, None));
+        let ack = |id: &str, tid: u32| make_w_msg(&format!(
+            "<ResultSetTickerId><id>{}</id><tickerId>{}</tickerId><minTick>0.01</minTick><eoq>false</eoq></ResultSetTickerId>", id, tid));
+        hmds.process_hmds_message(&ack("rt_12", 9), &mut conn, &shared, &None, &mut hb);
+        assert_eq!(hmds.rtbar_subs[0].ticker_id, None, "rt_1 is not rt_12");
+        assert_eq!(hmds.rtbar_subs[1].ticker_id, Some(9));
+        hmds.process_hmds_message(&ack("rt_1", 0), &mut conn, &shared, &None, &mut hb);
+        assert_eq!(shared.reference.drain_historical_errors(), vec![(1, 420, "Invalid Real-time Query".to_string())]);
+        assert_eq!(hmds.rtbar_subs.len(), 1);
+    }
+
+    #[test]
+    fn rtbar_query_error_is_420_with_the_server_text() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.rtbar_subs.push(rt_sub("rt_3", 3, None));
+        hmds.process_hmds_message(&make_query_error_msg("rt_3", "No market data permissions"), &mut conn, &shared, &None, &mut hb);
+        assert_eq!(shared.reference.drain_historical_errors(),
+            vec![(3, 420, "Invalid Real-time Query:No market data permissions".to_string())]);
+        assert!(hmds.rtbar_subs.is_empty());
+    }
+
+    #[test]
+    fn rtbar_request_checks_what_to_show_duplicate_and_limit() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.max_real_time_requests = 2;
+        hmds.send_realtime_bar_subscribe(1, 265598, "STK", "SMART", "AAPL", "BID_ASK", true, &mut conn, &mut hb, &shared);
+        hmds.send_realtime_bar_subscribe(2, 265598, "STK", "SMART", "AAPL", "TRADES", true, &mut conn, &mut hb, &shared);
+        hmds.send_realtime_bar_subscribe(2, 265598, "STK", "SMART", "AAPL", "TRADES", true, &mut conn, &mut hb, &shared);
+        hmds.send_realtime_bar_subscribe(3, 272093, "STK", "SMART", "MSFT", "MIDPOINT", true, &mut conn, &mut hb, &shared);
+        hmds.send_realtime_bar_subscribe(4, 756733, "STK", "SMART", "SPY", "TRADES", true, &mut conn, &mut hb, &shared);
+        assert_eq!(shared.reference.drain_historical_errors(), vec![
+            (1, 321, "Error validating request.-'bS' : cause - What to show field is missing or incorrect.".to_string()),
+            (2, 102, "Duplicate ticker id".to_string()),
+            (4, 456, "Max number of real time requests has been reached".to_string()),
+        ]);
+        let reqs: Vec<u32> = hmds.rtbar_subs.iter().map(|s| s.req_id).collect();
+        assert_eq!(reqs, vec![2, 3]);
     }
 
     // ── ibx#232: unknown bar_size rejects at the engine too (backstop for

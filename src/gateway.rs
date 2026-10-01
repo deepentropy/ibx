@@ -507,6 +507,8 @@ pub struct Gateway {
     pub tick_by_tick_limit: usize,
     /// The logon feature list turns tick-by-tick data off (ibx#455).
     pub tick_by_tick_off: bool,
+    /// Most real-time bar requests at once, from the logon (ibx#454).
+    pub max_real_time_requests: u32,
     /// Logical-name → host URL map pushed by the gateway during logon. Empty when no
     /// URL set was pushed (callers should then fall back to a documented literal,
     /// e.g. `api.ibkr.com` for `region_dam`).
@@ -1372,6 +1374,8 @@ impl Gateway {
         // Tick-by-tick limit fields, first value seen (ibx#455).
         let mut tbt_limit_fields: [Option<String>; 4] = Default::default();
         let mut tick_by_tick_off = false;
+        // Logon values of the real-time bar limit (ibx#454).
+        let mut ticker_limit_tags: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
         let mut raw_misc_urls = String::new();
         // Per ib-agent#128: the auth-logon ACK tells us which farms this
         // account is routed to. Hardcoding `usfarm`/`ushmds` only works for
@@ -1505,6 +1509,11 @@ impl Gateway {
             for (slot, tag) in tbt_limit_fields.iter_mut().zip([8421u32, 8422, 6594, 6848]) {
                 if slot.is_none() { *slot = fields.get(&tag).cloned(); }
             }
+            for tag in [6847u32, 6846, 8421, 8422, 6083] {
+                if let Some(n) = fields.get(&tag).and_then(|v| v.trim().parse::<i64>().ok()) {
+                    ticker_limit_tags.entry(tag).or_insert(n);
+                }
+            }
             // Tag 6321: PRIV_LAB_MISC_URLS — try parsed fields first, then raw byte search.
             // Mirrors the 8035 defensive scan because the value can carry `|` separators
             // that confuse downstream parsers if a chunk is fragmented.
@@ -1538,9 +1547,10 @@ impl Gateway {
             server_session_id = session_id.clone();
         }
 
+        let max_real_time_requests = max_real_time_requests(&ticker_limit_tags);
         log::info!(
-            "Auth logon: account={} session_id={} hb={}s scale_us_lots={}",
-            account_id, server_session_id, heartbeat_interval, scale_us_lots
+            "Auth logon: account={} session_id={} hb={}s scale_us_lots={} max_real_time_requests={}",
+            account_id, server_session_id, heartbeat_interval, scale_us_lots, max_real_time_requests
         );
 
         // --- Post-logon init sequence ---
@@ -1847,6 +1857,7 @@ impl Gateway {
             scale_us_lots,
             tick_by_tick_limit: tick_by_tick_limit(&tbt_limit_fields),
             tick_by_tick_off,
+            max_real_time_requests,
             misc_urls: parse_misc_urls(&raw_misc_urls),
             ccp_sign_key,
             ccp_sign_iv,
@@ -1994,6 +2005,7 @@ impl Gateway {
         hot_loop.set_control_rx(rx);
         hot_loop.set_account_id(self.account_id.clone());
         hot_loop.set_scale_us_lots(self.scale_us_lots);
+        hot_loop.set_max_real_time_requests(self.max_real_time_requests);
         hot_loop.set_farm_name(self.farm_name.clone());
         hot_loop.set_reconnect_auth(reconnect_auth);
         hot_loop.farm_conn = Some(farm_conn);
@@ -2069,6 +2081,24 @@ fn parse_account_config(init: &str) -> Option<(Vec<String>, String)> {
         let features = field("6542=").split(',').filter(|f| !f.is_empty()).map(String::from).collect();
         (features, field("8234=").to_string())
     })
+}
+
+/// Most real-time bar requests at once, from the logon values, in the
+/// order of preference of the reference (ibx#454); 40 when the logon
+/// gives none.
+fn max_real_time_requests(tags: &std::collections::HashMap<u32, i64>) -> u32 {
+    let positive = |t: u32| tags.get(&t).copied().filter(|n| *n > 0);
+    let n = positive(6847)
+        .or_else(|| positive(6846))
+        .or_else(|| match (tags.get(&8421), tags.contains_key(&8422)) {
+            (Some(n), true) => Some(*n),
+            _ => None,
+        })
+        .or_else(|| positive(6083));
+    match n {
+        Some(n) => n.clamp(0, u32::MAX as i64) as u32,
+        None => crate::engine::hot_loop::hmds::DEFAULT_MAX_REAL_TIME_REQUESTS,
+    }
 }
 
 /// The logon feature list turns on US stock sizes in round lots
@@ -2684,6 +2714,17 @@ mod account_config_tests {
         assert_eq!(f(None, None, None, None), 3);
         assert!(super::features_have("A,NOTICKBYTICK", "NOTICKBYTICK"));
         assert!(!super::features_have("NOTICKBYTICKS", "NOTICKBYTICK"));
+    }
+
+    #[test]
+    fn max_real_time_requests_from_the_logon() {
+        let tags = |pairs: &[(u32, i64)]| pairs.iter().copied().collect::<std::collections::HashMap<u32, i64>>();
+        // The values of the paper logon.
+        assert_eq!(super::max_real_time_requests(&tags(&[(6846, 100), (6847, 100)])), 100);
+        assert_eq!(super::max_real_time_requests(&tags(&[(6846, 60), (6847, 0)])), 60);
+        assert_eq!(super::max_real_time_requests(&tags(&[(8421, 100), (8422, 5), (6083, 30)])), 100);
+        assert_eq!(super::max_real_time_requests(&tags(&[(8421, 100), (6083, 30)])), 30);
+        assert_eq!(super::max_real_time_requests(&tags(&[])), 40);
     }
 
     #[test]

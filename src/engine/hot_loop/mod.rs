@@ -190,6 +190,11 @@ impl HotLoop {
         self.context.scale_us_lots = on;
     }
 
+    /// Most real-time bar requests at once, from the logon (ibx#454).
+    pub fn set_max_real_time_requests(&mut self, max: u32) {
+        self.hmds.max_real_time_requests = max;
+    }
+
     /// Access the context (for pre-start configuration like registering instruments).
     pub fn context_mut(&mut self) -> &mut Context {
         &mut self.context
@@ -837,13 +842,13 @@ impl HotLoop {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_realtime_bar_subscribe(req_id, con_id, &sec_type, &exchange, &symbol, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_realtime_bar_subscribe(req_id, con_id, &sec_type, &exchange, &symbol, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
                 ControlCommand::CancelRealTimeBar { req_id } => {
-                    if let Some(pos) = self.hmds.rtbar_subs.iter().position(|(_, rid, _, _)| *rid == req_id) {
-                        let (query_id, _, ticker_id, _) = self.hmds.rtbar_subs.remove(pos);
-                        let cancel_id = ticker_id.map(|t| t.to_string()).unwrap_or(query_id);
+                    if let Some(pos) = self.hmds.rtbar_subs.iter().position(|s| !s.keep_up_to_date && s.req_id == req_id) {
+                        let sub = self.hmds.rtbar_subs.remove(pos);
+                        let cancel_id = sub.ticker_id.map(|t| t.to_string()).unwrap_or(sub.query_id);
                         self.hmds.send_historical_cancel(&cancel_id, &mut self.hmds_conn, &mut self.hb);
                     }
                 }

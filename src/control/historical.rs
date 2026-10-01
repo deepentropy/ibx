@@ -896,6 +896,19 @@ pub fn parse_tick_response(xml: &str, what_to_show: &str) -> Option<(String, cra
     }
 }
 
+/// Server data name of a real-time bar whatToShow, with the reference
+/// table (ibx#454): exact API names only. None is refused with 321.
+pub fn realtime_bar_data(what_to_show: &str) -> Option<&'static str> {
+    match what_to_show {
+        "ASK" => Some("Ask"),
+        "BID" => Some("Bid"),
+        "MIDPOINT" => Some("MidPoint"),
+        "TRADES" => Some("Last"),
+        "AGGTRADES" => Some("AggLast"),
+        _ => None,
+    }
+}
+
 /// Build the XML subscription for real-time 5-second bars.
 ///
 /// Unlike the other historical queries, the exchange is the API contract
@@ -910,12 +923,8 @@ pub fn build_realtime_bar_xml(
     };
     let sec_type = query_sec_type(sec_type);
     let rth = if use_rth { "true" } else { "false" };
-    let data = match what_to_show.to_uppercase().as_str() {
-        "MIDPOINT" => "Midpoint",
-        "BID" => "Bid",
-        "ASK" => "Ask",
-        _ => "Last",
-    };
+    // The engine refuses a value outside the table before building.
+    let data = realtime_bar_data(what_to_show).unwrap_or("Last");
 
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -1839,6 +1848,21 @@ mod tests {
         assert!(xml.contains("<exchange>SMART</exchange><secType>STK</secType>"), "{}", xml);
         let xml = build_realtime_bar_xml("rt_2", 815824267, "FUT", "CME", "TRADES", true);
         assert!(xml.contains("<exchange>CME</exchange><secType>FUT</secType>"), "{}", xml);
+        // ibx#454: the reference names.
+        assert!(build_realtime_bar_xml("rt_3", 1, "STK", "SMART", "MIDPOINT", true).contains("<data>MidPoint</data>"));
+        assert!(build_realtime_bar_xml("rt_4", 1, "STK", "SMART", "AGGTRADES", true).contains("<data>AggLast</data>"));
+    }
+
+    #[test]
+    fn realtime_bar_what_to_show_table() {
+        assert_eq!(realtime_bar_data("ASK"), Some("Ask"));
+        assert_eq!(realtime_bar_data("BID"), Some("Bid"));
+        assert_eq!(realtime_bar_data("MIDPOINT"), Some("MidPoint"));
+        assert_eq!(realtime_bar_data("TRADES"), Some("Last"));
+        assert_eq!(realtime_bar_data("AGGTRADES"), Some("AggLast"));
+        for bad in ["BID_ASK", "trades", "", "ADJUSTED_LAST"] {
+            assert_eq!(realtime_bar_data(bad), None, "{:?}", bad);
+        }
     }
 
     #[test]
