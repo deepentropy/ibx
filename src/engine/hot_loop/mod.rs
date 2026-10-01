@@ -683,9 +683,9 @@ impl HotLoop {
                     );
                     self.try_reclaim_instrument(instrument);
                 }
-                ControlCommand::SubscribeTbt { con_id, symbol, tbt_type, reply_tx } => {
+                ControlCommand::SubscribeTbt { con_id, symbol, tbt_type, number_of_ticks, ignore_size, reply_tx } => {
                     if let Some(id) = self.register_or_reject(con_id, symbol, "", "", &reply_tx) {
-                        self.hmds.send_tbt_subscribe(con_id, id, tbt_type, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_tbt_subscribe(con_id, id, tbt_type, number_of_ticks, ignore_size, &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::UnsubscribeTbt { instrument } => {
@@ -2553,6 +2553,38 @@ mod tests {
         assert_eq!(engine.context.market.con_id(qqq), Some(320227571));
     }
 
+    // ibx#455: the query names the type as the API does, asks for past
+    // ticks only when some are wanted, and a server refusal of it reaches
+    // the client with the server's text.
+    #[test]
+    fn tick_by_tick_query_and_server_refusal() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (c1, mut hmds_side) = socket_pair();
+        engine.hmds_conn = Some(Connection::new_raw(c1).unwrap());
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+        let tbt = |tbt_type, number_of_ticks| ControlCommand::SubscribeTbt {
+            con_id: 265598, symbol: String::new(), tbt_type, number_of_ticks, ignore_size: false, reply_tx: None,
+        };
+        tx.send(tbt(crate::types::TbtType::Last, 10)).unwrap();
+        tx.send(tbt(crate::types::TbtType::MidPoint, 0)).unwrap();
+        engine.poll_once();
+        let sent = plain_messages_sent(&mut hmds_side);
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent[0].contains("<data>Last</data><refresh>ticks</refresh><timeLength>10 t</timeLength><source>API</source>"), "{}", sent[0]);
+        assert!(sent[1].contains("<data>MidPoint</data><refresh>ticks</refresh><source>API</source>"), "{}", sent[1]);
+        let qid = sent[0].split("<id>").nth(1).and_then(|s| s.split("</id>").next()).unwrap().to_string();
+
+        let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<QueryError>\n\t<id>{qid}</id>\n\t<error>No historical market data for AAPL@BEST Last 10</error>\n</QueryError>\n");
+        let msg = fix::fix_build(&[(35, "W"), (6118, &xml)], 1);
+        engine.hmds.process_hmds_message(&msg, &mut engine.hmds_conn, &shared, &None, &mut engine.hb);
+        let id = engine.context.market.instrument_by_con_id(265598).unwrap();
+        assert_eq!(shared.market.drain_tbt_errors(),
+            [(id, crate::types::TbtType::Last, "No historical market data for AAPL@BEST Last 10".to_string())]);
+        assert_eq!(engine.hmds.tbt_subscriptions.len(), 1, "the refused query is gone, the other stays");
+    }
+
     // ibx#291: dropping the tick-by-tick or news consumer of a contract
     // keeps the slot while its market data runs, also while the farm is
     // down; the market data cancel then frees it.
@@ -2563,7 +2595,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(8);
         engine.set_control_rx(rx);
         tx.send(subscribe_cmd(265598, "STK")).unwrap();
-        tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), tbt_type: crate::types::TbtType::BidAsk, reply_tx: None }).unwrap();
+        tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), tbt_type: crate::types::TbtType::BidAsk, number_of_ticks: 0, ignore_size: false, reply_tx: None }).unwrap();
         tx.send(ControlCommand::SubscribeNews { con_id: 265598, symbol: String::new(), providers: String::new(), reply_tx: None }).unwrap();
         engine.poll_once();
         let id = engine.context.market.instrument_by_con_id(265598).unwrap();
@@ -2575,7 +2607,7 @@ mod tests {
 
         // Farm down: the subscription waits for the reconnect, the slot stays.
         engine.farm.handle_disconnect(&mut engine.context, &None);
-        tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), tbt_type: crate::types::TbtType::BidAsk, reply_tx: None }).unwrap();
+        tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), tbt_type: crate::types::TbtType::BidAsk, number_of_ticks: 0, ignore_size: false, reply_tx: None }).unwrap();
         tx.send(ControlCommand::UnsubscribeTbt { instrument: id }).unwrap();
         engine.poll_once();
         assert_eq!(engine.context.market.con_id(id), Some(265598));

@@ -106,13 +106,17 @@ impl EClient {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
 
-        let tbt_type = match tick_type {
-            "Last" | "AllLast" => TbtType::Last,
-            "BidAsk" => TbtType::BidAsk,
-            _ => return Err(PyRuntimeError::new_err(format!("Unknown tick type: '{}'", tick_type))),
-        };
-
+        // The reference's checks: 321 for a bad type or a combo, 10189 when
+        // the logon turns it off, 10190 past the contract limit (ibx#455).
         let shared = self.shared_state()?;
+        let local_symbol = if contract.local_symbol.is_empty() { &contract.symbol } else { &contract.local_symbol };
+        let tbt_type = match self.core.tbt_refusal(&shared, contract.con_id, &contract.sec_type, tick_type, local_symbol) {
+            Ok(t) => t,
+            Err((code, text)) => {
+                shared.orders.push_order_error(req_id as u64, code, text);
+                return Ok(());
+            }
+        };
         send_cmd(py, &tx, ControlCommand::RegisterInstrument {
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
@@ -124,21 +128,15 @@ impl EClient {
         // (ibx#271).
         py.detach(|| self.core.register_tbt(
             &shared, &tx, req_id,
-            contract.con_id, &contract.symbol, tbt_type,
+            contract.con_id, &contract.symbol, tbt_type, number_of_ticks, ignore_size,
         )).map_err(|e| PyRuntimeError::new_err(e))?;
-
-        let _ = (number_of_ticks, ignore_size);
         Ok(())
     }
 
     /// Cancel tick-by-tick data.
     fn cancel_tick_by_tick_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        // Lock released before the send (ibx#271).
-        let instrument = self.core.req_to_instrument.lock().unwrap().remove(&req_id);
-        if let Some(instrument) = instrument {
-            self.core.instrument_to_req.lock().unwrap().remove(&instrument);
-            self.core.forget_instrument(instrument);
+        if let Some(instrument) = self.core.unregister_tbt(req_id) {
             let tx = self.tx()?;
             send_cmd(py, &tx, ControlCommand::UnsubscribeTbt { instrument })?;
         }

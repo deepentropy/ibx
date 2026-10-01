@@ -263,12 +263,25 @@ impl EClient {
             let _ = self.cancel_mkt_data(req_id);
         }
 
-        // TBT trades → tick_by_tick_all_last
+        // Tick-by-tick requests the server refused: 10189 with its text,
+        // and the request ends (ibx#455).
+        for (instrument, tbt_type, text) in self.shared.market.drain_tbt_errors() {
+            if let Some(req_id) = self.core.tbt_req_of_type(instrument, tbt_type) {
+                wrapper.error(req_id, 10189, &format!("Failed to request tick-by-tick data.{}", text), "");
+                if let Some(instrument) = self.core.unregister_tbt(req_id) {
+                    let _ = self.control_tx.send(ControlCommand::UnsubscribeTbt { instrument });
+                }
+            }
+        }
+
+        // TBT trades → tick_by_tick_all_last, tickType 1 for Last and 2 for
+        // AllLast (ibx#455)
         for trade in self.shared.market.drain_tbt_trades() {
-            let req_id = self.core.req_id_for_instrument(trade.instrument);
+            let (req_id, tick_type) = self.core.tbt_req_for(trade.instrument, true)
+                .map_or((-1, 1), |(r, t)| (r, t.api_tick_type()));
             let attrib_last = TickAttribLast::default();
             wrapper.tick_by_tick_all_last(
-                req_id, 1, trade.timestamp as i64,
+                req_id, tick_type, trade.timestamp as i64,
                 trade.price as f64 / PRICE_SCALE_F, trade.size as f64,
                 &attrib_last, &trade.exchange, &trade.conditions,
             );
@@ -276,7 +289,7 @@ impl EClient {
 
         // TBT quotes → tick_by_tick_bid_ask
         for quote in self.shared.market.drain_tbt_quotes() {
-            let req_id = self.core.req_id_for_instrument(quote.instrument);
+            let req_id = self.core.tbt_req_for(quote.instrument, false).map_or(-1, |(r, _)| r);
             let attrib_ba = TickAttribBidAsk::default();
             wrapper.tick_by_tick_bid_ask(
                 req_id, quote.timestamp as i64,

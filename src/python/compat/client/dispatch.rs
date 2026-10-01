@@ -419,24 +419,36 @@ impl EClient {
             self.cancel_mkt_data(py, req_id)?;
         }
 
-        // Drain TBT trades -> tickByTickAllLast
+        // Tick-by-tick requests the server refused: 10189 with its text,
+        // and the request ends (ibx#455).
+        for (instrument, tbt_type, text) in shared.market.drain_tbt_errors() {
+            if let Some(req_id) = self.core.tbt_req_of_type(instrument, tbt_type) {
+                let msg = format!("Failed to request tick-by-tick data.{}", text);
+                call_wrapper!(self.wrapper, py, "error", (req_id, 10189i64, msg.as_str(), ""));
+                if let (Some(instrument), Ok(tx)) = (self.core.unregister_tbt(req_id), self.tx()) {
+                    let _ = send_cmd(py, &tx, ControlCommand::UnsubscribeTbt { instrument });
+                }
+            }
+        }
+
+        // Drain TBT trades -> tickByTickAllLast, tickType 1 for Last and 2
+        // for AllLast (ibx#455)
         let tbt_trades = shared.market.drain_tbt_trades();
         for trade in tbt_trades {
-            let req_id = self.core.instrument_to_req.lock().unwrap()
-                .get(&trade.instrument).copied().unwrap_or(-1);
+            let (req_id, tick_type) = self.core.tbt_req_for(trade.instrument, true)
+                .map_or((-1, 1), |(r, t)| (r, t.api_tick_type()));
             let price = trade.price as f64 / PRICE_SCALE_F;
             let size = trade.size as f64;
             let attrib = super::super::tick_types::TickAttribLast::default();
             let attrib_obj = Py::new(py, attrib)?.into_any();
-            call_wrapper!(self.wrapper, py, "tick_by_tick_all_last", (req_id, 1i32, trade.timestamp as i64, price, size,
+            call_wrapper!(self.wrapper, py, "tick_by_tick_all_last", (req_id, tick_type, trade.timestamp as i64, price, size,
                  &attrib_obj, trade.exchange.as_str(), trade.conditions.as_str()));
         }
 
         // Drain TBT quotes -> tickByTickBidAsk
         let tbt_quotes = shared.market.drain_tbt_quotes();
         for quote in tbt_quotes {
-            let req_id = self.core.instrument_to_req.lock().unwrap()
-                .get(&quote.instrument).copied().unwrap_or(-1);
+            let req_id = self.core.tbt_req_for(quote.instrument, false).map_or(-1, |(r, _)| r);
             let attrib = super::super::tick_types::TickAttribBidAsk::default();
             let attrib_obj = Py::new(py, attrib)?.into_any();
             call_wrapper!(self.wrapper, py, "tick_by_tick_bid_ask", (req_id, quote.timestamp as i64,

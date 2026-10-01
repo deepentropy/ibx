@@ -134,6 +134,8 @@ impl BenchSession {
                 con_id,
                 symbol: symbol.to_string(),
                 tbt_type,
+                number_of_ticks: 0,
+                ignore_size: false,
                 reply_tx: None,
             })
             .unwrap();

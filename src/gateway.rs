@@ -502,6 +502,11 @@ pub struct Gateway {
     /// The logon feature list asks for US stock sizes in round lots
     /// (ibx#287).
     pub scale_us_lots: bool,
+    /// Most contracts with tick-by-tick data at once, from the logon's
+    /// limits (ibx#455).
+    pub tick_by_tick_limit: usize,
+    /// The logon feature list turns tick-by-tick data off (ibx#455).
+    pub tick_by_tick_off: bool,
     /// Logical-name → host URL map pushed by the gateway during logon. Empty when no
     /// URL set was pushed (callers should then fall back to a documented literal,
     /// e.g. `api.ibkr.com` for `region_dam`).
@@ -1364,6 +1369,9 @@ impl Gateway {
         let mut white_branding_id = String::new();
         let mut fa_session = false;
         let mut scale_us_lots = false;
+        // Tick-by-tick limit fields, first value seen (ibx#455).
+        let mut tbt_limit_fields: [Option<String>; 4] = Default::default();
+        let mut tick_by_tick_off = false;
         let mut raw_misc_urls = String::new();
         // Per ib-agent#128: the auth-logon ACK tells us which farms this
         // account is routed to. Hardcoding `usfarm`/`ushmds` only works for
@@ -1492,6 +1500,10 @@ impl Gateway {
             }
             if let Some(v) = fields.get(&6542) {
                 scale_us_lots |= features_scale_us_lots(v);
+                tick_by_tick_off |= features_have(v, "NOTICKBYTICK");
+            }
+            for (slot, tag) in tbt_limit_fields.iter_mut().zip([8421u32, 8422, 6594, 6848]) {
+                if slot.is_none() { *slot = fields.get(&tag).cloned(); }
             }
             // Tag 6321: PRIV_LAB_MISC_URLS — try parsed fields first, then raw byte search.
             // Mirrors the 8035 defensive scan because the value can carry `|` separators
@@ -1833,6 +1845,8 @@ impl Gateway {
             fa_session,
             account_config,
             scale_us_lots,
+            tick_by_tick_limit: tick_by_tick_limit(&tbt_limit_fields),
+            tick_by_tick_off,
             misc_urls: parse_misc_urls(&raw_misc_urls),
             ccp_sign_key,
             ccp_sign_iv,
@@ -1920,6 +1934,7 @@ impl Gateway {
         // White branding ID (empty for standard accounts).
         shared.reference.set_white_branding_id(self.white_branding_id.clone());
         shared.reference.set_fa_session(self.fa_session);
+        shared.reference.set_tick_by_tick_limits(self.tick_by_tick_limit, self.tick_by_tick_off);
         if let Some((features, mifid)) = &self.account_config {
             shared.reference.set_account_config(features.clone(), mifid.clone());
         }
@@ -2059,7 +2074,26 @@ fn parse_account_config(init: &str) -> Option<(Vec<String>, String)> {
 /// The logon feature list turns on US stock sizes in round lots
 /// (ibx#287): one of its comma separated tokens is SCALEUSLOT.
 fn features_scale_us_lots(features: &str) -> bool {
-    features.split(',').any(|f| f == "SCALEUSLOT")
+    features_have(features, "SCALEUSLOT")
+}
+
+/// One of the comma separated tokens of a feature list is `feature`.
+fn features_have(features: &str, feature: &str) -> bool {
+    features.split(',').any(|f| f == feature)
+}
+
+/// Most contracts with tick-by-tick data at once (ibx#455), as the
+/// reference reads its logon limit fields, given in the order the loop
+/// collects them: the second field when the first two are both present,
+/// else the third; the fourth when that one is missing or negative; at
+/// least 3, and 3 when none is given.
+fn tick_by_tick_limit(fields: &[Option<String>; 4]) -> usize {
+    let int = |v: &Option<String>| v.as_deref().and_then(|s| s.trim().parse::<i64>().ok());
+    let mut value = if fields[0].is_some() && fields[1].is_some() { int(&fields[1]) } else { int(&fields[2]) };
+    if value.is_none_or(|v| v < 0) {
+        value = int(&fields[3]);
+    }
+    value.map_or(3, |v| v.max(3) as usize)
 }
 
 /// The whiteBrandingId in one field of the logon data: tag 6593, as the
@@ -2637,6 +2671,21 @@ mod account_config_tests {
     use super::parse_account_config;
 
     // ibx#287: the logon feature list turns on US stock sizes in lots.
+    #[test]
+    fn tick_by_tick_limit_follows_the_reference_rule() {
+        let f = |a: Option<&str>, b: Option<&str>, c: Option<&str>, d: Option<&str>| {
+            super::tick_by_tick_limit(&[a.map(String::from), b.map(String::from), c.map(String::from), d.map(String::from)])
+        };
+        assert_eq!(f(Some("100"), Some("5"), None, Some("3")), 5, "captured paper logon");
+        assert_eq!(f(None, Some("5"), Some("7"), Some("3")), 7);
+        assert_eq!(f(None, None, None, Some("9")), 9);
+        assert_eq!(f(Some("100"), Some("-1"), None, Some("4")), 4);
+        assert_eq!(f(Some("100"), Some("0"), None, Some("9")), 3, "0 is kept, then at least 3");
+        assert_eq!(f(None, None, None, None), 3);
+        assert!(super::features_have("A,NOTICKBYTICK", "NOTICKBYTICK"));
+        assert!(!super::features_have("NOTICKBYTICKS", "NOTICKBYTICK"));
+    }
+
     #[test]
     fn scale_us_lots_is_a_feature_token() {
         assert!(super::features_scale_us_lots("SCALEFRAC,SCALEMOD,SCALEUSLOT,SCALEWHATIF"));

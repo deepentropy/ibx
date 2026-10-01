@@ -388,6 +388,14 @@ impl HmdsState {
                             } else if let Some(pos) = self.pending_scanner.iter().position(|(q, _)| q == qid) {
                                 let (_, req_id) = self.pending_scanner.remove(pos);
                                 released_req_id = Some(req_id);
+                            } else if let Some(pos) = self.tbt_subscriptions.iter().position(|(_, q, _)| q == qid) {
+                                // A refused tick-by-tick request ends with
+                                // 10189 and the server's text (ibx#455).
+                                let (instrument, _, tbt_type) = self.tbt_subscriptions.remove(pos);
+                                self.tbt_price_state[instrument as usize] = (0, 0, 0);
+                                log::warn!("HMDS QueryError for tick-by-tick {} query_id={}: {}", tbt_type.as_str(), qid, error_msg);
+                                shared.market.push_tbt_error(instrument, tbt_type, error_msg);
+                                return;
                             }
                         }
                         match released_req_id {
@@ -622,15 +630,25 @@ impl HmdsState {
         con_id: i64,
         instrument: InstrumentId,
         tbt_type: TbtType,
+        number_of_ticks: i32,
+        ignore_size: bool,
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
         let req_id = self.next_tbt_req_id;
         self.next_tbt_req_id += 1;
-        let tbt_type_str = match tbt_type {
-            TbtType::Last => "AllLast",
-            TbtType::BidAsk => "BidAsk",
+        // Each type under its own API name; the past ticks only when asked
+        // for; elements in the reference's order (ibx#455). The size
+        // filter's form is not known, so it is not sent.
+        let tbt_type_str = tbt_type.as_str();
+        let time_length = if number_of_ticks > 0 {
+            format!("<timeLength>{number_of_ticks} t</timeLength>")
+        } else {
+            String::new()
         };
+        if ignore_size {
+            log::warn!("Tick-by-tick {} con_id={}: ignoreSize is not sent", tbt_type_str, con_id);
+        }
         let xml = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
              <ListOfQueries>\
@@ -641,8 +659,9 @@ impl HmdsState {
              <secType>CS</secType>\
              <expired>no</expired>\
              <type>TickData</type>\
-             <refresh>ticks</refresh>\
              <data>{tbt_type_str}</data>\
+             <refresh>ticks</refresh>\
+             {time_length}\
              <source>API</source>\
              </Query>\
              </ListOfQueries>"

@@ -308,23 +308,93 @@ fn req_tick_by_tick_data_sends_subscribe_tbt() {
     }
 }
 
+// ibx#455: each of the four types is asked under its own name, with the
+// tick count and the size flag; another name, a combo, a session with
+// tick-by-tick off, or one contract too many is refused before anything
+// is sent, with the reference's codes and texts.
 #[test]
-fn req_tick_by_tick_data_defaults_to_last() {
-    let (client, rx, _shared) = test_client();
-    let _ = client.req_tick_by_tick_data(10, &spy(), "AllLast", 0, false);
-    let cmd = rx.try_recv().unwrap();
-    match cmd {
-        ControlCommand::SubscribeTbt { tbt_type, .. } => {
-            assert!(matches!(tbt_type, TbtType::Last));
+fn req_tick_by_tick_data_types_and_local_refusals() {
+    let (client, rx, shared) = test_client();
+    for (req, name) in [(10, "Last"), (11, "AllLast"), (12, "BidAsk"), (13, "MidPoint")] {
+        let _ = client.req_tick_by_tick_data(req, &spy(), name, 5, true);
+        match rx.try_recv().unwrap() {
+            ControlCommand::SubscribeTbt { tbt_type, number_of_ticks, ignore_size, .. } => {
+                assert_eq!((tbt_type.as_str(), number_of_ticks, ignore_size), (name, 5, true));
+            }
+            other => panic!("expected SubscribeTbt, got {other:?}"),
         }
-        _ => panic!("expected SubscribeTbt"),
     }
+    let _ = client.req_tick_by_tick_data(20, &spy(), "last", 0, false);
+    let bag = Contract { sec_type: "BAG".into(), ..spy() };
+    let _ = client.req_tick_by_tick_data(21, &bag, "Last", 0, false);
+    shared.reference.set_tick_by_tick_limits(3, true);
+    let _ = client.req_tick_by_tick_data(22, &spy(), "AllLast", 0, false);
+    assert!(rx.try_recv().is_err(), "nothing sent for a refused request");
+
+    // Limit 3: three contracts live (types share a contract's slot), a
+    // fourth contract is refused, the first one again is not.
+    shared.reference.set_tick_by_tick_limits(3, false);
+    {
+        let mut tbt = client.core.tbt_reqs.lock().unwrap();
+        tbt.clear();
+        tbt.insert(30, (0, 756733, TbtType::Last));
+        tbt.insert(31, (0, 756733, TbtType::BidAsk));
+        tbt.insert(32, (1, 265598, TbtType::Last));
+        tbt.insert(33, (2, 272093, TbtType::Last));
+    }
+    let _ = client.req_tick_by_tick_data(23, &Contract { con_id: 4391, ..spy() }, "Last", 0, false);
+    assert!(rx.try_recv().is_err());
+    let _ = client.req_tick_by_tick_data(24, &spy(), "MidPoint", 0, false);
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::SubscribeTbt { tbt_type: TbtType::MidPoint, .. })));
+
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    for e in [
+        "error:20:321:Error validating request.-'bT' : cause - Tick-by-tick data type is incorrect/not set",
+        "error:21:321:Error validating request.-'bT' : cause - 'BAG' security type is not supported in ReqTickByTick(97) request",
+        "error:22:10189:Failed to request tick-by-tick data.AllLast tick-by-tick requests are not supported for SPY",
+        "error:23:10190:Max number of tick-by-tick requests has been reached",
+    ] {
+        assert!(w.events.contains(&e.to_string()), "{e}: {:?}", w.events);
+    }
+}
+
+// ibx#455: trades report tickType 1 for a Last request and 2 for AllLast;
+// tick-by-tick and market data on one contract keep their own request
+// ids; a server refusal gives 10189 with its text and ends the request.
+#[test]
+fn tick_by_tick_reports_by_request_type() {
+    let (client, rx, shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    client.core.tbt_reqs.lock().unwrap().insert(7, (0, 756733, TbtType::Last));
+    client.core.tbt_reqs.lock().unwrap().insert(8, (2, 265598, TbtType::AllLast));
+    client.core.tbt_reqs.lock().unwrap().insert(9, (2, 265598, TbtType::BidAsk));
+    let trade = |instrument| TbtTrade {
+        instrument, price: 100 * PRICE_SCALE, size: 3, timestamp: 1, exchange: "ARCA".into(), conditions: String::new(),
+    };
+    shared.market.push_tbt_trade(trade(0));
+    shared.market.push_tbt_trade(trade(2));
+    shared.market.push_tbt_error(2, TbtType::BidAsk, "No historical market data for X".into());
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.contains(&"tbt_last:7:1:1:100:3:ARCA".to_string()), "{:?}", w.events);
+    assert!(w.events.contains(&"tbt_last:8:2:1:100:3:ARCA".to_string()), "{:?}", w.events);
+    assert!(w.events.contains(&"error:9:10189:Failed to request tick-by-tick data.No historical market data for X".to_string()), "{:?}", w.events);
+    assert!(!client.core.tbt_reqs.lock().unwrap().contains_key(&9));
+    assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::UnsubscribeTbt { instrument: 2 })));
+
+    // Cancelling the tick-by-tick request leaves the market data mapping.
+    client.cancel_tick_by_tick_data(7).unwrap();
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::UnsubscribeTbt { instrument: 0 })));
+    assert_eq!(client.core.req_id_for_instrument(0), 1);
+    assert_eq!(client.core.con_id_to_instrument.lock().unwrap().get(&756733), Some(&0));
 }
 
 #[test]
 fn cancel_tick_by_tick_data_sends_unsubscribe_tbt() {
     let (client, rx, _shared) = test_client();
-    client.core.req_to_instrument.lock().unwrap().insert(10, 3);
+    client.core.tbt_reqs.lock().unwrap().insert(10, (3, 1, TbtType::Last));
     client.cancel_tick_by_tick_data(10).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::UnsubscribeTbt { instrument: 3 }));
@@ -2578,7 +2648,7 @@ fn process_msgs_multiple_instruments_independent() {
 #[test]
 fn process_msgs_dispatches_tbt_trade() {
     let (client, _rx, shared) = test_client();
-    client.core.instrument_to_req.lock().unwrap().insert(0, 10);
+    client.core.tbt_reqs.lock().unwrap().insert(10, (0, 756733, TbtType::Last));
     shared.market.push_tbt_trade(TbtTrade {
         instrument: 0, price: 150 * PRICE_SCALE, size: 100,
         timestamp: 1700000000, exchange: "ARCA".into(), conditions: "".into(),
@@ -2591,7 +2661,7 @@ fn process_msgs_dispatches_tbt_trade() {
 #[test]
 fn process_msgs_dispatches_tbt_quote() {
     let (client, _rx, shared) = test_client();
-    client.core.instrument_to_req.lock().unwrap().insert(0, 10);
+    client.core.tbt_reqs.lock().unwrap().insert(10, (0, 756733, TbtType::BidAsk));
     shared.market.push_tbt_quote(TbtQuote {
         instrument: 0, bid: 150 * PRICE_SCALE, ask: 151 * PRICE_SCALE,
         bid_size: 1000, ask_size: 2000, timestamp: 1700000000,

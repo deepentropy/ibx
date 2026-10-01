@@ -1255,13 +1255,53 @@ impl MarketDataModes {
     }
 }
 
-/// Tick-by-tick data type for subscription requests.
+/// Tick-by-tick data type for subscription requests: the four types of
+/// the API, each asked under its own name (ibx#455).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TbtType {
-    /// Last trade ticks (AllLast).
+    /// Last trade ticks ("Last").
     Last,
-    /// Bid/ask quote ticks (BidAsk).
+    /// All trade ticks ("AllLast").
+    AllLast,
+    /// Bid/ask quote ticks ("BidAsk").
     BidAsk,
+    /// Midpoint ticks ("MidPoint").
+    MidPoint,
+}
+
+impl TbtType {
+    /// The type of an API tick type string: exactly one of the four names,
+    /// case sensitive, as the reference checks it; None otherwise.
+    pub fn from_api(tick_type: &str) -> Option<Self> {
+        match tick_type {
+            "Last" => Some(TbtType::Last),
+            "AllLast" => Some(TbtType::AllLast),
+            "BidAsk" => Some(TbtType::BidAsk),
+            "MidPoint" => Some(TbtType::MidPoint),
+            _ => None,
+        }
+    }
+
+    /// The API name, also the name the request is sent with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TbtType::Last => "Last",
+            TbtType::AllLast => "AllLast",
+            TbtType::BidAsk => "BidAsk",
+            TbtType::MidPoint => "MidPoint",
+        }
+    }
+
+    /// The tickType a client reports: 1 Last, 2 AllLast, 3 BidAsk, 4
+    /// MidPoint.
+    pub fn api_tick_type(self) -> i32 {
+        match self {
+            TbtType::Last => 1,
+            TbtType::AllLast => 2,
+            TbtType::BidAsk => 3,
+            TbtType::MidPoint => 4,
+        }
+    }
 }
 
 /// A single tick-by-tick trade (AllLast) from 35=E.
@@ -1491,7 +1531,12 @@ pub enum ControlCommand {
     /// rejects switches to delayed data (ibx#447).
     SetMarketDataType { market_data_type: i32 },
     /// Subscribe to tick-by-tick data via historical data connection.
-    SubscribeTbt { con_id: i64, symbol: String, tbt_type: TbtType, reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>> },
+    /// `number_of_ticks` above 0 asks for that many past ticks first;
+    /// `ignore_size` reaches the engine but is not sent yet (ibx#455).
+    SubscribeTbt {
+        con_id: i64, symbol: String, tbt_type: TbtType, number_of_ticks: i32, ignore_size: bool,
+        reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>>,
+    },
     /// Unsubscribe from tick-by-tick data.
     UnsubscribeTbt { instrument: InstrumentId },
     /// Subscribe to per-contract news ticks via CCP (264=292).

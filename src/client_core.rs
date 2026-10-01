@@ -649,6 +649,9 @@ pub struct ClientCore {
     pub delayed_reqs: Mutex<HashSet<i64>>,
     /// Market data requests whose tickReqParams was sent (ibx#449).
     pub tick_req_params_sent: Mutex<HashSet<i64>>,
+    /// Tick-by-tick requests: reqId -> (instrument, conId, type). Kept apart
+    /// from the market data maps, so both can run on one contract (ibx#455).
+    pub tbt_reqs: Mutex<HashMap<i64, (InstrumentId, i64, TbtType)>>,
 
     // Historical data keepUpToDate: req_ids that have completed initial batch.
     // Subsequent bars for these req_ids dispatch as historical_data_update.
@@ -771,6 +774,7 @@ impl ClientCore {
             mdt_sent: Mutex::new(HashSet::new()),
             delayed_reqs: Mutex::new(HashSet::new()),
             tick_req_params_sent: Mutex::new(HashSet::new()),
+            tbt_reqs: Mutex::new(HashMap::new()),
             hist_initial_complete: Mutex::new(HashSet::new()),
             news_providers: Mutex::new("BRFG*BRFUPDN".into()),
             news_instruments: Mutex::new(HashSet::new()),
@@ -808,6 +812,7 @@ impl ClientCore {
         self.mdt_sent.lock().unwrap().clear();
         self.delayed_reqs.lock().unwrap().clear();
         self.tick_req_params_sent.lock().unwrap().clear();
+        self.tbt_reqs.lock().unwrap().clear();
         self.hist_initial_complete.lock().unwrap().clear();
         *self.news_providers.lock().unwrap() = "BRFG*BRFUPDN".into();
         self.news_instruments.lock().unwrap().clear();
@@ -1117,7 +1122,10 @@ impl ClientCore {
             self.delayed_reqs.lock().unwrap().remove(&req_id);
             self.tick_req_params_sent.lock().unwrap().remove(&req_id);
             let needs_news = self.news_instruments.lock().unwrap().remove(&instrument);
-            self.forget_instrument(instrument);
+            // The slot stays while tick-by-tick data uses it.
+            if !self.tbt_reqs.lock().unwrap().values().any(|(i, ..)| *i == instrument) {
+                self.forget_instrument(instrument);
+            }
             (Some(instrument), needs_news)
         } else {
             (None, false)
@@ -1184,6 +1192,44 @@ impl ClientCore {
         })
     }
 
+    /// The local checks of a tick-by-tick request, in the reference's order
+    /// (ibx#455): 321 for a combo security type or a tick type that is not
+    /// exactly one of the four names, 10189 when the logon turns
+    /// tick-by-tick data off, 10190 when a new contract would pass the
+    /// limit (contracts are counted once, whatever their types). The type
+    /// when the request may go.
+    pub fn tbt_refusal(
+        &self,
+        shared: &SharedState,
+        con_id: i64,
+        sec_type: &str,
+        tick_type: &str,
+        local_symbol: &str,
+    ) -> Result<TbtType, (i64, String)> {
+        let sec_type = sec_type.to_ascii_uppercase();
+        if matches!(sec_type.as_str(), "BAG" | "PDC") {
+            return Err((321, format!(
+                "Error validating request.-'bT' : cause - '{}' security type is not supported in ReqTickByTick(97) request",
+                sec_type)));
+        }
+        let Some(tbt_type) = TbtType::from_api(tick_type) else {
+            return Err((321, "Error validating request.-'bT' : cause - Tick-by-tick data type is incorrect/not set".to_string()));
+        };
+        let (limit, off) = shared.reference.tick_by_tick_limits();
+        if off {
+            return Err((10189, format!(
+                "Failed to request tick-by-tick data.{} tick-by-tick requests are not supported for {}",
+                tbt_type.as_str(), local_symbol)));
+        }
+        if let Some(limit) = limit {
+            let contracts: HashSet<i64> = self.tbt_reqs.lock().unwrap().values().map(|(_, c, _)| *c).collect();
+            if contracts.len() >= limit && !contracts.contains(&con_id) {
+                return Err((10190, "Max number of tick-by-tick requests has been reached".to_string()));
+            }
+        }
+        Ok(tbt_type)
+    }
+
     /// Register a TBT subscription mapping.
     pub fn register_tbt(
         &self,
@@ -1193,20 +1239,52 @@ impl ClientCore {
         con_id: i64,
         symbol: &str,
         tbt_type: TbtType,
+        number_of_ticks: i32,
+        ignore_size: bool,
     ) -> Result<InstrumentId, String> {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         control_tx.send(ControlCommand::SubscribeTbt {
             con_id,
             symbol: symbol.to_string(),
             tbt_type,
+            number_of_ticks,
+            ignore_size,
             reply_tx: Some(reply_tx),
         }).map_err(|e| format!("Engine stopped: {}", e))?;
 
         let instrument_id = Self::recv_registration(reply_rx)?;
         self.con_id_to_instrument.lock().unwrap().insert(con_id, instrument_id);
-        self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
-        self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
+        self.tbt_reqs.lock().unwrap().insert(req_id, (instrument_id, con_id, tbt_type));
         Ok(instrument_id)
+    }
+
+    /// End a tick-by-tick request: its instrument, None when unknown. The
+    /// conId cache keeps the slot while market data uses it.
+    pub fn unregister_tbt(&self, req_id: i64) -> Option<InstrumentId> {
+        let (instrument, ..) = self.tbt_reqs.lock().unwrap().remove(&req_id)?;
+        let still_used = self.instrument_to_req.lock().unwrap().contains_key(&instrument)
+            || self.tbt_reqs.lock().unwrap().values().any(|(i, ..)| *i == instrument);
+        if !still_used {
+            self.forget_instrument(instrument);
+        }
+        Some(instrument)
+    }
+
+    /// The tick-by-tick request of an instrument for trades (`trades`) or
+    /// for quotes: (reqId, type).
+    pub fn tbt_req_for(&self, instrument: InstrumentId, trades: bool) -> Option<(i64, TbtType)> {
+        self.tbt_reqs.lock().unwrap().iter()
+            .find(|(_, (i, _, t))| *i == instrument
+                && matches!(t, TbtType::Last | TbtType::AllLast) == trades
+                && *t != TbtType::MidPoint)
+            .map(|(r, (_, _, t))| (*r, *t))
+    }
+
+    /// The tick-by-tick request of an instrument of the given type.
+    pub fn tbt_req_of_type(&self, instrument: InstrumentId, tbt_type: TbtType) -> Option<i64> {
+        self.tbt_reqs.lock().unwrap().iter()
+            .find(|(_, (i, _, t))| *i == instrument && *t == tbt_type)
+            .map(|(r, _)| *r)
     }
 
     /// Look up req_id for an instrument.
@@ -1502,7 +1580,8 @@ impl ClientCore {
     /// A market data request whose id is already live: error 322, as the
     /// reference (the key is the request id only; ibx#444).
     pub fn duplicate_ticker_refusal(&self, req_id: i64) -> Option<(i64, String)> {
-        self.req_to_instrument.lock().unwrap().contains_key(&req_id)
+        (self.req_to_instrument.lock().unwrap().contains_key(&req_id)
+            || self.tbt_reqs.lock().unwrap().contains_key(&req_id))
             .then(|| (322, "Error processing request.-'bQ' : cause - Duplicate ticker id".to_string()))
     }
 

@@ -208,6 +208,8 @@ pub struct MarketDataState {
     md_rejects: Mutex<Vec<MdReject>>,
     /// The request parameters of acked subscriptions (ibx#449).
     tick_req_params: Mutex<Vec<TickReqParams>>,
+    /// Tick-by-tick requests the server refused, with its text (ibx#455).
+    tbt_errors: Mutex<Vec<(InstrumentId, TbtType, String)>>,
 }
 
 /// What a client reports as tickReqParams for a subscription, from its
@@ -263,7 +265,16 @@ impl MarketDataState {
             news_bulletins: Mutex::new(Vec::with_capacity(16)),
             md_rejects: Mutex::new(Vec::new()),
             tick_req_params: Mutex::new(Vec::new()),
+            tbt_errors: Mutex::new(Vec::new()),
         }
+    }
+
+    #[doc(hidden)] pub fn push_tbt_error(&self, instrument: InstrumentId, tbt_type: TbtType, text: String) {
+        self.tbt_errors.lock().unwrap().push((instrument, tbt_type, text));
+    }
+
+    pub fn drain_tbt_errors(&self) -> Vec<(InstrumentId, TbtType, String)> {
+        self.tbt_errors.lock().unwrap().drain(..).collect()
     }
 
     #[doc(hidden)] pub fn push_tick_req_params(&self, params: TickReqParams) {
@@ -549,6 +560,11 @@ pub struct ReferenceState {
     white_branding_id: Mutex<String>,
     /// FA session, from CCP logon tag 6108 (ibx#481).
     fa_session: std::sync::atomic::AtomicBool,
+    /// Most contracts with tick-by-tick data at once, from the logon;
+    /// u64::MAX until known (ibx#455).
+    tick_by_tick_limit: AtomicU64,
+    /// The logon turns tick-by-tick data off (ibx#455).
+    tick_by_tick_off: AtomicBool,
     /// Account config (6040=210): feature list and MiFID config id; None
     /// until known (ibx#425).
     account_config: Mutex<Option<(Vec<String>, String)>>,
@@ -587,6 +603,8 @@ impl ReferenceState {
             family_codes: Mutex::new(Vec::new()),
             white_branding_id: Mutex::new(String::new()),
             fa_session: std::sync::atomic::AtomicBool::new(false),
+            tick_by_tick_limit: AtomicU64::new(u64::MAX),
+            tick_by_tick_off: AtomicBool::new(false),
             account_config: Mutex::new(None),
             ccp_session_id: Mutex::new(String::new()),
             misc_urls: Mutex::new(HashMap::new()),
@@ -862,6 +880,19 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_account_config(&self, features: Vec<String>, mifid_config_id: String) {
         *self.account_config.lock().unwrap() = Some((features, mifid_config_id));
+    }
+
+    /// Tick-by-tick limits of the session (ibx#455): the most contracts at
+    /// once (None until the logon is read) and whether the logon turns it
+    /// off.
+    pub fn tick_by_tick_limits(&self) -> (Option<usize>, bool) {
+        let limit = self.tick_by_tick_limit.load(Ordering::Relaxed);
+        ((limit != u64::MAX).then_some(limit as usize), self.tick_by_tick_off.load(Ordering::Relaxed))
+    }
+
+    #[doc(hidden)] pub fn set_tick_by_tick_limits(&self, limit: usize, off: bool) {
+        self.tick_by_tick_limit.store(limit as u64, Ordering::Relaxed);
+        self.tick_by_tick_off.store(off, Ordering::Relaxed);
     }
 
     #[doc(hidden)] pub fn set_fa_session(&self, fa: bool) {

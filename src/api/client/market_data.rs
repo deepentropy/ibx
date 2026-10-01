@@ -83,26 +83,32 @@ impl EClient {
     }
 
     /// Subscribe to tick-by-tick data. Matches `reqTickByTickData` in C++.
+    /// `tick_type` is "Last", "AllLast", "BidAsk" or "MidPoint", each asked
+    /// under its own name; anything else gives error 321, as the reference.
+    /// `number_of_ticks` above 0 asks for that many past ticks first;
+    /// `ignore_size` reaches the engine but is not sent yet (ibx#455).
     pub fn req_tick_by_tick_data(
         &self, req_id: i64, contract: &Contract, tick_type: &str,
-        _number_of_ticks: i32, _ignore_size: bool,
+        number_of_ticks: i32, ignore_size: bool,
     ) -> Result<(), String> {
-        let tbt_type = match tick_type {
-            "BidAsk" => TbtType::BidAsk,
-            _ => TbtType::Last,
+        let local_symbol = if contract.local_symbol.is_empty() { &contract.symbol } else { &contract.local_symbol };
+        let tbt_type = match self.core.tbt_refusal(&self.shared, contract.con_id, &contract.sec_type, tick_type, local_symbol) {
+            Ok(t) => t,
+            Err((code, text)) => {
+                self.shared.orders.push_order_error(req_id as u64, code, text);
+                return Ok(());
+            }
         };
         self.core.register_tbt(
             &self.shared, &self.control_tx, req_id,
-            contract.con_id, &contract.symbol, tbt_type,
+            contract.con_id, &contract.symbol, tbt_type, number_of_ticks, ignore_size,
         )?;
         Ok(())
     }
 
     /// Cancel tick-by-tick data. Matches `cancelTickByTickData` in C++.
     pub fn cancel_tick_by_tick_data(&self, req_id: i64) -> Result<(), String> {
-        if let Some(instrument) = self.core.req_to_instrument.lock().unwrap().remove(&req_id) {
-            self.core.instrument_to_req.lock().unwrap().remove(&instrument);
-            self.core.forget_instrument(instrument);
+        if let Some(instrument) = self.core.unregister_tbt(req_id) {
             self.send(ControlCommand::UnsubscribeTbt { instrument })?;
         }
         Ok(())
