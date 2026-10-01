@@ -579,6 +579,98 @@ fn close_order_phases_live() {
     assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
 }
 
+/// Focused live entry for the bracket key and the price management flag
+/// (ibx#248, ibx#492): a stock limit parent far from the market sent alone,
+/// a limit child and a stop child attached to it, a replace of the limit
+/// child and of the parent, and a limit order with the flag set off. The
+/// server must accept them all and echo the flag on the limit orders only;
+/// then everything is cancelled. Run with the wire trace:
+///   RUST_LOG=ibx=trace cargo test --test ib_paper_compat pd_orders_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn pd_orders_live() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    println!("=== bracket key and price management (session={:?}) ===\n", market_session().0);
+    let (gw, farm, ccp, hmds) = connect_paper(&config).expect("Gateway::connect() failed");
+    println!("  price management feature {} exclusions {:?}", gw.price_mgmt, gw.price_mgmt_exclusions);
+    check!(gw.price_mgmt, "the paper logon allows price management");
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (mut hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(), Some(event_tx), gw.account_id.clone(), farm, ccp, hmds, None,
+    );
+    hot_loop.set_price_mgmt(gw.price_mgmt, gw.price_mgmt_exclusions.as_deref());
+    let inst = hot_loop.context_mut().register_instrument(265598);
+    hot_loop.context_mut().set_symbol(inst, "AAPL".to_string());
+    let join = run_hot_loop(hot_loop);
+
+    let px = |d: f64| (d * PRICE_SCALE as f64) as i64;
+    let (parent, child1, child2, off) = (next_order_id(), next_order_id(), next_order_id(), next_order_id());
+    let child = || OrderAttrs { parent_id: parent, ..OrderAttrs::default() };
+    let wait_working = |oid: OrderId| -> bool {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if let Ok(Event::OrderUpdate(u)) = event_rx.recv_timeout(Duration::from_millis(100)) {
+                if u.order_id == oid {
+                    match u.status {
+                        OrderStatus::PreSubmitted | OrderStatus::Submitted => return true,
+                        OrderStatus::Rejected | OrderStatus::Cancelled => return false,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        false
+    };
+    let send = |req: OrderRequest| control_tx.send(ControlCommand::Order(req)).unwrap();
+
+    send(OrderRequest::SubmitLimitEx { order_id: parent, instrument: inst, side: Side::Buy, qty: 1, price: px(150.0), tif: b'0', attrs: OrderAttrs::default() });
+    check!(wait_working(parent), "parent working");
+    send(OrderRequest::SubmitLimitEx { order_id: child1, instrument: inst, side: Side::Sell, qty: 1, price: px(600.0), tif: b'0', attrs: child() });
+    check!(wait_working(child1), "limit child working");
+    send(OrderRequest::SubmitEx { order_id: child2, instrument: inst, side: Side::Sell, qty: 1, kind: OrderKind::Stop { stop_price: px(100.0) }, tif: b'0', attrs: child() });
+    check!(wait_working(child2), "stop child working");
+    send(OrderRequest::Modify { new_order_id: child1, order_id: child1, qty: 1, kind: OrderKind::Limit { price: px(601.0) }, tif: b'0', attrs: child() });
+    std::thread::sleep(Duration::from_secs(3));
+    send(OrderRequest::Modify { new_order_id: parent, order_id: parent, qty: 1, kind: OrderKind::Limit { price: px(151.0) }, tif: b'0', attrs: OrderAttrs::default() });
+    std::thread::sleep(Duration::from_secs(3));
+    send(OrderRequest::SubmitLimitEx { order_id: off, instrument: inst, side: Side::Buy, qty: 1, price: px(150.0), tif: b'0', attrs: OrderAttrs { use_price_mgmt_algo: Some(false), ..OrderAttrs::default() } });
+    check!(wait_working(off), "order with the flag off working");
+    std::thread::sleep(Duration::from_secs(2));
+
+    let flag = |oid: OrderId| shared.orders.get_order_info(oid).map(|i| i.order.use_price_mgmt_algo);
+    let price = |oid: OrderId| confirmed_price_qty(&shared, oid).map(|(p, _)| p);
+    println!("  reported flag: parent {:?} limit child {:?} stop child {:?} off {:?}", flag(parent), flag(child1), flag(child2), flag(off));
+    println!("  reported price: parent {:?} limit child {:?}", price(parent), price(child1));
+    check_eq!(flag(parent), Some(1), "parent echoes the flag");
+    check_eq!(flag(child1), Some(1), "limit child echoes the flag");
+    check_eq!(flag(child2), Some(0), "stop child has no flag");
+    check_eq!(flag(off), Some(0), "flag off is not sent");
+    check_eq!(price(child1), Some(601.0), "the child's replace landed");
+    check_eq!(price(parent), Some(151.0), "the parent's replace landed");
+    let errors = shared.orders.drain_order_errors();
+    println!("  errors: {:?}", errors);
+
+    send(OrderRequest::Cancel { order_id: parent });
+    send(OrderRequest::Cancel { order_id: off });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut cancelled = std::collections::HashSet::new();
+    while Instant::now() < deadline && cancelled.len() < 4 {
+        if let Ok(Event::OrderUpdate(u)) = event_rx.recv_timeout(Duration::from_millis(100)) {
+            if matches!(u.status, OrderStatus::Cancelled) { cancelled.insert(u.order_id); }
+        }
+    }
+    println!("  cancelled: {:?}", cancelled);
+    check_eq!(cancelled.len(), 4, "all four orders cancelled");
+    let _ = shutdown_and_reclaim(&control_tx, join, gw.account_id.clone());
+    let rejected = take_rejections();
+    assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
+}
+
 /// Focused live entry for the market-to-limit, box top and snap phases
 /// (ibx#418, ibx#493): in regular hours they can stay PreSubmitted after the
 /// cancel. Run:
