@@ -9,12 +9,30 @@ impl EClient {
     // ── Historical Data ──
 
     /// Request historical data. Matches `reqHistoricalData` in C++.
+    /// A request the reference refuses locally gets its error (321 or
+    /// 10314) and no query; SCHEDULE asks for the trading schedule
+    /// (ibx#430).
     pub fn req_historical_data(
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, bar_size: &str,
-        what_to_show: &str, use_rth: bool, _format_date: i32, keep_up_to_date: bool,
+        what_to_show: &str, use_rth: bool, format_date: i32, keep_up_to_date: bool,
     ) -> Result<(), String> {
+        if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration, bar_size, what_to_show, format_date) {
+            self.shared.reference.push_historical_error(req_id as u32, code, text);
+            return Ok(());
+        }
         ClientCore::validate_historical_args(bar_size, what_to_show, keep_up_to_date)?;
+        if what_to_show.eq_ignore_ascii_case("SCHEDULE") {
+            return self.send(ControlCommand::FetchHistoricalSchedule {
+                req_id: req_id as u32,
+                con_id: contract.con_id,
+                sec_type: contract.sec_type.clone(),
+                exchange: contract.exchange.clone(),
+                end_date_time: end_date_time.into(),
+                duration: duration.into(),
+                use_rth,
+            });
+        }
         self.send(ControlCommand::FetchHistorical {
             req_id: req_id as u32,
             con_id: contract.con_id,

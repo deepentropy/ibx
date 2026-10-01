@@ -2528,13 +2528,28 @@ impl ClientCore {
     /// 5-minute bars silently (via TWO divergent tables), and an
     /// unrecognized what_to_show fell back to TRADES. The caller gets a
     /// synchronous Err at the call instead of plausible, wrong candles.
-    pub fn validate_historical_args(
+    /// The reference's local refusal of a reqHistoricalData (ibx#430):
+    /// (code, text) to report as an error, 321 or 10314, with no end.
+    pub fn historical_refusal(
+        end_date_time: &str,
+        duration: &str,
         bar_size: &str,
         what_to_show: &str,
+        format_date: i32,
+    ) -> Option<(i32, String)> {
+        crate::control::historical::check_bar_request(
+            end_date_time, duration, bar_size, what_to_show, Some(format_date),
+        ).err()
+    }
+
+    /// keepUpToDate bar sizes ibx streams (ibx#232). The reference checks
+    /// are in [`Self::historical_refusal`]; a size it refuses is left to it.
+    pub fn validate_historical_args(
+        bar_size: &str,
+        _what_to_show: &str,
         keep_up_to_date: bool,
     ) -> Result<(), String> {
-        let bs = crate::control::historical::BarSize::from_api_str(bar_size)?;
-        crate::control::historical::BarDataType::from_api_str(what_to_show)?;
+        let Ok(bs) = crate::control::historical::BarSize::from_api_str(bar_size) else { return Ok(()) };
         if keep_up_to_date && !bs.supports_keep_up_to_date() {
             return Err(format!(
                 "bar_size '{}' is not supported with keep_up_to_date=true: \

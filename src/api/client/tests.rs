@@ -1786,21 +1786,48 @@ fn req_historical_data_sends_fetch_historical() {
 // falling back to 5-minute / TRADES bars ──
 
 #[test]
-fn req_historical_data_rejects_unknown_bar_size() {
-    let (client, rx, _shared) = test_client();
-    // The issue's exact repro: "1 Min" (wrong case) used to return 5-minute
-    // candles with no error.
-    let err = client.req_historical_data(5, &spy(), "", "2 D", "1 Min", "TRADES", true, 1, false).unwrap_err();
-    assert!(err.contains("bar_size"), "got: {}", err);
+fn req_historical_data_refuses_unknown_bar_size_with_321() {
+    let (client, rx, shared) = test_client();
+    // ibx#430: "1 sec" is not a reference size; the refusal is error 321.
+    client.req_historical_data(5, &spy(), "", "2 D", "1 sec", "TRADES", true, 1, false).unwrap();
     assert!(rx.try_recv().is_err(), "nothing may reach the engine");
+    let errors = shared.reference.drain_historical_errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!((errors[0].0, errors[0].1), (5, 321));
+    assert!(errors[0].2.contains("bar size setting is invalid"), "got: {}", errors[0].2);
 }
 
 #[test]
-fn req_historical_data_rejects_unknown_what_to_show() {
-    let (client, rx, _shared) = test_client();
-    let err = client.req_historical_data(5, &spy(), "", "2 D", "1 min", "TRADE", true, 1, false).unwrap_err();
-    assert!(err.contains("what_to_show"), "got: {}", err);
+fn req_historical_data_accepts_reference_bar_size_in_any_case() {
+    let (client, rx, shared) = test_client();
+    // "1 Min" is "1 min" for the reference (ibx#430), never 5-minute bars (ibx#232).
+    client.req_historical_data(5, &spy(), "", "2 D", "1 Min", "TRADES", true, 1, false).unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::FetchHistorical { .. }));
+    assert!(shared.reference.drain_historical_errors().is_empty());
+}
+
+#[test]
+fn req_historical_data_refuses_unknown_what_to_show_and_format_date() {
+    let (client, rx, shared) = test_client();
+    client.req_historical_data(5, &spy(), "", "2 D", "1 min", "TRADE", true, 1, false).unwrap();
+    client.req_historical_data(6, &spy(), "", "2 D", "1 min", "TRADES", true, 5, false).unwrap();
+    client.req_historical_data(7, &spy(), "2026-01-02", "2 D", "1 min", "TRADES", true, 1, false).unwrap();
     assert!(rx.try_recv().is_err());
+    let errors = shared.reference.drain_historical_errors();
+    assert_eq!(errors[0], (5, 321, "Error validating request.-'bM' : cause - What to show value of TRADE rejected.".to_string()));
+    assert_eq!(errors[1], (6, 321, "Error validating request.-'bM' : cause - Date formatting selection of 5 rejected.".to_string()));
+    assert_eq!((errors[2].0, errors[2].1), (7, 10314));
+}
+
+#[test]
+fn req_historical_data_schedule_asks_for_the_trading_schedule() {
+    let (client, rx, shared) = test_client();
+    client.req_historical_data(8, &spy(), "", "1 M", "1 day", "SCHEDULE", true, 1, false).unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::FetchHistoricalSchedule { req_id: 8, .. }));
+    client.req_historical_data(9, &spy(), "", "1 M", "1 hour", "SCHEDULE", true, 1, false).unwrap();
+    assert!(rx.try_recv().is_err());
+    assert_eq!(shared.reference.drain_historical_errors()[0].2,
+        "Error validating request.-'bM' : cause - Only daily resolution supported for Schedule requests");
 }
 
 #[test]

@@ -792,8 +792,26 @@ impl HmdsState {
         hb: &mut HeartbeatState,
         shared: &SharedState,
     ) {
-        let duration = duration.to_lowercase();
-        let duration = duration.as_str();
+        // The reference checks, refused with its codes and texts and no
+        // end (ibx#430). The client checks first; this is the engine-side
+        // backstop for raw control-channel callers.
+        let checked = match crate::control::historical::check_bar_request(
+            end_date_time, duration, bar_size, what_to_show, None,
+        ) {
+            Ok(c) => c,
+            Err((code, text)) => {
+                log::error!("historical req_id={}: {} {}", req_id, code, text);
+                shared.reference.push_historical_error(req_id, code, text);
+                return;
+            }
+        };
+        let data_type = checked.data_type;
+        let bs = checked.bar_size;
+        let duration = checked.duration.as_str();
+        if data_type == crate::control::historical::BarDataType::Schedule {
+            self.send_schedule_request(req_id, con_id, sec_type, exchange, end_date_time, duration, use_rth, hmds_conn, hb);
+            return;
+        }
         let end_date_time = if end_date_time.is_empty() {
             crate::gateway::chrono_free_timestamp().to_string()
         } else {
@@ -802,27 +820,6 @@ impl HmdsState {
         let end_date_time = end_date_time.as_str();
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
-
-        // One shared table, rejection instead of a silent Min5/TRADES
-        // fallback (ibx#232). The client validates synchronously before the
-        // command is sent; this is the engine-side backstop for raw
-        // control-channel callers.
-        let data_type = match crate::control::historical::BarDataType::from_api_str(what_to_show) {
-            Ok(dt) => dt,
-            Err(e) => {
-                log::error!("historical req_id={}: {}", req_id, e);
-                super::push_hmds_error(shared, req_id, e, true);
-                return;
-            }
-        };
-        let bs = match crate::control::historical::BarSize::from_api_str(bar_size) {
-            Ok(bs) => bs,
-            Err(e) => {
-                log::error!("historical req_id={}: {}", req_id, e);
-                super::push_hmds_error(shared, req_id, e, true);
-                return;
-            }
-        };
 
         // One server query per leg: BID_ASK is a Bid query plus an Ask
         // query answered as one request (ibx#408).
@@ -1002,8 +999,18 @@ impl HmdsState {
         sign_iv: &std::sync::Mutex<Vec<u8>>,
         shared: &SharedState,
     ) -> bool {
+        // The reference checks of every bar request (ibx#430).
+        let duration = match crate::control::historical::check_bar_request(
+            end_date_time, duration, bar_size, what_to_show, None,
+        ) {
+            Ok(c) => c.duration,
+            Err((code, text)) => {
+                log::error!("keepUpToDate req_id={}: {} {}", req_id, code, text);
+                shared.reference.push_historical_error(req_id, code, text);
+                return false;
+            }
+        };
         // Reuse the same request builder but with keep_up_to_date=true
-        let duration = duration.to_lowercase();
         let end_date_time = if end_date_time.is_empty() {
             crate::gateway::chrono_free_timestamp().to_string()
         } else {
@@ -1123,8 +1130,11 @@ impl HmdsState {
         let data_type = match crate::control::historical::BarDataType::from_api_str(what_to_show) {
             Ok(dt) => dt,
             Err(e) => {
+                // 321 with the text of the reference (ibx#430).
                 log::error!("head timestamp req_id={}: {}", req_id, e);
-                super::push_hmds_error(shared, req_id, e, false);
+                shared.reference.push_historical_error(
+                    req_id, 321, format!("Error validating request.-'bN' : cause - {}", e),
+                );
                 return;
             }
         };
@@ -1368,7 +1378,10 @@ impl HmdsState {
     pub(crate) fn send_schedule_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, end_date_time: &str, duration: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
-        let duration = duration.to_lowercase();
+        // Duration in the reference form (ibx#430); an unreadable one is
+        // sent lower-cased as before.
+        let duration = crate::control::historical::normalize_duration(duration)
+            .unwrap_or_else(|_| duration.to_lowercase());
         let end_date_time = if end_date_time.is_empty() {
             chrono_free_timestamp().to_string()
         } else {
@@ -2020,23 +2033,58 @@ mod tests {
     // raw control-channel callers; the client validates synchronously) ──
 
     #[test]
-    fn engine_rejects_unknown_bar_size_with_error_and_sentinel() {
+    fn engine_rejects_unknown_bar_size_with_321_and_no_end() {
         let mut hmds = HmdsState::new();
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
 
-        hmds.send_historical_request_ex(9, 756733, "STK", "SMART", "", "2 d", "1 Min", "TRADES",
+        hmds.send_historical_request_ex(9, 756733, "STK", "SMART", "", "2 d", "1 sec", "TRADES",
             true, false, "SPY", &mut conn, &mut hb, &shared);
 
         assert!(hmds.pending_historical.is_empty(), "rejected request must not go pending");
         let errors = shared.reference.drain_historical_errors();
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].1, 162);
-        assert!(errors[0].2.contains("bar_size"), "got: {}", errors[0].2);
-        let hist = shared.reference.drain_historical_data();
-        assert_eq!(hist.len(), 1, "terminal sentinel must unblock waiters");
-        assert!(hist[0].1.is_complete);
+        assert_eq!(errors[0].1, 321);
+        assert!(errors[0].2.starts_with("Error validating request.-'bM' : cause - Historical data bar size setting is invalid."),
+            "got: {}", errors[0].2);
+        assert!(shared.reference.drain_historical_data().is_empty(), "a refusal has no end");
+    }
+
+    // ── ibx#430: the reference forms on the wire ──
+
+    #[test]
+    fn engine_sends_reference_duration_and_bar_size_and_routes_schedule() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.send_historical_request_ex(1, 756733, "STK", "SMART", "", "3600", "1 Min", "trades",
+            true, false, "SPY", &mut conn, &mut hb, &shared);
+        assert!(shared.reference.drain_historical_errors().is_empty());
+        assert_eq!(hmds.pending_historical.len(), 1);
+        hmds.send_historical_request_ex(2, 756733, "STK", "SMART", "", "1 M", "1 day", "SCHEDULE",
+            true, false, "SPY", &mut conn, &mut hb, &shared);
+        assert_eq!(hmds.pending_historical.len(), 1, "a schedule is not a bar query");
+        assert_eq!(hmds.pending_schedule.len(), 1);
+        assert_eq!(hmds.pending_schedule[0].1, 2);
+        hmds.send_historical_request_ex(3, 756733, "STK", "SMART", "", "1 M", "1 hour", "SCHEDULE",
+            true, false, "SPY", &mut conn, &mut hb, &shared);
+        assert_eq!(hmds.pending_schedule.len(), 1);
+        assert_eq!(shared.reference.drain_historical_errors()[0].1, 321);
+    }
+
+    #[test]
+    fn head_timestamp_with_unknown_what_to_show_is_refused_with_321() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.send_head_timestamp_request(4, 265598, "STK", "SMART", "TRADE", true, &mut conn, &mut hb, &shared);
+        assert!(hmds.pending_head_ts.is_empty());
+        assert_eq!(shared.reference.drain_historical_errors(), vec![(
+            4, 321, "Error validating request.-'bN' : cause - What to show value of TRADE rejected.".to_string(),
+        )]);
     }
 
     // ── ibx#231: idle-deadline sweep ──

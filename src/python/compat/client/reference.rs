@@ -28,11 +28,15 @@ impl EClient {
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
-        let _ = (format_date, chart_options);
-        if !what_to_show.eq_ignore_ascii_case("SCHEDULE") {
-            ClientCore::validate_historical_args(bar_size_setting, what_to_show, keep_up_to_date)
-                .map_err(|e| PyRuntimeError::new_err(e))?;
+        let _ = chart_options;
+        // A request the reference refuses locally gets its error (321 or
+        // 10314) and no query (ibx#430).
+        if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration_str, bar_size_setting, what_to_show, format_date) {
+            self.shared_state()?.reference.push_historical_error(req_id as u32, code, text);
+            return Ok(());
         }
+        ClientCore::validate_historical_args(bar_size_setting, what_to_show, keep_up_to_date)
+            .map_err(|e| PyRuntimeError::new_err(e))?;
         if what_to_show.eq_ignore_ascii_case("SCHEDULE") {
             send_cmd(py, &tx, ControlCommand::FetchHistoricalSchedule {
                 req_id: req_id as u32,

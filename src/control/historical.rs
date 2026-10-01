@@ -18,16 +18,25 @@ pub enum BarDataType {
     AdjustedLast,
     HistoricalVolatility,
     ImpliedVolatility,
+    IndicativeAuction,
+    NavLast,
+    YieldAsk,
+    YieldBid,
+    YieldBidAsk,
+    YieldMark,
+    YieldLast,
+    FeeRate,
+    Schedule,
+    AggTrades,
 }
 
 impl BarDataType {
-    /// Parse the official API what_to_show string. Unknown values were
-    /// previously coerced to TRADES silently, so a misspelled "BID" quietly
-    /// returned trade bars (ibx#232). An empty string is the documented
-    /// TRADES default; anything else must match exactly (case-insensitive).
+    /// Parse the official API what_to_show string, case-insensitive, with
+    /// the reference table (ibx#430). Any other value, the empty string
+    /// included, is refused with the reference text.
     pub fn from_api_str(s: &str) -> Result<BarDataType, String> {
         Ok(match s.to_uppercase().as_str() {
-            "" | "TRADES" => Self::Trades,
+            "TRADES" => Self::Trades,
             "MIDPOINT" => Self::Midpoint,
             "BID" => Self::Bid,
             "ASK" => Self::Ask,
@@ -35,20 +44,24 @@ impl BarDataType {
             "ADJUSTED_LAST" => Self::AdjustedLast,
             "HISTORICAL_VOLATILITY" => Self::HistoricalVolatility,
             "OPTION_IMPLIED_VOLATILITY" => Self::ImpliedVolatility,
-            other => {
-                return Err(format!(
-                    "Unsupported what_to_show '{}': expected TRADES, MIDPOINT, \
-                     BID, ASK, BID_ASK, ADJUSTED_LAST, HISTORICAL_VOLATILITY \
-                     or OPTION_IMPLIED_VOLATILITY", other,
-                ));
-            }
+            "INDICATIVE_AUCTION_PRICE_SIZE" => Self::IndicativeAuction,
+            "NAV_LAST" => Self::NavLast,
+            "YIELD_ASK" => Self::YieldAsk,
+            "YIELD_BID" => Self::YieldBid,
+            "YIELD_BID_ASK" => Self::YieldBidAsk,
+            "YIELD_MARK" => Self::YieldMark,
+            "YIELD_LAST" => Self::YieldLast,
+            "FEE_RATE" => Self::FeeRate,
+            "SCHEDULE" => Self::Schedule,
+            "AGGTRADES" => Self::AggTrades,
+            _ => return Err(format!("What to show value of {} rejected.", s)),
         })
     }
 
-    /// Server data name of this type (ibx#408). BID_ASK has no single server
-    /// name: a bar request sends one query per entry of [`Self::legs`]
-    /// instead. ADJUSTED_LAST asks for the trades series; the adjustment is
-    /// not a server-side data name.
+    /// Server data name of this type (ibx#408, ibx#430). BID_ASK and
+    /// YIELD_BID_ASK have no single server name: a bar request sends one
+    /// query per entry of [`Self::legs`] instead. ADJUSTED_LAST asks for
+    /// the trades series; the adjustment is not a server-side data name.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Trades => "Last",
@@ -59,21 +72,42 @@ impl BarDataType {
             Self::AdjustedLast => "Last",
             Self::HistoricalVolatility => "HistVol",
             Self::ImpliedVolatility => "OptionImpliedVol",
+            Self::IndicativeAuction => "AuctionIndicLast",
+            Self::NavLast => "NavLast",
+            Self::YieldAsk => "AskYield",
+            Self::YieldBid => "BidYield",
+            Self::YieldBidAsk => "BidYield",
+            Self::YieldMark => "MarkYield",
+            Self::YieldLast => "LastYield",
+            Self::FeeRate => "FeeRate",
+            Self::Schedule => "Schedule",
+            Self::AggTrades => "AggLast",
         }
     }
 
     /// Server queries one bar request needs: BID_ASK is answered from a Bid
-    /// query and an Ask query; every other type is one query (ibx#408).
+    /// query and an Ask query, YIELD_BID_ASK from a bid yield query and an
+    /// ask yield query; every other type is one query (ibx#408, ibx#430).
     pub fn legs(&self) -> &'static [BarDataType] {
         match self {
+            Self::BidAsk => &[Self::Bid, Self::Ask],
+            Self::YieldBidAsk => &[Self::YieldBid, Self::YieldAsk],
             Self::Trades => &[Self::Trades],
             Self::Midpoint => &[Self::Midpoint],
             Self::Bid => &[Self::Bid],
             Self::Ask => &[Self::Ask],
-            Self::BidAsk => &[Self::Bid, Self::Ask],
             Self::AdjustedLast => &[Self::AdjustedLast],
             Self::HistoricalVolatility => &[Self::HistoricalVolatility],
             Self::ImpliedVolatility => &[Self::ImpliedVolatility],
+            Self::IndicativeAuction => &[Self::IndicativeAuction],
+            Self::NavLast => &[Self::NavLast],
+            Self::YieldAsk => &[Self::YieldAsk],
+            Self::YieldBid => &[Self::YieldBid],
+            Self::YieldMark => &[Self::YieldMark],
+            Self::YieldLast => &[Self::YieldLast],
+            Self::FeeRate => &[Self::FeeRate],
+            Self::Schedule => &[Self::Schedule],
+            Self::AggTrades => &[Self::AggTrades],
         }
     }
 }
@@ -102,17 +136,24 @@ pub enum BarSize {
     Day1,
     Week1,
     Month1,
+    Month3,
+    Year1,
 }
 
+/// Bar sizes listed in the reference refusal text.
+const LEGAL_BAR_SIZES: &str = "1 secs, 5 secs, 10 secs, 15 secs, 30 secs, 1 min, 2 mins, 3 mins, \
+    5 mins, 10 mins, 15 mins, 20 mins, 30 mins, 1 hour, 2 hours, 3 hours, 4 hours, 8 hours, \
+    1 day, 1W, 1M";
+
 impl BarSize {
-    /// Parse the official API bar-size string. THE single table for every
-    /// request path — two divergent copies previously fell back to Min5
-    /// silently, so a typo or an unsupported size returned plausible,
-    /// complete, WRONG candles (ibx#232). Case-sensitive on purpose: the
-    /// official API strings are exact.
+    /// Parse the official API bar-size string with the reference table,
+    /// case-insensitive (ibx#430). THE single table for every request
+    /// path: two divergent copies previously fell back to Min5 silently
+    /// (ibx#232). `1 sec`, `1 mins` and `1 hours` are refused, as the
+    /// reference.
     pub fn from_api_str(s: &str) -> Result<BarSize, String> {
-        Ok(match s {
-            "1 secs" | "1 sec" => Self::Sec1,
+        Ok(match s.to_ascii_lowercase().as_str() {
+            "1 secs" => Self::Sec1,
             "5 secs" => Self::Sec5,
             "10 secs" => Self::Sec10,
             "15 secs" => Self::Sec15,
@@ -131,15 +172,14 @@ impl BarSize {
             "4 hours" => Self::Hour4,
             "8 hours" => Self::Hour8,
             "1 day" => Self::Day1,
-            "1 week" | "1W" => Self::Week1,
-            "1 month" | "1M" => Self::Month1,
-            other => {
+            "1w" | "1 w" | "1 week" => Self::Week1,
+            "1m" | "1 m" | "1 month" => Self::Month1,
+            "3 months" => Self::Month3,
+            "1 year" => Self::Year1,
+            _ => {
                 return Err(format!(
-                    "Unsupported bar_size '{}': expected one of 1 secs, 5 secs, \
-                     10 secs, 15 secs, 30 secs, 1 min, 2 mins, 3 mins, 5 mins, \
-                     10 mins, 15 mins, 20 mins, 30 mins, 1 hour, 2 hours, \
-                     3 hours, 4 hours, 8 hours, 1 day, 1 week, 1 month \
-                     (case-sensitive)", other,
+                    "Historical data bar size setting is invalid. Legal ones are: {}",
+                    LEGAL_BAR_SIZES,
                 ));
             }
         })
@@ -152,6 +192,12 @@ impl BarSize {
         matches!(self, Self::Sec1 | Self::Sec5 | Self::Min5 | Self::Hour1 | Self::Day1)
     }
 
+    /// Bars longer than one day (ibx#430).
+    pub fn is_multi_day(&self) -> bool {
+        matches!(self, Self::Week1 | Self::Month1 | Self::Month3 | Self::Year1)
+    }
+
+    /// Wire name of the size, as the reference sends it.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Sec1 => "1 secs",
@@ -173,10 +219,160 @@ impl BarSize {
             Self::Hour4 => "4 hours",
             Self::Hour8 => "8 hours",
             Self::Day1 => "1 day",
-            Self::Week1 => "1 week",
-            Self::Month1 => "1 month",
+            Self::Week1 => "1W",
+            Self::Month1 => "1M",
+            Self::Month3 => "3 months",
+            Self::Year1 => "1 year",
         }
     }
+}
+
+/// Text of a local refusal of a bar request, as the reference sends it
+/// with error 321 (ibx#430).
+pub fn bar_request_refusal(cause: &str) -> String {
+    format!("Error validating request.-'bM' : cause - {}", cause)
+}
+
+/// Text of error 10314 for an end date the reference cannot read.
+pub const INVALID_END_DATE: &str = "End Date/Time: The date, time, or time-zone entered is invalid.\n\
+The correct format is yyyymmdd hh:mm:ss xx/xxxx\n\
+where yyyymmdd and xx/xxxx are optional.\n\
+E.g.: 20031126 15:59:00 US/Eastern\n\
+\n\
+Note that there is a space between the date and time,\n\
+and between the time and time-zone.\n\
+\n\
+If no date is specified, current date is assumed.\n\
+If no time-zone is specified, local time-zone is assumed(deprecated).\n\
+\n\
+You can also provide yyyymmddd-hh:mm:ss time is in UTC.\n\
+Note that there is a dash between the date and time in UTC notation.";
+
+/// Whether the reference reads an API end date (ibx#430): empty;
+/// `yyyyMMdd-HH:mm:ss`; or `[yyyyMMdd ]HH:mm:ss` followed by optional
+/// time-zone words (words that do not start with a digit). The date has a
+/// year from 1978 to 3000, a month from 1 to 12 and a day up to 31.
+pub fn is_valid_end_date(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return true;
+    }
+    fn date_ok(d: &str) -> bool {
+        if d.len() != 8 || !d.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        let y: u32 = d[0..4].parse().unwrap_or(0);
+        let m: u32 = d[4..6].parse().unwrap_or(0);
+        let day: u32 = d[6..8].parse().unwrap_or(99);
+        (1978..=3000).contains(&y) && (1..=12).contains(&m) && day <= 31
+    }
+    fn time_ok(t: &str) -> bool {
+        let parts: Vec<&str> = t.split(':').collect();
+        if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+            return false;
+        }
+        let v: Vec<u32> = parts.iter().map(|p| p.parse().unwrap_or(99)).collect();
+        v[0] <= 23 && v[1] <= 59 && v[2] <= 59
+    }
+    if let Some((d, t)) = s.split_once('-') {
+        if date_ok(d) && time_ok(t) {
+            return true;
+        }
+    }
+    let words: Vec<&str> = s.split_whitespace()
+        .filter(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .collect();
+    match words.as_slice() {
+        [d, t] => date_ok(d) && time_ok(t),
+        [t] => time_ok(t),
+        _ => false,
+    }
+}
+
+/// Duration of a bar request in the reference form (ibx#430): a plain
+/// number is seconds, and the unit letter takes the case the reference
+/// sends. Err is the refusal text.
+pub fn normalize_duration(duration: &str) -> Result<String, String> {
+    if duration.is_empty() {
+        return Err("Historical data request duration not specified.".to_string());
+    }
+    let with_unit = if duration.bytes().all(|b| b.is_ascii_digit()) {
+        format!("{} S", duration)
+    } else {
+        duration.to_string()
+    };
+    let d: String = with_unit.chars().map(|c| match c {
+        's' => 'S',
+        'D' => 'd',
+        'w' => 'W',
+        'M' => 'm',
+        'Y' => 'y',
+        other => other,
+    }).collect();
+    let format_error = || "When specifying a unit, historical data request duration format is integer{SPACE}unit (S|D|W|M|Y).".to_string();
+    let (num, unit) = d.split_once(' ').ok_or_else(format_error)?;
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) || !matches!(unit, "S" | "d" | "W" | "m" | "y") {
+        return Err(format_error());
+    }
+    let invalid = || "Historical data requested duration is invalid.".to_string();
+    let n: i32 = num.parse().map_err(|_| invalid())?;
+    if n < 1 || (unit == "S" && n < 30) {
+        return Err(invalid());
+    }
+    match unit {
+        "S" if n > 86400 => Err("Historical data request for greater than 86400 seconds rejected.".to_string()),
+        "d" if n > 365 => Err("Historical data requests for durations longer than 365 days must be made in years.".to_string()),
+        "W" if n > 52 => Err("Historical data request for durations longer than 52 weeks must be made in years.".to_string()),
+        "m" if n > 12 => Err("Historical data request for durations longer than 12 months must be made in years.".to_string()),
+        _ => Ok(d),
+    }
+}
+
+/// A bar request that passed the reference checks (ibx#430).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedBarRequest {
+    pub data_type: BarDataType,
+    pub bar_size: BarSize,
+    /// Duration in the reference form.
+    pub duration: String,
+}
+
+/// The local checks of a bar request, in the reference order (ibx#430):
+/// the end date (10314), then the duration, ADJUSTED_LAST with an end
+/// date, the bar size, ADJUSTED_LAST with bars longer than a day,
+/// whatToShow, formatDate (when given), and SCHEDULE with bars other than
+/// one day (321). Err is (code, text). The maximum number of backfill
+/// years is not checked.
+pub fn check_bar_request(
+    end_date_time: &str,
+    duration: &str,
+    bar_size: &str,
+    what_to_show: &str,
+    format_date: Option<i32>,
+) -> Result<CheckedBarRequest, (i32, String)> {
+    let refuse = |cause: &str| (321, bar_request_refusal(cause));
+    if !is_valid_end_date(end_date_time) {
+        return Err((10314, INVALID_END_DATE.to_string()));
+    }
+    let duration = normalize_duration(duration).map_err(|e| refuse(&e))?;
+    let adjusted = what_to_show.eq_ignore_ascii_case("ADJUSTED_LAST");
+    if adjusted && !end_date_time.trim().is_empty() {
+        return Err(refuse("End date not supported with adjusted last"));
+    }
+    let bar_size = BarSize::from_api_str(bar_size).map_err(|e| refuse(&e))?;
+    if adjusted && bar_size.is_multi_day() {
+        return Err(refuse("Multi day bar size not supported with adjusted last"));
+    }
+    let data_type = BarDataType::from_api_str(what_to_show).map_err(|e| refuse(&e))?;
+    if let Some(n) = format_date {
+        if !(1..=3).contains(&n) {
+            return Err(refuse(&format!("Date formatting selection of {} rejected.", n)));
+        }
+    }
+    if data_type == BarDataType::Schedule && bar_size != BarSize::Day1 {
+        return Err(refuse("Only daily resolution supported for Schedule requests"));
+    }
+    Ok(CheckedBarRequest { data_type, bar_size, duration })
 }
 
 /// Parameters for a historical data request.
@@ -459,7 +655,8 @@ pub fn parse_leg_bars(xml: &str) -> Vec<LegBar> {
 }
 
 /// The bars of a BID_ASK request from its Bid and Ask frames, given in
-/// arrival order (ibx#408). Bars are keyed by bar time, as the reference:
+/// arrival order (ibx#408); YIELD_BID_ASK uses the same rule with its bid
+/// and ask yield frames, as the reference. Bars are keyed by bar time, as the reference:
 /// the Bid bar gives the open (its time average) and the low, the Ask bar
 /// gives the close (its time average) and raises the high to its own high.
 /// A bar found in one leg only keeps that leg's values: Bid only, open,
@@ -470,8 +667,8 @@ pub fn combine_bid_ask(frames: &[(BarDataType, Vec<LegBar>)]) -> Vec<HistoricalB
     let mut series: std::collections::BTreeMap<String, HistoricalBar> = std::collections::BTreeMap::new();
     for (leg, bars) in frames {
         let is_bid = match leg {
-            BarDataType::Bid => true,
-            BarDataType::Ask => false,
+            BarDataType::Bid | BarDataType::YieldBid => true,
+            BarDataType::Ask | BarDataType::YieldAsk => false,
             _ => continue,
         };
         for b in bars {
@@ -959,13 +1156,121 @@ mod tests {
     #[test]
     fn bar_data_type_legs() {
         assert_eq!(BarDataType::BidAsk.legs(), &[BarDataType::Bid, BarDataType::Ask]);
+        assert_eq!(BarDataType::YieldBidAsk.legs(), &[BarDataType::YieldBid, BarDataType::YieldAsk]);
         for dt in [
             BarDataType::Trades, BarDataType::Midpoint, BarDataType::Bid,
             BarDataType::Ask, BarDataType::AdjustedLast,
             BarDataType::HistoricalVolatility, BarDataType::ImpliedVolatility,
+            BarDataType::FeeRate, BarDataType::AggTrades,
         ] {
             assert_eq!(dt.legs(), &[dt]);
         }
+    }
+
+    // ── ibx#430: the reference tables and checks ──
+
+    #[test]
+    fn what_to_show_reference_table() {
+        for (api, name) in [
+            ("TRADES", "Last"), ("midpoint", "MidPoint"), ("BID", "Bid"), ("ASK", "Ask"),
+            ("ADJUSTED_LAST", "Last"), ("HISTORICAL_VOLATILITY", "HistVol"),
+            ("OPTION_IMPLIED_VOLATILITY", "OptionImpliedVol"),
+            ("INDICATIVE_AUCTION_PRICE_SIZE", "AuctionIndicLast"), ("NAV_LAST", "NavLast"),
+            ("YIELD_ASK", "AskYield"), ("yield_bid", "BidYield"), ("YIELD_MARK", "MarkYield"),
+            ("YIELD_LAST", "LastYield"), ("FEE_RATE", "FeeRate"), ("SCHEDULE", "Schedule"),
+            ("AGGTRADES", "AggLast"),
+        ] {
+            assert_eq!(BarDataType::from_api_str(api).unwrap().as_str(), name, "{}", api);
+        }
+        for bad in ["", "TRADE", "REBATE_RATE", "OPTION_VOLUME"] {
+            assert_eq!(BarDataType::from_api_str(bad).unwrap_err(), format!("What to show value of {} rejected.", bad));
+        }
+    }
+
+    #[test]
+    fn combine_yield_bid_ask_like_bid_ask() {
+        let bars = combine_bid_ask(&[
+            (BarDataType::YieldBid, vec![leg("t1", 4.2, 4.0, 4.1)]),
+            (BarDataType::YieldAsk, vec![leg("t1", 4.5, 4.3, 4.4)]),
+        ]);
+        assert_eq!((bars[0].open, bars[0].high, bars[0].low, bars[0].close), (4.1, 4.5, 4.0, 4.4));
+    }
+
+    #[test]
+    fn bar_size_reference_table_case_insensitive() {
+        for (api, wire) in [
+            ("1 secs", "1 secs"), ("1 Min", "1 min"), ("1 DAY", "1 day"), ("2 Hours", "2 hours"),
+            ("1W", "1W"), ("1 W", "1W"), ("1 week", "1W"), ("1M", "1M"), ("1 m", "1M"),
+            ("1 month", "1M"), ("3 months", "3 months"), ("1 year", "1 year"),
+        ] {
+            assert_eq!(BarSize::from_api_str(api).unwrap().as_str(), wire, "{}", api);
+        }
+        for bad in ["1 sec", "1 mins", "1 hours", "7 mins", "1min", ""] {
+            let err = BarSize::from_api_str(bad).unwrap_err();
+            assert!(err.starts_with("Historical data bar size setting is invalid. Legal ones are: 1 secs, 5 secs"), "{}", err);
+        }
+    }
+
+    #[test]
+    fn duration_reference_rules() {
+        assert_eq!(normalize_duration("1 D").unwrap(), "1 d");
+        assert_eq!(normalize_duration("1800 S").unwrap(), "1800 S");
+        assert_eq!(normalize_duration("1800 s").unwrap(), "1800 S");
+        assert_eq!(normalize_duration("3600").unwrap(), "3600 S");
+        assert_eq!(normalize_duration("2 w").unwrap(), "2 W");
+        assert_eq!(normalize_duration("1 M").unwrap(), "1 m");
+        assert_eq!(normalize_duration("5 Y").unwrap(), "5 y");
+        assert_eq!(normalize_duration("365 D").unwrap(), "365 d");
+        let err = |d: &str| normalize_duration(d).unwrap_err();
+        assert_eq!(err(""), "Historical data request duration not specified.");
+        for bad in ["1 day", "1D", "1  D", "D", "1 X", "-1 D"] {
+            assert!(err(bad).starts_with("When specifying a unit"), "{}: {}", bad, err(bad));
+        }
+        assert_eq!(err("0 D"), "Historical data requested duration is invalid.");
+        assert_eq!(err("29 S"), "Historical data requested duration is invalid.");
+        assert_eq!(err("99999999999 S"), "Historical data requested duration is invalid.");
+        assert_eq!(err("86401 S"), "Historical data request for greater than 86400 seconds rejected.");
+        assert_eq!(err("400 D"), "Historical data requests for durations longer than 365 days must be made in years.");
+        assert_eq!(err("53 W"), "Historical data request for durations longer than 52 weeks must be made in years.");
+        assert_eq!(err("13 M"), "Historical data request for durations longer than 12 months must be made in years.");
+    }
+
+    #[test]
+    fn end_date_reference_forms() {
+        for ok in ["", "20260102-15:00:00", "20260102 10:00:00", "20260102 10:00:00 US/Eastern",
+                   "20260102 10:00:00 UTC", "10:00:00", "10:00:00 US/Eastern"] {
+            assert!(is_valid_end_date(ok), "{:?}", ok);
+        }
+        for bad in ["20260102", "2026-01-02", "20261302 10:00:00", "20260102 25:00:00",
+                    "20260102 10:00", "19770102 10:00:00", "yesterday", "20260102 10:00:00 20260103"] {
+            assert!(!is_valid_end_date(bad), "{:?}", bad);
+        }
+    }
+
+    #[test]
+    fn check_bar_request_order_and_codes() {
+        let ok = check_bar_request("", "3600", "1 Min", "trades", Some(1)).unwrap();
+        assert_eq!(ok, CheckedBarRequest { data_type: BarDataType::Trades, bar_size: BarSize::Min1, duration: "3600 S".into() });
+        let code = |r: Result<CheckedBarRequest, (i32, String)>| r.unwrap_err();
+        assert_eq!(code(check_bar_request("garbage", "1 D", "1 day", "TRADES", None)).0, 10314);
+        assert_eq!(code(check_bar_request("", "400 D", "1 day", "TRADES", None)),
+            (321, "Error validating request.-'bM' : cause - Historical data requests for durations longer than 365 days must be made in years.".to_string()));
+        assert_eq!(code(check_bar_request("20260102 10:00:00", "1 D", "1 hour", "ADJUSTED_LAST", None)).1,
+            "Error validating request.-'bM' : cause - End date not supported with adjusted last");
+        assert_eq!(code(check_bar_request("", "1 Y", "1 week", "ADJUSTED_LAST", None)).1,
+            "Error validating request.-'bM' : cause - Multi day bar size not supported with adjusted last");
+        assert!(check_bar_request("", "1 Y", "1 day", "ADJUSTED_LAST", None).is_ok());
+        assert_eq!(code(check_bar_request("", "1 D", "1 sec", "TRADES", None)).0, 321);
+        assert_eq!(code(check_bar_request("", "1 D", "1 day", "YIELD", None)).1,
+            "Error validating request.-'bM' : cause - What to show value of YIELD rejected.");
+        assert_eq!(code(check_bar_request("", "1 D", "1 day", "TRADES", Some(4))).1,
+            "Error validating request.-'bM' : cause - Date formatting selection of 4 rejected.");
+        assert_eq!(code(check_bar_request("", "1 M", "1 hour", "SCHEDULE", None)).1,
+            "Error validating request.-'bM' : cause - Only daily resolution supported for Schedule requests");
+        assert!(check_bar_request("", "1 M", "1 day", "SCHEDULE", None).is_ok());
+        // The issue's checks: 1 year and 3 months bars over 5 Y.
+        assert!(check_bar_request("", "5 Y", "1 year", "TRADES", None).is_ok());
+        assert!(check_bar_request("", "5 Y", "3 months", "TRADES", None).is_ok());
     }
 
     // ibx#408: BID_ASK bars from the Bid leg and the Ask leg.
@@ -1033,7 +1338,7 @@ mod tests {
             "1 secs", "5 secs", "10 secs", "15 secs", "30 secs",
             "1 min", "2 mins", "3 mins", "5 mins", "10 mins", "15 mins",
             "20 mins", "30 mins", "1 hour", "2 hours", "3 hours", "4 hours",
-            "8 hours", "1 day", "1 week", "1 month",
+            "8 hours", "1 day", "1 week", "1 month", "3 months", "1 year",
         ];
         for s in all {
             assert!(BarSize::from_api_str(s).is_ok(), "'{}' must parse", s);
@@ -1042,11 +1347,11 @@ mod tests {
     }
 
     #[test]
-    fn bar_size_from_api_str_rejects_unknown_and_wrong_case() {
-        // The issue's exact repro: "1 Min" silently became 5-minute bars.
-        for s in ["1 Min", "1min", "1 minute", "7 mins", ""] {
+    fn bar_size_from_api_str_rejects_unknown() {
+        // ibx#232: an unknown size is refused, never replaced by 5 minutes.
+        for s in ["1min", "1 minute", "7 mins", ""] {
             let err = BarSize::from_api_str(s).unwrap_err();
-            assert!(err.contains("bar_size"), "'{}' -> {}", s, err);
+            assert!(err.contains("bar size setting is invalid"), "'{}' -> {}", s, err);
         }
     }
 
@@ -1064,7 +1369,8 @@ mod tests {
     fn bar_data_type_from_api_str() {
         assert_eq!(BarDataType::from_api_str("TRADES").unwrap(), BarDataType::Trades);
         assert_eq!(BarDataType::from_api_str("trades").unwrap(), BarDataType::Trades);
-        assert_eq!(BarDataType::from_api_str("").unwrap(), BarDataType::Trades);
+        // ibx#430: an empty value is not TRADES for the reference.
+        assert!(BarDataType::from_api_str("").is_err());
         assert_eq!(BarDataType::from_api_str("BID_ASK").unwrap(), BarDataType::BidAsk);
         // A misspelled value used to quietly return trade bars.
         assert!(BarDataType::from_api_str("TRADE").is_err());
