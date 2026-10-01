@@ -972,7 +972,9 @@ fn api_gt_suite() {
     {
         print!("  req_historical_news (AAPL)... ");
         wrapper.drain();
-        client.req_historical_news(480, 265598, "BRFG+DJNL+BRFUPDN+BZ+FLY", "", "", 5).unwrap();
+        // Subscribed providers only: the reference refuses a provider that
+        // carries service ids in the logon source list (321).
+        client.req_historical_news(480, 265598, "BRFG+DJNL+BRFUPDN", "", "", 5).unwrap();
         poll_until(&client, &mut wrapper,
             |cbs| cbs.iter().any(|c| matches!(c, Cb::HistoricalNewsEnd { .. } | Cb::Error { .. })),
             Duration::from_secs(15));
