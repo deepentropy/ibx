@@ -2173,6 +2173,67 @@ mod tests {
         assert!(engine.hmds_next_attempt_at.is_some(), "reconnect must be scheduled");
     }
 
+    /// A keyed connection and its server side, plus a frame the server
+    /// signed whose signature value was then changed.
+    fn conn_with_bad_signed_frame() -> (Connection, std::net::TcpStream, Vec<u8>) {
+        let (client, server) = socket_pair();
+        let mac_key: Vec<u8> = (0..20).collect();
+        let iv: Vec<u8> = (0..16).collect();
+        let mut conn = Connection::new_raw(client).unwrap();
+        conn.set_keys(Vec::new(), Vec::new(), mac_key.clone(), iv.clone());
+        let (mut signed, _) = fix::fix_sign(&fix::fix_build(&[(35, "0")], 1), &mac_key, &iv);
+        let pos = signed.windows(5).position(|w| w == b"8349=").unwrap() + 5;
+        signed[pos] = if signed[pos] == b'0' { b'1' } else { b'0' };
+        (conn, server, signed)
+    }
+
+    // ibx#275: a signature mismatch on the market-data farm drops the
+    // connection and schedules the normal reconnect.
+    #[test]
+    fn a_farm_signature_mismatch_drops_the_connection() {
+        use std::io::{Read, Write};
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared, None, None);
+        engine.set_reconnect_auth(reconnect_auth_with_host("gw.example"));
+        let (conn, mut server, bad) = conn_with_bad_signed_frame();
+        engine.farm_conn = Some(conn);
+        server.write_all(&bad).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !engine.farm.disconnected && Instant::now() < deadline {
+            engine.poll_farm_for_test();
+        }
+        assert!(engine.farm.disconnected, "mismatch must drop the farm");
+        // The socket is closed: the server side reads end of stream.
+        server.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut buf = [0u8; 16];
+        assert_eq!(server.read(&mut buf).unwrap_or(0), 0, "socket closed");
+        engine.maybe_spawn_farm_reconnect();
+        assert!(engine.farm_next_attempt_at.is_some(), "reconnect scheduled");
+    }
+
+    // ibx#275: same on the historical connection: the socket is dropped and
+    // the reconnect loop re-dials it.
+    #[test]
+    fn an_hmds_signature_mismatch_drops_the_connection() {
+        use std::io::Write;
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.set_reconnect_auth(reconnect_auth_with_host("gw.example"));
+        let (conn, mut server, bad) = conn_with_bad_signed_frame();
+        engine.hmds_conn = Some(conn);
+        server.write_all(&bad).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !engine.hmds.disconnected && Instant::now() < deadline {
+            engine.hmds.poll(&mut engine.hmds_conn, &shared, &None, &mut engine.hb);
+        }
+        assert!(engine.hmds.disconnected, "mismatch must drop the historical connection");
+        assert!(engine.hmds_conn.is_none(), "socket dropped");
+        engine.maybe_spawn_hmds_reconnect();
+        assert!(engine.hmds_next_attempt_at.is_some(), "reconnect scheduled");
+    }
+
     fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();

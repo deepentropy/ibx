@@ -590,7 +590,7 @@ impl CcpState {
         account_id: &str,
     ) {
         if self.disconnected { return; }
-        let messages = match ccp_conn.as_mut() {
+        let (messages, bad_signature) = match ccp_conn.as_mut() {
             None => return,
             Some(conn) => {
                 match conn.try_recv() {
@@ -613,10 +613,12 @@ impl CcpState {
                 }
                 let frames = conn.extract_frames();
                 let mut msgs = Vec::new();
+                let mut bad_signature = false;
                 for frame in frames {
                     match frame {
                         Frame::FixComp(raw) => {
-                            let (unsigned, _) = conn.unsign(&raw);
+                            let (unsigned, valid) = conn.unsign(&raw);
+                            if !valid { bad_signature = true; break; }
                             match fixcomp::fixcomp_decompress(&unsigned) {
                                 Ok(inner) => {
                                     if log::log_enabled!(log::Level::Trace) {
@@ -635,14 +637,16 @@ impl CcpState {
                             }
                         }
                         Frame::Fix(raw) => {
-                            let (unsigned, _) = conn.unsign(&raw);
+                            let (unsigned, valid) = conn.unsign(&raw);
+                            if !valid { bad_signature = true; break; }
                             if log::log_enabled!(log::Level::Trace) {
                                 log::trace!("WIRE< ccp/fix {}", fix::fmt_pipe(&unsigned));
                             }
                             msgs.push(unsigned);
                         }
                         Frame::Binary(raw) => {
-                            let (unsigned, _) = conn.unsign(&raw);
+                            let (unsigned, valid) = conn.unsign(&raw);
+                            if !valid { bad_signature = true; break; }
                             if log::log_enabled!(log::Level::Trace) {
                                 log::trace!("WIRE< ccp/bin {}", fix::fmt_pipe(&unsigned));
                             }
@@ -653,11 +657,20 @@ impl CcpState {
                         }
                     }
                 }
-                msgs
+                (msgs, bad_signature)
             }
         };
         for msg in &messages {
             self.process_ccp_message(msg, ccp_conn, context, shared, event_tx, hb, account_id);
+        }
+        // A signature mismatch drops the connection, as the reference does;
+        // the reconnect path follows (ibx#275).
+        if bad_signature {
+            log::error!("CCP frame signature mismatch: connection dropped, reconnecting");
+            if let Some(conn) = ccp_conn.as_mut() {
+                conn.shutdown();
+            }
+            self.handle_disconnect(context, event_tx);
         }
     }
 

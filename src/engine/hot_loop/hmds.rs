@@ -120,7 +120,7 @@ impl HmdsState {
         hb: &mut HeartbeatState,
     ) {
         if self.disconnected { return; }
-        let messages = match hmds_conn.as_mut() {
+        let (messages, bad_signature) = match hmds_conn.as_mut() {
             None => return,
             Some(conn) => {
                 match conn.try_recv() {
@@ -153,10 +153,12 @@ impl HmdsState {
                     conn.buffered(),
                 );
                 let mut msgs = Vec::new();
+                let mut bad_signature = false;
                 for frame in &frames {
                     match frame {
                         Frame::FixComp(raw) => {
-                            let (unsigned, _valid) = conn.unsign(raw);
+                            let (unsigned, valid) = conn.unsign(raw);
+                            if !valid { bad_signature = true; break; }
                             match fixcomp::fixcomp_decompress(&unsigned) {
                                 Ok(inner) => {
                                     if log::log_enabled!(log::Level::Trace) {
@@ -175,14 +177,16 @@ impl HmdsState {
                             }
                         }
                         Frame::Binary(raw) => {
-                            let (unsigned, _valid) = conn.unsign(raw);
+                            let (unsigned, valid) = conn.unsign(raw);
+                            if !valid { bad_signature = true; break; }
                             if log::log_enabled!(log::Level::Trace) {
                                 log::trace!("WIRE< hmds/bin {}", crate::protocol::fix::fmt_pipe(&unsigned));
                             }
                             msgs.push(unsigned);
                         }
                         Frame::Fix(raw) => {
-                            let (unsigned, _valid) = conn.unsign(raw);
+                            let (unsigned, valid) = conn.unsign(raw);
+                            if !valid { bad_signature = true; break; }
                             if log::log_enabled!(log::Level::Trace) {
                                 log::trace!("WIRE< hmds/fix {}", crate::protocol::fix::fmt_pipe(&unsigned));
                             }
@@ -193,11 +197,21 @@ impl HmdsState {
                         }
                     }
                 }
-                msgs
+                (msgs, bad_signature)
             }
         };
         for msg in &messages {
             self.process_hmds_message(msg, hmds_conn, shared, event_tx, hb);
+        }
+        // A signature mismatch drops the connection, as the reference does;
+        // with no socket held the reconnect loop re-dials it (ibx#275).
+        if bad_signature {
+            log::error!("HMDS frame signature mismatch: connection dropped, reconnecting");
+            if let Some(conn) = hmds_conn.as_mut() {
+                conn.shutdown();
+            }
+            self.disconnected = true;
+            *hmds_conn = None;
         }
     }
 

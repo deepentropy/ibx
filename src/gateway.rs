@@ -324,10 +324,16 @@ pub fn farm_logon_exchange(
 
         // FIX.4.1 message
         if msg.starts_with(b"8=FIX.4.1\x01") {
-            let has_sig = msg.windows(5).any(|w| w == b"8349=");
-            // Check for HMAC signature → unsign
-            let parsed_msg = if has_sig {
-                let (unsigned, new_iv, _valid) = fix::fix_unsign(&msg, read_mac_key, &read_iv);
+            // A signed frame is verified; on a mismatch the logon fails and
+            // the IV is not advanced, as in the reference (ibx#275).
+            let parsed_msg = if fix::is_signed(&msg) {
+                let (unsigned, new_iv, valid) = fix::fix_unsign(&msg, read_mac_key, &read_iv);
+                if !valid {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "farm logon: frame signature mismatch",
+                    ));
+                }
                 read_iv = new_iv;
                 unsigned
             } else {
@@ -636,7 +642,10 @@ pub fn connect_farm(
     for frame in &frames {
         match frame {
             crate::protocol::connection::Frame::FixComp(raw) => {
-                let (unsigned, _valid) = conn.unsign(raw);
+                let (unsigned, valid) = conn.unsign(raw);
+                if !valid {
+                    return Err(signature_mismatch(farm_id));
+                }
                 let inner = fixcomp::fixcomp_decompress(&unsigned).unwrap_or_else(|e| {
                     log::warn!("{}: dropping malformed FIXCOMP frame: {}", farm_id, e);
                     Vec::new()
@@ -657,7 +666,10 @@ pub fn connect_farm(
                 }
             }
             crate::protocol::connection::Frame::Fix(raw) => {
-                let (unsigned, _valid) = conn.unsign(raw);
+                let (unsigned, valid) = conn.unsign(raw);
+                if !valid {
+                    return Err(signature_mismatch(farm_id));
+                }
                 let parsed = fix_parse(&unsigned);
                 let mt = parsed.get(&35).map(|s| s.as_str()).unwrap_or("");
                 log::debug!("{} routing FIX 35={}", farm_id, mt);
@@ -672,7 +684,10 @@ pub fn connect_farm(
                 }
             }
             crate::protocol::connection::Frame::Binary(raw) => {
-                let (_unsigned, _valid) = conn.unsign(raw);
+                let (_unsigned, valid) = conn.unsign(raw);
+                if !valid {
+                    return Err(signature_mismatch(farm_id));
+                }
                 log::info!("{} routing 8=O: {} bytes", farm_id, raw.len());
             }
             crate::protocol::connection::Frame::Control(raw) => {
@@ -685,6 +700,11 @@ pub fn connect_farm(
         log::info!("{} post-logon frames: {} frames, seq now {}", farm_id, frames.len(), conn.seq);
     }
     Ok(conn)
+}
+
+/// Error of a frame whose signature does not match on `farm_id` (ibx#275).
+fn signature_mismatch(farm_id: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("{}: frame signature mismatch", farm_id))
 }
 
 /// Reconnect to the CCP (order/auth) server using cached session credentials.

@@ -316,6 +316,18 @@ pub fn fix_sign(msg: &[u8], mac_key: &[u8], iv: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (new_msg, new_iv.to_vec())
 }
 
+/// True when the signature field is the last field of `msg` (the checksum
+/// excepted). This is how the reference tells a signed frame from an
+/// unsigned one; an unsigned frame is accepted as it is (ibx#275).
+pub fn is_signed(msg: &[u8]) -> bool {
+    let end = if msg.starts_with(b"8=FIX.4.1") { msg.len().saturating_sub(7) } else { msg.len() };
+    if end < 15 {
+        return false;
+    }
+    let trailer = &msg[end - 15..end];
+    trailer[0] == SOH && &trailer[1..6] == b"8349=" && trailer[14] == SOH
+}
+
 /// Un-distort and verify a signed FIX message.
 ///
 /// Returns (undistorted_msg, new_iv, signature_valid).
@@ -568,6 +580,26 @@ mod tests {
         let (_, new_iv2, valid) = fix_unsign(&signed, &mac_key, &iv);
         assert!(valid);
         assert_eq!(new_iv, new_iv2);
+    }
+
+    // ibx#275: a frame is signed only when it ends with the signature
+    // trailer (before the checksum of a FIX.4.1 message).
+    #[test]
+    fn is_signed_needs_the_trailer() {
+        let mac_key: Vec<u8> = (0..20).collect();
+        let iv: Vec<u8> = (0..16).collect();
+        let msg = fix_build(&[(35, "0")], 1);
+        assert!(!is_signed(&msg));
+        let (signed, _) = fix_sign(&msg, &mac_key, &iv);
+        assert!(is_signed(&signed));
+        let comp = crate::protocol::fixcomp::fixcomp_build(&msg);
+        let (signed_comp, _) = fix_sign(&comp, &mac_key, &iv);
+        assert!(is_signed(&signed_comp));
+        // The tag inside the body is not a signature.
+        let inside = fix_build(&[(35, "U"), (58, "x\x018349=ABCDEF01\x01y")], 1);
+        assert!(!is_signed(&inside));
+        assert!(!is_signed(b""));
+        assert!(!is_signed(b"8=FIX.4.1\x01"));
     }
 
     #[test]

@@ -277,19 +277,36 @@ impl Connection {
         frames
     }
 
-    /// Unsign a received frame using the read IV. Chains the IV.
+    /// Unsign a received frame using the read IV.
     /// Returns the undistorted message bytes and whether the signature was valid.
+    ///
+    /// As in the reference (ibx#275): a frame without the signature trailer
+    /// is unsigned and accepted as it is; the read IV advances only after a
+    /// signature match. On a mismatch the caller must drop the connection
+    /// and reconnect; the frame must not be used.
     pub fn unsign(&mut self, msg: &[u8]) -> (Vec<u8>, bool) {
         if self.read_key.is_empty() {
             return (msg.to_vec(), true); // no signing configured
         }
-        // Only unsign if 8349= HMAC tag is present (matching Python _unsign_conn)
-        if !msg.windows(5).any(|w| w == b"8349=") {
+        if !fix::is_signed(msg) {
             return (msg.to_vec(), true);
         }
         let (undistorted, new_iv, valid) = fix::fix_unsign(msg, &self.read_key, &self.read_iv);
-        self.read_iv = new_iv;
+        if valid {
+            self.read_iv = new_iv;
+        }
         (undistorted, valid)
+    }
+
+    /// Close the socket in both directions, for a connection that must not
+    /// be read any more (signature mismatch, ibx#275). Errors are ignored:
+    /// the socket may be closed already.
+    pub fn shutdown(&mut self) {
+        let tcp = match &self.stream {
+            Stream::Tls(s) => s.get_ref(),
+            Stream::Raw(s) => s,
+        };
+        let _ = tcp.shutdown(std::net::Shutdown::Both);
     }
 
     /// Build a FIX message, sign it, and send it. Increments seq and chains sign IV.
@@ -699,5 +716,46 @@ mod tests {
     fn find_subsequence_empty_needle() {
         // windows(0) panics, so empty needle panics
         find_subsequence(b"hello", b"");
+    }
+
+    fn keyed_conn(mac_key: &[u8], iv: &[u8]) -> (Connection, TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let mut conn = Connection::new_raw(client).unwrap();
+        conn.set_keys(Vec::new(), Vec::new(), mac_key.to_vec(), iv.to_vec());
+        (conn, server)
+    }
+
+    /// `msg` signed with its signature value changed (body intact).
+    fn bad_signature(signed: &[u8]) -> Vec<u8> {
+        let mut bad = signed.to_vec();
+        let pos = find_subsequence(&bad, b"8349=").unwrap() + 5;
+        bad[pos] = if bad[pos] == b'0' { b'1' } else { b'0' };
+        bad
+    }
+
+    // ibx#275: the read IV advances only after a match; an unsigned frame
+    // is accepted and leaves the IV as it is.
+    #[test]
+    fn unsign_advances_the_iv_only_after_a_match() {
+        let mac_key: Vec<u8> = (0..20).collect();
+        let iv: Vec<u8> = (0..16).collect();
+        let (mut conn, _server) = keyed_conn(&mac_key, &iv);
+        let (signed, next_iv) = fix::fix_sign(&fix_build(&[(35, "0")], 1), &mac_key, &iv);
+
+        let (_, valid) = conn.unsign(&bad_signature(&signed));
+        assert!(!valid, "tampered signature detected");
+        assert_eq!(conn.read_iv, iv, "IV kept after a mismatch");
+
+        let unsigned = fix_build(&[(35, "0")], 2);
+        let (out, valid) = conn.unsign(&unsigned);
+        assert!(valid);
+        assert_eq!(out, unsigned);
+        assert_eq!(conn.read_iv, iv, "IV kept for an unsigned frame");
+
+        let (_, valid) = conn.unsign(&signed);
+        assert!(valid);
+        assert_eq!(conn.read_iv, next_iv, "IV advanced after a match");
     }
 }

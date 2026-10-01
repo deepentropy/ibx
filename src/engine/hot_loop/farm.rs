@@ -125,6 +125,7 @@ impl FarmState {
             return;
         }
         self.farm_msg_buf.clear();
+        let mut bad_signature = false;
         {
             let conn = match farm_conn.as_mut() {
                 None => return,
@@ -150,7 +151,8 @@ impl FarmState {
             for frame in &frames {
                 match frame {
                     Frame::FixComp(raw) => {
-                        let (unsigned, _valid) = conn.unsign(raw);
+                        let (unsigned, valid) = conn.unsign(raw);
+                        if !valid { bad_signature = true; break; }
                         match fixcomp::fixcomp_decompress(&unsigned) {
                             Ok(inner) => {
                                 if log::log_enabled!(log::Level::Trace) {
@@ -169,14 +171,16 @@ impl FarmState {
                         }
                     }
                     Frame::Binary(raw) => {
-                        let (unsigned, _valid) = conn.unsign(raw);
+                        let (unsigned, valid) = conn.unsign(raw);
+                        if !valid { bad_signature = true; break; }
                         if log::log_enabled!(log::Level::Trace) {
                             log::trace!("WIRE< farm/bin {}", fix::fmt_pipe(&unsigned));
                         }
                         self.farm_msg_buf.push(unsigned);
                     }
                     Frame::Fix(raw) => {
-                        let (unsigned, _valid) = conn.unsign(raw);
+                        let (unsigned, valid) = conn.unsign(raw);
+                        if !valid { bad_signature = true; break; }
                         if log::log_enabled!(log::Level::Trace) {
                             log::trace!("WIRE< farm/fix {}", fix::fmt_pipe(&unsigned));
                         }
@@ -195,6 +199,17 @@ impl FarmState {
         }
         msgs.clear();
         self.farm_msg_buf = msgs;
+
+        // A signature mismatch drops the connection, as the reference does;
+        // the frames before it were handled, the reconnect path follows
+        // (ibx#275).
+        if bad_signature {
+            log::error!("Farm frame signature mismatch: connection dropped, reconnecting");
+            if let Some(conn) = farm_conn.as_mut() {
+                conn.shutdown();
+            }
+            self.handle_disconnect(context, event_tx);
+        }
     }
 
     pub(crate) fn process_farm_message(
