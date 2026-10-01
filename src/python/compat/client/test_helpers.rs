@@ -391,4 +391,11 @@ impl EClient {
         let tx = tx.as_ref().ok_or_else(|| PyRuntimeError::new_err("No event channel"))?;
         tx.send(Event::Disconnected).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))
     }
+
+    /// Queue a link status notice, as the engine does (test-only).
+    #[doc(hidden)]
+    fn _test_push_connection_notice(&self, code: i64, message: &str) -> PyResult<()> {
+        self.shared_state()?.push_connection_notice(code, message.to_string());
+        Ok(())
+    }
 }

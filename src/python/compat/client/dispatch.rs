@@ -162,14 +162,19 @@ impl EClient {
 
     /// Single iteration of event dispatch: drain all shared queues and fire Python callbacks.
     pub(crate) fn dispatch_once(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
-        // Drain engine events — surface disconnects as error callbacks.
-        if let Some(rx) = self.event_rx.lock().unwrap().as_ref() {
-            while let Ok(event) = rx.try_recv() {
-                if matches!(event, Event::Disconnected) {
-                    call_wrapper!(self.wrapper, py, "error", (-1i64, 1100i64, "Connectivity between client and server has been lost", ""));
-                    self.connected.store(false, Ordering::Release);
-                }
-            }
+        // Drain engine events. The lock is held only to drain, never across
+        // a callback, so a callback may call disconnect() or connect()
+        // (ibx#268). A stopped engine ends the session: run() exits and
+        // fires connection_closed, with no error code. A lost link is not
+        // this event; it comes as a connection notice below.
+        let engine_stopped = {
+            let guard = self.event_rx.lock().unwrap();
+            guard.as_ref().is_some_and(|rx| {
+                rx.try_iter().fold(false, |stopped, event| stopped | matches!(event, Event::Disconnected))
+            })
+        };
+        if engine_stopped {
+            self.connected.store(false, Ordering::Release);
         }
 
         // Link lost / restored and farm status (ibx#399): errors with id -1.
