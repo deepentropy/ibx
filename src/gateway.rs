@@ -538,6 +538,10 @@ pub struct Gateway {
     pub farm_name: String,
     /// Host of the market-data farm, for the farm reconnect (ibx#295).
     pub farm_host: String,
+    /// Rows of the routing tables of the two primary farms, when they came
+    /// with the logon (#445). A table that comes later is read by the loop.
+    pub md_routing: Option<String>,
+    pub hmds_routing: Option<String>,
 }
 
 /// Request ids of the routing-table requests: one process-wide counter
@@ -561,6 +565,27 @@ pub fn connect_farm(
     encoded: &str,
     slot: u32,
 ) -> io::Result<Connection> {
+    connect_farm_ex(host, farm_id, username, password, paper, server_session_id, session_key,
+        hw_info, encoded, slot, true).map(|(conn, _)| conn)
+}
+
+/// [`connect_farm`], with the routing table request only when `routing`
+/// is set: the reference asks for it on the two primary farms, never on a
+/// farm opened on demand (#445). Also returns the rows of the table when
+/// its answer came with the logon.
+pub fn connect_farm_ex(
+    host: &str,
+    farm_id: &str,
+    username: &str,
+    password: &str,
+    paper: bool,
+    server_session_id: &str,
+    session_key: &BigUint,
+    hw_info: &str,
+    encoded: &str,
+    slot: u32,
+    routing: bool,
+) -> io::Result<(Connection, Option<String>)> {
     let port = misc_port();
     let farm_host = farm_host_override().unwrap_or_else(|| host.to_string());
     log::info!("Connecting to {} {}:{}", farm_id, farm_host, port);
@@ -619,51 +644,55 @@ pub fn connect_farm(
 
     // Send routing table request after logon. Its request id is a unique
     // counter, as in the reference; it is not derived from the farm name
-    // (ibx#253).
-    let request_id = next_routing_request_id().to_string();
-    let now = chrono_free_timestamp();
-    let routing_msg = fix_build(&[
-        (fix::TAG_MSG_TYPE, "U"),
-        (fix::TAG_SENDING_TIME, &now),
-        (6040, "112"),
-        (6556, &request_id),
-    ], 1);
-    let wrapped = fixcomp::fixcomp_build(&routing_msg);
-
-    let (signed, new_sign_iv) = fix::fix_sign(&wrapped, &sign_mac_key, &sign_iv);
-    stream.write_all(&signed)?;
-    let final_sign_iv = new_sign_iv;
-    log::info!("{} sent routing request (6556={})", farm_id, request_id);
-
-    // Read routing response. Frame-based termination: poll with a short
-    // timeout, break as soon as we have at least one complete FIXCOMP frame
-    // buffered. The 5-s read timeout remains as the worst-case fallback.
-    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    // (ibx#253). A farm opened on demand is not asked (#445).
+    let mut final_sign_iv = sign_iv.clone();
     let mut resp_buf = Vec::new();
-    let routing_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let mut tmp = [0u8; 8192];
-        match stream.read(&mut tmp) {
-            Ok(0) => break,
-            Ok(n) => {
-                resp_buf.extend_from_slice(&tmp[..n]);
-                if has_complete_response_frame(&resp_buf) { break; }
+    if routing {
+        let request_id = next_routing_request_id().to_string();
+        let now = chrono_free_timestamp();
+        let routing_msg = fix_build(&[
+            (fix::TAG_MSG_TYPE, "U"),
+            (fix::TAG_SENDING_TIME, &now),
+            (6040, "112"),
+            (6556, &request_id),
+        ], 1);
+        let wrapped = fixcomp::fixcomp_build(&routing_msg);
+
+        let (signed, new_sign_iv) = fix::fix_sign(&wrapped, &sign_mac_key, &sign_iv);
+        stream.write_all(&signed)?;
+        final_sign_iv = new_sign_iv;
+        log::info!("{} sent routing request (6556={})", farm_id, request_id);
+
+        // Read routing response. Frame-based termination: poll with a short
+        // timeout, break as soon as we have at least one complete FIXCOMP frame
+        // buffered. The 5-s read timeout remains as the worst-case fallback.
+        stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let routing_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut tmp = [0u8; 8192];
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => {
+                    resp_buf.extend_from_slice(&tmp[..n]);
+                    if has_complete_response_frame(&resp_buf) { break; }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    if has_complete_response_frame(&resp_buf) { break; }
+                    if std::time::Instant::now() >= routing_deadline { break; }
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock
-                || e.kind() == io::ErrorKind::TimedOut =>
-            {
-                if has_complete_response_frame(&resp_buf) { break; }
-                if std::time::Instant::now() >= routing_deadline { break; }
-            }
-            Err(e) => return Err(e),
         }
+        log::info!("{} routing response: {} bytes", farm_id, resp_buf.len());
     }
-    log::info!("{} routing response: {} bytes", farm_id, resp_buf.len());
 
     // Create Connection (switches to non-blocking), inject routing bytes
     let mut conn = Connection::new_raw(stream)?;
     conn.set_keys(sign_mac_key, final_sign_iv, read_mac_key, read_iv);
-    conn.seq = 1; // routing request was seq=1; next send_fix will be seq=2
+    // The routing request was seq=1; the next send_fix is seq=2.
+    conn.seq = if routing { 1 } else { 0 };
 
     // Inject logon remaining bytes + routing response into connection buffer.
     // Python processes logon remaining before routing, but both need read_iv chaining.
@@ -674,6 +703,7 @@ pub fn connect_farm(
         conn.inject_buf(&resp_buf);
     }
     // Extract and process all frames (unsign + respond to TestRequests, like Python).
+    let mut table = None;
     let frames = conn.extract_frames();
     for frame in &frames {
         match frame {
@@ -720,11 +750,14 @@ pub fn connect_farm(
                 }
             }
             crate::protocol::connection::Frame::Binary(raw) => {
-                let (_unsigned, valid) = conn.unsign(raw);
+                let (unsigned, valid) = conn.unsign(raw);
                 if !valid {
                     return Err(signature_mismatch(farm_id));
                 }
                 log::info!("{} routing 8=O: {} bytes", farm_id, raw.len());
+                if let Some(text) = crate::engine::routing::table_text(&unsigned) {
+                    table = Some(text);
+                }
             }
             crate::protocol::connection::Frame::Control(raw) => {
                 // 8=1 / 8=X control state — extracted, not routed (ibx#185).
@@ -735,7 +768,7 @@ pub fn connect_farm(
     if !frames.is_empty() {
         log::info!("{} post-logon frames: {} frames, seq now {}", farm_id, frames.len(), conn.seq);
     }
-    Ok(conn)
+    Ok((conn, table))
 }
 
 /// Error of a frame whose signature does not match on `farm_id` (ibx#275).
@@ -1865,21 +1898,21 @@ impl Gateway {
             let hw = &hw_info;
             let enc = &encoded;
             let trading_handle = scope.spawn(move || {
-                connect_farm(&trading_host, &trading_farm, username, password,
-                    paper, ssid, token, hw, enc, 18)
+                connect_farm_ex(&trading_host, &trading_farm, username, password,
+                    paper, ssid, token, hw, enc, 18, true)
             });
             let mktdata_handle = scope.spawn(move || {
-                connect_farm(&mktdata_host, &mktdata_farm, username, password,
-                    paper, ssid, token, hw, enc, 17)
+                connect_farm_ex(&mktdata_host, &mktdata_farm, username, password,
+                    paper, ssid, token, hw, enc, 17, true)
             });
             let trading = trading_handle.join().expect("trading farm thread panicked");
             let mktdata = mktdata_handle.join().expect("mktdata farm thread panicked");
             (trading, mktdata)
         });
-        let farm_conn = farm_conn?;
-        let hmds_conn = match hmds_conn {
-            Ok(c) => { log::info!("Historical data farm connected"); Some(c) }
-            Err(e) => { log::warn!("Historical data farm connection failed (non-fatal): {}", e); None }
+        let (farm_conn, md_routing) = farm_conn?;
+        let (hmds_conn, hmds_routing) = match hmds_conn {
+            Ok((c, table)) => { log::info!("Historical data farm connected"); (Some(c), table) }
+            Err(e) => { log::warn!("Historical data farm connection failed (non-fatal): {}", e); (None, None) }
         };
 
         let gw = Gateway {
@@ -1914,6 +1947,8 @@ impl Gateway {
             session_epoch,
             farm_name,
             farm_host,
+            md_routing,
+            hmds_routing,
         };
         Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
@@ -2052,6 +2087,12 @@ impl Gateway {
         hot_loop.ccp.ccp_sign_key = self.ccp_sign_key.clone();
         hot_loop.ccp.ccp_sign_iv = std::sync::Mutex::new(self.ccp_sign_iv.clone());
         hot_loop.hmds_conn = hmds_conn;
+        if let Some(text) = &self.md_routing {
+            hot_loop.set_routing_table(crate::engine::routing::TableKind::MarketData, text);
+        }
+        if let Some(text) = &self.hmds_routing {
+            hot_loop.set_routing_table(crate::engine::routing::TableKind::Historical, text);
+        }
         (hot_loop, tx)
     }
 }

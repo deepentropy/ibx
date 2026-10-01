@@ -88,6 +88,11 @@ pub(crate) struct HmdsState {
     /// Drained by the engine top-level after each hmds.poll, then handed to
     /// `CcpState::start_scanner_enrichment`.
     pub(crate) cold_scanner_results: Vec<(u32, crate::control::scanner::ScannerResult)>,
+    /// The historical routing table of the logon (#445); None until it
+    /// came.
+    pub(crate) routing: Option<crate::engine::routing::RoutingTable>,
+    /// The farm the messages being handled came from (#445).
+    pub(crate) rx_farm: super::pool::FarmId,
 }
 
 /// A stream of 5-second bars (ibx#454).
@@ -215,7 +220,16 @@ impl HmdsState {
             keep_up_to_date_reqs: std::collections::HashSet::new(),
             multi_leg: Vec::new(),
             cold_scanner_results: Vec::new(),
+            routing: None,
+            rx_farm: super::pool::PRIMARY_HMDS,
         }
+    }
+
+    /// A live streaming listener on a historical farm (5-second bars,
+    /// tick-by-tick, scanner): no historical farm is closed as dormant
+    /// while one exists, as in the reference (#445).
+    pub(crate) fn has_live_listener(&self) -> bool {
+        !self.rtbar_subs.is_empty() || !self.tbt_subscriptions.is_empty() || !self.pending_scanner.is_empty()
     }
 
     pub(crate) fn poll(
@@ -633,6 +647,14 @@ impl HmdsState {
                 }
             }
             "G" => self.handle_rtbar_data(msg, shared, hmds_conn, hb),
+            "T" => {
+                // The routing table, when it came after the logon (#445).
+                if let Some(text) = crate::engine::routing::table_text(msg) {
+                    let table = crate::engine::routing::RoutingTable::parse(&text, crate::engine::routing::TableKind::Historical);
+                    log::info!("Historical routing table: {} farms", table.routes().len());
+                    self.routing = Some(table);
+                }
+            }
             other => {
                 // ibx#183 follow-up: was a silent _ => {} arm — log unhandled
                 // msg_types so we can catch frames that bypass the W cascade

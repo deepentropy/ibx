@@ -30,9 +30,21 @@ impl std::hash::Hasher for TagHasher {
     fn write_u32(&mut self, n: u32) {
         self.0 = (self.0 ^ n as u64).wrapping_mul(TAG_HASH_MUL);
     }
+
+    #[inline(always)]
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0 ^ n).wrapping_mul(TAG_HASH_MUL);
+    }
 }
 
-type TagMap = HashMap<u32, InstrumentId, std::hash::BuildHasherDefault<TagHasher>>;
+/// Server tags are numbered by each farm (#445): the key is the farm and
+/// the tag.
+type TagMap = HashMap<u64, InstrumentId, std::hash::BuildHasherDefault<TagHasher>>;
+
+#[inline(always)]
+fn tag_key(farm: u8, server_tag: u32) -> u64 {
+    ((farm as u64) << 32) | server_tag as u64
+}
 
 /// Server tags pre-sized for: two per instrument (quote and trade stream)
 /// with room to spare, so the map does not grow in a normal session.
@@ -209,9 +221,14 @@ impl MarketState {
         Some(con_id)
     }
 
-    /// Map an IB server_tag (from 35=Q subscription ack) to an InstrumentId.
+    /// Map a server tag of the primary market data farm to an instrument.
     pub fn register_server_tag(&mut self, server_tag: u32, instrument: InstrumentId) {
-        self.server_tags.insert(server_tag, instrument);
+        self.register_farm_tag(0, server_tag, instrument);
+    }
+
+    /// Map a server tag of a farm to an instrument (#445).
+    pub fn register_farm_tag(&mut self, farm: u8, server_tag: u32, instrument: InstrumentId) {
+        self.server_tags.insert(tag_key(farm, server_tag), instrument);
     }
 
     /// Slot iteration bound (high-water mark). Freed slots below this count
@@ -244,10 +261,17 @@ impl MarketState {
         self.con_id_to_instrument.get(&con_id).copied()
     }
 
-    /// Look up InstrumentId by server_tag. O(1) hash lookup.
+    /// Look up the instrument of a server tag of the primary market data
+    /// farm. O(1) hash lookup.
     #[inline(always)]
     pub fn instrument_by_server_tag(&self, server_tag: u32) -> Option<InstrumentId> {
-        self.server_tags.get(&server_tag).copied()
+        self.instrument_by_farm_tag(0, server_tag)
+    }
+
+    /// Look up the instrument of a server tag of a farm (#445).
+    #[inline(always)]
+    pub fn instrument_by_farm_tag(&self, farm: u8, server_tag: u32) -> Option<InstrumentId> {
+        self.server_tags.get(&tag_key(farm, server_tag)).copied()
     }
 
     /// Set symbol name for an instrument (e.g. "AAPL"). Used for orders.
@@ -459,6 +483,19 @@ impl MarketState {
     /// Clear server tag mappings (called on farm disconnect — old tags are invalid).
     pub fn clear_server_tags(&mut self) {
         self.server_tags.clear();
+    }
+
+    /// Clear the server tags of one farm, whose connection was lost (#445).
+    pub fn clear_farm_tags(&mut self, farm: u8) {
+        self.server_tags.retain(|k, _| (k >> 32) as u8 != farm);
+    }
+
+    /// Zero the quote of one instrument, whose farm was lost (#445).
+    pub fn zero_quote(&mut self, id: InstrumentId) {
+        if (id as usize) < MAX_INSTRUMENTS {
+            self.quotes[id as usize] = Quote::default();
+            self.last_ts_base[id as usize] = 0;
+        }
     }
 
     /// Zero all quote data to prevent stale price trading after farm disconnect.

@@ -635,6 +635,20 @@ pub fn round_lot_from_secdef(data: &[u8]) -> i64 {
         .unwrap_or(100)
 }
 
+/// Aggregate group of a contract (#445), from its definition: the routing
+/// row of a SMART request is the one of this group. None when absent.
+pub fn agg_group_from_secdef(data: &[u8]) -> Option<i32> {
+    fix::fix_parse(data).get(&6178).and_then(|v| v.trim().parse().ok())
+}
+
+/// SMART component exchanges of a contract (#452), from its definition
+/// (comma list, a trailing comma allowed). Empty when absent.
+pub fn smart_components_from_secdef(data: &[u8]) -> Vec<String> {
+    fix::fix_parse(data).get(&6177)
+        .map(|v| v.split(',').map(str::trim).filter(|e| !e.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
+}
+
 /// Cache of contract definitions by conId.
 #[derive(Debug, Default)]
 pub struct ContractStore {

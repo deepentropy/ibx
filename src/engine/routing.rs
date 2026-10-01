@@ -459,3 +459,25 @@ mod tests {
         assert_eq!(rows.iter().filter(|r| r.service_data_type == "Deep").count(), 6);
     }
 }
+
+/// The rows of a routing table message, None when `msg` is not one.
+pub fn table_text(msg: &[u8]) -> Option<String> {
+    let start = msg.windows(5).position(|w| w == b"35=T\x01")? + 5;
+    let mut rest = &msg[start..];
+    if rest.starts_with(b"6556=") {
+        let end = rest.iter().position(|&b| b == 0x01)?;
+        rest = &rest[end + 1..];
+    }
+    let end = rest.iter().position(|&b| b == 0x01).unwrap_or(rest.len());
+    Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+}
+
+#[cfg(test)]
+mod table_text_tests {
+    #[test]
+    fn rows_of_a_table_message() {
+        let msg = b"8=O\x019=60\x0135=T\x016556=2\x01CME,FUT,Top,-1,*,h,4000,usfuture;X,STK,Top,-1,*,h,4000,f\x018349=AB\x01";
+        assert_eq!(super::table_text(msg).as_deref(), Some("CME,FUT,Top,-1,*,h,4000,usfuture;X,STK,Top,-1,*,h,4000,f"));
+        assert_eq!(super::table_text(b"8=O\x019=5\x0135=P\x01xx"), None);
+    }
+}

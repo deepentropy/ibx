@@ -11,6 +11,7 @@ use crate::types::InstrumentId;
 use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, fast_extract_msg_type, find_body_after_tag};
+use super::pool::{FarmId, FixSink, PRIMARY_MD};
 
 /// A market data subscription as the control command gives it, kept while
 /// it waits for the contract's round lot (ibx#287).
@@ -41,8 +42,20 @@ pub(crate) fn round_lot_reply(context: &mut Context, req_id: &str, msg: &[u8]) -
     let lot = crate::control::contracts::round_lot_from_secdef(msg);
     log::info!("Round lot for con_id {}: {}", con_id, lot);
     context.round_lots.insert(con_id, lot);
+    note_definition(context, con_id, msg);
     release_lot_parked(context, con_id, lot);
     true
+}
+
+/// Keep what routing needs from a contract definition (#445, #452): its
+/// aggregate group (-1 when absent) and its SMART component exchanges.
+pub(crate) fn note_definition(context: &mut Context, con_id: i64, msg: &[u8]) {
+    let group = crate::control::contracts::agg_group_from_secdef(msg).unwrap_or(-1);
+    context.agg_groups.insert(con_id, group);
+    let components = crate::control::contracts::smart_components_from_secdef(msg);
+    if !components.is_empty() {
+        context.smart_components.insert(con_id, components);
+    }
 }
 
 /// Lookups with no reply in time: the subscriptions go out with a round
@@ -89,6 +102,7 @@ pub(crate) fn md_contract_reply(context: &mut Context, shared: &SharedState, req
     con_ids.dedup();
     if let [con_id] = con_ids[..] {
         log::info!("Market data for {} {}: conId {} ({})", sub.symbol, sub.sec_type, con_id, req_id);
+        note_definition(context, con_id, msg);
         context.market.resolve_con_id(sub.instrument, con_id);
         sub.con_id = con_id;
         context.md_resolved.push(sub);
@@ -118,10 +132,53 @@ fn release_lot_parked(context: &mut Context, con_id: i64, lot: i64) {
     let (ready, parked): (Vec<MdSubscribe>, Vec<MdSubscribe>) =
         std::mem::take(&mut context.lot_parked).into_iter().partition(|s| s.con_id == con_id);
     context.lot_parked = parked;
+    // A lookup made for the route alone leaves the sizes as on the wire.
+    let lot = if context.scale_us_lots { lot } else { 1 };
     for sub in ready {
         context.market.set_round_lot(sub.instrument, lot);
         context.lot_ready.push(sub);
     }
+}
+
+/// One entry of a top-of-book request on the wire (#445): where it went
+/// and the values its cancel repeats.
+#[derive(Debug, Clone)]
+pub(crate) struct MdEntry {
+    pub(crate) req_id: u32,
+    pub(crate) instrument: InstrumentId,
+    pub(crate) farm: FarmId,
+    pub(crate) con_id: String,
+    pub(crate) exchange: String,
+    pub(crate) sec_type: String,
+    pub(crate) req_type: &'static str,
+    pub(crate) mode_9887: i32,
+}
+
+/// The security type as the request writes it: a stock has a code of its
+/// own, other types keep their name (#445).
+pub(crate) fn fix_sec_type(sec_type: &str) -> &str {
+    match sec_type {
+        "" | "STK" => "CS",
+        other => other,
+    }
+}
+
+/// The routing exchange of a request, as the reference writes it: SMART
+/// (or none) becomes the smart-routing name, or the currency exchange for
+/// a currency pair; any other exchange is kept (#445).
+pub(crate) fn routing_exchange<'a>(exchange: &'a str, sec_type: &str) -> &'a str {
+    match exchange {
+        "" | "SMART" if sec_type == "CASH" => "IDEALPRO",
+        "" | "SMART" => "BEST",
+        other => other,
+    }
+}
+
+/// The exchange of the bid/ask entry: a currency pair asks the
+/// high-precision book there, its last entry keeps the pair's exchange
+/// (captured 23/09/2026, #445).
+fn bid_ask_exchange<'a>(exchange: &'a str, sec_type: &str) -> &'a str {
+    if sec_type == "CASH" && exchange == "IDEALPRO" { "FXSUBPIP" } else { exchange }
 }
 
 pub(crate) struct FarmState {
@@ -143,6 +200,14 @@ pub(crate) struct FarmState {
     pub(crate) disconnected: bool,
     pub(crate) tick_buf: Vec<tick_decoder::RawTick>,
     pub(crate) farm_msg_buf: Vec<Vec<u8>>,
+    /// The market data routing table of the logon (#445); None until it
+    /// came.
+    pub(crate) routing: Option<crate::engine::routing::RoutingTable>,
+    /// Top-of-book entries on the wire, by request id (#445).
+    pub(crate) md_entries: Vec<MdEntry>,
+    /// The farm the messages being handled came from (#445): server tags
+    /// are numbered by each farm.
+    pub(crate) rx_farm: FarmId,
 }
 
 impl FarmState {
@@ -160,6 +225,9 @@ impl FarmState {
             disconnected: false,
             tick_buf: Vec::with_capacity(16),
             farm_msg_buf: Vec::with_capacity(32),
+            routing: None,
+            md_entries: Vec::new(),
+            rx_farm: PRIMARY_MD,
         }
     }
 
@@ -303,6 +371,14 @@ impl FarmState {
             b"Y" => self.handle_depth_35y(msg, shared),
             b"G" => self.handle_tick_news(msg, context, shared, event_tx),
             b"3" => self.handle_md_reject(msg, context, shared, farm_conn, hb),
+            b"T" => {
+                // The routing table, when it came after the logon (#445).
+                if let Some(text) = crate::engine::routing::table_text(msg) {
+                    let table = crate::engine::routing::RoutingTable::parse(&text, crate::engine::routing::TableKind::MarketData);
+                    log::info!("Market data routing table: {} farms", table.routes().len());
+                    self.routing = Some(table);
+                }
+            }
             other => {
                 log::debug!("Farm unhandled 35={}: {} bytes", String::from_utf8_lossy(other), msg.len());
             }
@@ -344,7 +420,7 @@ impl FarmState {
 
         // Phase 1: Apply all ticks to internal quotes before publishing.
         for tick in &ticks {
-            let instrument = match context.market.instrument_by_server_tag(tick.server_tag) {
+            let instrument = match context.market.instrument_by_farm_tag(self.rx_farm, tick.server_tag) {
                 Some(id) => id,
                 None => continue,
             };
@@ -421,7 +497,7 @@ impl FarmState {
             }
         };
 
-        context.market.register_server_tag(server_tag, instrument);
+        context.market.register_farm_tag(self.rx_farm, server_tag, instrument);
         context.market.set_min_tick(instrument, min_tick);
         // The size increment (ibx#287); absent from older acks.
         if let Some(size_min_tick) = parts.get(8).and_then(|v| v.parse::<f64>().ok()) {
@@ -456,7 +532,7 @@ impl FarmState {
         let server_tag: u32 = match parts[2].parse() { Ok(v) => v, Err(_) => return };
 
         if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
-            context.market.register_server_tag(server_tag, instrument);
+            context.market.register_farm_tag(self.rx_farm, server_tag, instrument);
             context.market.set_min_tick(instrument, min_tick);
             // The size increment, when present (ibx#287).
             if let Some(size_min_tick) = parts.get(4).and_then(|v| v.parse::<f64>().ok()) {
@@ -473,15 +549,9 @@ impl FarmState {
             || self.md_resub_info.iter().any(|(id, ..)| *id == instrument)
     }
 
-    /// Send a subscription kept by `MdSubscribe`.
-    pub(crate) fn send_md_subscribe(&mut self, sub: &MdSubscribe, farm_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        self.send_mktdata_subscribe(
-            sub.con_id, &sub.symbol, &sub.exchange, &sub.sec_type,
-            &sub.last_trade_date, sub.strike, &sub.right, &sub.multiplier,
-            sub.instrument, sub.mode_9887, farm_conn, hb,
-        );
-    }
-
+    /// `subscribe_top` to the primary farm, from the fields of a
+    /// subscription.
+    #[cfg(test)]
     pub(crate) fn send_mktdata_subscribe(
         &mut self,
         con_id: i64,
@@ -497,11 +567,23 @@ impl FarmState {
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
-        // Always the BID_ASK (442) + LAST (443) pair, as the reference; a
-        // frozen / delayed mode rides 9887 on each entry, never 264=1
-        // (ibx#447, captured 28/09/2026).
+        let sub = MdSubscribe {
+            con_id, symbol: symbol.to_string(), exchange: exchange.to_string(), sec_type: sec_type.to_string(),
+            last_trade_date: last_trade_date.to_string(), strike, right: right.to_string(),
+            multiplier: multiplier.to_string(), instrument, mode_9887,
+        };
+        self.subscribe_top(&sub, PRIMARY_MD, farm_conn, hb);
+    }
+
+    /// Subscribe to the top of book of a contract on `farm`, the farm its
+    /// routing row names (#445). Always the bid/ask and last pair, as the
+    /// reference; a frozen / delayed mode rides on each entry (ibx#447,
+    /// captured 28/09/2026). Each entry carries the contract's own
+    /// exchange and security type, as the reference writes them.
+    pub(crate) fn subscribe_top(&mut self, sub: &MdSubscribe, farm: FarmId, sink: &mut dyn FixSink, hb: &mut HeartbeatState) {
         // The reference always subscribes by conId; one without it is
         // resolved first (ibx#278).
+        let (con_id, instrument, mode_9887) = (sub.con_id, sub.instrument, sub.mode_9887);
         if con_id <= 0 {
             log::error!("Market data subscribe for instrument {} without a conId: not sent", instrument);
             return;
@@ -524,39 +606,87 @@ impl FarmState {
             }
         }
         if self.md_resub_info.iter().all(|(id, ..)| *id != instrument) {
-            self.md_resub_info.push((instrument, symbol.to_string(), exchange.to_string(), sec_type.to_string(), last_trade_date.to_string(), strike, right.to_string(), multiplier.to_string(), mode_9887));
+            self.md_resub_info.push((instrument, sub.symbol.clone(), sub.exchange.clone(), sub.sec_type.clone(),
+                sub.last_trade_date.clone(), sub.strike, sub.right.clone(), sub.multiplier.clone(), mode_9887));
         }
 
-        if let Some(conn) = farm_conn.as_mut() {
-            let bid_ask_str = bid_ask_id.to_string();
-            let last_str = last_id.to_string();
-            let con_id_str = (con_id as u32).to_string();
-            let mode_str = mode_9887.to_string();
-            let ts = chrono_free_timestamp();
+        let con_id_str = (con_id as u32).to_string();
+        let exchange = routing_exchange(&sub.exchange, &sub.sec_type);
+        let sec_type = fix_sec_type(&sub.sec_type);
+        let entries = [
+            (bid_ask_id, bid_ask_exchange(exchange, &sub.sec_type), "442"),
+            (last_id, exchange, "443"),
+        ];
+        for (req_id, exch, req_type) in entries {
+            self.md_entries.push(MdEntry {
+                req_id, instrument, farm, con_id: con_id_str.clone(), exchange: exch.to_string(),
+                sec_type: sec_type.to_string(), req_type, mode_9887,
+            });
+        }
 
-            let no_related_sym = "2";
-
-            let mut tags: Vec<(u32, &str)> = vec![
-                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                (fix::TAG_SENDING_TIME, &ts),
-                (263, "1"),
-                (146, no_related_sym),
-            ];
-            for (req_str, depth) in [(&bid_ask_str, "442"), (&last_str, "443")] {
-                tags.push((262, req_str));
-                tags.push((6008, &con_id_str));
-                tags.push((207, "BEST"));
-                tags.push((167, "CS"));
-                tags.push((264, depth));
-                tags.push((6088, "Socket"));
-                if !realtime { tags.push((9887, &mode_str)); }
-                tags.push((9830, "1"));
+        let ids: Vec<String> = entries.iter().map(|(r, ..)| r.to_string()).collect();
+        let mode_str = mode_9887.to_string();
+        let ts = chrono_free_timestamp();
+        let mut tags: Vec<(u32, &str)> = vec![
+            (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+            (fix::TAG_SENDING_TIME, &ts),
+            (263, "1"),
+            (146, "2"),
+        ];
+        for ((_, exch, req_type), id) in entries.iter().zip(&ids) {
+            tags.push((262, id));
+            tags.push((6008, &con_id_str));
+            tags.push((207, exch));
+            tags.push((167, sec_type));
+            tags.push((264, req_type));
+            tags.push((6088, "Socket"));
+            if !realtime { tags.push((9887, &mode_str)); }
+            tags.push((9830, "1"));
+        }
+        if sink.send_comp(&tags) {
+            log::info!("Sent 35=V subscribe (9887={}) on farm {}: con_id={} {} {} ids={},{}",
+                mode_9887, farm, con_id, exchange, sec_type, bid_ask_id, last_id);
+            if farm == PRIMARY_MD {
+                hb.last_farm_sent = Instant::now();
             }
-            let _ = conn.send_fixcomp(&tags);
-            log::info!("Sent 35=V subscribe (9887={}): con_id={} sec_type={} ids={},{} seq={}",
-                mode_9887, con_id, sec_type, bid_ask_id, last_id, conn.seq);
-            hb.last_farm_sent = Instant::now();
         }
+    }
+
+    /// Whether a live top-of-book request uses `farm` (#445).
+    pub(crate) fn uses_farm(&self, farm: FarmId) -> bool {
+        self.md_entries.iter().any(|e| e.farm == farm)
+    }
+
+    /// The subscriptions that have no entry on the wire (their farm was
+    /// lost), to be sent again by their route (#445).
+    pub(crate) fn unsent_subscriptions(&self, context: &Context) -> Vec<MdSubscribe> {
+        self.md_resub_info.iter()
+            .filter(|(id, ..)| self.instrument_md_reqs.iter().all(|(i, _)| i != id))
+            .filter_map(|(id, symbol, exchange, sec_type, ltd, strike, right, mult, mode)| {
+                context.market.con_id(*id).map(|con_id| MdSubscribe {
+                    con_id, symbol: symbol.clone(), exchange: exchange.clone(), sec_type: sec_type.clone(),
+                    last_trade_date: ltd.clone(), strike: *strike, right: right.clone(), multiplier: mult.clone(),
+                    instrument: *id, mode_9887: *mode,
+                })
+            })
+            .collect()
+    }
+
+    /// The connection of `farm` was lost (#445): its entries and server
+    /// tags are gone; the subscriptions stay, to be sent again. Quotes of
+    /// the contracts it served are zeroed.
+    pub(crate) fn farm_lost(&mut self, farm: FarmId, context: &mut Context) {
+        let lost: Vec<MdEntry> = self.md_entries.iter().filter(|e| e.farm == farm).cloned().collect();
+        self.md_entries.retain(|e| e.farm != farm);
+        for e in &lost {
+            self.md_req_to_instrument.retain(|(r, _)| *r != e.req_id);
+            for (_, reqs) in self.instrument_md_reqs.iter_mut() {
+                reqs.retain(|r| *r != e.req_id);
+            }
+            context.market.zero_quote(e.instrument);
+        }
+        self.instrument_md_reqs.retain(|(_, reqs)| !reqs.is_empty());
+        context.market.clear_farm_tags(farm);
     }
 
     /// A market data reject (35=3) on the farm (ibx#444, ibx#447): 262 is
@@ -605,15 +735,20 @@ impl FarmState {
                 // 4 too: when the reference asks for delayed-frozen data
                 // instead is not known (ibx#447).
                 info.8 = crate::types::MarketDataModes::entry_mode(false, true);
-                let (_, sym, exch, st, ltd, strike, right, mult, mode) = info.clone();
+                let (_, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887) = info.clone();
                 let Some(con_id) = context.market.con_id(instrument) else { continue };
-                self.send_mktdata_subscribe(con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, mode, farm_conn, hb);
+                let sub = MdSubscribe {
+                    con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, instrument, mode_9887,
+                };
+                // Asked again on the farm that rejected it.
+                self.subscribe_top(&sub, self.rx_farm, farm_conn, hb);
                 shared.market.push_md_reject(crate::bridge::MdReject::Delayed { instrument });
             } else {
                 // The subscription stops: nothing is left to cancel.
                 if let Some(idx) = self.instrument_md_reqs.iter().position(|(id, _)| *id == instrument) {
                     let (_, reqs) = self.instrument_md_reqs.remove(idx);
                     self.md_req_to_instrument.retain(|(r, _)| !reqs.contains(r));
+                    self.md_entries.retain(|e| !reqs.contains(&e.req_id));
                 }
                 self.md_resub_info.retain(|(id, ..)| *id != instrument);
                 shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
@@ -623,12 +758,27 @@ impl FarmState {
         }
     }
 
+    /// Cancel the top of book of an instrument on its primary-farm
+    /// connection; the routed form is `unsubscribe_top`.
+    #[cfg(test)]
     pub(crate) fn send_mktdata_unsubscribe(
         &mut self,
         instrument: InstrumentId,
         farm_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
     ) {
+        for (farm, msg) in self.unsubscribe_top(instrument) {
+            let fields: Vec<(u32, &str)> = msg.iter().map(|(t, v)| (*t, v.as_str())).collect();
+            if farm == PRIMARY_MD && farm_conn.send_comp(&fields) {
+                hb.last_farm_sent = Instant::now();
+            }
+        }
+    }
+
+    /// Forget the top-of-book subscription of an instrument and build its
+    /// cancels: one message per farm, with the entries of the subscribe,
+    /// as the reference cancels (#445).
+    pub(crate) fn unsubscribe_top(&mut self, instrument: InstrumentId) -> Vec<(FarmId, Vec<(u32, String)>)> {
         // Before the lookup: while the farm is down the request ids are
         // already cleared, and the subscription must still not come back on
         // reconnect (ibx#288).
@@ -640,27 +790,41 @@ impl FarmState {
                 let (_, reqs) = self.instrument_md_reqs.remove(idx);
                 reqs
             }
-            None => return,
+            None => return Vec::new(),
         };
         // A late ack for a cancelled request id then matches nothing and is
         // dropped, as the reference does: it can never bind to the contract
         // that reuses this slot (ibx#289).
         self.md_req_to_instrument.retain(|(r, _)| !reqs.contains(r));
+        let entries: Vec<MdEntry> = self.md_entries.iter().filter(|e| reqs.contains(&e.req_id)).cloned().collect();
+        self.md_entries.retain(|e| !reqs.contains(&e.req_id));
 
-        let conn = match farm_conn.as_mut() {
-            Some(c) => c,
-            None => return,
-        };
-
-        for req_id in reqs {
-            let req_id_str = req_id.to_string();
-            let _ = conn.send_fixcomp(&[
-                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                (262, &req_id_str),
-                (263, "2"),
-            ]);
+        let mut out: Vec<(FarmId, Vec<(u32, String)>)> = Vec::new();
+        let mut farms: Vec<FarmId> = entries.iter().map(|e| e.farm).collect();
+        farms.sort_unstable();
+        farms.dedup();
+        for farm in farms {
+            let mine: Vec<&MdEntry> = entries.iter().filter(|e| e.farm == farm).collect();
+            let mut msg: Vec<(u32, String)> = vec![
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
+                (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
+                (263, "2".into()),
+                (146, mine.len().to_string()),
+            ];
+            for e in mine {
+                msg.push((262, e.req_id.to_string()));
+                msg.push((6008, e.con_id.clone()));
+                msg.push((207, e.exchange.clone()));
+                msg.push((167, e.sec_type.clone()));
+                msg.push((264, e.req_type.to_string()));
+                if e.mode_9887 != 0 {
+                    msg.push((9887, e.mode_9887.to_string()));
+                }
+                msg.push((9830, "1".into()));
+            }
+            out.push((farm, msg));
         }
-        hb.last_farm_sent = Instant::now();
+        out
     }
 
     pub(crate) fn send_depth_subscribe(
@@ -1056,15 +1220,13 @@ impl FarmState {
 
     pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {
         self.disconnected = true;
-        self.md_req_to_instrument.clear();
-        self.instrument_md_reqs.clear();
+        // Entries and tags of the farms opened on demand stay (#445).
+        self.farm_lost(PRIMARY_MD, context);
         // Clear depth wire-state (server_tags become invalid after disconnect).
         // depth_resub_info is preserved for resubscription on reconnect.
         self.depth_subs.clear();
         self.depth_tag_to_req.clear();
         self.depth_fanout_map.clear();
-        context.market.clear_server_tags();
-        context.market.zero_all_quotes();
         // Don't emit Event::Disconnected — auto-reconnect handles farm drops transparently.
         // Python is only notified if reconnect exhausts retries.
     }
@@ -1085,22 +1247,10 @@ impl FarmState {
         self.disconnected = false;
         hb.farm_connected(Instant::now());
 
-        // Snapshot active subscriptions and re-issue them on the new connection.
-        // md_resub_info is the list to use: handle_disconnect already cleared
-        // the request-id maps, so reading them re-issued nothing (ibx#288).
-        let active: Vec<(InstrumentId, i64, String, String, String, String, f64, String, String, i32)> = self.md_resub_info.iter()
-            .filter_map(|(id, s, e, st, l, k, r, m, mode)| {
-                context.market.con_id(*id).map(|con_id| {
-                    (*id, con_id, s.clone(), e.clone(), st.clone(), l.clone(), *k, r.clone(), m.clone(), *mode)
-                })
-            })
-            .collect();
-        self.md_req_to_instrument.clear();
-        self.instrument_md_reqs.clear();
-        self.md_resub_info.clear();
-        for (instrument, con_id, sym, exch, st, ltd, strike, right, mult, mode) in active {
-            self.send_mktdata_subscribe(con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, mode, farm_conn, hb);
-        }
+        // The top-of-book subscriptions without an entry on the wire are
+        // sent again by the loop, each to the farm of its route
+        // (`unsent_subscriptions`, #445, ibx#288).
+        let _ = context;
 
         // Re-subscribe depth subscriptions (depth_resub_info survived disconnect)
         let depth_params: Vec<_> = self.depth_resub_info.drain(..).collect();
@@ -1112,7 +1262,7 @@ impl FarmState {
             );
         }
 
-        log::info!("Farm reconnected, re-subscribed {} instruments + {} depth", self.instrument_md_reqs.len(), depth_count);
+        log::info!("Farm reconnected, re-subscribed {} depth", depth_count);
     }
 
     fn handle_tick_news(&mut self, msg: &[u8], context: &Context, shared: &SharedState, event_tx: &Option<Sender<Event>>) {
@@ -1127,7 +1277,7 @@ impl FarmState {
         if tick_type != 0x1E90 { return; }
 
         let server_tag = u32::from_be_bytes([body[2], body[3], body[4], body[5]]);
-        let instrument = context.market.instrument_by_server_tag(server_tag).unwrap_or(0);
+        let instrument = context.market.instrument_by_farm_tag(self.rx_farm, server_tag).unwrap_or(0);
 
         let batch_count = u32::from_be_bytes([body[8], body[9], body[10], body[11]]) as usize;
         let mut pos = 12;
@@ -1380,6 +1530,7 @@ mod tests {
     #[test]
     fn round_lot_reply_releases_the_waiting_subscriptions() {
         let mut context = Context::new();
+        context.scale_us_lots = true;
         let aapl = context.market.register(265598);
         let msft = context.market.register(272093);
         let sub = |con_id, instrument| MdSubscribe {

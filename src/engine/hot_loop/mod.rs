@@ -1,6 +1,7 @@
 pub mod farm;
 pub mod ccp;
 pub mod hmds;
+pub(crate) mod pool;
 pub mod order_builder;
 pub mod liveness;
 
@@ -22,6 +23,20 @@ use ccp::CcpState;
 use hmds::HmdsState;
 pub use liveness::HeartbeatState;
 use liveness::FarmCheck;
+use pool::{FarmKind, FarmPool, FixSink, PRIMARY_HMDS, PRIMARY_MD};
+
+/// The sink of a farm: the primary market data or historical connection,
+/// or a farm opened on demand (#445). A macro so that the borrow stays on
+/// the connection fields and the subsystems can be borrowed beside it.
+macro_rules! farm_sink {
+    ($self:ident, $id:expr) => {
+        match $id {
+            PRIMARY_MD => Some(&mut $self.farm_conn as &mut dyn FixSink),
+            PRIMARY_HMDS => Some(&mut $self.hmds_conn as &mut dyn FixSink),
+            id => $self.pool.get_mut(id).map(|f| f as &mut dyn FixSink),
+        }
+    };
+}
 
 /// The pinned-core hot loop. Pushes events to SharedState + optional event channel.
 pub struct HotLoop {
@@ -58,6 +73,8 @@ pub struct HotLoop {
     pub(crate) farm: FarmState,
     pub(crate) ccp: CcpState,
     pub(crate) hmds: HmdsState,
+    /// Data farms opened on demand by the routing table (#445).
+    pub(crate) pool: FarmPool,
     // ── Auto-reconnect ──
     reconnect_auth: Option<ReconnectAuth>,
     pending_farm_reconnect: Option<Receiver<io::Result<Connection>>>,
@@ -96,6 +113,7 @@ impl HotLoop {
             farm: FarmState::new(),
             ccp: CcpState::new(),
             hmds: HmdsState::new(),
+            pool: FarmPool::new(Instant::now()),
             reconnect_auth: None,
             pending_farm_reconnect: None,
             ccp_next_attempt_at: None,
@@ -125,6 +143,17 @@ impl HotLoop {
     /// data sizes of those stocks are multiplied by the contract's lot.
     pub fn set_scale_us_lots(&mut self, on: bool) {
         self.context.scale_us_lots = on;
+    }
+
+    /// The routing table of a primary farm (#445): the market data table
+    /// routes market data, the historical table historical requests.
+    pub fn set_routing_table(&mut self, kind: crate::engine::routing::TableKind, text: &str) {
+        let table = crate::engine::routing::RoutingTable::parse(text, kind);
+        log::info!("Routing table ({:?}): {} farms", kind, table.routes().len());
+        match kind {
+            crate::engine::routing::TableKind::MarketData => self.farm.routing = Some(table),
+            crate::engine::routing::TableKind::Historical => self.hmds.routing = Some(table),
+        }
     }
 
     /// Most real-time bar requests at once, from the logon (ibx#454).
@@ -224,29 +253,44 @@ impl HotLoop {
         }
     }
 
-    /// Round lot of a new market data subscription (ibx#287). When the
-    /// session counts US stock sizes in round lots and the contract may be
-    /// one, its definition is asked for and the subscription waits for it,
-    /// as the reference knows the contract before it subscribes: true when
-    /// parked. Otherwise the known lot (or 1) is set now.
+    /// Whether the farm of a subscription depends on the contract's
+    /// aggregate group and it is not known yet: a SMART route with a
+    /// routing table (#445). The reference knows the contract before it
+    /// subscribes.
+    fn needs_agg_group(&self, sub: &farm::MdSubscribe) -> bool {
+        let sec_type = if sub.sec_type.is_empty() { "STK" } else { sub.sec_type.as_str() };
+        self.farm.routing.is_some()
+            && sub.con_id > 0
+            && farm::routing_exchange(&sub.exchange, sec_type) == "BEST"
+            && !self.context.agg_groups.contains_key(&sub.con_id)
+    }
+
+    /// Round lot of a new market data subscription (ibx#287), and the
+    /// aggregate group its route needs (#445). When the session counts US
+    /// stock sizes in round lots and the contract may be one, or when its
+    /// SMART route needs its aggregate group, its definition is asked for
+    /// and the subscription waits for it, as the reference knows the
+    /// contract before it subscribes: true when parked. Otherwise the known
+    /// lot (or 1) is set now.
     fn park_for_round_lot(&mut self, sub: &farm::MdSubscribe) -> bool {
         let id = sub.instrument;
-        if !self.context.scale_us_lots {
-            self.context.market.set_round_lot(id, 1);
-            return false;
-        }
-        if let Some(&lot) = self.context.round_lots.get(&sub.con_id) {
-            self.context.market.set_round_lot(id, lot);
-            return false;
-        }
         let maybe_stock = matches!(sub.sec_type.to_ascii_uppercase().as_str(), "" | "STK" | "WAR");
-        if !maybe_stock || sub.con_id <= 0 {
-            self.context.market.set_round_lot(id, 1);
+        let lot_needed = self.context.scale_us_lots && maybe_stock && sub.con_id > 0
+            && !self.context.round_lots.contains_key(&sub.con_id);
+        if !lot_needed {
+            let lot = if self.context.scale_us_lots {
+                self.context.round_lots.get(&sub.con_id).copied().unwrap_or(1)
+            } else {
+                1
+            };
+            self.context.market.set_round_lot(id, lot);
+        }
+        if !lot_needed && !self.needs_agg_group(sub) {
             return false;
         }
         if !self.context.lot_lookups.iter().any(|(_, c, _)| *c == sub.con_id) {
             let Some(conn) = self.ccp_conn.as_mut().filter(|_| !self.ccp.disconnected) else {
-                log::warn!("No auth connection to read the round lot of con_id {}: subscribing with a round lot of 1", sub.con_id);
+                log::warn!("No auth connection to read the definition of con_id {}: subscribing with a round lot of 1", sub.con_id);
                 self.context.market.set_round_lot(id, 1);
                 return false;
             };
@@ -268,11 +312,81 @@ impl HotLoop {
                 (6004, &exchange),
             ]);
             self.hb.last_ccp_sent = Instant::now();
-            log::info!("Definition of con_id {} on {} asked for its round lot ({})", sub.con_id, exchange, req_id);
+            log::info!("Definition of con_id {} on {} asked for its round lot and group ({})", sub.con_id, exchange, req_id);
             self.context.lot_lookups.push((req_id, sub.con_id, Instant::now() + farm::LOT_LOOKUP_TIMEOUT));
         }
         self.context.lot_parked.push(sub.clone());
         true
+    }
+
+    /// The farm of a top-of-book subscription (#445): the farm of its
+    /// routing row for (routing exchange or aggregate group, security type,
+    /// Top), opened on demand when it is not a primary farm. The primary
+    /// farm when no table came. None when no row serves it (the reference
+    /// drops the entry with a log line only) or for a NEWS contract, which
+    /// has no top of book.
+    fn md_target(&mut self, sub: &farm::MdSubscribe) -> Option<pool::FarmId> {
+        if sub.sec_type.eq_ignore_ascii_case("NEWS") {
+            log::info!("No top-of-book entry for the NEWS contract {}", sub.symbol);
+            return None;
+        }
+        let Some(table) = self.farm.routing.as_ref() else { return Some(PRIMARY_MD) };
+        let sec_type = if sub.sec_type.is_empty() { "STK" } else { sub.sec_type.as_str() };
+        let exchange = farm::routing_exchange(&sub.exchange, sec_type);
+        let agg_group = if exchange == "BEST" {
+            self.context.agg_groups.get(&sub.con_id).copied().unwrap_or(-1)
+        } else {
+            -1
+        };
+        let Some(route) = table.lookup(exchange, agg_group, sec_type, crate::engine::routing::DataType::Top, "*") else {
+            log::error!("Error: no route data for {} ({}) type=Top. Looked for exchange={} aggGroup={} secType={}",
+                sub.con_id, sub.symbol, exchange, agg_group, sec_type);
+            return None;
+        };
+        if route.farm == self.farm_name {
+            return Some(PRIMARY_MD);
+        }
+        let (name, host) = (route.farm.clone(), route.host.clone());
+        Some(self.pool.ensure(&name, &host, FarmKind::MarketData, Instant::now()))
+    }
+
+    /// Send a top-of-book subscription to the farm of its route (#445).
+    fn route_md_subscribe(&mut self, sub: &farm::MdSubscribe) {
+        let Some(id) = self.md_target(sub) else { return };
+        if let Some(f) = self.pool.get_mut(id) {
+            f.note_request(Instant::now());
+        }
+        let Some(sink) = farm_sink!(self, id) else { return };
+        self.farm.subscribe_top(sub, id, sink, &mut self.hb);
+    }
+
+    /// Cancel the top of book of an instrument on each farm it went to
+    /// (#445).
+    fn route_md_cancel(&mut self, instrument: InstrumentId) {
+        let now = Instant::now();
+        for (id, msg) in self.farm.unsubscribe_top(instrument) {
+            let fields: Vec<(u32, &str)> = msg.iter().map(|(t, v)| (*t, v.as_str())).collect();
+            if let Some(f) = self.pool.get_mut(id) {
+                f.note_request(now);
+            }
+            if let Some(sink) = farm_sink!(self, id) {
+                if sink.send_comp(&fields) && id == PRIMARY_MD {
+                    self.hb.last_farm_sent = now;
+                }
+            }
+        }
+    }
+
+    /// Send again, each to the farm of its route, the subscriptions that
+    /// lost their entries with their farm (#445, ibx#288).
+    fn resend_unsent_subscriptions(&mut self) {
+        let unsent = self.farm.unsent_subscriptions(&self.context);
+        if !unsent.is_empty() {
+            log::info!("Sending {} market data subscriptions again", unsent.len());
+        }
+        for sub in unsent {
+            self.route_md_subscribe(&sub);
+        }
     }
 
     /// Poll the auth socket once, then the timeouts of what waits on it,
@@ -330,7 +444,7 @@ impl HotLoop {
         if self.context.md_resolved.is_empty() { return; }
         for sub in std::mem::take(&mut self.context.md_resolved) {
             if !self.park_for_round_lot(&sub) {
-                self.farm.send_md_subscribe(&sub, &mut self.farm_conn, &mut self.hb);
+                self.route_md_subscribe(&sub);
             }
         }
     }
@@ -339,7 +453,7 @@ impl HotLoop {
     fn send_lot_ready(&mut self) {
         if self.context.lot_ready.is_empty() { return; }
         for sub in std::mem::take(&mut self.context.lot_ready) {
-            self.farm.send_md_subscribe(&sub, &mut self.farm_conn, &mut self.hb);
+            self.route_md_subscribe(&sub);
         }
     }
 
@@ -420,6 +534,13 @@ impl HotLoop {
                 &mut self.hmds_conn, &self.shared,
                 &self.event_tx, &mut self.hb,
             );
+
+            // 1b'. Farms opened on demand (#445): read, then connect,
+            //      heartbeat and close them by their rules.
+            if !self.pool.is_empty() {
+                self.poll_pool();
+                self.service_pool();
+            }
 
             // 1c. Hand off any scanner results with cache-miss con_ids to CCP for
             //     contract-detail fan-out (ibx#156). Mirrors what the gateway does
@@ -609,7 +730,7 @@ impl HotLoop {
                         if con_id == 0 {
                             self.lookup_md_contract(sub, String::new(), filters);
                         } else if !self.park_for_round_lot(&sub) {
-                            self.farm.send_md_subscribe(&sub, &mut self.farm_conn, &mut self.hb);
+                            self.route_md_subscribe(&sub);
                         }
                     }
                 }
@@ -633,11 +754,7 @@ impl HotLoop {
                     self.context.lot_ready.retain(|s| s.instrument != instrument);
                     self.context.md_lookups.retain(|(_, s, _)| s.instrument != instrument);
                     self.context.md_resolved.retain(|s| s.instrument != instrument);
-                    self.farm.send_mktdata_unsubscribe(
-                        instrument,
-                        &mut self.farm_conn,
-                        &mut self.hb,
-                    );
+                    self.route_md_cancel(instrument);
                     self.try_reclaim_instrument(instrument);
                 }
                 ControlCommand::SubscribeTbt { con_id, symbol, tbt_type, number_of_ticks, ignore_size, reply_tx } => {
@@ -862,11 +979,7 @@ impl HotLoop {
                     let instruments: Vec<InstrumentId> = self.farm.instrument_md_reqs
                         .iter().map(|(id, _)| *id).collect();
                     for instrument in instruments {
-                        self.farm.send_mktdata_unsubscribe(
-                            instrument,
-                            &mut self.farm_conn,
-                            &mut self.hb,
-                        );
+                        self.route_md_cancel(instrument);
                     }
                     // Unsubscribe all TBT subscriptions before stopping
                     let tbt_instruments: Vec<InstrumentId> = self.hmds.tbt_subscriptions
@@ -1058,11 +1171,158 @@ impl HotLoop {
     /// Replace the farm connection (after reconnection) and re-subscribe to all instruments.
     pub fn reconnect_farm(&mut self, mut conn: Connection) {
         conn.set_queued_writes(true);
+        // Entries made while the farm was down never reached it.
+        self.farm.farm_lost(PRIMARY_MD, &mut self.context);
         self.farm.reconnect(
             conn,
             &mut self.farm_conn,
             &mut self.context, &mut self.hb,
         );
+        self.resend_unsent_subscriptions();
+    }
+
+    /// Read the farms opened on demand and hand their messages to the
+    /// market data or historical handlers (#445).
+    fn poll_pool(&mut self) {
+        let now = Instant::now();
+        for i in 0..self.pool.farms.len() {
+            let (id, kind) = (self.pool.farms[i].id, self.pool.farms[i].kind);
+            let Some(conn) = self.pool.farms[i].conn.as_mut() else { continue };
+            let (msgs, bad_signature) = match pool::read_messages(conn) {
+                Ok(read) => read,
+                Err(e) => {
+                    log::error!("{} connection lost: {}", self.pool.farms[i].name, e);
+                    self.pool_farm_lost(id);
+                    continue;
+                }
+            };
+            for msg in &msgs {
+                let heartbeat = matches!(fast_extract_msg_type(msg), Some(b"0") | Some(b"1"));
+                self.pool.note_received(id, !heartbeat, now);
+                match kind {
+                    FarmKind::MarketData => {
+                        self.farm.rx_farm = id;
+                        self.farm.process_farm_message(msg, &mut self.pool.farms[i].conn, &mut self.context,
+                            &self.shared, &self.event_tx, &mut self.hb);
+                        self.farm.rx_farm = PRIMARY_MD;
+                    }
+                    FarmKind::Historical => {
+                        self.hmds.rx_farm = id;
+                        self.hmds.process_hmds_message(msg, &mut self.pool.farms[i].conn, &self.shared,
+                            &self.event_tx, &mut self.hb);
+                        self.hmds.rx_farm = PRIMARY_HMDS;
+                    }
+                }
+            }
+            if bad_signature {
+                log::error!("{} frame signature mismatch: connection dropped", self.pool.farms[i].name);
+                self.pool_farm_lost(id);
+            }
+        }
+    }
+
+    /// A farm opened on demand was lost: its market data entries go, the
+    /// clients hear of it, and it is opened again when requests still use
+    /// it (#445).
+    fn pool_farm_lost(&mut self, id: pool::FarmId) {
+        let Some(kind) = self.pool.get(id).map(|f| f.kind) else { return };
+        let wanted = kind == FarmKind::MarketData && self.farm.uses_farm(id);
+        if kind == FarmKind::MarketData {
+            self.farm.farm_lost(id, &mut self.context);
+        }
+        let event = self.pool.on_lost(id, wanted, Instant::now());
+        self.pool_notice(&event);
+    }
+
+    /// The client notice of an event of a farm opened on demand.
+    fn pool_notice(&self, event: &pool::FarmEvent) {
+        let id = match event {
+            pool::FarmEvent::Connecting(id) | pool::FarmEvent::Connected(id)
+            | pool::FarmEvent::Lost(id) | pool::FarmEvent::IdleClosed(id) => *id,
+        };
+        let Some(farm) = self.pool.get(id) else { return };
+        let (code, text) = pool::farm_notice(farm.kind, event, &farm.name);
+        log::info!("Farm notice {}: {}", code, text);
+        self.shared.push_connection_notice(code, text);
+    }
+
+    /// Connect, heartbeat and close the farms opened on demand (#445).
+    fn service_pool(&mut self) {
+        let now = Instant::now();
+        for id in self.pool.due_connects(now) {
+            self.spawn_pool_connect(id, now);
+        }
+        let (done, events) = self.pool.poll_connects(now);
+        for event in &events {
+            // The reference reports a connecting market data farm.
+            if self.pool.get(event_farm(event)).is_some_and(|f| f.kind == FarmKind::MarketData) {
+                self.pool_notice(event);
+            }
+        }
+        for (id, result) in done {
+            match result {
+                Ok(conn) => {
+                    let event = self.pool.on_connected(id, conn, now);
+                    self.pool_notice(&event);
+                    if self.pool.get(id).is_some_and(|f| f.kind == FarmKind::MarketData) {
+                        self.resend_unsent_subscriptions();
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Farm {} connect failed: {}", self.pool.get(id).map(|f| f.name.as_str()).unwrap_or("?"), e);
+                    self.pool.on_connect_failed(id, now);
+                }
+            }
+        }
+        let hb = &mut self.hb;
+        let mut dead = self.pool.liveness(now, &mut || hb.next_test_id());
+        dead.extend(self.pool.flush_writes());
+        for id in dead {
+            self.pool_farm_lost(id);
+        }
+        let others_up = usize::from(!self.farm.disconnected && self.farm_conn.is_some());
+        let farm = &self.farm;
+        for id in self.pool.md_activity_check(now, others_up, |id| farm.uses_farm(id)) {
+            let event = self.pool.close_idle(id);
+            self.pool_notice(&event);
+        }
+        let listener = self.hmds.has_live_listener();
+        for id in self.pool.hmds_dormant_check(now, listener) {
+            let event = self.pool.close_idle(id);
+            self.pool_notice(&event);
+        }
+    }
+
+    /// Open a farm on demand in the background, with the session's
+    /// credentials; no routing table is asked there, as in the reference.
+    fn spawn_pool_connect(&mut self, id: pool::FarmId, now: Instant) {
+        let Some(farm) = self.pool.get(id) else { return };
+        let auth = match self.reconnect_auth.clone() {
+            Some(a) if !a.username.is_empty() => a,
+            _ => {
+                log::warn!("Farm {} cannot be opened: no session credentials", farm.name);
+                self.pool.on_connect_failed(id, now);
+                return;
+            }
+        };
+        let (host, name) = (farm.host.clone(), farm.name.clone());
+        let slot = if farm.kind == FarmKind::MarketData { 18 } else { 17 };
+        log::info!("Opening farm {} ({}) on demand", name, host);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let spawned = std::thread::Builder::new()
+            .name(format!("{}-connect", name))
+            .spawn(move || {
+                let result = crate::gateway::connect_farm_ex(
+                    &host, &name, &auth.username, &auth.password, auth.paper,
+                    &auth.server_session_id, &auth.session_key, &auth.hw_info, &auth.encoded, slot, false,
+                ).map(|(conn, _)| conn);
+                let _ = tx.send(result);
+            });
+        if spawned.is_ok() {
+            self.pool.set_connecting(id, rx, now);
+        } else {
+            self.pool.on_connect_failed(id, now);
+        }
     }
 
     /// Replace the auth connection (after reconnection) and reconcile order state.
@@ -1588,6 +1848,14 @@ fn farm_reconnect_target(auth: &ReconnectAuth, fallback_name: &str) -> (String, 
     let host = if auth.farm_host.is_empty() { auth.host.clone() } else { auth.farm_host.clone() };
     let name = if auth.farm_name.is_empty() { fallback_name.to_string() } else { auth.farm_name.clone() };
     (host, name)
+}
+
+/// The farm of a pool event.
+fn event_farm(event: &pool::FarmEvent) -> pool::FarmId {
+    match event {
+        pool::FarmEvent::Connecting(id) | pool::FarmEvent::Connected(id)
+        | pool::FarmEvent::Lost(id) | pool::FarmEvent::IdleClosed(id) => *id,
+    }
 }
 
 /// Up/down state of each connection, as reported to the clients.
@@ -3026,8 +3294,9 @@ mod tests {
         let id = engine.context.market.instrument_by_con_id(265598).unwrap();
         assert_eq!(engine.context.market.round_lot(id), 40);
         let sent = farm_messages_sent(&mut farm_side);
-        assert_eq!(sent.len(), 3, "two cancels, then the new subscription: {sent:?}");
-        assert!(sent[2].contains("6008=265598|"), "{}", sent[2]);
+        assert_eq!(sent.len(), 2, "one cancel with both entries, then the new subscription: {sent:?}");
+        assert!(sent[0].contains("|263=2|146=2|"), "{}", sent[0]);
+        assert!(sent[1].contains("6008=265598|"), "{}", sent[1]);
     }
 
     // ibx#278 (captured E6): two requests with no conId get their own
@@ -3302,5 +3571,220 @@ mod tests {
                 assert!(engine.farm.md_req_to_instrument.is_empty());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use crate::bridge::SharedState;
+    use crate::engine::routing::TableKind;
+
+    const MD_TABLE: &str = "BEST,STK,Top,1,*,cdc1.example,4000,usfarm;\
+        BEST,STK,Top,3,*,zdc1.example,4000,eufarm;\
+        CME,FUT,Top|Deep,-1,*,cdc1.example,4000,usfuture;\
+        IDEALPRO,CASH,Top|Deep,4,*,ndc1.example,4000,cashfarm;\
+        NASDAQ,STK,Top|Deep2|Deep,-1,*,cdc1.example,4000,usfarm";
+
+    fn loopback() -> (Connection, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (Connection::new_raw(client).unwrap(), server)
+    }
+
+    fn sent(server: &mut std::net::TcpStream) -> Vec<String> {
+        use std::io::Read;
+        server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = server.read(&mut chunk) {
+            if n == 0 { break; }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let mut out = Vec::new();
+        let mut rest = &buf[..];
+        while let Some(len) = crate::protocol::fixcomp::fixcomp_length(rest) {
+            for m in crate::protocol::fixcomp::fixcomp_decompress(&rest[..len]).unwrap() {
+                out.push(String::from_utf8_lossy(&m).replace('\x01', "|"));
+            }
+            rest = &rest[len..];
+        }
+        out
+    }
+
+    fn sub(con_id: i64, symbol: &str, exchange: &str, sec_type: &str) -> farm::MdSubscribe {
+        farm::MdSubscribe {
+            con_id, symbol: symbol.into(), exchange: exchange.into(), sec_type: sec_type.into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            instrument: 0, mode_9887: 0,
+        }
+    }
+
+    fn engine() -> (HotLoop, std::net::TcpStream) {
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        engine.set_farm_name("usfarm".into());
+        let (farm, farm_side) = loopback();
+        engine.farm_conn = Some(farm);
+        (engine, farm_side)
+    }
+
+    fn register(engine: &mut HotLoop, s: &mut farm::MdSubscribe) {
+        s.instrument = engine.context.market.register(s.con_id);
+        engine.context.market.set_routing(s.instrument, &s.sec_type, &s.exchange);
+    }
+
+    // #445: each entry writes the contract's own exchange and security
+    // type (captured 23/09/2026: a future, a currency pair, a SMART stock).
+    #[test]
+    fn entries_carry_the_contract_exchange_and_security_type() {
+        let (mut engine, mut farm_side) = engine();
+        for (con_id, sym, exch, st) in [(815824267, "MNQ", "CME", "FUT"), (12087792, "EUR", "IDEALPRO", "CASH"), (265598, "AAPL", "SMART", "STK")] {
+            let mut s = sub(con_id, sym, exch, st);
+            register(&mut engine, &mut s);
+            engine.route_md_subscribe(&s);
+        }
+        let msgs = sent(&mut farm_side);
+        assert_eq!(msgs.len(), 3, "{msgs:?}");
+        assert!(msgs[0].contains("|6008=815824267|207=CME|167=FUT|264=442|6088=Socket|9830=1|"), "{}", msgs[0]);
+        assert!(msgs[0].contains("|207=CME|167=FUT|264=443|"), "{}", msgs[0]);
+        assert!(msgs[1].contains("|207=FXSUBPIP|167=CASH|264=442|"), "{}", msgs[1]);
+        assert!(msgs[1].contains("|207=IDEALPRO|167=CASH|264=443|"), "{}", msgs[1]);
+        assert!(msgs[2].contains("|207=BEST|167=CS|264=442|"), "{}", msgs[2]);
+        assert!(msgs.iter().all(|m| !m.contains("|9839=")));
+    }
+
+    // #445: the cancel repeats the entries of the subscribe in one message
+    // (captured 18/06/2026).
+    #[test]
+    fn cancel_repeats_the_entries() {
+        let (mut engine, mut farm_side) = engine();
+        let mut s = sub(815824267, "MNQ", "CME", "FUT");
+        register(&mut engine, &mut s);
+        engine.route_md_subscribe(&s);
+        let _ = sent(&mut farm_side);
+        let first = engine.farm.next_md_req_id - 2;
+        engine.route_md_cancel(s.instrument);
+        let msgs = sent(&mut farm_side);
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        let want = format!("|263=2|146=2|262={}|6008=815824267|207=CME|167=FUT|264=442|9830=1|262={}|6008=815824267|207=CME|167=FUT|264=443|9830=1|",
+            first, first + 1);
+        assert!(msgs[0].contains(&want), "{}\nwant {}", msgs[0], want);
+        assert!(!msgs[0].contains("6088"), "{}", msgs[0]);
+    }
+
+    // #445: with a routing table, a contract whose row names another farm
+    // goes to that farm, opened on demand: its subscription waits in the
+    // farm's queue and nothing is sent to the primary farm. A SMART stock
+    // of group 1 stays on the primary farm; one with no row is dropped.
+    #[test]
+    fn routed_to_the_farm_of_its_row() {
+        let (mut engine, mut farm_side) = engine();
+        engine.set_routing_table(TableKind::MarketData, MD_TABLE);
+
+        let mut fut = sub(815824267, "MNQ", "CME", "FUT");
+        register(&mut engine, &mut fut);
+        engine.route_md_subscribe(&fut);
+        let id = engine.pool.find("usfuture").expect("usfuture opened on demand");
+        let farm = engine.pool.get(id).unwrap();
+        assert_eq!(farm.host, "cdc1.example");
+        assert_eq!(farm.queued(), 1, "the subscription waits for the logon");
+        assert!(sent(&mut farm_side).is_empty());
+        assert!(engine.farm.uses_farm(id));
+
+        let mut fx = sub(12087792, "EUR", "IDEALPRO", "CASH");
+        register(&mut engine, &mut fx);
+        engine.route_md_subscribe(&fx);
+        assert!(engine.pool.find("cashfarm").is_some());
+
+        let mut aapl = sub(265598, "AAPL", "SMART", "STK");
+        register(&mut engine, &mut aapl);
+        engine.context.agg_groups.insert(265598, 1);
+        engine.route_md_subscribe(&aapl);
+        assert_eq!(sent(&mut farm_side).len(), 1, "group 1 is the primary farm");
+
+        let mut opt = sub(1234, "X", "CBOE", "OPT");
+        register(&mut engine, &mut opt);
+        engine.route_md_subscribe(&opt);
+        assert!(!engine.farm.has_md_subscription(opt.instrument), "no row: nothing sent");
+        assert!(sent(&mut farm_side).is_empty());
+
+        let mut news = sub(999, "BRF", "BRF", "NEWS");
+        register(&mut engine, &mut news);
+        engine.route_md_subscribe(&news);
+        assert!(!engine.farm.has_md_subscription(news.instrument), "no top of book for NEWS");
+    }
+
+    // #445: a SMART subscription waits for the contract's definition when
+    // its group is not known, then goes to the farm of its group.
+    #[test]
+    fn smart_route_waits_for_the_aggregate_group() {
+        let (mut engine, mut farm_side) = engine();
+        let (ccp, mut ccp_side) = loopback();
+        engine.ccp_conn = Some(ccp);
+        engine.set_routing_table(TableKind::MarketData, MD_TABLE);
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+        tx.send(ControlCommand::Subscribe {
+            con_id: 14094, symbol: "BMW".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            mode_9887: 0, reply_tx: None,
+        }).unwrap();
+        engine.poll_once();
+        use std::io::Read;
+        ccp_side.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut buf = [0u8; 4096];
+        let n = ccp_side.read(&mut buf).unwrap();
+        let asked = String::from_utf8_lossy(&buf[..n]).replace('\x01', "|");
+        assert!(asked.contains("|35=c|") && asked.contains("|6008=14094|"), "{asked}");
+        let req_id = asked.split('|').find_map(|p| p.strip_prefix("320=")).unwrap().to_string();
+        assert!(sent(&mut farm_side).is_empty());
+
+        let reply = fix::fix_build(&[(35, "d"), (320, &req_id), (6008, "14094"), (167, "CS"), (6178, "3")], 1);
+        assert!(farm::round_lot_reply(&mut engine.context, &req_id, &reply));
+        engine.send_lot_ready();
+        let id = engine.pool.find("eufarm").expect("group 3 is eufarm");
+        assert_eq!(engine.pool.get(id).unwrap().queued(), 1);
+        let inst = engine.context.market.instrument_by_con_id(14094).unwrap();
+        assert_eq!(engine.context.market.round_lot(inst), 1, "sizes as on the wire with the lots scaling off");
+    }
+
+    // #445: server tags are numbered by each farm: a tag acked on a farm
+    // opened on demand maps its ticks, the same tag on the primary farm
+    // does not; the farm's loss drops only its own tags, and the
+    // subscription goes out again when the farm is back.
+    #[test]
+    fn server_tags_are_kept_per_farm() {
+        let (mut engine, _farm_side) = engine();
+        engine.set_routing_table(TableKind::MarketData, MD_TABLE);
+        let mut fut = sub(815824267, "MNQ", "CME", "FUT");
+        register(&mut engine, &mut fut);
+        engine.route_md_subscribe(&fut);
+        let id = engine.pool.find("usfuture").unwrap();
+        let (conn, mut side) = loopback();
+        engine.pool.on_connected(id, conn, std::time::Instant::now());
+        let flushed = sent(&mut side);
+        assert_eq!(flushed.len(), 1);
+        let first = engine.farm.next_md_req_id - 2;
+
+        engine.farm.rx_farm = id;
+        let ack = format!("8=O\x0135=Q\x01228,{},0.25,0,3,5,,1,1", first);
+        engine.inject_farm_message(ack.as_bytes());
+        engine.farm.rx_farm = pool::PRIMARY_MD;
+        assert_eq!(engine.context.market.instrument_by_farm_tag(id, 228), Some(fut.instrument));
+        assert_eq!(engine.context.market.instrument_by_server_tag(228), None);
+
+        engine.pool_farm_lost(id);
+        assert_eq!(engine.context.market.instrument_by_farm_tag(id, 228), None);
+        assert!(!engine.farm.uses_farm(id));
+        assert!(engine.farm.has_md_subscription(fut.instrument), "kept for the reconnect");
+        let (conn, mut side) = loopback();
+        engine.pool.on_connected(id, conn, std::time::Instant::now());
+        engine.resend_unsent_subscriptions();
+        let again = sent(&mut side);
+        assert_eq!(again.len(), 1, "{again:?}");
+        assert!(again[0].contains("|207=CME|167=FUT|264=442|"));
     }
 }
