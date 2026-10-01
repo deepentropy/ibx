@@ -667,7 +667,7 @@ impl CcpState {
         };
         match msg_type {
             fix::MSG_EXEC_REPORT => self.handle_exec_report(&parsed, context, shared, event_tx, account_id),
-            fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed, context, shared, event_tx),
+            fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed, ccp_conn, context, shared, event_tx, hb, account_id),
             fix::MSG_NEWS => self.handle_news_bulletin(&parsed, shared),
             fix::MSG_HEARTBEAT => {}
             fix::MSG_TEST_REQUEST => {
@@ -1056,6 +1056,7 @@ impl CcpState {
                 crate::types::OrderStatus::PreSubmitted
             }
         };
+        let is_status_report = parsed.get(&20).map(|s| s.as_str()) == Some("3");
         let status = match ord_status {
             "0" => working(),
             // Replaced: back to working, by the same routing rule. The
@@ -1087,6 +1088,11 @@ impl CcpState {
             // Pending cancel: the order stays open until 39=4 or a fill
             // (ibx#472, a server-cancelled IOC sends 39=D then 39=4).
             "D" => crate::types::OrderStatus::PendingCancel,
+            // A status report in the rejected state: the reference reads it
+            // as cancelled, with no reject error. It answers the status
+            // request sent after a refused cancel of an order the server no
+            // longer has (ib-agent#192 C2b, ibx#252).
+            "8" if is_status_report => crate::types::OrderStatus::Cancelled,
             "8" => crate::types::OrderStatus::Rejected,
             _ => {
                 log::warn!("Unknown order status 39={} for order {}", ord_status, clord_id);
@@ -1099,7 +1105,15 @@ impl CcpState {
         // current status does: the reference reports every report of a known
         // order (ibx#473), except the statuses it reads as invalid (39=E,
         // 39=I, ibx#472).
-        let change = context.apply_order_status(clord_id, status);
+        // The answer to a status request after a refused cancel or modify
+        // sets the status, back to working too (ibx#252).
+        let queried = is_status_report && !context.status_queries.is_empty()
+            && context.status_queries.remove(&clord_id);
+        let change = if queried {
+            context.apply_queried_status(clord_id, status)
+        } else {
+            context.apply_order_status(clord_id, status)
+        };
         let status_changed = change == crate::engine::context::StatusChange::Changed;
         let report_status = matches!(change,
             crate::engine::context::StatusChange::Changed | crate::engine::context::StatusChange::Same)
@@ -1134,8 +1148,10 @@ impl CcpState {
         }
         // A cancel of an order of this session: error 202 with the server's
         // reason, before the Cancelled status, as the reference (ibx#465;
-        // captured 25/09/2026, empty reason for a user cancel).
-        if status == crate::types::OrderStatus::Cancelled && status_changed {
+        // captured 25/09/2026, empty reason for a user cancel). Not for a
+        // status report in the rejected state: the reference sets that one
+        // cancelled without the notice (ibx#252).
+        if status == crate::types::OrderStatus::Cancelled && status_changed && ord_status != "8" {
             let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("");
             shared.orders.push_order_error(clord_id, 202, format!("Order Canceled - reason:{}", reason));
         }
@@ -1584,52 +1600,59 @@ impl CcpState {
         Some((execution, fill_exec_of(parsed, exec_id)))
     }
 
+    /// A cancel or modify the server refused (ibx#252). As the reference:
+    /// the order is the one whose current ClOrdID the reject carries (a
+    /// reject of an older version changes nothing); its ClOrdID version
+    /// goes back by one, its status and its record stay, and a status
+    /// request for it is sent. The answer to that request sets the status.
+    #[allow(clippy::too_many_arguments)]
     fn handle_cancel_reject(
         &mut self,
         parsed: &std::collections::HashMap<u32, String>,
+        ccp_conn: &mut Option<Connection>,
         context: &mut Context,
         shared: &SharedState,
         event_tx: &Option<Sender<Event>>,
+        hb: &mut HeartbeatState,
+        account_id: &str,
     ) {
-        // Match handle_exec_report's tag-11 parsing: strip the gateway's
-        // "C" prefix and any ".0/.1/.2" modify-chain suffix.
-        let orig_clord = parsed.get(&41).and_then(|s| {
-            let stripped = s.strip_prefix('C').unwrap_or(s);
-            let base = stripped.split('.').next().unwrap_or(stripped);
-            base.parse::<u64>().ok()
-        });
         let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("Cancel rejected");
         let reject_type: u8 = parsed.get(&434).and_then(|s| s.parse().ok()).unwrap_or(1);
         let reason_code: i32 = parsed.get(&102).and_then(|s| s.parse().ok()).unwrap_or(-1);
-        log::warn!("CancelReject: origClOrd={:?} type={} code={} reason={}",
-            orig_clord, reject_type, reason_code, reason);
+        let clord = parsed.get(&11).map(|s| s.as_str()).unwrap_or("");
+        log::warn!("CancelReject: clord={} type={} code={} reason={}",
+            clord, reject_type, reason_code, reason);
 
-        let Some(oid) = orig_clord else { return };
+        let Some((oid, version)) = clord.split_once('.')
+            .and_then(|(id, ver)| Some((id.parse::<u64>().ok()?, ver.parse::<u32>().ok()?)))
+        else { return };
+        if version == 0 || context.modify_versions.get(&oid) != Some(&version) {
+            log::info!("CancelReject: {} is not the current version of order {}, ignored", clord, oid);
+            return;
+        }
+        let lowered = format!("{}.{}", oid, version - 1);
+        context.modify_versions.insert(oid, version - 1);
+        // A refused modify had set the order's ClOrdID on record.
+        if context.last_clord.get(&oid).map(String::as_str) == Some(clord) {
+            context.last_clord.insert(oid, lowered.clone());
+        }
         // The cancel is over; a later cancel sends a new id (ibx#464).
-        context.cancel_clord.remove(&oid);
-
-        // Update local context only if we tracked the order in this session.
-        let instrument = if let Some(order) = context.order(oid).copied() {
-            let restore_status = if order.filled_fixed > 0 {
-                crate::types::OrderStatus::PartiallyFilled
-            } else {
-                crate::types::OrderStatus::Submitted
-            };
-            // Deliberate regression (PendingCancel back to working) — the
-            // ibx#212 guard would rightly block it on the ordinary path.
-            context.set_order_status_forced(oid, restore_status);
-            order.instrument
-        } else {
-            0
+        if context.cancel_clord.get(&oid).map(String::as_str) == Some(clord) {
+            context.cancel_clord.remove(&oid);
+        }
+        let instrument = match context.order(oid).copied() {
+            Some(order) => {
+                context.status_queries.insert(oid);
+                order.instrument
+            }
+            None => 0,
         };
-
-        // FIX CxlRejReason 1 = UnknownOrder. The gateway is telling us the
-        // order it just listed in the mass-status burst doesn't exist on its
-        // side — drop the stale cache entry so subsequent req_open_orders
-        // stops returning it. Other reasons (TooLate, OrderInProcess, ...)
-        // leave the cache alone; a follow-up exec report will reconcile.
-        if reason_code == 1 {
-            shared.orders.remove_order_info(oid);
+        if let Some(conn) = ccp_conn.as_mut() {
+            let now = chrono_free_timestamp();
+            match conn.send_fix(&order_status_request(&lowered, account_id, &now)) {
+                Ok(()) => hb.last_ccp_sent = Instant::now(),
+                Err(e) => log::warn!("CancelReject: status request for order {} not sent: {}", oid, e),
+            }
         }
 
         let reject = crate::types::CancelReject {
@@ -2447,6 +2470,13 @@ impl CcpState {
         }
         fields
     }
+}
+
+/// The status request for one order, after the server refused its cancel
+/// or modify (ibx#252): the order's ClOrdID, any symbol and side, and the
+/// account, as the reference writes it.
+pub(crate) fn order_status_request<'a>(clord: &'a str, account_id: &'a str, now: &'a str) -> [(u32, &'a str); 7] {
+    [(fix::TAG_MSG_TYPE, "H"), (fix::TAG_SENDING_TIME, now), (11, clord), (55, "*"), (54, "*"), (6471, "1"), (1, account_id)]
 }
 
 /// The order status replay request: every working order (ibx#399).
@@ -3467,14 +3497,142 @@ mod tests {
     #[test]
     fn a_cancel_reject_ends_the_cancel() {
         let (mut ccp, mut context, shared) = ord_status_test_state();
+        context.modify_versions.insert(42, 1);
         context.cancel_clord.insert(42, "42.1".to_string());
         let mut reject = std::collections::HashMap::new();
         for (t, v) in [(35u32, "9"), (11, "42.1"), (41, "42.0"), (434, "1"), (102, "0")] {
             reject.insert(t, v.to_string());
         }
-        ccp.handle_cancel_reject(&reject, &mut context, &shared, &None);
+        ccp.handle_cancel_reject(&reject, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
         assert!(context.cancel_clord.get(&42).is_none());
-        assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::Submitted);
+    }
+
+    fn pipe_frame(text: &str) -> Vec<u8> {
+        text.replace('|', "\x01").into_bytes()
+    }
+
+    // ibx#252, captured (ib-agent#192 C2b): the cancel of a child the
+    // server had already cancelled with its parent is refused, then the
+    // answer to the status request the refusal triggers comes in the
+    // rejected state. The reference lowers the ClOrdID version, sends the
+    // status request, and reads the answer as Cancelled: no reject, no 201.
+    #[test]
+    fn refused_cancel_of_a_cancelled_order_asks_its_status_and_stays_cancelled() {
+        use crate::types::OrderStatus;
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut ccp = CcpState::new();
+        let instrument = context.register_instrument(265598);
+        context.insert_order(crate::types::Order::new(
+            1626578655, instrument, Side::Sell, 1, 50962 * PRICE_SCALE / 100, b'2', b'0', 0,
+        ));
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        // The cancel ibx sent: version 1.
+        context.modify_versions.insert(1626578655, 1);
+        context.cancel_clord.insert(1626578655, "1626578655.1".to_string());
+        context.last_clord.insert(1626578655, "1626578655.0".to_string());
+
+        let cancelled = pipe_frame("8=FIX.4.1|9=000518|35=8|34=000769|43=N|52=20260923-10:09:51|11=1626578655.0|17=140781.1790158191.3|150=4|20=3|378=5|39=4|167=CS|55=AAPL|6210=BEST|38=1|44=509.62|32=0|31=0.00|14=0|151=0|6=0|54=2|37=00cf16ed.000225ed.6ab35319.0001|1=DU1|60=20260923-10:09:51|6571=20260923-10:09:51|6596=20261231-21:00:00|583=1626578654|6209=ReduceOnFillNonBlock|40=2|6119=192|6121=118|59=1|6008=265598|15=USD|6004=BEST|6122=c|6107=1626578654.0|6531=11/1/-7625079|6205=1|6236=CHILD|198=NONE|6115=0|6088=Socket|6035=AAPL|6817=20260923-10:09:46|10=052|");
+        ccp.process_ccp_message(&cancelled, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(context.finished_status(1626578655), Some(OrderStatus::Cancelled));
+        shared.orders.drain_order_updates();
+        shared.orders.drain_order_errors();
+
+        let refused = pipe_frame("8=FIX.4.1|9=000106|35=9|34=000770|43=N|52=20260923-10:09:51|37=0|11=1626578655.1|41=1626578655.0|39=8|102=1|58=No such order|10=200|");
+        ccp.process_ccp_message(&refused, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(ccp_messages_sent(&mut server),
+            ["35=H|11=1626578655.0|55=*|54=*|6471=1|1=DU1"]);
+        assert_eq!(context.modify_versions.get(&1626578655), Some(&0));
+        assert!(context.cancel_clord.get(&1626578655).is_none());
+
+        let answer = pipe_frame("8=FIX.4.1|9=000183|35=8|34=000771|43=N|52=20260923-10:09:51|11=1626578655.0|17=140781.1790158191.7|150=8|20=3|103=0|39=8|38=0|32=0|31=0.00|14=0|151=0|6=0|37=0|58=No such order|60=20260923-10:09:51|40=2|10=120|");
+        ccp.process_ccp_message(&answer, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(shared.orders.drain_order_errors().is_empty(), "no 201 and no 202");
+        assert!(shared.orders.drain_order_updates().iter().all(|u| u.status != OrderStatus::Rejected));
+        assert_eq!(context.finished_status(1626578655), Some(OrderStatus::Cancelled));
+        let info = shared.orders.get_order_info(1626578655).unwrap();
+        assert_eq!(info.order_state.status, "Cancelled");
+    }
+
+    // ibx#252: a refused cancel of a working order changes neither its
+    // status nor its record; the answer to the status request sets the
+    // status, here back to working.
+    #[test]
+    fn refused_cancel_keeps_the_order_until_the_status_answer() {
+        use crate::types::OrderStatus;
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        let routed = exec_report_frame(&[(11, "42.0"), (39, "0"), (150, "0"), (20, "0"), (100, "ARCA")]);
+        ccp.handle_exec_report(&routed, &mut context, &shared, &None, "DU1");
+        context.modify_versions.insert(42, 1);
+        context.cancel_clord.insert(42, "42.1".to_string());
+        context.apply_order_status(42, OrderStatus::PendingCancel);
+        shared.orders.drain_order_updates();
+
+        ccp.process_ccp_message(&pipe_frame("35=9|11=42.1|41=42.0|39=0|102=0|58=Too late to cancel|"),
+            &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(context.order(42).unwrap().status, OrderStatus::PendingCancel, "no state change");
+        assert!(shared.orders.get_order_info(42).is_some(), "the record stays");
+        assert!(shared.orders.drain_order_updates().is_empty());
+        assert_eq!(ccp_messages_sent(&mut server), ["35=H|11=42.0|55=*|54=*|6471=1|1=DU1"]);
+
+        // The answer: still working.
+        ccp.process_ccp_message(&pipe_frame("35=8|11=42.0|150=0|20=3|39=0|100=ARCA|"),
+            &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(context.order(42).unwrap().status, OrderStatus::Submitted);
+        let last = shared.orders.drain_order_updates().last().map(|u| u.status);
+        assert_eq!(last, Some(OrderStatus::Submitted));
+        assert!(context.status_queries.is_empty());
+
+        // A later status report is guarded again.
+        context.apply_order_status(42, OrderStatus::PendingCancel);
+        ccp.process_ccp_message(&pipe_frame("35=8|11=42.0|150=0|20=3|39=0|100=ARCA|"),
+            &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(context.order(42).unwrap().status, OrderStatus::PendingCancel);
+    }
+
+    // ibx#252: the reference acts only on a reject that carries the order's
+    // current ClOrdID, and reads the order from it, not from the previous id.
+    #[test]
+    fn a_reject_of_an_older_version_changes_nothing() {
+        use crate::types::OrderStatus;
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        context.modify_versions.insert(42, 2);
+        context.last_clord.insert(42, "42.2".to_string());
+        ccp.process_ccp_message(&pipe_frame("35=9|11=42.1|41=42.0|39=0|102=1|58=No such order|"),
+            &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        // Only the reject's own id names the order.
+        ccp.process_ccp_message(&pipe_frame("35=9|41=42.2|39=0|102=1|58=No such order|"),
+            &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(ccp_messages_sent(&mut server).is_empty());
+        assert_eq!(context.modify_versions.get(&42), Some(&2));
+        assert!(shared.orders.drain_cancel_rejects().is_empty());
+        assert_eq!(context.order(42).unwrap().status, OrderStatus::PendingSubmit);
+
+        // A refused modify: the version and the ClOrdID on record go back.
+        ccp.process_ccp_message(&pipe_frame("35=9|11=42.2|41=42.1|39=0|102=0|434=2|58=Order modify rejected|"),
+            &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(context.modify_versions.get(&42), Some(&1));
+        assert_eq!(context.last_clord.get(&42).map(String::as_str), Some("42.1"));
+        assert_eq!(ccp_messages_sent(&mut server), ["35=H|11=42.1|55=*|54=*|6471=1|1=DU1"]);
+    }
+
+    // ibx#252: the rejected state of an ordinary report is still a reject.
+    #[test]
+    fn a_rejected_new_order_is_still_rejected() {
+        use crate::types::OrderStatus;
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let frame = exec_report_frame(&[(11, "42.0"), (20, "0"), (39, "8"), (150, "8"), (58, "no")]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "DU1");
+        assert_eq!(context.finished_status(42), Some(OrderStatus::Rejected));
+        assert_eq!(shared.orders.drain_order_errors()[0].1, 201);
     }
 
     // ibx#472: the reference handles 39=E and 39=I as invalid statuses: no

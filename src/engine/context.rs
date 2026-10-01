@@ -80,6 +80,9 @@ pub struct Context {
     /// the cancel is rejected. Reports carrying it are about the cancel, not
     /// a new version of the order (ibx#464).
     pub(crate) cancel_clord: HashMap<OrderId, String>,
+    /// Orders whose cancel or modify the server refused, until the answer
+    /// to the status request sent for them (ibx#252).
+    pub(crate) status_queries: std::collections::HashSet<OrderId>,
     /// The last limit offset, limit price and stop price the server
     /// reported for a TRAIL LIMIT order (ib-agent#194, ibx#491).
     pub(crate) trail_limit_reported: HashMap<OrderId, TrailLimitReported>,
@@ -124,6 +127,7 @@ impl Context {
             modify_versions: HashMap::new(),
             last_clord: HashMap::new(),
             cancel_clord: HashMap::new(),
+            status_queries: std::collections::HashSet::new(),
             trail_limit_reported: HashMap::new(),
             rth_types: HashMap::new(),
             rth_lookups: Vec::new(),
@@ -1047,8 +1051,26 @@ impl Context {
         StatusChange::Changed
     }
 
+    /// The status the server gives in answer to a status request, after
+    /// it refused a cancel or modify (ibx#252): the order kept its status
+    /// until then, and the answer sets it, back to working too. A finished
+    /// status stays.
+    pub fn apply_queried_status(&mut self, order_id: OrderId, status: OrderStatus) -> StatusChange {
+        let Some(order) = self.open_orders.get_mut(&order_id) else {
+            return StatusChange::Unknown;
+        };
+        if order.status == status {
+            return StatusChange::Same;
+        }
+        if order.status.is_terminal() {
+            return StatusChange::Stale;
+        }
+        order.status = status;
+        StatusChange::Changed
+    }
+
     /// Set a status unconditionally — for deliberate lifecycle regressions
-    /// only (cancel-reject restore, disconnect reconciliation).
+    /// only (disconnect reconciliation).
     pub fn set_order_status_forced(&mut self, order_id: OrderId, status: OrderStatus) {
         if let Some(order) = self.open_orders.get_mut(&order_id) {
             order.status = status;
@@ -1073,6 +1095,7 @@ impl Context {
             return;
         }
         self.cancel_clord.remove(&order_id);
+        self.status_queries.remove(&order_id);
         self.trail_limit_reported.remove(&order_id);
         if self.finished_orders.insert(order_id, status).is_none() {
             self.finished_order_ids.push_back(order_id);
