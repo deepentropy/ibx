@@ -729,7 +729,7 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchMatchingSymbols { req_id, pattern } => {
-                    self.ccp.send_matching_symbols_request(req_id, &pattern, &mut self.ccp_conn, &mut self.hb);
+                    self.ccp.send_matching_symbols_request(req_id, &pattern, &mut self.ccp_conn, &mut self.hb, &self.shared);
                 }
                 ControlCommand::FetchMktDepthExchanges => {
                     self.ccp.send_mkt_depth_exchanges_request(&mut self.ccp_conn, &mut self.hb, &self.shared);
