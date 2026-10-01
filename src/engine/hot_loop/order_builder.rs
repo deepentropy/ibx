@@ -2352,27 +2352,10 @@ fn push_extended_attrs(
     // 6151. ibx had them the other way round and sent them only when set
     // (ib-agent#192 B2, ibx#327).
     if !attrs.conditions.is_empty() {
-        let cond_strs = build_condition_strings(&attrs.conditions);
         let flag = |on: bool| if on { "1" } else { "0" }.to_string();
         fields.push((6128, flag(attrs.conditions_ignore_rth)));
         fields.push((6151, flag(attrs.conditions_cancel_order)));
-        fields.push((6136, cond_strs[0].clone())); // first element is count
-        // Per-condition tags start at index 1, 11 strings per condition
-        for i in 0..attrs.conditions.len() {
-            let base = 1 + i * 11;
-            fields.push((6222, cond_strs[base].clone()));      // condType
-            fields.push((6137, cond_strs[base + 1].clone()));  // conjunction
-            fields.push((6126, cond_strs[base + 2].clone()));  // operator
-            fields.push((6123, cond_strs[base + 3].clone()));  // conId
-            fields.push((6124, cond_strs[base + 4].clone()));  // exchange
-            fields.push((6127, cond_strs[base + 5].clone()));  // triggerMethod
-            fields.push((6125, cond_strs[base + 6].clone()));  // price
-            fields.push((6223, cond_strs[base + 7].clone()));  // time
-            fields.push((6245, cond_strs[base + 8].clone()));  // percent
-            fields.push((6263, cond_strs[base + 9].clone()));  // volume
-            fields.push((6246, cond_strs[base + 10].clone())); // execution
-            fields.push((6947, String::new()));                // empty, as the reference sends it
-        }
+        fields.extend(condition_tags(&attrs.conditions));
     }
 }
 
@@ -2668,94 +2651,68 @@ fn condition_exchange(exchange: &str) -> String {
     if exchange.eq_ignore_ascii_case("SMART") { "BEST".to_string() } else { exchange.to_string() }
 }
 
-fn build_condition_strings(conditions: &[OrderCondition]) -> Vec<String> {
-    let mut out = Vec::with_capacity(1 + conditions.len() * 11);
-    out.push(conditions.len().to_string());
+/// Tags every condition is padded with, in this order: each one the
+/// condition did not write goes out empty (ib-agent ORDER-SUBMIT.md 4.2).
+/// The available-funds tag of the list is left out: ibx has no such
+/// condition.
+const CONDITION_PADDING: [u32; 10] = [6123, 6124, 6127, 6126, 6125, 6223, 6245, 6263, 6246, 6947];
+
+/// The condition block after the two flags, as the reference writes it
+/// (ib-agent ORDER-SUBMIT.md 4.2, 4.3; ibx#416): the count, then per
+/// condition its type, conjunction and own tags in the reference's order,
+/// then the padding. A time condition carries its time right after the
+/// operator; numbers have two decimals at least.
+fn condition_tags(conditions: &[OrderCondition]) -> Vec<(u32, String)> {
+    let mut out = vec![(6136, conditions.len().to_string())];
     for (i, cond) in conditions.iter().enumerate() {
-        let is_last = i == conditions.len() - 1;
-        let conj = if is_last { "n" } else { "a" };
-        let op = |is_more: bool| if is_more { ">=" } else { "<=" };
-        match cond {
-            OrderCondition::Price { con_id, exchange, price, is_more, trigger_method } => {
-                out.push("1".into());                              // condType
-                out.push(conj.into());                             // conjunction
-                out.push(op(*is_more).into());                     // operator
-                out.push(con_id.to_string());                      // conId
-                out.push(condition_exchange(exchange));            // exchange
-                out.push(trigger_method.to_string());              // triggerMethod
-                out.push(format_price(*price).to_string());         // price
-                out.push(String::new());                           // time (unused)
-                out.push(String::new());                           // percent (unused)
-                out.push(String::new());                           // volume (unused)
-                out.push(String::new());                           // execution (unused)
-            }
-            OrderCondition::Time { time, is_more } => {
-                out.push("3".into());
-                out.push(conj.into());
-                out.push(op(*is_more).into());
-                out.push(String::new());                           // conId (unused)
-                out.push(String::new());                           // exchange (unused)
-                out.push(String::new());                           // triggerMethod (unused)
-                out.push(String::new());                           // price (unused)
-                out.push(time.clone());                            // time
-                out.push(String::new());                           // percent (unused)
-                out.push(String::new());                           // volume (unused)
-                out.push(String::new());                           // execution (unused)
-            }
-            OrderCondition::Margin { percent, is_more } => {
-                out.push("4".into());
-                out.push(conj.into());
-                out.push(op(*is_more).into());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(percent.to_string());                     // percent
-                out.push(String::new());
-                out.push(String::new());
-            }
+        let conj = if i == conditions.len() - 1 { "n" } else { "a" };
+        let op = |is_more: bool| if is_more { ">=" } else { "<=" }.to_string();
+        let own: Vec<(u32, String)> = match cond {
+            OrderCondition::Price { con_id, exchange, price, is_more, trigger_method } => vec![
+                (6126, op(*is_more)),
+                (6123, con_id.to_string()),
+                (6124, condition_exchange(exchange)),
+                (6127, trigger_method.to_string()),
+                (6125, format_price_ref(*price).to_string()),
+            ],
+            OrderCondition::Time { time, is_more } => vec![
+                (6126, op(*is_more)),
+                (6223, time.clone()),
+            ],
+            OrderCondition::Margin { percent, is_more } => vec![
+                (6126, op(*is_more)),
+                (6245, percent.to_string()),
+            ],
             OrderCondition::Execution { symbol, exchange, sec_type } => {
-                out.push("5".into());
-                out.push(conj.into());
-                out.push(String::new());                           // operator (unused)
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
                 let exch = if exchange == "SMART" { "*" } else { exchange.as_str() };
-                out.push(format!("symbol={};exchange={};securityType={};", symbol, exch, sec_type));
+                vec![(6246, format!("symbol={};exchange={};securityType={};", symbol, exch, sec_type))]
             }
-            OrderCondition::Volume { con_id, exchange, volume, is_more } => {
-                out.push("6".into());
-                out.push(conj.into());
-                out.push(op(*is_more).into());
-                out.push(con_id.to_string());
-                out.push(exchange.clone());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(volume.to_string());                      // volume
-                out.push(String::new());
-            }
-            OrderCondition::PercentChange { con_id, exchange, percent, is_more } => {
-                out.push("7".into());
-                out.push(conj.into());
-                out.push(op(*is_more).into());
-                out.push(con_id.to_string());
-                out.push(exchange.clone());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(String::new());
-                out.push(format!("{}", percent));                   // percent
-                out.push(String::new());
-                out.push(String::new());
-            }
-        }
+            OrderCondition::Volume { con_id, exchange, volume, is_more } => vec![
+                (6126, op(*is_more)),
+                (6123, con_id.to_string()),
+                (6124, condition_exchange(exchange)),
+                (6263, volume.to_string()),
+            ],
+            OrderCondition::PercentChange { con_id, exchange, percent, is_more } => vec![
+                (6126, op(*is_more)),
+                (6123, con_id.to_string()),
+                (6124, condition_exchange(exchange)),
+                (6245, format_price_ref((percent * crate::types::PRICE_SCALE as f64).round() as crate::types::Price).to_string()),
+            ],
+        };
+        let kind = match cond {
+            OrderCondition::Price { .. } => "1",
+            OrderCondition::Time { .. } => "3",
+            OrderCondition::Margin { .. } => "4",
+            OrderCondition::Execution { .. } => "5",
+            OrderCondition::Volume { .. } => "6",
+            OrderCondition::PercentChange { .. } => "7",
+        };
+        out.push((6222, kind.to_string()));
+        out.push((6137, conj.to_string()));
+        let written: Vec<u32> = own.iter().map(|(t, _)| *t).collect();
+        out.extend(own);
+        out.extend(CONDITION_PADDING.iter().filter(|t| !written.contains(t)).map(|&t| (t, String::new())));
     }
     out
 }
@@ -3394,6 +3351,47 @@ mod tests {
     fn condition_block_with_ignore_rth_matches_reference() {
         let want = parse_frame("6128=1|6151=0|6136=1|6222=1|6137=n|6126=>=|6123=265598|6124=BEST|6127=0|6125=509.62|6223=|6245=|6263=|6246=|6947=");
         assert_eq!(condition_block(false, true), want);
+    }
+
+    /// The condition tags of a limit order with these conditions.
+    fn conditions_of(conditions: Vec<OrderCondition>) -> Vec<(u32, String)> {
+        let tags = wire_tags(OrderRequest::SubmitEx {
+            order_id: 13, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::Limit { price: 237 * crate::types::PRICE_SCALE },
+            tif: b'0',
+            attrs: crate::types::OrderAttrs { conditions, ..Default::default() },
+        });
+        let start = pos(&tags, 6136);
+        let end = tags.iter().rposition(|(t, _)| *t == 6947).unwrap();
+        tags[start..=end].to_vec()
+    }
+
+    // ibx#416: a time condition carries its time right after the operator,
+    // then the padding in the reference's list order (ib-agent
+    // ORDER-SUBMIT.md 4.2-4.4, static prediction of the reference frame).
+    #[test]
+    fn time_condition_matches_the_reference_layout() {
+        let got = conditions_of(vec![OrderCondition::Time { time: "20991231-23:59:59".into(), is_more: false }]);
+        let want = parse_frame("6136=1|6222=3|6137=n|6126=<=|6223=20991231-23:59:59|6123=|6124=|6127=|6125=|6245=|6263=|6246=|6947=");
+        assert_eq!(got, want);
+    }
+
+    // The other condition types in the reference's order: own tags, then
+    // the padding; SMART goes out as BEST, numbers with two decimals.
+    #[test]
+    fn volume_percent_and_execution_conditions_match_the_reference_layout() {
+        let got = conditions_of(vec![
+            OrderCondition::Volume { con_id: 756733, exchange: "SMART".into(), volume: 1000, is_more: true },
+            OrderCondition::PercentChange { con_id: 756733, exchange: "SMART".into(), percent: 5.0, is_more: true },
+            OrderCondition::Execution { symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "STK".into() },
+        ]);
+        let want = parse_frame(concat!(
+            "6136=3",
+            "|6222=6|6137=a|6126=>=|6123=756733|6124=BEST|6263=1000|6127=|6125=|6223=|6245=|6246=|6947=",
+            "|6222=7|6137=a|6126=>=|6123=756733|6124=BEST|6245=5.00|6127=|6125=|6223=|6263=|6246=|6947=",
+            "|6222=5|6137=n|6246=symbol=SPY;exchange=*;securityType=STK;|6123=|6124=|6127=|6126=|6125=|6223=|6245=|6263=|6947=",
+        ));
+        assert_eq!(got, want);
     }
 
     #[test]
