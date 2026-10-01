@@ -50,6 +50,18 @@ pub(crate) fn drain_and_send_orders(
             log::warn!("What-if of order {} dropped: only a single new order can be previewed", oid);
             continue;
         }
+        // A quantity that is not whole: refused with 10243 and nothing
+        // sent, as the reference refuses it for an API client (ib-agent#192
+        // B3). Sent with the API client fields of every new order, it was
+        // rejected by the server on paper (01/10/2026).
+        if let OrderRequest::SubmitLimitFractional { qty, .. } = &order_req {
+            if qty % crate::types::QTY_SCALE != 0 {
+                let (code, message) = crate::client_core::FRACTIONAL_VIA_API;
+                log::warn!("Order {} refused: fractional quantity", oid);
+                shared.orders.push_order_error(oid, code, message.into());
+                continue;
+            }
+        }
         // A short-side order: refused with 321 and nothing sent, as the
         // reference, or sent with its short-sale fields (ibx#417).
         context.short_sale_send = None;
@@ -4473,5 +4485,18 @@ mod tests {
         }, 3);
         assert_eq!(tag(&frames[2], 6117), tag(&frames[2], 99));
         assert!(tag(&frames[1], 6117).is_none());
+    }
+
+    // A fractional quantity is refused with 10243 and nothing is sent, as
+    // the reference refuses it (ib-agent#192 B3); a whole one goes out.
+    #[test]
+    fn fractional_quantity_is_refused_with_10243() {
+        let frac = |order_id, qty| OrderRequest::SubmitLimitFractional { order_id, instrument: 0, side: Side::Buy, qty, price: P };
+        let (frames, errors) = short_sale_run(false, false, "DU1", frac(1, crate::types::QTY_SCALE / 2));
+        assert!(frames.is_empty(), "nothing sent: {frames:?}");
+        assert_eq!(errors, vec![(1, 10243, crate::client_core::FRACTIONAL_VIA_API.1.to_string())]);
+        let (frames, errors) = short_sale_run(false, false, "DU1", frac(2, 2 * crate::types::QTY_SCALE));
+        assert!(errors.is_empty());
+        assert_eq!(tag(&frames[0], 38), Some("2"));
     }
 }

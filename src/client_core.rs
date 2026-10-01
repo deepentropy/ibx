@@ -551,6 +551,10 @@ pub struct OrderView {
 /// sent (ibx#463; captured 25/09/2026).
 pub const MODIFY_OF_FINISHED_ORDER: (i64, &str) = (104, "Cannot modify a filled order.");
 
+/// The reference's refusal of a fractional quantity (ib-agent#192 B3).
+pub const FRACTIONAL_VIA_API: (i64, &str) = (10243,
+    "Fractional-sized order cannot be placed via API. Please use desktop version to place this order.");
+
 /// Most commission reports kept while waiting for their execution.
 pub const PENDING_COMMISSIONS_MAX: usize = 1024;
 
@@ -2803,8 +2807,7 @@ impl ClientCore {
     /// number and send it, so 1.5 shares went out as 1 (ibx#313).
     pub fn fractional_quantity_refusal(order: &ApiOrder) -> Option<(i64, String)> {
         if order.total_quantity.fract() != 0.0 {
-            Some((10243, "Fractional-sized order cannot be placed via API. \
-                Please use desktop version to place this order.".to_string()))
+            Some((FRACTIONAL_VIA_API.0, FRACTIONAL_VIA_API.1.to_string()))
         } else {
             None
         }

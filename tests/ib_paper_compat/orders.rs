@@ -1291,62 +1291,13 @@ pub(super) fn phase_cash_qty_order(conns: Conns) -> Conns {
 
 // ─── Phase 74: Fractional Shares Order ───
 
+// The reference refuses a fractional quantity for an API client with
+// 10243 and sends nothing (ib-agent#192 B3, captured on this paper account).
 pub(super) fn phase_fractional_order(conns: Conns) -> Conns {
-    println!("--- Phase 74: Fractional Shares Order (SPY) ---");
-
-    let account_id = conns.account_id;
-    let shared = Arc::new(SharedState::new());
-    let (event_tx, event_rx) = crossbeam_channel::unbounded();
-    let (mut hot_loop, control_tx) = HotLoop::with_connections(
-        shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
-    );
-    let inst_id = hot_loop.context_mut().register_instrument(756733);
-    hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
-
-    let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitFractional {
-        order_id, instrument: inst_id, side: Side::Buy, qty: QTY_SCALE / 2, price: 1_00_000_000,
-    })).unwrap();
-    control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
-    let join = run_hot_loop(hot_loop);
-
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut order_acked = false;
-    let mut order_cancelled = false;
-    let mut order_rejected = false;
-    let mut cancel_sent = false;
-
-    while Instant::now() < deadline {
-        match event_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Event::OrderUpdate(update)) => {
-                match update.status {
-                    OrderStatus::PreSubmitted | OrderStatus::Submitted => {
-                        order_acked = true;
-                        if !cancel_sent {
-                            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
-                            cancel_sent = true;
-                        }
-                    }
-                    OrderStatus::Cancelled => { order_cancelled = true; break; }
-                    OrderStatus::Rejected => { order_rejected = true; break; }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
-
-    if order_rejected {
-        record_rejection("Fractional rejected (may be blocked by CCP)");
-        return conns;
-    }
-    if skip_unacked_if_closed(order_acked) { return conns; }
-    check!(order_acked, "Order was never acknowledged");
-    check!(order_cancelled, "Order was never cancelled");
-    println!("  PASS\n");
-    conns
+    let oid = next_order_id();
+    run_submit_cancel_phase_or_refused(conns, "Phase 74: Fractional Shares Order (SPY)",
+        OrderRequest::SubmitLimitFractional { order_id: oid, instrument: 0, side: Side::Buy, qty: QTY_SCALE / 2, price: 1_00_000_000 },
+        false, Some(10243))
 }
 
 // ─── Phase 75: Adjustable Stop ───
