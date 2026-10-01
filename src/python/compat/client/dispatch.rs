@@ -558,12 +558,14 @@ impl EClient {
         for (req_id, matches) in symbol_results {
             let descriptions: Vec<Py<ContractDescription>> = matches.iter().map(|m| {
                 Py::new(py, ContractDescription {
-                    con_id: m.con_id as i64,
+                    con_id: m.con_id,
                     symbol: m.symbol.clone(),
-                    sec_type: m.sec_type.to_fix().to_string(),
+                    sec_type: m.sec_type.clone(),
                     currency: m.currency.clone(),
                     primary_exchange: m.primary_exchange.clone(),
                     derivative_sec_types: m.derivative_types.clone(),
+                    description: m.description.clone(),
+                    issuer_id: m.issuer_id.clone(),
                 }).unwrap()
             }).collect();
             let list = pyo3::types::PyList::new(py, &descriptions)?;

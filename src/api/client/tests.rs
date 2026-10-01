@@ -1763,6 +1763,57 @@ fn req_matching_symbols_sends_fetch() {
     }
 }
 
+// ibx#439: the pattern is checked and trimmed as the reference.
+#[test]
+fn req_matching_symbols_checks_and_trims_the_pattern() {
+    let (client, rx, _shared) = test_client();
+    client.req_matching_symbols(9, "  BRK   A ").unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::FetchMatchingSymbols { req_id, pattern } => assert_eq!((req_id, pattern.as_str()), (9, "BRK A")),
+        _ => panic!("expected FetchMatchingSymbols"),
+    }
+    for bad in ["", "   ", "\t"] {
+        client.req_matching_symbols(2, bad).unwrap();
+    }
+    client.req_matching_symbols(3, "MS\tFT").unwrap();
+    client.req_matching_symbols(4, "Soci\u{e9}t\u{e9}").unwrap();
+    assert!(rx.try_recv().is_err(), "nothing is sent for a refused pattern");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let errors: Vec<String> = w.events.iter().filter(|e| e.starts_with("error:")).cloned().collect();
+    let empty = "error:2:321:Error validating request.-'ce' : cause - Pattern must not be empty";
+    assert_eq!(errors, [
+        empty.to_string(), empty.to_string(), empty.to_string(),
+        "error:3:321:Error validating request.-'ce' : cause - Invalid pattern: 'MS\tFT'".to_string(),
+        "error:4:321:Error validating request.-'ce' : cause - Invalid pattern: 'Soci\u{e9}t\u{e9}'".to_string(),
+    ]);
+}
+
+// ibx#439: a row reaches the client with its conId, API security type,
+// description and issuer id.
+#[test]
+fn process_msgs_symbol_samples_carry_the_row_fields() {
+    #[derive(Default)]
+    struct Samples(Vec<crate::api::types::ContractDescription>);
+    impl Wrapper for Samples {
+        fn symbol_samples(&mut self, _req_id: i64, descriptions: &[crate::api::types::ContractDescription]) {
+            self.0.extend_from_slice(descriptions);
+        }
+    }
+    let (client, _rx, shared) = test_client();
+    shared.reference.push_matching_symbols(8, vec![SymbolMatch {
+        con_id: -1, symbol: "".into(), sec_type: "BOND".into(), currency: "USD".into(),
+        primary_exchange: "".into(), description: "MICROSOFT CORP".into(), issuer_id: "e1393444".into(),
+        derivative_types: vec![],
+    }]);
+    let mut w = Samples::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.0.len(), 1);
+    let d = &w.0[0];
+    assert_eq!((d.con_id, d.sec_type.as_str(), d.description.as_str(), d.issuer_id.as_str()),
+        (-1, "BOND", "MICROSOFT CORP", "e1393444"));
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  Positions
 // ═══════════════════════════════════════════════════════════════════
@@ -2610,9 +2661,9 @@ fn process_msgs_dispatches_symbol_samples() {
     let (client, _rx, shared) = test_client();
     shared.reference.push_matching_symbols(8, vec![
         SymbolMatch {
-            con_id: 265598, symbol: "AAPL".into(), sec_type: SecurityType::Stock,
+            con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(),
             currency: "USD".into(), primary_exchange: "NASDAQ".into(),
-            description: "Apple Inc".into(), derivative_types: vec!["OPT".into()],
+            description: "Apple Inc".into(), issuer_id: String::new(), derivative_types: vec!["OPT".into()],
         },
     ]);
     let mut w = RecordingWrapper::default();

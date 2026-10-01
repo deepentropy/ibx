@@ -81,10 +81,19 @@ impl EClient {
     }
 
     /// Request matching symbols. Matches `reqMatchingSymbols` in C++.
+    /// An empty or invalid pattern gives 321 and nothing is sent; the
+    /// pattern is sent trimmed (ibx#439).
     pub fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> Result<(), String> {
+        let pattern = match crate::client_core::matching_symbols_pattern(pattern) {
+            Ok(pattern) => pattern,
+            Err((code, message)) => {
+                self.shared.orders.push_order_error(req_id as u64, code, message);
+                return Ok(());
+            }
+        };
         self.send(ControlCommand::FetchMatchingSymbols {
             req_id: req_id as u32,
-            pattern: pattern.into(),
+            pattern,
         })
     }
 

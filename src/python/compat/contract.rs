@@ -2296,14 +2296,19 @@ pub struct ContractDescription {
     pub primary_exchange: String,
     #[pyo3(get, set)]
     pub derivative_sec_types: Vec<String>,
+    #[pyo3(get, set)]
+    pub description: String,
+    #[pyo3(get, set)]
+    pub issuer_id: String,
 }
 
 #[pymethods]
 impl ContractDescription {
     #[new]
-    #[pyo3(signature = (con_id=0, symbol="".to_string(), sec_type="".to_string(), currency="".to_string(), primary_exchange="".to_string(), derivative_sec_types=Vec::new()))]
-    fn new(con_id: i64, symbol: String, sec_type: String, currency: String, primary_exchange: String, derivative_sec_types: Vec<String>) -> Self {
-        Self { con_id, symbol, sec_type, currency, primary_exchange, derivative_sec_types }
+    #[pyo3(signature = (con_id=0, symbol="".to_string(), sec_type="".to_string(), currency="".to_string(), primary_exchange="".to_string(), derivative_sec_types=Vec::new(), description="".to_string(), issuer_id="".to_string()))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(con_id: i64, symbol: String, sec_type: String, currency: String, primary_exchange: String, derivative_sec_types: Vec<String>, description: String, issuer_id: String) -> Self {
+        Self { con_id, symbol, sec_type, currency, primary_exchange, derivative_sec_types, description, issuer_id }
     }
 
     fn __repr__(&self) -> String {

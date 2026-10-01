@@ -212,7 +212,7 @@ pub(super) fn phase_matching_symbols(conns: Conns) -> Conns {
     let m = matches.expect("No matching symbols response received for 'SPY'");
     check!(!m.is_empty(), "Should have at least one match for 'SPY'");
     println!("  {} matches found", m.len());
-    let spy = m.iter().find(|s| s.symbol == "SPY" && s.sec_type == contracts::SecurityType::Stock && s.currency == "USD");
+    let spy = m.iter().find(|s| s.symbol == "SPY" && s.sec_type == "STK" && s.currency == "USD");
     if let Some(spy) = spy {
         check_eq!(spy.con_id, 756733);
         println!("  SPY: conId={} exchange={} desc={}", spy.con_id, spy.primary_exchange, spy.description);

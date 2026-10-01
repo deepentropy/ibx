@@ -364,12 +364,14 @@ impl EClient {
         for (req_id, matches) in self.shared.reference.drain_matching_symbols() {
             let descriptions: Vec<ContractDescription> = matches.iter().map(|m| {
                 ContractDescription {
-                    con_id: m.con_id as i64,
+                    con_id: m.con_id,
                     symbol: m.symbol.clone(),
-                    sec_type: m.sec_type.to_fix().to_string(),
+                    sec_type: m.sec_type.clone(),
                     currency: m.currency.clone(),
                     primary_exchange: m.primary_exchange.clone(),
                     derivative_sec_types: m.derivative_types.clone(),
+                    description: m.description.clone(),
+                    issuer_id: m.issuer_id.clone(),
                 }
             }).collect();
             wrapper.symbol_samples(req_id as i64, &descriptions);

@@ -744,6 +744,8 @@ pub struct ContractDescription {
     pub currency: String,
     pub primary_exchange: String,
     pub derivative_sec_types: Vec<String>,
+    pub description: String,
+    pub issuer_id: String,
 }
 
 // ── PriceIncrement (for market rules) ──

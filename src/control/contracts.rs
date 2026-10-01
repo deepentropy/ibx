@@ -858,16 +858,33 @@ pub const TAG_MATCH_PRIMARY_EXCHANGE: u32 = 6453;
 pub const TAG_MATCH_DESCRIPTION: u32 = 306;
 pub const TAG_MATCH_DERIVATIVE_TYPES: u32 = 6070;
 
-/// A single matching symbol result.
+pub const TAG_MATCH_ISSUER_ID: u32 = 6454;
+/// Security type of a row that has no security type field (bond rows).
+pub const TAG_MATCH_ALT_SECURITY_TYPE: u32 = 310;
+
+/// A single matching symbol result (ibx#439).
 #[derive(Debug, Clone)]
 pub struct SymbolMatch {
-    pub con_id: u32,
+    /// -1 when the row has no conId, as the reference.
+    pub con_id: i64,
     pub symbol: String,
-    pub sec_type: SecurityType,
+    /// The API text ("STK", "BOND", ...); a type the engine does not know
+    /// is kept as received.
+    pub sec_type: String,
     pub currency: String,
     pub primary_exchange: String,
     pub description: String,
+    pub issuer_id: String,
     pub derivative_types: Vec<String>,
+}
+
+/// API text of a security type as received: the known types in their API
+/// form, any other text as is.
+fn api_sec_type(raw: &str) -> String {
+    match SecurityType::from_fix(raw) {
+        SecurityType::Other => raw.to_string(),
+        known => known.to_api_str().to_string(),
+    }
 }
 
 /// Build a matching symbols request.
@@ -906,62 +923,73 @@ pub fn parse_matching_symbols_response(data: &[u8]) -> Option<Vec<SymbolMatch>> 
     let sub_protocol = tags.iter().find(|(t, _)| *t == TAG_SUB_PROTOCOL)?.1.as_str();
     if sub_protocol != "186" { return None; }
 
-    // Parse repeating groups: each match starts with tag 55 (symbol)
+    // Each row starts at its symbol, as the reference: rows without a
+    // conId are kept with -1, the security type is the first type field
+    // else the alternative one (ibx#439). A row whose conId is not a number
+    // is skipped, as the reference skips a row it cannot convert.
+    struct Row<'a> {
+        m: SymbolMatch,
+        sec_type: Option<&'a str>,
+        alt_sec_type: Option<&'a str>,
+        con_id: Option<&'a str>,
+    }
+    fn close(row: Row<'_>, out: &mut Vec<SymbolMatch>) {
+        let mut m = row.m;
+        m.sec_type = api_sec_type(row.sec_type.or(row.alt_sec_type).unwrap_or(""));
+        m.con_id = match row.con_id {
+            None => -1,
+            Some(v) => match v.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    log::warn!("matching symbols: row {} skipped, conId {:?}", m.symbol, v);
+                    return;
+                }
+            },
+        };
+        out.push(m);
+    }
     let mut matches = Vec::new();
-    let mut current: Option<SymbolMatch> = None;
+    let mut current: Option<Row> = None;
 
     for (tag, val) in &tags {
-        match *tag {
-            TAG_SYMBOL => {
-                if let Some(m) = current.take() {
-                    if m.con_id > 0 { matches.push(m); }
-                }
-                current = Some(SymbolMatch {
-                    con_id: 0,
+        if *tag == TAG_SYMBOL {
+            if let Some(row) = current.take() {
+                close(row, &mut matches);
+            }
+            current = Some(Row {
+                m: SymbolMatch {
+                    con_id: -1,
                     symbol: val.clone(),
-                    sec_type: SecurityType::Stock,
+                    sec_type: String::new(),
                     currency: String::new(),
                     primary_exchange: String::new(),
                     description: String::new(),
+                    issuer_id: String::new(),
                     derivative_types: Vec::new(),
-                });
-            }
-            TAG_SECURITY_TYPE => {
-                if let Some(ref mut m) = current {
-                    m.sec_type = SecurityType::from_fix(val);
-                }
-            }
-            TAG_CURRENCY => {
-                if let Some(ref mut m) = current {
-                    m.currency = val.clone();
-                }
-            }
-            TAG_IB_CON_ID => {
-                if let Some(ref mut m) = current {
-                    m.con_id = val.parse().unwrap_or(0);
-                }
-            }
-            TAG_MATCH_PRIMARY_EXCHANGE => {
-                if let Some(ref mut m) = current {
-                    m.primary_exchange = val.clone();
-                }
-            }
-            TAG_MATCH_DESCRIPTION => {
-                if let Some(ref mut m) = current {
-                    m.description = val.clone();
-                }
-            }
+                },
+                sec_type: None,
+                alt_sec_type: None,
+                con_id: None,
+            });
+            continue;
+        }
+        let Some(row) = current.as_mut() else { continue };
+        match *tag {
+            TAG_SECURITY_TYPE => row.sec_type = Some(val),
+            TAG_MATCH_ALT_SECURITY_TYPE => row.alt_sec_type = Some(val),
+            TAG_CURRENCY => row.m.currency = val.clone(),
+            TAG_IB_CON_ID => row.con_id = Some(val),
+            TAG_MATCH_PRIMARY_EXCHANGE => row.m.primary_exchange = val.clone(),
+            TAG_MATCH_DESCRIPTION => row.m.description = val.clone(),
+            TAG_MATCH_ISSUER_ID => row.m.issuer_id = val.clone(),
             TAG_MATCH_DERIVATIVE_TYPES => {
-                if let Some(ref mut m) = current {
-                    m.derivative_types = val.split(',').map(|s| s.to_string()).collect();
-                }
+                row.m.derivative_types = val.split(',').map(|s| s.to_string()).collect();
             }
             _ => {}
         }
     }
-    // Flush last match
-    if let Some(m) = current {
-        if m.con_id > 0 { matches.push(m); }
+    if let Some(row) = current {
+        close(row, &mut matches);
     }
 
     Some(matches)
@@ -1505,6 +1533,38 @@ pub(crate) mod tests {
         assert_eq!(matches[0].derivative_types, vec!["OPT", "WAR"]);
         assert_eq!(matches[1].symbol, "APP");
         assert_eq!(matches[1].con_id, 481863646);
+        assert_eq!(matches[0].sec_type, "STK");
+    }
+
+    // ibx#439: the captured MSFT reply, a bond row and a row without conId.
+    #[test]
+    fn matching_symbols_rows_as_the_reference() {
+        let msg = pipe_msg("35=U|6040=186|320=10|146=4|\
+            55=MSFT|167=STK|15=USD|6008=272093|6453=NASDAQ|6470=NASDAQ.NMS|306=MICROSOFT CORP|6070=BAG,CFD,IOPT,OPT,WAR|6739=WAR|8499=1|8077=COMMON|8273=COMMON|8179=US/STK|\
+            55=|310=BOND|15=USD|6008=123456|306=MICROSOFT CORP|6454=e1393444|8450=Corp|\
+            55=EUR|167=CASH|15=USD|\
+            55=MSF|167=FUND|15=EUR|6008=1|8533=BOND:2,STK:23,IND:2");
+        let m = parse_matching_symbols_response(&msg).unwrap();
+        assert_eq!(m.len(), 4);
+        assert_eq!((m[0].con_id, m[0].symbol.as_str(), m[0].sec_type.as_str()), (272093, "MSFT", "STK"));
+        assert_eq!((m[0].primary_exchange.as_str(), m[0].currency.as_str()), ("NASDAQ", "USD"));
+        assert_eq!(m[0].description, "MICROSOFT CORP");
+        assert_eq!(m[0].derivative_types, ["BAG", "CFD", "IOPT", "OPT", "WAR"]);
+        assert_eq!(m[0].issuer_id, "");
+        // A bond row: empty symbol, type from the alternative field, issuer id.
+        assert_eq!((m[1].symbol.as_str(), m[1].sec_type.as_str(), m[1].issuer_id.as_str()), ("", "BOND", "e1393444"));
+        // No conId: kept with -1.
+        assert_eq!((m[2].con_id, m[2].sec_type.as_str()), (-1, "CASH"));
+        // A type the engine does not know is kept as received.
+        assert_eq!(m[3].sec_type, "FUND");
+        // The wire stock code is given in its API form.
+        let msg = pipe_msg("35=U|6040=186|320=1|146=1|55=AAPL|167=CS|6008=265598");
+        assert_eq!(parse_matching_symbols_response(&msg).unwrap()[0].sec_type, "STK");
+        // A conId that is not a number: the row is skipped.
+        let msg = pipe_msg("35=U|6040=186|320=1|146=2|55=AAPL|167=STK|6008=x|55=IBM|167=STK|6008=8314");
+        let m = parse_matching_symbols_response(&msg).unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].symbol, "IBM");
     }
 
     // ibx#223: a closed day (neither hours flag set) must be represented,

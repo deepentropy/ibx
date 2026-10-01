@@ -141,10 +141,19 @@ impl EClient {
     /// Search for matching symbols.
     fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        // An empty or invalid pattern gives 321 and nothing is sent; the
+        // pattern is sent trimmed (ibx#439).
+        let pattern = match crate::client_core::matching_symbols_pattern(pattern) {
+            Ok(pattern) => pattern,
+            Err((code, message)) => {
+                self.shared_state()?.orders.push_order_error(req_id as u64, code, message);
+                return Ok(());
+            }
+        };
         let tx = self.tx()?;
         tx.send(ControlCommand::FetchMatchingSymbols {
             req_id: req_id as u32,
-            pattern: pattern.to_string(),
+            pattern,
         }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())
     }

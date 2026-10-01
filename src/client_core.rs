@@ -158,6 +158,21 @@ fn pnl_account_refusal(class: &str, account: &str, own_account: &str) -> Result<
     Err((321, format!("Error validating request.-'{}' : cause - {}", class, cause)))
 }
 
+/// Pattern of a matching symbols request as the reference checks and
+/// sends it (ibx#439): an empty or blank pattern, or one with a character
+/// that is neither a printable ASCII character nor a space, gives 321; the
+/// pattern sent is trimmed, with runs of spaces made one space.
+pub fn matching_symbols_pattern(pattern: &str) -> Result<String, (i64, String)> {
+    let refuse = |cause: String| Err((321, format!("Error validating request.-'ce' : cause - {}", cause)));
+    if pattern.trim_matches(|c: char| c <= ' ').is_empty() {
+        return refuse("Pattern must not be empty".into());
+    }
+    if !pattern.chars().all(|c| c == ' ' || c.is_ascii_graphic()) {
+        return refuse(format!("Invalid pattern: '{}'", pattern));
+    }
+    Ok(pattern.split(' ').filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
+}
+
 /// Answer of a market rule request (ibx#437), as the reference: the
 /// rule's price increments, or 322 when the id was not received in a
 /// definition reply, or when its rule has no price increments.
