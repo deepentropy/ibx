@@ -583,6 +583,58 @@ pub fn recv_msg<R: Read>(stream: &mut R) -> io::Result<RecvMsg> {
     }
 }
 
+/// Reads `#%#%` frames across read timeouts: a partial frame stays in the
+/// buffer until the rest arrives, and no byte after the frame is read, so
+/// the next reader of the stream starts at the next frame.
+#[derive(Default)]
+struct NsFramePoller {
+    buf: Vec<u8>,
+}
+
+impl NsFramePoller {
+    /// The next frame payload, or `None` when a read timed out first.
+    fn poll<R: Read>(&mut self, stream: &mut R) -> io::Result<Option<Vec<u8>>> {
+        loop {
+            let needed = if self.buf.len() < 8 {
+                8 - self.buf.len()
+            } else {
+                if &self.buf[..4] != NS_MAGIC {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Expected #%#% magic, got {:?}", &self.buf[..4]),
+                    ));
+                }
+                let len = u32::from_be_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]]);
+                if len & 0x8000_0000 != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("NS frame length {:#010x} is negative", len),
+                    ));
+                }
+                let total = 8 + len as usize;
+                if self.buf.len() >= total {
+                    let payload = self.buf[8..total].to_vec();
+                    self.buf.drain(..total);
+                    return Ok(Some(payload));
+                }
+                total - self.buf.len()
+            };
+            let mut tmp = [0u8; 4096];
+            let want = needed.min(tmp.len());
+            match stream.read(&mut tmp[..want]) {
+                Ok(0) => {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed"));
+                }
+                Ok(n) => self.buf.extend_from_slice(&tmp[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::TimedOut => return Ok(None),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
 /// Classify one framed payload as NS text or XYZ binary.
 fn classify_payload(payload: &[u8]) -> io::Result<RecvMsg> {
     // Try NS text first
@@ -947,6 +999,11 @@ pub struct IbKeyChallenge {
 /// wrong code returns state=4 FAILED and the socket is torn down. The
 /// callback should pull the code from a deterministic source (stdin,
 /// secrets vault, etc.) or return an `io::Error` to abort the login.
+///
+/// The callback runs on its own thread: the login keeps reading the socket
+/// and answering the server keepalives while it waits (ibx#244). The login
+/// deadline still applies; when it fires first the login fails and a later
+/// answer of the callback is dropped.
 pub type CodeProvider = std::sync::Arc<
     dyn Fn(IbKeyChallenge) -> io::Result<String> + Send + Sync,
 >;
@@ -982,6 +1039,11 @@ const IB_KEY_HEARTBEAT_CADENCE_SECS: u64 = 20;
 /// 4. `deadline` expires → `TimedOut` error
 /// 5. Underlying socket close → `ConnectionAborted` error (server's deadline)
 ///
+/// With a `code_provider` the code is asked on a worker thread at state=2 and
+/// sent as state=3 when it arrives; the loop goes on reading meanwhile. Give
+/// the stream a short read timeout so the code and the deadline are checked
+/// between reads: a read that times out is not an error here.
+///
 /// If the server jumps straight to a non-XYZ NS message (e.g. CONNECT_RESPONSE),
 /// returns `Skipped` and logs the path — the unread NS message is then handled
 /// by the post-auth loop. (We can't `unread`, so this branch is reached only
@@ -1011,7 +1073,12 @@ pub fn do_ib_key_2fa<S: Read + Write>(
     let mut session_id = String::new();
     let mut announced_wait = false;
     let mut saw_challenge = false;
-    let mut code_submitted = false;
+    let mut code_requested = false;
+    // The code provider runs on a worker thread, so this loop keeps reading
+    // and answering the keepalives while the user types the code, as in the
+    // reference (ibx#244). Its answer arrives here.
+    let mut code_rx: Option<std::sync::mpsc::Receiver<io::Result<String>>> = None;
+    let mut frames = NsFramePoller::default();
 
     loop {
         if Instant::now() >= deadline {
@@ -1021,8 +1088,39 @@ pub fn do_ib_key_2fa<S: Read + Write>(
             ));
         }
 
-        let recv = match recv_msg(stream) {
-            Ok(m) => m,
+        if let Some(rx) = code_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(Ok(code)) => {
+                    code_rx = None;
+                    let submission = xyz::xyz_build_swcr_token_code_submission(&code);
+                    let framed = xyz::xyz_wrap(&submission);
+                    stream.write_all(&framed)?;
+                    log::info!(
+                        "2FA gate: submitted SWCR_TOKEN state=3 code (len={}, {} bytes framed)",
+                        code.len(), framed.len(),
+                    );
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(ib_key_err(
+                        io::ErrorKind::Other,
+                        "2FA gate: the code provider ended without a code",
+                    ));
+                }
+            }
+        }
+
+        let polled = frames.poll(stream).and_then(|frame| match frame {
+            None => Ok(None),
+            Some(payload) if ns::is_ns_text(&payload)
+                && is_backup_host_notice(&String::from_utf8_lossy(&payload)) => Ok(None),
+            Some(payload) => classify_payload(&payload).map(Some),
+        });
+        let recv = match polled {
+            // Read timeout: check the deadline and the code again.
+            Ok(None) => continue,
+            Ok(Some(m)) => m,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof
                 || e.kind() == io::ErrorKind::ConnectionReset
                 || e.kind() == io::ErrorKind::ConnectionAborted =>
@@ -1061,24 +1159,25 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                     announced_wait = true;
                 }
                 // Challenge/Response branch: if a code_provider is configured,
-                // pull the 8-char code from the callback and submit state=3
-                // instead of waiting for a phone tap. Guarded so a repeated
-                // state=2 (server retransmission) doesn't double-submit.
-                if !code_submitted {
+                // ask it for the 8-char code on a worker thread and submit
+                // state=3 when it answers, instead of waiting for a phone tap.
+                // Guarded so a repeated state=2 (server retransmission)
+                // doesn't ask twice.
+                if !code_requested {
                     if let Some(provider) = code_provider {
                         let challenge_info = IbKeyChallenge {
                             display_id: session_id.clone(),
                             avth_url: approval_url.clone(),
                         };
-                        let code = provider(challenge_info)?;
-                        let submission = xyz::xyz_build_swcr_token_code_submission(&code);
-                        let framed = xyz::xyz_wrap(&submission);
-                        stream.write_all(&framed)?;
-                        log::info!(
-                            "2FA gate: submitted SWCR_TOKEN state=3 code (len={}, {} bytes framed)",
-                            code.len(), framed.len(),
-                        );
-                        code_submitted = true;
+                        let provider = provider.clone();
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::Builder::new()
+                            .name("ibx-2fa-code".into())
+                            .spawn(move || {
+                                let _ = tx.send(provider(challenge_info));
+                            })?;
+                        code_rx = Some(rx);
+                        code_requested = true;
                     }
                 }
             }
@@ -2017,6 +2116,55 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> { Ok(()) }
     }
 
+    /// Stream that answers like a server: chunk `i` becomes readable only
+    /// once `after_writes` frames were written; until then a read times out
+    /// (WouldBlock). After the last chunk a read gives end of stream.
+    struct GatedStream {
+        chunks: Vec<(usize, Vec<u8>)>,
+        next: usize,
+        pos: usize,
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl GatedStream {
+        fn new(chunks: Vec<(usize, Vec<u8>)>) -> Self {
+            Self { chunks, next: 0, pos: 0, writes: Vec::new() }
+        }
+
+        /// Payloads of the written frames (header removed).
+        fn written_payloads(&self) -> Vec<Vec<u8>> {
+            self.writes.iter().map(|w| w[8..].to_vec()).collect()
+        }
+    }
+
+    impl io::Read for GatedStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let Some((after, chunk)) = self.chunks.get(self.next) else {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "scripted end"));
+            };
+            if self.writes.len() < *after {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "no data yet"));
+            }
+            let n = (chunk.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&chunk[self.pos..self.pos + n]);
+            self.pos += n;
+            if self.pos == chunk.len() {
+                self.next += 1;
+                self.pos = 0;
+            }
+            Ok(n)
+        }
+    }
+
+    impl io::Write for GatedStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.writes.push(buf.to_vec());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
     /// Wrap an XYZ binary payload in `#%#%` framing.
     fn frame_xyz(payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(8 + payload.len());
@@ -2194,10 +2342,12 @@ mod tests {
         ]);
         let state4_passed = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "johnbegood", &["PASSED"]);
         let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 3, "johnbegood", &["PASSED"]);
-        let mut incoming = frame_xyz(&challenge);
-        incoming.extend_from_slice(&frame_xyz(&state4_passed));
-        incoming.extend_from_slice(&frame_xyz(&auth_finish));
-        let mut stream = ScriptedStream::new(incoming);
+        // The result comes only after the code (second write).
+        let mut stream = GatedStream::new(vec![
+            (1, frame_xyz(&challenge)),
+            (2, frame_xyz(&state4_passed)),
+            (2, frame_xyz(&auth_finish)),
+        ]);
 
         let seen_challenge = std::sync::Arc::new(std::sync::Mutex::new(IbKeyChallenge::default()));
         let seen_clone = seen_challenge.clone();
@@ -2222,15 +2372,7 @@ mod tests {
 
         // Walk written frames: 1st = SWCR_TOKEN state=1 init, 2nd = state=3 submission.
         // The 2nd frame must be byte-for-byte the 40-byte capture from run A.
-        let mut frames: Vec<Vec<u8>> = Vec::new();
-        let mut offset = 0;
-        while offset + 8 <= stream.written.len() {
-            let len = u32::from_be_bytes(
-                stream.written[offset + 4..offset + 8].try_into().unwrap(),
-            ) as usize;
-            frames.push(stream.written[offset + 8..offset + 8 + len].to_vec());
-            offset += 8 + len;
-        }
+        let frames = stream.written_payloads();
         assert!(frames.len() >= 2, "expected at least 2 frames (init + submission); got {}", frames.len());
         let expected_state3 = xyz::xyz_build_swcr_token_code_submission(RUN_A_CODE);
         assert_eq!(frames[1], expected_state3,
@@ -2248,9 +2390,10 @@ mod tests {
             "https://x.example/u",
         ]);
         let state4_failed = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "user", &["FAILED"]);
-        let mut incoming = frame_xyz(&challenge);
-        incoming.extend_from_slice(&frame_xyz(&state4_failed));
-        let mut stream = ScriptedStream::new(incoming);
+        let mut stream = GatedStream::new(vec![
+            (1, frame_xyz(&challenge)),
+            (2, frame_xyz(&state4_failed)),
+        ]);
 
         let provider: CodeProvider = std::sync::Arc::new(|_| Ok("99999999".to_string()));
         let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider)).unwrap_err();
@@ -2268,11 +2411,120 @@ mod tests {
             "399 830",
             "https://x.example/u",
         ]);
-        let mut stream = ScriptedStream::new(frame_xyz(&challenge));
+        // Nothing more comes from the server until a code is sent.
+        let mut stream = GatedStream::new(vec![
+            (1, frame_xyz(&challenge)),
+            (2, frame_xyz(&xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "user", &["PASSED"]))),
+        ]);
         let provider: CodeProvider = std::sync::Arc::new(|_| {
             Err(io::Error::new(io::ErrorKind::Interrupted, "user cancelled"))
         });
         let err = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), Some(&provider)).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(stream.written_payloads().len(), 1, "no code sent");
+    }
+
+    /// Records whether a keepalive answer was written.
+    struct WatchKeepalive<'a> {
+        inner: &'a mut GatedStream,
+        answered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl io::Read for WatchKeepalive<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.inner.read(buf) }
+    }
+
+    impl io::Write for WatchKeepalive<'_> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if ns::ns_parse(&buf[8..]).is_some_and(|(_, t, _)| t == ns::NS_HEART_BEAT) {
+                self.answered.store(true, std::sync::atomic::Ordering::Release);
+            }
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    // ibx#244: while the code provider waits, the loop keeps reading and
+    // answers the keepalive; the code goes out when the provider answers.
+    #[test]
+    fn ib_key_2fa_answers_keepalives_while_the_code_is_typed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let challenge = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 2, "user", &[
+            "e7429fde5b4c26f81fff956be6749908a8653558e7429fde5b4c26f81fff956b",
+            "399 830",
+            "https://x.example/u",
+        ]);
+        let test_req = ns::ns_build(NS_VERSION, ns::NS_TEST_REQUEST, &["20260430-22:58:25"], "MISC");
+        let state4 = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "user", &["PASSED"]);
+        let finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 3, "user", &["PASSED"]);
+        // Writes: 1 init, 2 keepalive answer, 3 code.
+        let mut stream = GatedStream::new(vec![
+            (1, frame_xyz(&challenge)),
+            (1, test_req),
+            (3, frame_xyz(&state4)),
+            (3, frame_xyz(&finish)),
+        ]);
+        // The provider answers only once the keepalive was answered: with the
+        // provider on the receive loop this never happens.
+        let answered = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = answered.clone();
+        let provider: CodeProvider = std::sync::Arc::new(move |_| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !flag.load(Ordering::Acquire) {
+                if std::time::Instant::now() > until {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "keepalive not answered"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok("12345678".to_string())
+        });
+        let mut watch = WatchKeepalive { inner: &mut stream, answered };
+        let outcome = do_ib_key_2fa(&mut watch, "2a", far_future_deadline(), Some(&provider)).unwrap();
+        assert!(matches!(outcome, IbKeyOutcome::Approved { .. }), "{outcome:?}");
+        let frames = stream.written_payloads();
+        assert_eq!(frames.len(), 3, "init, keepalive answer, code");
+        assert_eq!(ns::ns_parse(&frames[1]).unwrap().1, ns::NS_HEART_BEAT);
+        assert_eq!(frames[2], xyz::xyz_build_swcr_token_code_submission("12345678"));
+    }
+
+    // ibx#244: the deadline still applies while the provider waits.
+    #[test]
+    fn ib_key_2fa_deadline_while_the_code_is_typed() {
+        let challenge = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 2, "user", &[
+            "e7429fde5b4c26f81fff956be6749908a8653558e7429fde5b4c26f81fff956b",
+            "399 830",
+            "https://x.example/u",
+        ]);
+        let mut stream = GatedStream::new(vec![
+            (1, frame_xyz(&challenge)),
+            (2, frame_xyz(&xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 4, "user", &["PASSED"]))),
+        ]);
+        let provider: CodeProvider = std::sync::Arc::new(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            Ok("12345678".to_string())
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let err = do_ib_key_2fa(&mut stream, "2a", deadline, Some(&provider)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "did not wait for the provider");
+    }
+
+    // A frame split over reads with timeouts in between is read whole, and
+    // nothing after it is read.
+    #[test]
+    fn frame_poller_keeps_a_partial_frame_across_timeouts() {
+        let frame = ns::ns_build(50, ns::NS_TEST_REQUEST, &["ts"], "MISC");
+        let (a, b) = frame.split_at(5);
+        let mut rest = b.to_vec();
+        rest.extend_from_slice(b"next");
+        let mut stream = GatedStream::new(vec![(0, a.to_vec()), (1, rest)]);
+        let mut poller = NsFramePoller::default();
+        assert_eq!(poller.poll(&mut stream).unwrap(), None, "timed out mid-frame");
+        io::Write::write_all(&mut stream, b"########").unwrap();
+        assert_eq!(poller.poll(&mut stream).unwrap(), Some(frame[8..].to_vec()));
+        let mut tail = Vec::new();
+        let _ = io::Read::read_to_end(&mut stream, &mut tail);
+        assert_eq!(tail, b"next", "bytes after the frame stay unread");
     }
 }

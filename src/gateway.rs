@@ -1190,6 +1190,9 @@ impl Gateway {
                     config.username, config.ib_key_timeout_secs,
                 );
             }
+            // Short read timeout: the wait checks the code provider and the
+            // deadline between reads (ibx#244).
+            tls.get_ref().set_read_timeout(Some(Duration::from_millis(FARM_LOGON_POLL_MS)))?;
             match session::do_ib_key_2fa(
                 &mut tls,
                 &token_sub_type,
