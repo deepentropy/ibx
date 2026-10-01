@@ -762,7 +762,7 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::CancelHeadTimestamp { req_id } => {
-                    if let Some(pos) = self.hmds.pending_head_ts.iter().position(|(_, rid)| *rid == req_id) {
+                    if let Some(pos) = self.hmds.pending_head_ts.iter().position(|(_, rid, _)| *rid == req_id) {
                         self.hmds.pending_head_ts.remove(pos);
                     }
                 }
@@ -822,7 +822,7 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::CancelHistogramData { req_id } => {
-                    if let Some(pos) = self.hmds.pending_histogram.iter().position(|(_, rid)| *rid == req_id) {
+                    if let Some(pos) = self.hmds.pending_histogram.iter().position(|(_, rid, _)| *rid == req_id) {
                         self.hmds.pending_histogram.remove(pos);
                     }
                 }

@@ -9,6 +9,9 @@ use super::historical::TAG_HISTORICAL_XML;
 /// Parameters for a histogram data request.
 #[derive(Debug, Clone)]
 pub struct HistogramRequest {
+    /// Window id of the query, unique per request (ibx#428): the reply
+    /// carries it back.
+    pub window_id: String,
     pub con_id: u32,
     /// Security type of the API contract. Empty is a stock.
     pub sec_type: String,
@@ -38,9 +41,10 @@ pub fn build_histogram_request_xml(req: &HistogramRequest) -> String {
 
     let exchange = super::historical::query_exchange(&req.exchange, &req.sec_type);
     let sec_type = super::historical::query_sec_type(&req.sec_type);
+    // As the reference, the id does not carry useRTH.
     let id = format!(
-        "histogramQuery;;{}@{exchange} Histogram;;0;;{rth};;0;;U",
-        req.con_id,
+        "{};;{}@{exchange} Histogram;;0;;true;;0;;U",
+        req.window_id, req.con_id,
     );
 
     format!(
@@ -163,6 +167,7 @@ mod tests {
     #[test]
     fn build_xml_structure() {
         let req = HistogramRequest {
+            window_id: "histogramQuery0".to_string(),
             con_id: 265598,
             sec_type: "STK".to_string(),
             exchange: "SMART".to_string(),
@@ -179,6 +184,7 @@ mod tests {
         assert!(xml.contains("<exchange>BEST</exchange>"));
         assert!(xml.contains("<secType>STK</secType>"));
         assert!(xml.contains("<endTime>20260320-21:00:00</endTime>"));
+        assert!(xml.contains("<id>histogramQuery0;;265598@BEST Histogram;;0;;true;;0;;U</id>"), "{}", xml);
         // No <step> tag
         assert!(!xml.contains("<step>"));
     }
@@ -186,6 +192,7 @@ mod tests {
     #[test]
     fn build_xml_rth_false() {
         let req = HistogramRequest {
+            window_id: "histogramQuery0".to_string(),
             con_id: 100,
             sec_type: String::new(),
             exchange: String::new(),
@@ -201,6 +208,7 @@ mod tests {
     #[test]
     fn build_fix_request() {
         let req = HistogramRequest {
+            window_id: "histogramQuery0".to_string(),
             con_id: 265598,
             sec_type: "STK".to_string(),
             exchange: "SMART".to_string(),

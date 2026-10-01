@@ -339,6 +339,23 @@ pub fn build_cancel_request(ticker_id: &str, seq: u32) -> Vec<u8> {
     )
 }
 
+/// Window id of a data-service query id: its first part. Replies are
+/// matched to requests by it, exactly (ibx#428).
+pub fn window_id(query_id: &str) -> &str {
+    query_id.split(";;").next().unwrap_or(query_id).trim()
+}
+
+/// An error text and its detail joined as the reference joins them: a `:`
+/// unless the text already ends with `:`, `.`, `=` or `-`.
+pub fn join_error_text(text: &str, detail: &str) -> String {
+    let t = text.trim();
+    if t.ends_with(':') || t.ends_with('.') || t.ends_with('=') || t.ends_with('-') {
+        format!("{}{}", text, detail)
+    } else {
+        format!("{}:{}", text, detail)
+    }
+}
+
 /// Extract a simple XML tag value: `<tag>value</tag>` → `value`.
 pub fn extract_xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     let open = format!("<{}>", tag);
@@ -500,6 +517,9 @@ pub fn parse_ticker_id(xml: &str) -> Option<String> {
 /// Parameters for a head timestamp request.
 #[derive(Debug, Clone)]
 pub struct HeadTimestampRequest {
+    /// Window id of the query, unique per request (ibx#428): the reply
+    /// carries it back.
+    pub window_id: String,
     pub con_id: u32,
     /// Security type of the API contract. Empty is a stock.
     pub sec_type: String,
@@ -520,9 +540,9 @@ pub struct HeadTimestampResponse {
 pub fn build_head_timestamp_xml(req: &HeadTimestampRequest) -> String {
     let exchange = query_exchange(&req.exchange, &req.sec_type);
     let sec_type = query_sec_type(&req.sec_type);
-    let rth = if req.use_rth { "true" } else { "false" };
-    let id = format!("TickHeadClient1;;{}@{} {};;0;;{};;0;;U",
-        req.con_id, exchange, req.data_type.as_str(), rth);
+    // As the reference, the id does not carry useRTH.
+    let id = format!("{};;{}@{} {};;0;;true;;0;;U",
+        req.window_id, req.con_id, exchange, req.data_type.as_str());
 
     // The head timestamp query always asks for regular hours (ibx#305).
     format!(
@@ -1295,6 +1315,7 @@ mod tests {
     #[test]
     fn head_timestamp_xml_structure() {
         let req = HeadTimestampRequest {
+            window_id: "TickHeadClient1".to_string(),
             con_id: 756733,
             sec_type: "STK".to_string(),
             exchange: "SMART".to_string(),
@@ -1316,6 +1337,7 @@ mod tests {
     #[test]
     fn head_timestamp_xml_future_always_rth() {
         let req = HeadTimestampRequest {
+            window_id: "TickHeadClient7".to_string(),
             con_id: 815824267,
             sec_type: "FUT".to_string(),
             exchange: "CME".to_string(),
@@ -1325,6 +1347,17 @@ mod tests {
         let xml = build_head_timestamp_xml(&req);
         assert!(xml.contains("<useRTH>true</useRTH>"), "{}", xml);
         assert!(xml.contains("<exchange>CME</exchange><secType>FUT</secType><type>TickHeadTimeStamp</type>"), "{}", xml);
+        // ibx#428: the request's own window id, without useRTH.
+        assert!(xml.contains("<id>TickHeadClient7;;815824267@CME Last;;0;;true;;0;;U</id>"), "{}", xml);
+    }
+
+    #[test]
+    fn window_id_and_error_join() {
+        assert_eq!(window_id("TickHeadClient12;;265598@BEST Last;;0;;true;;0;;U"), "TickHeadClient12");
+        assert_eq!(window_id("hist_1001"), "hist_1001");
+        assert_eq!(window_id("Fundamentals1;; COMPANY_FUNDAMENTALS;;0;;true;;0;;U"), "Fundamentals1");
+        assert_eq!(join_error_text("Failed to request histogram data", "boom"), "Failed to request histogram data:boom");
+        assert_eq!(join_error_text("Failed to request tick-by-tick data.", "boom"), "Failed to request tick-by-tick data.boom");
     }
 
     #[test]

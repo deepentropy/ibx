@@ -18,6 +18,16 @@ use super::{HeartbeatState, emit, clone_for_event, find_body_after_tag, extract_
 /// indistinguishable from a permanent hang.
 const HISTORICAL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// A head timestamp query with no answer for this long fails with
+/// "Request Timed Out", as the reference (ibx#428).
+const HEAD_TIMESTAMP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Error text of a server rejection of a historical ticks request (10187).
+const HISTORICAL_TICKS_ERROR: &str = "Failed to request historical ticks";
+
+/// Error text of a server rejection of a histogram request (10188).
+const HISTOGRAM_ERROR: &str = "Failed to request histogram data";
+
 pub(crate) struct HmdsState {
     pub(crate) next_tbt_req_id: u32,
     pub(crate) tbt_subscriptions: Vec<(InstrumentId, String, TbtType)>,
@@ -31,14 +41,21 @@ pub(crate) struct HmdsState {
     /// (ibx#231). keepUpToDate entries are exempt: they stay resident by
     /// design and their bars flow on a different path.
     pub(crate) pending_historical: Vec<(String, u32, Instant)>,
-    pub(crate) pending_head_ts: Vec<(String, u32)>,
+    /// In-flight head timestamp queries: (window id, req_id, deadline).
+    pub(crate) pending_head_ts: Vec<(String, u32, Instant)>,
+    /// Running numbers of the window ids of head timestamp, histogram and
+    /// fundamentals queries (ibx#428).
+    pub(crate) next_head_ts_window: u32,
+    pub(crate) next_histogram_window: u32,
+    pub(crate) next_fundamental_window: u32,
     pub(crate) pending_scanner_params: bool,
     pub(crate) pending_scanner: Vec<(String, u32)>,
     pub(crate) next_scanner_id: u32,
     pub(crate) pending_news: Vec<(String, u32)>,
     pub(crate) pending_articles: Vec<(String, u32)>,
     pub(crate) pending_fundamental: Vec<(String, u32)>,
-    pub(crate) pending_histogram: Vec<(String, u32)>,
+    /// In-flight histogram queries: (window id, req_id, idle deadline).
+    pub(crate) pending_histogram: Vec<(String, u32, Instant)>,
     pub(crate) pending_schedule: Vec<(String, u32)>,
     pub(crate) pending_ticks: Vec<(String, u32, String)>,
     pub(crate) rtbar_subs: Vec<(String, u32, Option<u32>, f64)>,
@@ -88,7 +105,7 @@ pub(crate) struct MultiLegBars {
 /// Error text of a server-side rejection of a historical bar query, as the
 /// official API reports it with code 162 (ibx#408).
 fn historical_service_error(server_text: &str) -> String {
-    format!("Historical Market Data Service error message:{}", server_text)
+    crate::control::historical::join_error_text("Historical Market Data Service error message", server_text)
 }
 
 impl HmdsState {
@@ -101,6 +118,9 @@ impl HmdsState {
             disconnected: false,
             pending_historical: Vec::new(),
             pending_head_ts: Vec::new(),
+            next_head_ts_window: 1,
+            next_histogram_window: 0,
+            next_fundamental_window: 1,
             pending_scanner_params: false,
             pending_scanner: Vec::new(),
             next_scanner_id: 1,
@@ -258,7 +278,8 @@ impl HmdsState {
                         &xml_tag[..xml_tag.len().min(200)],
                     );
                     if let Some(resp) = crate::control::historical::parse_bar_response(xml_tag) {
-                        if let Some(pos) = self.pending_historical.iter().position(|(qid, _, _)| resp.query_id.starts_with(qid.as_str())) {
+                        let wid = crate::control::historical::window_id(&resp.query_id);
+                        if let Some(pos) = self.pending_historical.iter().position(|(qid, _, _)| qid == wid) {
                             let (_, req_id, _) = self.pending_historical[pos];
                             let is_complete = resp.is_complete;
                             // Activity on this query — push the idle deadline out (ibx#231).
@@ -299,31 +320,47 @@ impl HmdsState {
                         }
                     }
                     else if let Some(resp) = crate::control::historical::parse_head_timestamp_response(xml_tag) {
-                        if let Some(pos) = self.pending_head_ts.iter().position(|_| true) {
-                            let (_, req_id) = self.pending_head_ts.remove(pos);
+                        let wid = reply_window_id(xml_tag);
+                        if let Some(pos) = self.pending_head_ts.iter().position(|(q, _, _)| q == wid) {
+                            let (_, req_id, _) = self.pending_head_ts.remove(pos);
                             let for_event = clone_for_event(event_tx, &resp);
                             shared.reference.push_head_timestamp(req_id, resp);
                             if let Some(data) = for_event {
                                 emit(event_tx, Event::HeadTimestamp { req_id, data });
                             }
+                        } else {
+                            log::warn!("HMDS head timestamp reply for no pending request: id={:?}", wid);
                         }
                     }
                     else if let Some(entries) = crate::control::histogram::parse_histogram_response(xml_tag) {
-                        if let Some(pos) = self.pending_histogram.iter().position(|_| true) {
-                            let (_, req_id) = self.pending_histogram.remove(pos);
+                        let wid = reply_window_id(xml_tag);
+                        if let Some(pos) = self.pending_histogram.iter().position(|(q, _, _)| q == wid) {
+                            let (_, req_id, _) = self.pending_histogram.remove(pos);
                             shared.reference.push_histogram_data(req_id, entries);
+                        } else {
+                            log::warn!("HMDS histogram reply for no pending request: id={:?}", wid);
                         }
                     }
                     else if xml_tag.contains("<ResultSetTick>") {
-                        if let Some(pos) = self.pending_ticks.iter().position(|(qid, _, _)| xml_tag.contains(qid.as_str())) {
-                            let (_, req_id, what_to_show) = self.pending_ticks.remove(pos);
+                        let wid = reply_window_id(xml_tag);
+                        if let Some(pos) = self.pending_ticks.iter().position(|(qid, _, _)| qid == wid) {
+                            let what_to_show = self.pending_ticks[pos].2.clone();
+                            let req_id = self.pending_ticks[pos].1;
                             if let Some((_, data, done)) = crate::control::historical::parse_tick_response(xml_tag, &what_to_show) {
+                                // Every frame is delivered; the last one ends the
+                                // request, as the reference.
+                                if done {
+                                    self.pending_ticks.remove(pos);
+                                }
                                 shared.reference.push_historical_ticks(req_id, data, what_to_show, done);
                             }
+                        } else {
+                            log::warn!("HMDS ticks reply for no pending request: id={:?}", wid);
                         }
                     }
                     else if let Some(resp) = crate::control::historical::parse_schedule_response(xml_tag) {
-                        if let Some(pos) = self.pending_schedule.iter().position(|(qid, _)| *qid == resp.query_id) {
+                        let wid = crate::control::historical::window_id(&resp.query_id).to_string();
+                        if let Some(pos) = self.pending_schedule.iter().position(|(qid, _)| *qid == wid) {
                             let (_, req_id) = self.pending_schedule.remove(pos);
                             shared.reference.push_historical_schedule(req_id, resp);
                         }
@@ -345,8 +382,9 @@ impl HmdsState {
                         }
                         if !matched {
                             // Check keepUpToDate historical queries
+                            let wid = reply_window_id(xml_tag);
                             for (qid, req_id, _) in &self.pending_historical {
-                                if xml_tag.contains(qid.as_str()) && self.keep_up_to_date_reqs.contains(req_id) {
+                                if qid == wid && self.keep_up_to_date_reqs.contains(req_id) {
                                     // Store as rtbar subscription so 35=G bars get dispatched
                                     self.rtbar_subs.push((qid.clone(), *req_id, Some(ticker_id), min_tick));
                                     matched = true;
@@ -367,32 +405,33 @@ impl HmdsState {
                         let error_msg = crate::control::historical::extract_xml_tag(xml_tag, "error")
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| "unknown".to_string());
-                        // IB canonical error code for HMDS-side validation/rejection.
-                        const HMDS_ERROR_CODE: i32 = 162;
-                        let mut released_req_id: Option<u32> = None;
-                        let mut from_historical = false;
+                        // The error goes to the request of the same window id
+                        // (ibx#428), with the reference code of its kind: 162
+                        // for bars, schedules and head timestamps, 10188 for a
+                        // histogram, 10187 for historical ticks.
+                        let mut released: Option<(u32, i32, String)> = None;
                         if let Some(qid) = &query_id {
-                            if let Some(pos) = self.pending_historical.iter().position(|(q, _, _)| q == qid) {
-                                let (_, req_id, _) = self.pending_historical.remove(pos);
+                            let wid = crate::control::historical::window_id(qid);
+                            if let Some(pos) = self.pending_historical.iter().position(|(q, _, _)| q == wid) {
+                                let (leg_qid, req_id, _) = self.pending_historical.remove(pos);
                                 self.keep_up_to_date_reqs.remove(&req_id);
-                                self.on_leg_failed(req_id, qid);
-                                released_req_id = Some(req_id);
-                                from_historical = true;
-                            } else if let Some(pos) = self.pending_head_ts.iter().position(|(q, _)| q == qid) {
-                                let (_, req_id) = self.pending_head_ts.remove(pos);
-                                released_req_id = Some(req_id);
-                            } else if let Some(pos) = self.pending_histogram.iter().position(|(q, _)| q == qid) {
-                                let (_, req_id) = self.pending_histogram.remove(pos);
-                                released_req_id = Some(req_id);
-                            } else if let Some(pos) = self.pending_ticks.iter().position(|(q, _, _)| q == qid) {
+                                self.on_leg_failed(req_id, &leg_qid);
+                                released = Some((req_id, 162, historical_service_error(&error_msg)));
+                            } else if let Some(pos) = self.pending_head_ts.iter().position(|(q, _, _)| q == wid) {
+                                let (_, req_id, _) = self.pending_head_ts.remove(pos);
+                                released = Some((req_id, 162, historical_service_error(&error_msg)));
+                            } else if let Some(pos) = self.pending_histogram.iter().position(|(q, _, _)| q == wid) {
+                                let (_, req_id, _) = self.pending_histogram.remove(pos);
+                                released = Some((req_id, 10188, crate::control::historical::join_error_text(HISTOGRAM_ERROR, &error_msg)));
+                            } else if let Some(pos) = self.pending_ticks.iter().position(|(q, _, _)| q == wid) {
                                 let (_, req_id, _) = self.pending_ticks.remove(pos);
-                                released_req_id = Some(req_id);
-                            } else if let Some(pos) = self.pending_schedule.iter().position(|(q, _)| q == qid) {
+                                released = Some((req_id, 10187, crate::control::historical::join_error_text(HISTORICAL_TICKS_ERROR, &error_msg)));
+                            } else if let Some(pos) = self.pending_schedule.iter().position(|(q, _)| q == wid) {
                                 let (_, req_id) = self.pending_schedule.remove(pos);
-                                released_req_id = Some(req_id);
+                                released = Some((req_id, 162, historical_service_error(&error_msg)));
                             } else if let Some(pos) = self.pending_scanner.iter().position(|(q, _)| q == qid) {
                                 let (_, req_id) = self.pending_scanner.remove(pos);
-                                released_req_id = Some(req_id);
+                                released = Some((req_id, 162, error_msg.clone()));
                             } else if let Some(pos) = self.tbt_subscriptions.iter().position(|(_, q, _)| q == qid) {
                                 // A refused tick-by-tick request ends with
                                 // 10189 and the server's text (ibx#455).
@@ -403,8 +442,8 @@ impl HmdsState {
                                 return;
                             }
                         }
-                        match released_req_id {
-                            Some(req_id) => {
+                        match released {
+                            Some((req_id, code, text)) => {
                                 log::warn!(
                                     "HMDS QueryError req_id={} query_id={:?}: {}",
                                     req_id, query_id, error_msg
@@ -413,12 +452,7 @@ impl HmdsState {
                                 // official API sends no historical_data_end after it
                                 // (ibx#408). Each rejected leg of a multi-query request
                                 // reports its own error under the same req_id.
-                                let text = if from_historical {
-                                    historical_service_error(&error_msg)
-                                } else {
-                                    error_msg.clone()
-                                };
-                                shared.reference.push_historical_error(req_id, HMDS_ERROR_CODE, text);
+                                shared.reference.push_historical_error(req_id, code, text);
                             }
                             None => {
                                 log::warn!(
@@ -501,9 +535,14 @@ impl HmdsState {
                                 } else {
                                     xml.clone()
                                 };
-                                if let Some(pos) = self.pending_fundamental.iter().position(|_| true) {
+                                let wid = crate::control::fundamental::parse_fundamental_response_id(xml)
+                                    .map(|id| crate::control::historical::window_id(&id).to_string())
+                                    .unwrap_or_default();
+                                if let Some(pos) = self.pending_fundamental.iter().position(|(q, _)| *q == wid) {
                                     let (_, req_id) = self.pending_fundamental.remove(pos);
                                     shared.reference.push_fundamental_data(req_id, data);
+                                } else {
+                                    log::warn!("HMDS fundamentals reply for no pending request: id={:?}", wid);
                                 }
                             }
                         }
@@ -1071,7 +1110,10 @@ impl HmdsState {
                 return;
             }
         };
+        let window_id = format!("TickHeadClient{}", self.next_head_ts_window);
+        self.next_head_ts_window = self.next_head_ts_window.wrapping_add(1);
         let req = crate::control::historical::HeadTimestampRequest {
+            window_id: window_id.clone(),
             con_id: con_id as u32,
             sec_type: sec_type.to_string(),
             exchange: exchange.to_string(),
@@ -1079,8 +1121,6 @@ impl HmdsState {
             use_rth,
         };
         let xml = crate::control::historical::build_head_timestamp_xml(&req);
-        let query_id = format!("hts_{}", self.next_hmds_query_id);
-        self.next_hmds_query_id += 1;
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
             let _ = conn.send_fix(&[
@@ -1091,7 +1131,7 @@ impl HmdsState {
             log::info!("Sent head timestamp request: req_id={} con_id={}", req_id, con_id);
             hb.last_hmds_sent = Instant::now();
         }
-        self.pending_head_ts.push((query_id, req_id));
+        self.pending_head_ts.push((window_id, req_id, Instant::now() + HEAD_TIMESTAMP_TIMEOUT));
     }
 
     pub(crate) fn send_scanner_params_request(&mut self, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
@@ -1203,15 +1243,16 @@ impl HmdsState {
             "ReportsFinStatements" | "finstat" => crate::control::fundamental::ReportType::FinancialStatements,
             _ => crate::control::fundamental::ReportType::Snapshot,
         };
+        let window_id = format!("{}{}", rt.provider(), self.next_fundamental_window);
+        self.next_fundamental_window = self.next_fundamental_window.wrapping_add(1);
         let req = crate::control::fundamental::FundamentalRequest {
+            window_id: window_id.clone(),
             con_id,
             sec_type: "STK",
             currency: "USD",
             report_type: rt,
         };
         let xml = crate::control::fundamental::build_fundamental_request_xml(&req);
-        let query_id = format!("fund_{}", self.next_hmds_query_id);
-        self.next_hmds_query_id += 1;
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
             let _ = conn.send_fix(&[
@@ -1223,11 +1264,14 @@ impl HmdsState {
             hb.last_hmds_sent = Instant::now();
             log::info!("Sent fundamental data request: req_id={} con_id={}", req_id, con_id);
         }
-        self.pending_fundamental.push((query_id, req_id));
+        self.pending_fundamental.push((window_id, req_id));
     }
 
     pub(crate) fn send_histogram_request(&mut self, req_id: u32, con_id: u32, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        let window_id = format!("histogramQuery{}", self.next_histogram_window);
+        self.next_histogram_window = self.next_histogram_window.wrapping_add(1);
         let req = crate::control::histogram::HistogramRequest {
+            window_id: window_id.clone(),
             con_id,
             sec_type: sec_type.to_string(),
             exchange: exchange.to_string(),
@@ -1236,8 +1280,6 @@ impl HmdsState {
             end_time: chrono_free_timestamp().to_string(),
         };
         let xml = crate::control::histogram::build_histogram_request_xml(&req);
-        let query_id = format!("hg_{}", self.next_hmds_query_id);
-        self.next_hmds_query_id += 1;
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
             let _ = conn.send_fix(&[
@@ -1248,7 +1290,7 @@ impl HmdsState {
             hb.last_hmds_sent = Instant::now();
             log::info!("Sent histogram request: req_id={} con_id={}", req_id, con_id);
         }
-        self.pending_histogram.push((query_id, req_id));
+        self.pending_histogram.push((window_id, req_id, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
     }
 
     pub(crate) fn send_historical_ticks_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, start_date_time: &str, end_date_time: &str, number_of_ticks: u32, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
@@ -1321,6 +1363,7 @@ impl HmdsState {
     /// subscriptions are exempt — they stay resident by design and their
     /// live bars flow on the rtbar path.
     pub(crate) fn sweep_pending_historical(&mut self, shared: &SharedState) {
+        self.sweep_head_ts_and_histogram(shared);
         if self.pending_historical.is_empty() {
             return;
         }
@@ -1365,6 +1408,49 @@ impl HmdsState {
             );
         }
     }
+}
+
+impl HmdsState {
+    /// Fail head timestamp and histogram queries past their deadline, as
+    /// bar queries are (ibx#428): a head timestamp gets 162 "Request Timed
+    /// Out" after 5 s, as the reference; a histogram gets 10188 after the
+    /// bar idle time.
+    fn sweep_head_ts_and_histogram(&mut self, shared: &SharedState) {
+        if self.pending_head_ts.is_empty() && self.pending_histogram.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut expired: Vec<(u32, i32, String)> = Vec::new();
+        self.pending_head_ts.retain(|(wid, req_id, deadline)| {
+            if now >= *deadline {
+                log::warn!("HMDS head timestamp timeout: req_id={} id={}", req_id, wid);
+                expired.push((*req_id, 162, historical_service_error("Request Timed Out")));
+                false
+            } else {
+                true
+            }
+        });
+        self.pending_histogram.retain(|(wid, req_id, deadline)| {
+            if now >= *deadline {
+                log::warn!("HMDS histogram timeout: req_id={} id={}", req_id, wid);
+                expired.push((*req_id, 10188, crate::control::historical::join_error_text(
+                    HISTOGRAM_ERROR, "histogram request timed out — no response from the gateway")));
+                false
+            } else {
+                true
+            }
+        });
+        for (req_id, code, text) in expired {
+            shared.reference.push_historical_error(req_id, code, text);
+        }
+    }
+}
+
+/// Window id of the `<id>` of a reply (ibx#428).
+fn reply_window_id(xml: &str) -> &str {
+    crate::control::historical::extract_xml_tag(xml, "id")
+        .map(crate::control::historical::window_id)
+        .unwrap_or("")
 }
 
 #[cfg(test)]
@@ -1679,16 +1765,165 @@ mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.pending_head_ts.push(("hts_1004".to_string(), 42));
+        hmds.pending_head_ts.push(("TickHeadClient4".to_string(), 42, Instant::now() + HEAD_TIMESTAMP_TIMEOUT));
 
-        let msg = make_query_error_msg("hts_1004", "No head timestamp");
+        let msg = make_query_error_msg("TickHeadClient4;;265598@BEST Last;;0;;true;;0;;U", "No head timestamp");
         hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
 
         assert!(hmds.pending_head_ts.is_empty());
         let errors = shared.reference.drain_historical_errors();
-        assert_eq!(errors, vec![(42, 162, "No head timestamp".to_string())]);
+        assert_eq!(errors, vec![(42, 162, "Historical Market Data Service error message:No head timestamp".to_string())]);
         // Head-ts is not a bar request — no historical_data sentinel should fire.
         assert!(shared.reference.drain_historical_data().is_empty());
+    }
+
+    // ── ibx#428: replies and errors go to the request of the same window id ──
+
+    fn make_w_msg(xml: &str) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"35=W\x016118=");
+        msg.extend_from_slice(xml.as_bytes());
+        msg.push(0x01);
+        msg
+    }
+
+    fn head_ts_reply(id: &str, ts: &str) -> Vec<u8> {
+        make_w_msg(&format!(
+            "<ResultSetHeadTimeStamp><id>{}</id><eoq>true</eoq><headTS>{}</headTS><tz>US/Eastern</tz></ResultSetHeadTimeStamp>",
+            id, ts,
+        ))
+    }
+
+    #[test]
+    fn head_timestamps_in_flight_get_their_own_replies() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.send_head_timestamp_request(1, 265598, "STK", "SMART", "TRADES", true, &mut conn, &mut hb, &shared);
+        hmds.send_head_timestamp_request(2, 756733, "STK", "SMART", "TRADES", true, &mut conn, &mut hb, &shared);
+        let ids: Vec<&str> = hmds.pending_head_ts.iter().map(|(w, _, _)| w.as_str()).collect();
+        assert_eq!(ids, vec!["TickHeadClient1", "TickHeadClient2"]);
+
+        // The second request is answered first.
+        hmds.process_hmds_message(&head_ts_reply("TickHeadClient2;;756733@BEST Last;;0;;true;;0;;U", "19930129-14:30:00"),
+            &mut conn, &shared, &None, &mut hb);
+        hmds.process_hmds_message(&head_ts_reply("TickHeadClient1;;265598@BEST Last;;0;;true;;0;;U", "19801212-14:30:00"),
+            &mut conn, &shared, &None, &mut hb);
+        let got: Vec<(u32, String)> = shared.reference.drain_head_timestamps().into_iter()
+            .map(|(r, h)| (r, h.head_timestamp)).collect();
+        assert_eq!(got, vec![(2, "19930129-14:30:00".to_string()), (1, "19801212-14:30:00".to_string())]);
+        assert!(hmds.pending_head_ts.is_empty());
+    }
+
+    #[test]
+    fn a_reply_for_an_unknown_window_id_is_not_given_to_another_request() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.pending_head_ts.push(("TickHeadClient1".to_string(), 1, Instant::now() + HEAD_TIMESTAMP_TIMEOUT));
+        hmds.process_hmds_message(&head_ts_reply("TickHeadClient9;;1@BEST Last;;0;;true;;0;;U", "20000101-00:00:00"),
+            &mut conn, &shared, &None, &mut hb);
+        assert!(shared.reference.drain_head_timestamps().is_empty());
+        assert_eq!(hmds.pending_head_ts.len(), 1);
+    }
+
+    #[test]
+    fn bar_replies_match_the_whole_window_id_not_a_prefix() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        let deadline = Instant::now() + HISTORICAL_IDLE_TIMEOUT;
+        hmds.pending_historical.push(("hist_100".to_string(), 1, deadline));
+        hmds.pending_historical.push(("hist_1000".to_string(), 2, deadline));
+        hmds.process_hmds_message(&make_bar_msg("hist_1000", true), &mut conn, &shared, &None, &mut hb);
+        let hist = shared.reference.drain_historical_data();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].0, 2, "hist_1000 belongs to request 2, not to the prefix hist_100");
+        assert_eq!(hmds.pending_historical.len(), 1);
+        assert_eq!(hmds.pending_historical[0].1, 1);
+    }
+
+    #[test]
+    fn histogram_and_ticks_errors_use_their_own_codes() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.send_histogram_request(3, 265598, "STK", "SMART", true, "1 week", &mut conn, &mut hb);
+        hmds.send_historical_ticks_request(4, 265598, "STK", "SMART", "", "20260312-15:00:00", 100, "TRADES", true, &mut conn, &mut hb);
+        let hg = hmds.pending_histogram[0].0.clone();
+        let tk = hmds.pending_ticks[0].0.clone();
+        assert_eq!(hg, "histogramQuery0");
+
+        hmds.process_hmds_message(&make_query_error_msg(&format!("{};;265598@BEST Histogram;;0;;true;;0;;U", hg), "No data"),
+            &mut conn, &shared, &None, &mut hb);
+        hmds.process_hmds_message(&make_query_error_msg(&tk, "No ticks"), &mut conn, &shared, &None, &mut hb);
+        assert_eq!(shared.reference.drain_historical_errors(), vec![
+            (3, 10188, "Failed to request histogram data:No data".to_string()),
+            (4, 10187, "Failed to request historical ticks:No ticks".to_string()),
+        ]);
+        assert!(hmds.pending_histogram.is_empty() && hmds.pending_ticks.is_empty());
+    }
+
+    #[test]
+    fn tick_frames_are_delivered_until_the_last_one() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.pending_ticks.push(("tk_7".to_string(), 5, "TRADES".to_string()));
+        hmds.pending_ticks.push(("tk_70".to_string(), 6, "TRADES".to_string()));
+        let frame = |eoq: bool| make_w_msg(&format!(
+            "<ResultSetTick><id>tk_70</id><eoq>{}</eoq><Events><Tick><time>20260312-14:30:01</time>\
+             <price>1.5</price><size>100</size></Tick></Events></ResultSetTick>", eoq));
+        hmds.process_hmds_message(&frame(false), &mut conn, &shared, &None, &mut hb);
+        assert_eq!(hmds.pending_ticks.len(), 2, "not done yet");
+        hmds.process_hmds_message(&frame(true), &mut conn, &shared, &None, &mut hb);
+        let got: Vec<(u32, bool)> = shared.reference.drain_historical_ticks().into_iter().map(|t| (t.0, t.3)).collect();
+        assert_eq!(got, vec![(6, false), (6, true)]);
+        assert_eq!(hmds.pending_ticks.len(), 1);
+        assert_eq!(hmds.pending_ticks[0].0, "tk_7");
+    }
+
+    #[test]
+    fn fundamentals_reply_goes_to_its_window_id() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.send_fundamental_data_request(1, 265598, "ReportSnapshot", &mut conn, &mut hb);
+        hmds.send_fundamental_data_request(2, 272093, "ReportSnapshot", &mut conn, &mut hb);
+        assert_eq!(hmds.pending_fundamental[1].0, "Fundamentals2");
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"35=U\x016040=10012\x016118=<FundResponse><id>Fundamentals2;; COMPANY_FUNDAMENTALS;;0;;true;;0;;U</id></FundResponse>\x01");
+        hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+        let got = shared.reference.drain_fundamental_data();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, 2);
+        assert_eq!(hmds.pending_fundamental.len(), 1);
+        assert_eq!(hmds.pending_fundamental[0].1, 1);
+    }
+
+    #[test]
+    fn head_timestamp_and_histogram_time_out() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let past = Instant::now() - std::time::Duration::from_secs(1);
+        hmds.pending_head_ts.push(("TickHeadClient1".to_string(), 1, past));
+        hmds.pending_histogram.push(("histogramQuery0".to_string(), 2, past));
+        hmds.pending_histogram.push(("histogramQuery1".to_string(), 3, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+        hmds.sweep_pending_historical(&shared);
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0], (1, 162, "Historical Market Data Service error message:Request Timed Out".to_string()));
+        assert_eq!((errors[1].0, errors[1].1), (2, 10188));
+        assert!(errors[1].2.starts_with("Failed to request histogram data:"));
+        assert!(hmds.pending_head_ts.is_empty());
+        assert_eq!(hmds.pending_histogram.len(), 1);
+        assert!(shared.reference.drain_historical_data().is_empty(), "no bar end for these requests");
     }
 
     // ── ibx#232: unknown bar_size rejects at the engine too (backstop for

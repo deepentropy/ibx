@@ -37,6 +37,9 @@ impl ReportType {
 /// Parameters for a fundamental data request.
 #[derive(Debug, Clone)]
 pub struct FundamentalRequest {
+    /// Window id of the query, unique per request (ibx#428): the reply
+    /// carries it back.
+    pub window_id: String,
     pub con_id: u32,
     pub sec_type: &'static str,
     pub currency: &'static str,
@@ -64,7 +67,7 @@ pub fn build_fundamental_request_xml(req: &FundamentalRequest) -> String {
     format!(
         "<ListOfQueries>\
          <FundamentalsQuery>\
-         <id>COMPANY_FUNDAMENTALS</id>\
+         <id>{window_id};; COMPANY_FUNDAMENTALS;;0;;true;;0;;U</id>\
          <contractID>{con_id}</contractID>\
          <exchange>RTRSFND</exchange>\
          <secType>{sec_type}</secType>\
@@ -76,6 +79,7 @@ pub fn build_fundamental_request_xml(req: &FundamentalRequest) -> String {
          <currency>{currency}</currency>\
          </FundamentalsQuery>\
          </ListOfQueries>",
+        window_id = req.window_id,
         con_id = req.con_id,
         sec_type = req.sec_type,
         report_type = req.report_type.report_type_str(),
@@ -121,6 +125,7 @@ mod tests {
     #[test]
     fn fundamental_request_xml_structure() {
         let req = FundamentalRequest {
+            window_id: "Fundamentals1".to_string(),
             con_id: 265598,
             sec_type: "STK",
             currency: "USD",
@@ -135,6 +140,8 @@ mod tests {
         assert!(xml.contains("<reportType>snapshot</reportType>"));
         assert!(xml.contains("<currency>USD</currency>"));
         assert!(xml.contains("<source>API</source>"));
+        // ibx#428: the request's own window id, in the reference form.
+        assert!(xml.contains("<id>Fundamentals1;; COMPANY_FUNDAMENTALS;;0;;true;;0;;U</id>"), "{}", xml);
     }
 
     #[test]
