@@ -1833,8 +1833,8 @@ impl Gateway {
         // (ibx#480).
         shared.reference.set_soft_dollar_tiers(parse_soft_dollar_tiers(&self.raw_soft_dollar_tiers));
 
-        // Family codes: parse from CCP logon tag 6823.
-        // Empty for paper/single accounts.
+        // Family codes: parse from CCP logon tag 6823, answered as the
+        // reference (ibx#441).
         let codes = if self.raw_family_codes.is_empty() {
             Vec::new()
         } else {
@@ -1851,7 +1851,7 @@ impl Gateway {
                 }
             }).collect()
         };
-        shared.reference.set_family_codes(codes);
+        shared.reference.set_family_codes(family_codes_answer(codes));
 
         // White branding ID (empty for standard accounts).
         shared.reference.set_white_branding_id(self.white_branding_id.clone());
@@ -2490,6 +2490,47 @@ pub(crate) fn parse_soft_dollar_tiers(raw: &str) -> Vec<crate::types::SoftDollar
         }
     }
     groups.into_iter().flat_map(|(_, tiers)| tiers).collect()
+}
+
+/// The family codes answer of the reference (ibx#441): the list of
+/// accounts with their code when the accounts do not all share one code;
+/// else one entry for every account, `*`, with the shared code, empty when
+/// no account has one.
+pub(crate) fn family_codes_answer(codes: Vec<crate::types::FamilyCode>) -> Vec<crate::types::FamilyCode> {
+    let first = codes.iter().find(|c| !c.family_code_str.is_empty()).map(|c| c.family_code_str.clone());
+    if let Some(code) = &first {
+        if codes.iter().any(|c| c.family_code_str != *code) {
+            return codes;
+        }
+    }
+    vec![crate::types::FamilyCode { account_id: "*".into(), family_code_str: first.unwrap_or_default() }]
+}
+
+#[cfg(test)]
+mod family_code_tests {
+    use super::family_codes_answer;
+    use crate::types::FamilyCode;
+
+    fn codes(list: &[(&str, &str)]) -> Vec<FamilyCode> {
+        list.iter().map(|(a, c)| FamilyCode { account_id: a.to_string(), family_code_str: c.to_string() }).collect()
+    }
+
+    fn pairs(list: &[FamilyCode]) -> Vec<(&str, &str)> {
+        list.iter().map(|c| (c.account_id.as_str(), c.family_code_str.as_str())).collect()
+    }
+
+    // ibx#441: one entry when the accounts share a code or none has one.
+    #[test]
+    fn family_codes_answer_as_the_reference() {
+        // No data, or no account with a code: one entry with an empty code.
+        assert_eq!(pairs(&family_codes_answer(vec![])), [("*", "")]);
+        assert_eq!(pairs(&family_codes_answer(codes(&[("DU1", ""), ("DU2", "")]))), [("*", "")]);
+        // Every account with the same code: one entry with that code.
+        assert_eq!(pairs(&family_codes_answer(codes(&[("U1", "F1"), ("U2", "F1")]))), [("*", "F1")]);
+        // Different codes, or a code and no code: the full list.
+        assert_eq!(pairs(&family_codes_answer(codes(&[("U1", "F1"), ("U2", "F2")]))), [("U1", "F1"), ("U2", "F2")]);
+        assert_eq!(pairs(&family_codes_answer(codes(&[("U1", ""), ("U2", "F2")]))), [("U1", ""), ("U2", "F2")]);
+    }
 }
 
 #[cfg(test)]
