@@ -616,6 +616,9 @@ pub struct ClientCore {
 
     // News bulletin subscription
     pub bulletin_subscribed: AtomicBool,
+    /// The stored bulletins are to be replayed at the next dispatch
+    /// (ibx#461).
+    pub bulletin_replay: AtomicBool,
 
     // Account updates subscription
     pub account_updates_subscribed: AtomicBool,
@@ -761,6 +764,7 @@ impl ClientCore {
             account_multi: Mutex::new(Vec::new()),
             next_account_summary: AtomicU64::new(1),
             bulletin_subscribed: AtomicBool::new(false),
+            bulletin_replay: AtomicBool::new(false),
             account_updates_subscribed: AtomicBool::new(false),
             account_stream: Mutex::new(AccountStream::default()),
             last_portfolio: Mutex::new(None),
@@ -799,6 +803,7 @@ impl ClientCore {
         self.positions_multi.lock().unwrap().clear();
         self.account_multi.lock().unwrap().clear();
         self.bulletin_subscribed.store(false, Ordering::Relaxed);
+        self.bulletin_replay.store(false, Ordering::Relaxed);
         self.account_updates_subscribed.store(false, Ordering::Relaxed);
         *self.account_stream.lock().unwrap() = AccountStream::default();
         *self.last_portfolio.lock().unwrap() = None;
@@ -1619,16 +1624,34 @@ impl ClientCore {
 
     // ── Bulletin subscription management ──
 
-    pub fn subscribe_bulletins(&self) {
+    /// All bulletin types from now on; with `all_msgs`, the stored
+    /// bulletins of the day first (ibx#461).
+    pub fn subscribe_bulletins(&self, all_msgs: bool) {
         self.bulletin_subscribed.store(true, Ordering::Release);
+        if all_msgs {
+            self.bulletin_replay.store(true, Ordering::Release);
+        }
     }
 
+    /// Back to popup bulletins only (ibx#461).
     pub fn unsubscribe_bulletins(&self) {
         self.bulletin_subscribed.store(false, Ordering::Release);
     }
 
     pub fn bulletins_subscribed(&self) -> bool {
         self.bulletin_subscribed.load(Ordering::Acquire)
+    }
+
+    /// The bulletins to hand to the client now, as the reference delivers
+    /// them (ibx#461): every client gets the popup types (5, 6), a
+    /// subscribed client every type; a replay hands over the whole store.
+    pub fn bulletins_to_deliver(&self, shared: &SharedState) -> Vec<NewsBulletin> {
+        let replay = self.bulletin_replay.swap(false, Ordering::AcqRel);
+        let mut list = shared.market.take_news_bulletins(replay);
+        if !self.bulletins_subscribed() {
+            list.retain(|b| b.msg_type == 5 || b.msg_type == 6);
+        }
+        list
     }
 
     // ── Execution replay store ──

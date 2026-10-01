@@ -320,11 +320,10 @@ impl EClient {
             );
         }
 
-        // News bulletins → update_news_bulletin (only when subscribed)
-        if self.core.bulletins_subscribed() {
-            for b in self.shared.market.drain_news_bulletins() {
-                wrapper.update_news_bulletin(b.msg_id as i64, b.msg_type, &b.message, &b.exchange);
-            }
+        // News bulletins → update_news_bulletin (popups always, every type
+        // when subscribed, ibx#461)
+        for b in self.core.bulletins_to_deliver(&self.shared) {
+            wrapper.update_news_bulletin(b.msg_id as i64, b.msg_type, &b.message, &b.exchange);
         }
 
         // HMDS query errors → error (ibx#186). Drain before historical_data so a

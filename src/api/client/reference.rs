@@ -136,9 +136,10 @@ impl EClient {
 
     // ── News Bulletins ──
 
-    /// Subscribe to news bulletins. Matches `reqNewsBulletins` in C++.
-    pub fn req_news_bulletins(&self, _all_msgs: bool) {
-        self.core.subscribe_bulletins();
+    /// Subscribe to news bulletins. Matches `reqNewsBulletins` in C++:
+    /// `all_msgs` replays the bulletins of the day first.
+    pub fn req_news_bulletins(&self, all_msgs: bool) {
+        self.core.subscribe_bulletins(all_msgs);
     }
 
     /// Cancel news bulletin subscription. Matches `cancelNewsBulletins` in C++.

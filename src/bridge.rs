@@ -193,6 +193,15 @@ impl SeqQuote {
 
 // ── Domain-specific state containers ──
 
+/// News bulletins of the session (ibx#461): the store of the day, replayed
+/// on request, and the ones not yet handed to the client.
+#[derive(Default)]
+struct BulletinStore {
+    store: Vec<NewsBulletin>,
+    queue: Vec<NewsBulletin>,
+    day: Option<jiff::civil::Date>,
+}
+
 /// Lock-free quotes, TBT streams, real-time bars, depth updates, and news ticks.
 pub struct MarketDataState {
     quotes: Box<[SeqQuote; MAX_INSTRUMENTS]>,
@@ -203,7 +212,7 @@ pub struct MarketDataState {
     real_time_bars: Mutex<Vec<(u32, RealTimeBar)>>,
     depth_updates: Mutex<Vec<DepthUpdate>>,
     tick_news: Mutex<Vec<TickNews>>,
-    news_bulletins: Mutex<Vec<NewsBulletin>>,
+    news_bulletins: Mutex<BulletinStore>,
     /// Subscriptions the market data server rejected (ibx#444, ibx#447).
     md_rejects: Mutex<Vec<MdReject>>,
     /// The request parameters of acked subscriptions (ibx#449).
@@ -262,7 +271,7 @@ impl MarketDataState {
             real_time_bars: Mutex::new(Vec::with_capacity(64)),
             depth_updates: Mutex::new(Vec::with_capacity(64)),
             tick_news: Mutex::new(Vec::with_capacity(32)),
-            news_bulletins: Mutex::new(Vec::with_capacity(16)),
+            news_bulletins: Mutex::new(BulletinStore::default()),
             md_rejects: Mutex::new(Vec::new()),
             tick_req_params: Mutex::new(Vec::new()),
             tbt_errors: Mutex::new(Vec::new()),
@@ -340,7 +349,15 @@ impl MarketDataState {
     }
 
     pub fn drain_news_bulletins(&self) -> Vec<NewsBulletin> {
-        self.news_bulletins.lock().unwrap().drain(..).collect()
+        self.news_bulletins.lock().unwrap().queue.drain(..).collect()
+    }
+
+    /// The bulletins arrived since the last call; with `replay`, the whole
+    /// store of the day instead (ibx#461).
+    pub fn take_news_bulletins(&self, replay: bool) -> Vec<NewsBulletin> {
+        let mut store = self.news_bulletins.lock().unwrap();
+        let queued: Vec<NewsBulletin> = store.queue.drain(..).collect();
+        if replay { store.store.clone() } else { queued }
     }
 
     // ── Hot-loop-side writers ──
@@ -376,8 +393,27 @@ impl MarketDataState {
         self.tick_news.lock().unwrap().push(news);
     }
 
-    #[doc(hidden)] pub fn push_news_bulletin(&self, bulletin: NewsBulletin) {
-        self.news_bulletins.lock().unwrap().push(bulletin);
+    /// Store a bulletin received today (local day) (ibx#461).
+    #[doc(hidden)] pub fn push_news_bulletin(&self, bulletin: NewsBulletin) -> bool {
+        self.push_news_bulletin_on(bulletin, jiff::Zoned::now().date())
+    }
+
+    /// Store a bulletin received on `day`, as the reference does
+    /// (ibx#461): the store is emptied when a bulletin arrives on a new
+    /// day, and a message id already stored is dropped. Returns false
+    /// when dropped.
+    #[doc(hidden)] pub fn push_news_bulletin_on(&self, bulletin: NewsBulletin, day: jiff::civil::Date) -> bool {
+        let mut store = self.news_bulletins.lock().unwrap();
+        if store.day != Some(day) {
+            store.day = Some(day);
+            store.store.clear();
+        }
+        if store.store.iter().any(|b| b.msg_id == bulletin.msg_id) {
+            return false;
+        }
+        store.store.push(bulletin.clone());
+        store.queue.push(bulletin);
+        true
     }
 
     #[doc(hidden)] pub fn set_instrument_count(&self, count: u32) {

@@ -189,7 +189,6 @@ pub(crate) struct CcpState {
     /// Order messages already reported as 399, by order and text (ibx#465).
     pub(crate) order_messages_sent: HashSet<(u64, String)>,
     pub(crate) exec_realized_order: VecDeque<String>,
-    pub(crate) bulletin_next_id: i32,
     pub(crate) news_subscriptions: Vec<(InstrumentId, u32)>,
     pub(crate) disconnected: bool,
     /// (req_id, is_single_shot). Single-shot = known-conId lookup whose
@@ -505,7 +504,6 @@ impl CcpState {
             exec_realized: std::collections::HashMap::with_capacity(256),
             order_messages_sent: HashSet::new(),
             exec_realized_order: VecDeque::with_capacity(256),
-            bulletin_next_id: 0,
             news_subscriptions: Vec::new(),
             disconnected: false,
             pending_secdef: Vec::new(),
@@ -1770,29 +1768,29 @@ impl CcpState {
         emit(event_tx, Event::CancelReject(reject));
     }
 
+    /// A news bulletin, read as the reference does (ibx#461): its type
+    /// mapped to the client type (types the client never gets are
+    /// dropped), the server's message id (0 when absent), an empty message
+    /// dropped; the store drops a repeated id.
     fn handle_news_bulletin(&mut self, parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
         static BULLETIN_TYPE_MAP: &[(i32, i32)] = &[
-            (1, 1), (2, 2), (3, 3), (8, 1), (9, 1), (10, 1),
+            (1, 1), (2, 3), (3, 2), (8, 4), (9, 5), (10, 6),
         ];
         let fix_type: i32 = parsed.get(&fix::TAG_URGENCY)
-            .and_then(|s| s.parse().ok()).unwrap_or(0);
-        let api_type = BULLETIN_TYPE_MAP.iter()
+            .and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        let Some(api_type) = BULLETIN_TYPE_MAP.iter()
             .find(|(k, _)| *k == fix_type)
-            .map(|(_, v)| *v);
-        let api_type = match api_type {
-            Some(t) => t,
-            None => return,
-        };
+            .map(|(_, v)| *v) else { return };
         let message = parsed.get(&fix::TAG_HEADLINE).cloned().unwrap_or_default();
+        if message.is_empty() {
+            return;
+        }
         let exchange = parsed.get(&fix::TAG_SECURITY_EXCHANGE).cloned().unwrap_or_default();
-        self.bulletin_next_id += 1;
-        let bulletin = NewsBulletin {
-            msg_id: self.bulletin_next_id,
-            msg_type: api_type,
-            message,
-            exchange,
-        };
-        shared.market.push_news_bulletin(bulletin);
+        let msg_id = parsed.get(&6143).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        let bulletin = NewsBulletin { msg_id, msg_type: api_type, message, exchange };
+        if !shared.market.push_news_bulletin(bulletin) {
+            log::info!("News bulletin {} already received: dropped", msg_id);
+        }
     }
 
     fn handle_account_summary(&mut self, parsed: &std::collections::HashMap<u32, String>, context: &mut Context, shared: &SharedState) {

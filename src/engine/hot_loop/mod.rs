@@ -2743,6 +2743,33 @@ mod tests {
         assert!(sent[0].contains("<id>APISCAN1:4</id>"));
     }
 
+    // ibx#461: a bulletin keeps the server's message id and gets the
+    // reference's client type; an empty message (the logon one), a type
+    // the client never gets and a repeated id are dropped.
+    #[test]
+    fn news_bulletin_ids_and_types() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let bulletin = |t: &str, text: &str, id: &str| {
+            let mut f = vec![(35u32, "B"), (61, t), (148, text), (207, "NYSE")];
+            if !id.is_empty() { f.push((6143, id)); }
+            crate::protocol::fix::fix_build(&f, 1)
+        };
+        engine.inject_ccp_message(&bulletin("-2", "", "0"));
+        engine.inject_ccp_message(&bulletin("3", "Exchange back", "123"));
+        engine.inject_ccp_message(&bulletin("2", "Exchange down", "124"));
+        engine.inject_ccp_message(&bulletin("2", "Exchange down", "124"));
+        engine.inject_ccp_message(&bulletin("8", "<b>html</b>", "125"));
+        engine.inject_ccp_message(&bulletin("9", "popup", "126"));
+        engine.inject_ccp_message(&bulletin("10", "popup html", "127"));
+        engine.inject_ccp_message(&bulletin("1", "regular", "128"));
+        engine.inject_ccp_message(&bulletin("0", "ad", "129"));
+        engine.inject_ccp_message(&bulletin("99", "unknown", "130"));
+        engine.inject_ccp_message(&bulletin("1", "no id", ""));
+        let got: Vec<(i32, i32)> = shared.market.drain_news_bulletins().iter().map(|b| (b.msg_id, b.msg_type)).collect();
+        assert_eq!(got, [(123, 2), (124, 3), (125, 4), (126, 5), (127, 6), (128, 1), (0, 1)]);
+    }
+
     fn subscribe_cmd(con_id: i64, sec_type: &str) -> ControlCommand {
         ControlCommand::Subscribe {
             con_id, symbol: String::new(), exchange: "SMART".into(), sec_type: sec_type.into(),

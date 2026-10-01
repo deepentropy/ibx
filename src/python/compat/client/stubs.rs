@@ -72,8 +72,7 @@ impl EClient {
     #[pyo3(signature = (all_msgs=true))]
     fn req_news_bulletins(&self, all_msgs: bool) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        let _ = all_msgs;
-        self.core.subscribe_bulletins();
+        self.core.subscribe_bulletins(all_msgs);
         Ok(())
     }
 

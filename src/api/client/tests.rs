@@ -4782,3 +4782,38 @@ fn no_internal_quote_when_the_caller_has_one() {
     let (subs, _) = answer_pnl_quotes(&rx, 3);
     assert!(subs.is_empty());
 }
+
+// ibx#461: popup bulletins reach every client; a subscription gets every
+// type from then on, and the day's store first only with all_msgs; a
+// cancel goes back to popups; a new day empties the store.
+#[test]
+fn news_bulletin_delivery_modes() {
+    let (client, _rx, shared) = test_client();
+    let b = |id: i32, t: i32| crate::types::NewsBulletin { msg_id: id, msg_type: t, message: format!("m{id}"), exchange: "X".into() };
+    let day = jiff::civil::date(2026, 10, 1);
+    let events = |client: &EClient| {
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+        w.events.into_iter().filter(|e| e.starts_with("news_bulletin:")).collect::<Vec<_>>()
+    };
+    shared.market.push_news_bulletin_on(b(1, 1), day);
+    shared.market.push_news_bulletin_on(b(2, 5), day);
+    assert_eq!(events(&client), ["news_bulletin:2:5:m2:X"], "only the popup without a subscription");
+
+    client.req_news_bulletins(false);
+    shared.market.push_news_bulletin_on(b(3, 2), day);
+    assert_eq!(events(&client), ["news_bulletin:3:2:m3:X"], "no replay without all_msgs");
+
+    client.req_news_bulletins(true);
+    assert_eq!(events(&client), ["news_bulletin:1:1:m1:X", "news_bulletin:2:5:m2:X", "news_bulletin:3:2:m3:X"]);
+
+    client.cancel_news_bulletins();
+    shared.market.push_news_bulletin_on(b(4, 1), day);
+    shared.market.push_news_bulletin_on(b(5, 6), day);
+    assert!(!shared.market.push_news_bulletin_on(b(5, 6), day), "a repeated id is dropped");
+    assert_eq!(events(&client), ["news_bulletin:5:6:m5:X"]);
+
+    shared.market.push_news_bulletin_on(b(6, 6), jiff::civil::date(2026, 10, 2));
+    client.req_news_bulletins(true);
+    assert_eq!(events(&client), ["news_bulletin:6:6:m6:X"], "the store holds the new day only");
+}

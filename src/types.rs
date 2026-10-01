@@ -1329,8 +1329,10 @@ pub struct TbtQuote {
 /// An IB news bulletin from auth server news bulletin message.
 #[derive(Debug, Clone)]
 pub struct NewsBulletin {
+    /// Message id given by the server (ibx#461).
     pub msg_id: i32,
-    /// 1=Regular, 2=Exchange unavailable, 3=Exchange available.
+    /// 1=Regular, 2=Exchange available, 3=Exchange unavailable, 4=HTML,
+    /// 5=Popup text, 6=Popup HTML (ibx#461).
     pub msg_type: i32,
     pub message: String,
     pub exchange: String,

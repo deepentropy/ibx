@@ -476,8 +476,9 @@ impl EClient {
         }
 
         // Drain news bulletins -> updateNewsBulletin
-        if self.core.bulletin_subscribed.load(Ordering::Acquire) {
-            let bulletins = shared.market.drain_news_bulletins();
+        // (popups always, every type when subscribed, ibx#461)
+        {
+            let bulletins = self.core.bulletins_to_deliver(shared);
             for b in bulletins {
                 call_wrapper!(self.wrapper, py, "update_news_bulletin", (b.msg_id as i64, b.msg_type, b.message.as_str(), b.exchange.as_str()));
             }
