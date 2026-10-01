@@ -765,32 +765,37 @@ impl Context {
         id
     }
 
+    /// `price` is the limit price, 0 = unset.
     pub fn submit_peg_mkt(
         &mut self,
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+        price: Price,
         offset: Price,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitPegMkt {
-            order_id: id, instrument, side, qty, offset,
+            order_id: id, instrument, side, qty, price, offset,
         });
         id
     }
 
+    /// `price` is the limit price, 0 = unset. The offset goes out as zero,
+    /// as the reference sends it.
     pub fn submit_peg_mid(
         &mut self,
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+        price: Price,
         offset: Price,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitPegMid {
-            order_id: id, instrument, side, qty, offset,
+            order_id: id, instrument, side, qty, price, offset,
         });
         id
     }

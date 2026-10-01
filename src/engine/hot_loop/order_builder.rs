@@ -31,6 +31,13 @@ pub(crate) fn drain_and_send_orders(
     };
     for mut order_req in orders {
         let oid = order_req.order_id();
+        // A pegged type the contract's list does not allow on the order's
+        // exchange is refused, as the reference (ibx#414).
+        match pegged_type_refusal(&order_req, context, conn, hb, shared) {
+            Some(false) => { context.rth_parked.push(order_req); continue; }
+            Some(true) => continue,
+            None => {}
+        }
         // Outside RTH: kept only where the reference keeps it, from the
         // contract definition of the order's exchange (ibx#465).
         if !apply_outside_rth(&mut order_req, context, conn, hb, shared) {
@@ -1237,7 +1244,9 @@ pub(crate) fn drain_and_send_orders(
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
+                // The contract's own routing, as the reference (captured
+                // 25/09/2026 on SMART, ibx#414).
+                let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
                 let mut fields: Vec<(u32, &str)> = vec![
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
@@ -1252,8 +1261,8 @@ pub(crate) fn drain_and_send_orders(
                     (59, "0"),
                     (60, &now),
                     (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
+                    (100, &destination),
+                    (6210, &destination),
                     (15, currency.as_str()),
                     (204, "0"),
                 ];
@@ -1369,79 +1378,43 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ])
             }
-            OrderRequest::SubmitPegMkt { order_id, instrument, side, qty, offset } => {
+            OrderRequest::SubmitPegMkt { order_id, instrument, side, qty, price, offset }
+            | OrderRequest::SubmitPegMid { order_id, instrument, side, qty, price, offset } => {
+                let mid = matches!(order_req, OrderRequest::SubmitPegMid { .. });
+                let ord_type = if mid { crate::types::ORD_PEG_MID } else { crate::types::ORD_PEG_MKT };
                 context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_PEG_MKT, b'0', offset,
+                    order_id, instrument, side, qty, price, ord_type, b'0', offset,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "E"),          // OrdType = Pegged (no mid-offset tags = PEGMKT)
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
-                    (15, currency.as_str()),
-                    (204, "0"),
+                let (sec_type_str, destination) = context.market.order_routing(instrument);
+                let now = chrono_free_timestamp().to_string();
+                let mut fields: Vec<(u32, String)> = vec![
+                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
+                    (fix::TAG_SENDING_TIME, now.clone()),
+                    (11, format!("{}.{}", order_id, ver)),
                 ];
-                let offset_str;
-                if offset > 0 {
-                    offset_str = format_price(offset);
-                    fields.push((211, &offset_str)); // PegOffsetValue
-                }
-                send_new_order(conn, context, instrument, &fields)
-            }
-            OrderRequest::SubmitPegMid { order_id, instrument, side, qty, offset } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, 0, crate::types::ORD_PEG_MID, b'0', offset,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, _destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let mut fields: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "E"),          // OrdType = Pegged (tags 8403/8404 = PEGMID)
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, "ISLAND"),    // Requires directed exchange
-                    (6210, "ISLAND"),
-                    (15, currency.as_str()),
-                    (204, "0"),
-                    (8403, "0.0"),      // midOffsetAtWhole — differentiates PEGMID from PEGMKT
-                    (8404, "0.0"),      // midOffsetAtHalf
-                ];
-                let offset_str;
-                if offset > 0 {
-                    offset_str = format_price(offset);
-                    fields.push((211, &offset_str)); // PegOffsetValue
-                }
-                send_new_order(conn, context, instrument, &fields)
+                let (price_tags, type_tags) = pegged_tags(mid, price, offset);
+                fields.extend(price_tags);
+                fields.extend([
+                    (1, account_id.to_string()),
+                    (21, "2".to_string()),
+                    (55, symbol),
+                    (54, fix_side(side).to_string()),
+                    (38, format_uint(qty as u64).to_string()),
+                ]);
+                fields.extend(type_tags);
+                fields.extend([
+                    (59, "0".to_string()),
+                    (60, now),
+                    (167, sec_type_str),
+                    (100, destination.clone()),
+                    (6210, destination),
+                    (15, currency.clone()),
+                    (204, "0".to_string()),
+                ]);
+                let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+                send_new_order(conn, context, instrument, &refs)
             }
             OrderRequest::Cancel { order_id } => {
                 let fields = cancel_fields(context, account_id, order_id, "SEL");
@@ -1735,6 +1708,29 @@ fn adjustable_stop_tags(
     tags
 }
 
+/// Order fields as (tag, value) pairs.
+type Fields = Vec<(u32, String)>;
+
+/// The fields of a pegged-to-market or pegged-to-midpoint order, as the
+/// reference writes them (ibx#414; pegged to midpoint captured in
+/// ib-agent#192 B8c, pegged to market from the code read): the limit
+/// price when set and, for pegged to market, the offset in the stop price
+/// field; then the pegged order type, the offset (always 0.00 for pegged
+/// to midpoint) and the peg instruction. Returned as the price fields
+/// (before the account) and the order-type fields.
+fn pegged_tags(mid: bool, price: crate::types::Price, offset: crate::types::Price) -> (Fields, Fields) {
+    let offset = if mid { 0 } else { offset };
+    let mut prices = Vec::with_capacity(2);
+    if price > 0 { prices.push((44, format_price_ref(price).to_string())); }
+    if !mid { prices.push((99, format_price_ref(offset).to_string())); }
+    let types = vec![
+        (40, "P".to_string()),
+        (211, format_price_ref(offset).to_string()),
+        (18, if mid { "M" } else { "P" }.to_string()),
+    ];
+    (prices, types)
+}
+
 /// The benchmark attributes of a pegged-to-benchmark order, as the
 /// reference writes them (ibx#415; captured 25/09/2026 and 26/09/2026):
 /// the pegged change, negative for a decrease, the reference change, the
@@ -1858,15 +1854,12 @@ fn modify_fields(
             after_type.push((211, format_price_ref(offset).to_string()));
             match kind { K::SnapMkt { .. } => "SMKT", K::SnapMid { .. } => "SMID", _ => "SREL" }
         }
-        K::PegMkt { offset } => {
-            if offset > 0 { after_type.push((211, p(offset))); }
-            "E"
-        }
-        K::PegMid { offset } => {
-            after_type.push((8403, "0.0".to_string()));
-            after_type.push((8404, "0.0".to_string()));
-            if offset > 0 { after_type.push((211, p(offset))); }
-            "E"
+        K::PegMkt { price, offset } | K::PegMid { price, offset } => {
+            let (prices, mut types) = pegged_tags(matches!(kind, K::PegMid { .. }), price, offset);
+            before_account.extend(prices);
+            types.remove(0); // the order type, pushed below
+            after_type.extend(types);
+            "P"
         }
         K::Rel { offset } => {
             after_type.push((211, p(offset)));
@@ -1931,6 +1924,84 @@ fn modify_fields(
     f
 }
 
+/// The definition an order rule reads for an instrument on its exchange
+/// (ibx#465, ibx#414).
+enum Definition<'a> {
+    /// The instrument has no contract id: no rule applies.
+    NoContract,
+    /// Not known yet; the lookup was asked once and the request waits.
+    Waiting,
+    /// Known, with the exchange it was asked for.
+    Known(&'a crate::engine::outside_rth::RthTypes, String),
+}
+
+/// The definition of `instrument` on the exchange it is routed to: by
+/// conId for that exchange, as the reference asks for the order-type list
+/// (ib-agent#199).
+fn definition<'a>(
+    context: &'a mut Context,
+    conn: &mut Connection,
+    hb: &mut HeartbeatState,
+    instrument: crate::types::InstrumentId,
+) -> Definition<'a> {
+    let Some(con_id) = context.market.con_id(instrument) else { return Definition::NoContract };
+    let (_, destination) = context.market.order_routing(instrument);
+    let key = (con_id, destination);
+    if !context.rth_types.contains_key(&key) {
+        if !context.rth_lookups.iter().any(|(_, k, _)| *k == key) {
+            let id = format!("ibxrth{}", context.next_rth_lookup);
+            context.next_rth_lookup = context.next_rth_lookup.wrapping_add(1);
+            let ts = chrono_free_timestamp();
+            let con_id_str = con_id.to_string();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "c"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (320, &id),
+                (321, "2"),
+                (146, "1"),
+                (6008, &con_id_str),
+                (6004, &key.1),
+            ]);
+            hb.last_ccp_sent = std::time::Instant::now();
+            log::info!("Definition of con_id {} on {} asked for the order rules ({})", con_id, key.1, id);
+            context.rth_lookups.push((id, key, std::time::Instant::now() + RTH_LOOKUP_TIMEOUT));
+        }
+        return Definition::Waiting;
+    }
+    let exchange = key.1.clone();
+    match context.rth_types.get(&key) {
+        Some(types) => Definition::Known(types, exchange),
+        None => Definition::Waiting,
+    }
+}
+
+/// A new pegged-to-market or pegged-to-midpoint order whose type is not
+/// in the contract's order-type list for its exchange: the reference
+/// refuses it with 387 and sends nothing (ib-agent#192 B8b, ibx#414).
+/// `Some(false)` while the list is asked for, `Some(true)` when refused,
+/// `None` to go on. A definition without a list, or none in time, is
+/// not checked.
+fn pegged_type_refusal(
+    req: &OrderRequest,
+    context: &mut Context,
+    conn: &mut Connection,
+    hb: &mut HeartbeatState,
+    shared: &Arc<SharedState>,
+) -> Option<bool> {
+    let (instrument, allowed) = crate::engine::outside_rth::pegged_type_check(req)?;
+    match definition(context, conn, hb, instrument) {
+        Definition::NoContract => None,
+        Definition::Waiting => Some(false),
+        Definition::Known(types, _) if types.types_known && !allowed(types) => {
+            let oid = req.order_id();
+            log::warn!("Order {} refused: its pegged type is not allowed on this exchange", oid);
+            shared.orders.push_order_error(oid, 387, crate::engine::outside_rth::UNSUPPORTED_ORDER_TYPE.to_string());
+            Some(true)
+        }
+        Definition::Known(..) => None,
+    }
+}
+
 /// Outside RTH on a request (ibx#465). A request of an order that already
 /// waits, or with outside-RTH whose contract definition is not known yet,
 /// waits (false): the definition is asked once. Otherwise outside-RTH is
@@ -1952,37 +2023,16 @@ fn apply_outside_rth(
         return false;
     }
     let is_new = !matches!(req, OrderRequest::Modify { .. });
-    let Some((instrument, kind, tif, order_kind, outside_rth)) = rth::rth_parts(req) else { return true };
+    let Some((instrument, kind, tif, _, outside_rth)) = rth::rth_parts(req) else { return true };
     if !*outside_rth { return true; }
     let Some(instrument) = instrument.or_else(|| context.order(oid).map(|o| o.instrument)) else { return true };
-    let Some(con_id) = context.market.con_id(instrument) else { return true };
-    let (_, routed) = context.market.order_routing(instrument);
-    let destination = rth::order_destination(order_kind.as_ref(), routed);
-    let key = (con_id, destination);
-    let Some(types) = context.rth_types.get(&key) else {
-        if !context.rth_lookups.iter().any(|(_, k, _)| *k == key) {
-            let id = format!("ibxrth{}", context.next_rth_lookup);
-            context.next_rth_lookup = context.next_rth_lookup.wrapping_add(1);
-            let ts = chrono_free_timestamp();
-            let con_id_str = con_id.to_string();
-            // By conId for one exchange, as the reference asks for the
-            // order-type list (ib-agent#199).
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "c"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (320, &id),
-                (321, "2"),
-                (146, "1"),
-                (6008, &con_id_str),
-                (6004, &key.1),
-            ]);
-            hb.last_ccp_sent = std::time::Instant::now();
-            log::info!("Definition of con_id {} on {} asked for outside RTH ({})", con_id, key.1, id);
-            context.rth_lookups.push((id, key, std::time::Instant::now() + RTH_LOOKUP_TIMEOUT));
-        }
-        return false;
+    let ibkrats = context.market.exchange(instrument) == "IBKRATS";
+    let (types, routed) = match definition(context, conn, hb, instrument) {
+        Definition::NoContract => return true,
+        Definition::Waiting => return false,
+        Definition::Known(types, routed) => (types, routed),
     };
-    let exchange = if context.market.exchange(instrument) == "IBKRATS" { "IBKRATS" } else { key.1.as_str() };
+    let exchange = if ibkrats { "IBKRATS" } else { routed.as_str() };
     if !rth::outside_rth_applies(kind, tif, exchange, types) {
         *outside_rth = false;
         if is_new {
@@ -2236,8 +2286,8 @@ fn send_order_ex(
         K::SnapMkt { offset } => (crate::types::ORD_SNAP_MKT, 0, offset),
         K::SnapMid { offset } => (crate::types::ORD_SNAP_MID, 0, offset),
         K::SnapPri { offset } => (crate::types::ORD_SNAP_PRI, 0, offset),
-        K::PegMkt { offset } => (crate::types::ORD_PEG_MKT, 0, offset),
-        K::PegMid { offset } => (crate::types::ORD_PEG_MID, 0, offset),
+        K::PegMkt { price, offset } => (crate::types::ORD_PEG_MKT, price, offset),
+        K::PegMid { price, offset } => (crate::types::ORD_PEG_MID, price, offset),
         K::Rel { offset } => (b'R', 0, offset),
         K::AdjustableStop { stop_price, .. } => (b'3', 0, stop_price),
         K::PegBench { starting_price, .. } => (crate::types::ORD_PEG_BENCH, starting_price, 0),
@@ -2363,19 +2413,13 @@ fn send_order_ex(
             fields.push((99, o.clone()));
             fields.push((211, o));
         }
-        K::PegMkt { offset } => {
-            fields.push((40, "E".to_string()));
-            if offset > 0 {
-                fields.push((211, format_price(offset).to_string()));
-            }
-        }
-        K::PegMid { offset } => {
-            fields.push((40, "E".to_string()));
-            fields.push((8403, "0.0".to_string())); // midOffsetAtWhole — differentiates PEGMID
-            fields.push((8404, "0.0".to_string())); // midOffsetAtHalf
-            if offset > 0 {
-                fields.push((211, format_price(offset).to_string()));
-            }
+        K::PegMkt { price, offset } | K::PegMid { price, offset } => {
+            // As the reference (ibx#414): the pegged order type with the
+            // peg instruction, no mid-offset fields.
+            let (prices, types) = pegged_tags(matches!(kind, K::PegMid { .. }), price, offset);
+            fields.extend(types);
+            fields.extend(prices);
+            has_base_exec_inst = true;
         }
         K::Rel { offset } => {
             // Per ib-agent#138 capture: Relative shares OrdType=P and is
@@ -2405,13 +2449,8 @@ fn send_order_ex(
     push_dtc_flag(&mut fields, tif);
     fields.push((60, now));
     fields.push((167, sec_type_str.clone()));
-    // MIDPX / PEG* require a directed exchange; everything else routes per
-    // the instrument's registered routing (ibx#217). The snap types keep
-    // the contract's routing, as the reference (ibx#413).
-    let destination = match kind {
-        K::MidPrice { .. } | K::PegMkt { .. } | K::PegMid { .. } => "ISLAND".to_string(),
-        _ => destination,
-    };
+    // Every type keeps the contract's routing, as the reference (ibx#413,
+    // ibx#414): a forced directed exchange is refused for some of them.
     fields.push((100, destination.clone()));
     // Secondary routing field — the reference encoder always writes it
     // alongside the destination (ib-agent#165).
@@ -3761,6 +3800,131 @@ mod tests {
                 assert!(tag(&ours, 8534).is_none(), "{tif}: no overnight attribute");
             }
         }
+    }
+
+    const PEG_TAGS: [u32; 9] = [40, 18, 44, 99, 211, 8403, 8404, 100, 6210];
+
+    // ibx#414 (ib-agent#192 B8c, captured 23/09/2026, account masked): a
+    // pegged-to-midpoint order with lmtPrice 237.82 and auxPrice 0.05 goes
+    // out as the pegged type with the midpoint instruction, a zero offset,
+    // no stop price, no mid-offset fields, on the contract's routing.
+    #[test]
+    fn peg_mid_matches_the_reference() {
+        let reference = "35=D|11=1626578609.0|44=237.82|1=DU1|6122=c|6121=76|6119=192|38=1|40=P|211=0.00|18=M|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        let order = crate::api::types::Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "PEG MID".into(),
+            lmt_price: 237.82, aux_price: 0.05, ..Default::default()
+        };
+        let want = captured(reference, &PEG_TAGS);
+        let ex = crate::api::types::Order { tif: "GTC".into(), ..order.clone() };
+        for (label, req) in [("plain", api_request(&order, 87)), ("extended", api_request(&ex, 88))] {
+            let ours = wire_tags(req);
+            assert_eq!(ours_as(&ours, &want), want, "{label}");
+            for absent in [99, 8403, 8404] {
+                assert!(tag(&ours, absent).is_none(), "{label}: field {absent} is not sent");
+            }
+        }
+        let replace = replace_fields(89, Side::Buy, 1,
+            crate::types::OrderKind::PegMid { price: px(237.92), offset: px(0.05) }, b'0', Default::default());
+        assert_eq!((tag(&replace, 40), tag(&replace, 211), tag(&replace, 18), tag(&replace, 44), tag(&replace, 99)),
+            (Some("P"), Some("0.00"), Some("M"), Some("237.92"), None));
+    }
+
+    // Pegged to market (from the code read, not captured on the wire:
+    // jclient.pe.o / pe.gI, ORDER-SUBMIT.md 3.5): the limit price when
+    // given, the offset in the stop price and the offset fields, the
+    // market instruction.
+    #[test]
+    fn peg_mkt_is_written_like_the_reference() {
+        let req = |price: i64| OrderRequest::SubmitPegMkt {
+            order_id: 90, instrument: 0, side: Side::Buy, qty: 1, price, offset: px(0.05) };
+        let tags = wire_tags(req(px(240.0)));
+        assert_eq!((tag(&tags, 40), tag(&tags, 18), tag(&tags, 44), tag(&tags, 99), tag(&tags, 211)),
+            (Some("P"), Some("P"), Some("240.00"), Some("0.05"), Some("0.05")));
+        assert_eq!(tag(&tags, 100), Some("BEST"));
+        assert!(tag(&wire_tags(req(0)), 44).is_none(), "no limit price when unset");
+        let unset = wire_tags(OrderRequest::SubmitEx { order_id: 91, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::PegMkt { price: 0, offset: 0 }, tif: b'1', attrs: Default::default() });
+        assert_eq!((tag(&unset, 99), tag(&unset, 211)), (Some("0.00"), Some("0.00")));
+        assert_eq!(unset.iter().filter(|(t, _)| *t == 18).count(), 1);
+    }
+
+    // ibx#414 (ib-agent#192 B8a, captured 23/09/2026): MIDPRICE on SMART
+    // keeps the contract's routing.
+    #[test]
+    fn midprice_keeps_the_contract_routing() {
+        let reference = "35=D|11=1626578607.0|44=237.82|1=DU1|6122=c|6121=74|6119=192|38=1|40=MIDPX|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        let want = captured(reference, &[40, 100, 6210]);
+        for req in [
+            OrderRequest::SubmitMidPrice { order_id: 92, instrument: 0, side: Side::Buy, qty: 1, price_cap: px(237.82) },
+            OrderRequest::SubmitEx { order_id: 93, instrument: 0, side: Side::Buy, qty: 1,
+                kind: crate::types::OrderKind::MidPrice { price_cap: px(237.82) }, tif: b'1', attrs: Default::default() },
+        ] {
+            let ours = wire_tags(req);
+            assert_eq!(ours_as(&ours, &want), want);
+            assert_eq!(tag(&ours, 44).and_then(|v| v.parse::<f64>().ok()), Some(237.82));
+        }
+    }
+
+    /// The definition reply for a lookup, with the order-type list `tokens`.
+    fn definition_reply(id: &str, exchange: &str, tokens: &str) -> Vec<u8> {
+        fix::fix_build(&[(35, "d"), (320, id), (6008, "265598"), (55, "AAPL"), (167, "STK"),
+            (15, "USD"), (207, exchange), (6523, "USSTK"), (6431, tokens)], 1)
+    }
+
+    // ibx#414: the order-type lists of AAPL captured 28/09/2026 (on BEST:
+    // PEGMID, no PEGMKT; on ISLAND: neither). The reference refuses pegged
+    // to market on SMART (ib-agent#192 B8b) and pegged to midpoint on
+    // ISLAND (25/09/2026) with 387, nothing sent; pegged to midpoint on
+    // SMART goes out (B8c).
+    #[test]
+    fn pegged_types_not_in_the_list_are_refused_with_387() {
+        const BEST_LIST: &str = "ACTIVETIM/1,AD/5,ADDONT/1,ADJUST/1,ALERT/1,ALGO/1,ALLOC/1,AON/1,AVGCOST/1,BASKET/1,BENCHPX/1,CASHQTY/1,COND/1,CONDORDER/1,DARKONLY/1,DARKPOLL/1,DAY/3,DEACT/1,DEACTDIS/1,DEACTEOD/1,DIS/1,DUR/1,GAT/1,GTC/1,GTD/1,GTT/1,HID/1,IBKRATS/1,ICE/1,IMB/1,IOC/1,LIT/1,LMT/3,LOC/1,MIDPX/1,MIT/1,MKT/1,MOC/1,MTL/1,NGCOMB/1,NODARK/1,NONALGO/3,OCA/1,OPG/1,OPGREROUT/1,PEGBENCH/1,PEGMID/1,POSTATS/1,POSTONLY/1,PREOPGRTH/1,PRICECHK/1,REL/1,REL2MID/1,RELPCTOFS/1,RPI/1,RTH/1,SCALE/1,SCALEODD/1,SCALERST/1,SIZECHK/1,SMARTSTG/1,SNAPMID/1,SNAPMKT/1,SNAPREL/1,STP/1,STPLMT/1,SWEEP/1,TRAIL/1,TRAILLIT/1,TRAILLMT/1,TRAILMIT/1,WHATIF/1";
+        const ISLAND_LIST: &str = "ACTIVETIM/1,AD/5,ADJUST/1,ALERT/1,ALGOCLS/1,ALGOOPG/1,ALLOC/1,AON/3,AVGCOST/1,BASKET/1,BENCHPX/1,CASHQTY/1,COND/1,CONDORDER/1,DAY/3,DEACT/1,DEACTDIS/1,DEACTEOD/1,DIS/1,GAT/1,GTC/1,GTD/1,GTT/1,HID/1,IOC/3,LIT/1,LMT/3,LOC/1,MIT/1,MKT/1,MOC/1,MTL/1,NGCOMB/1,NONALGO/3,OCA/1,OPG/1,PEGBENCH/1,RELPCTOFS/1,RTH/1,SCALE/1,SCALERST/1,SNAPMID/1,SNAPMKT/1,SNAPREL/1,STP/1,STPLMT/1,TRAIL/1,TRAILLIT/1,TRAILLMT/1,TRAILMIT/1,WHATIF/1";
+        let run = |exchange: &str, list: &str, req: OrderRequest| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut server, _) = listener.accept().unwrap();
+            let mut conn = Some(Connection::new_raw(client).unwrap());
+            let shared = Arc::new(SharedState::new());
+            let mut context = Context::new();
+            context.market.register(265598);
+            context.set_symbol(0, "AAPL".to_string());
+            context.market.set_routing(0, "STK", exchange);
+            context.pending_orders.push(req);
+            let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+            assert_eq!(frames.len(), 1, "only the definition is asked: {frames:?}");
+            assert_eq!(tag(&frames[0], 35), Some("c"));
+            let id = tag(&frames[0], 320).unwrap().to_string();
+            assert!(rth_definition_reply(&mut context, &id, &definition_reply(&id, tag(&frames[0], 6004).unwrap(), list)));
+            let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+            (frames, shared.orders.drain_order_errors())
+        };
+        let peg_mkt = |id| OrderRequest::SubmitPegMkt { order_id: id, instrument: 0, side: Side::Buy, qty: 1, price: 0, offset: px(0.05) };
+        let peg_mid = |id| OrderRequest::SubmitEx { order_id: id, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::PegMid { price: px(237.82), offset: 0 }, tif: b'0', attrs: Default::default() };
+        let refused = (94, 387, "Unsupported order type for this exchange and security type.".to_string());
+
+        let (frames, errors) = run("SMART", BEST_LIST, peg_mkt(94));
+        assert!(frames.is_empty(), "nothing sent: {frames:?}");
+        assert_eq!(errors, [refused.clone()]);
+
+        let (frames, errors) = run("ISLAND", ISLAND_LIST, peg_mid(94));
+        assert!(frames.is_empty(), "nothing sent: {frames:?}");
+        assert_eq!(errors, [refused]);
+
+        let (frames, errors) = run("SMART", BEST_LIST, peg_mid(95));
+        assert_eq!(frames.len(), 1);
+        assert_eq!((tag(&frames[0], 35), tag(&frames[0], 18)), (Some("D"), Some("M")));
+        assert!(errors.is_empty());
+    }
+
+    // A definition with no order-type list, or none in time: the type is
+    // not checked and the order goes out.
+    #[test]
+    fn pegged_types_without_a_list_are_sent() {
+        let tags = wire_tags(OrderRequest::SubmitPegMkt { order_id: 96, instrument: 0, side: Side::Buy, qty: 1, price: 0, offset: 0 });
+        assert_eq!(tag(&tags, 35), Some("D"));
     }
 
     // ibx#425: customer account 6207 and professional customer 6636.

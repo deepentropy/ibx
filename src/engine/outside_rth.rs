@@ -32,6 +32,13 @@ pub(crate) struct RthTypes {
     pub elh_only: bool,
     pub erh_only: bool,
     pub rth4mkt: bool,
+    /// The definition carried an order-type list (ibx#414). Without one
+    /// the pegged types are not checked.
+    pub types_known: bool,
+    /// The order-type keys of pegged to market and pegged to midpoint
+    /// (PEGMKT; PEGMID or PEGMID2) are in the list (ibx#414).
+    pub peg_mkt: bool,
+    pub peg_mid: bool,
 }
 
 impl RthTypes {
@@ -42,6 +49,7 @@ impl RthTypes {
             market_type: market_type.to_string(),
             sec_type: sec_type.to_string(),
             currency: currency.to_string(),
+            types_known: !tokens.is_empty(),
             ..Default::default()
         };
         for token in tokens {
@@ -55,6 +63,8 @@ impl RthTypes {
                 "ELHONLY" => t.elh_only = true,
                 "ERHONLY" => t.erh_only = true,
                 "RTH4MKT" => t.rth4mkt = true,
+                "PEGMKT" => t.peg_mkt = true,
+                "PEGMID" | "PEGMID2" => t.peg_mid = true,
                 _ => {}
             }
         }
@@ -146,13 +156,21 @@ pub(crate) fn rth_parts(req: &mut OrderRequest) -> Option<(Option<u32>, RthKind,
     }
 }
 
-/// The exchange an order goes to: the instrument's routing, except the
-/// types that need a directed exchange (ibx#217). The snap types keep the
-/// instrument's routing (ibx#413).
-pub(crate) fn order_destination(kind: Option<&OrderKind>, routed: String) -> String {
-    match kind {
-        Some(OrderKind::MidPrice { .. } | OrderKind::PegMkt { .. } | OrderKind::PegMid { .. }) => "ISLAND".to_string(),
-        _ => routed,
+/// Text of error 387, the reference's refusal of an order type the
+/// contract's list does not allow on the order's exchange (ibx#414).
+pub(crate) const UNSUPPORTED_ORDER_TYPE: &str = "Unsupported order type for this exchange and security type.";
+
+/// A new pegged-to-market or pegged-to-midpoint order and its instrument:
+/// the reference refuses it with 387 when the contract's order-type list
+/// for its exchange lacks the type (ib-agent#192 B8b, ibx#414).
+pub(crate) fn pegged_type_check(req: &OrderRequest) -> Option<(u32, fn(&RthTypes) -> bool)> {
+    use OrderRequest as R;
+    let mkt: fn(&RthTypes) -> bool = |t| t.peg_mkt;
+    let mid: fn(&RthTypes) -> bool = |t| t.peg_mid;
+    match req {
+        R::SubmitPegMkt { instrument, .. } | R::SubmitEx { instrument, kind: OrderKind::PegMkt { .. }, .. } => Some((*instrument, mkt)),
+        R::SubmitPegMid { instrument, .. } | R::SubmitEx { instrument, kind: OrderKind::PegMid { .. }, .. } => Some((*instrument, mid)),
+        _ => None,
     }
 }
 

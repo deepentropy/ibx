@@ -217,8 +217,8 @@ pub const ORD_MIDPX: u8 = 2;     // FIX "MIDPX" — Mid-Price
 pub const ORD_SNAP_MKT: u8 = 3;  // FIX "SMKT" — Snap to Market
 pub const ORD_SNAP_MID: u8 = 4;  // FIX "SMID" — Snap to Midpoint
 pub const ORD_SNAP_PRI: u8 = 5;  // FIX "SREL" — Snap to Primary
-pub const ORD_PEG_MKT: u8 = 6;   // FIX "E" + ExecInst "P" — Pegged to Market
-pub const ORD_PEG_MID: u8 = 7;   // FIX "E" + ExecInst "M" — Pegged to Midpoint
+pub const ORD_PEG_MKT: u8 = 6;   // FIX "P" + ExecInst "P" — Pegged to Market
+pub const ORD_PEG_MID: u8 = 7;   // FIX "P" + ExecInst "M" — Pegged to Midpoint
 pub const ORD_PEG_BENCH: u8 = 8; // FIX "PB" — Pegged to Benchmark
 pub const ORD_WHAT_IF: u8 = 9;   // Not a real OrdType — marker for what-if orders
 
@@ -231,7 +231,7 @@ pub fn ord_type_fix_str(t: u8) -> &'static str {
         ORD_SNAP_MKT => "SMKT",
         ORD_SNAP_MID => "SMID",
         ORD_SNAP_PRI => "SREL",
-        ORD_PEG_MKT | ORD_PEG_MID => "E",
+        ORD_PEG_MKT | ORD_PEG_MID => "P",
         ORD_PEG_BENCH => "PB",
         b'1' => "1", b'2' => "2", b'3' => "3", b'4' => "4", b'5' => "5",
         b'B' => "B", b'E' => "E", b'J' => "J", b'K' => "K",
@@ -562,8 +562,11 @@ pub enum OrderKind {
     SnapMkt { offset: Price },
     SnapMid { offset: Price },
     SnapPri { offset: Price },
-    PegMkt { offset: Price },
-    PegMid { offset: Price },
+    /// Pegged to market / to midpoint (ibx#414): `price` is the limit
+    /// price, 0 = unset; `offset` the API auxPrice (pegged to midpoint
+    /// always sends a zero offset, as the reference).
+    PegMkt { price: Price, offset: Price },
+    PegMid { price: Price, offset: Price },
     Rel { offset: Price },
     /// Pegged to benchmark (ibx#415): the starting price (0 = unset), the
     /// stock reference price (0 = unset), the reference contract, the
@@ -613,8 +616,8 @@ impl OrderKind {
                 s(lmt_offset); if let Some(p) = lmt_price { s(p); } s(trail_amt); s(trail_stop_price);
             }
             OrderKind::MidPrice { price_cap } => s(price_cap),
-            OrderKind::PegMkt { offset } | OrderKind::PegMid { offset }
-            | OrderKind::Rel { offset } | OrderKind::SnapMkt { offset }
+            OrderKind::PegMkt { price, offset } | OrderKind::PegMid { price, offset } => { s(price); s(offset); }
+            OrderKind::Rel { offset } | OrderKind::SnapMkt { offset }
             | OrderKind::SnapMid { offset } | OrderKind::SnapPri { offset } => s(offset),
             OrderKind::PegBench { starting_price, pegged_change_amount, ref_change_amount, .. } => {
                 s(starting_price); s(pegged_change_amount); s(ref_change_amount);
@@ -894,21 +897,24 @@ pub enum OrderRequest {
         qty: u32,
         offset: Price, // the API auxPrice, 0 = unset
     },
-    /// Pegged to Market: pegs to market with optional offset. OrdType E + ExecInst P.
+    /// Pegged to Market: pegs to market with optional offset and limit price.
     SubmitPegMkt {
         order_id: OrderId,
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+        price: Price,  // limit price, 0 = unset
         offset: Price, // peg offset, 0 = no offset
     },
-    /// Pegged to Midpoint: pegs to midpoint with optional offset. OrdType E + ExecInst M.
+    /// Pegged to Midpoint: pegs to midpoint with optional limit price. The
+    /// offset is kept but goes out as zero, as the reference (ibx#414).
     SubmitPegMid {
         order_id: OrderId,
         instrument: InstrumentId,
         side: Side,
         qty: u32,
-        offset: Price, // peg offset, 0 = no offset
+        price: Price,  // limit price, 0 = unset
+        offset: Price,
     },
     /// Algorithmic order: limit order with IB algo strategy overlay (VWAP, TWAP, etc.).
     SubmitAlgo {
@@ -1160,9 +1166,9 @@ impl OrderRequest {
             Self::SubmitTrailingStopPct { trail_stop_price, .. }
             | Self::SubmitTrailingStopPctEx { trail_stop_price, .. } => s(trail_stop_price),
             Self::SubmitMidPrice { price_cap, .. } => s(price_cap),
+            Self::SubmitPegMkt { price, offset, .. }
+            | Self::SubmitPegMid { price, offset, .. } => { s(price); s(offset); }
             Self::SubmitRel { offset, .. }
-            | Self::SubmitPegMkt { offset, .. }
-            | Self::SubmitPegMid { offset, .. }
             | Self::SubmitSnapMkt { offset, .. }
             | Self::SubmitSnapMid { offset, .. }
             | Self::SubmitSnapPri { offset, .. } => s(offset),

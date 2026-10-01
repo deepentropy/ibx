@@ -2640,8 +2640,12 @@ impl ClientCore {
             "MKT PRT" => OrderKind::MktPrt,
             "STP PRT" => OrderKind::StpPrt { stop_price: scale(order.aux_price) },
             "REL" => OrderKind::Rel { offset: scale(order.aux_price) },
-            "PEG MKT" => OrderKind::PegMkt { offset: scale(order.aux_price) },
-            "PEG MID" | "PEG MIDPT" => OrderKind::PegMid { offset: scale(order.aux_price) },
+            "PEG MKT" => OrderKind::PegMkt {
+                price: scale(aux_or_zero(order.lmt_price)), offset: scale(aux_or_zero(order.aux_price)),
+            },
+            "PEG MID" | "PEG MIDPT" => OrderKind::PegMid {
+                price: scale(aux_or_zero(order.lmt_price)), offset: scale(aux_or_zero(order.aux_price)),
+            },
             "MIDPX" | "MIDPRICE" => OrderKind::MidPrice { price_cap: scale(order.lmt_price) },
             "SNAP MKT" => OrderKind::SnapMkt { offset: scale(aux_or_zero(order.aux_price)) },
             "SNAP MID" | "SNAP MIDPT" => OrderKind::SnapMid { offset: scale(aux_or_zero(order.aux_price)) },
@@ -2956,15 +2960,18 @@ impl ClientCore {
                 if extended { ex(OrderKind::Rel { offset }) }
                 else { OrderRequest::SubmitRel { order_id, instrument, side, qty, offset } }
             }
+            // The limit price when given, and the offset (ibx#414).
             "PEG MKT" => {
-                let offset = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::PegMkt { offset }) }
-                else { OrderRequest::SubmitPegMkt { order_id, instrument, side, qty, offset } }
+                let price = (aux_or_zero(order.lmt_price) * PRICE_SCALE_F) as i64;
+                let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;
+                if extended { ex(OrderKind::PegMkt { price, offset }) }
+                else { OrderRequest::SubmitPegMkt { order_id, instrument, side, qty, price, offset } }
             }
             "PEG MID" | "PEG MIDPT" => {
-                let offset = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::PegMid { offset }) }
-                else { OrderRequest::SubmitPegMid { order_id, instrument, side, qty, offset } }
+                let price = (aux_or_zero(order.lmt_price) * PRICE_SCALE_F) as i64;
+                let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;
+                if extended { ex(OrderKind::PegMid { price, offset }) }
+                else { OrderRequest::SubmitPegMid { order_id, instrument, side, qty, price, offset } }
             }
             "MIDPX" | "MIDPRICE" => {
                 let cap = (order.lmt_price * PRICE_SCALE_F) as i64;
