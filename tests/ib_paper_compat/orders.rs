@@ -671,18 +671,16 @@ pub(super) fn phase_lit_order(conns: Conns) -> Conns {
 
 pub(super) fn phase_moc_order(conns: Conns) -> Conns {
     let oid = next_order_id();
-    run_submit_cancel_phase(conns, "Phase 27: MOC Order (SPY)",
-        OrderRequest::SubmitMoc { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 },
-        false)
+    run_close_order_phase(conns, "Phase 27: MOC Order (SPY)",
+        OrderRequest::SubmitMoc { order_id: oid, instrument: 0, side: Side::Buy, qty: 1 })
 }
 
 // ─── Phase 28: Limit on Close ───
 
 pub(super) fn phase_loc_order(conns: Conns) -> Conns {
     let oid = next_order_id();
-    run_submit_cancel_phase(conns, "Phase 28: LOC Order (SPY)",
-        OrderRequest::SubmitLoc { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000 },
-        false)
+    run_close_order_phase(conns, "Phase 28: LOC Order (SPY)",
+        OrderRequest::SubmitLoc { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000 })
 }
 
 // ─── Phase 29: Bracket Order ───

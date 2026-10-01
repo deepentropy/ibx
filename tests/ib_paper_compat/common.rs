@@ -638,7 +638,7 @@ pub(super) fn run_submit_cancel_phase_or_refused(
     fill_or_cancel: bool,
     accepted_refusal: Option<i64>,
 ) -> Conns {
-    run_submit_cancel_phase_inner(conns, phase_name, order_req, fill_or_cancel, accepted_refusal, None)
+    run_submit_cancel_phase_inner(conns, phase_name, order_req, fill_or_cancel, accepted_refusal, None, None)
 }
 
 /// Same as `run_submit_cancel_phase`, but `reference_reject` is the reason
@@ -652,7 +652,18 @@ pub(super) fn run_submit_cancel_phase_or_server_reject(
     fill_or_cancel: bool,
     reference_reject: &str,
 ) -> Conns {
-    run_submit_cancel_phase_inner(conns, phase_name, order_req, fill_or_cancel, None, Some(reference_reject))
+    run_submit_cancel_phase_inner(conns, phase_name, order_req, fill_or_cancel, None, Some(reference_reject), None)
+}
+
+/// An at-the-close order (MOC, LOC). In regular hours the server answers
+/// nothing until the order is cancelled; the reference's client gets no status
+/// either, then PendingCancel, Cancelled and 202 on the cancel (captured
+/// 01/10/2026). So in regular hours the cancel goes 5 s after the send without
+/// an acknowledgement, and the phase needs the cancel and its 202. In the other
+/// sessions the order is acknowledged and cancelled as any other.
+pub(super) fn run_close_order_phase(conns: Conns, phase_name: &str, order_req: OrderRequest) -> Conns {
+    let unacked_cancel = (market_session().0 == MarketSession::Regular).then_some(Duration::from_secs(5));
+    run_submit_cancel_phase_inner(conns, phase_name, order_req, false, None, None, unacked_cancel)
 }
 
 /// True when the order errors hold the server reject (201) with exactly the
@@ -669,6 +680,7 @@ fn run_submit_cancel_phase_inner(
     fill_or_cancel: bool,
     accepted_refusal: Option<i64>,
     reference_reject: Option<&str>,
+    unacked_cancel: Option<Duration>,
 ) -> Conns {
     phase!("--- {} ---", phase_name);
 
@@ -731,7 +743,8 @@ fn run_submit_cancel_phase_inner(
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let sent_at = Instant::now();
+    let deadline = sent_at + Duration::from_secs(60);
     let mut order_acked = false;
     let mut cancel_sent = false;
     let mut order_cancelled = false;
@@ -751,6 +764,10 @@ fn run_submit_cancel_phase_inner(
         if !order_acked && accepted_refusal.is_some_and(|c| order_errors.iter().any(|(code, _)| *code == c)) {
             refused_as_reference = true;
             break;
+        }
+        if !cancel_sent && !order_acked && unacked_cancel.is_some_and(|d| sent_at.elapsed() >= d) {
+            control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id })).unwrap();
+            cancel_sent = true;
         }
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
@@ -822,6 +839,15 @@ fn run_submit_cancel_phase_inner(
         // peg to a live primary NBBO and are never acknowledged when the market is
         // closed. Treat an un-acked order on a Closed session as a SKIP, not a
         // failure — a plain order that acks on a closed market still reaches PASS.
+        if unacked_cancel.is_some() && !order_acked {
+            check!(order_cancelled, "Order not cancelled after the cancel sent without an acknowledgement (statuses: {:?}, errors: {:?})",
+                statuses, order_errors);
+            check!(order_errors.iter().any(|(code, _)| *code == 202),
+                "No 202 cancel notice (the reference's client gets one; errors: {:?})", order_errors);
+            pass!("  PASS (no answer before the cancel, as the reference; cancelled with 202)
+");
+            return conns;
+        }
         if !order_acked && market_session().0 == MarketSession::Closed {
             println!("  SKIP: Closed — order not acknowledged (order type needs a live market)\n");
             return conns;
