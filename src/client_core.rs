@@ -680,7 +680,7 @@ pub const REPLACE_FA_NOT_FA: (i64, &str) =
 
 /// The reference's other names for order types ibx supports, and the name
 /// ibx uses (ibx#469, from the reference's order-type map).
-const ORDER_TYPE_ALIASES: [(&str, &str); 14] = [
+const ORDER_TYPE_ALIASES: [(&str, &str); 15] = [
     ("LIMIT", "LMT"),
     ("MARKET", "MKT"),
     ("STOP", "STP"),
@@ -693,6 +693,7 @@ const ORDER_TYPE_ALIASES: [(&str, &str); 14] = [
     ("PEG PRIM", "REL"),
     ("PEGMKT", "PEG MKT"),
     ("PEGMID", "PEG MID"),
+    ("PEGBENCH", "PEG BENCH"),
     ("TRAILING STOP", "TRAIL"),
     ("TRAILLMT", "TRAIL LIMIT"),
 ];
@@ -2334,7 +2335,7 @@ impl ClientCore {
             | "MOC" | "LOC" | "MIT" | "LIT" | "MTL" | "MKT PRT" | "STP PRT"
             | "REL" | "PEG MKT" | "PEG MID" | "PEG MIDPT" | "MIDPX" | "MIDPRICE"
             | "SNAP MKT" | "SNAP MID" | "SNAP MIDPT" | "SNAP PRI" | "SNAP PRIM"
-            | "BOX TOP" => {}
+            | "BOX TOP" | "PEG BENCH" => {}
             _ => return Err(format!("Unsupported order type: '{}'", order.order_type)),
         }
 
@@ -2631,8 +2632,25 @@ impl ClientCore {
             "SNAP MKT" => OrderKind::SnapMkt { offset: scale(aux_or_zero(order.aux_price)) },
             "SNAP MID" | "SNAP MIDPT" => OrderKind::SnapMid { offset: scale(aux_or_zero(order.aux_price)) },
             "SNAP PRI" | "SNAP PRIM" => OrderKind::SnapPri { offset: scale(aux_or_zero(order.aux_price)) },
+            "PEG BENCH" => Self::peg_bench_kind(order),
             _ => return Err(format!("Unsupported order type: '{}'", order.order_type)),
         })
+    }
+
+    /// A pegged-to-benchmark order from the API fields (ibx#415): the
+    /// starting price, the stock reference price, the reference contract,
+    /// the pegged change and its direction, the reference change. An
+    /// unset price is 0 (not sent).
+    fn peg_bench_kind(order: &ApiOrder) -> OrderKind {
+        let scale = |v: f64| (aux_or_zero(v) * PRICE_SCALE_F) as i64;
+        OrderKind::PegBench {
+            starting_price: scale(order.starting_price),
+            stock_ref_price: scale(order.stock_ref_price),
+            ref_con_id: order.reference_contract_id.max(0) as u32,
+            is_peg_decrease: order.is_pegged_change_amount_decrease,
+            pegged_change_amount: scale(order.pegged_change_amount),
+            ref_change_amount: scale(order.reference_change_amount),
+        }
     }
 
     /// Build the replace for an order that is already working, from the full
@@ -2886,6 +2904,9 @@ impl ClientCore {
                 if extended { ex(OrderKind::MidPrice { price_cap: cap }) }
                 else { OrderRequest::SubmitMidPrice { order_id, instrument, side, qty, price_cap: cap } }
             }
+            // One encoder for every pegged-to-benchmark order: its
+            // reference exchange rides the attributes (ibx#415).
+            "PEG BENCH" => ex(Self::peg_bench_kind(order)),
             // The offset is the API auxPrice, 0.00 when unset (ibx#413).
             "SNAP MKT" => {
                 let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;

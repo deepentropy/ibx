@@ -813,8 +813,12 @@ impl Context {
         id
     }
 
-    /// Submit a Pegged to Benchmark order (OrdType PB).
-    /// Pegs to a benchmark instrument's price with change amounts.
+    /// Submit a Pegged to Benchmark order.
+    /// Pegs to a benchmark instrument's price with change amounts. `price`
+    /// is the starting price and `stock_ref_price` the stock reference
+    /// price (0 = unset for both); `ref_exchange` the reference contract's
+    /// exchange (empty = not sent).
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_peg_bench(
         &mut self,
         instrument: InstrumentId,
@@ -825,12 +829,15 @@ impl Context {
         is_peg_decrease: bool,
         pegged_change_amount: Price,
         ref_change_amount: Price,
+        stock_ref_price: Price,
+        ref_exchange: &str,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitPegBench {
             order_id: id, instrument, side, qty, price,
             ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount,
+            stock_ref_price, ref_exchange: ref_exchange.to_string(),
         });
         id
     }
@@ -1716,12 +1723,16 @@ mod tests {
     #[test]
     fn submit_peg_bench_drains_correctly() {
         let mut ctx = Context::new();
-        let id = ctx.submit_peg_bench(0, Side::Buy, 100, 150 * PRICE_SCALE, 12345, false, 50_000_000, 50_000_000);
+        let id = ctx.submit_peg_bench(0, Side::Buy, 100, 150 * PRICE_SCALE, 12345, false, 50_000_000, 50_000_000,
+            151 * PRICE_SCALE, "ARCA");
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
             OrderRequest::SubmitPegBench { order_id, instrument, side, qty, price,
-                ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount } => {
+                ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount,
+                stock_ref_price, ref_exchange } => {
+                assert_eq!(*stock_ref_price, 151 * PRICE_SCALE);
+                assert_eq!(ref_exchange, "ARCA");
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);

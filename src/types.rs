@@ -390,6 +390,9 @@ pub struct OrderAttrs {
     /// emits the gateway default 3 (ReduceOnFillNonBlock). Only emitted when
     /// an OCA group is present. See ibx#215.
     pub oca_type: u8,
+    /// Reference exchange of a pegged-to-benchmark order; empty = not set
+    /// (ibx#415). Not sent for other order types.
+    pub reference_exchange: String,
 }
 
 /// A condition that must be met before an order activates.
@@ -559,6 +562,18 @@ pub enum OrderKind {
     PegMkt { offset: Price },
     PegMid { offset: Price },
     Rel { offset: Price },
+    /// Pegged to benchmark (ibx#415): the starting price (0 = unset), the
+    /// stock reference price (0 = unset), the reference contract, the
+    /// pegged change (sent negative for a decrease) and the reference
+    /// change. The reference exchange rides `OrderAttrs::reference_exchange`.
+    PegBench {
+        starting_price: Price,
+        stock_ref_price: Price,
+        ref_con_id: u32,
+        is_peg_decrease: bool,
+        pegged_change_amount: Price,
+        ref_change_amount: Price,
+    },
     /// Adjustable stop, same fields as `OrderRequest::SubmitAdjustableStop`.
     /// On this path it also carries parent, OCA and tif, so it can be a
     /// bracket child (ibx#240).
@@ -598,6 +613,9 @@ impl OrderKind {
             OrderKind::PegMkt { offset } | OrderKind::PegMid { offset }
             | OrderKind::Rel { offset } | OrderKind::SnapMkt { offset }
             | OrderKind::SnapMid { offset } | OrderKind::SnapPri { offset } => s(offset),
+            OrderKind::PegBench { starting_price, pegged_change_amount, ref_change_amount, .. } => {
+                s(starting_price); s(pegged_change_amount); s(ref_change_amount);
+            }
             OrderKind::AdjustableStop {
                 stop_price, trigger_price, adjusted_stop_price, adjusted_stop_limit_price,
                 adjusted_trailing_amount, adjustable_trailing_unit, ..
@@ -902,18 +920,23 @@ pub enum OrderRequest {
         tif: u8,
         attrs: OrderAttrs,
     },
-    /// Pegged to Benchmark: pegs to a benchmark instrument's price. OrdType PB.
-    /// Companion tags: 6941=refConId, 6938=isPegDecrease, 6939=pegChangeAmt, 6942=refChangeAmt.
+    /// Pegged to Benchmark: pegs to a benchmark instrument's price, written
+    /// as the reference writes it (ibx#415).
     SubmitPegBench {
         order_id: OrderId,
         instrument: InstrumentId,
         side: Side,
         qty: u32,
+        /// The starting price, 0 = unset. There is no limit price.
         price: Price,
         ref_con_id: u32,
         is_peg_decrease: bool,
         pegged_change_amount: Price,
         ref_change_amount: Price,
+        /// The stock reference price, 0 = unset.
+        stock_ref_price: Price,
+        /// The reference contract's exchange, empty = not sent.
+        ref_exchange: String,
     },
     /// Limit order for auction (TIF=AUC, tag 59=8). Participates in exchange opening/closing auction.
     SubmitLimitAuc {

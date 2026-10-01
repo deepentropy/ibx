@@ -1097,7 +1097,7 @@ pub(super) fn phase_pct_vol_order(conns: Conns) -> Conns {
 pub(super) fn phase_peg_bench_order(conns: Conns) -> Conns {
     let oid = next_order_id();
     run_submit_cancel_phase(conns, "Phase 68: Pegged to Benchmark Order (SPY pegged to AAPL)",
-        OrderRequest::SubmitPegBench { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, ref_con_id: 265598, is_peg_decrease: false, pegged_change_amount: 50_000_000, ref_change_amount: 50_000_000 },
+        OrderRequest::SubmitPegBench { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, ref_con_id: 265598, is_peg_decrease: false, pegged_change_amount: 50_000_000, ref_change_amount: 50_000_000, stock_ref_price: 1_00_000_000, ref_exchange: "SMART".into() },
         false)
 }
 

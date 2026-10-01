@@ -472,6 +472,7 @@ impl Order {
             },
             customer_account: self.customer_account.clone(),
             professional_customer: self.professional_customer,
+            reference_exchange: self.reference_exchange_id.clone(),
         }
     }
 

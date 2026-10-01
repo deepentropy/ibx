@@ -923,45 +923,44 @@ pub(crate) fn drain_and_send_orders(
                 send_new_order(conn, context, instrument, &refs)
             }
             OrderRequest::SubmitPegBench { order_id, instrument, side, qty, price,
-                ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount } => {
+                ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount,
+                stock_ref_price, ref_exchange } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, price, crate::types::ORD_PEG_BENCH, b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
-                let side_str = fix_side(side);
-                let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp();
-                let ref_con_str = ref_con_id.to_string();
-                let peg_decrease_str = if is_peg_decrease { "1" } else { "0" };
-                let peg_change_str = format_price(pegged_change_amount);
-                let ref_change_str = format_price(ref_change_amount);
-                send_new_order(conn, context, instrument, &[
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER),
-                    (fix::TAG_SENDING_TIME, &now),
-                    (11, &clord_str),
-                    (1, account_id),
-                    (21, "2"),
-                    (55, &symbol),
-                    (54, side_str),
-                    (38, &qty_str),
-                    (40, "PB"),          // OrdType = Pegged to Benchmark
-                    (44, &price_str),    // Limit price
-                    (59, "0"),
-                    (60, &now),
-                    (167, &sec_type_str),
-                    (100, &destination),
-                    (6210, &destination),
-                    (15, currency.as_str()),
-                    (204, "0"),
-                    (6941, &ref_con_str),      // referenceContractId
-                    (6938, peg_decrease_str),   // isPeggedChangeAmountDecrease
-                    (6939, &peg_change_str),    // peggedChangeAmount
-                    (6942, &ref_change_str),    // referenceChangeAmount
-                ])
+                let now = chrono_free_timestamp().to_string();
+                // As the reference (ibx#415): the starting price in the stop
+                // price field, no limit price, the peg instruction, then the
+                // benchmark attributes.
+                let mut fields: Vec<(u32, String)> = vec![
+                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
+                    (fix::TAG_SENDING_TIME, now.clone()),
+                    (11, format!("{}.{}", order_id, ver)),
+                ];
+                if price > 0 { fields.push((99, format_price_ref(price).to_string())); }
+                fields.extend([
+                    (1, account_id.to_string()),
+                    (21, "2".to_string()),
+                    (55, symbol),
+                    (54, fix_side(side).to_string()),
+                    (38, format_uint(qty as u64).to_string()),
+                    (40, "PB".to_string()),     // OrdType = Pegged to Benchmark
+                    (18, "R".to_string()),
+                    (59, "0".to_string()),
+                    (60, now),
+                    (167, sec_type_str),
+                    (100, destination.clone()),
+                    (6210, destination),
+                    (15, currency.clone()),
+                    (204, "0".to_string()),
+                ]);
+                fields.extend(peg_bench_attrs(stock_ref_price, ref_con_id, is_peg_decrease,
+                    pegged_change_amount, ref_change_amount, &ref_exchange, true));
+                let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+                send_new_order(conn, context, instrument, &refs)
             }
             OrderRequest::SubmitLimitAuc { order_id, instrument, side, qty, price } => {
                 context.insert_order(crate::types::Order::new(
@@ -1736,6 +1735,30 @@ fn adjustable_stop_tags(
     tags
 }
 
+/// The benchmark attributes of a pegged-to-benchmark order, as the
+/// reference writes them (ibx#415; captured 25/09/2026 and 26/09/2026):
+/// the pegged change, negative for a decrease, the reference change, the
+/// stock reference price when set, and on a new order only the reference
+/// contract and its exchange (SMART as BEST) when set.
+fn peg_bench_attrs(
+    stock_ref_price: crate::types::Price,
+    ref_con_id: u32,
+    is_peg_decrease: bool,
+    pegged_change_amount: crate::types::Price,
+    ref_change_amount: crate::types::Price,
+    ref_exchange: &str,
+    new_order: bool,
+) -> Vec<(u32, String)> {
+    let signed = if is_peg_decrease { -pegged_change_amount } else { pegged_change_amount };
+    let mut tags = Vec::with_capacity(5);
+    if new_order { tags.push((6941, ref_con_id.to_string())); }
+    tags.push((6938, format_price_ref(signed).to_string()));
+    tags.push((6939, format_price_ref(ref_change_amount).to_string()));
+    if stock_ref_price > 0 { tags.push((6580, format_price_ref(stock_ref_price).to_string())); }
+    if new_order && !ref_exchange.is_empty() { tags.push((6942, condition_exchange(ref_exchange))); }
+    tags
+}
+
 /// The replace message for a working order, in the reference's field order
 /// (ib-agent#192 group A). The identity fields the reference leaves out of a
 /// replace (exchange, currency, routing) are left out; the order type, its
@@ -1772,6 +1795,7 @@ fn modify_fields(
     let mut trail_offset: Option<String> = None; // TRAIL LIMIT limit offset
     let mut trail_unit: Option<&str> = None;     // 0 = amount, 100 = percent
     let mut after_type: Vec<(u32, String)> = Vec::new();
+    let mut bench_attrs: Vec<(u32, String)> = Vec::new();
     let ord_type: &str = match kind {
         K::Market => "1",
         K::Limit { price } => { before_account.push((44, p(price))); "2" }
@@ -1854,6 +1878,16 @@ fn modify_fields(
             stop_trigger = Some(p(stop_price));
             "3"
         }
+        // The starting price and the benchmark attributes, without the
+        // reference contract and exchange (ib-agent#197, 26/09/2026).
+        K::PegBench { starting_price, stock_ref_price, ref_con_id, is_peg_decrease,
+            pegged_change_amount, ref_change_amount } => {
+            if starting_price > 0 { before_account.push((99, format_price_ref(starting_price).to_string())); }
+            bench_attrs = peg_bench_attrs(stock_ref_price, ref_con_id, is_peg_decrease,
+                pegged_change_amount, ref_change_amount, "", false);
+            after_type.push((18, "R".to_string()));
+            "PB"
+        }
     };
 
     let tif_str = tif_str(tif);
@@ -1880,6 +1914,7 @@ fn modify_fields(
     // the order regular-hours only (ibx#247).
     if attrs.outside_rth { f.push((6433, "1".to_string())); }
     if let Some(u) = trail_unit { f.push((6268, u.to_string())); }
+    f.extend(bench_attrs);
     f.push((38, format_uint(qty as u64).to_string()));
     f.push((54, side.to_string()));
     f.push((40, ord_type.to_string()));
@@ -2198,6 +2233,7 @@ fn send_order_ex(
         K::PegMid { offset } => (crate::types::ORD_PEG_MID, 0, offset),
         K::Rel { offset } => (b'R', 0, offset),
         K::AdjustableStop { stop_price, .. } => (b'3', 0, stop_price),
+        K::PegBench { starting_price, .. } => (crate::types::ORD_PEG_BENCH, starting_price, 0),
     };
     context.insert_order(crate::types::Order::new(
         order_id, instrument, side, qty, track_price, ord_type_byte, tif, track_stop,
@@ -2347,6 +2383,15 @@ fn send_order_ex(
             fields.push((40, "3".to_string()));
             fields.push((99, format_price(stop_price).to_string()));
         }
+        // As the reference (ibx#415): the starting price in the stop price
+        // field, no limit price, the peg instruction; the benchmark
+        // attributes follow the common block below.
+        K::PegBench { starting_price, .. } => {
+            fields.push((40, "PB".to_string()));
+            if starting_price > 0 { fields.push((99, format_price_ref(starting_price).to_string())); }
+            fields.push((18, "R".to_string()));
+            has_base_exec_inst = true;
+        }
     }
 
     fields.push((59, tif_str));
@@ -2374,6 +2419,13 @@ fn send_order_ex(
         fields.extend(adjustable_stop_tags(trigger_price, adjusted_order_type,
             adjusted_stop_price, adjusted_stop_limit_price,
             adjusted_trailing_amount, adjustable_trailing_unit));
+    }
+
+    if let K::PegBench { stock_ref_price, ref_con_id, is_peg_decrease,
+        pegged_change_amount, ref_change_amount, .. } = kind
+    {
+        fields.extend(peg_bench_attrs(stock_ref_price, ref_con_id, is_peg_decrease,
+            pegged_change_amount, ref_change_amount, &attrs.reference_exchange, true));
     }
 
     // Extended attributes — same tag order as the historical SubmitLimitEx
@@ -3602,6 +3654,79 @@ mod tests {
         assert_eq!(tag(&ours, 99), Some("0.10"));
         assert_eq!(tag(&ours, 211), Some("0.10"));
         assert!(pos(&ours, 99) < pos(&ours, 1) && pos(&ours, 211) == pos(&ours, 40) + 1);
+    }
+
+    /// The request the API mapping builds for `order` on instrument 0.
+    fn api_request(order: &crate::api::types::Order, order_id: u64) -> OrderRequest {
+        match crate::client_core::ClientCore::build_order_request(order, order_id, 0) {
+            Ok(crate::types::ControlCommand::Order(req)) => req,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    const PEG_BENCH_TAGS: [u32; 11] = [40, 18, 44, 99, 211, 6941, 6938, 6939, 6942, 6580, 59];
+
+    // ibx#415 (captured 25/09/2026, BUY 1 AAPL SMART, reference SPY on
+    // ARCA, account masked). The attribute fields have no fixed order in
+    // the reference, so the values are compared field by field.
+    #[test]
+    fn peg_bench_from_the_api_matches_the_reference() {
+        let reference = "35=D|11=x|99=272.88|1=DU1|6938=0.50|6941=756733|6122=c|6580=272.88|6939=0.50|6942=ARCA|6121=55|6119=250|38=1|40=PB|18=R|55=AAPL|167=STK|231=1.00|54=1|59=1|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        let order = crate::api::types::Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "PEG BENCH".into(), tif: "GTC".into(),
+            starting_price: 272.88, stock_ref_price: 272.88, reference_contract_id: 756733,
+            pegged_change_amount: 0.5, reference_change_amount: 0.5, reference_exchange_id: "ARCA".into(),
+            ..Default::default()
+        };
+        let ours = wire_tags(api_request(&order, 82));
+        let want = captured(reference, &PEG_BENCH_TAGS);
+        assert_eq!(ours_as(&ours, &want), want);
+        for absent in [44, 211] {
+            assert!(tag(&ours, absent).is_none(), "field {absent} is not sent");
+        }
+        assert_eq!(tag(&ours, 100), Some("BEST"));
+    }
+
+    // The 26/09/2026 capture (SPY, reference QQQ on NASDAQ, DAY), on the
+    // engine's own request; a decrease goes out negative (from the code
+    // read, not captured).
+    #[test]
+    fn peg_bench_request_matches_the_reference_and_signs_a_decrease() {
+        let reference = "35=D|11=x|99=721.35|1=DU1|6942=NASDAQ|6941=320227571|6939=0.10|6122=c|6938=0.10|6580=744.50|38=1|40=PB|18=R|55=SPY|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=756733|6088=Socket|15=USD|6211=|6238=";
+        let req = |decrease: bool| OrderRequest::SubmitPegBench {
+            order_id: 83, instrument: 0, side: Side::Buy, qty: 1, price: px(721.35),
+            ref_con_id: 320227571, is_peg_decrease: decrease, pegged_change_amount: px(0.10),
+            ref_change_amount: px(0.10), stock_ref_price: px(744.50), ref_exchange: "NASDAQ".into(),
+        };
+        let want = captured(reference, &PEG_BENCH_TAGS);
+        assert_eq!(ours_as(&wire_tags(req(false)), &want), want);
+        assert_eq!(tag(&wire_tags(req(true)), 6938), Some("-0.10"));
+        // SMART as the reference writes it.
+        let smart = OrderRequest::SubmitPegBench {
+            order_id: 84, instrument: 0, side: Side::Buy, qty: 1, price: px(721.35), ref_con_id: 1,
+            is_peg_decrease: false, pegged_change_amount: 0, ref_change_amount: 0, stock_ref_price: 0,
+            ref_exchange: "SMART".into(),
+        };
+        let tags = wire_tags(smart);
+        assert_eq!(tag(&tags, 6942), Some("BEST"));
+        assert_eq!(tag(&tags, 6580), None, "unset stock reference price");
+    }
+
+    // The replace (captured 26/09/2026) restates the starting price and the
+    // benchmark changes, not the reference contract or its exchange.
+    #[test]
+    fn peg_bench_replace_restates_the_starting_price() {
+        let kind = crate::types::OrderKind::PegBench {
+            starting_price: px(721.45), stock_ref_price: px(744.50), ref_con_id: 320227571,
+            is_peg_decrease: false, pegged_change_amount: px(0.10), ref_change_amount: px(0.10),
+        };
+        let ours = replace_fields(85, Side::Buy, 1, kind, b'0', Default::default());
+        let reference = "35=G|99=721.45|1=DU1|6939=0.10|6938=0.10|6580=744.50|38=1|54=1|40=PB|18=R|59=0";
+        let want = captured(reference, &[99, 6939, 6938, 6580, 40, 18, 59, 44, 6941, 6942]);
+        assert_eq!(ours_as(&ours, &want), want);
+        for absent in [44, 6941, 6942] {
+            assert!(tag(&ours, absent).is_none(), "field {absent} is not restated");
+        }
     }
 
     // ibx#425: customer account 6207 and professional customer 6636.
