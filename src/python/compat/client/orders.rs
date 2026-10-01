@@ -66,8 +66,10 @@ impl EClient {
         }
 
         // If orderId is already tracked, this is a modification: replace it
-        // with the full wanted state (ibx#247).
-        let cmd = if let Some(working) = self.core.tracked_order(oid) {
+        // with the full wanted state (ibx#247). A what-if never modifies:
+        // it previews a new order (ibx#462).
+        let working = if api_order.what_if { None } else { self.core.tracked_order(oid) };
+        let cmd = if let Some(working) = working {
             match ClientCore::build_modify_request(&api_order, oid, &working)
                 .map_err(|e| PyRuntimeError::new_err(e))?
             {
@@ -97,7 +99,11 @@ impl EClient {
         let mut tracked_order = api_order.clone();
         tracked_order.order_id = oid as i64;
         self.core.cache_contract(contract.con_id, api_contract.clone());
-        self.core.track_order(oid, api_contract, tracked_order, instrument);
+        if tracked_order.what_if {
+            self.core.track_what_if(oid, api_contract, tracked_order);
+        } else {
+            self.core.track_order(oid, api_contract, tracked_order, instrument);
+        }
 
         Ok(())
     }

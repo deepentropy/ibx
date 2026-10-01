@@ -962,18 +962,12 @@ pub enum OrderRequest {
         side: Side,
         qty: u32,
     },
-    /// What-If order: sends a limit order with tag 6091=1 for margin/commission preview.
-    /// The order is NOT placed — response comes back as 35=8 with margin fields.
+    /// What-If preview of a new order (ibx#462): `request` is the order as
+    /// it would be placed, written by its own encoder with the preview flag,
+    /// under a ClOrdID of its own. It is NOT placed and never modifies a
+    /// working order; the answer is an `Event::WhatIf`.
     SubmitWhatIf {
-        order_id: OrderId,
-        instrument: InstrumentId,
-        side: Side,
-        qty: u32,
-        price: Price,
-        /// Time-in-force byte and extended attributes, like every other
-        /// order type: a parented or GTC algo order kept neither (ibx#318).
-        tif: u8,
-        attrs: OrderAttrs,
+        request: Box<OrderRequest>,
     },
     /// Fractional shares limit order. Qty is fixed-point (QTY_SCALE = 10^4).
     /// E.g., 0.5 shares = 5000. Tag 38 sent as decimal string.
@@ -1066,11 +1060,11 @@ impl OrderRequest {
             | Self::SubmitPegBench { order_id, .. }
             | Self::SubmitLimitAuc { order_id, .. }
             | Self::SubmitMtlAuc { order_id, .. }
-            | Self::SubmitWhatIf { order_id, .. }
             | Self::SubmitLimitFractional { order_id, .. }
             | Self::SubmitAdjustableStop { order_id, .. }
             | Self::SubmitEx { order_id, .. } => *order_id,
             Self::SubmitBracket { parent_id, .. } => *parent_id,
+            Self::SubmitWhatIf { request } => request.order_id(),
         }
     }
 
@@ -1115,11 +1109,11 @@ impl OrderRequest {
             | Self::SubmitPegBench { instrument, .. }
             | Self::SubmitLimitAuc { instrument, .. }
             | Self::SubmitMtlAuc { instrument, .. }
-            | Self::SubmitWhatIf { instrument, .. }
             | Self::SubmitLimitFractional { instrument, .. }
             | Self::SubmitAdjustableStop { instrument, .. }
             | Self::SubmitEx { instrument, .. }
             | Self::SubmitBracket { instrument, .. } => Some(*instrument),
+            Self::SubmitWhatIf { request } => request.instrument(),
         }
     }
 
@@ -1150,8 +1144,8 @@ impl OrderRequest {
             | Self::SubmitLimitFractional { price, .. }
             | Self::SubmitAdaptive { price, .. }
             | Self::SubmitAlgo { price, .. }
-            | Self::SubmitWhatIf { price, .. }
             | Self::SubmitLoc { price, .. } => s(price),
+            Self::SubmitWhatIf { request } => request.snap_prices(tick),
             Self::SubmitStop { stop_price, .. }
             | Self::SubmitStopGtc { stop_price, .. }
             | Self::SubmitMit { stop_price, .. }

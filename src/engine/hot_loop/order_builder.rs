@@ -31,17 +31,35 @@ pub(crate) fn drain_and_send_orders(
     };
     for mut order_req in orders {
         let oid = order_req.order_id();
+        // A what-if preview is the order as it would be placed, written by
+        // its own encoder (ibx#462); it is unwrapped here and wrapped again
+        // if it has to wait.
+        let what_if = matches!(order_req, OrderRequest::SubmitWhatIf { .. });
+        if let OrderRequest::SubmitWhatIf { request } = order_req {
+            order_req = *request;
+        }
+        let rewrap = |req: OrderRequest| if what_if {
+            OrderRequest::SubmitWhatIf { request: Box::new(req) }
+        } else {
+            req
+        };
+        if what_if && matches!(order_req, OrderRequest::Cancel { .. } | OrderRequest::CancelAll { .. }
+            | OrderRequest::Modify { .. } | OrderRequest::SubmitBracket { .. } | OrderRequest::SubmitWhatIf { .. })
+        {
+            log::warn!("What-if of order {} dropped: only a single new order can be previewed", oid);
+            continue;
+        }
         // A pegged type the contract's list does not allow on the order's
         // exchange is refused, as the reference (ibx#414).
         match pegged_type_refusal(&order_req, context, conn, hb, shared) {
-            Some(false) => { context.rth_parked.push(order_req); continue; }
+            Some(false) => { context.rth_parked.push(rewrap(order_req)); continue; }
             Some(true) => continue,
             None => {}
         }
         // Outside RTH: kept only where the reference keeps it, from the
         // contract definition of the order's exchange (ibx#465).
         if !apply_outside_rth(&mut order_req, context, conn, hb, shared) {
-            context.rth_parked.push(order_req);
+            context.rth_parked.push(rewrap(order_req));
             continue;
         }
         // The contract's currency (tag 15), USD when unknown (ibx#466).
@@ -77,6 +95,17 @@ pub(crate) fn drain_and_send_orders(
         // without one it is 0 and prices pass through unchanged.
         if let Some(instrument) = order_req.instrument() {
             order_req.snap_prices(context.market.min_tick_scaled(instrument));
+        }
+        // A what-if goes out under a ClOrdID of its own and stays out of
+        // the order table: an order with the same id is left as it is
+        // (ibx#462).
+        let held = what_if.then(|| (context.order(oid).copied(), context.modify_versions.get(&oid).copied()));
+        if what_if {
+            let clord = format!("{}.{}", oid, WHAT_IF_CLORD_BASE + context.next_what_if);
+            context.next_what_if = context.next_what_if.wrapping_add(1);
+            let instrument = order_req.instrument().unwrap_or(0);
+            context.what_ifs.insert(clord.clone(), (oid, instrument));
+            context.what_if_send = Some(clord);
         }
         let result = match order_req {
             OrderRequest::SubmitLimit { order_id, instrument, side, qty, price } => {
@@ -1031,42 +1060,8 @@ pub(crate) fn drain_and_send_orders(
                     (204, "0"),
                 ])
             }
-            OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price, tif, attrs } => {
-                // What-if: insert with ORD_WHAT_IF marker so we can detect the response
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, crate::types::ORD_WHAT_IF, tif, 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp().to_string();
-                let mut fields: Vec<(u32, String)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
-                    (fix::TAG_SENDING_TIME, now.clone()),
-                    (11, format!("{}.{}", order_id, ver)),
-                    (1, account_id.to_string()),
-                    (21, "2".to_string()),
-                    (55, symbol),
-                    (54, fix_side(side).to_string()),
-                    (38, format_uint(qty as u64).to_string()),
-                    (40, "2".to_string()),           // OrdType = Limit
-                    (44, format_price(price).to_string()),
-                    (59, tif_str(tif)),
-                    (60, now),
-                    (167, sec_type_str),
-                    (100, destination.clone()),
-                    (6210, destination),
-                    (15, currency.clone()),
-                    (204, "0".to_string()),
-                    (6091, "1".to_string()),         // What-If flag
-                ];
-                push_dtc_flag(&mut fields, tif);
-                // The preview is for the order as it would be placed: its
-                // time-in-force and attributes go too (ibx#318).
-                push_extended_attrs(&mut fields, context, &attrs, false);
-                let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
-                send_new_order(conn, context, instrument, &refs)
-            }
+            // Unwrapped above; a nested preview is dropped there.
+            OrderRequest::SubmitWhatIf { .. } => Ok(()),
             OrderRequest::SubmitLimitFractional { order_id, instrument, side, qty, price } => {
                 // The tracked quantity is fixed-point like `qty` (it was 0).
                 let mut tracked = crate::types::Order::new(
@@ -1495,6 +1490,19 @@ pub(crate) fn drain_and_send_orders(
                 conn.send_fix(&refs)
             }
         };
+        if let Some((order, version)) = held {
+            let clord = context.what_if_send.take().unwrap_or_default();
+            match order {
+                Some(o) => context.insert_order(o),
+                None => context.remove_order(oid),
+            }
+            if version.is_none() { context.modify_versions.remove(&oid); }
+            if let Err(e) = &result {
+                log::error!("Failed to send the what-if of order {}: {}", oid, e);
+                context.what_ifs.remove(&clord);
+                continue;
+            }
+        }
         match result {
             Ok(()) => hb.last_ccp_sent = Instant::now(),
             Err(e) => {
@@ -1662,6 +1670,11 @@ fn send_new_order(
     fields: &[(u32, &str)],
 ) -> std::io::Result<()> {
     let con_id = context.market.con_id(instrument).unwrap_or(0);
+    if let Some(clord) = context.what_if_send.as_deref() {
+        let preview = what_if_fields(fields, clord, con_id);
+        let refs: Vec<(u32, &str)> = preview.iter().map(|(t, v)| (*t, v.as_str())).collect();
+        return conn.send_fix(&refs);
+    }
     if con_id <= 0 {
         return conn.send_fix(fields);
     }
@@ -1674,6 +1687,36 @@ fn send_new_order(
         }
     }
     conn.send_fix(&out)
+}
+
+/// Version part of the what-if ClOrdIDs, far above any replace count, so
+/// a preview never takes an id an order of the same number uses (ibx#462).
+const WHAT_IF_CLORD_BASE: u32 = 1_000_000;
+
+/// A new order's fields as its what-if preview, as the reference writes
+/// it (ibx#462): the preview's own ClOrdID, the preview flag before the
+/// currency, the contract id after the routing, and no OCA group or type
+/// (the reference drops both from a preview).
+fn what_if_fields(fields: &[(u32, &str)], clord: &str, con_id: i64) -> Fields {
+    let mut out: Fields = Vec::with_capacity(fields.len() + 2);
+    let mut flagged = false;
+    for &(tag, value) in fields {
+        match tag {
+            11 => out.push((11, clord.to_string())),
+            583 | 6209 => {}
+            15 if !flagged => {
+                out.push((6091, "1".to_string()));
+                flagged = true;
+                out.push((15, value.to_string()));
+            }
+            _ => out.push((tag, value.to_string())),
+        }
+        if tag == 6210 && con_id > 0 {
+            out.push((6008, con_id.to_string()));
+        }
+    }
+    if !flagged { out.push((6091, "1".to_string())); }
+    out
 }
 
 /// The adjustable-stop tags (ib-agent#49), shared by the plain and extended
@@ -3116,12 +3159,101 @@ mod tests {
 
     #[test]
     fn what_if_carries_its_time_in_force() {
-        let tags = wire_tags(OrderRequest::SubmitWhatIf {
+        let tags = wire_tags(OrderRequest::SubmitWhatIf { request: Box::new(OrderRequest::SubmitLimitEx {
             order_id: 11, instrument: 0, side: Side::Buy, qty: 1, price: 237 * crate::types::PRICE_SCALE,
             tif: b'1', attrs: crate::types::OrderAttrs::default(),
-        });
+        }) });
         assert_eq!(tag(&tags, 59), Some("1"));
         assert_eq!(tag(&tags, 6091), Some("1"));
+    }
+
+    /// The what-if request the API mapping builds for `order`.
+    fn what_if_of(order: crate::api::types::Order, order_id: u64) -> OrderRequest {
+        api_request(&crate::api::types::Order { what_if: true, ..order }, order_id)
+    }
+
+    // ibx#462 (ib-agent#192 B1e, captured 23/09/2026, account masked): the
+    // preview of a LMT GTC order is the order's own frame plus the preview
+    // flag, under a ClOrdID of its own.
+    #[test]
+    fn what_if_is_the_real_order_plus_the_preview_flag() {
+        let reference = "35=D|11=1626578592.0|44=237.82|1=DU1|6122=c|6121=54|6119=192|38=1|40=2|55=AAPL|167=STK|231=1.00|54=1|59=1|100=BEST|6210=BEST|6008=265598|6088=Socket|6091=1|15=USD|6211=|6238=";
+        let lmt = crate::api::types::Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 237.82, tif: "GTC".into(), ..Default::default() };
+        let req = what_if_of(lmt, 100);
+        assert!(matches!(&req, OrderRequest::SubmitWhatIf { request } if matches!(**request, OrderRequest::SubmitLimitEx { .. })));
+        let ours = wire_tags(req);
+        let want = captured(reference, &[35, 40, 59, 6091, 100, 6210, 6008]);
+        assert_eq!(ours_as(&ours, &want), want);
+        assert_eq!(tag(&ours, 44).and_then(|v| v.parse::<f64>().ok()), Some(237.82));
+        assert_eq!(tag(&ours, 11), Some("100.1000000"), "the preview's own ClOrdID");
+        assert_eq!(pos(&ours, 6091) + 1, pos(&ours, 15));
+
+        // A MKT preview is a MKT order (captured in ib-agent#160), not a limit at 0.
+        let mkt = wire_tags(what_if_of(crate::api::types::Order { action: "SELL".into(), total_quantity: 1.0,
+            order_type: "MKT".into(), ..Default::default() }, 101));
+        assert_eq!((tag(&mkt, 40), tag(&mkt, 44), tag(&mkt, 6091)), (Some("1"), None, Some("1")));
+
+        // An algo preview keeps the algo fields (ibx#462: it went out as a
+        // real algo order).
+        let vwap = wire_tags(what_if_of(crate::api::types::Order { action: "BUY".into(), total_quantity: 1.0,
+            order_type: "LMT".into(), lmt_price: 100.0, algo_strategy: "Vwap".into(),
+            algo_params: vec![crate::api::types::TagValue { tag: "maxPctVol".into(), value: "0.1".into() }],
+            ..Default::default() }, 102));
+        assert_eq!((tag(&vwap, 847), tag(&vwap, 18), tag(&vwap, 6091)), (Some("Vwap"), Some("e"), Some("1")));
+        let adaptive = wire_tags(what_if_of(crate::api::types::Order { action: "BUY".into(), total_quantity: 1.0,
+            order_type: "LMT".into(), lmt_price: 100.0, algo_strategy: "Adaptive".into(), ..Default::default() }, 103));
+        assert_eq!((tag(&adaptive, 847), tag(&adaptive, 6091)), (Some("Adaptive"), Some("1")));
+    }
+
+    // The preview drops the OCA group and type and keeps the parent link
+    // (ORDER-WHATIF.md 4, from the code read).
+    #[test]
+    fn what_if_drops_the_oca_fields() {
+        let child = crate::api::types::Order { action: "SELL".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 110.0, parent_id: 7, oca_group: "G".into(), oca_type: 1, ..Default::default() };
+        let tags = wire_tags(what_if_of(child, 104));
+        assert!(tag(&tags, 583).is_none() && tag(&tags, 6209).is_none(), "{tags:?}");
+        assert_eq!(tag(&tags, 6107), Some("7.0"));
+        assert_eq!(tag(&tags, 6091), Some("1"));
+    }
+
+    // ibx#462: a what-if with the id of a working order is a new preview:
+    // the working order, its versions and its ClOrdID are left as they are.
+    #[test]
+    fn what_if_on_a_working_order_id_does_not_touch_it() {
+        let lmt = crate::api::types::Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+            lmt_price: 101.0, ..Default::default() };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let shared = Arc::new(SharedState::new());
+        let mut context = Context::new();
+        context.market.register(265598);
+        let working = Order::new(105, 0, Side::Buy, 1, 100 * P, b'2', b'0', 0);
+        context.insert_order(working);
+        context.modify_versions.insert(105, 2);
+        context.last_clord.insert(105, "105.2".into());
+        context.pending_orders.push(what_if_of(lmt, 105));
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(tag(&frames[0], 35), Some("D"), "a new preview, never a replace");
+        assert_eq!(tag(&frames[0], 11), Some("105.1000000"));
+        assert!(tag(&frames[0], 41).is_none());
+        let order = context.order(105).copied().expect("the working order is kept");
+        assert_eq!((order.price, order.status), (100 * P, OrderStatus::PendingSubmit));
+        assert_eq!(context.modify_versions.get(&105), Some(&2));
+        assert_eq!(context.last_clord.get(&105).map(String::as_str), Some("105.2"));
+        assert_eq!(context.what_ifs.len(), 1);
+        // A preview of a new id leaves no order behind.
+        let new_id = what_if_of(crate::api::types::Order { action: "BUY".into(), total_quantity: 1.0,
+            order_type: "LMT".into(), lmt_price: 1.0, ..Default::default() }, 106);
+        context.pending_orders.push(new_id);
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(tag(&frames[0], 11), Some("106.1000001"));
+        assert!(context.order(106).is_none());
+        assert!(context.modify_versions.get(&106).is_none());
     }
 
     // A plain algo order (no attributes, DAY) is unchanged apart from the

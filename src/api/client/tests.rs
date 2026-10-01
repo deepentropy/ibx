@@ -1337,6 +1337,58 @@ fn place_order_what_if() {
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitWhatIf { .. })));
 }
 
+// ibx#462: a what-if with the id of a working order is a preview, never a
+// modify; the working order stays tracked as placed. The preview is kept
+// apart and answered with open_order only.
+#[test]
+fn what_if_on_a_working_order_id_is_a_preview_not_a_modify() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let working = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(), lmt_price: 150.0, ..Default::default()
+    };
+    client.place_order(73, &spy(), &working).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    let preview = Order { lmt_price: 149.0, what_if: true, ..working.clone() };
+    client.place_order(73, &spy(), &preview).unwrap();
+    let cmds: Vec<ControlCommand> = rx.try_iter().collect();
+    assert!(cmds.iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::SubmitWhatIf { .. }))), "{cmds:?}");
+    assert!(!cmds.iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::Modify { .. }))));
+    assert_eq!(client.core.tracked_order(73).map(|o| (o.lmt_price, o.what_if)), Some((150.0, false)));
+
+    shared.orders.push_what_if(WhatIfResponse {
+        order_id: 73, instrument: 0,
+        init_margin_before: 0, maint_margin_before: 0, equity_with_loan_before: 0,
+        init_margin_after: 0, maint_margin_after: 0, equity_with_loan_after: 0, commission: 0,
+    });
+    let mut w = crate::api::wrapper::tests::RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("open_order:73:PreSubmitted")), "{:?}", w.events);
+    assert!(!w.events.iter().any(|e| e.starts_with("order_status:73")), "{:?}", w.events);
+    assert!(client.core.tracked_order(73).is_some(), "the working order is still tracked");
+    assert!(client.core.what_if_orders.lock().unwrap().is_empty());
+}
+
+// ibx#462: an algo or Adaptive what-if is a preview of that order, not a
+// real algo order.
+#[test]
+fn algo_what_if_is_a_preview() {
+    for algo in ["Adaptive", "Twap"] {
+        let (client, rx, shared) = test_client();
+        shared.market.set_instrument_count(1);
+        let order = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 150.0,
+            algo_strategy: algo.into(), what_if: true, ..Default::default()
+        };
+        client.place_order(74, &spy(), &order).unwrap();
+        let cmd = rx.try_recv().unwrap();
+        assert!(matches!(&cmd, ControlCommand::Order(OrderRequest::SubmitWhatIf { request })
+            if matches!(**request, OrderRequest::SubmitAdaptive { .. } | OrderRequest::SubmitAlgo { .. })), "{algo}: {cmd:?}");
+        assert!(client.core.tracked_order(74).is_none(), "{algo}: not an open order");
+    }
+}
+
 #[test]
 fn place_order_unsupported_type_returns_error() {
     let (client, _rx, shared) = test_client();
@@ -2540,11 +2592,13 @@ fn process_msgs_dispatches_what_if() {
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("order_status:42:PreSubmitted")));
+    // open_order only, as the reference answers a preview (ibx#462).
+    assert!(w.events.iter().any(|e| e.starts_with("open_order:42:PreSubmitted")));
+    assert!(!w.events.iter().any(|e| e.starts_with("order_status:42")));
 }
 
-/// Regression: what-if dispatch must populate all 8 OrderState fields and call
-/// open_order BEFORE order_status, matching official ibapi contract.
+/// Regression: what-if dispatch must populate all 8 OrderState fields in
+/// open_order, with no order_status (the reference sends none, ibx#462).
 #[test]
 fn process_msgs_what_if_emits_full_order_state() {
     let (client, _rx, shared) = test_client();
@@ -2564,9 +2618,7 @@ fn process_msgs_what_if_emits_full_order_state() {
 
     let open_idx = w.events.iter().position(|e| e.starts_with("open_order:7:"))
         .expect("open_order callback missing for what-if");
-    let status_idx = w.events.iter().position(|e| e.starts_with("order_status:7:PreSubmitted"))
-        .expect("order_status callback missing for what-if");
-    assert!(open_idx < status_idx, "open_order must be emitted before order_status");
+    assert!(!w.events.iter().any(|e| e.starts_with("order_status:7")), "no order_status for a what-if");
 
     let evt = &w.events[open_idx];
     // status, all 9 margin fields (before/change/after × init/maint/eql), commission.

@@ -846,6 +846,67 @@ impl CcpState {
         }
     }
 
+    /// A reply to a what-if preview (ibx#462). The gateway may first send a
+    /// not-ready frame whose margin fields carry the literal string "n/a"
+    /// (parse fails), then a data frame with numbers. Discriminate on
+    /// parse-success, NOT positivity: a margin-reducing preview (closing a
+    /// position, cash-account sell) legitimately resolves to
+    /// init_margin_after == 0, sent as a numeric "0" which must be delivered
+    /// (ibx#205). The not-ready frame is not always sent, so the first data
+    /// frame is taken with no assumption that one precedes it. A frame is
+    /// the real preview when ANY of the six margin fields (three before,
+    /// three after) parses as a finite number, as the
+    /// reference: each field is "set" when it parses, unset on
+    /// nan/unparseable (ibx#213, ibx#214; captured in ib-agent#160). A
+    /// reject ends the preview with error 201 and the reason. A reply for a
+    /// preview this session did not send is dropped, as the reference does.
+    fn handle_what_if(
+        parsed: &std::collections::HashMap<u32, String>,
+        context: &mut Context,
+        shared: &SharedState,
+        event_tx: &Option<Sender<Event>>,
+    ) {
+        let Some(clord) = parsed.get(&11) else { return };
+        let Some(&(order_id, instrument)) = context.what_ifs.get(clord.as_str()) else {
+            log::info!("What-if reply for {} that this session did not send: dropped", clord);
+            return;
+        };
+        if parsed.get(&39).map(|s| s.as_str()) == Some("8") {
+            context.what_ifs.remove(clord.as_str());
+            let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("");
+            shared.orders.push_order_error(order_id, 201, format!("Order rejected - reason:{}", reason));
+            return;
+        }
+        const MARGIN_TAGS: [u32; 6] = [6826, 6827, 6828, 6092, 6093, 6094];
+        let is_data_frame = MARGIN_TAGS.iter().any(|tag| {
+            parsed.get(tag)
+                .and_then(|s| s.parse::<f64>().ok())
+                .is_some_and(|f| f.is_finite())
+        });
+        if !is_data_frame {
+            return;
+        }
+        context.what_ifs.remove(clord.as_str());
+        let response = crate::types::WhatIfResponse {
+            order_id,
+            instrument,
+            init_margin_before: parse_price_tag(parsed.get(&6826)),
+            maint_margin_before: parse_price_tag(parsed.get(&6827)),
+            equity_with_loan_before: parse_price_tag(parsed.get(&6828)),
+            init_margin_after: parse_price_tag(parsed.get(&6092)),
+            maint_margin_after: parse_price_tag(parsed.get(&6093)),
+            equity_with_loan_after: parse_price_tag(parsed.get(&6094)),
+            commission: parse_price_tag(parsed.get(&6378)),
+        };
+        log::info!("WhatIf response: clord={} order={} initMargin={:.2}->{:.2} commission={:.2}",
+            clord, order_id,
+            response.init_margin_before as f64 / PRICE_SCALE as f64,
+            response.init_margin_after as f64 / PRICE_SCALE as f64,
+            response.commission as f64 / PRICE_SCALE as f64);
+        shared.orders.push_what_if(response);
+        emit(event_tx, Event::WhatIf(response));
+    }
+
     fn handle_exec_report(
         &mut self,
         parsed: &std::collections::HashMap<u32, String>,
@@ -867,6 +928,16 @@ impl CcpState {
                 self.status_replay_end_at = Some(Instant::now());
             }
             log::debug!("ExecReport: end of order status replay");
+            return;
+        }
+
+        // A what-if reply goes to the preview, before anything reads the
+        // frame as an order: by the ClOrdID the preview was sent under, or
+        // by a positive preview flag, as the reference routes it (ibx#462).
+        let what_if_clord = parsed.get(&11).is_some_and(|c| context.what_ifs.contains_key(c.as_str()));
+        let what_if_flag = parsed.get(&6091).and_then(|v| v.parse::<i64>().ok()).is_some_and(|v| v > 0);
+        if what_if_clord || what_if_flag {
+            Self::handle_what_if(parsed, context, shared, event_tx);
             return;
         }
 
@@ -979,56 +1050,6 @@ impl CcpState {
             if !is_cancel_request && raw_clord != "*" {
                 context.last_clord.insert(clord_id, raw_clord.clone());
             }
-        }
-
-        // What-If response: tag 6091=1 with margin data (tag 6092+).
-        // The gateway emits a not-ready ack frame whose margin fields carry the
-        // literal string "n/a" (parse fails), then a data frame with numbers.
-        // Discriminate on parse-success, NOT positivity: a margin-reducing
-        // preview (closing a position, cash-account sell) legitimately resolves
-        // to init_margin_after == 0, and the gateway sends that as a numeric "0"
-        // which must be delivered. Guarding on `> 0.0` silently dropped those
-        // and left the caller's pending what-if to time out (ibx#205).
-        // The not-ready ack is not always emitted — close/reject previews send a
-        // single data frame — so accept the first data frame with no assumption
-        // that an ack precedes it. A frame is the real preview when ANY of the
-        // six margin fields (6826/6827/6828 before, 6092/6093/6094 after)
-        // parses as a finite number, mirroring the gateway's own real-frame
-        // test: each field is "set" when it parses, unset on nan/unparseable,
-        // and the frame is real when any field is set (ibx#213, ibx#214). The
-        // ack carries "n/a" in all six, so it never matches. Captured
-        // byte-level in ib-agent#160.
-        if parsed.get(&6091).map(|s| s.as_str()) == Some("1") {
-            const MARGIN_TAGS: [u32; 6] = [6826, 6827, 6828, 6092, 6093, 6094];
-            let is_data_frame = MARGIN_TAGS.iter().any(|tag| {
-                parsed.get(tag)
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .is_some_and(|f| f.is_finite())
-            });
-            if is_data_frame {
-                if let Some(order) = context.order(clord_id).copied() {
-                    let response = crate::types::WhatIfResponse {
-                        order_id: clord_id,
-                        instrument: order.instrument,
-                        init_margin_before: parse_price_tag(parsed.get(&6826)),
-                        maint_margin_before: parse_price_tag(parsed.get(&6827)),
-                        equity_with_loan_before: parse_price_tag(parsed.get(&6828)),
-                        init_margin_after: parse_price_tag(parsed.get(&6092)),
-                        maint_margin_after: parse_price_tag(parsed.get(&6093)),
-                        equity_with_loan_after: parse_price_tag(parsed.get(&6094)),
-                        commission: parse_price_tag(parsed.get(&6378)),
-                    };
-                    log::info!("WhatIf response: clord={} initMargin={:.2}->{:.2} commission={:.2}",
-                        clord_id,
-                        response.init_margin_before as f64 / PRICE_SCALE as f64,
-                        response.init_margin_after as f64 / PRICE_SCALE as f64,
-                        response.commission as f64 / PRICE_SCALE as f64);
-                    context.remove_order(clord_id);
-                    shared.orders.push_what_if(response);
-                    emit(event_tx, Event::WhatIf(response));
-                }
-            }
-            return;
         }
 
         let ord_status = parsed.get(&39).map(|s| s.as_str()).unwrap_or("");
@@ -3160,7 +3181,7 @@ mod tests {
     // on the wire (ib-agent#160).
     fn what_if_frame(margin_fields: &[(u32, &str)]) -> std::collections::HashMap<u32, String> {
         let mut m = std::collections::HashMap::new();
-        m.insert(11u32, "42".to_string()); // ClOrdID
+        m.insert(11u32, WHAT_IF_CLORD.to_string()); // the preview's own ClOrdID
         m.insert(6091u32, "1".to_string()); // what-if marker
         for (tag, val) in margin_fields {
             m.insert(*tag, val.to_string());
@@ -3175,9 +3196,15 @@ mod tests {
         (6092, "0"), (6093, "0"), (6094, "945923.47"),
     ];
 
+    /// The ClOrdID the preview of order 42 was sent under (ibx#462).
+    const WHAT_IF_CLORD: &str = "42.1000000";
+
+    /// A preview of order 42 in flight, and a working order 42 the preview
+    /// must not touch (ibx#462).
     fn what_if_test_state() -> (CcpState, Context, SharedState) {
         let mut context = Context::new();
         let instrument = context.register_instrument(756733);
+        context.what_ifs.insert(WHAT_IF_CLORD.to_string(), (42, instrument));
         context.insert_order(crate::types::Order {
             order_id: 42,
             instrument,
@@ -3204,8 +3231,9 @@ mod tests {
         let responses = shared.orders.drain_what_if_responses();
         assert_eq!(responses.len(), 1, "zero-margin preview must be delivered");
         assert_eq!(responses[0].init_margin_after, 0);
-        // The completed preview consumes the pending order.
-        assert!(context.order(42).is_none());
+        // The completed preview is consumed; the working order is not.
+        assert!(context.what_ifs.is_empty());
+        assert!(context.order(42).is_some());
     }
 
     // The not-ready ack carries the literal "n/a" in all six margin fields
@@ -3220,8 +3248,8 @@ mod tests {
         ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
         assert!(shared.orders.drain_what_if_responses().is_empty(),
             "n/a ack must not surface as a response");
-        // The order stays pending for the subsequent data frame.
-        assert!(context.order(42).is_some());
+        // The preview stays pending for the subsequent data frame.
+        assert!(context.what_ifs.contains_key(WHAT_IF_CLORD));
     }
 
     // ibx#213: the gateway's real-frame test is "any of the six margin fields
@@ -3237,7 +3265,7 @@ mod tests {
         assert_eq!(responses[0].init_margin_after, 0);
         assert_eq!(responses[0].equity_with_loan_after,
             (945923.47 * PRICE_SCALE as f64) as Price);
-        assert!(context.order(42).is_none());
+        assert!(context.what_ifs.is_empty());
     }
 
     // ibx#214: "nan" parses as f64::NAN, so it passed the old parse-success
@@ -3253,7 +3281,7 @@ mod tests {
         ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
         assert!(shared.orders.drain_what_if_responses().is_empty(),
             "all-nan frame must not surface as a response");
-        assert!(context.order(42).is_some());
+        assert!(context.what_ifs.contains_key(WHAT_IF_CLORD));
     }
 
     // Mixed frame: a nan field is unset, but one finite sibling makes the
@@ -3268,6 +3296,39 @@ mod tests {
         assert_eq!(responses[0].init_margin_after, 0, "nan field reads as unset/0");
         assert_eq!(responses[0].equity_with_loan_after,
             (945923.47 * PRICE_SCALE as f64) as Price);
+    }
+
+    // ibx#462: a reply is routed by the preview's ClOrdID even without the
+    // flag; it never touches the working order of the same id, nor the
+    // ClOrdID recorded for it. A reject ends the preview with 201.
+    #[test]
+    fn what_if_reply_never_touches_the_working_order() {
+        let (mut ccp, mut context, shared) = what_if_test_state();
+        context.last_clord.insert(42, "42.0".to_string());
+        let mut frame = what_if_frame(&ZERO_CLOSE_FIELDS);
+        frame.remove(&6091);
+        frame.insert(39, "A".to_string());
+        frame.insert(150, "A".to_string());
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_what_if_responses().len(), 1);
+        assert_eq!(context.order(42).map(|o| o.status), Some(crate::types::OrderStatus::Submitted));
+        assert_eq!(context.last_clord.get(&42).map(String::as_str), Some("42.0"));
+        assert!(shared.orders.drain_order_updates().is_empty(), "no status for the preview");
+
+        context.what_ifs.insert(WHAT_IF_CLORD.to_string(), (42, 0));
+        let mut reject = what_if_frame(&[]);
+        reject.insert(39, "8".to_string());
+        reject.insert(150, "8".to_string());
+        reject.insert(58, "YOUR ORDER IS NOT ACCEPTED.".to_string());
+        ccp.handle_exec_report(&reject, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_order_errors(),
+            [(42, 201, "Order rejected - reason:YOUR ORDER IS NOT ACCEPTED.".to_string())]);
+        assert!(context.what_ifs.is_empty());
+        assert!(context.order(42).is_some());
+
+        // A flagged reply for a preview this session did not send.
+        ccp.handle_exec_report(&what_if_frame(&ZERO_CLOSE_FIELDS), &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_what_if_responses().is_empty());
     }
 
     // ibx#210: a working order carries wire 39=0 whether it is routed or not.

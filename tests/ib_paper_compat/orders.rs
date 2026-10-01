@@ -1144,8 +1144,8 @@ pub(super) fn phase_what_if_order(conns: Conns) -> Conns {
     hot_loop.context_mut().set_symbol(inst_id, "SPY".to_string());
 
     let order_id = next_order_id();
-    control_tx.send(ControlCommand::Order(OrderRequest::SubmitWhatIf {
-        order_id, instrument: inst_id, side: Side::Buy, qty: 100, price: 1_00_000_000, tif: b'0', attrs: OrderAttrs::default() })).unwrap();
+    control_tx.send(ControlCommand::Order(OrderRequest::SubmitWhatIf { request: Box::new(OrderRequest::SubmitLimitEx {
+        order_id, instrument: inst_id, side: Side::Buy, qty: 100, price: 1_00_000_000, tif: b'0', attrs: OrderAttrs::default() }) })).unwrap();
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 

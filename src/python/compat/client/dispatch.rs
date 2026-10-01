@@ -469,8 +469,8 @@ impl EClient {
             }
         }
 
-        // Drain what-if responses -> open_order(contract, order, OrderState) + order_status
-        // (iso with official ibapi: server delivers margin via openOrder.orderState)
+        // Drain what-if responses -> open_order(contract, order, OrderState)
+        // only, as the reference answers a preview (ibx#462).
         let what_ifs = shared.orders.drain_what_if_responses();
         for wi in what_ifs {
             let fmt = |p: Price| format!("{:.2}", p as f64 / PRICE_SCALE_F);
@@ -487,25 +487,25 @@ impl EClient {
             state.equity_with_loan_after = fmt(wi.equity_with_loan_after);
             state.commission_and_fees = wi.commission as f64 / PRICE_SCALE_F;
 
-            let tracked = self.core.open_orders.lock().unwrap().get(&wi.order_id).cloned();
-            let (contract_py, order_py) = if let Some(t) = tracked {
+            let tracked = self.core.take_what_if(wi.order_id);
+            let (contract_py, order_py) = if let Some((contract, order)) = tracked {
                 let c = Contract {
-                    con_id: t.contract.con_id,
-                    symbol: t.contract.symbol,
-                    sec_type: t.contract.sec_type,
-                    exchange: t.contract.exchange,
-                    currency: t.contract.currency,
+                    con_id: contract.con_id,
+                    symbol: contract.symbol,
+                    sec_type: contract.sec_type,
+                    exchange: contract.exchange,
+                    currency: contract.currency,
                     ..Default::default()
                 };
                 let mut o = Order::default();
-                o.order_id = t.order.order_id;
-                o.action = t.order.action;
-                o.total_quantity = t.order.total_quantity;
-                o.order_type = t.order.order_type;
-                o.lmt_price = t.order.lmt_price;
-                o.aux_price = t.order.aux_price;
-                o.tif = t.order.tif;
-                o.what_if = t.order.what_if;
+                o.order_id = order.order_id;
+                o.action = order.action;
+                o.total_quantity = order.total_quantity;
+                o.order_type = order.order_type;
+                o.lmt_price = order.lmt_price;
+                o.aux_price = order.aux_price;
+                o.tif = order.tif;
+                o.what_if = order.what_if;
                 (Py::new(py, c)?.into_any(), Py::new(py, o)?.into_any())
             } else {
                 (Py::new(py, Contract::default())?.into_any(),
@@ -514,9 +514,6 @@ impl EClient {
             let state_py = Py::new(py, state)?.into_any();
             call_wrapper!(self.wrapper, py, "open_order",
                 (wi.order_id as i64, &contract_py, &order_py, &state_py));
-            call_wrapper!(self.wrapper, py, "order_status", (wi.order_id as i64, "PreSubmitted", 0.0f64, 0.0f64,
-                 0.0f64, 0i64, 0i64, 0.0f64, 0i64, "", 0.0f64));
-            self.core.open_orders.lock().unwrap().remove(&wi.order_id);
         }
 
         // Drain HMDS query errors -> error (ibx#186). Surface gateway-side validation

@@ -227,7 +227,9 @@ fn order_lifecycle_what_if_preview() {
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("order_status:90:PreSubmitted")));
+    // The reference answers a preview with open_order only (ibx#462).
+    assert!(w.events.iter().any(|e| e.starts_with("open_order:90")), "{:?}", w.events);
+    assert!(!w.events.iter().any(|e| e.starts_with("order_status:90")));
 
     // No actual position change
     assert_eq!(shared.portfolio.position_fixed(0) / ibx::types::QTY_SCALE, 0);

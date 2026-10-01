@@ -46,8 +46,10 @@ impl EClient {
         self.core.note_currency(&self.control_tx, contract.con_id, &contract.currency);
 
         // If orderId is already tracked, this is a modification: replace it
-        // with the full wanted state (ibx#247).
-        let cmd = if let Some(working) = self.core.tracked_order(oid) {
+        // with the full wanted state (ibx#247). A what-if never modifies:
+        // it previews a new order (ibx#462).
+        let working = if order.what_if { None } else { self.core.tracked_order(oid) };
+        let cmd = if let Some(working) = working {
             match ClientCore::build_modify_request(order, oid, &working)? {
                 ModifyPlan::Send(cmd) => cmd,
                 ModifyPlan::Refused { code, message } => {
@@ -62,7 +64,11 @@ impl EClient {
         };
         self.send(cmd)?;
         self.core.cache_contract(contract.con_id, contract.clone());
-        self.core.track_order(oid, contract.clone(), order.clone(), instrument);
+        if order.what_if {
+            self.core.track_what_if(oid, contract.clone(), order.clone());
+        } else {
+            self.core.track_order(oid, contract.clone(), order.clone(), instrument);
+        }
         Ok(())
     }
 

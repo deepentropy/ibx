@@ -603,7 +603,7 @@ pub(super) fn run_submit_cancel_phase(
         OrderRequest::SubmitPegBench { order_id, .. } => *order_id,
         OrderRequest::SubmitLimitAuc { order_id, .. } => *order_id,
         OrderRequest::SubmitMtlAuc { order_id, .. } => *order_id,
-        OrderRequest::SubmitWhatIf { order_id, .. } => *order_id,
+        OrderRequest::SubmitWhatIf { request } => request.order_id(),
         OrderRequest::SubmitLimitFractional { order_id, .. } => *order_id,
         OrderRequest::SubmitAdjustableStop { order_id, .. } => *order_id,
         OrderRequest::SubmitTrailingStopPctEx { order_id, .. } => *order_id,

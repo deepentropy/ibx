@@ -90,6 +90,14 @@ pub struct Context {
     pub(crate) rth_types: HashMap<(i64, String), crate::engine::outside_rth::RthTypes>,
     /// Definition lookups in flight for `rth_types`: (320 id, key, deadline).
     pub(crate) rth_lookups: Vec<(String, (i64, String), std::time::Instant)>,
+    /// What-if previews waiting for their answer, by the ClOrdID each was
+    /// sent under: the API order id and the instrument (ibx#462). They are
+    /// not in the order table.
+    pub(crate) what_ifs: HashMap<String, (OrderId, InstrumentId)>,
+    /// Set while a what-if is encoded: the ClOrdID it goes out under.
+    pub(crate) what_if_send: Option<String>,
+    /// Sequence of the what-if ClOrdIDs of this session.
+    pub(crate) next_what_if: u32,
     /// Requests with outside-RTH waiting for their lookup, in order; later
     /// requests of the same order wait behind them.
     pub(crate) rth_parked: Vec<OrderRequest>,
@@ -133,6 +141,9 @@ impl Context {
             rth_lookups: Vec::new(),
             rth_parked: Vec::new(),
             next_rth_lookup: 0,
+            what_ifs: HashMap::new(),
+            what_if_send: None,
+            next_what_if: 0,
             scale_us_lots: false,
             round_lots: HashMap::new(),
             lot_lookups: Vec::new(),
@@ -888,8 +899,8 @@ impl Context {
         self.submit_mtl(instrument, side, qty)
     }
 
-    /// Submit a what-if order for margin/commission preview. The order is NOT placed.
-    /// Response delivered via `Event::WhatIf`.
+    /// Submit a what-if preview of a limit order for margin/commission. The
+    /// order is NOT placed. Response delivered via `Event::WhatIf`.
     pub fn submit_what_if(
         &mut self,
         instrument: InstrumentId,
@@ -900,8 +911,7 @@ impl Context {
         let id = self.next_order_id;
         self.next_order_id += 1;
         self.pending_orders.push(OrderRequest::SubmitWhatIf {
-            order_id: id, instrument, side, qty, price,
-            tif: b'0', attrs: OrderAttrs::default(),
+            request: Box::new(OrderRequest::SubmitLimit { order_id: id, instrument, side, qty, price }),
         });
         id
     }
@@ -1811,7 +1821,10 @@ mod tests {
         let orders: Vec<_> = ctx.drain_pending_orders().collect();
         assert_eq!(orders.len(), 1);
         match &orders[0] {
-            OrderRequest::SubmitWhatIf { order_id, instrument, side, qty, price, .. } => {
+            OrderRequest::SubmitWhatIf { request } => {
+                let OrderRequest::SubmitLimit { order_id, instrument, side, qty, price } = request.as_ref() else {
+                    panic!("expected a limit order under the preview");
+                };
                 assert_eq!(*order_id, id);
                 assert_eq!(*instrument, 0);
                 assert_eq!(*side, Side::Buy);

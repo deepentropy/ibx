@@ -635,6 +635,10 @@ pub struct ClientCore {
 
     // Open order tracking
     pub open_orders: Mutex<HashMap<u64, TrackedOrder>>,
+    /// What-if previews waiting for their answer, by order id, oldest
+    /// first: the contract and order the answer reports (ibx#462). Kept
+    /// apart from the open orders.
+    pub what_if_orders: Mutex<HashMap<u64, std::collections::VecDeque<(ApiContract, ApiOrder)>>>,
     // Ids of tracked orders that were filled or cancelled: never sent again (ibx#463).
     pub finished_orders: Mutex<HashSet<u64>>,
 
@@ -759,6 +763,7 @@ impl ClientCore {
             client_id: AtomicI64::new(0),
             pending_commissions: Mutex::new(PendingCommissions::default()),
             open_orders: Mutex::new(HashMap::new()),
+            what_if_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
@@ -793,6 +798,7 @@ impl ClientCore {
         self.executions.lock().unwrap().clear();
         self.pending_commissions.lock().unwrap().clear();
         self.open_orders.lock().unwrap().clear();
+        self.what_if_orders.lock().unwrap().clear();
         // `finished_orders` is kept: the server still knows those orders
         // after a reconnect, so their ids must not be sent as new orders.
         self.market_data_type.store(1, Ordering::Relaxed);
@@ -2335,9 +2341,7 @@ impl ClientCore {
             crate::api::client::parse_algo_params(&order.algo_strategy, &order.algo_params)?;
             return Ok(());
         }
-        if order.what_if {
-            return Ok(());
-        }
+        // A what-if is checked as the order it previews (ibx#462).
         match order_type.as_str() {
             "MKT" | "LMT" | "STP" | "STP LMT" | "TRAIL" | "TRAIL LIMIT"
             | "MOC" | "LOC" | "MIT" | "LIT" | "MTL" | "MKT PRT" | "STP PRT"
@@ -2565,6 +2569,21 @@ impl ClientCore {
         self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.order_type.clone())
     }
 
+    /// Keep a what-if preview for its answer (ibx#462).
+    pub fn track_what_if(&self, order_id: u64, contract: ApiContract, order: ApiOrder) {
+        self.what_if_orders.lock().unwrap().entry(order_id).or_default().push_back((contract, order));
+    }
+
+    /// The contract and order of the oldest what-if preview of `order_id`
+    /// in flight, removed (ibx#462).
+    pub fn take_what_if(&self, order_id: u64) -> Option<(ApiContract, ApiOrder)> {
+        let mut previews = self.what_if_orders.lock().unwrap();
+        let queue = previews.get_mut(&order_id)?;
+        let first = queue.pop_front();
+        if queue.is_empty() { previews.remove(&order_id); }
+        first
+    }
+
     /// A tracked order as the caller placed it (the order a modify is
     /// checked against).
     pub fn tracked_order(&self, order_id: u64) -> Option<ApiOrder> {
@@ -2760,6 +2779,16 @@ impl ClientCore {
         order_id: u64,
         instrument: InstrumentId,
     ) -> Result<ControlCommand, String> {
+        // A what-if first (ibx#462): the order as it would be placed, of
+        // any type or algo, previewed, never placed.
+        if order.what_if {
+            let real = ApiOrder { what_if: false, ..order.clone() };
+            return match Self::build_order_request(&real, order_id, instrument)? {
+                ControlCommand::Order(request) => Ok(ControlCommand::Order(
+                    OrderRequest::SubmitWhatIf { request: Box::new(request) })),
+                other => Ok(other),
+            };
+        }
         let side = order.side()?;
         let qty = order.total_quantity as u32;
         let order_type = order.order_type.to_uppercase();
@@ -2788,15 +2817,6 @@ impl ClientCore {
             let price = (order.lmt_price * PRICE_SCALE_F) as i64;
             return Ok(ControlCommand::Order(OrderRequest::SubmitAlgo {
                 order_id, instrument, side, qty, price, algo,
-                tif: order.tif_byte(), attrs: order.attrs(),
-            }));
-        }
-
-        // What-if orders
-        if order.what_if {
-            let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-            return Ok(ControlCommand::Order(OrderRequest::SubmitWhatIf {
-                order_id, instrument, side, qty, price,
                 tif: order.tif_byte(), attrs: order.attrs(),
             }));
         }

@@ -178,7 +178,8 @@ impl EClient {
             wrapper.error(reject.order_id as i64, code, &msg, "");
         }
 
-        // What-if → open_order(contract, order, OrderState) + order_status (iso with ibapi)
+        // What-if → open_order(contract, order, OrderState) only, as the
+        // reference answers a preview (ibx#462).
         for wi in self.shared.orders.drain_what_if_responses() {
             let fmt = |p: Price| format!("{:.2}", p as f64 / PRICE_SCALE_F);
             let state = OrderState {
@@ -195,15 +196,9 @@ impl EClient {
                 commission_and_fees: wi.commission as f64 / PRICE_SCALE_F,
                 ..Default::default()
             };
-            let tracked = self.core.open_orders.lock().unwrap().get(&wi.order_id).cloned();
-            let (contract, order) = tracked
-                .map(|t| (t.contract, t.order))
+            let (contract, order) = self.core.take_what_if(wi.order_id)
                 .unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
             wrapper.open_order(wi.order_id as i64, &contract, &order, &state);
-            wrapper.order_status(
-                wi.order_id as i64, "PreSubmitted", 0.0, 0.0, 0.0, 0, 0, 0.0, 0, "", 0.0,
-            );
-            self.core.open_orders.lock().unwrap().remove(&wi.order_id);
         }
     }
 

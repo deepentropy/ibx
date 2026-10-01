@@ -687,15 +687,9 @@ class TestWhatIfDispatch:
         c._test_dispatch_once()
 
         open_events = [e for e in w.events if e[0] == "open_order"]
-        status_events = [(i, e) for i, e in enumerate(w.events) if e[0] == "order_status"]
         assert len(open_events) == 1, "open_order missing for what-if"
-        assert any(e[1] == 7 and e[2] == "PreSubmitted" for _, e in status_events), \
-            "order_status PreSubmitted missing"
-
-        # Ordering: open_order before order_status
-        open_idx = next(i for i, e in enumerate(w.events) if e[0] == "open_order")
-        status_idx = next(i for i, e in status_events)
-        assert open_idx < status_idx, "open_order must fire before order_status"
+        # open_order only, as the reference answers a preview (ibx#462).
+        assert not [e for e in w.events if e[0] == "order_status"], "no order_status for a what-if"
 
         oid, _contract, _order, state = open_events[0][1], open_events[0][2], open_events[0][3], open_events[0][4]
         assert oid == 7
@@ -717,8 +711,8 @@ class TestWhatIfDispatch:
         assert state["reject_reason"] == ""
         assert state["order_allocations"] == []
 
-    def test_order_status_why_held_is_clean(self):
-        """why_held must NOT contain margin info anymore (was the legacy hack)."""
+    def test_what_if_sends_no_order_status(self):
+        """The reference answers a what-if with open_order only (ibx#462)."""
         w, c = make_test_client()
         c._test_push_what_if(
             order_id=99, instrument=0,
@@ -728,11 +722,8 @@ class TestWhatIfDispatch:
         )
         c._test_dispatch_once()
 
-        status_events = [e for e in w.events if e[0] == "order_status" and e[1] == 99]
-        assert len(status_events) == 1
-        # RecordingWrapper.order_status doesn't record why_held, but we can verify
-        # status is the canonical "PreSubmitted" without inline margin string.
-        assert status_events[0][2] == "PreSubmitted"
+        assert [e for e in w.events if e[0] == "open_order" and e[1] == 99]
+        assert not [e for e in w.events if e[0] == "order_status" and e[1] == 99]
 
 
 class TestTbtDispatch:
