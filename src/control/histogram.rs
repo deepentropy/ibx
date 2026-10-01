@@ -12,7 +12,7 @@ pub struct HistogramRequest {
     /// Window id of the query, unique per request (ibx#428): the reply
     /// carries it back.
     pub window_id: String,
-    pub con_id: u32,
+    pub con_id: i64,
     /// Security type of the API contract. Empty is a stock.
     pub sec_type: String,
     /// Exchange of the API contract. Empty is `SMART`.

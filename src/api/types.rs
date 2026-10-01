@@ -780,7 +780,7 @@ pub struct ContractDetails {
 impl ContractDetails {
     pub fn from_definition(def: &crate::control::contracts::ContractDefinition) -> Self {
         let c = Contract {
-            con_id: def.con_id as i64,
+            con_id: def.con_id,
             symbol: def.symbol.clone(),
             sec_type: def.sec_type.to_api_str().to_string(),
             exchange: def.exchange.clone(),

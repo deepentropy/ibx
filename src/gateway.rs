@@ -2108,7 +2108,7 @@ impl Gateway {
 
 /// Build market data subscription request.
 pub fn build_mktdata_subscribe(
-    con_id: u32,
+    con_id: i64,
     exchange: &str,
     sec_type: &str,
     md_req_id: &str,

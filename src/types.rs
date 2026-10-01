@@ -615,7 +615,7 @@ pub enum OrderKind {
     PegBench {
         starting_price: Price,
         stock_ref_price: Price,
-        ref_con_id: u32,
+        ref_con_id: i64,
         is_peg_decrease: bool,
         pegged_change_amount: Price,
         ref_change_amount: Price,
@@ -978,7 +978,7 @@ pub enum OrderRequest {
         qty: u32,
         /// The starting price, 0 = unset. There is no limit price.
         price: Price,
-        ref_con_id: u32,
+        ref_con_id: i64,
         is_peg_decrease: bool,
         pegged_change_amount: Price,
         ref_change_amount: Price,
@@ -1737,7 +1737,7 @@ pub enum ControlCommand {
     /// Request historical news via historical data connection.
     FetchHistoricalNews {
         req_id: ReqId,
-        con_id: u32,
+        con_id: i64,
         provider_codes: String,
         start_time: String,
         end_time: String,
@@ -1752,7 +1752,7 @@ pub enum ControlCommand {
     /// Request fundamental data via historical data connection.
     FetchFundamentalData {
         req_id: ReqId,
-        con_id: u32,
+        con_id: i64,
         report_type: String,
     },
     /// Cancel fundamental data request.
@@ -1760,7 +1760,7 @@ pub enum ControlCommand {
     /// Request histogram data via historical data connection.
     FetchHistogramData {
         req_id: ReqId,
-        con_id: u32,
+        con_id: i64,
         /// Security type of the API contract (ibx#305). Empty is a stock.
         sec_type: String,
         /// Exchange of the API contract (ibx#305). Empty is `SMART`.

@@ -23,7 +23,7 @@ pub struct AccountSummary {
 #[derive(Debug, Clone)]
 pub struct PositionUpdate {
     pub account_id: String,
-    pub con_id: u32,
+    pub con_id: i64,
     pub symbol: String,
     pub position: f64,
     pub avg_cost: f64,
@@ -58,7 +58,7 @@ pub fn parse_account_value(tag: &str, value: &str, summary: &mut AccountSummary)
 /// Track all positions by conId.
 #[derive(Debug, Default)]
 pub struct PositionTracker {
-    positions: HashMap<u32, PositionUpdate>,
+    positions: HashMap<i64, PositionUpdate>,
 }
 
 impl PositionTracker {
@@ -66,7 +66,7 @@ impl PositionTracker {
         self.positions.insert(pos.con_id, pos);
     }
 
-    pub fn get(&self, con_id: u32) -> Option<&PositionUpdate> {
+    pub fn get(&self, con_id: i64) -> Option<&PositionUpdate> {
         self.positions.get(&con_id)
     }
 

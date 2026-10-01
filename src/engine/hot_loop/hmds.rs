@@ -166,7 +166,7 @@ pub(crate) const TBT_CANCEL_DELAY: std::time::Duration = std::time::Duration::fr
 pub(crate) struct PendingFundamental {
     pub(crate) window_id: String,
     pub(crate) req_id: ReqId,
-    pub(crate) con_id: u32,
+    pub(crate) con_id: i64,
     pub(crate) report: &'static str,
     /// The farm it was sent to, where its cancel goes.
     pub(crate) farm: super::pool::FarmId,
@@ -175,7 +175,7 @@ pub(crate) struct PendingFundamental {
 /// A fundamentals report kept for the session (#434).
 #[derive(Debug, Clone)]
 pub(crate) struct CachedReport {
-    pub(crate) con_id: u32,
+    pub(crate) con_id: i64,
     pub(crate) report: &'static str,
     pub(crate) data: String,
     pub(crate) used: Instant,
@@ -1048,7 +1048,7 @@ impl HmdsState {
             let query_id = format!("hist_{}", qid);
             let req = crate::control::historical::HistoricalRequest {
                 query_id: query_id.clone(),
-                con_id: con_id as u32,
+                con_id,
                 symbol: symbol.to_string(),
                 sec_type: sec_type.to_string(),
                 exchange: exchange.to_string(),
@@ -1282,7 +1282,7 @@ impl HmdsState {
         let query_id = format!("hist_{}", qid);
         let req = crate::control::historical::HistoricalRequest {
             query_id: query_id.clone(),
-            con_id: con_id as u32,
+            con_id,
             symbol: symbol.to_string(),
             sec_type: sec_type.to_string(),
             exchange: exchange.to_string(),
@@ -1363,7 +1363,7 @@ impl HmdsState {
         self.next_head_ts_window = self.next_head_ts_window.wrapping_add(1);
         let req = crate::control::historical::HeadTimestampRequest {
             window_id: window_id.clone(),
-            con_id: con_id as u32,
+            con_id,
             sec_type: sec_type.to_string(),
             exchange: exchange.to_string(),
             data_type,
@@ -1483,7 +1483,7 @@ impl HmdsState {
         // (ibx#156).
         let any_cold = result.entries.iter().any(|e| {
             e.con_id != 0
-                && shared.reference.get_contract(e.con_id as i64).is_none()
+                && shared.reference.get_contract(e.con_id).is_none()
         });
         if any_cold {
             self.cold_scanner_results.push((req_id, result));
@@ -1651,7 +1651,7 @@ impl HmdsState {
         queries.push(NewsQuery { id, req_ids: vec![req_id], query });
     }
 
-    pub(crate) fn send_historical_news_request(&mut self, req_id: ReqId, con_id: u32, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_historical_news_request(&mut self, req_id: ReqId, con_id: i64, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         self.next_news_query += 1;
         let req = crate::control::news::HistoricalNewsRequest {
             query_id: self.next_news_query.to_string(),
@@ -1690,7 +1690,7 @@ impl HmdsState {
     /// query goes to `sink`, the farm of the fundamentals route (`farm`).
     /// The report type is the reference's (an unknown name is asked with
     /// no type); the query id is the provider and a session counter.
-    pub(crate) fn send_fundamental_data_request(&mut self, req_id: ReqId, con_id: u32, report_type: &str, farm: super::pool::FarmId, sink: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_fundamental_data_request(&mut self, req_id: ReqId, con_id: i64, report_type: &str, farm: super::pool::FarmId, sink: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState, shared: &SharedState) {
         if self.pending_fundamental.iter().any(|p| p.req_id == req_id) {
             shared.reference.push_historical_error(req_id, 322, "Error processing request.-'bL' : cause - Duplicate ticker id".into());
             return;
@@ -1769,7 +1769,7 @@ impl HmdsState {
         shared.reference.push_fundamental_data(p.req_id, data);
     }
 
-    fn cache_report(&mut self, con_id: u32, report: &'static str, data: &str) {
+    fn cache_report(&mut self, con_id: i64, report: &'static str, data: &str) {
         let now = Instant::now();
         self.fundamental_cache.retain(|c| !(c.con_id == con_id && c.report == report));
         self.fundamental_cache.push(CachedReport { con_id, report, data: data.to_string(), used: now });
@@ -1792,7 +1792,7 @@ impl HmdsState {
         }
     }
 
-    pub(crate) fn send_histogram_request(&mut self, req_id: ReqId, con_id: u32, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_histogram_request(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // An unreadable period is refused locally, as the reference (ibx#433).
         if crate::control::histogram::parse_period(period).is_none() {
             log::error!("histogram req_id={}: invalid time period {:?}", req_id, period);

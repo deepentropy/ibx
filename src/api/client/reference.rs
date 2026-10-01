@@ -196,7 +196,7 @@ impl EClient {
         }
         self.send(ControlCommand::FetchHistoricalNews {
             req_id,
-            con_id: con_id as u32,
+            con_id,
             provider_codes: provider_codes.into(),
             start_time: start_time.into(),
             end_time: end_time.into(),
@@ -229,7 +229,7 @@ impl EClient {
         }
         self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchFundamentalData {
             req_id,
-            con_id: contract.con_id as u32,
+            con_id: contract.con_id,
             report_type: report_type.into(),
         }))
     }
@@ -245,7 +245,7 @@ impl EClient {
     pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) -> Result<(), String> {
         self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistogramData {
             req_id,
-            con_id: contract.con_id as u32,
+            con_id: contract.con_id,
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),
             use_rth,

@@ -3059,7 +3059,7 @@ impl ClientCore {
         OrderKind::PegBench {
             starting_price: scale(order.starting_price),
             stock_ref_price: scale(order.stock_ref_price),
-            ref_con_id: order.reference_contract_id.max(0) as u32,
+            ref_con_id: i64::from(order.reference_contract_id.max(0)),
             is_peg_decrease: order.is_pegged_change_amount_decrease,
             pegged_change_amount: scale(order.pegged_change_amount),
             ref_change_amount: scale(order.reference_change_amount),

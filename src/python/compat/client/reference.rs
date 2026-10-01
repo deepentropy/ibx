@@ -299,7 +299,7 @@ impl EClient {
         }
         send_cmd(py, &tx, ControlCommand::FetchHistoricalNews {
             req_id,
-            con_id: con_id as u32,
+            con_id,
             provider_codes: provider_codes.to_string(),
             start_time: start_date_time.to_string(),
             end_time: end_date_time.to_string(),
@@ -327,7 +327,7 @@ impl EClient {
         let tx = self.tx()?;
         send_cmd(py, &tx, ClientCore::resolve_first(req_id, &contract.to_api(), ControlCommand::FetchFundamentalData {
             req_id,
-            con_id: contract.con_id as u32,
+            con_id: contract.con_id,
             report_type: report_type.to_string(),
         }))?;
         Ok(())
@@ -401,7 +401,7 @@ impl EClient {
         let tx = self.tx()?;
         send_cmd(py, &tx, ClientCore::resolve_first(req_id, &contract.to_api(), ControlCommand::FetchHistogramData {
             req_id,
-            con_id: contract.con_id as u32,
+            con_id: contract.con_id,
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),
             use_rth,

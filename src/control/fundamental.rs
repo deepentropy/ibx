@@ -57,7 +57,7 @@ pub struct FundamentalRequest {
     /// Window id of the query, unique per request (ibx#428): the reply
     /// carries it back.
     pub window_id: String,
-    pub con_id: u32,
+    pub con_id: i64,
     pub sec_type: &'static str,
     pub currency: &'static str,
     pub report_type: ReportType,

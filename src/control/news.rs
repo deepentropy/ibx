@@ -19,7 +19,7 @@ pub const TAG_RAW_DATA: u32 = 96;
 pub struct HistoricalNewsRequest {
     /// Query number, part of the query id (ibx#459).
     pub query_id: String,
-    pub con_id: u32,
+    pub con_id: i64,
     /// Requested provider codes, `+` separated as the client gives them.
     pub provider_codes: String,
     pub start_time: String,
@@ -558,7 +558,7 @@ mod tests {
         ["BRFG", "BRFUPDN", "DJ-N", "DJ-RTA", "DJ-RTE", "DJ-RTG", "DJ-RTPRO", "DJNL"].map(String::from).to_vec()
     }
 
-    fn news_req(con_id: u32, providers: &str, start: &str, end: &str) -> HistoricalNewsRequest {
+    fn news_req(con_id: i64, providers: &str, start: &str, end: &str) -> HistoricalNewsRequest {
         HistoricalNewsRequest {
             query_id: "1".to_string(),
             con_id,

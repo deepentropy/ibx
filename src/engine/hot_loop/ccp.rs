@@ -211,7 +211,7 @@ pub(crate) struct CcpState {
     pub(crate) pending_lookups: Vec<PendingLookup>,
     /// Known market rule per (conId, exchange), from the records of every
     /// definition reply; a fan-out asks only for the unknown ones (ibx#435).
-    pub(crate) market_rule_by_exchange: std::collections::HashMap<(u32, String), u32>,
+    pub(crate) market_rule_by_exchange: std::collections::HashMap<(i64, String), u32>,
     /// Matching-symbols requests sent and not answered: (own request id
     /// sent, API reqId). No deadline, as in the reference; cleared without
     /// an answer when the auth link drops (ibx#369).
@@ -282,20 +282,19 @@ pub(crate) const HIST_LOOKUP_FIRST_ID: u32 = 0xD000_0000;
 pub(crate) const HIST_LOOKUP_IDS: u32 = 0x1000_0000;
 
 /// `request` with its contract conId set (ibx#427).
-pub(crate) fn request_with_con_id(request: crate::types::ControlCommand, con_id: u32) -> crate::types::ControlCommand {
+pub(crate) fn request_with_con_id(request: crate::types::ControlCommand, con_id: i64) -> crate::types::ControlCommand {
     use crate::types::ControlCommand as C;
-    let id = con_id as i64;
     match request {
         C::FetchHistorical { req_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired, .. } =>
-            C::FetchHistorical { req_id, con_id: id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired },
+            C::FetchHistorical { req_id, con_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired },
         C::FetchHeadTimestamp { req_id, sec_type, exchange, what_to_show, use_rth, .. } =>
-            C::FetchHeadTimestamp { req_id, con_id: id, sec_type, exchange, what_to_show, use_rth },
+            C::FetchHeadTimestamp { req_id, con_id, sec_type, exchange, what_to_show, use_rth },
         C::FetchHistogramData { req_id, sec_type, exchange, use_rth, period, .. } =>
             C::FetchHistogramData { req_id, con_id, sec_type, exchange, use_rth, period },
         C::FetchHistoricalTicks { req_id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth, .. } =>
-            C::FetchHistoricalTicks { req_id, con_id: id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth },
+            C::FetchHistoricalTicks { req_id, con_id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth },
         C::FetchHistoricalSchedule { req_id, sec_type, exchange, end_date_time, duration, use_rth, .. } =>
-            C::FetchHistoricalSchedule { req_id, con_id: id, sec_type, exchange, end_date_time, duration, use_rth },
+            C::FetchHistoricalSchedule { req_id, con_id, sec_type, exchange, end_date_time, duration, use_rth },
         C::FetchFundamentalData { req_id, report_type, .. } =>
             C::FetchFundamentalData { req_id, con_id, report_type },
         other => other,
@@ -326,7 +325,7 @@ pub(crate) struct PendingSchedulePair {
 pub(crate) struct PendingFanout {
     pub api_req_id: ReqId,
     /// Requests not answered yet: (request id, conId, exchange).
-    pub outstanding: Vec<(String, u32, String)>,
+    pub outstanding: Vec<(String, i64, String)>,
     /// Number of requests sent.
     pub total: usize,
     /// The records of the lookup, in reply order.
@@ -473,7 +472,7 @@ fn push_contract_row(
     // The zone of its trading hours, for the zone rule of an order's
     // expiry (ibx#335).
     if let Some(zone) = &def.time_zone_id {
-        shared.reference.cache_time_zone_id(def.con_id as i64, zone);
+        shared.reference.cache_time_zone_id(def.con_id, zone);
     }
     let for_event = clone_for_event(event_tx, &def);
     shared.reference.push_contract_details(req_id, def);
@@ -2041,7 +2040,7 @@ impl CcpState {
         self.news_subscriptions.push((instrument, req_id));
         if let Some(conn) = ccp_conn.as_mut() {
             let req_id_str = req_id.to_string();
-            let con_id_str = (con_id as u32).to_string();
+            let con_id_str = con_id.to_string();
             let ts = chrono_free_timestamp();
             let _ = conn.send_fix(&[
                 (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
@@ -2273,7 +2272,7 @@ impl CcpState {
             // A lookup by conId asks for one contract, but its reply lists
             // that contract once per exchange: only the first record is a
             // row. The others still gave their market rules above.
-            let mut seen: Vec<u32> = Vec::with_capacity(1);
+            let mut seen: Vec<i64> = Vec::with_capacity(1);
             records.retain(|d| {
                 let first = !seen.contains(&d.con_id);
                 seen.push(d.con_id);
@@ -2283,7 +2282,7 @@ impl CcpState {
         // By-symbol lookup: each record asks for its unknown per-exchange
         // market rules before it becomes a row.
         let by_symbol = !single_shot && !contracts::secdef_response_is_last(msg);
-        let mut outstanding: Vec<(String, u32, String)> = Vec::new();
+        let mut outstanding: Vec<(String, i64, String)> = Vec::new();
         if by_symbol {
             for def in records.iter().filter(|d| d.con_id != 0) {
                 for exch in &def.valid_exchanges {
@@ -2295,7 +2294,7 @@ impl CcpState {
                     }
                     let fid = format!("ibxfan-{}-{}", req_id, self.next_fanout_id);
                     self.next_fanout_id = self.next_fanout_id.wrapping_add(1);
-                    self.send_fanout_secdef_request(&fid, def.con_id as i64, exch, ccp_conn, hb);
+                    self.send_fanout_secdef_request(&fid, def.con_id, exch, ccp_conn, hb);
                     outstanding.push((fid, def.con_id, exch.clone()));
                 }
             }
@@ -2372,7 +2371,7 @@ impl CcpState {
         let Some(idx) = self.pending_resolves.iter().position(|p| ReqId::from(p.lookup_id) == number) else { return false };
         let pending = self.pending_resolves.swap_remove(idx);
         let records = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default();
-        let mut con_ids: Vec<u32> = Vec::new();
+        let mut con_ids: Vec<i64> = Vec::new();
         for def in &records {
             if def.con_id != 0 && !con_ids.contains(&def.con_id) {
                 con_ids.push(def.con_id);
@@ -2418,8 +2417,8 @@ impl CcpState {
         if def.con_id == 0 {
             return;
         }
-        shared.reference.cache_contract(def.con_id as i64, api::Contract {
-            con_id: def.con_id as i64,
+        shared.reference.cache_contract(def.con_id, api::Contract {
+            con_id: def.con_id,
             symbol: def.symbol.clone(),
             sec_type: def.sec_type.to_api_str().to_string(),
             exchange: def.exchange.clone(),
@@ -2429,8 +2428,8 @@ impl CcpState {
             trading_class: def.trading_class.clone(),
             ..Default::default()
         });
-        shared.reference.cache_market_name(def.con_id as i64, &def.market_name);
-        self.try_release_scanner_enrichments(def.con_id as i64, shared);
+        shared.reference.cache_market_name(def.con_id, &def.market_name);
+        self.try_release_scanner_enrichments(def.con_id, shared);
     }
 
     /// The rows of a lookup, in record order (ibx#435): each record gets its
@@ -2993,7 +2992,7 @@ impl CcpState {
     ) {
         let mut awaiting: HashSet<i64> = HashSet::new();
         for entry in &result.entries {
-            let con_id = entry.con_id as i64;
+            let con_id = entry.con_id;
             if con_id == 0 { continue; }
             if shared.reference.get_contract(con_id).is_some() { continue; }
             awaiting.insert(con_id);
@@ -4313,7 +4312,7 @@ mod tests {
         let rows = shared.reference.drain_contract_details();
         assert_eq!(rows.len(), 5, "one row per record");
         assert!(rows.iter().all(|(rid, _)| *rid == 21));
-        let ids: Vec<u32> = rows.iter().map(|(_, d)| d.con_id).collect();
+        let ids: Vec<i64> = rows.iter().map(|(_, d)| d.con_id).collect();
         assert_eq!(ids, [815824267, 840227399, 866514785, 893091676, 925800444]);
         // The record's own exchange rule is known: no fan-out.
         assert!(ccp.pending_fanout.is_empty());
@@ -4369,7 +4368,7 @@ mod tests {
 
         reply(&mut ccp, &mut context, &shared, &stock_reply("31"));
         assert_eq!(ccp.pending_fanout.len(), 1);
-        let asked: Vec<(u32, String)> = ccp.pending_fanout[0].outstanding.iter()
+        let asked: Vec<(i64, String)> = ccp.pending_fanout[0].outstanding.iter()
             .map(|(_, c, e)| (*c, e.clone())).collect();
         assert_eq!(asked, [(265598, "AMEX".to_string()), (265598, "NYSE".to_string())],
             "only the exchanges with no known rule");
@@ -4453,7 +4452,7 @@ mod tests {
         let schedule = pipe_msg(&format!("35=U|6040=107|6256={key}"));
         ccp.process_ccp_message(&schedule, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
 
-        let rows: Vec<(ReqId, u32, String, String)> = shared.reference.drain_contract_details().into_iter()
+        let rows: Vec<(ReqId, i64, String, String)> = shared.reference.drain_contract_details().into_iter()
             .map(|(rid, d)| (rid, d.con_id, d.symbol, d.market_rule_ids)).collect();
         assert_eq!(rows, [
             (100, 756733, "SPY".to_string(), "4563,109,110".to_string()),

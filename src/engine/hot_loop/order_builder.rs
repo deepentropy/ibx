@@ -1869,7 +1869,7 @@ fn pegged_tags(mid: bool, price: crate::types::Price, offset: crate::types::Pric
 /// contract and its exchange (SMART as BEST) when set.
 fn peg_bench_attrs(
     stock_ref_price: crate::types::Price,
-    ref_con_id: u32,
+    ref_con_id: i64,
     is_peg_decrease: bool,
     pegged_change_amount: crate::types::Price,
     ref_change_amount: crate::types::Price,

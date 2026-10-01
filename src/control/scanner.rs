@@ -104,7 +104,7 @@ fn xml_escape(s: &str) -> String {
 /// One entry from a scanner result.
 #[derive(Debug, Clone, Default)]
 pub struct ScannerEntry {
-    pub con_id: u32,
+    pub con_id: i64,
     pub symbol: String,
     pub sec_type: String,
     pub exchange: String,
@@ -123,7 +123,7 @@ pub struct ScannerEntry {
 pub struct ScannerResult {
     /// Subscription id echoed by the server (ibx#457).
     pub id: String,
-    pub con_ids: Vec<u32>,
+    pub con_ids: Vec<i64>,
     pub entries: Vec<ScannerEntry>,
     pub scan_time: String,
     /// Server refusal text: the subscription ends (ibx#457).
@@ -243,7 +243,7 @@ pub fn parse_scanner_response(xml: &str) -> Option<ScannerResult> {
         let contract_xml = &xml[abs_start..c_end];
 
         let con_id = extract_xml_tag(contract_xml, "contractID")
-            .and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+            .and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
         if con_id != 0 {
             con_ids.push(con_id);
         }

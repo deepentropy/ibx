@@ -627,9 +627,9 @@ impl EClient {
                 let cd = ContractDetails::new_default(py);
                 {
                     let mut contract = cd.contract.borrow_mut(py);
-                    contract.con_id = entry.con_id as i64;
+                    contract.con_id = entry.con_id;
                     // Look up cached contract for symbol info
-                    if let Some(ac) = self.core.get_contract(entry.con_id as i64, shared) {
+                    if let Some(ac) = self.core.get_contract(entry.con_id, shared) {
                         contract.symbol = ac.symbol;
                         contract.sec_type = ac.sec_type;
                         contract.exchange = ac.exchange;

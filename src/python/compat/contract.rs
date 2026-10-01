@@ -2103,7 +2103,7 @@ impl ContractDetails {
 
     pub fn from_definition(py: Python<'_>, def: &crate::control::contracts::ContractDefinition) -> Self {
         let mut c = Contract::default();
-        c.con_id = def.con_id as i64;
+        c.con_id = def.con_id;
         // Official API string ("STK"), not the Debug derive ("Stock"): the
         // returned Contract must round-trip into another request (ibx#230).
         c.sec_type = def.sec_type.to_api_str().to_string();

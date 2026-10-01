@@ -24,7 +24,7 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
         (contracts::TAG_IB_SOURCE, "Socket"),
     ]).expect("Failed to send forex secdef request");
 
-    let mut forex_con_id: Option<u32> = None;
+    let mut forex_con_id: Option<i64> = None;
     let deadline = Instant::now() + Duration::from_secs(10);
 
     while Instant::now() < deadline && forex_con_id.is_none() {
@@ -73,7 +73,7 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
         shared, Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
-    let inst = hot_loop.context_mut().register_instrument(fx_con_id as i64);
+    let inst = hot_loop.context_mut().register_instrument(fx_con_id);
     hot_loop.context_mut().set_symbol(inst, "EUR".to_string());
 
     let oid = next_order_id();
@@ -196,7 +196,7 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
         shared, Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
-    let inst = hot_loop.context_mut().register_instrument(fut_def.con_id as i64);
+    let inst = hot_loop.context_mut().register_instrument(fut_def.con_id);
     hot_loop.context_mut().set_symbol(inst, "MES".to_string());
 
     let oid = next_order_id();
@@ -328,7 +328,7 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
         shared, Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
-    let inst = hot_loop.context_mut().register_instrument(opt_con_id as i64);
+    let inst = hot_loop.context_mut().register_instrument(opt_con_id);
     hot_loop.context_mut().set_symbol(inst, "SPY".to_string());
 
     let oid = next_order_id();

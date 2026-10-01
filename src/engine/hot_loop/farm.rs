@@ -104,7 +104,7 @@ pub(crate) fn md_contract_reply(context: &mut Context, shared: &SharedState, req
     let (_, mut sub, _) = context.md_lookups.remove(idx);
     // A reply can list one contract once per exchange.
     let mut con_ids: Vec<i64> = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default()
-        .iter().map(|d| d.con_id as i64).filter(|c| *c != 0).collect();
+        .iter().map(|d| d.con_id).filter(|c| *c != 0).collect();
     con_ids.sort_unstable();
     con_ids.dedup();
     if let [con_id] = con_ids[..] {
@@ -646,7 +646,7 @@ impl FarmState {
                 sub.last_trade_date.clone(), sub.strike, sub.right.clone(), sub.multiplier.clone(), mode_9887));
         }
 
-        let con_id_str = (con_id as u32).to_string();
+        let con_id_str = con_id.to_string();
         let exchange = routing_exchange(&sub.exchange, &sub.sec_type);
         let sec_type = fix_sec_type(&sub.sec_type);
         let entries = [
@@ -889,7 +889,7 @@ impl FarmState {
             let kinds: &[&'static str] = if book { &["0"] } else { &["442", "443"] };
             for kind in kinds {
                 req.entries.push(DepthEntry {
-                    farm_req: 0, farm, con_id: (con_id as u32).to_string(), exchange: exchange.clone(),
+                    farm_req: 0, farm, con_id: con_id.to_string(), exchange: exchange.clone(),
                     sec_type: fix_type.clone(), req_type: kind, live: false,
                 });
             }

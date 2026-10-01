@@ -3307,7 +3307,7 @@ mod tests {
             assert!(m.contains(&format!("<id>{id}</id>")) && m.contains(&format!("<scanCode>{code}</scanCode>")), "{m}");
             assert!(m.contains("<maxItems>10</maxItems><suspend>no</suspend>"), "as the reference: {m}");
         }
-        let got: Vec<(ReqId, u32, usize)> = engine.hmds.cold_scanner_results.iter()
+        let got: Vec<(ReqId, i64, usize)> = engine.hmds.cold_scanner_results.iter()
             .map(|(r, res)| (*r, res.con_ids[0], res.con_ids.len())).collect();
         assert_eq!(got, [(9006, 911617323, 10), (9005, 909360667, 10)]);
 
@@ -3575,7 +3575,7 @@ mod tests {
         engine.inject_hmds_message(&scan("<Contract><contractID>1</contractID></Contract>"));
         engine.inject_hmds_message(&fund_reply);
         engine.inject_hmds_message(&scan("<Contract><contractID>2</contractID></Contract>"));
-        let rows: Vec<(ReqId, u32)> = engine.hmds.cold_scanner_results.iter().map(|(r, res)| (*r, res.con_ids[0])).collect();
+        let rows: Vec<(ReqId, i64)> = engine.hmds.cold_scanner_results.iter().map(|(r, res)| (*r, res.con_ids[0])).collect();
         assert_eq!(rows, [(460, 1), (460, 2)]);
         assert!(errors(&shared).is_empty());
         tx.send(ControlCommand::CancelScanner { req_id: 460 }).unwrap();

@@ -878,7 +878,7 @@ impl Context {
         side: Side,
         qty: u32,
         price: Price,
-        ref_con_id: u32,
+        ref_con_id: i64,
         is_peg_decrease: bool,
         pegged_change_amount: Price,
         ref_change_amount: Price,

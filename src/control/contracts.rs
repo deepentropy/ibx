@@ -129,7 +129,7 @@ pub enum OptionRight {
 /// Full contract definition.
 #[derive(Debug, Clone)]
 pub struct ContractDefinition {
-    pub con_id: u32,
+    pub con_id: i64,
     pub symbol: String,
     pub sec_type: SecurityType,
     pub exchange: String,
@@ -220,7 +220,7 @@ pub fn exchange_from_fix(exchange: &str) -> &str {
 }
 
 /// Build a SecurityDefinitionRequest by conId.
-pub fn build_secdef_request_by_conid(req_id: &str, con_id: u32, seq: u32) -> Vec<u8> {
+pub fn build_secdef_request_by_conid(req_id: &str, con_id: i64, seq: u32) -> Vec<u8> {
     let con_id_str = con_id.to_string();
     fix::fix_build(
         &[
@@ -302,7 +302,7 @@ pub fn parse_secdef_records(data: &[u8]) -> Option<Vec<ContractDefinition>> {
     let mut is_secdef = false;
     let mut section = SecdefSection::Header;
     let mut records: Vec<Vec<(u32, &str)>> = Vec::new();
-    let mut details: Vec<(u32, Vec<(u32, &str)>)> = Vec::new();
+    let mut details: Vec<(i64, Vec<(u32, &str)>)> = Vec::new();
     let mut order_types: Vec<(&str, &str)> = Vec::new();
     let mut industries: Vec<(&str, &str)> = Vec::new();
     for part in data.split(|&b| b == SOH) {
@@ -652,8 +652,8 @@ pub fn smart_components_from_secdef(data: &[u8]) -> Vec<String> {
 /// Cache of contract definitions by conId.
 #[derive(Debug, Default)]
 pub struct ContractStore {
-    by_con_id: HashMap<u32, ContractDefinition>,
-    by_symbol: HashMap<String, u32>,
+    by_con_id: HashMap<i64, ContractDefinition>,
+    by_symbol: HashMap<String, i64>,
 }
 
 impl ContractStore {
@@ -663,7 +663,7 @@ impl ContractStore {
         self.by_con_id.insert(def.con_id, def);
     }
 
-    pub fn get(&self, con_id: u32) -> Option<&ContractDefinition> {
+    pub fn get(&self, con_id: i64) -> Option<&ContractDefinition> {
         self.by_con_id.get(&con_id)
     }
 
@@ -1168,7 +1168,7 @@ pub(crate) mod tests {
     fn parse_records_splits_a_multi_contract_reply() {
         let defs = parse_secdef_records(&five_future_records("11", "")).unwrap();
         assert_eq!(defs.len(), 5);
-        let ids: Vec<u32> = defs.iter().map(|d| d.con_id).collect();
+        let ids: Vec<i64> = defs.iter().map(|d| d.con_id).collect();
         assert_eq!(ids, [815824267, 840227399, 866514785, 893091676, 925800444]);
         let locals: Vec<&str> = defs.iter().map(|d| d.local_symbol.as_str()).collect();
         assert_eq!(locals, ["MNQZ6", "MNQH7", "MNQM7", "MNQU7", "MNQZ7"]);

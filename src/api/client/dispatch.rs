@@ -398,8 +398,8 @@ impl EClient {
         // flushed partials where a secdef reply never arrived.
         for (req_id, result) in self.shared.reference.drain_scanner_data() {
             for (rank, entry) in result.entries.iter().enumerate() {
-                let mut contract = Contract { con_id: entry.con_id as i64, ..Default::default() };
-                if let Some(ac) = self.core.get_contract(entry.con_id as i64, &self.shared) {
+                let mut contract = Contract { con_id: entry.con_id, ..Default::default() };
+                if let Some(ac) = self.core.get_contract(entry.con_id, &self.shared) {
                     contract.symbol = ac.symbol;
                     contract.sec_type = ac.sec_type;
                     contract.exchange = ac.exchange;
