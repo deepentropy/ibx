@@ -2193,7 +2193,8 @@ fn cancel_scanner_subscription_sends_cancel() {
 
 #[test]
 fn req_historical_news_sends_fetch() {
-    let (client, rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
+    shared.reference.set_news_sources(vec!["BRFG".into()]);
     client.req_historical_news(4, 265598, "BRFG", "2026-01-01", "2026-03-01", 10).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2209,7 +2210,8 @@ fn req_historical_news_sends_fetch() {
 
 #[test]
 fn req_news_article_sends_fetch() {
-    let (client, rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
+    shared.reference.set_news_sources(vec!["BRFG".into()]);
     client.req_news_article(5, "BRFG", "BRFG$12345").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
@@ -2219,6 +2221,34 @@ fn req_news_article_sends_fetch() {
             assert_eq!(article_id, "BRFG$12345");
         }
         _ => panic!("expected FetchNewsArticle"),
+    }
+}
+
+// ibx#459: the reference's local checks of news requests (321), and the
+// 300 cap.
+#[test]
+fn news_request_refusals() {
+    let (client, rx, shared) = test_client();
+    shared.reference.set_news_sources(vec!["BRFG".into(), "DJ-N".into()]);
+    client.req_historical_news(1, 0, "BRFG+BZ", "", "", 5).unwrap();
+    client.req_historical_news(2, 0, "", "", "", 5).unwrap();
+    client.req_historical_news(3, 0, "brfg+DJ-N", "", "", 0).unwrap();
+    client.req_news_article(4, "FLY", "X").unwrap();
+    client.req_news_article(5, "BRFG", "").unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    client.req_historical_news(6, 0, "BRFG+", "", "", 1000).unwrap();
+    let Ok(ControlCommand::FetchHistoricalNews { max_results, .. }) = rx.try_recv() else { panic!("expected a request") };
+    assert_eq!(max_results, 300);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    for want in [
+        "error:1:321:Error validating request.-'ca' : cause - Not subscribed for 'BZ' provider",
+        "error:2:321:Error validating request.-'ca' : cause - Not subscribed for '' provider",
+        "error:3:321:Error validating request.-'ca' : cause - Total results must be > 0",
+        "error:4:321:Error validating request.-'cg' : cause - Not subscribed for 'FLY' provider",
+        "error:5:321:Error validating request.-'cg' : cause - Article ID must not be empty",
+    ] {
+        assert!(w.events.iter().any(|e| e == want), "{want} not in {:?}", w.events);
     }
 }
 

@@ -183,22 +183,35 @@ impl EClient {
     // ── News ──
 
     /// Request historical news headlines. Matches `reqHistoricalNews` in C++.
+    /// The dates are sent as given; at most 300 headlines. A local refusal
+    /// comes back through `error`.
     pub fn req_historical_news(
         &self, req_id: i64, con_id: i64, provider_codes: &str,
         start_time: &str, end_time: &str, max_results: u32,
     ) -> Result<(), String> {
+        let sources = self.shared.reference.news_sources();
+        if let Some((code, text)) = ClientCore::historical_news_refusal(provider_codes, max_results as i64, &sources) {
+            self.shared.orders.push_order_error(req_id as u64, code, text);
+            return Ok(());
+        }
         self.send(ControlCommand::FetchHistoricalNews {
             req_id: req_id as u32,
             con_id: con_id as u32,
             provider_codes: provider_codes.into(),
             start_time: start_time.into(),
             end_time: end_time.into(),
-            max_results,
+            max_results: max_results.min(ClientCore::MAX_NEWS_RESULTS as u32),
         })
     }
 
     /// Request a news article by provider and article ID. Matches `reqNewsArticle` in C++.
+    /// A local refusal comes back through `error`.
     pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &str) -> Result<(), String> {
+        let sources = self.shared.reference.news_sources();
+        if let Some((code, text)) = ClientCore::news_article_refusal(provider_code, article_id, &sources) {
+            self.shared.orders.push_order_error(req_id as u64, code, text);
+            return Ok(());
+        }
         self.send(ControlCommand::FetchNewsArticle {
             req_id: req_id as u32,
             provider_code: provider_code.into(),

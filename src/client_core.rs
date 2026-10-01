@@ -145,6 +145,12 @@ const PNL_QUOTES_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
 /// Last values of a P&L request before its first callback.
 const PNL_NOT_SENT: i64 = i64::MIN;
 
+/// A provider code is a subscribed news source of the session; the lookup
+/// ignores case, as the reference's (ibx#459).
+fn news_source_subscribed(code: &str, sources: &[String]) -> bool {
+    !code.is_empty() && sources.iter().any(|s| s.eq_ignore_ascii_case(code))
+}
+
 /// The reference's account checks of a P&L request (ibx#478): 321 for an
 /// empty account or one this session is not logged in to.
 fn pnl_account_refusal(class: &str, account: &str, own_account: &str) -> Result<(), (i64, String)> {
@@ -2631,6 +2637,42 @@ impl ClientCore {
             number_of_rows: sub.number_of_rows,
             filters,
         })
+    }
+
+    /// Most headlines one historical news request returns (ibx#459).
+    pub const MAX_NEWS_RESULTS: i64 = 300;
+
+    /// The reference's local checks of a historical news request
+    /// (ibx#459), all 321: every requested provider must be a subscribed
+    /// source; the total, capped at 300, must be positive.
+    pub fn historical_news_refusal(provider_codes: &str, total_results: i64, sources: &[String]) -> Option<(i64, String)> {
+        let refuse = |cause: String| Some((321, format!("Error validating request.-'ca' : cause - {}", cause)));
+        // The codes as a Java split on `+`: trailing empty codes dropped,
+        // an empty text is one empty code.
+        let mut codes: Vec<&str> = provider_codes.split('+').collect();
+        if !provider_codes.is_empty() {
+            while codes.last() == Some(&"") { codes.pop(); }
+        }
+        if let Some(code) = codes.into_iter().find(|c| !news_source_subscribed(c, sources)) {
+            return refuse(format!("Not subscribed for '{}' provider", code));
+        }
+        if total_results.min(Self::MAX_NEWS_RESULTS) <= 0 {
+            return refuse("Total results must be > 0".into());
+        }
+        None
+    }
+
+    /// The reference's local checks of a news article request (ibx#459),
+    /// both 321.
+    pub fn news_article_refusal(provider_code: &str, article_id: &str, sources: &[String]) -> Option<(i64, String)> {
+        let refuse = |cause: String| Some((321, format!("Error validating request.-'cg' : cause - {}", cause)));
+        if !news_source_subscribed(provider_code, sources) {
+            return refuse(format!("Not subscribed for '{}' provider", provider_code));
+        }
+        if article_id.is_empty() {
+            return refuse("Article ID must not be empty".into());
+        }
+        None
     }
 
     /// Validate historical-request arguments before anything reaches the

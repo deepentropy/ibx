@@ -263,6 +263,11 @@ impl EClient {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = news_article_options;
         let tx = self.tx()?;
+        let shared = self.shared_state()?;
+        if let Some((code, text)) = ClientCore::news_article_refusal(provider_code, article_id, &shared.reference.news_sources()) {
+            shared.orders.push_order_error(req_id as u64, code, text);
+            return Ok(());
+        }
         send_cmd(py, &tx, ControlCommand::FetchNewsArticle {
             req_id: req_id as u32,
             provider_code: provider_code.to_string(),
@@ -287,13 +292,18 @@ impl EClient {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = historical_news_options;
         let tx = self.tx()?;
+        let shared = self.shared_state()?;
+        if let Some((code, text)) = ClientCore::historical_news_refusal(provider_codes, total_results as i64, &shared.reference.news_sources()) {
+            shared.orders.push_order_error(req_id as u64, code, text);
+            return Ok(());
+        }
         send_cmd(py, &tx, ControlCommand::FetchHistoricalNews {
             req_id: req_id as u32,
             con_id: con_id as u32,
             provider_codes: provider_codes.to_string(),
             start_time: start_date_time.to_string(),
             end_time: end_date_time.to_string(),
-            max_results: total_results as u32,
+            max_results: (total_results as i64).min(ClientCore::MAX_NEWS_RESULTS) as u32,
         })?;
         Ok(())
     }

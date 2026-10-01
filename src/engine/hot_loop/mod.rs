@@ -811,14 +811,14 @@ impl HotLoop {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_historical_news_request(req_id, con_id, &provider_codes, &start_time, &end_time, max_results, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_historical_news_request(req_id, con_id, &provider_codes, &start_time, &end_time, max_results, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
                 ControlCommand::FetchNewsArticle { req_id, provider_code, article_id } => {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_news_article_request(req_id, &provider_code, &article_id, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_news_article_request(req_id, &provider_code, &article_id, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
                 ControlCommand::FetchFundamentalData { req_id, con_id, report_type } => {
@@ -2768,6 +2768,67 @@ mod tests {
         engine.inject_ccp_message(&bulletin("1", "no id", ""));
         let got: Vec<(i32, i32)> = shared.market.drain_news_bulletins().iter().map(|b| (b.msg_id, b.msg_type)).collect();
         assert_eq!(got, [(123, 2), (124, 3), (125, 4), (126, 5), (127, 6), (128, 1), (0, 1)]);
+    }
+
+    /// A news reply frame with `id`, status line and properties.
+    fn news_reply(id: &str, status: &str, props: &str) -> Vec<u8> {
+        let mut zip = Vec::new();
+        zip.extend_from_slice(b"PK\x03\x04");
+        zip.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        zip.extend_from_slice(&(props.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(props.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&5u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(b"ENTRY");
+        zip.extend_from_slice(props.as_bytes());
+        // Codec header with no replaced byte.
+        let mut payload = format!("{status}\n").into_bytes();
+        payload.extend_from_slice(&[0u8; 8]);
+        payload.extend_from_slice(&zip);
+        let xml = format!("<NewsResponse><id>{id}</id></NewsResponse>");
+        let mut msg = crate::protocol::fix::fix_build(&[(35, "U"), (6040, "10032"), (6118, &xml)], 1);
+        msg.truncate(msg.len() - 7); // drop the checksum field
+        msg.extend_from_slice(format!("95={}\x0196=", payload.len()).as_bytes());
+        msg.extend_from_slice(&payload);
+        msg.extend_from_slice(b"\x0110=000\x01");
+        msg
+    }
+
+    // ibx#459: news replies are matched by query id, not in send order;
+    // equal requests share one query and both get the reply; a failed
+    // reply is 10173 / 10172 with no end.
+    #[test]
+    fn news_replies_matched_by_query_id() {
+        let shared = Arc::new(SharedState::new());
+        shared.reference.set_news_sources(vec!["BRFG".into(), "DJ-N".into()]);
+        let (mut engine, mut server, tx) = scanner_engine(&shared);
+        for (req_id, providers) in [(1, "BRFG"), (2, "DJ-N"), (3, "BRFG")] {
+            tx.send(ControlCommand::FetchHistoricalNews {
+                req_id, con_id: 265598, provider_codes: providers.into(),
+                start_time: String::new(), end_time: String::new(), max_results: 5,
+            }).unwrap();
+        }
+        tx.send(ControlCommand::FetchNewsArticle { req_id: 4, provider_code: "BRFG".into(), article_id: "A1".into() }).unwrap();
+        engine.poll_control_commands();
+        let sent = plain_messages_sent(&mut server);
+        assert_eq!(sent.len(), 3, "the equal request shares the query: {sent:?}");
+        assert!(sent[0].contains("<id>1-history;;NewsQuery;;0;;true;;0;;U</id>"), "{}", sent[0]);
+        assert!(sent[1].contains("<id>2-history;"), "{}", sent[1]);
+        assert!(sent[2].contains("<id>4-article_file;"), "{}", sent[2]);
+
+        engine.inject_hmds_message(&news_reply("4-article_file;;NewsQuery;;0;;true;;0;;U", "200", "error_code=Not available\n"));
+        engine.inject_hmds_message(&news_reply("2-history;;NewsQuery;;0;;true;;0;;U", "200",
+            "h\\:0=Dow|2026-03-03 14:02:00.0|DJ-N$1|0|1|DJ-N|265598\nhas_more=1\n"));
+        engine.inject_hmds_message(&news_reply("1-history;;NewsQuery;;0;;true;;0;;U", "500", ""));
+        let news: Vec<(u32, usize, bool)> = shared.reference.drain_historical_news().into_iter()
+            .map(|(r, h, more)| (r, h.len(), more)).collect();
+        assert_eq!(news, [(2, 1, true)]);
+        assert_eq!(errors(&shared), [
+            "4:10172:Failed to request news article:Not available",
+            "1:10173:Failed to request historical news:Request ignored",
+            "3:10173:Failed to request historical news:Request ignored",
+        ]);
+        assert!(engine.hmds.pending_news.is_empty() && engine.hmds.pending_articles.is_empty());
     }
 
     fn subscribe_cmd(con_id: i64, sec_type: &str) -> ControlCommand {

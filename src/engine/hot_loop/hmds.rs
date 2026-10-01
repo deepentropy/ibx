@@ -59,8 +59,13 @@ pub(crate) struct HmdsState {
     pub(crate) scan_size_limits: std::collections::HashMap<String, u32>,
     /// Live scanner subscriptions, matched to results by their id (ibx#457).
     pub(crate) pending_scanner: Vec<ScannerSub>,
-    pub(crate) pending_news: Vec<(String, u32)>,
-    pub(crate) pending_articles: Vec<(String, u32)>,
+    /// News queries in flight, matched to replies by query id (ibx#459).
+    pub(crate) pending_news: Vec<NewsQuery>,
+    pub(crate) pending_articles: Vec<NewsQuery>,
+    /// Number of the last news query; one counter for all news queries.
+    pub(crate) next_news_query: u32,
+    /// Session key of news queries, built at the first one (ibx#459).
+    pub(crate) news_url_key: Option<String>,
     pub(crate) pending_fundamental: Vec<(String, u32)>,
     /// In-flight histogram queries, summed over their frames until the
     /// last one (ibx#433).
@@ -128,6 +133,15 @@ pub(crate) struct ScannerSub {
     pub(crate) sent: bool,
 }
 
+/// One news query in flight (ibx#459). Requests with the same query text
+/// share it, as the reference does, and all get the reply.
+#[derive(Debug, Clone)]
+pub(crate) struct NewsQuery {
+    pub(crate) id: String,
+    pub(crate) req_ids: Vec<u32>,
+    pub(crate) query: String,
+}
+
 /// Scanner notices of the historical data link, as the reference words
 /// them (ibx#457).
 const SCANNER_LINK_LOST: &str = "HMDS server disconnect occurred.  Attempting reconnection...";
@@ -190,6 +204,8 @@ impl HmdsState {
             pending_scanner: Vec::new(),
             pending_news: Vec::new(),
             pending_articles: Vec::new(),
+            next_news_query: 0,
+            news_url_key: None,
             pending_fundamental: Vec::new(),
             pending_histogram: Vec::new(),
             pending_schedule: Vec::new(),
@@ -580,27 +596,9 @@ impl HmdsState {
                             }
                         }
                         "10032" => {
-                            let raw_bytes = extract_raw_tag(msg, 96);
+                            let raw_bytes = extract_raw_tag(msg, 96).unwrap_or_default();
                             if let Some(xml) = parsed.get(&6118) {
-                                let is_article = xml.contains("article_file");
-                                if is_article {
-                                    if let Some(pos) = self.pending_articles.iter().position(|_| true) {
-                                        let (_, req_id) = self.pending_articles.remove(pos);
-                                        if let Some(raw) = &raw_bytes {
-                                            if let Some((atype, text)) = crate::control::news::parse_article_payload(raw) {
-                                                shared.reference.push_news_article(req_id, atype, text);
-                                            }
-                                        }
-                                    }
-                                } else if let Some(pos) = self.pending_news.iter().position(|_| true) {
-                                    let (_, req_id) = self.pending_news.remove(pos);
-                                    if let Some(raw) = &raw_bytes {
-                                        let (headlines, has_more) = crate::control::news::parse_news_payload(raw);
-                                        shared.reference.push_historical_news(req_id, headlines, has_more);
-                                    } else {
-                                        shared.reference.push_historical_news(req_id, Vec::new(), false);
-                                    }
-                                }
+                                self.on_news_reply(xml, &raw_bytes, shared);
                             }
                         }
                         "10012" => {
@@ -1438,53 +1436,100 @@ impl HmdsState {
         }
     }
 
-    pub(crate) fn send_historical_news_request(&mut self, req_id: u32, con_id: u32, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        let query_id = format!("news_{}", self.next_hmds_query_id);
+    /// A news reply, matched to its query by id (ibx#459). A failure is
+    /// 10173 for headlines and 10172 for an article, with no end message.
+    fn on_news_reply(&mut self, xml: &str, raw: &[u8], shared: &SharedState) {
+        let Some(id) = crate::control::news::parse_news_response_id(xml) else {
+            log::warn!("News reply with no query id");
+            return;
+        };
+        if let Some(pos) = self.pending_articles.iter().position(|q| q.id == id) {
+            let query = self.pending_articles.remove(pos);
+            let result = crate::control::news::parse_article_payload(raw);
+            for req_id in query.req_ids {
+                match &result {
+                    Ok((atype, text)) => shared.reference.push_news_article(req_id, *atype, text.clone()),
+                    Err(reason) => shared.reference.push_historical_error(req_id, 10172,
+                        format!("Failed to request news article:{}", reason)),
+                }
+            }
+        } else if let Some(pos) = self.pending_news.iter().position(|q| q.id == id) {
+            let query = self.pending_news.remove(pos);
+            let result = crate::control::news::parse_news_payload(raw);
+            for req_id in query.req_ids {
+                match &result {
+                    Ok((headlines, has_more)) => shared.reference.push_historical_news(req_id, headlines.clone(), *has_more),
+                    Err(reason) => shared.reference.push_historical_error(req_id, 10173,
+                        format!("Failed to request historical news:{}", reason)),
+                }
+            }
+        } else {
+            log::warn!("News reply for no pending query: id={:?}", id);
+        }
+    }
+
+    /// The session key of news queries, built once (ibx#459).
+    fn news_url_key(&mut self, shared: &SharedState) -> String {
+        self.news_url_key.get_or_insert_with(|| {
+            let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs()).unwrap_or(0);
+            crate::control::news::news_url_key(&shared.reference.news_sources(), epoch,
+                rand::random_range(0..1_000_000_000u32))
+        }).clone()
+    }
+
+    /// Send a news query, or join an equal one in flight (ibx#459).
+    fn send_news_query(queries: &mut Vec<NewsQuery>, req_id: u32, id: String, xml: String,
+                       hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        let query = crate::control::news::news_query_text(&xml).to_string();
+        if let Some(q) = queries.iter_mut().find(|q| q.query == query) {
+            q.req_ids.push(req_id);
+            return;
+        }
+        if let Some(conn) = hmds_conn.as_mut() {
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "U"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6040, "10030"),
+                (6118, &xml),
+            ]);
+            hb.last_hmds_sent = Instant::now();
+        }
+        queries.push(NewsQuery { id, req_ids: vec![req_id], query });
+    }
+
+    pub(crate) fn send_historical_news_request(&mut self, req_id: u32, con_id: u32, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+        self.next_news_query += 1;
         let req = crate::control::news::HistoricalNewsRequest {
-            query_id: query_id.clone(),
+            query_id: self.next_news_query.to_string(),
             con_id,
             provider_codes: provider_codes.to_string(),
             start_time: start_time.to_string(),
             end_time: end_time.to_string(),
             max_results,
+            subscribed: shared.reference.news_sources(),
+            url_key: self.news_url_key(shared),
         };
+        let (cmd, _) = crate::control::news::historical_news_command(&req);
+        let id = crate::control::news::news_query_id(&req.query_id, cmd);
         let xml = crate::control::news::build_historical_news_xml(&req);
-        self.next_hmds_query_id += 1;
-        if let Some(conn) = hmds_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "U"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6040, "10030"),
-                (6118, &xml),
-            ]);
-            hb.last_hmds_sent = Instant::now();
-            log::info!("Sent historical news request: req_id={} con_id={}", req_id, con_id);
-        }
-        self.pending_news.push((query_id, req_id));
+        Self::send_news_query(&mut self.pending_news, req_id, id, xml, hmds_conn, hb);
+        log::info!("Sent historical news request: req_id={} con_id={}", req_id, con_id);
     }
 
-    pub(crate) fn send_news_article_request(&mut self, req_id: u32, provider_code: &str, article_id: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        let query_id = format!("art_{}", self.next_hmds_query_id);
+    pub(crate) fn send_news_article_request(&mut self, req_id: u32, provider_code: &str, article_id: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+        self.next_news_query += 1;
         let req = crate::control::news::NewsArticleRequest {
-            query_id: query_id.clone(),
+            query_id: self.next_news_query.to_string(),
             provider_code: provider_code.to_string(),
             article_id: article_id.to_string(),
+            url_key: self.news_url_key(shared),
         };
+        let id = crate::control::news::news_query_id(&req.query_id, "article_file");
         let xml = crate::control::news::build_article_request_xml(&req);
-        self.next_hmds_query_id += 1;
-        if let Some(conn) = hmds_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "U"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6040, "10030"),
-                (6118, &xml),
-            ]);
-            hb.last_hmds_sent = Instant::now();
-            log::info!("Sent news article request: req_id={} article={}", req_id, article_id);
-        }
-        self.pending_articles.push((query_id, req_id));
+        Self::send_news_query(&mut self.pending_articles, req_id, id, xml, hmds_conn, hb);
+        log::info!("Sent news article request: req_id={} article={}", req_id, article_id);
     }
 
     pub(crate) fn send_fundamental_data_request(&mut self, req_id: u32, con_id: u32, report_type: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
