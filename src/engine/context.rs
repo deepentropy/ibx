@@ -114,6 +114,13 @@ pub struct Context {
     /// Subscriptions whose round lot is known, to be sent.
     pub(crate) lot_ready: Vec<crate::engine::hot_loop::farm::MdSubscribe>,
     pub(crate) next_lot_lookup: u32,
+    /// Market data subscriptions given without a conId, waiting for the
+    /// lookup that resolves it: (request number, subscription, deadline)
+    /// (ibx#278).
+    pub(crate) md_lookups: Vec<(u32, crate::engine::hot_loop::farm::MdSubscribe, std::time::Instant)>,
+    /// Subscriptions whose conId was resolved, to be sent.
+    pub(crate) md_resolved: Vec<crate::engine::hot_loop::farm::MdSubscribe>,
+    pub(crate) next_md_lookup: u32,
     /// Final status of orders that left the engine filled, cancelled or
     /// rejected, for the reference's refusal of a later cancel (ibx#464).
     /// Bounded: the oldest are dropped past `FINISHED_ORDERS_MAX`.
@@ -150,6 +157,9 @@ impl Context {
             lot_parked: Vec::new(),
             lot_ready: Vec::new(),
             next_lot_lookup: 0,
+            md_lookups: Vec::new(),
+            md_resolved: Vec::new(),
+            next_md_lookup: 0,
             finished_orders: HashMap::new(),
             finished_order_ids: std::collections::VecDeque::new(),
             account: AccountState::default(),

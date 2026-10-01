@@ -882,6 +882,8 @@ impl ClientCore {
 
     /// Register a market data subscription mapping.
     /// If `generic_tick_list` contains "292", also subscribes to per-contract news.
+    /// A contract without a conId is looked up by the engine first, as the
+    /// reference does, with the currency and `filters` (ibx#278).
     pub fn register_mkt_data(
         &self,
         _shared: &SharedState,
@@ -891,14 +893,16 @@ impl ClientCore {
         symbol: &str,
         exchange: &str,
         sec_type: &str,
-        last_trade_date: &str,
-        strike: f64,
-        right: &str,
-        multiplier: &str,
+        currency: &str,
+        filters: &crate::types::SecDefFilters,
         snapshot: bool,
         generic_tick_list: &str,
         mode_9887: i32,
     ) -> Result<InstrumentId, String> {
+        let (last_trade_date, strike, right, multiplier) = (
+            filters.last_trade_date_or_contract_month.as_str(), filters.strike,
+            filters.right.as_str(), filters.multiplier.as_str(),
+        );
         // News subscription if generic_tick_list contains 292
         let wants_news = generic_tick_list.split(',')
             .any(|t| t.trim() == "292" || t.trim() == "mdoff,292" || t.trim().ends_with("292"));
@@ -916,6 +920,32 @@ impl ClientCore {
         // subscription: no second subscription to the server.
         if let Some(instrument_id) = self.pnl_quotes.lock().unwrap().active.remove(&con_id) {
             self.con_id_to_instrument.lock().unwrap().insert(con_id, instrument_id);
+            self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
+            self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
+            if snapshot {
+                self.snapshot_reqs.lock().unwrap().insert(req_id);
+            }
+            if wants_news {
+                self.news_instruments.lock().unwrap().insert(instrument_id);
+            }
+            return Ok(instrument_id);
+        }
+
+        // No conId: not an identity. The engine gives the request its own
+        // slot and resolves the conId before it subscribes (ibx#278); the
+        // only duplicate check is the one on the request id.
+        if con_id == 0 {
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            control_tx.send(ControlCommand::SubscribeBySymbol {
+                symbol: symbol.to_string(),
+                sec_type: sec_type.to_string(),
+                exchange: exchange.to_string(),
+                currency: currency.to_string(),
+                filters: filters.clone(),
+                mode_9887,
+                reply_tx: Some(reply_tx),
+            }).map_err(|e| format!("Engine stopped: {}", e))?;
+            let instrument_id = Self::recv_registration(reply_rx)?;
             self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
             self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
             if snapshot {
@@ -1468,6 +1498,8 @@ impl ClientCore {
             MdReject::NotSubscribed { delayed_available: true, .. } =>
                 (354, "Requested market data is not subscribed. Delayed market data is available.", true),
             MdReject::NotSubscribed { .. } => (354, "Requested market data is not subscribed.", true),
+            MdReject::NoSecurityDefinition { .. } =>
+                (200, crate::engine::hot_loop::ccp::NO_SECURITY_DEFINITION, true),
         }
     }
 

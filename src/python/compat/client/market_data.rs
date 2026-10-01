@@ -35,26 +35,40 @@ impl EClient {
             return Ok(());
         }
 
+        let filters = SecDefFilters {
+            primary_exchange: contract.primary_exchange.clone(),
+            local_symbol: contract.local_symbol.clone(),
+            last_trade_date_or_contract_month: contract.last_trade_date_or_contract_month.clone(),
+            strike: contract.strike,
+            right: contract.right.clone(),
+            multiplier: contract.multiplier.clone(),
+            trading_class: contract.trading_class.clone(),
+            sec_id: contract.sec_id.clone(),
+            sec_id_type: contract.sec_id_type.clone(),
+            include_expired: contract.include_expired,
+        };
         // The registration waits for the engine: interpreter lock released
         // (ibx#271).
         py.detach(|| self.core.register_mkt_data(
             &shared, &tx, req_id,
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
-            &contract.last_trade_date_or_contract_month, contract.strike, &contract.right, &contract.multiplier,
-            snapshot, generic_tick_list, 0,
+            &contract.currency, &filters, snapshot, generic_tick_list, 0,
         )).map_err(|e| PyRuntimeError::new_err(e))?;
-        self.core.cache_contract(contract.con_id, crate::api::types::Contract {
-            con_id: contract.con_id,
-            symbol: contract.symbol.clone(),
-            sec_type: contract.sec_type.clone(),
-            exchange: contract.exchange.clone(),
-            currency: contract.currency.clone(),
-            last_trade_date_or_contract_month: contract.last_trade_date_or_contract_month.clone(),
-            strike: contract.strike,
-            right: contract.right.clone(),
-            multiplier: contract.multiplier.clone(),
-            ..Default::default()
-        });
+        // A contract without a conId has no identity to cache (ibx#278).
+        if contract.con_id != 0 {
+            self.core.cache_contract(contract.con_id, crate::api::types::Contract {
+                con_id: contract.con_id,
+                symbol: contract.symbol.clone(),
+                sec_type: contract.sec_type.clone(),
+                exchange: contract.exchange.clone(),
+                currency: contract.currency.clone(),
+                last_trade_date_or_contract_month: contract.last_trade_date_or_contract_month.clone(),
+                strike: contract.strike,
+                right: contract.right.clone(),
+                multiplier: contract.multiplier.clone(),
+                ..Default::default()
+            });
+        }
 
         let _ = (regulatory_snapshot, mkt_data_options);
 

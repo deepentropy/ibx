@@ -64,6 +64,56 @@ pub(crate) fn sweep_round_lot_lookups(context: &mut Context) {
     }
 }
 
+/// How long a market data request without a conId waits for its lookup;
+/// then error 200, as for a contract lookup with no reply (ibx#278).
+pub(crate) const MD_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Request numbers of those lookups: a range of their own, below the
+/// internal lookups' range and far above caller request ids (ibx#278).
+pub(crate) const MD_LOOKUP_FIRST_ID: u32 = 0xE000_0000;
+pub(crate) const MD_LOOKUP_IDS: u32 = 0x1000_0000;
+
+/// A definition reply for the conId lookup of a market data request
+/// (ibx#278). Exactly one contract: its conId is set on the instrument
+/// and the subscription goes on; else error 200 and it ends, as the
+/// reference. False when the reply is not for such a lookup.
+pub(crate) fn md_contract_reply(context: &mut Context, shared: &SharedState, req_id: &str, msg: &[u8]) -> bool {
+    // The reply names the lookup as it was asked; its number is the key.
+    let Some(number) = crate::control::contracts::secdef_request_number(req_id) else { return false };
+    let Some(idx) = context.md_lookups.iter().position(|(id, _, _)| *id == number) else { return false };
+    let (_, mut sub, _) = context.md_lookups.remove(idx);
+    // A reply can list one contract once per exchange.
+    let mut con_ids: Vec<i64> = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default()
+        .iter().map(|d| d.con_id as i64).filter(|c| *c != 0).collect();
+    con_ids.sort_unstable();
+    con_ids.dedup();
+    if let [con_id] = con_ids[..] {
+        log::info!("Market data for {} {}: conId {} ({})", sub.symbol, sub.sec_type, con_id, req_id);
+        context.market.resolve_con_id(sub.instrument, con_id);
+        sub.con_id = con_id;
+        context.md_resolved.push(sub);
+    } else {
+        log::warn!("Market data for {} {}: the lookup found {} contracts ({}): error 200",
+            sub.symbol, sub.sec_type, con_ids.len(), req_id);
+        shared.market.push_md_reject(crate::bridge::MdReject::NoSecurityDefinition { instrument: sub.instrument });
+    }
+    true
+}
+
+/// conId lookups with no reply in time end their subscription with error
+/// 200 (ibx#278).
+pub(crate) fn sweep_md_lookups(context: &mut Context, shared: &SharedState) {
+    if context.md_lookups.is_empty() { return; }
+    let now = Instant::now();
+    context.md_lookups.retain(|(id, sub, deadline)| {
+        if *deadline > now { return true; }
+        log::warn!("Market data for {} {}: no lookup reply within {:?} ({}): error 200",
+            sub.symbol, sub.sec_type, MD_LOOKUP_TIMEOUT, id);
+        shared.market.push_md_reject(crate::bridge::MdReject::NoSecurityDefinition { instrument: sub.instrument });
+        false
+    });
+}
+
 fn release_lot_parked(context: &mut Context, con_id: i64, lot: i64) {
     let (ready, parked): (Vec<MdSubscribe>, Vec<MdSubscribe>) =
         std::mem::take(&mut context.lot_parked).into_iter().partition(|s| s.con_id == con_id);
@@ -438,6 +488,12 @@ impl FarmState {
         // Always the BID_ASK (442) + LAST (443) pair, as the reference; a
         // frozen / delayed mode rides 9887 on each entry, never 264=1
         // (ibx#447, captured 28/09/2026).
+        // The reference always subscribes by conId; one without it is
+        // resolved first (ibx#278).
+        if con_id <= 0 {
+            log::error!("Market data subscribe for instrument {} without a conId: not sent", instrument);
+            return;
+        }
         let realtime = mode_9887 == 0;
         let bid_ask_id = self.next_md_req_id;
         let last_id = self.next_md_req_id + 1;
@@ -468,58 +524,23 @@ impl FarmState {
 
             let no_related_sym = "2";
 
-            // When con_id is known, use the proven minimal format (con_id + BEST + CS).
-            // The server resolves the full contract details from con_id regardless of sec_type.
-            // When con_id is 0, include descriptive fields so the server can resolve by description.
-            if con_id > 0 {
-                let mut tags: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                    (fix::TAG_SENDING_TIME, &ts),
-                    (263, "1"),
-                    (146, no_related_sym),
-                ];
-                for (req_str, depth) in [(&bid_ask_str, "442"), (&last_str, "443")] {
-                    tags.push((262, req_str));
-                    tags.push((6008, &con_id_str));
-                    tags.push((207, "BEST"));
-                    tags.push((167, "CS"));
-                    tags.push((264, depth));
-                    tags.push((6088, "Socket"));
-                    if !realtime { tags.push((9887, &mode_str)); }
-                    tags.push((9830, "1"));
-                }
-                let _ = conn.send_fixcomp(&tags);
-            } else {
-                // No con_id — send descriptive fields
-                let fix_exchange = crate::control::contracts::exchange_to_fix(exchange);
-                let fix_sec_type = match sec_type {
-                    "STK" => "CS", "FUT" => "FUT", "OPT" => "OPT", "IND" => "IND",
-                    "CASH" => "CASH", other => other,
-                };
-                let strike_str = if strike > 0.0 { strike.to_string() } else { String::new() };
-                let mut tags: Vec<(u32, &str)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                    (fix::TAG_SENDING_TIME, &ts),
-                    (263, "1"),
-                    (146, no_related_sym),
-                ];
-                let entries: &[(&String, &str)] = &[(&bid_ask_str, "442"), (&last_str, "443")];
-                for (req_str, depth) in entries {
-                    tags.push((262, req_str));
-                    tags.push((55, symbol));
-                    tags.push((207, fix_exchange));
-                    tags.push((167, fix_sec_type));
-                    if !last_trade_date.is_empty() { tags.push((200, last_trade_date)); }
-                    if strike > 0.0 { tags.push((202, &strike_str)); }
-                    if !right.is_empty() { tags.push((201, right)); }
-                    if !multiplier.is_empty() { tags.push((231, multiplier)); }
-                    tags.push((264, depth));
-                    tags.push((6088, "Socket"));
-                    if !realtime { tags.push((9887, &mode_str)); }
-                    tags.push((9830, "1"));
-                }
-                let _ = conn.send_fixcomp(&tags);
+            let mut tags: Vec<(u32, &str)> = vec![
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+                (fix::TAG_SENDING_TIME, &ts),
+                (263, "1"),
+                (146, no_related_sym),
+            ];
+            for (req_str, depth) in [(&bid_ask_str, "442"), (&last_str, "443")] {
+                tags.push((262, req_str));
+                tags.push((6008, &con_id_str));
+                tags.push((207, "BEST"));
+                tags.push((167, "CS"));
+                tags.push((264, depth));
+                tags.push((6088, "Socket"));
+                if !realtime { tags.push((9887, &mode_str)); }
+                tags.push((9830, "1"));
             }
+            let _ = conn.send_fixcomp(&tags);
             log::info!("Sent 35=V subscribe (9887={}): con_id={} sec_type={} ids={},{} seq={}",
                 mode_9887, con_id, sec_type, bid_ask_id, last_id, conn.seq);
             hb.last_farm_sent = Instant::now();

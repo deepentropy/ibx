@@ -359,10 +359,7 @@ impl EClient {
 
         // Subscriptions the server rejected (ibx#444, ibx#447).
         for reject in shared.market.drain_md_rejects() {
-            let instrument = match reject {
-                crate::bridge::MdReject::Delayed { instrument }
-                | crate::bridge::MdReject::NotSubscribed { instrument, .. } => instrument,
-            };
+            let instrument = reject.instrument();
             let req_id = self.core.req_id_for_instrument(instrument);
             if req_id < 0 { continue; }
             let (code, text, gone) = crate::client_core::ClientCore::md_reject_error(&reject);

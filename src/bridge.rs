@@ -219,6 +219,20 @@ pub enum MdReject {
     /// text when the server says so) or 10089 (an API subscription is
     /// needed).
     NotSubscribed { instrument: InstrumentId, delayed_available: bool, needs_api_subscription: bool },
+    /// A subscription given without a conId whose lookup found no single
+    /// contract: error 200, the subscription is gone (ibx#278).
+    NoSecurityDefinition { instrument: InstrumentId },
+}
+
+impl MdReject {
+    /// The instrument of the rejected subscription.
+    pub fn instrument(&self) -> InstrumentId {
+        match *self {
+            MdReject::Delayed { instrument }
+            | MdReject::NotSubscribed { instrument, .. }
+            | MdReject::NoSecurityDefinition { instrument } => instrument,
+        }
+    }
 }
 
 impl MarketDataState {

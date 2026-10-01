@@ -1473,6 +1473,17 @@ pub enum ControlCommand {
         mode_9887: i32,
         reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>>,
     },
+    /// Subscribe to market data for a contract given without a conId
+    /// (ibx#278): the engine looks the contract up first, as the
+    /// reference does, then subscribes with the conId found. The reply
+    /// gives the instrument at once; a lookup that finds no single contract
+    /// ends the subscription with error 200.
+    SubscribeBySymbol {
+        symbol: String, sec_type: String, exchange: String, currency: String,
+        filters: SecDefFilters,
+        mode_9887: i32,
+        reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>>,
+    },
     /// Unsubscribe from market data for an instrument.
     Unsubscribe { instrument: InstrumentId },
     /// The client's reqMarketDataType (1..4), applied to the engine's

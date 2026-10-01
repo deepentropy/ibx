@@ -242,7 +242,25 @@ impl HotLoop {
         exchange: &str,
         reply_tx: &Option<crossbeam_channel::Sender<Result<InstrumentId, String>>>,
     ) -> Option<InstrumentId> {
-        match self.context.market.try_register(con_id) {
+        self.register_slot_or_reject(Some(con_id), symbol, sec_type, exchange, reply_tx)
+    }
+
+    /// `register_or_reject` for a slot keyed by its conId, or (None) a slot
+    /// of its own for a contract whose conId is not known yet (ibx#278).
+    fn register_slot_or_reject(
+        &mut self,
+        con_id: Option<i64>,
+        symbol: String,
+        sec_type: &str,
+        exchange: &str,
+        reply_tx: &Option<crossbeam_channel::Sender<Result<InstrumentId, String>>>,
+    ) -> Option<InstrumentId> {
+        let con_id_log = con_id.unwrap_or(0);
+        let registered = match con_id {
+            Some(con_id) => self.context.market.try_register(con_id),
+            None => self.context.market.try_register_unresolved(),
+        };
+        match registered {
             Some(id) => {
                 self.context.market.set_symbol(id, symbol);
                 self.context.market.set_routing(id, sec_type, exchange);
@@ -251,7 +269,7 @@ impl HotLoop {
                 Some(id)
             }
             None => {
-                log::error!("Instrument table full: rejecting registration for con_id={}", con_id);
+                log::error!("Instrument table full: rejecting registration for con_id={}", con_id_log);
                 if let Some(tx) = reply_tx {
                     let _ = tx.send(Err(format!(
                         "instrument table full: {} contracts are live concurrently; \
@@ -327,9 +345,51 @@ impl HotLoop {
         self.ccp.sweep_scanner_enrichments(&self.shared);
         self.ccp.sweep_contract_details(&self.shared, &self.event_tx, &mut self.ccp_conn, &mut self.hb);
         order_builder::sweep_rth_lookups(&mut self.context);
+        farm::sweep_md_lookups(&mut self.context, &self.shared);
+        self.send_md_resolved();
         farm::sweep_round_lot_lookups(&mut self.context);
         self.send_lot_ready();
         self.hmds.sweep_pending_historical(&self.shared);
+    }
+
+    /// A market data subscription without a conId (ibx#278): the contract
+    /// is looked up by symbol first, as the reference does, and the
+    /// subscription waits for the reply.
+    fn lookup_md_contract(&mut self, sub: farm::MdSubscribe, currency: String, filters: crate::types::SecDefFilters) {
+        // Asked in the reference's named form, as a contract lookup, with a
+        // number from a range of its own so its reply is never taken for
+        // a caller's lookup.
+        let req_id = farm::MD_LOOKUP_FIRST_ID + self.context.next_md_lookup % farm::MD_LOOKUP_IDS;
+        self.context.next_md_lookup = self.context.next_md_lookup.wrapping_add(1);
+        let lookup = ccp::SymbolLookup {
+            symbol: sub.symbol.clone(),
+            sec_type: sub.sec_type.clone(),
+            exchange: sub.exchange.clone(),
+            currency,
+            filters,
+        };
+        let strike = if lookup.filters.strike > 0.0 { format!("{}", lookup.filters.strike) } else { String::new() };
+        match self.ccp_conn.as_mut().filter(|_| !self.ccp.disconnected) {
+            Some(conn) => {
+                ccp::send_symbol_lookup_on(conn, req_id, &lookup, &strike);
+                self.hb.last_ccp_sent = Instant::now();
+                log::info!("Market data for {} {}: contract lookup ({})", sub.symbol, sub.sec_type, req_id);
+            }
+            // The deadline still ends it with error 200.
+            None => log::warn!("No auth connection to look up {} {} for market data ({})", sub.symbol, sub.sec_type, req_id),
+        }
+        self.context.md_lookups.push((req_id, sub, Instant::now() + farm::MD_LOOKUP_TIMEOUT));
+    }
+
+    /// Send the subscriptions whose conId was resolved (ibx#278), through
+    /// the round-lot step as any other.
+    fn send_md_resolved(&mut self) {
+        if self.context.md_resolved.is_empty() { return; }
+        for sub in std::mem::take(&mut self.context.md_resolved) {
+            if !self.park_for_round_lot(&sub) {
+                self.farm.send_md_subscribe(&sub, &mut self.farm_conn, &mut self.hb);
+            }
+        }
     }
 
     /// Send the subscriptions whose round lot came in (ibx#287).
@@ -352,7 +412,9 @@ impl HotLoop {
             return;
         }
         if self.farm.has_md_subscription(instrument)
-            || self.context.lot_parked.iter().chain(&self.context.lot_ready).any(|s| s.instrument == instrument)
+            || self.context.lot_parked.iter().chain(&self.context.lot_ready).chain(&self.context.md_resolved)
+                .chain(self.context.md_lookups.iter().map(|(_, s, _)| s))
+                .any(|s| s.instrument == instrument)
         {
             return;
         }
@@ -576,14 +638,33 @@ impl HotLoop {
         for cmd in cmds {
             match cmd {
                 ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, reply_tx } => {
-                    if let Some(id) = self.register_or_reject(con_id, symbol.clone(), &sec_type, &exchange, &reply_tx) {
+                    // No conId: resolved first, as the reference (ibx#278).
+                    let key = (con_id != 0).then_some(con_id);
+                    if let Some(id) = self.register_slot_or_reject(key, symbol.clone(), &sec_type, &exchange, &reply_tx) {
+                        let filters = crate::types::SecDefFilters {
+                            last_trade_date_or_contract_month: last_trade_date.clone(), strike,
+                            right: right.clone(), multiplier: multiplier.clone(), ..Default::default()
+                        };
                         let sub = farm::MdSubscribe {
                             con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier,
                             instrument: id, mode_9887,
                         };
-                        if !self.park_for_round_lot(&sub) {
+                        if con_id == 0 {
+                            self.lookup_md_contract(sub, String::new(), filters);
+                        } else if !self.park_for_round_lot(&sub) {
                             self.farm.send_md_subscribe(&sub, &mut self.farm_conn, &mut self.hb);
                         }
+                    }
+                }
+                ControlCommand::SubscribeBySymbol { symbol, sec_type, exchange, currency, filters, mode_9887, reply_tx } => {
+                    if let Some(id) = self.register_slot_or_reject(None, symbol.clone(), &sec_type, &exchange, &reply_tx) {
+                        let sub = farm::MdSubscribe {
+                            con_id: 0, symbol, exchange, sec_type,
+                            last_trade_date: filters.last_trade_date_or_contract_month.clone(),
+                            strike: filters.strike, right: filters.right.clone(), multiplier: filters.multiplier.clone(),
+                            instrument: id, mode_9887,
+                        };
+                        self.lookup_md_contract(sub, currency, filters);
                     }
                 }
                 ControlCommand::SetMarketDataType { market_data_type } => {
@@ -593,6 +674,8 @@ impl HotLoop {
                     // Not sent yet: nothing to cancel on the farm.
                     self.context.lot_parked.retain(|s| s.instrument != instrument);
                     self.context.lot_ready.retain(|s| s.instrument != instrument);
+                    self.context.md_lookups.retain(|(_, s, _)| s.instrument != instrument);
+                    self.context.md_resolved.retain(|s| s.instrument != instrument);
                     self.farm.send_mktdata_unsubscribe(
                         instrument,
                         &mut self.farm_conn,
@@ -2405,6 +2488,69 @@ mod tests {
         let sent = farm_messages_sent(&mut farm_side);
         assert_eq!(sent.len(), 3, "two cancels, then the new subscription: {sent:?}");
         assert!(sent[2].contains("6008=265598|"), "{}", sent[2]);
+    }
+
+    // ibx#278 (captured E6): two requests with no conId get their own
+    // slots, a lookup each, then a subscription by the conId found; both
+    // run side by side. A lookup that finds several contracts ends its
+    // request with error 200 and sends nothing.
+    #[test]
+    fn a_request_without_con_id_is_resolved_first() {
+        use crate::control::contracts::tests::pipe_msg;
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (c1, mut farm_side) = socket_pair();
+        let (c2, mut ccp_side) = socket_pair();
+        engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
+        engine.ccp_conn = Some(Connection::new_raw(c2).unwrap());
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+        let by_symbol = |symbol: &str, sec_type: &str, reply: crossbeam_channel::Sender<Result<InstrumentId, String>>| {
+            ControlCommand::SubscribeBySymbol {
+                symbol: symbol.into(), sec_type: sec_type.into(), exchange: "SMART".into(), currency: "USD".into(),
+                filters: Default::default(), mode_9887: 0, reply_tx: Some(reply),
+            }
+        };
+        let (r1, a1) = crossbeam_channel::bounded(1);
+        let (r2, a2) = crossbeam_channel::bounded(1);
+        let (r3, a3) = crossbeam_channel::bounded(1);
+        tx.send(by_symbol("QQQ", "STK", r1)).unwrap();
+        tx.send(by_symbol("SPY", "STK", r2)).unwrap();
+        tx.send(by_symbol("MNQ", "FUT", r3)).unwrap();
+        engine.poll_once();
+        let (qqq, spy, mnq) = (a1.recv().unwrap().unwrap(), a2.recv().unwrap().unwrap(), a3.recv().unwrap().unwrap());
+        assert!(qqq != spy && spy != mnq && qqq != mnq, "a slot each");
+        let asked = plain_messages_sent(&mut ccp_side);
+        assert_eq!(asked.len(), 3, "{asked:?}");
+        assert!(asked[0].contains("|35=c|") && asked[0].contains("|321=2|6088=Socket|55=QQQ|167=CS|100=BEST|15=USD|"), "{}", asked[0]);
+        assert!(farm_messages_sent(&mut farm_side).is_empty(), "nothing subscribed before the conId is known");
+        let ids: Vec<String> = asked.iter()
+            .map(|m| m.split('|').find_map(|p| p.strip_prefix("320=")).unwrap().to_string()).collect();
+
+        let reply = |id: &str, body: &str| pipe_msg(&format!("35=d|43=N|320={id}|322=*|323=4|{body}"));
+        let mut context = std::mem::replace(&mut engine.context, Context::new());
+        assert!(farm::md_contract_reply(&mut context, &shared, &ids[0],
+            &reply(&ids[0], "55=QQQ|167=STK|207=BEST|6008=320227571|15=USD|55=QQQ|167=STK|207=NASDAQ|6008=320227571|15=USD|")));
+        assert!(farm::md_contract_reply(&mut context, &shared, &ids[1],
+            &reply(&ids[1], "55=SPY|167=STK|207=BEST|6008=756733|15=USD|")));
+        assert!(farm::md_contract_reply(&mut context, &shared, &ids[2],
+            &reply(&ids[2], "55=MNQ|167=FUT|207=CME|6008=815824267|55=MNQ|167=FUT|207=CME|6008=840227399|")));
+        engine.context = context;
+        engine.send_md_resolved();
+
+        let sent = farm_messages_sent(&mut farm_side);
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent[0].contains("6008=320227571|") && sent[1].contains("6008=756733|"), "{sent:?}");
+        assert!(!sent.iter().any(|m| m.contains("|55=")), "never a descriptive request: {sent:?}");
+        assert_eq!(engine.context.market.instrument_by_con_id(320227571), Some(qqq));
+        assert_eq!(engine.context.market.instrument_by_con_id(756733), Some(spy));
+        assert_eq!(shared.market.drain_md_rejects(), [crate::bridge::MdReject::NoSecurityDefinition { instrument: mnq }]);
+
+        // The client cancels the refused request: its slot is freed.
+        tx.send(ControlCommand::Unsubscribe { instrument: mnq }).unwrap();
+        engine.poll_once();
+        assert_eq!(engine.context.market.con_id(mnq), None);
+        assert_eq!(engine.context.market.con_id(qqq), Some(320227571));
     }
 
     // ibx#291: dropping the tick-by-tick or news consumer of a contract

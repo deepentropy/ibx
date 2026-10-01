@@ -398,6 +398,18 @@ fn secdef_by_symbol_fields(req_id: u32, lookup: &SymbolLookup, strike: &str) -> 
     fields
 }
 
+/// Write one by-symbol lookup on `conn` (ibx#410; also the conId lookup of
+/// a market data request, ibx#278).
+pub(crate) fn send_symbol_lookup_on(conn: &mut Connection, req_id: u32, lookup: &SymbolLookup, strike: &str) {
+    let ts = chrono_free_timestamp();
+    let body = secdef_by_symbol_fields(req_id, lookup, strike);
+    let mut fields: Vec<(u32, &str)> = Vec::with_capacity(body.len() + 1);
+    fields.push((fix::TAG_MSG_TYPE, "c"));
+    fields.push((fix::TAG_SENDING_TIME, &ts));
+    fields.extend(body.iter().skip(1).map(|(t, v)| (*t, v.as_str())));
+    let _ = conn.send_fix(&fields);
+}
+
 /// One contract_details row.
 fn push_contract_row(
     shared: &SharedState,
@@ -2062,13 +2074,7 @@ impl CcpState {
     /// Send one by-symbol lookup with the strike text given (empty: none).
     fn send_symbol_lookup(&mut self, req_id: u32, lookup: &SymbolLookup, strike: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         if let Some(conn) = ccp_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let body = secdef_by_symbol_fields(req_id, lookup, strike);
-            let mut fields: Vec<(u32, &str)> = Vec::with_capacity(body.len() + 1);
-            fields.push((fix::TAG_MSG_TYPE, "c"));
-            fields.push((fix::TAG_SENDING_TIME, &ts));
-            fields.extend(body.iter().skip(1).map(|(t, v)| (*t, v.as_str())));
-            let _ = conn.send_fix(&fields);
+            send_symbol_lookup_on(conn, req_id, lookup, strike);
             log::info!("Sent secdef lookup: req_id={} symbol={} sec_type={} identifier={}",
                 req_id, lookup.symbol, lookup.sec_type, lookup.is_identifier());
             hb.last_ccp_sent = Instant::now();
@@ -2135,6 +2141,8 @@ impl CcpState {
             if super::order_builder::rth_definition_reply(context, rid, msg) { return; }
             // Asked for a round lot (ibx#287): not a user reply.
             if super::farm::round_lot_reply(context, rid, msg) { return; }
+            // Asked for the conId of a market data request (ibx#278).
+            if super::farm::md_contract_reply(context, shared, rid, msg) { return; }
         }
         let rules = contracts::parse_market_rules(msg);
         if !rules.is_empty() {

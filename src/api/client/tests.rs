@@ -211,6 +211,28 @@ fn req_mkt_data_sends_register_and_subscribe() {
     }
 }
 
+// ibx#278: a contract with no conId is no identity: each symbol-only
+// request goes to the engine for a lookup, with its currency and contract
+// fields, and is never refused by the conId duplicate guard.
+#[test]
+fn symbol_only_requests_are_looked_up_not_keyed_on_con_id_0() {
+    let (client, rx, _shared) = test_client();
+    // A live request under conId 0, as the old keying left it.
+    client.core.con_id_to_instrument.lock().unwrap().insert(0, 3);
+    client.core.instrument_to_req.lock().unwrap().insert(3, 1);
+    for (req, symbol) in [(2, "QQQ"), (4, "SPY")] {
+        let c = Contract { symbol: symbol.into(), sec_type: "STK".into(), exchange: "SMART".into(),
+            currency: "USD".into(), primary_exchange: "NASDAQ".into(), ..Default::default() };
+        let r = client.req_mkt_data(req, &c, "", false, false);
+        assert!(!r.as_ref().is_err_and(|e| e.contains("already has a live")), "{r:?}");
+    }
+    let sent: Vec<(String, String, String)> = rx.try_iter().map(|c| match c {
+        ControlCommand::SubscribeBySymbol { symbol, currency, filters, .. } => (symbol, currency, filters.primary_exchange),
+        other => panic!("expected SubscribeBySymbol, got {:?}", other),
+    }).collect();
+    assert_eq!(sent, [("QQQ".into(), "USD".into(), "NASDAQ".into()), ("SPY".into(), "USD".into(), "NASDAQ".into())]);
+}
+
 #[test]
 fn req_mkt_data_defaults_to_realtime_mode() {
     let (client, rx, _shared) = test_client();

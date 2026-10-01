@@ -134,6 +134,36 @@ impl MarketState {
         Some(id)
     }
 
+    /// A slot for a contract given without a conId (ibx#278): never shared
+    /// and not found by conId until `resolve_con_id`; conId 0 until then.
+    /// None when the table is full.
+    pub fn try_register_unresolved(&mut self) -> Option<InstrumentId> {
+        let id = match self.free_ids.pop() {
+            Some(id) => id,
+            None => {
+                if (self.active_count as usize) >= MAX_INSTRUMENTS {
+                    return None;
+                }
+                let id = self.active_count;
+                self.active_count += 1;
+                id
+            }
+        };
+        self.instrument_to_con_id[id as usize] = 0;
+        Some(id)
+    }
+
+    /// The conId a lookup found for an unresolved slot (ibx#278). When
+    /// another slot already has that conId, lookups by conId keep finding
+    /// the other one.
+    pub fn resolve_con_id(&mut self, instrument: InstrumentId, con_id: i64) {
+        if self.con_id(instrument).is_none() {
+            return;
+        }
+        self.instrument_to_con_id[instrument as usize] = con_id;
+        self.con_id_to_instrument.entry(con_id).or_insert(instrument);
+    }
+
     /// Register an IB contract, returns the assigned InstrumentId.
     /// Panics when the table is full — use `try_register` on any path that
     /// must survive that condition (the engine's handlers do; ibx#233).
@@ -157,7 +187,11 @@ impl MarketState {
         if con_id == FREE_SLOT {
             return None;
         }
-        self.con_id_to_instrument.remove(&con_id);
+        // Only its own entry: an unresolved slot has none, and a resolved
+        // one can share its conId with another slot (ibx#278).
+        if self.con_id_to_instrument.get(&con_id) == Some(&instrument) {
+            self.con_id_to_instrument.remove(&con_id);
+        }
         self.instrument_to_con_id[instrument as usize] = FREE_SLOT;
         self.quotes[instrument as usize] = Quote::default();
         self.symbols[instrument as usize] = None;
