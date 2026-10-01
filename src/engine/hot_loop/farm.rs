@@ -596,6 +596,10 @@ impl FarmState {
             }
             None => return,
         };
+        // A late ack for a cancelled request id then matches nothing and is
+        // dropped, as the reference does: it can never bind to the contract
+        // that reuses this slot (ibx#289).
+        self.md_req_to_instrument.retain(|(r, _)| !reqs.contains(r));
 
         let conn = match farm_conn.as_mut() {
             Some(c) => c,
@@ -1235,6 +1239,30 @@ mod tests {
         let q = shared.market.quote(id);
         assert_eq!(q.last_size, 100 * QTY_SCALE); // 250 x 0.01 x 40
         assert_eq!(q.volume, 50 * QTY_SCALE); // 5000 x 0.01
+    }
+
+    // ibx#289: an ack that comes after the unsubscribe binds nothing, also
+    // when the slot went to another contract meanwhile.
+    #[test]
+    fn late_ack_after_unsubscribe_binds_nothing() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let id = context.market.register(265598);
+        farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "", id, 0, &mut None, &mut hb);
+        let ids: Vec<u32> = farm.md_req_to_instrument.iter().map(|(r, _)| *r).collect();
+        assert_eq!(ids.len(), 2);
+        farm.send_mktdata_unsubscribe(id, &mut None, &mut hb);
+        assert!(farm.md_req_to_instrument.is_empty());
+
+        // The slot is reused by another contract, then the late ack lands.
+        context.market.unregister(id);
+        let other = context.market.register(4391);
+        assert_eq!(other, id);
+        let ack = format!("8=O\x0135=Q\x011101,{},0.25,0,3,5,,1,1", ids[0]);
+        farm.handle_subscription_ack(ack.as_bytes(), &mut context);
+        assert_eq!(context.market.instrument_by_server_tag(1101), None);
+        assert_eq!(context.market.min_tick(other), 0.0);
     }
 
     // ibx#287: a definition reply sets the round lot and releases the
