@@ -801,7 +801,7 @@ fn run_submit_cancel_phase_inner(
     }
     if order_rejected {
         if let Some(reason) = reference_reject.filter(|r| is_reference_reject(&order_errors, r)) {
-            println!("  PASS (rejected by the server as the reference: 201 Order rejected - reason:{})
+            pass!("  PASS (rejected by the server as the reference: 201 Order rejected - reason:{})
 ", reason);
         } else {
             record_rejection_with(phase_name, &order_errors);

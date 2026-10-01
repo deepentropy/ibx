@@ -619,7 +619,7 @@ pub(super) fn phase_limit_fok(conns: Conns) -> Conns {
         let errors: Vec<(i64, String)> = shared.orders.drain_order_errors()
             .into_iter().map(|(_, code, text)| (code, text)).collect();
         if is_reference_reject(&errors, FOK_REFERENCE_REJECT) {
-            println!("  PASS (rejected by the server as the reference: {})
+            pass!("  PASS (rejected by the server as the reference: {})
 ", FOK_REFERENCE_REJECT);
         } else {
             record_rejection_with("FOK order rejected", &errors);
