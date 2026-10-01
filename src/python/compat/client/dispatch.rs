@@ -18,16 +18,26 @@ use super::super::contract::{Contract, ContractDescription, ContractDetails, Bar
 use super::super::tick_types::*;
 use super::super::super::types::{PRICE_SCALE_F, QTY_SCALE_F};
 
-/// Call a Python wrapper method, catching and logging any exception instead of propagating.
-/// This prevents user callback exceptions from killing the dispatch loop.
+/// Call a Python wrapper method. An `Exception` it raises is logged and
+/// dropped, so one failing callback does not stop the dispatch loop. Any
+/// other `BaseException` (KeyboardInterrupt, SystemExit) returns from the
+/// enclosing function and reaches the caller of run() (ibx#270).
 macro_rules! call_wrapper {
     ($wrapper:expr, $py:expr, $method:expr, $args:expr) => {
         if let Err(e) = $wrapper.call_method($py, $method, $args, None) {
-            log::error!("Python callback {}() raised: {}", $method, e);
-            e.restore($py);
-            unsafe { pyo3::ffi::PyErr_Clear(); }
+            callback_raised($py, $method, e)?;
         }
     };
+}
+
+/// What a callback exception does: see `call_wrapper!` (ibx#270).
+pub(crate) fn callback_raised(py: Python<'_>, method: &str, e: PyErr) -> PyResult<()> {
+    if e.is_instance_of::<pyo3::exceptions::PyException>(py) {
+        log::error!("Python callback {}() raised: {}", method, e);
+        Ok(())
+    } else {
+        Err(e)
+    }
 }
 
 impl EClient {

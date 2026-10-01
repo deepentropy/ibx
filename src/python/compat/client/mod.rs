@@ -254,17 +254,19 @@ impl EClient {
     /// A request on a client that is not connected: the reference reports
     /// error 504 "Not connected" through `error()` and returns, it does not
     /// raise. `id` is the request's id, or -1 when it has none. Returns the
-    /// method's result when not connected, `None` when connected.
+    /// method's result when not connected, `None` when connected. An
+    /// exception from `error()` follows the dispatch rule: only a
+    /// KeyboardInterrupt or SystemExit is raised (ibx#270).
     pub(crate) fn not_connected(&self, id: i64) -> Option<PyResult<()>> {
         if self.control_tx.lock().unwrap().is_some() {
             return None;
         }
-        Python::attach(|py| {
-            if let Err(e) = self.wrapper.call_method1(py, "error", (id, 504i64, "Not connected", "")) {
-                log::error!("Python callback error() raised: {}", e);
+        Some(Python::attach(|py| {
+            match self.wrapper.call_method1(py, "error", (id, 504i64, "Not connected", "")) {
+                Ok(_) => Ok(()),
+                Err(e) => dispatch::callback_raised(py, "error", e),
             }
-        });
-        Some(Ok(()))
+        }))
     }
 
     /// Clone the control channel sender, or return "Not connected".
