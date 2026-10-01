@@ -1229,6 +1229,12 @@ impl ClientCore {
     /// tick-by-tick data off, 10190 when a new contract would pass the
     /// limit (contracts are counted once, whatever their types). The type
     /// when the request may go.
+    /// The reference's local refusal of a fundamental data request
+    /// (#434): only a stock may be asked, else 321.
+    pub fn fundamental_refusal(sec_type: &str) -> Option<(i32, String)> {
+        (sec_type != "STK").then(|| (321, "Error validating request.-'bL' : cause - Please enter a valid security type".to_string()))
+    }
+
     pub fn tbt_refusal(
         &self,
         shared: &SharedState,

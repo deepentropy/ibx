@@ -223,6 +223,10 @@ impl EClient {
 
     /// Request fundamental data (e.g. ReportSnapshot, ReportsFinSummary). Matches `reqFundamentalData` in C++.
     pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) -> Result<(), String> {
+        if let Some((code, text)) = ClientCore::fundamental_refusal(&contract.sec_type) {
+            self.shared.reference.push_historical_error(req_id as u32, code, text);
+            return Ok(());
+        }
         self.send(ClientCore::resolve_first(req_id as u32, contract, ControlCommand::FetchFundamentalData {
             req_id: req_id as u32,
             con_id: contract.con_id as u32,

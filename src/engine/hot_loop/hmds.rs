@@ -66,7 +66,12 @@ pub(crate) struct HmdsState {
     pub(crate) next_news_query: u32,
     /// Session key of news queries, built at the first one (ibx#459).
     pub(crate) news_url_key: Option<String>,
-    pub(crate) pending_fundamental: Vec<(String, u32)>,
+    /// Fundamental data queries waiting for their reply (#434).
+    pub(crate) pending_fundamental: Vec<PendingFundamental>,
+    /// Reports received this session, by conId and report type: a request
+    /// for one is answered from here with no query, as the reference
+    /// does (#434).
+    pub(crate) fundamental_cache: Vec<CachedReport>,
     /// In-flight histogram queries, summed over their frames until the
     /// last one (ibx#433).
     pub(crate) pending_histogram: Vec<PendingHistogram>,
@@ -94,6 +99,32 @@ pub(crate) struct HmdsState {
     /// The farm the messages being handled came from (#445).
     pub(crate) rx_farm: super::pool::FarmId,
 }
+
+/// A fundamental data query waiting for its reply (#434).
+#[derive(Debug, Clone)]
+pub(crate) struct PendingFundamental {
+    pub(crate) window_id: String,
+    pub(crate) req_id: u32,
+    pub(crate) con_id: u32,
+    pub(crate) report: &'static str,
+    /// The farm it was sent to, where its cancel goes.
+    pub(crate) farm: super::pool::FarmId,
+}
+
+/// A fundamentals report kept for the session (#434).
+#[derive(Debug, Clone)]
+pub(crate) struct CachedReport {
+    pub(crate) con_id: u32,
+    pub(crate) report: &'static str,
+    pub(crate) data: String,
+    pub(crate) used: Instant,
+}
+
+/// Size of the report cache above which reports idle for a minute are
+/// dropped, oldest first, and its hard limit (#434).
+const REPORT_CACHE_COMPACT: usize = 100;
+const REPORT_CACHE_MAX: usize = 200;
+const REPORT_CACHE_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A stream of 5-second bars (ibx#454).
 #[derive(Debug, Clone)]
@@ -212,6 +243,7 @@ impl HmdsState {
             next_news_query: 0,
             news_url_key: None,
             pending_fundamental: Vec::new(),
+            fundamental_cache: Vec::new(),
             pending_histogram: Vec::new(),
             pending_schedule: Vec::new(),
             pending_ticks: Vec::new(),
@@ -617,21 +649,7 @@ impl HmdsState {
                         }
                         "10012" => {
                             if let Some(xml) = parsed.get(&6118) {
-                                let data = if let Some(raw) = parsed.get(&96) {
-                                    crate::control::fundamental::decompress_fundamental_data(raw.as_bytes())
-                                        .unwrap_or_else(|| raw.clone())
-                                } else {
-                                    xml.clone()
-                                };
-                                let wid = crate::control::fundamental::parse_fundamental_response_id(xml)
-                                    .map(|id| crate::control::historical::window_id(&id).to_string())
-                                    .unwrap_or_default();
-                                if let Some(pos) = self.pending_fundamental.iter().position(|(q, _)| *q == wid) {
-                                    let (_, req_id) = self.pending_fundamental.remove(pos);
-                                    shared.reference.push_fundamental_data(req_id, data);
-                                } else {
-                                    log::warn!("HMDS fundamentals reply for no pending request: id={:?}", wid);
-                                }
+                                self.on_fundamental_reply(xml, msg, shared);
                             }
                         }
                         "10022" => {
@@ -1554,13 +1572,24 @@ impl HmdsState {
         log::info!("Sent news article request: req_id={} article={}", req_id, article_id);
     }
 
-    pub(crate) fn send_fundamental_data_request(&mut self, req_id: u32, con_id: u32, report_type: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        let rt = match report_type {
-            "ReportSnapshot" | "snapshot" => crate::control::fundamental::ReportType::Snapshot,
-            "ReportFinSummary" | "finsum" => crate::control::fundamental::ReportType::FinancialSummary,
-            "ReportsFinStatements" | "finstat" => crate::control::fundamental::ReportType::FinancialStatements,
-            _ => crate::control::fundamental::ReportType::Snapshot,
-        };
+    /// A fundamental data request (#434), as the reference handles it: a
+    /// request id still waiting is refused with 322; a report received
+    /// before for the contract and type is answered from memory; else the
+    /// query goes to `sink`, the farm of the fundamentals route (`farm`).
+    /// The report type is the reference's (an unknown name is asked with
+    /// no type); the query id is the provider and a session counter.
+    pub(crate) fn send_fundamental_data_request(&mut self, req_id: u32, con_id: u32, report_type: &str, farm: super::pool::FarmId, sink: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState, shared: &SharedState) {
+        if self.pending_fundamental.iter().any(|p| p.req_id == req_id) {
+            shared.reference.push_historical_error(req_id, 322, "Error processing request.-'bL' : cause - Duplicate ticker id".into());
+            return;
+        }
+        let rt = crate::control::fundamental::ReportType::from_api(report_type);
+        if let Some(cached) = self.fundamental_cache.iter_mut().find(|c| c.con_id == con_id && c.report == rt.wire_name) {
+            cached.used = Instant::now();
+            log::info!("Fundamentals {} for con_id {} answered from memory (req_id={})", rt.wire_name, con_id, req_id);
+            shared.reference.push_fundamental_data(req_id, cached.data.clone());
+            return;
+        }
         let window_id = format!("{}{}", rt.provider(), self.next_fundamental_window);
         self.next_fundamental_window = self.next_fundamental_window.wrapping_add(1);
         let req = crate::control::fundamental::FundamentalRequest {
@@ -1571,21 +1600,86 @@ impl HmdsState {
             report_type: rt,
         };
         let xml = crate::control::fundamental::build_fundamental_request_xml(&req);
-        if let Some(conn) = hmds_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "U"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6040, "10010"),
-                (6118, &xml),
-            ]);
-            hb.last_hmds_sent = Instant::now();
-            log::info!("Sent fundamental data request: req_id={} con_id={}", req_id, con_id);
+        let ts = chrono_free_timestamp();
+        if sink.send_plain(&[
+            (fix::TAG_MSG_TYPE, "U"),
+            (fix::TAG_SENDING_TIME, &ts),
+            (6040, "10010"),
+            (6118, &xml),
+        ]) {
+            if farm == super::pool::PRIMARY_HMDS {
+                hb.last_hmds_sent = Instant::now();
+            }
+            log::info!("Sent fundamental data request on farm {}: req_id={} con_id={} type={:?}", farm, req_id, con_id, rt.wire_name);
         }
-        self.pending_fundamental.push((window_id, req_id));
+        self.pending_fundamental.push(PendingFundamental { window_id, req_id, con_id, report: rt.wire_name, farm });
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Cancel a fundamental data request: while its query waits for the
+    /// reply, a cancel of the query goes to its farm; after the reply, or
+    /// for an unknown id, nothing is sent (#434). Returns the farm and the
+    /// cancel message to send.
+    pub(crate) fn cancel_fundamental(&mut self, req_id: u32) -> Option<(super::pool::FarmId, String)> {
+        let pos = self.pending_fundamental.iter().position(|p| p.req_id == req_id)?;
+        let p = self.pending_fundamental.remove(pos);
+        Some((p.farm, crate::control::fundamental::build_fundamental_cancel_xml(&p.window_id)))
+    }
+
+    /// The reply of a fundamentals query (#434): the report is the gzip
+    /// payload cut from the raw message with its length, inflated; a server
+    /// error text, an empty payload or a payload that does not inflate is
+    /// error 430 with its cause, never data.
+    fn on_fundamental_reply(&mut self, xml: &str, raw: &[u8], shared: &SharedState) {
+        use crate::control::fundamental as f;
+        let wid = f::parse_fundamental_response_id(xml)
+            .map(|id| crate::control::historical::window_id(&id).to_string())
+            .unwrap_or_default();
+        let Some(pos) = self.pending_fundamental.iter().position(|p| p.window_id == wid) else {
+            log::warn!("HMDS fundamentals reply for no pending request: id={:?}", wid);
+            return;
+        };
+        let p = self.pending_fundamental.remove(pos);
+        let fail = |cause: &str| {
+            log::warn!("Fundamentals req_id={} failed: {}", p.req_id, cause);
+            shared.reference.push_historical_error(p.req_id, 430, format!("{}{}", f::FUNDAMENTALS_NOT_AVAILABLE, cause));
+        };
+        if let Some(text) = f::fundamental_error_text(xml) {
+            return fail(&text);
+        }
+        let payload = super::extract_raw_tag(raw, 96).unwrap_or_default();
+        if payload.is_empty() {
+            return fail("Query failed");
+        }
+        let Some(data) = f::decompress_fundamental_data(&payload) else {
+            return fail("Query failed");
+        };
+        self.cache_report(p.con_id, p.report, &data);
+        shared.reference.push_fundamental_data(p.req_id, data);
+    }
+
+    fn cache_report(&mut self, con_id: u32, report: &'static str, data: &str) {
+        let now = Instant::now();
+        self.fundamental_cache.retain(|c| !(c.con_id == con_id && c.report == report));
+        self.fundamental_cache.push(CachedReport { con_id, report, data: data.to_string(), used: now });
+        if self.fundamental_cache.len() > REPORT_CACHE_COMPACT {
+            // Oldest first: drop those idle for a minute down to the
+            // compaction size, then anything above the hard limit.
+            self.fundamental_cache.sort_by_key(|c| c.used);
+            let mut excess = self.fundamental_cache.len() - REPORT_CACHE_COMPACT;
+            self.fundamental_cache.retain(|c| {
+                if excess > 0 && now.duration_since(c.used) > REPORT_CACHE_IDLE {
+                    excess -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            while self.fundamental_cache.len() > REPORT_CACHE_MAX {
+                self.fundamental_cache.remove(0);
+            }
+        }
+    }
+
     pub(crate) fn send_histogram_request(&mut self, req_id: u32, con_id: u32, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // An unreadable period is refused locally, as the reference (ibx#433).
         if crate::control::histogram::parse_period(period).is_none() {
@@ -1843,7 +1937,7 @@ fn reply_window_id(xml: &str) -> &str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // ibx#272: a running tick-by-tick price that would leave the range is
@@ -2283,17 +2377,79 @@ mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.send_fundamental_data_request(1, 265598, "ReportSnapshot", &mut conn, &mut hb);
-        hmds.send_fundamental_data_request(2, 272093, "ReportSnapshot", &mut conn, &mut hb);
-        assert_eq!(hmds.pending_fundamental[1].0, "Fundamentals2");
-        let mut msg = Vec::new();
-        msg.extend_from_slice(b"35=U\x016040=10012\x016118=<FundResponse><id>Fundamentals2;; COMPANY_FUNDAMENTALS;;0;;true;;0;;U</id></FundResponse>\x01");
+        hmds.send_fundamental_data_request(1, 265598, "ReportSnapshot", super::super::pool::PRIMARY_HMDS, &mut conn, &mut hb, &shared);
+        hmds.send_fundamental_data_request(2, 272093, "ReportSnapshot", super::super::pool::PRIMARY_HMDS, &mut conn, &mut hb, &shared);
+        assert_eq!(hmds.pending_fundamental[1].window_id, "Fundamentals2");
+        let msg = fund_reply("Fundamentals2", "", b"<Snapshot/>");
         hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
         let got = shared.reference.drain_fundamental_data();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].0, 2);
+        assert_eq!(got, [(2, "<Snapshot/>".to_string())]);
         assert_eq!(hmds.pending_fundamental.len(), 1);
-        assert_eq!(hmds.pending_fundamental[0].1, 1);
+        assert_eq!(hmds.pending_fundamental[0].req_id, 1);
+    }
+
+    /// A fundamentals reply: the id, a server error text when given, and
+    /// the report gzip-compressed in the raw payload (none when empty).
+    pub(crate) fn fund_reply(window_id: &str, error: &str, report: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let err = if error.is_empty() { String::new() } else { format!("<errorText>{error}</errorText>") };
+        let mut msg = format!("8=O\x019=0\x0135=U\x016040=10012\x016118=<FundResponse><id>{window_id};; COMPANY_FUNDAMENTALS;;0;;true;;0;;U</id>{err}</FundResponse>\x01").into_bytes();
+        if !report.is_empty() {
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gz.write_all(report).unwrap();
+            let body = gz.finish().unwrap();
+            msg.extend_from_slice(format!("95={}\x0196=", body.len()).as_bytes());
+            msg.extend_from_slice(&body);
+            msg.push(1);
+        }
+        msg
+    }
+
+    // #434: the report is the inflated raw payload (binary bytes kept
+    // whole); a server error, an empty payload or a broken one is 430
+    // with its cause; a report is kept and asked again it is answered
+    // from memory; an unknown name is asked with no type; a waiting
+    // request id is refused with 322.
+    #[test]
+    fn fundamentals_reply_errors_cache_and_types() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        let primary = super::super::pool::PRIMARY_HMDS;
+        // A report with bytes that are not text in every position of the
+        // payload, and a separator byte inside the compressed data.
+        let report = "<ReportFinancialSummary>caf\u{e9}\u{1}</ReportFinancialSummary>";
+        hmds.send_fundamental_data_request(1, 265598, "ReportsFinSummary", primary, &mut conn, &mut hb, &shared);
+        assert_eq!(hmds.pending_fundamental[0].window_id, "Morningstar1");
+        hmds.send_fundamental_data_request(1, 265598, "ReportsFinSummary", primary, &mut conn, &mut hb, &shared);
+        assert_eq!(shared.reference.drain_historical_errors(),
+            [(1, 322, "Error processing request.-'bL' : cause - Duplicate ticker id".to_string())]);
+        hmds.process_hmds_message(&fund_reply("Morningstar1", "", report.as_bytes()), &mut conn, &shared, &None, &mut hb);
+        assert_eq!(shared.reference.drain_fundamental_data(), [(1, report.to_string())]);
+
+        hmds.send_fundamental_data_request(2, 265598, "finsum", primary, &mut conn, &mut hb, &shared);
+        assert!(hmds.pending_fundamental.is_empty(), "answered from memory");
+        assert_eq!(shared.reference.drain_fundamental_data(), [(2, report.to_string())]);
+
+        hmds.send_fundamental_data_request(3, 265598, "ReportsOwnership", primary, &mut conn, &mut hb, &shared);
+        hmds.process_hmds_message(&fund_reply("Morningstar2", "Not allowed", b""), &mut conn, &shared, &None, &mut hb);
+        hmds.send_fundamental_data_request(4, 265598, "BadName", primary, &mut conn, &mut hb, &shared);
+        assert_eq!(hmds.pending_fundamental[0].report, "");
+        hmds.process_hmds_message(&fund_reply("Fundamentals3", "", b""), &mut conn, &shared, &None, &mut hb);
+        let not_available = crate::control::fundamental::FUNDAMENTALS_NOT_AVAILABLE;
+        assert_eq!(shared.reference.drain_historical_errors(), [
+            (3, 430, format!("{not_available}Not allowed")),
+            (4, 430, format!("{not_available}Query failed")),
+        ]);
+        assert!(shared.reference.drain_fundamental_data().is_empty(), "errors are never data");
+
+        // A cancel while waiting gives the query's cancel; after, nothing.
+        hmds.send_fundamental_data_request(5, 272093, "ReportSnapshot", primary, &mut conn, &mut hb, &shared);
+        let (farm, xml) = hmds.cancel_fundamental(5).unwrap();
+        assert_eq!(farm, primary);
+        assert!(xml.contains("<CancelQuery><id>Fundamentals4;; COMPANY_FUNDAMENTALS;;0;;true;;0;;U</id></CancelQuery>"), "{xml}");
+        assert!(hmds.cancel_fundamental(5).is_none());
     }
 
     #[test]

@@ -350,6 +350,30 @@ impl HotLoop {
         Some(self.pool.ensure(&name, &host, FarmKind::MarketData, Instant::now()))
     }
 
+    /// Name of the primary historical farm.
+    fn primary_hmds_name(&self) -> String {
+        self.hmds_farm_name().to_string()
+    }
+
+    /// The farm of a historical request (#445): the farm of its routing
+    /// row (exchange, aggregate group for a SMART request, security type,
+    /// data kind), opened on demand when it is not the primary historical
+    /// farm. The primary farm when no table came; None when no row
+    /// serves it.
+    fn hmds_target(&mut self, exchange: &str, agg_group: i32, sec_type: &str, data_type: crate::engine::routing::DataType) -> Option<pool::FarmId> {
+        let Some(table) = self.hmds.routing.as_ref() else { return Some(PRIMARY_HMDS) };
+        let Some(route) = table.lookup(exchange, agg_group, sec_type, data_type, "*") else {
+            log::error!("No historical route for exchange={} aggGroup={} secType={} type={}",
+                exchange, agg_group, sec_type, data_type.name());
+            return None;
+        };
+        if route.farm == self.primary_hmds_name() {
+            return Some(PRIMARY_HMDS);
+        }
+        let (name, host) = (route.farm.clone(), route.host.clone());
+        Some(self.pool.ensure(&name, &host, FarmKind::Historical, Instant::now()))
+    }
+
     /// Send a top-of-book subscription to the farm of its route (#445).
     fn route_md_subscribe(&mut self, sub: &farm::MdSubscribe) {
         let Some(id) = self.md_target(sub) else { return };
@@ -883,15 +907,25 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchFundamentalData { req_id, con_id, report_type } => {
-                    if self.hmds_conn.is_none() {
-                        self.emit_hmds_unavailable(req_id, false);
-                    } else {
-                        self.hmds.send_fundamental_data_request(req_id, con_id, &report_type, &mut self.hmds_conn, &mut self.hb);
+                    // The farm of the fundamentals route, opened on demand
+                    // (#434); with no route, 430 as the reference.
+                    match self.hmds_target("RTRSFND", -1, "STK", crate::engine::routing::DataType::DayChart) {
+                        None => self.shared.reference.push_historical_error(req_id, 430,
+                            format!("{}No Route Found", crate::control::fundamental::FUNDAMENTALS_NOT_AVAILABLE)),
+                        Some(PRIMARY_HMDS) if self.hmds_conn.is_none() => self.emit_hmds_unavailable(req_id, false),
+                        Some(id) => {
+                            if let Some(sink) = farm_sink!(self, id) {
+                                self.hmds.send_fundamental_data_request(req_id, con_id, &report_type, id, sink, &mut self.hb, &self.shared);
+                            }
+                        }
                     }
                 }
                 ControlCommand::CancelFundamentalData { req_id } => {
-                    if let Some(pos) = self.hmds.pending_fundamental.iter().position(|(_, rid)| *rid == req_id) {
-                        self.hmds.pending_fundamental.remove(pos);
+                    if let Some((id, xml)) = self.hmds.cancel_fundamental(req_id) {
+                        let ts = chrono_free_timestamp();
+                        if let Some(sink) = farm_sink!(self, id) {
+                            sink.send_plain(&[(fix::TAG_MSG_TYPE, "U"), (fix::TAG_SENDING_TIME, &ts), (6040, "10011"), (6118, &xml)]);
+                        }
                     }
                 }
                 ControlCommand::FetchHistogramData { req_id, con_id, sec_type, exchange, use_rth, period } => {
@@ -3226,8 +3260,8 @@ mod tests {
 
         let scan = |rows: &str| crate::protocol::fix::fix_build(&[(35, "U"), (6040, "10005"),
             (6118, &format!("<ScanResponse><id>APISCAN0:460</id><Contracts>{rows}</Contracts></ScanResponse>"))], 1);
-        let fund_reply = crate::protocol::fix::fix_build(&[(35, "U"), (6040, "10012"),
-            (6118, &format!("<FundResponse><id>{fund_id}</id></FundResponse>"))], 1);
+        let fund_window = fund_id.split(";;").next().unwrap();
+        let fund_reply = super::hmds::tests::fund_reply(fund_window, "", b"<Snapshot/>");
         engine.inject_hmds_message(&scan("<Contract><contractID>1</contractID></Contract>"));
         engine.inject_hmds_message(&fund_reply);
         engine.inject_hmds_message(&scan("<Contract><contractID>2</contractID></Contract>"));

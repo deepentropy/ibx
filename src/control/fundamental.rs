@@ -8,29 +8,46 @@ pub const TAG_SUB_PROTOCOL: u32 = 6040;
 pub const TAG_RAW_DATA_LENGTH: u32 = 95;
 pub const TAG_RAW_DATA: u32 = 96;
 
-/// Report types for fundamental data queries.
+/// A report type of the reference (#434): the API name, the name the
+/// query asks for, the provider (the query id prefix) and the storage
+/// directory of the provider's reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReportType {
-    Snapshot,
-    FinancialSummary,
-    FinancialStatements,
+pub struct ReportType {
+    pub api_name: &'static str,
+    pub wire_name: &'static str,
+    pub provider: &'static str,
+    pub storage_dir: Option<&'static str>,
 }
 
+/// The reference's report types, in its order.
+pub const REPORT_TYPES: [ReportType; 5] = [
+    ReportType { api_name: "ReportSnapshot", wire_name: "snapshot", provider: "Fundamentals", storage_dir: None },
+    ReportType { api_name: "RESC", wire_name: "estimates", provider: "Fundamentals", storage_dir: None },
+    ReportType { api_name: "CalendarReport", wire_name: "calendar", provider: "Fundamentals", storage_dir: None },
+    ReportType { api_name: "ReportsFinSummary", wire_name: "finsum", provider: "Morningstar", storage_dir: Some("morningstar") },
+    ReportType { api_name: "ReportsOwnership", wire_name: "ownstat", provider: "Morningstar", storage_dir: Some("morningstar") },
+];
+
+/// The type the reference gives a name it does not know: no name, asked
+/// as it is (no local refusal).
+pub const UNKNOWN_REPORT_TYPE: ReportType =
+    ReportType { api_name: "", wire_name: "", provider: "Fundamentals", storage_dir: None };
+
 impl ReportType {
+    /// The type of an API report type text: its API name or its query
+    /// name, case-sensitive, as the reference matches it.
+    pub fn from_api(text: &str) -> ReportType {
+        REPORT_TYPES.into_iter()
+            .find(|t| t.api_name == text || t.wire_name == text)
+            .unwrap_or(UNKNOWN_REPORT_TYPE)
+    }
+
     pub fn provider(&self) -> &'static str {
-        match self {
-            Self::Snapshot => "Fundamentals",
-            Self::FinancialSummary => "Morningstar",
-            Self::FinancialStatements => "Morningstar",
-        }
+        self.provider
     }
 
     pub fn report_type_str(&self) -> &'static str {
-        match self {
-            Self::Snapshot => "snapshot",
-            Self::FinancialSummary => "finsum",
-            Self::FinancialStatements => "finstat",
-        }
+        self.wire_name
     }
 }
 
@@ -62,12 +79,17 @@ fn extract_xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     Some(&xml[start..end])
 }
 
-/// Build the XML query for a fundamental data request.
+/// Build the XML query for a fundamental data request, as the reference
+/// writes it (#434).
 pub fn build_fundamental_request_xml(req: &FundamentalRequest) -> String {
+    let storage_dir = req.report_type.storage_dir
+        .map(|d| format!("<storageDir>{}</storageDir>", d))
+        .unwrap_or_default();
     format!(
-        "<ListOfQueries>\
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <ListOfQueries>\
          <FundamentalsQuery>\
-         <id>{window_id};; COMPANY_FUNDAMENTALS;;0;;true;;0;;U</id>\
+         <id>{window_id}</id>\
          <contractID>{con_id}</contractID>\
          <exchange>RTRSFND</exchange>\
          <secType>{sec_type}</secType>\
@@ -76,16 +98,41 @@ pub fn build_fundamental_request_xml(req: &FundamentalRequest) -> String {
          <wholeDays>false</wholeDays>\
          <delay>auto</delay>\
          <reportType>{report_type}</reportType>\
+         {storage_dir}\
          <currency>{currency}</currency>\
          </FundamentalsQuery>\
          </ListOfQueries>",
-        window_id = req.window_id,
+        window_id = fundamental_query_id(&req.window_id),
         con_id = req.con_id,
         sec_type = req.sec_type,
         report_type = req.report_type.report_type_str(),
         currency = req.currency,
     )
 }
+
+/// The whole query id of a window id, which the reply and the cancel
+/// repeat.
+pub fn fundamental_query_id(window_id: &str) -> String {
+    format!("{window_id};; COMPANY_FUNDAMENTALS;;0;;true;;0;;U")
+}
+
+/// The cancel of a fundamental data query still waiting for its reply.
+pub fn build_fundamental_cancel_xml(window_id: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <ListOfCancelQueries><CancelQuery><id>{}</id></CancelQuery></ListOfCancelQueries>",
+        fundamental_query_id(window_id),
+    )
+}
+
+/// The server's error text of a fundamentals reply, when it has one.
+pub fn fundamental_error_text(xml: &str) -> Option<String> {
+    extract_xml_tag(xml, "errorText").map(|s| s.to_string()).filter(|s| !s.is_empty())
+}
+
+/// Text of every fundamentals failure, as the reference sends it with
+/// code 430; the cause follows the sentence.
+pub const FUNDAMENTALS_NOT_AVAILABLE: &str = "We are sorry, but fundamentals data for the security specified is not available.";
 
 /// Extract the query ID from a `<FundResponse>` XML correlation tag.
 pub fn parse_fundamental_response_id(xml: &str) -> Option<String> {
@@ -110,16 +157,23 @@ mod tests {
     use flate2::Compression;
     use std::io::Write;
 
+    // #434: the reference's table, by API name or query name,
+    // case-sensitive; an unknown name is asked with no type.
     #[test]
     fn report_type_mapping() {
-        assert_eq!(ReportType::Snapshot.provider(), "Fundamentals");
-        assert_eq!(ReportType::Snapshot.report_type_str(), "snapshot");
+        let t = ReportType::from_api("ReportSnapshot");
+        assert_eq!((t.provider(), t.report_type_str(), t.storage_dir), ("Fundamentals", "snapshot", None));
+        let t = ReportType::from_api("ReportsFinSummary");
+        assert_eq!((t.provider(), t.report_type_str(), t.storage_dir), ("Morningstar", "finsum", Some("morningstar")));
+        let t = ReportType::from_api("ReportsOwnership");
+        assert_eq!((t.provider(), t.report_type_str(), t.storage_dir), ("Morningstar", "ownstat", Some("morningstar")));
+        assert_eq!(ReportType::from_api("CalendarReport").report_type_str(), "calendar");
+        assert_eq!(ReportType::from_api("RESC").report_type_str(), "estimates");
+        assert_eq!(ReportType::from_api("finsum").api_name, "ReportsFinSummary");
+        for unknown in ["ReportFinSummary", "ReportsFinStatements", "ReportRatios", "reportsnapshot", "BadName"] {
+            assert_eq!(ReportType::from_api(unknown), UNKNOWN_REPORT_TYPE, "{unknown}");
+        }
 
-        assert_eq!(ReportType::FinancialSummary.provider(), "Morningstar");
-        assert_eq!(ReportType::FinancialSummary.report_type_str(), "finsum");
-
-        assert_eq!(ReportType::FinancialStatements.provider(), "Morningstar");
-        assert_eq!(ReportType::FinancialStatements.report_type_str(), "finstat");
     }
 
     #[test]
@@ -129,15 +183,16 @@ mod tests {
             con_id: 265598,
             sec_type: "STK",
             currency: "USD",
-            report_type: ReportType::Snapshot,
+            report_type: ReportType::from_api("ReportsFinSummary"),
         };
         let xml = build_fundamental_request_xml(&req);
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"), "{}", xml);
+        assert!(xml.contains("<reportType>finsum</reportType><storageDir>morningstar</storageDir><currency>USD</currency>"), "{}", xml);
         assert!(xml.contains("<ListOfQueries>"));
         assert!(xml.contains("<FundamentalsQuery>"));
         assert!(xml.contains("<contractID>265598</contractID>"));
         assert!(xml.contains("<exchange>RTRSFND</exchange>"));
         assert!(xml.contains("<secType>STK</secType>"));
-        assert!(xml.contains("<reportType>snapshot</reportType>"));
         assert!(xml.contains("<currency>USD</currency>"));
         assert!(xml.contains("<source>API</source>"));
         // ibx#428: the request's own window id, in the reference form.

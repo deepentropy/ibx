@@ -2258,8 +2258,14 @@ fn news_request_refusals() {
 
 #[test]
 fn req_fundamental_data_sends_fetch() {
-    let (client, rx, _shared) = test_client();
-    client.req_fundamental_data(6, &spy(), "ReportSnapshot").unwrap();
+    let (client, rx, shared) = test_client();
+    // #434: only a stock may be asked; anything else is 321 at once.
+    client.req_fundamental_data(5, &spy(), "ReportSnapshot").unwrap();
+    assert!(rx.try_recv().is_err());
+    assert_eq!(shared.reference.drain_historical_errors(),
+        [(5, 321, "Error validating request.-'bL' : cause - Please enter a valid security type".to_string())]);
+    let stock = Contract { sec_type: "STK".into(), ..spy() };
+    client.req_fundamental_data(6, &stock, "ReportSnapshot").unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchFundamentalData { req_id, report_type, .. } => {

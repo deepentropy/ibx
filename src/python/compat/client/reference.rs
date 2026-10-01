@@ -320,6 +320,10 @@ impl EClient {
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = fundamental_data_options;
+        if let Some((code, text)) = ClientCore::fundamental_refusal(&contract.sec_type) {
+            self.shared_state()?.reference.push_historical_error(req_id as u32, code, text);
+            return Ok(());
+        }
         let tx = self.tx()?;
         send_cmd(py, &tx, ClientCore::resolve_first(req_id as u32, &contract.to_api(), ControlCommand::FetchFundamentalData {
             req_id: req_id as u32,
