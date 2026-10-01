@@ -224,6 +224,7 @@ fn historical_request_full_workflow() {
         bar_size: BarSize::Min5,
         use_rth: true,
         keep_up_to_date: false,
+        include_expired: false,
     };
 
     // Build FIX message
@@ -314,6 +315,7 @@ fn historical_streaming_subscription_flow() {
         bar_size: BarSize::Sec5,
         use_rth: false,
         keep_up_to_date: false,
+        include_expired: false,
     };
     let msg = build_historical_request(&req, 1);
     let tags = fix::fix_parse(&msg);
@@ -488,6 +490,7 @@ fn contract_lookup_feeds_historical_request() {
         bar_size: BarSize::Min5,
         use_rth: true,
         keep_up_to_date: false,
+        include_expired: false,
     };
 
     let msg = build_historical_request(&req, 1);

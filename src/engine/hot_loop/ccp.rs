@@ -237,6 +237,13 @@ pub(crate) struct CcpState {
     /// con_id has been resolved via the same 35=d path that user-initiated
     /// `reqContractDetails` uses. See ibx#156, ib-agent#142.
     pub(crate) pending_scanner_enrichment: Vec<PendingScannerEnrichment>,
+    /// Historical-data requests waiting for the conId of their contract
+    /// (ibx#427).
+    pub(crate) pending_resolves: Vec<PendingResolve>,
+    pub(crate) next_resolve_id: u32,
+    /// Requests whose contract was found, with its conId, for the engine
+    /// to send.
+    pub(crate) resolved_requests: Vec<crate::types::ControlCommand>,
     /// Last execution of the session and its server time, for the fill-up
     /// request after a reconnect (ibx#399).
     pub(crate) last_exec: Option<(String, String)>,
@@ -247,6 +254,43 @@ pub(crate) struct CcpState {
     /// When the end frame of the post-reconnect status replay came; the
     /// engine reports the restored link from it (ibx#399).
     pub(crate) status_replay_end_at: Option<Instant>,
+}
+
+/// A historical-data request waiting for its contract lookup (ibx#427).
+pub(crate) struct PendingResolve {
+    /// Request number of the lookup.
+    pub lookup_id: u32,
+    /// API request id of the waiting request.
+    pub req_id: u32,
+    pub request: crate::types::ControlCommand,
+    pub deadline: Instant,
+}
+
+/// Request numbers of the contract lookups of historical-data requests
+/// (ibx#427): a range of their own, below the market data lookups
+/// (0xE000_0000) and the internal lookups (0xF000_0000).
+pub(crate) const HIST_LOOKUP_FIRST_ID: u32 = 0xD000_0000;
+pub(crate) const HIST_LOOKUP_IDS: u32 = 0x1000_0000;
+
+/// `request` with its contract conId set (ibx#427).
+pub(crate) fn request_with_con_id(request: crate::types::ControlCommand, con_id: u32) -> crate::types::ControlCommand {
+    use crate::types::ControlCommand as C;
+    let id = con_id as i64;
+    match request {
+        C::FetchHistorical { req_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired, .. } =>
+            C::FetchHistorical { req_id, con_id: id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired },
+        C::FetchHeadTimestamp { req_id, sec_type, exchange, what_to_show, use_rth, .. } =>
+            C::FetchHeadTimestamp { req_id, con_id: id, sec_type, exchange, what_to_show, use_rth },
+        C::FetchHistogramData { req_id, sec_type, exchange, use_rth, period, .. } =>
+            C::FetchHistogramData { req_id, con_id, sec_type, exchange, use_rth, period },
+        C::FetchHistoricalTicks { req_id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth, .. } =>
+            C::FetchHistoricalTicks { req_id, con_id: id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth },
+        C::FetchHistoricalSchedule { req_id, sec_type, exchange, end_date_time, duration, use_rth, .. } =>
+            C::FetchHistoricalSchedule { req_id, con_id: id, sec_type, exchange, end_date_time, duration, use_rth },
+        C::FetchFundamentalData { req_id, report_type, .. } =>
+            C::FetchFundamentalData { req_id, con_id, report_type },
+        other => other,
+    }
 }
 
 /// Scanner result parked for contract-detail fan-out.
@@ -480,6 +524,9 @@ impl CcpState {
             next_internal_secdef_id: 0xF000_0000,
             auto_fetched_conids: HashSet::new(),
             pending_scanner_enrichment: Vec::new(),
+            pending_resolves: Vec::new(),
+            next_resolve_id: 0,
+            resolved_requests: Vec::new(),
             last_exec: None,
             // The login sends the first trades request.
             next_trades_request: 5,
@@ -2143,6 +2190,8 @@ impl CcpState {
             if super::farm::round_lot_reply(context, rid, msg) { return; }
             // Asked for the conId of a market data request (ibx#278).
             if super::farm::md_contract_reply(context, shared, rid, msg) { return; }
+            // Asked for the conId of a historical-data request (ibx#427).
+            if self.contract_resolve_reply(rid, msg, shared) { return; }
         }
         let rules = contracts::parse_market_rules(msg);
         if !rules.is_empty() {
@@ -2257,6 +2306,102 @@ impl CcpState {
                 records,
                 deadline: Instant::now() + SECDEF_TIMEOUT,
             });
+        }
+    }
+
+    /// Look up the contract of a historical-data request given without
+    /// conId (ibx#427), with the by-symbol lookup of contract details. The
+    /// request waits for the answer.
+    pub(crate) fn start_contract_resolve(
+        &mut self,
+        req_id: u32,
+        lookup: crate::types::ContractLookup,
+        request: crate::types::ControlCommand,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        // The request form of a contract lookup, with a number from a
+        // range of its own: below the market data lookups and the internal
+        // lookups, far above caller request ids, so no reply is taken from
+        // another lookup.
+        let lookup_id = HIST_LOOKUP_FIRST_ID + self.next_resolve_id % HIST_LOOKUP_IDS;
+        self.next_resolve_id = self.next_resolve_id.wrapping_add(1);
+        let symbol_lookup = SymbolLookup {
+            symbol: lookup.symbol,
+            sec_type: lookup.sec_type,
+            exchange: lookup.exchange,
+            currency: lookup.currency,
+            filters: lookup.filters,
+        };
+        let strike = if symbol_lookup.filters.strike > 0.0 {
+            format!("{}", symbol_lookup.filters.strike)
+        } else {
+            String::new()
+        };
+        if let Some(conn) = ccp_conn.as_mut().filter(|_| !self.disconnected) {
+            send_symbol_lookup_on(conn, lookup_id, &symbol_lookup, &strike);
+            hb.last_ccp_sent = Instant::now();
+            log::info!("Contract lookup {} for historical req_id={}: symbol={} sec_type={}",
+                lookup_id, req_id, symbol_lookup.symbol, symbol_lookup.sec_type);
+        } else {
+            log::warn!("Contract lookup {} for req_id={} queued with no auth connection", lookup_id, req_id);
+        }
+        self.pending_resolves.push(PendingResolve {
+            lookup_id,
+            req_id,
+            request,
+            deadline: Instant::now() + SECDEF_TIMEOUT,
+        });
+    }
+
+    /// The answer to a contract lookup of a historical-data request
+    /// (ibx#427): exactly one contract releases the request with its
+    /// conId; none or several give error 200 and no query, as the
+    /// reference. False when the reply is not for such a lookup.
+    fn contract_resolve_reply(&mut self, lookup_id: &str, msg: &[u8], shared: &SharedState) -> bool {
+        // The reply names the lookup as it was asked; its number is the key.
+        let Some(number) = crate::control::contracts::secdef_request_number(lookup_id) else { return false };
+        let Some(idx) = self.pending_resolves.iter().position(|p| p.lookup_id == number) else { return false };
+        let pending = self.pending_resolves.swap_remove(idx);
+        let records = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default();
+        let mut con_ids: Vec<u32> = Vec::new();
+        for def in &records {
+            if def.con_id != 0 && !con_ids.contains(&def.con_id) {
+                con_ids.push(def.con_id);
+            }
+        }
+        if let [con_id] = con_ids.as_slice() {
+            log::info!("Contract lookup {}: req_id={} con_id={}", lookup_id, pending.req_id, con_id);
+            self.resolved_requests.push(request_with_con_id(pending.request, *con_id));
+        } else {
+            log::info!("Contract lookup {}: req_id={} found {} contracts", lookup_id, pending.req_id, con_ids.len());
+            shared.reference.push_historical_error(pending.req_id, 200, NO_SECURITY_DEFINITION.to_string());
+        }
+        true
+    }
+
+    /// Contract lookups of historical-data requests with no answer in time
+    /// (ibx#427): the request gets error 200 and no query.
+    pub(crate) fn sweep_contract_resolves(&mut self, shared: &SharedState) {
+        if self.pending_resolves.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut expired: Vec<u32> = Vec::new();
+        self.pending_resolves.retain(|p| {
+            if now >= p.deadline {
+                log::warn!("Contract lookup {} timeout: req_id={}", p.lookup_id, p.req_id);
+                expired.push(p.req_id);
+                false
+            } else {
+                true
+            }
+        });
+        for req_id in expired {
+            shared.reference.push_historical_error(
+                req_id, 200,
+                "contract details request timed out — no reply from the gateway".to_string(),
+            );
         }
     }
 
@@ -5181,5 +5326,100 @@ mod reconnect_tests {
         let shared = SharedState::new();
         ccp.handle_exec_report(&frame(&[(11, "*"), (55, "*")]), &mut context, &shared, &None, "DU1");
         assert!(ccp.status_replay_end_at.is_none());
+    }
+
+    // ── ibx#427: a historical request without conId looks the contract up ──
+    mod contract_resolve {
+        use super::*;
+        use crate::control::contracts::tests::pipe_msg;
+        use crate::types::{ContractLookup, ControlCommand};
+
+        fn bars(req_id: u32) -> ControlCommand {
+            ControlCommand::FetchHistorical {
+                req_id, con_id: 0, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+                end_date_time: String::new(), duration: "1 D".into(), bar_size: "1 hour".into(),
+                what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, include_expired: true,
+            }
+        }
+
+        fn lookup() -> ContractLookup {
+            ContractLookup { symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() }
+        }
+
+        #[test]
+        fn one_contract_releases_the_request_with_its_con_id() {
+            let (mut ccp, mut context, shared) = (CcpState::new(), Context::new(), SharedState::new());
+            ccp.start_contract_resolve(5, lookup(), bars(5), &mut None, &mut HeartbeatState::new());
+            assert_eq!(ccp.pending_resolves[0].lookup_id, HIST_LOOKUP_FIRST_ID);
+            // The reply lists the contract once per exchange: one contract.
+            let reply = pipe_msg("35=d|43=N|320=FixSecDefReqBySymbol3489660928|322=*|323=4|55=AAPL|167=STK|207=BEST|6008=265598|15=USD|\
+                55=AAPL|167=STK|207=NASDAQ|6008=265598|15=USD");
+            ccp.process_ccp_message(&reply, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
+            assert!(ccp.pending_resolves.is_empty());
+            assert!(shared.reference.drain_historical_errors().is_empty());
+            assert!(shared.reference.drain_contract_details().is_empty(), "not a contract details answer");
+            match ccp.resolved_requests.as_slice() {
+                [ControlCommand::FetchHistorical { req_id: 5, con_id: 265598, include_expired: true, symbol, .. }] =>
+                    assert_eq!(symbol, "AAPL"),
+                other => panic!("{:?}", other),
+            }
+        }
+
+        #[test]
+        fn none_or_several_contracts_give_200_and_no_query() {
+            let (mut ccp, mut context, shared) = (CcpState::new(), Context::new(), SharedState::new());
+            ccp.start_contract_resolve(6, lookup(), bars(6), &mut None, &mut HeartbeatState::new());
+            ccp.start_contract_resolve(7, lookup(), bars(7), &mut None, &mut HeartbeatState::new());
+            let none = pipe_msg("35=d|43=N|320=FixSecDefReqBySymbol3489660928|322=*|323=4");
+            let two = pipe_msg("35=d|43=N|320=FixSecDefReqBySymbol3489660929|322=*|323=4|55=MNQ|167=FUT|207=CME|6008=815824267|15=USD|\
+                55=MNQ|167=FUT|207=CME|6008=840227399|15=USD");
+            ccp.process_ccp_message(&none, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
+            ccp.process_ccp_message(&two, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
+            assert!(ccp.resolved_requests.is_empty());
+            assert_eq!(shared.reference.drain_historical_errors(), vec![
+                (6, 200, NO_SECURITY_DEFINITION.to_string()),
+                (7, 200, NO_SECURITY_DEFINITION.to_string()),
+            ]);
+        }
+
+        #[test]
+        fn only_replies_of_its_own_range_are_taken() {
+            let (mut ccp, shared) = (CcpState::new(), SharedState::new());
+            ccp.start_contract_resolve(9, lookup(), bars(9), &mut None, &mut HeartbeatState::new());
+            // Same low bits in the market data and internal ranges, and a
+            // caller lookup number: none of them is this lookup's reply.
+            let reply = |id: &str| pipe_msg(&format!("35=d|43=N|320={}|322=*|323=4|55=AAPL|167=STK|207=BEST|6008=265598|15=USD", id));
+            for other in ["FixSecDefReqBySymbol3758096384", "FixSecDefReqBySymbol4026531840", "FixSecDefReqBySymbol0", "ibxlot0"] {
+                assert!(!ccp.contract_resolve_reply(other, &reply(other), &shared), "{}", other);
+            }
+            assert_eq!(ccp.pending_resolves.len(), 1);
+            assert!(HIST_LOOKUP_FIRST_ID + HIST_LOOKUP_IDS <= crate::engine::hot_loop::farm::MD_LOOKUP_FIRST_ID);
+        }
+
+        #[test]
+        fn a_lookup_with_no_answer_gives_200() {
+            let (mut ccp, shared) = (CcpState::new(), SharedState::new());
+            ccp.start_contract_resolve(8, lookup(), bars(8), &mut None, &mut HeartbeatState::new());
+            ccp.pending_resolves[0].deadline = Instant::now() - std::time::Duration::from_secs(1);
+            ccp.sweep_contract_resolves(&shared);
+            assert!(ccp.pending_resolves.is_empty());
+            let errors = shared.reference.drain_historical_errors();
+            assert_eq!((errors[0].0, errors[0].1), (8, 200));
+        }
+
+        #[test]
+        fn every_historical_request_kind_gets_the_con_id() {
+            let kinds = vec![
+                ControlCommand::FetchHeadTimestamp { req_id: 1, con_id: 0, sec_type: String::new(), exchange: String::new(), what_to_show: "TRADES".into(), use_rth: true },
+                ControlCommand::FetchHistogramData { req_id: 2, con_id: 0, sec_type: String::new(), exchange: String::new(), use_rth: true, period: "1 week".into() },
+                ControlCommand::FetchHistoricalTicks { req_id: 3, con_id: 0, sec_type: String::new(), exchange: String::new(), start_date_time: String::new(), end_date_time: String::new(), number_of_ticks: 10, what_to_show: "TRADES".into(), use_rth: true },
+                ControlCommand::FetchHistoricalSchedule { req_id: 4, con_id: 0, sec_type: String::new(), exchange: String::new(), end_date_time: String::new(), duration: "1 M".into(), use_rth: true },
+                ControlCommand::FetchFundamentalData { req_id: 5, con_id: 0, report_type: "ReportSnapshot".into() },
+            ];
+            for cmd in kinds {
+                let got = format!("{:?}", request_with_con_id(cmd, 265598));
+                assert!(got.contains("con_id: 265598"), "{}", got);
+            }
+        }
     }
 }

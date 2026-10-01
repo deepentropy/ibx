@@ -45,7 +45,7 @@ pub(super) fn phase_historical_data(mut conns: Conns, gw: &Gateway, config: &Gat
         bar_size: "5 mins".into(),
         what_to_show: "TRADES".into(),
         use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -114,7 +114,7 @@ pub(super) fn phase_historical_daily_bars(mut conns: Conns, gw: &Gateway, config
         bar_size: "1 day".into(),
         what_to_show: "TRADES".into(),
         use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -174,7 +174,7 @@ pub(super) fn phase_cancel_historical(mut conns: Conns, gw: &Gateway, config: &G
         req_id: 7700, con_id: 756733, symbol: "SPY".into(),
         end_date_time: now_ib_timestamp(), duration: "5 D".into(),
         bar_size: "5 mins".into(), what_to_show: "TRADES".into(), use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -243,7 +243,7 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config:
         req_id: REQ_ID, con_id: 756733, symbol: "SPY".into(),
         end_date_time: now_ib_timestamp(), duration: "1 W".into(),
         bar_size: "15 mins".into(), what_to_show: "TRADES".into(), use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -949,21 +949,21 @@ pub(super) fn phase_parallel_historical(mut conns: Conns, gw: &Gateway, config: 
         req_id: 8001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt.clone(), duration: "1 d".to_string(),
         bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
     control_tx.send(ControlCommand::FetchHistorical {
         sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 8002, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt.clone(), duration: "5 d".to_string(),
         bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
     control_tx.send(ControlCommand::FetchHistorical {
         sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 8003, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt, duration: "1 W".to_string(),
         bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
 
     let join = run_hot_loop(hot_loop);
@@ -1089,7 +1089,7 @@ pub(super) fn phase_historical_ohlc_validation(conns: Conns, _gw: &Gateway, _con
         bar_size: "1 hour".into(),
         what_to_show: "TRADES".into(),
         use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
 
     let join = run_hot_loop(hot_loop);
@@ -1184,7 +1184,7 @@ pub(super) fn phase_large_historical_dataset(mut conns: Conns, gw: &Gateway, con
         req_id: 11001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: end_dt, duration: "1 Y".to_string(),
         bar_size: "1 day".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -1254,7 +1254,7 @@ pub(super) fn phase_dst_boundary_historical(mut conns: Conns, gw: &Gateway, conf
         req_id: 12001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: "20260314-20:00:00".to_string(), duration: "2 W".to_string(),
         bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
     let join = run_hot_loop(hot_loop);
 
@@ -1338,7 +1338,7 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config:
         req_id: 20001, con_id: 756733, symbol: "SPY".to_string(),
         end_date_time: now.clone(), duration: "1 d".to_string(),
         bar_size: "5 mins".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
     }).unwrap();
     control_tx.send(ControlCommand::CancelHistorical { req_id: 20001 }).unwrap();
 
@@ -1436,7 +1436,7 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config
             req_id: 30001 + i, con_id: 756733, symbol: "SPY".to_string(),
             end_date_time: now.clone(), duration: "1 d".to_string(),
             bar_size: "1 hour".to_string(), what_to_show: "TRADES".to_string(), use_rth: true,
-        keep_up_to_date: false,
+        keep_up_to_date: false, include_expired: false,
         }).unwrap();
     }
 

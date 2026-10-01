@@ -1819,6 +1819,38 @@ fn req_historical_data_refuses_unknown_what_to_show_and_format_date() {
     assert_eq!((errors[2].0, errors[2].1), (7, 10314));
 }
 
+// ── ibx#427: a contract without conId is looked up first ──
+
+#[test]
+fn historical_requests_without_con_id_ask_for_the_contract_first() {
+    let (client, rx, _shared) = test_client();
+    let aapl = Contract { symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+    client.req_historical_data(1, &aapl, "", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
+    client.req_head_time_stamp(2, &aapl, "TRADES", true, 1).unwrap();
+    client.req_histogram_data(3, &aapl, true, "1 week").unwrap();
+    client.req_historical_ticks(4, &aapl, "", "20260102 10:00:00", 10, "TRADES", true).unwrap();
+    client.req_historical_schedule(5, &aapl, "", "1 M", true).unwrap();
+    client.req_fundamental_data(6, &aapl, "ReportSnapshot").unwrap();
+    for expected in 1..=6u32 {
+        match rx.try_recv().unwrap() {
+            ControlCommand::ResolveContract { req_id, lookup, request } => {
+                assert_eq!(req_id, expected);
+                assert_eq!((lookup.symbol.as_str(), lookup.sec_type.as_str(), lookup.currency.as_str()), ("AAPL", "STK", "USD"));
+                assert!(!matches!(*request, ControlCommand::ResolveContract { .. }));
+            }
+            other => panic!("expected ResolveContract, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn req_historical_data_sends_include_expired() {
+    let (client, rx, _shared) = test_client();
+    let fut = Contract { con_id: 495512551, include_expired: true, ..Default::default() };
+    client.req_historical_data(1, &fut, "", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::FetchHistorical { con_id: 495512551, include_expired: true, .. }));
+}
+
 #[test]
 fn req_historical_data_schedule_asks_for_the_trading_schedule() {
     let (client, rx, shared) = test_client();

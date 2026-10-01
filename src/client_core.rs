@@ -2528,6 +2528,37 @@ impl ClientCore {
     /// 5-minute bars silently (via TWO divergent tables), and an
     /// unrecognized what_to_show fell back to TRADES. The caller gets a
     /// synchronous Err at the call instead of plausible, wrong candles.
+    /// A historical-data request for a contract with no conId is looked up
+    /// first, as the reference (ibx#427): the request is wrapped so the
+    /// engine sends it once the contract is found. Others go as they are.
+    pub fn resolve_first(req_id: u32, contract: &crate::api::types::Contract, request: ControlCommand) -> ControlCommand {
+        if contract.con_id != 0 {
+            return request;
+        }
+        ControlCommand::ResolveContract {
+            req_id,
+            lookup: crate::types::ContractLookup {
+                symbol: contract.symbol.clone(),
+                sec_type: contract.sec_type.clone(),
+                exchange: contract.exchange.clone(),
+                currency: contract.currency.clone(),
+                filters: crate::types::SecDefFilters {
+                    primary_exchange: contract.primary_exchange.clone(),
+                    local_symbol: contract.local_symbol.clone(),
+                    last_trade_date_or_contract_month: contract.last_trade_date_or_contract_month.clone(),
+                    strike: contract.strike,
+                    right: contract.right.clone(),
+                    multiplier: contract.multiplier.clone(),
+                    trading_class: contract.trading_class.clone(),
+                    sec_id: contract.sec_id.clone(),
+                    sec_id_type: contract.sec_id_type.clone(),
+                    include_expired: contract.include_expired,
+                },
+            },
+            request: Box::new(request),
+        }
+    }
+
     /// The reference's local refusal of a reqHistoricalData (ibx#430):
     /// (code, text) to report as an error, 321 or 10314, with no end.
     pub fn historical_refusal(

@@ -38,7 +38,7 @@ impl EClient {
         ClientCore::validate_historical_args(bar_size_setting, what_to_show, keep_up_to_date)
             .map_err(|e| PyRuntimeError::new_err(e))?;
         if what_to_show.eq_ignore_ascii_case("SCHEDULE") {
-            send_cmd(py, &tx, ControlCommand::FetchHistoricalSchedule {
+            send_cmd(py, &tx, ClientCore::resolve_first(req_id as u32, &contract.to_api(), ControlCommand::FetchHistoricalSchedule {
                 req_id: req_id as u32,
                 con_id: contract.con_id,
                 sec_type: contract.sec_type.clone(),
@@ -46,9 +46,9 @@ impl EClient {
                 end_date_time: end_date_time.to_string(),
                 duration: duration_str.to_string(),
                 use_rth: use_rth != 0,
-            })?;
+            }))?;
         } else {
-            send_cmd(py, &tx, ControlCommand::FetchHistorical {
+            send_cmd(py, &tx, ClientCore::resolve_first(req_id as u32, &contract.to_api(), ControlCommand::FetchHistorical {
                 req_id: req_id as u32,
                 con_id: contract.con_id,
                 symbol: contract.symbol.clone(),
@@ -60,7 +60,8 @@ impl EClient {
                 what_to_show: what_to_show.to_string(),
                 use_rth: use_rth != 0,
                 keep_up_to_date,
-            })?;
+                include_expired: contract.include_expired,
+            }))?;
         }
         Ok(())
     }
@@ -86,14 +87,14 @@ impl EClient {
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
-        send_cmd(py, &tx, ControlCommand::FetchHeadTimestamp {
+        send_cmd(py, &tx, ClientCore::resolve_first(req_id as u32, &contract.to_api(), ControlCommand::FetchHeadTimestamp {
             req_id: req_id as u32,
             con_id: contract.con_id,
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),
             what_to_show: what_to_show.to_string(),
             use_rth: use_rth != 0,
-        })?;
+        }))?;
         let _ = format_date;
         Ok(())
     }
@@ -264,11 +265,11 @@ impl EClient {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let _ = fundamental_data_options;
         let tx = self.tx()?;
-        send_cmd(py, &tx, ControlCommand::FetchFundamentalData {
+        send_cmd(py, &tx, ClientCore::resolve_first(req_id as u32, &contract.to_api(), ControlCommand::FetchFundamentalData {
             req_id: req_id as u32,
             con_id: contract.con_id as u32,
             report_type: report_type.to_string(),
-        })?;
+        }))?;
         Ok(())
     }
 
@@ -298,7 +299,7 @@ impl EClient {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
         let _ = (ignore_size, misc_options);
-        send_cmd(py, &tx, ControlCommand::FetchHistoricalTicks {
+        send_cmd(py, &tx, ClientCore::resolve_first(req_id as u32, &contract.to_api(), ControlCommand::FetchHistoricalTicks {
             req_id: req_id as u32,
             con_id: contract.con_id,
             sec_type: contract.sec_type.clone(),
@@ -308,7 +309,7 @@ impl EClient {
             number_of_ticks: number_of_ticks as u32,
             what_to_show: what_to_show.to_string(),
             use_rth: use_rth != 0,
-        })?;
+        }))?;
         Ok(())
     }
 
@@ -338,14 +339,14 @@ impl EClient {
     fn req_histogram_data(&self, py: Python<'_>, req_id: i64, contract: &Contract, use_rth: bool, time_period: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
-        send_cmd(py, &tx, ControlCommand::FetchHistogramData {
+        send_cmd(py, &tx, ClientCore::resolve_first(req_id as u32, &contract.to_api(), ControlCommand::FetchHistogramData {
             req_id: req_id as u32,
             con_id: contract.con_id as u32,
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),
             use_rth,
             period: time_period.to_string(),
-        })?;
+        }))?;
         Ok(())
     }
 
@@ -365,7 +366,7 @@ impl EClient {
     ) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let tx = self.tx()?;
-        send_cmd(py, &tx, ControlCommand::FetchHistoricalSchedule {
+        send_cmd(py, &tx, ClientCore::resolve_first(req_id as u32, &contract.to_api(), ControlCommand::FetchHistoricalSchedule {
             req_id: req_id as u32,
             con_id: contract.con_id,
             sec_type: contract.sec_type.clone(),
@@ -373,7 +374,7 @@ impl EClient {
             end_date_time: end_date_time.into(),
             duration: duration_str.into(),
             use_rth,
-        })?;
+        }))?;
         Ok(())
     }
 }

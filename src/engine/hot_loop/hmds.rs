@@ -844,6 +844,7 @@ impl HmdsState {
         hmds_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
         shared: &SharedState,
+        include_expired: bool,
     ) {
         // The reference checks, refused with its codes and texts and no
         // end (ibx#430). The client checks first; this is the engine-side
@@ -899,6 +900,7 @@ impl HmdsState {
                 bar_size: bs,
                 use_rth,
                 keep_up_to_date,
+                include_expired,
             };
 
             let xml = crate::control::historical::build_query_xml(&req);
@@ -1051,6 +1053,7 @@ impl HmdsState {
         sign_key: &[u8],
         sign_iv: &std::sync::Mutex<Vec<u8>>,
         shared: &SharedState,
+        include_expired: bool,
     ) -> bool {
         // The reference checks of every bar request (ibx#430).
         let duration = match crate::control::historical::check_bar_request(
@@ -1126,6 +1129,7 @@ impl HmdsState {
             bar_size: bs,
             use_rth,
             keep_up_to_date: true,
+            include_expired,
         };
 
         let xml = crate::control::historical::build_query_xml(&req);
@@ -1725,7 +1729,7 @@ mod tests {
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
         hmds.send_historical_request_ex(req_id, 416904, "IND", "CBOE", "", "3600 S", "1 min", "BID_ASK",
-            true, false, "SPX", &mut conn, &mut hb, shared);
+            true, false, "SPX", &mut conn, &mut hb, shared, false);
         let legs: Vec<&(String, u32, Instant)> =
             hmds.pending_historical.iter().filter(|(_, r, _)| *r == req_id).collect();
         assert_eq!(legs.len(), 2, "BID_ASK must go out as two queries");
@@ -1903,7 +1907,7 @@ mod tests {
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
         let sent = hmds.send_historical_request_via_ccp(12, 416904, "IND", "CBOE", "", "3600 S", "5 secs", "BID_ASK",
-            true, "SPX", &mut conn, &mut hb, &[], &std::sync::Mutex::new(Vec::new()), &shared);
+            true, "SPX", &mut conn, &mut hb, &[], &std::sync::Mutex::new(Vec::new()), &shared, false);
         assert!(!sent);
         assert!(hmds.pending_historical.is_empty());
         let errors = shared.reference.drain_historical_errors();
@@ -2275,7 +2279,7 @@ mod tests {
         let mut conn: Option<Connection> = None;
 
         hmds.send_historical_request_ex(9, 756733, "STK", "SMART", "", "2 d", "1 sec", "TRADES",
-            true, false, "SPY", &mut conn, &mut hb, &shared);
+            true, false, "SPY", &mut conn, &mut hb, &shared, false);
 
         assert!(hmds.pending_historical.is_empty(), "rejected request must not go pending");
         let errors = shared.reference.drain_historical_errors();
@@ -2295,16 +2299,16 @@ mod tests {
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
         hmds.send_historical_request_ex(1, 756733, "STK", "SMART", "", "3600", "1 Min", "trades",
-            true, false, "SPY", &mut conn, &mut hb, &shared);
+            true, false, "SPY", &mut conn, &mut hb, &shared, false);
         assert!(shared.reference.drain_historical_errors().is_empty());
         assert_eq!(hmds.pending_historical.len(), 1);
         hmds.send_historical_request_ex(2, 756733, "STK", "SMART", "", "1 M", "1 day", "SCHEDULE",
-            true, false, "SPY", &mut conn, &mut hb, &shared);
+            true, false, "SPY", &mut conn, &mut hb, &shared, false);
         assert_eq!(hmds.pending_historical.len(), 1, "a schedule is not a bar query");
         assert_eq!(hmds.pending_schedule.len(), 1);
         assert_eq!(hmds.pending_schedule[0].1, 2);
         hmds.send_historical_request_ex(3, 756733, "STK", "SMART", "", "1 M", "1 hour", "SCHEDULE",
-            true, false, "SPY", &mut conn, &mut hb, &shared);
+            true, false, "SPY", &mut conn, &mut hb, &shared, false);
         assert_eq!(hmds.pending_schedule.len(), 1);
         assert_eq!(shared.reference.drain_historical_errors()[0].1, 321);
     }

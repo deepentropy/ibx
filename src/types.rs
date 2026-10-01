@@ -1499,9 +1499,28 @@ pub struct SecDefFilters {
     pub include_expired: bool,
 }
 
+/// A contract as the API gave it, for a lookup by symbol (ibx#427).
+#[derive(Debug, Clone, Default)]
+pub struct ContractLookup {
+    pub symbol: String,
+    pub sec_type: String,
+    pub exchange: String,
+    pub currency: String,
+    pub filters: SecDefFilters,
+}
+
 /// Commands sent from the control plane to the hot loop via SPSC channel.
 #[derive(Debug, Clone)]
 pub enum ControlCommand {
+    /// A historical-data request for a contract with no conId (ibx#427):
+    /// the contract is looked up first. With exactly one contract found,
+    /// `request` is sent with its conId; otherwise the request gets error
+    /// 200 and no query is sent.
+    ResolveContract {
+        req_id: u32,
+        lookup: ContractLookup,
+        request: Box<ControlCommand>,
+    },
     /// Subscribe to market data for a contract.
     /// `exchange` and `sec_type` determine farm routing (empty = UsFarm default).
     /// `mode_9887` is the per-request market-data mode sent on each entry
@@ -1577,6 +1596,8 @@ pub enum ControlCommand {
         what_to_show: String,
         use_rth: bool,
         keep_up_to_date: bool,
+        /// The contract includes expired contracts (ibx#427).
+        include_expired: bool,
     },
     /// Measure auth-connection round-trip time (ibx#158): sends a
     /// test request immediately; the sample lands in

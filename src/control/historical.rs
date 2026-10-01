@@ -392,6 +392,9 @@ pub struct HistoricalRequest {
     pub bar_size: BarSize,
     pub use_rth: bool,
     pub keep_up_to_date: bool,
+    /// The contract includes expired contracts: sent with the query
+    /// (ibx#427).
+    pub include_expired: bool,
 }
 
 /// Security type of a data-service query for an API contract secType
@@ -452,6 +455,7 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
     let sec_type = query_sec_type(&req.sec_type);
     let rth = if query_use_rth(&req.sec_type, req.use_rth) { "true" } else { "false" };
     let native = if query_use_native(&req.sec_type) { "<useNative>yes</useNative>" } else { "" };
+    let expired = if req.include_expired { "yes" } else { "no" };
 
     let data_str = req.data_type.as_str();
     // keepUpToDate uses structured ;;-delimited ID required by CCP gateway parser.
@@ -478,7 +482,7 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
          <contractID>{con_id}</contractID>\
          <exchange>{exchange}</exchange>\
          <secType>{sec_type}</secType>\
-         <expired>no</expired>\
+         <expired>{expired}</expired>\
          <type>BarData</type>\
          <data>{data}</data>\
          {end_time}\
@@ -1400,6 +1404,7 @@ mod tests {
             bar_size: BarSize::Min5,
             use_rth: true,
             keep_up_to_date: false,
+            include_expired: false,
         };
         let xml = build_query_xml(&req);
         assert!(xml.contains("<id>q1</id>"));
@@ -1411,6 +1416,10 @@ mod tests {
         assert!(xml.contains("<step>5 mins</step>"));
         assert!(xml.contains("<useRTH>true</useRTH>"));
         assert!(xml.contains("<timeLength>1 d</timeLength>"));
+        assert!(xml.contains("<expired>no</expired>"));
+        // ibx#427: includeExpired reaches the query.
+        let xml = build_query_xml(&HistoricalRequest { include_expired: true, ..req.clone() });
+        assert!(xml.contains("<expired>yes</expired>"), "{}", xml);
 
         // ibx#408: server data names.
         for (dt, name) in [
@@ -1439,6 +1448,7 @@ mod tests {
             bar_size: BarSize::Hour1,
             use_rth,
             keep_up_to_date: false,
+            include_expired: false,
         }
     }
 
@@ -1508,6 +1518,7 @@ mod tests {
             bar_size: BarSize::Min5,
             use_rth: true,
             keep_up_to_date: false,
+            include_expired: false,
         };
         let msg = build_historical_request(&req, 1);
         let tags = fix::fix_parse(&msg);

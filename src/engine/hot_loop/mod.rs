@@ -349,6 +349,7 @@ impl HotLoop {
         self.ccp.sweep_pending_schedule_pairs(&self.shared, &self.event_tx);
         self.ccp.sweep_scanner_enrichments(&self.shared);
         self.ccp.sweep_contract_details(&self.shared, &self.event_tx, &mut self.ccp_conn, &mut self.hb);
+        self.ccp.sweep_contract_resolves(&self.shared);
         order_builder::sweep_rth_lookups(&mut self.context);
         farm::sweep_md_lookups(&mut self.context, &self.shared);
         self.send_md_resolved();
@@ -639,7 +640,10 @@ impl HotLoop {
         };
 
         // Drain the buffer so we can mutably borrow self in the loop body.
-        let cmds: Vec<ControlCommand> = self.cmd_buf.drain(..).collect();
+        // Requests whose contract was looked up (ibx#427) go first.
+        let cmds: Vec<ControlCommand> = self.ccp.resolved_requests.drain(..)
+            .chain(self.cmd_buf.drain(..))
+            .collect();
         for cmd in cmds {
             match cmd {
                 ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, reply_tx } => {
@@ -736,17 +740,22 @@ impl HotLoop {
                 ControlCommand::RegisterInstrument { con_id, symbol, sec_type, exchange, reply_tx } => {
                     self.register_or_reject(con_id, symbol, &sec_type, &exchange, &reply_tx);
                 }
-                ControlCommand::FetchHistorical { req_id, con_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date } => {
+                ControlCommand::ResolveContract { req_id, lookup, request } => {
+                    // Look the contract up first (ibx#427); the request comes
+                    // back through `resolved_requests` with its conId.
+                    self.ccp.start_contract_resolve(req_id, lookup, *request, &mut self.ccp_conn, &mut self.hb);
+                }
+                ControlCommand::FetchHistorical { req_id, con_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired } => {
                     // keepUpToDate sends via CCP but bars/end arrive on HMDS — both
                     // paths require an authed HMDS socket to deliver a completion.
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, true);
                     } else if keep_up_to_date {
-                        if self.hmds.send_historical_request_via_ccp(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, &symbol, &mut self.ccp_conn, &mut self.hb, &self.ccp.ccp_sign_key, &self.ccp.ccp_sign_iv, &self.shared) {
+                        if self.hmds.send_historical_request_via_ccp(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, &symbol, &mut self.ccp_conn, &mut self.hb, &self.ccp.ccp_sign_key, &self.ccp.ccp_sign_iv, &self.shared, include_expired) {
                             self.hmds.keep_up_to_date_reqs.insert(req_id);
                         }
                     } else {
-                        self.hmds.send_historical_request_ex(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, &symbol, &mut self.hmds_conn, &mut self.hb, &self.shared);
+                        self.hmds.send_historical_request_ex(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, &symbol, &mut self.hmds_conn, &mut self.hb, &self.shared, include_expired);
                     }
                 }
                 ControlCommand::CancelHistorical { req_id } => {
@@ -2022,6 +2031,41 @@ mod tests {
 
         assert!(shared.take_connection_lost(), "shutdown must signal connection lost");
         assert!(!shared.take_connection_lost(), "flag must clear after being read");
+    }
+
+    // ibx#427: a request without conId waits for its contract lookup, then
+    // goes through the normal command path with the conId found.
+    #[test]
+    fn a_resolved_request_is_dispatched_with_its_con_id() {
+        let shared = Arc::new(SharedState::new());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.set_control_rx(rx);
+        engine.running = true;
+        let request = ControlCommand::FetchHeadTimestamp {
+            req_id: 3, con_id: 0, sec_type: "STK".into(), exchange: "SMART".into(),
+            what_to_show: "TRADES".into(), use_rth: true,
+        };
+        tx.send(ControlCommand::ResolveContract {
+            req_id: 3,
+            lookup: crate::types::ContractLookup { symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() },
+            request: Box::new(request),
+        }).unwrap();
+        engine.poll_once();
+        assert_eq!(engine.ccp.pending_resolves.len(), 1);
+        assert!(shared.reference.drain_historical_errors().is_empty(), "nothing is sent before the lookup answers");
+
+        engine.inject_ccp_message(&crate::control::contracts::tests::pipe_msg(
+            "35=d|43=N|320=FixSecDefReqBySymbol3489660928|322=*|323=4|55=AAPL|167=STK|207=BEST|6008=265598|15=USD"));
+        assert!(matches!(engine.ccp.resolved_requests.as_slice(),
+            [ControlCommand::FetchHeadTimestamp { con_id: 265598, .. }]));
+        engine.poll_once();
+        assert!(engine.ccp.resolved_requests.is_empty());
+        // No historical connection in this test: the dispatched request
+        // reports it, which shows it went through the command path.
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!((errors[0].0, errors[0].1), (3, 162));
     }
 
     #[test]
