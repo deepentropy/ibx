@@ -10,6 +10,7 @@ use crate::types::{InstrumentId, TbtType, PRICE_SCALE};
 use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, clone_for_event, find_body_after_tag, extract_raw_tag};
+use super::pool::FixSink;
 
 /// Idle bound for an in-flight historical query: if no bar segment, error,
 /// or completion arrives for this long, the request is failed with error 162
@@ -98,6 +99,8 @@ pub(crate) struct HmdsState {
     pub(crate) routing: Option<crate::engine::routing::RoutingTable>,
     /// The farm the messages being handled came from (#445).
     pub(crate) rx_farm: super::pool::FarmId,
+    /// The farm each bar query went to, when not the primary one (#445).
+    pub(crate) query_farms: std::collections::HashMap<String, super::pool::FarmId>,
 }
 
 /// A tick-by-tick stream (ibx#404): its query, the farm and stream id the
@@ -311,6 +314,7 @@ impl HmdsState {
             cold_scanner_results: Vec::new(),
             routing: None,
             rx_farm: super::pool::PRIMARY_HMDS,
+            query_farms: std::collections::HashMap::new(),
         }
     }
 
@@ -995,7 +999,7 @@ impl HmdsState {
         use_rth: bool,
         keep_up_to_date: bool,
         symbol: &str,
-        hmds_conn: &mut Option<Connection>,
+        hmds_conn: &mut dyn super::pool::FixSink,
         hb: &mut HeartbeatState,
         shared: &SharedState,
         include_expired: bool,
@@ -1058,13 +1062,12 @@ impl HmdsState {
             };
 
             let xml = crate::control::historical::build_query_xml(&req);
-            if let Some(conn) = hmds_conn.as_mut() {
-                let ts = chrono_free_timestamp();
-                let _ = conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, "W"),
-                    (fix::TAG_SENDING_TIME, &ts),
-                    (6118, &xml),
-                ]);
+            let ts = chrono_free_timestamp();
+            if hmds_conn.send_plain(&[
+                (fix::TAG_MSG_TYPE, "W"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (6118, &xml),
+            ]) {
                 log::info!("Sent historical request: req_id={} con_id={} bar_size={} data={}",
                     req_id, con_id, bar_size, leg_type.as_str());
                 hb.last_hmds_sent = Instant::now();
@@ -1171,7 +1174,15 @@ impl HmdsState {
 
     /// Cancel every in-flight query of a bar request (a BID_ASK request has
     /// two) and drop its held legs.
-    pub(crate) fn cancel_historical(&mut self, req_id: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn cancel_historical(&mut self, req_id: u32, hmds_conn: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
+        for query_id in self.take_historical_cancels(req_id) {
+            self.send_historical_cancel(&query_id, hmds_conn, hb);
+        }
+    }
+
+    /// Forget a bar request and give the query ids still waiting, whose
+    /// cancels go to the farms they were sent to (#445).
+    pub(crate) fn take_historical_cancels(&mut self, req_id: u32) -> Vec<String> {
         self.keep_up_to_date_reqs.remove(&req_id);
         self.multi_leg.retain(|m| m.req_id != req_id);
         let mut cancelled = Vec::new();
@@ -1183,9 +1194,7 @@ impl HmdsState {
                 true
             }
         });
-        for query_id in cancelled {
-            self.send_historical_cancel(&query_id, hmds_conn, hb);
-        }
+        cancelled
     }
 
     /// Send keepUpToDate historical request via CCP (FIXCOMP compressed).
@@ -1314,8 +1323,8 @@ impl HmdsState {
         true
     }
 
-    pub(crate) fn send_historical_cancel(&mut self, query_id: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        if let Some(conn) = hmds_conn.as_mut() {
+    pub(crate) fn send_historical_cancel(&mut self, query_id: &str, hmds_conn: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
+        {
             let xml = format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                  <ListOfCancelQueries>\
@@ -1326,12 +1335,13 @@ impl HmdsState {
                 tid = query_id,
             );
             let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
+            if hmds_conn.send_plain(&[
                 (fix::TAG_MSG_TYPE, "Z"),
                 (fix::TAG_SENDING_TIME, &ts),
                 (6118, &xml),
-            ]);
-            hb.last_hmds_sent = Instant::now();
+            ]) {
+                hb.last_hmds_sent = Instant::now();
+            }
         }
     }
 
@@ -1886,7 +1896,7 @@ impl HmdsState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn send_schedule_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, end_date_time: &str, duration: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_schedule_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, end_date_time: &str, duration: &str, use_rth: bool, hmds_conn: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
         // Duration in the reference form (ibx#430); an unreadable one is
@@ -1900,13 +1910,12 @@ impl HmdsState {
         };
         let query_id = format!("sched_{}", qid);
         let xml = crate::control::historical::build_schedule_xml(&query_id, con_id, sec_type, exchange, &end_date_time, &duration, use_rth);
-        if let Some(conn) = hmds_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "W"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6118, &xml),
-            ]);
+        let ts = chrono_free_timestamp();
+        if hmds_conn.send_plain(&[
+            (fix::TAG_MSG_TYPE, "W"),
+            (fix::TAG_SENDING_TIME, &ts),
+            (6118, &xml),
+        ]) {
             hb.last_hmds_sent = Instant::now();
             log::info!("Sent schedule request: req_id={} con_id={}", req_id, con_id);
         }

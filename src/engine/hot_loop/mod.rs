@@ -965,18 +965,54 @@ impl HotLoop {
                 ControlCommand::FetchHistorical { req_id, con_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired } => {
                     // keepUpToDate sends via CCP but bars/end arrive on HMDS — both
                     // paths require an authed HMDS socket to deliver a completion.
-                    if self.hmds_conn.is_none() {
-                        self.emit_hmds_unavailable(req_id, true);
-                    } else if keep_up_to_date {
-                        if self.hmds.send_historical_request_via_ccp(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, &symbol, &mut self.ccp_conn, &mut self.hb, &self.ccp.ccp_sign_key, &self.ccp.ccp_sign_iv, &self.shared, include_expired) {
+                    if keep_up_to_date {
+                        if self.hmds_conn.is_none() {
+                            self.emit_hmds_unavailable(req_id, true);
+                        } else if self.hmds.send_historical_request_via_ccp(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, &symbol, &mut self.ccp_conn, &mut self.hb, &self.ccp.ccp_sign_key, &self.ccp.ccp_sign_iv, &self.shared, include_expired) {
                             self.hmds.keep_up_to_date_reqs.insert(req_id);
                         }
-                    } else {
-                        self.hmds.send_historical_request_ex(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, &symbol, &mut self.hmds_conn, &mut self.hb, &self.shared, include_expired);
+                        continue;
+                    }
+                    // A SMART route needs the contract's aggregate group
+                    // (#445): the request waits for the definition.
+                    let again = ControlCommand::FetchHistorical {
+                        req_id, con_id, symbol: symbol.clone(), sec_type: sec_type.clone(), exchange: exchange.clone(),
+                        end_date_time: end_date_time.clone(), duration: duration.clone(), bar_size: bar_size.clone(),
+                        what_to_show: what_to_show.clone(), use_rth, keep_up_to_date, include_expired,
+                    };
+                    if self.park_for_hmds_definition(con_id, &exchange, &sec_type, again) {
+                        continue;
+                    }
+                    let st = if sec_type.is_empty() { "STK" } else { sec_type.as_str() };
+                    let route_exchange = farm::routing_exchange(&exchange, st).to_string();
+                    let agg_group = self.agg_group_for(con_id, &route_exchange);
+                    let data_type = bar_data_kind(&bar_size);
+                    match self.hmds_target(&route_exchange, agg_group, st, data_type) {
+                        None => self.shared.reference.push_historical_error(req_id, 162, format!(
+                            "Historical Market Data Service error message:No data of type {} is available for the exchange '{}' and the security type '{}'",
+                            data_type.name(), route_exchange, st)),
+                        Some(PRIMARY_HMDS) if self.hmds_conn.is_none() => self.emit_hmds_unavailable(req_id, true),
+                        Some(farm_id) => {
+                            if let Some(sink) = farm_sink!(self, farm_id) {
+                                self.hmds.send_historical_request_ex(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, &symbol, sink, &mut self.hb, &self.shared, include_expired);
+                            }
+                            if farm_id != PRIMARY_HMDS {
+                                let sent: Vec<String> = self.hmds.pending_historical.iter()
+                                    .filter(|(_, r, _)| *r == req_id).map(|(q, ..)| q.clone()).collect();
+                                for q in sent {
+                                    self.hmds.query_farms.insert(q, farm_id);
+                                }
+                            }
+                        }
                     }
                 }
                 ControlCommand::CancelHistorical { req_id } => {
-                    self.hmds.cancel_historical(req_id, &mut self.hmds_conn, &mut self.hb);
+                    for query_id in self.hmds.take_historical_cancels(req_id) {
+                        let farm_id = self.hmds.query_farms.remove(&query_id).unwrap_or(PRIMARY_HMDS);
+                        if let Some(sink) = farm_sink!(self, farm_id) {
+                            self.hmds.send_historical_cancel(&query_id, sink, &mut self.hb);
+                        }
+                    }
                 }
                 ControlCommand::FetchHeadTimestamp { req_id, con_id, sec_type, exchange, what_to_show, use_rth } => {
                     if self.hmds_conn.is_none() {
@@ -2017,6 +2053,17 @@ fn farm_reconnect_target(auth: &ReconnectAuth, fallback_name: &str) -> (String, 
     let host = if auth.farm_host.is_empty() { auth.host.clone() } else { auth.farm_host.clone() };
     let name = if auth.farm_name.is_empty() { fallback_name.to_string() } else { auth.farm_name.clone() };
     (host, name)
+}
+
+/// The data kind of a bar request's route: daily or longer bars are end of
+/// day charts, others day charts, as the reference picks it (#445).
+fn bar_data_kind(bar_size: &str) -> crate::engine::routing::DataType {
+    let unit = bar_size.trim().to_ascii_lowercase();
+    if ["day", "week", "month"].iter().any(|u| unit.contains(u)) {
+        crate::engine::routing::DataType::EODChart
+    } else {
+        crate::engine::routing::DataType::DayChart
+    }
 }
 
 /// The farm of a pool event.
@@ -4287,5 +4334,53 @@ mod tbt_tests {
         let mnq = engine.context.market.instrument_by_con_id(815824267).unwrap();
         assert_eq!(shared.market.drain_tbt_errors(),
             [(mnq, crate::types::TbtType::AllLast, "AllLast tick-by-tick requests are not supported for MNQ".to_string())]);
+    }
+}
+
+#[cfg(test)]
+mod bars_routing_tests {
+    use super::*;
+    use std::sync::Arc;
+    use crate::bridge::SharedState;
+    use crate::engine::routing::TableKind;
+
+    fn bars(req_id: u32, con_id: i64, exchange: &str, sec_type: &str, bar_size: &str) -> ControlCommand {
+        ControlCommand::FetchHistorical {
+            req_id, con_id, symbol: "X".into(), sec_type: sec_type.into(), exchange: exchange.into(),
+            end_date_time: String::new(), duration: "1 D".into(), bar_size: bar_size.into(),
+            what_to_show: "MIDPOINT".into(), use_rth: true, keep_up_to_date: false, include_expired: false,
+        }
+    }
+
+    // #445: bars go to the farm of their historical row (day charts, or
+    // end of day charts for daily bars), opened on demand; the cancel goes
+    // to the same farm; with no row the request ends with 162.
+    #[test]
+    fn bars_routed_by_the_historical_table() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _server = listener.accept().unwrap();
+        engine.hmds_conn = Some(Connection::new_raw(client).unwrap());
+        engine.set_routing_table(TableKind::Historical,
+            "IDEALPRO,CASH,DayChart|Bar5Sec,4,*,ndc1.example,4000,cashhmds;IDEALPRO,CASH,EODChart,4,*,ndc1.example,4000,cashhmds2");
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+        tx.send(bars(1, 12087792, "IDEALPRO", "CASH", "1 hour")).unwrap();
+        tx.send(bars(2, 12087792, "IDEALPRO", "CASH", "1 day")).unwrap();
+        tx.send(bars(3, 815824267, "CME", "FUT", "1 hour")).unwrap();
+        engine.poll_once();
+        let day = engine.pool.find("cashhmds").expect("day charts farm");
+        let eod = engine.pool.find("cashhmds2").expect("end of day farm");
+        assert_eq!(engine.pool.get(day).unwrap().queued(), 1);
+        assert_eq!(engine.pool.get(eod).unwrap().queued(), 1);
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!((errors[0].0, errors[0].1), (3, 162));
+
+        tx.send(ControlCommand::CancelHistorical { req_id: 1 }).unwrap();
+        engine.poll_once();
+        assert_eq!(engine.pool.get(day).unwrap().queued(), 2, "the cancel goes to the same farm");
     }
 }
