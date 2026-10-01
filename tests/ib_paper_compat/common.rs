@@ -187,34 +187,32 @@ pub(super) fn shutdown_and_reclaim(
 pub(super) fn ccp_keepalive(ccp: &mut Connection) {
     // Drain any pending data (heartbeats, TestRequests from IB)
     let _ = ccp.try_recv();
-    if ccp.has_buffered_data() || true {
-        let frames = ccp.extract_frames();
-        for frame in frames {
-            let raw = match &frame {
-                Frame::Fix(r) | Frame::FixComp(r) | Frame::Binary(r) => r,
-                // Control-state frames are not consumed downstream (ibx#185).
-                Frame::Control(_) => continue,
-            };
-            let (unsigned, _) = ccp.unsign(raw);
-            let msg = if matches!(frame, Frame::FixComp(_)) {
-                fixcomp::fixcomp_decompress(&unsigned)
-                    .ok()
-                    .and_then(|m| m.into_iter().next())
-            } else {
-                Some(unsigned)
-            };
-            if let Some(m) = msg {
-                let parsed = fix::fix_parse(&m);
-                if parsed.get(&fix::TAG_MSG_TYPE).map(|s| s.as_str()) == Some(fix::MSG_TEST_REQUEST) {
-                    // Respond to TestRequest with Heartbeat containing the test ID
-                    let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
-                    let ts = gateway::chrono_free_timestamp();
-                    let _ = ccp.send_fix(&[
-                        (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
-                        (fix::TAG_SENDING_TIME, &ts),
-                        (fix::TAG_TEST_REQ_ID, &test_id),
-                    ]);
-                }
+    let frames = ccp.extract_frames();
+    for frame in frames {
+        let raw = match &frame {
+            Frame::Fix(r) | Frame::FixComp(r) | Frame::Binary(r) => r,
+            // Control-state frames are not consumed downstream (ibx#185).
+            Frame::Control(_) => continue,
+        };
+        let (unsigned, _) = ccp.unsign(raw);
+        let msg = if matches!(frame, Frame::FixComp(_)) {
+            fixcomp::fixcomp_decompress(&unsigned)
+                .ok()
+                .and_then(|m| m.into_iter().next())
+        } else {
+            Some(unsigned)
+        };
+        if let Some(m) = msg {
+            let parsed = fix::fix_parse(&m);
+            if parsed.get(&fix::TAG_MSG_TYPE).map(|s| s.as_str()) == Some(fix::MSG_TEST_REQUEST) {
+                // Respond to TestRequest with Heartbeat containing the test ID
+                let test_id = parsed.get(&fix::TAG_TEST_REQ_ID).cloned().unwrap_or_default();
+                let ts = gateway::chrono_free_timestamp();
+                let _ = ccp.send_fix(&[
+                    (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                    (fix::TAG_SENDING_TIME, &ts),
+                    (fix::TAG_TEST_REQ_ID, &test_id),
+                ]);
             }
         }
     }
