@@ -39,6 +39,10 @@ pub(crate) struct RthTypes {
     /// (PEGMKT; PEGMID or PEGMID2) are in the list (ibx#414).
     pub peg_mkt: bool,
     pub peg_mid: bool,
+    /// The keys of market with protection (MKTPROT) and stop with
+    /// protection (STPPROT) are in the list (ibx#493).
+    pub mkt_prot: bool,
+    pub stp_prot: bool,
 }
 
 impl RthTypes {
@@ -65,6 +69,8 @@ impl RthTypes {
                 "RTH4MKT" => t.rth4mkt = true,
                 "PEGMKT" => t.peg_mkt = true,
                 "PEGMID" | "PEGMID2" => t.peg_mid = true,
+                "MKTPROT" => t.mkt_prot = true,
+                "STPPROT" => t.stp_prot = true,
                 _ => {}
             }
         }
@@ -160,16 +166,26 @@ pub(crate) fn rth_parts(req: &mut OrderRequest) -> Option<(Option<u32>, RthKind,
 /// contract's list does not allow on the order's exchange (ibx#414).
 pub(crate) const UNSUPPORTED_ORDER_TYPE: &str = "Unsupported order type for this exchange and security type.";
 
-/// A new pegged-to-market or pegged-to-midpoint order and its instrument:
-/// the reference refuses it with 387 when the contract's order-type list
-/// for its exchange lacks the type (ib-agent#192 B8b, ibx#414).
+/// A new order of a type checked against the order-type list, and its
+/// instrument: the reference refuses it with 387 when the contract's
+/// order-type list for its exchange lacks the type's key
+/// (`trader.order.proc.aN.a(pe,OcoScope,Q,pe,boolean)@5275-5352`: the key
+/// `jibtypes.s.i()` is not in the list and the type is not in the list's
+/// order types either). Checked for pegged to market and pegged to
+/// midpoint (ib-agent#192 B8b, ibx#414), and for market and stop with
+/// protection, keys MKTPROT and STPPROT (`jibtypes.L.i()`,
+/// `jibtypes.ae.i()`; ibx#493: neither is in the SPY list on BEST).
 pub(crate) fn pegged_type_check(req: &OrderRequest) -> Option<(u32, fn(&RthTypes) -> bool)> {
     use OrderRequest as R;
     let mkt: fn(&RthTypes) -> bool = |t| t.peg_mkt;
     let mid: fn(&RthTypes) -> bool = |t| t.peg_mid;
+    let mkt_prot: fn(&RthTypes) -> bool = |t| t.mkt_prot;
+    let stp_prot: fn(&RthTypes) -> bool = |t| t.stp_prot;
     match req {
         R::SubmitPegMkt { instrument, .. } | R::SubmitEx { instrument, kind: OrderKind::PegMkt { .. }, .. } => Some((*instrument, mkt)),
         R::SubmitPegMid { instrument, .. } | R::SubmitEx { instrument, kind: OrderKind::PegMid { .. }, .. } => Some((*instrument, mid)),
+        R::SubmitMktPrt { instrument, .. } | R::SubmitEx { instrument, kind: OrderKind::MktPrt, .. } => Some((*instrument, mkt_prot)),
+        R::SubmitStpPrt { instrument, .. } | R::SubmitEx { instrument, kind: OrderKind::StpPrt { .. }, .. } => Some((*instrument, stp_prot)),
         _ => None,
     }
 }

@@ -78,8 +78,9 @@ pub(crate) fn drain_and_send_orders(
                 }
             }
         }
-        // A pegged type the contract's list does not allow on the order's
-        // exchange is refused, as the reference (ibx#414).
+        // A pegged or protection type the contract's list does not allow
+        // on the order's exchange is refused, as the reference (ibx#414,
+        // ibx#493).
         match pegged_type_refusal(&order_req, context, conn, hb, shared) {
             Some(false) => { context.rth_parked.push(rewrap(order_req)); continue; }
             Some(true) => continue,
@@ -2125,7 +2126,7 @@ fn pegged_type_refusal(
         Definition::Waiting => Some(false),
         Definition::Known(types, _) if types.types_known && !allowed(types) => {
             let oid = req.order_id();
-            log::warn!("Order {} refused: its pegged type is not allowed on this exchange", oid);
+            log::warn!("Order {} refused: its order type is not in the list of this exchange", oid);
             shared.orders.push_order_error(oid, 387, crate::engine::outside_rth::UNSUPPORTED_ORDER_TYPE.to_string());
             Some(true)
         }
@@ -2193,6 +2194,7 @@ pub(crate) fn rth_definition_reply(context: &mut Context, req_id: &str, msg: &[u
         def.as_ref().map(|d| d.currency.as_str()).unwrap_or(""),
     );
     log::info!("Outside RTH definition for con_id {} on {}: {:?}", key.0, key.1, types);
+    log::debug!("Order-type list for con_id {} on {}: {:?}", key.0, key.1, tokens);
     context.rth_types.insert(key, types);
     release_rth_parked(context);
     true
@@ -4134,6 +4136,22 @@ mod tests {
         let (frames, errors) = run("SMART", BEST_LIST, peg_mid(95));
         assert_eq!(frames.len(), 1);
         assert_eq!((tag(&frames[0], 35), tag(&frames[0], 18)), (Some("D"), Some("M")));
+        assert!(errors.is_empty());
+
+        // ibx#493: market and stop with protection, keys MKTPROT and
+        // STPPROT, absent from the SMART list (the SPY list on BEST of
+        // 01/10/2026 lacks them too).
+        let mkt_prt = |id| OrderRequest::SubmitMktPrt { order_id: id, instrument: 0, side: Side::Buy, qty: 1 };
+        let stp_prt = |id| OrderRequest::SubmitEx { order_id: id, instrument: 0, side: Side::Sell, qty: 1,
+            kind: crate::types::OrderKind::StpPrt { stop_price: px(200.0) }, tif: b'0', attrs: Default::default() };
+        for req in [mkt_prt(94), stp_prt(94)] {
+            let (frames, errors) = run("SMART", BEST_LIST, req);
+            assert!(frames.is_empty(), "nothing sent: {frames:?}");
+            assert_eq!(errors, [(94, 387, "Unsupported order type for this exchange and security type.".to_string())]);
+        }
+        let with_prot = format!("{BEST_LIST},MKTPROT/1,STPPROT/1");
+        let (frames, errors) = run("SMART", &with_prot, mkt_prt(97));
+        assert_eq!((frames.len(), tag(&frames[0], 40)), (1, Some("U")));
         assert!(errors.is_empty());
     }
 
