@@ -50,6 +50,16 @@ pub(crate) fn drain_and_send_orders(
             log::warn!("What-if of order {} dropped: only a single new order can be previewed", oid);
             continue;
         }
+        // A request that depends on one waiting for its contract definition
+        // waits behind it, so the orders go out in the order they were
+        // placed, as the reference sends them: a child behind its parent, an
+        // order behind another of its OCA group, a request of an order
+        // behind that order. A child sent ahead of its parent is refused by
+        // the server (201 "Can't find parent order", paper 01/10/2026).
+        if waits_behind(&order_req, &context.rth_parked) {
+            context.rth_parked.push(rewrap(order_req));
+            continue;
+        }
         // A quantity that is not whole: refused with 10243 and nothing
         // sent, as the reference refuses it for an API client (ib-agent#192
         // B3). Sent with the API client fields of every new order, it was
@@ -2250,6 +2260,39 @@ fn price_mgmt_flag(
         Definition::Waiting => None,
         Definition::Known(types, _) => Some(types.price_chk),
     }
+}
+
+/// The orders of a request, a bracket's three included.
+fn request_order_ids(req: &OrderRequest) -> Vec<crate::types::OrderId> {
+    match req {
+        OrderRequest::SubmitWhatIf { request } => request_order_ids(request),
+        OrderRequest::SubmitBracket { parent_id, tp_id, sl_id, .. } => vec![*parent_id, *tp_id, *sl_id],
+        OrderRequest::CancelAll { .. } => Vec::new(),
+        other => vec![other.order_id()],
+    }
+}
+
+/// The OCA group of a new order, None when it has none.
+fn request_oca_group(req: &OrderRequest) -> Option<String> {
+    let attrs = req.new_order_side()?.1?;
+    if !attrs.oca_group_str.is_empty() {
+        Some(attrs.oca_group_str.clone())
+    } else {
+        (attrs.oca_group > 0).then(|| attrs.oca_group.to_string())
+    }
+}
+
+/// A request must wait behind the waiting ones: a global cancel; a request
+/// of an order that waits; a child whose parent waits; an order of the OCA
+/// group of one that waits.
+fn waits_behind(req: &OrderRequest, parked: &[OrderRequest]) -> bool {
+    if parked.is_empty() { return false; }
+    if matches!(req, OrderRequest::CancelAll { .. }) { return true; }
+    let waiting: Vec<crate::types::OrderId> = parked.iter().flat_map(request_order_ids).collect();
+    if request_order_ids(req).iter().any(|id| waiting.contains(id)) { return true; }
+    let parent = req.new_order_side().and_then(|(_, a)| a).map_or(0, |a| a.parent_id);
+    if parent > 0 && waiting.contains(&parent) { return true; }
+    request_oca_group(req).is_some_and(|group| parked.iter().any(|p| request_oca_group(p).as_deref() == Some(&group)))
 }
 
 /// How long an order waits for the definition its outside-RTH needs; then
@@ -4835,5 +4878,62 @@ mod tests {
         }, vec![limit_ex(1, Side::Buy, 230 * P, priced(None))], 1);
         assert_eq!(tag(&frames[0], 35), Some("c"), "the definition is asked first");
         assert_eq!(context.rth_parked.len(), 1);
+    }
+
+    // The first bracket of a session (paper 01/10/2026): the limit parent
+    // waits for its contract definition, so its stop child, which needs
+    // none, went out first and the server refused it with 201 "Can't find
+    // parent order". The child and an order of the parent's OCA group now
+    // wait behind the parent; an order that depends on nothing goes at once.
+    #[test]
+    fn orders_that_depend_on_a_waiting_order_go_out_after_it() {
+        use std::io::Read;
+        use crate::types::OrderKind as K;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        let mut context = Context::new();
+        context.market.register(265598);
+        price_mgmt_session(&mut context);
+        let types = context.rth_types.remove(&(265598, "BEST".to_string())).unwrap();
+        let shared = Arc::new(SharedState::new());
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        let child = |order_id, kind, oca: &str| OrderRequest::SubmitEx {
+            order_id, instrument: 0, side: Side::Sell, qty: 1, kind, tif: b'1',
+            attrs: crate::types::OrderAttrs { parent_id: if oca.is_empty() { 0 } else { 10 }, oca_group_str: oca.into(), ..Default::default() },
+        };
+        for req in [
+            limit_ex(10, Side::Buy, 100 * P, crate::types::OrderAttrs { oca_group_str: "G".into(), ..Default::default() }),
+            child(11, K::Stop { stop_price: 50 * P }, "G"),
+            OrderRequest::SubmitEx { order_id: 12, instrument: 0, side: Side::Sell, qty: 1,
+                kind: K::Stop { stop_price: 50 * P }, tif: b'0',
+                attrs: crate::types::OrderAttrs { oca_group_str: "G".into(), ..Default::default() } },
+            child(13, K::Limit { price: 200 * P }, "G"),
+            OrderRequest::SubmitEx { order_id: 14, instrument: 0, side: Side::Sell, qty: 1,
+                kind: K::Stop { stop_price: 50 * P }, tif: b'0', attrs: Default::default() },
+        ] {
+            context.pending_orders.push(req);
+        }
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared);
+        assert_eq!(context.rth_parked.iter().map(|r| r.order_id()).collect::<Vec<_>>(), vec![10, 11, 12, 13]);
+        // The definition comes: the waiting orders go in their order.
+        context.rth_lookups.clear();
+        context.rth_types.insert((265598, "BEST".to_string()), types);
+        release_rth_parked(&mut context);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut hb, false, &shared);
+
+        let mut buf = vec![0u8; 65536];
+        let mut len = 0;
+        while let Ok(n) = server.read(&mut buf[len..]) {
+            if n == 0 { break; }
+            len += n;
+        }
+        let text = String::from_utf8_lossy(&buf[..len]).replace('\x01', "|");
+        let sent: Vec<&str> = text.split("|35=").skip(1)
+            .map(|f| if f.starts_with('c') { "c" } else { f.split("|11=").nth(1).and_then(|r| r.split('|').next()).unwrap_or("?") })
+            .collect();
+        assert_eq!(sent, vec!["c", "14.0", "10.0", "11.0", "12.0", "13.0"]);
     }
 }
