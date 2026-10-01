@@ -1313,7 +1313,9 @@ impl Gateway {
             let msg_type: u32 = inner_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
 
             if msg_type == ns::NS_CONNECT_RESPONSE {
-                log::info!("NS_CONNECT_RESPONSE: {}", inner_text);
+                // Type only: the connect response carries the session log
+                // key, so its text is not logged (ibx#283).
+                log::info!("Post-auth: connect response received");
                 // Send port type change (required before data start)
                 let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
                 session::send_secure(&mut tls, &mut channel, newcomm.as_bytes())?;
@@ -1327,7 +1329,7 @@ impl Gateway {
             } else if msg_type == ns::NS_BACKUP_HOST {
                 log::info!("Backup host notice received (ignored)");
             } else {
-                log::info!("Post-auth msg type={}: {}", msg_type, inner_text);
+                log::info!("Post-auth msg type={} (ignored)", msg_type);
             }
         }
         if !fix_ready {
