@@ -934,9 +934,11 @@ pub(super) fn phase_snap_pri_order(conns: Conns) -> Conns {
 
 pub(super) fn phase_peg_mkt_order(conns: Conns) -> Conns {
     let oid = next_order_id();
-    run_submit_cancel_phase(conns, "Phase 45: Pegged to Market Order (SPY)",
+    // The reference refuses this type locally with 387 when the server's allowed
+    // order types for the contract and exchange lack it; that refusal is a pass.
+    run_submit_cancel_phase_or_refused(conns, "Phase 45: Pegged to Market Order (SPY)",
         OrderRequest::SubmitPegMkt { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 0, offset: 0 },
-        true)
+        true, Some(387))
 }
 
 // ─── Phase 46: Pegged to Midpoint ───

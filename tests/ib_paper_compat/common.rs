@@ -551,6 +551,8 @@ pub(super) fn skip_unacked_if_closed(order_acked: bool) -> bool {
 // ─── Generic submit+cancel helper ───
 // fill_or_cancel=false: only cancelled counts as success
 // fill_or_cancel=true: filled OR cancelled both count as success
+// A local refusal of the order fails the phase, unless it is the one the phase
+// names as the reference answer (run_submit_cancel_phase_or_refused).
 
 pub(super) fn run_submit_cancel_phase(
     conns: Conns,
@@ -558,10 +560,25 @@ pub(super) fn run_submit_cancel_phase(
     order_req: OrderRequest,
     fill_or_cancel: bool,
 ) -> Conns {
+    run_submit_cancel_phase_or_refused(conns, phase_name, order_req, fill_or_cancel, None)
+}
+
+/// Same as `run_submit_cancel_phase`, but `accepted_refusal` names the local refusal
+/// code that is also a correct answer: the reference refuses some order types
+/// locally, depending on the order types the server allows for the contract and
+/// exchange, so either that refusal or the normal ack and cancel is right.
+pub(super) fn run_submit_cancel_phase_or_refused(
+    conns: Conns,
+    phase_name: &str,
+    order_req: OrderRequest,
+    fill_or_cancel: bool,
+    accepted_refusal: Option<i64>,
+) -> Conns {
     println!("--- {} ---", phase_name);
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
+    let shared_view = Arc::clone(&shared);
     let (event_tx, event_rx) = crossbeam_channel::unbounded();
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
         shared, Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
@@ -624,10 +641,24 @@ pub(super) fn run_submit_cancel_phase(
     let mut order_cancelled = false;
     let mut order_filled = false;
     let mut order_rejected = false;
+    // Every status seen, in order, so a failure says where the order stopped.
+    let mut statuses: Vec<OrderStatus> = Vec::new();
+
+    // Errors and notices of this order (refusals, cancel notice, warnings), in order.
+    let mut order_errors: Vec<(i64, String)> = Vec::new();
+    let mut refused_as_reference = false;
 
     while Instant::now() < deadline {
+        for (oid, code, text) in shared_view.orders.drain_order_errors() {
+            if oid == order_id { order_errors.push((code, text)); }
+        }
+        if !order_acked && accepted_refusal.is_some_and(|c| order_errors.iter().any(|(code, _)| *code == c)) {
+            refused_as_reference = true;
+            break;
+        }
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
+                if statuses.last() != Some(&update.status) { statuses.push(update.status); }
                 match update.status {
                     // PreSubmitted (39=A) is the server's ack: received, not yet
                     // working on the exchange. An at-the-open order stops there until
@@ -661,13 +692,25 @@ pub(super) fn run_submit_cancel_phase(
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
+    if refused_as_reference {
+        let (code, text) = order_errors.iter().find(|(code, _)| Some(*code) == accepted_refusal).unwrap();
+        println!("  PASS (refused locally as the reference: {} {})
+", code, text);
+        return conns;
+    }
     if order_rejected {
         record_rejection(phase_name);
         return conns;
     }
     if fill_or_cancel {
-        check!(order_filled || order_cancelled, "Order was neither filled nor cancelled");
-        if order_filled { println!("  PASS (filled)\n"); } else { println!("  PASS (cancelled)\n"); }
+        // A missing fill and cancel stays a failure: it means the order was never
+        // acknowledged or its cancel was never confirmed. The facts below tell which.
+        check!(order_filled || order_cancelled,
+            "Order was neither filled nor cancelled (acknowledged: {}, cancel sent: {}, statuses: {:?}, errors: {:?})",
+            order_acked, cancel_sent, statuses, order_errors);
+        if order_filled { println!("  PASS (filled)\n"); }
+        else if order_cancelled { println!("  PASS (cancelled)\n"); }
+        else { println!(); }
     } else {
         // Session-aware gate: some order types (Relative/pegged, snapshot, midprice)
         // peg to a live primary NBBO and are never acknowledged when the market is
@@ -677,8 +720,8 @@ pub(super) fn run_submit_cancel_phase(
             println!("  SKIP: Closed — order not acknowledged (order type needs a live market)\n");
             return conns;
         }
-        check!(order_acked, "Order was never acknowledged");
-        check!(order_cancelled, "Order was never cancelled");
+        check!(order_acked, "Order was never acknowledged (errors: {:?})", order_errors);
+        check!(order_cancelled, "Order was never cancelled (statuses: {:?}, errors: {:?})", statuses, order_errors);
         println!("  PASS\n");
     }
     conns
