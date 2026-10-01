@@ -53,12 +53,10 @@ pub fn ns_build(version: u32, msg_type: u32, fields: &[&str], prefix: &str) -> V
 /// Parse NS payload into (version, msg_type, remaining_fields).
 pub fn ns_parse(payload: &[u8]) -> Option<(u32, u32, Vec<String>)> {
     let text = std::str::from_utf8(payload).ok()?;
-    // Strip MISC prefix if present
-    let text = if text.to_uppercase().starts_with("MISC") {
-        &text[4..]
-    } else {
-        text
-    };
+    // Strip the text prefix from the original text, case-sensitive, as the
+    // reference does. Slicing at the length of an upper-cased copy panicked
+    // when upper-casing changed the byte length (ibx#365).
+    let text = text.strip_prefix("MISC").unwrap_or(text);
     let parts: Vec<&str> = text.split(';').collect();
     if parts.len() < 2 {
         return None;
@@ -234,13 +232,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_misc_prefix_lowercase() {
-        // "misc" in lowercase — to_uppercase converts to "MISC", so it should still strip.
-        let payload = b"misc38;529;val;";
-        let (version, msg_type, fields) = ns_parse(payload).unwrap();
-        assert_eq!(version, 38);
-        assert_eq!(msg_type, 529);
-        assert_eq!(fields, vec!["val"]);
+    fn parse_misc_prefix_lowercase_is_kept() {
+        // The prefix is stripped case-sensitively, as the reference does: a
+        // lower-case "misc" stays in the version field, which is then not a
+        // number (ibx#365).
+        assert!(ns_parse(b"misc38;529;val;").is_none());
+    }
+
+    #[test]
+    fn parse_prefix_that_changes_length_when_upper_cased_does_not_panic() {
+        // Upper-cased, these characters give "MISC" with a different byte
+        // length; slicing the original at byte 4 panicked (ibx#365).
+        let payload = "mıſc;1;2".as_bytes();
+        assert!(ns_parse(payload).is_none());
+        let payload = "MISCı;1;2".as_bytes();
+        assert!(ns_parse(payload).is_none());
     }
 
     #[test]
