@@ -477,7 +477,6 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
         // with the rejection reason carried separately on OrderState.completedStatus.
         OrderStatus::Rejected => "Inactive",
         OrderStatus::Inactive => "Inactive",
-        OrderStatus::Uncertain => "Unknown",
     }
 }
 

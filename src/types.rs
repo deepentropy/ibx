@@ -70,9 +70,6 @@ pub enum OrderStatus {
     Rejected,
     /// Server reports order inactive (FIX 39=I).
     Inactive,
-    /// Order state is unknown due to an auth connection disconnect.
-    /// Will be reconciled when reconnection completes (mass status request).
-    Uncertain,
 }
 
 impl OrderStatus {
@@ -85,7 +82,6 @@ impl OrderStatus {
     /// via `Context::set_order_status_forced`.
     pub fn rank(self) -> u8 {
         match self {
-            Self::Uncertain => 0,
             Self::PendingSubmit => 1,
             Self::PreSubmitted => 2,
             // Working tier: a modify ack returns PendingReplace to

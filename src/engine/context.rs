@@ -260,7 +260,7 @@ impl Context {
             .filter(|o| o.instrument == id && matches!(o.status,
                 OrderStatus::PendingSubmit | OrderStatus::PreSubmitted | OrderStatus::Submitted |
                 OrderStatus::PendingCancel | OrderStatus::PendingReplace |
-                OrderStatus::PartiallyFilled | OrderStatus::Uncertain))
+                OrderStatus::PartiallyFilled))
             .collect()
     }
 
@@ -1175,19 +1175,6 @@ impl Context {
     /// Final status of an order that left the engine (ibx#464).
     pub fn finished_status(&self, order_id: OrderId) -> Option<OrderStatus> {
         self.finished_orders.get(&order_id).copied()
-    }
-
-    /// Mark all live open orders as Uncertain (auth disconnect — status may have changed).
-    pub fn mark_orders_uncertain(&mut self) {
-        for order in self.open_orders.values_mut() {
-            match order.status {
-                OrderStatus::PendingSubmit | OrderStatus::PreSubmitted | OrderStatus::Submitted |
-                OrderStatus::PendingCancel | OrderStatus::PendingReplace | OrderStatus::PartiallyFilled => {
-                    order.status = OrderStatus::Uncertain;
-                }
-                _ => {}
-            }
-        }
     }
 }
 

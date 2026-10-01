@@ -1218,8 +1218,12 @@ impl CcpState {
         // 39=I, ibx#472).
         // The answer to a status request after a refused cancel or modify
         // sets the status, back to working too (ibx#252).
-        let queried = is_status_report && !context.status_queries.is_empty()
-            && context.status_queries.remove(&clord_id);
+        // The replay after a reconnect answers a status request for every
+        // working order: its status is set as the server gives it, as for
+        // a single status request (ibx#251).
+        let replayed = is_status_report && self.awaiting_status_replay;
+        let queried = replayed || (is_status_report && !context.status_queries.is_empty()
+            && context.status_queries.remove(&clord_id));
         let change = if queried {
             context.apply_queried_status(clord_id, status)
         } else {
@@ -2553,14 +2557,16 @@ impl CcpState {
         }
     }
 
-    pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {
+    pub(crate) fn handle_disconnect(&mut self, _context: &mut Context, _event_tx: &Option<Sender<Event>>) {
         self.disconnected = true;
         // Matching-symbols requests end without an answer and are not sent
         // again, as in the reference (ibx#369).
         self.pending_matching_symbols.clear();
         self.awaiting_status_replay = false;
         self.status_replay_end_at = None;
-        context.mark_orders_uncertain();
+        // The orders keep their status, as in the reference: the clients get
+        // the lost-link message only, and the replay after the new logon
+        // corrects each order (ibx#251).
         // Don't emit Event::Disconnected — auto-reconnect handles CCP drops transparently.
         // Python is only notified if reconnect exhausts retries.
     }
@@ -5527,6 +5533,56 @@ mod reconnect_tests {
         let shared = SharedState::new();
         ccp.handle_exec_report(&frame(&[(11, "*"), (55, "*")]), &mut context, &shared, &None, "DU1");
         assert!(ccp.status_replay_end_at.is_none());
+    }
+
+    // ibx#251: a lost auth link leaves every order with its status, and
+    // nothing is reported for the orders.
+    #[test]
+    fn link_loss_keeps_the_order_status() {
+        use crate::types::OrderStatus;
+        let (mut ccp, mut context, shared) = (CcpState::new(), Context::new(), SharedState::new());
+        let instrument = context.market.try_register(1005).unwrap();
+        for (id, status) in [(90, OrderStatus::Submitted), (91, OrderStatus::PendingCancel), (92, OrderStatus::PreSubmitted)] {
+            context.insert_order(crate::types::Order::new(id, instrument, Side::Buy, 1, 15 * PRICE_SCALE, b'2', b'0', 0));
+            context.set_order_status_forced(id, status);
+        }
+        ccp.handle_disconnect(&mut context, &None);
+        assert_eq!(context.order(90).unwrap().status, OrderStatus::Submitted);
+        assert_eq!(context.order(91).unwrap().status, OrderStatus::PendingCancel);
+        assert_eq!(context.order(92).unwrap().status, OrderStatus::PreSubmitted);
+        assert!(shared.orders.drain_order_updates().is_empty(), "no status at the drop");
+    }
+
+    // ibx#251: each replayed report of a known order gives its status, set
+    // as the server reports it, back to working too.
+    #[test]
+    fn replay_reports_set_the_status_as_reported() {
+        use crate::types::OrderStatus;
+        let (mut ccp, mut context, shared) = (CcpState::new(), Context::new(), SharedState::new());
+        let instrument = context.market.try_register(1005).unwrap();
+        for id in [90, 91] {
+            context.insert_order(crate::types::Order::new(id, instrument, Side::Buy, 1, 15 * PRICE_SCALE, b'2', b'0', 0));
+        }
+        context.set_order_status_forced(90, OrderStatus::Submitted);
+        context.set_order_status_forced(91, OrderStatus::PendingCancel);
+        ccp.handle_disconnect(&mut context, &None);
+        ccp.awaiting_status_replay = true;
+
+        let working = |id: &str| frame(&[(11, id), (20, "3"), (150, "0"), (39, "0"), (37, "57311390"),
+            (100, "NASDAQ"), (14, "0"), (151, "1"), (6008, "1005"), (38, "1")]);
+        ccp.handle_exec_report(&working("90.0"), &mut context, &shared, &None, "DU1");
+        ccp.handle_exec_report(&working("91.0"), &mut context, &shared, &None, "DU1");
+        ccp.handle_exec_report(&frame(&[(11, "*"), (55, "*")]), &mut context, &shared, &None, "DU1");
+
+        assert_eq!(context.order(91).unwrap().status, OrderStatus::Submitted, "the server's status wins");
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.iter().map(|u| (u.order_id, u.status)).collect::<Vec<_>>(),
+            vec![(90, OrderStatus::Submitted), (91, OrderStatus::Submitted)], "one status per replayed order");
+
+        // After the replay the status guard applies again.
+        context.set_order_status_forced(91, OrderStatus::PendingCancel);
+        ccp.handle_exec_report(&working("91.0"), &mut context, &shared, &None, "DU1");
+        assert_eq!(context.order(91).unwrap().status, OrderStatus::PendingCancel);
     }
 
     // ── ibx#427: a historical request without conId looks the contract up ──

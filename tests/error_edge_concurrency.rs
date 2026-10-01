@@ -163,21 +163,6 @@ fn disconnect_during_active_subscription() {
     // Might or might not dispatch depending on mapping — key is no panic
 }
 
-#[test]
-fn disconnect_during_pending_order_uncertain_status() {
-    let (client, _rx, shared) = test_client();
-
-    // Order was pending when we disconnect
-    shared.orders.push_order_update(OrderUpdate {
-        avg_fill_price: 0,
-        order_id: 50, instrument: 0, status: OrderStatus::Uncertain,
-        filled_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, remaining_qty_fixed: (100) as i64 * ibx::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0,
-    });
-    let mut w = RecordingWrapper::default();
-    client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("order_status:50:Unknown")));
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 //  ERROR PATHS — fill dedup (engine level)
 // ═══════════════════════════════════════════════════════════════════════
