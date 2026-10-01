@@ -475,6 +475,21 @@ fn apply_secdef_fields<'a>(def: &mut ContractDefinition, keys: &mut RecordKeys<'
     }
 }
 
+/// Request id names of a lookup by symbol and of a lookup by identifier,
+/// as the reference names them; the request number follows (ibx#229).
+pub const SECDEF_BY_SYMBOL_NAME: &str = "FixSecDefReqBySymbol";
+pub const SECDEF_BY_IDENTIFIER_NAME: &str = "FixSecDefReqByIdTypeValue";
+
+/// The request number of a definition reply's request id: the id without
+/// the name of its lookup (a bare number is taken as is).
+pub fn secdef_request_number(req_id: &str) -> Option<u32> {
+    req_id.strip_prefix(SECDEF_BY_IDENTIFIER_NAME)
+        .or_else(|| req_id.strip_prefix(SECDEF_BY_SYMBOL_NAME))
+        .unwrap_or(req_id)
+        .parse()
+        .ok()
+}
+
 /// Extract the SecurityReqID from a response to match with the original request.
 pub fn secdef_response_req_id(data: &[u8]) -> Option<String> {
     let tags = fix::fix_parse(data);

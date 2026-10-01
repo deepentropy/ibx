@@ -324,19 +324,25 @@ impl SymbolLookup {
 /// written, and their order, follow the reference (ibx#410): a lookup with
 /// a strike has no source name, the contract is named by the name fields
 /// the caller gave, and a contract month and a full date do not share a
-/// field.
-fn secdef_by_symbol_fields(req_id: &str, lookup: &SymbolLookup, strike: &str) -> Vec<(u32, String)> {
-    use crate::control::contracts::{lookup_symbol, TAG_IB_LOCAL_SYMBOL, TAG_IB_SOURCE, TAG_IB_TRADING_CLASS,
-        TAG_SYMBOL};
+/// field. The request id is the request number after the name of the
+/// lookup, and a lookup by symbol with a source asks for expired contracts
+/// when the caller does (ibx#229).
+fn secdef_by_symbol_fields(req_id: u32, lookup: &SymbolLookup, strike: &str) -> Vec<(u32, String)> {
+    use crate::control::contracts::{lookup_symbol, SECDEF_BY_IDENTIFIER_NAME, SECDEF_BY_SYMBOL_NAME,
+        TAG_IB_LOCAL_SYMBOL, TAG_IB_SOURCE, TAG_IB_TRADING_CLASS, TAG_SYMBOL};
     let f = &lookup.filters;
+    let identifier = lookup.is_identifier();
+    let name = if identifier { SECDEF_BY_IDENTIFIER_NAME } else { SECDEF_BY_SYMBOL_NAME };
     let mut fields: Vec<(u32, String)> = Vec::with_capacity(16);
     fields.push((fix::TAG_MSG_TYPE, "c".into()));
-    fields.push((320, req_id.into()));
+    fields.push((320, format!("{}{}", name, req_id)));
     fields.push((321, "2".into()));
     if strike.is_empty() {
         fields.push((TAG_IB_SOURCE, "Socket".into()));
+        if f.include_expired && !identifier {
+            fields.push((6320, "1".into()));
+        }
     }
-    let identifier = lookup.is_identifier();
     if identifier {
         // Identifier lookup: the identifier and its source replace the
         // symbol/secType/filters; exchange and currency still ride
@@ -2022,9 +2028,8 @@ impl CcpState {
     /// Send one by-symbol lookup with the strike text given (empty: none).
     fn send_symbol_lookup(&mut self, req_id: u32, lookup: &SymbolLookup, strike: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         if let Some(conn) = ccp_conn.as_mut() {
-            let req_id_str = req_id.to_string();
             let ts = chrono_free_timestamp();
-            let body = secdef_by_symbol_fields(&req_id_str, lookup, strike);
+            let body = secdef_by_symbol_fields(req_id, lookup, strike);
             let mut fields: Vec<(u32, &str)> = Vec::with_capacity(body.len() + 1);
             fields.push((fix::TAG_MSG_TYPE, "c"));
             fields.push((fix::TAG_SENDING_TIME, &ts));
@@ -2133,7 +2138,8 @@ impl CcpState {
         // Match the response to its originating pending_secdef entry by the
         // echoed request id: an internal auto-fetch reply landing while a
         // user request is in flight must not leak onto the user's req_id.
-        let Ok(req_id) = rid.parse::<u32>() else { return };
+        // A lookup's request id carries the name of the lookup (ibx#229).
+        let Some(req_id) = contracts::secdef_request_number(&rid) else { return };
         let Some(idx) = self.pending_secdef.iter().position(|(pid, _, _)| *pid == req_id) else { return };
         let (_, single_shot, _) = self.pending_secdef.remove(idx);
         if records.is_empty() {
@@ -3872,7 +3878,7 @@ mod tests {
 
     fn lookup_frame(lookup: &SymbolLookup) -> String {
         let strike = if lookup.filters.strike > 0.0 { format!("{}", lookup.filters.strike) } else { String::new() };
-        frame_text(&secdef_by_symbol_fields("7", lookup, &strike))
+        frame_text(&secdef_by_symbol_fields(7, lookup, &strike))
     }
 
     fn frame_text(fields: &[(u32, String)]) -> String {
@@ -3896,18 +3902,18 @@ mod tests {
         // Trading class, local symbol and symbol, with a strike: no source.
         let l = symbol_lookup("AAPL", "OPT", "SMART", option_filters("AAPL  261005C00342500", "AAPL", ""));
         assert_eq!(lookup_frame(&l),
-            "35=c|320=7|321=2|6058=AAPL|6035=AAPL  261005C00342500|55=AAPL|167=OPT|541=20261005|201=1|202=342.5|100=BEST|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6058=AAPL|6035=AAPL  261005C00342500|55=AAPL|167=OPT|541=20261005|201=1|202=342.5|100=BEST|15=USD");
         // Symbol only, with a multiplier.
         let l = symbol_lookup("AAPL", "OPT", "SMART", option_filters("", "", "100"));
         assert_eq!(lookup_frame(&l),
-            "35=c|320=7|321=2|55=AAPL|167=OPT|541=20261005|201=1|202=342.5|231=100|100=BEST|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|55=AAPL|167=OPT|541=20261005|201=1|202=342.5|231=100|100=BEST|15=USD");
         // The request of the issue.
         let mut f = option_filters("AAPL  261218C00220000", "AAPL", "100");
         f.last_trade_date_or_contract_month = "20261218".into();
         f.strike = 220.0;
         let l = symbol_lookup("AAPL", "OPT", "SMART", f);
         assert_eq!(lookup_frame(&l),
-            "35=c|320=7|321=2|6058=AAPL|6035=AAPL  261218C00220000|55=AAPL|167=OPT|541=20261218|201=1|202=220|231=100|100=BEST|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6058=AAPL|6035=AAPL  261218C00220000|55=AAPL|167=OPT|541=20261218|201=1|202=220|231=100|100=BEST|15=USD");
     }
 
     #[test]
@@ -3915,39 +3921,39 @@ mod tests {
         let f = crate::types::SecDefFilters { local_symbol: "AAPL  261005C00342500".into(), ..Default::default() };
         let l = symbol_lookup("", "OPT", "SMART", f);
         assert_eq!(lookup_frame(&l),
-            "35=c|320=7|321=2|6088=Socket|6035=AAPL  261005C00342500|167=OPT|100=BEST|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6088=Socket|6035=AAPL  261005C00342500|167=OPT|100=BEST|15=USD");
     }
 
     #[test]
     fn future_lookup_puts_the_month_and_the_date_on_different_fields() {
         let month = crate::types::SecDefFilters { last_trade_date_or_contract_month: "202612".into(), ..Default::default() };
         assert_eq!(lookup_frame(&symbol_lookup("MNQ", "FUT", "CME", month)),
-            "35=c|320=7|321=2|6088=Socket|55=MNQ|167=FUT|200=202612|100=CME|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6088=Socket|55=MNQ|167=FUT|200=202612|100=CME|15=USD");
         let date = crate::types::SecDefFilters { last_trade_date_or_contract_month: "20261218".into(), ..Default::default() };
         assert_eq!(lookup_frame(&symbol_lookup("MNQ", "FUT", "CME", date)),
-            "35=c|320=7|321=2|6088=Socket|55=MNQ|167=FUT|541=20261218|100=CME|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6088=Socket|55=MNQ|167=FUT|541=20261218|100=CME|15=USD");
         let noexp = crate::types::SecDefFilters { last_trade_date_or_contract_month: "noexp".into(), ..Default::default() };
         assert_eq!(lookup_frame(&symbol_lookup("MNQ", "FUT", "CME", noexp)),
-            "35=c|320=7|321=2|6088=Socket|55=MNQ|167=FUT|541=NOEXP|100=CME|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6088=Socket|55=MNQ|167=FUT|541=NOEXP|100=CME|15=USD");
         let short = crate::types::SecDefFilters { last_trade_date_or_contract_month: "2026".into(), ..Default::default() };
         assert_eq!(lookup_frame(&symbol_lookup("MNQ", "FUT", "CME", short)),
-            "35=c|320=7|321=2|6088=Socket|55=MNQ|167=FUT|100=CME|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6088=Socket|55=MNQ|167=FUT|100=CME|15=USD");
     }
 
     #[test]
     fn trading_class_only_lookup_has_no_symbol() {
         let f = crate::types::SecDefFilters { trading_class: "NMS".into(), ..Default::default() };
         assert_eq!(lookup_frame(&symbol_lookup("AAPL", "STK", "SMART", f)),
-            "35=c|320=7|321=2|6088=Socket|6058=NMS|167=CS|100=BEST|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6088=Socket|6058=NMS|167=CS|100=BEST|15=USD");
     }
 
     #[test]
     fn stock_lookup_strips_the_slash_and_keeps_the_primary_exchange() {
         let f = crate::types::SecDefFilters { primary_exchange: "NYSE".into(), ..Default::default() };
         assert_eq!(lookup_frame(&symbol_lookup("BRK/A", "STK", "SMART", f)),
-            "35=c|320=7|321=2|6088=Socket|55=BRKA|167=CS|100=BEST|207=NYSE|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6088=Socket|55=BRKA|167=CS|100=BEST|207=NYSE|15=USD");
         assert_eq!(lookup_frame(&symbol_lookup("BRK A", "STK", "SMART", Default::default())),
-            "35=c|320=7|321=2|6088=Socket|55=BRK A|167=CS|100=BEST|15=USD");
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6088=Socket|55=BRK A|167=CS|100=BEST|15=USD");
     }
 
     #[test]
@@ -3956,7 +3962,39 @@ mod tests {
             sec_id: "US0378331005".into(), sec_id_type: "ISIN".into(), ..Default::default()
         };
         assert_eq!(lookup_frame(&symbol_lookup("AAPL", "STK", "SMART", f)),
-            "35=c|320=7|321=2|6088=Socket|22=4|48=US0378331005|100=BEST|15=USD");
+            "35=c|320=FixSecDefReqByIdTypeValue7|321=2|6088=Socket|22=4|48=US0378331005|100=BEST|15=USD");
+    }
+
+    // ibx#229: expired contracts are asked for after the source, only on
+    // a lookup by symbol that has a source.
+    #[test]
+    fn include_expired_rides_a_symbol_lookup_with_a_source() {
+        let f = crate::types::SecDefFilters {
+            last_trade_date_or_contract_month: "202612".into(), include_expired: true, ..Default::default()
+        };
+        assert_eq!(lookup_frame(&symbol_lookup("MNQ", "FUT", "CME", f)),
+            "35=c|320=FixSecDefReqBySymbol7|321=2|6088=Socket|6320=1|55=MNQ|167=FUT|200=202612|100=CME|15=USD");
+        // A lookup with a strike has no source, so no such field either.
+        let mut f = option_filters("", "", "");
+        f.include_expired = true;
+        assert!(!lookup_frame(&symbol_lookup("AAPL", "OPT", "SMART", f)).contains("6320="));
+        // Nor a lookup by identifier.
+        let f = crate::types::SecDefFilters {
+            sec_id: "US0378331005".into(), sec_id_type: "ISIN".into(), include_expired: true, ..Default::default()
+        };
+        assert_eq!(lookup_frame(&symbol_lookup("AAPL", "STK", "SMART", f)),
+            "35=c|320=FixSecDefReqByIdTypeValue7|321=2|6088=Socket|22=4|48=US0378331005|100=BEST|15=USD");
+    }
+
+    // ibx#229: the request number of a reply, with or without the name.
+    #[test]
+    fn secdef_request_number_strips_the_lookup_name() {
+        use crate::control::contracts::secdef_request_number;
+        assert_eq!(secdef_request_number("FixSecDefReqBySymbol42"), Some(42));
+        assert_eq!(secdef_request_number("FixSecDefReqByIdTypeValue7"), Some(7));
+        assert_eq!(secdef_request_number("100"), Some(100));
+        assert_eq!(secdef_request_number("ibxfan-1-2"), None);
+        assert_eq!(secdef_request_number("FixSecDefReqBySymbol"), None);
     }
 
     #[test]
@@ -4007,15 +4045,15 @@ mod tests {
         f.strike = 342.8;
         ccp.send_secdef_request_by_symbol(9, "AAPL", "OPT", "SMART", "USD", &f, &mut conn, &mut hb);
         assert_eq!(ccp_messages_sent(&mut server),
-            ["35=c|320=9|321=2|55=AAPL|167=OPT|541=20261005|201=1|202=342.8|100=BEST|15=USD"]);
+            ["35=c|320=FixSecDefReqBySymbol9|321=2|55=AAPL|167=OPT|541=20261005|201=1|202=342.8|100=BEST|15=USD"]);
 
         ccp.process_ccp_message(&empty_secdef_reply("9"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
         assert_eq!(ccp_messages_sent(&mut server),
-            ["35=c|320=9|321=2|55=AAPL|167=OPT|541=20261005|201=1|202=3.428|100=BEST|15=USD"]);
+            ["35=c|320=FixSecDefReqBySymbol9|321=2|55=AAPL|167=OPT|541=20261005|201=1|202=3.428|100=BEST|15=USD"]);
         assert!(shared.reference.drain_historical_errors().is_empty(), "no error before the retry answers");
         assert_eq!(ccp.pending_secdef.len(), 1);
 
-        ccp.process_ccp_message(&empty_secdef_reply("9"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        ccp.process_ccp_message(&empty_secdef_reply("FixSecDefReqBySymbol9"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
         assert!(ccp_messages_sent(&mut server).is_empty(), "one retry only");
         let errors = shared.reference.drain_historical_errors();
         assert_eq!(errors.len(), 1);
@@ -4164,7 +4202,7 @@ mod tests {
 
         // The symbol lookup answers first and asks one exchange rule.
         let msft = pipe_msg(&format!(
-            "35=d|43=N|320=101|322=*|323=4|{}146=1|6038=Y|6019=1|6031=4563|6026=1|6023=0|6027=0.01|6030=1|6344=1|\
+            "35=d|43=N|320=FixSecDefReqBySymbol101|322=*|323=4|{}146=1|6038=Y|6019=1|6031=4563|6026=1|6023=0|6027=0.01|6030=1|6344=1|\
              6008=272093|306=MICROSOFT CORP|6046=BEST,AMEX,",
             listing("MSFT", "272093", "BEST", key, "4563"),
         ));

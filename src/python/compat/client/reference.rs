@@ -123,6 +123,7 @@ impl EClient {
                 trading_class: contract.trading_class.clone(),
                 sec_id: contract.sec_id.clone(),
                 sec_id_type: contract.sec_id_type.clone(),
+                include_expired: contract.include_expired,
             },
         }).map_err(|e| PyRuntimeError::new_err(format!("Engine stopped: {}", e)))?;
         Ok(())

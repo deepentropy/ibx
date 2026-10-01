@@ -1385,6 +1385,8 @@ pub struct SecDefFilters {
     /// lookup rides the identifier instead of the symbol (ib-agent#174).
     pub sec_id: String,
     pub sec_id_type: String,
+    /// Expired contracts are included (ibx#229).
+    pub include_expired: bool,
 }
 
 /// Commands sent from the control plane to the hot loop via SPSC channel.
