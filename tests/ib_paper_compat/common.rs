@@ -799,6 +799,14 @@ fn run_submit_cancel_phase_inner(
                     _ => {}
                 }
             }
+            // A fill comes as a fill event, not as a status update: the
+            // clients build their Filled status from it. Nothing left working
+            // means the order is filled.
+            Ok(Event::Fill(fill)) if fill.order_id == order_id && fill.remaining_fixed == 0 => {
+                if statuses.last() != Some(&OrderStatus::Filled) { statuses.push(OrderStatus::Filled); }
+                order_filled = true;
+                if fill_or_cancel { break; }
+            }
             _ => {}
         }
     }

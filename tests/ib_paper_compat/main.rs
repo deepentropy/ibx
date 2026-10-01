@@ -579,6 +579,39 @@ fn close_order_phases_live() {
     assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
 }
 
+/// Focused live entry for the market-to-limit, box top and snap phases
+/// (ibx#418, ibx#493): in regular hours they can stay PreSubmitted after the
+/// cancel. Run:
+///   cargo test --test ib_paper_compat mtl_snap_phases_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn mtl_snap_phases_live() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    println!("=== market-to-limit and snap phases (session={:?}) ===
+", market_session().0);
+    let (mut gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
+        .expect("Gateway::connect() failed");
+    let mut conns = Conns { farm: farm_conn, ccp: ccp_conn, hmds: hmds_conn, account_id: gw.account_id.clone() };
+    let phases: [fn(Conns) -> Conns; 5] = [
+        orders::phase_mtl_order,
+        orders::phase_box_top_order,
+        orders::phase_snap_mkt_order,
+        orders::phase_snap_mid_order,
+        orders::phase_snap_pri_order,
+    ];
+    for phase in phases {
+        conns = phase(conns);
+        conns = ensure_ccp_alive(conns, &mut gw, &config);
+    }
+    let _ = connection::phase_graceful_shutdown(conns);
+    let rejected = take_rejections();
+    assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
+}
+
 /// Focused live entry for the order phases with conditions (ibx#416,
 /// ibx#493). Run:
 ///   cargo test --test ib_paper_compat condition_phases_live -- --ignored --nocapture
