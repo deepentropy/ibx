@@ -222,13 +222,176 @@ pub fn send_secure<W: Write>(
     Ok(())
 }
 
+/// Kind of a login error answer, read from its code as the reference does
+/// (ibx#423).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginErrorKind {
+    /// Login from this IP address is not authorized.
+    IpNotAuthorized,
+    /// The user is locked out.
+    LockedOut,
+    /// Invalid user name or password.
+    BadCredentials,
+    /// The site is down. Retried with backoff.
+    SiteDown,
+    /// The site is not ready. Retried with backoff.
+    SiteNotReady,
+    /// Login restricted (sanctions, anonymous proxy, blocked address).
+    Restricted,
+    /// No demo user allocated.
+    DemoUserNotAllocated,
+    /// Live mode selected with a paper user.
+    PaperUserInLiveMode,
+    /// The user has no paper user.
+    NoPaperMapping,
+    /// The user has several paper users.
+    SeveralPaperUsers,
+    /// Paper logons are not allowed for this user.
+    PaperLogonNotAllowed,
+    /// The preview needs the paper mode.
+    PreviewNeedsPaper,
+    /// The password was rejected.
+    PasswordRejected,
+    /// Secure-error answer: the server refused the encrypted session.
+    SecureConnectionRefused,
+    /// Any other code, or a code that is not a number.
+    Other,
+}
+
+impl LoginErrorKind {
+    /// Kind of an error answer with `code` and server `text`.
+    pub fn from_code(code: Option<i64>, text: &str) -> Self {
+        match code {
+            Some(1) if text.contains("IP address") => Self::IpNotAuthorized,
+            Some(1) if text.contains("lockedout") => Self::LockedOut,
+            Some(1) => Self::BadCredentials,
+            Some(4) => Self::SiteDown,
+            Some(5) => Self::SiteNotReady,
+            Some(10..=12) => Self::Restricted,
+            Some(13) => Self::DemoUserNotAllocated,
+            Some(14) => Self::PaperUserInLiveMode,
+            Some(15) => Self::NoPaperMapping,
+            Some(16) => Self::SeveralPaperUsers,
+            Some(17..=19) => Self::PaperLogonNotAllowed,
+            Some(20) => Self::PreviewNeedsPaper,
+            Some(22 | 23) => Self::PasswordRejected,
+            _ => Self::Other,
+        }
+    }
+
+    /// Site down and site not ready are retried with backoff, as the
+    /// reference does; every other kind stops the login.
+    pub fn is_retryable(self) -> bool {
+        matches!(self, Self::SiteDown | Self::SiteNotReady)
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::IpNotAuthorized => "login from this IP address is not authorized",
+            Self::LockedOut => "user locked out",
+            Self::BadCredentials => "invalid user name or password",
+            Self::SiteDown => "site down",
+            Self::SiteNotReady => "site not ready",
+            Self::Restricted => "login restricted",
+            Self::DemoUserNotAllocated => "demo user not allocated",
+            Self::PaperUserInLiveMode => "live mode selected, but the user is a paper user",
+            Self::NoPaperMapping => "no paper user for this user",
+            Self::SeveralPaperUsers => "several paper users for this user",
+            Self::PaperLogonNotAllowed => "paper logons for this user are not allowed",
+            Self::PreviewNeedsPaper => "the preview needs the paper mode",
+            Self::PasswordRejected => "password rejected",
+            Self::SecureConnectionRefused => "secure connection refused",
+            Self::Other => "server error",
+        }
+    }
+}
+
+/// A login error answer from the server, carried inside the `io::Error` of
+/// the login (ibx#423). Read it back with [`login_error`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginError {
+    pub kind: LoginErrorKind,
+    /// Code of the answer; `None` when it is not a number or the answer
+    /// has no code.
+    pub code: Option<i64>,
+    /// Server text.
+    pub text: String,
+}
+
+impl std::fmt::Display for LoginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Auth error: {}", self.kind.describe())?;
+        if let Some(code) = self.code {
+            write!(f, " (code {})", code)?;
+        }
+        if !self.text.is_empty() {
+            write!(f, ": {}", self.text)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for LoginError {}
+
+impl From<LoginError> for io::Error {
+    fn from(e: LoginError) -> Self {
+        let kind = match e.kind {
+            LoginErrorKind::SiteDown | LoginErrorKind::SiteNotReady => io::ErrorKind::ConnectionRefused,
+            LoginErrorKind::Other => io::ErrorKind::Other,
+            _ => io::ErrorKind::PermissionDenied,
+        };
+        io::Error::new(kind, e)
+    }
+}
+
+/// The login error answer carried by `e`, if any.
+pub fn login_error(e: &io::Error) -> Option<&LoginError> {
+    e.get_ref()?.downcast_ref::<LoginError>()
+}
+
+/// Error for an error answer (`NS_ERROR_RESPONSE`) or a secure-error answer
+/// (`NS_SECURE_ERROR`); `fields` are the fields after the message type.
+///
+/// A secure-error answer can let the reference go on without the
+/// encryption; that fallback is not supported here, so it always refuses.
+pub fn ns_error(msg_type: u32, fields: &[&str]) -> io::Error {
+    let field = |i: usize| fields.get(i).copied().unwrap_or("").to_string();
+    if msg_type == NS_SECURE_ERROR {
+        let proceed = field(1) == "1";
+        let mut text = field(0);
+        if proceed {
+            text.push_str(" (the server allows an unencrypted login, which is not supported)");
+        }
+        return LoginError { kind: LoginErrorKind::SecureConnectionRefused, code: None, text }.into();
+    }
+    let code = fields.first().and_then(|c| c.trim().parse::<i64>().ok());
+    let text = field(1);
+    LoginError { kind: LoginErrorKind::from_code(code, &text), code, text }.into()
+}
+
+/// True for a backup-host notice, which the reference only logs during the
+/// login (ibx#423); the caller then reads the next message.
+pub fn is_backup_host_notice(text: &str) -> bool {
+    let notice = text.split(';').nth(1).and_then(|t| t.parse::<u32>().ok()) == Some(NS_BACKUP_HOST);
+    if notice {
+        log::info!("Backup host notice received (ignored)");
+    }
+    notice
+}
+
 /// Receive an encrypted response and decrypt.
 pub fn recv_secure<R: Read>(
     stream: &mut R,
     channel: &mut SecureChannel,
 ) -> io::Result<Vec<u8>> {
-    let (payload, _) = ns::ns_recv(stream)?;
-    let text = String::from_utf8_lossy(&payload);
+    let text = loop {
+        let (payload, _) = ns::ns_recv(stream)?;
+        let text = String::from_utf8_lossy(&payload).into_owned();
+        if is_backup_host_notice(&text) {
+            continue;
+        }
+        break text;
+    };
     let parts: Vec<&str> = text.split(';').collect();
 
     if parts.len() < 2 {
@@ -240,10 +403,7 @@ pub fn recv_secure<R: Read>(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid msg type"))?;
 
     if msg_type == NS_SECURE_ERROR || msg_type == ns::NS_ERROR_RESPONSE {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("Auth error: {}", parts[2..].join(";")),
-        ));
+        return Err(ns_error(msg_type, &parts[2..]));
     }
     if msg_type == NS_REDIRECT {
         let target = parts.get(2).unwrap_or(&"");
@@ -269,11 +429,20 @@ pub fn recv_secure<R: Read>(
 
 /// Receive a framed message and classify as text or binary.
 pub fn recv_msg<R: Read>(stream: &mut R) -> io::Result<RecvMsg> {
-    let (payload, _) = ns::ns_recv(stream)?;
+    loop {
+        let (payload, _) = ns::ns_recv(stream)?;
+        if ns::is_ns_text(&payload) && is_backup_host_notice(&String::from_utf8_lossy(&payload)) {
+            continue;
+        }
+        return classify_payload(&payload);
+    }
+}
 
+/// Classify one framed payload as NS text or XYZ binary.
+fn classify_payload(payload: &[u8]) -> io::Result<RecvMsg> {
     // Try NS text first
-    if ns::is_ns_text(&payload) {
-        if let Some((version, msg_type, fields)) = ns::ns_parse(&payload) {
+    if ns::is_ns_text(payload) {
+        if let Some((version, msg_type, fields)) = ns::ns_parse(payload) {
             return Ok(RecvMsg::Ns {
                 version,
                 msg_type,
@@ -284,7 +453,7 @@ pub fn recv_msg<R: Read>(stream: &mut R) -> io::Result<RecvMsg> {
 
     // Try XYZ binary
     if payload.len() >= 16 {
-        if let Some((msg_id, sub_id, state, fields)) = xyz::xyz_parse_response(&payload) {
+        if let Some((msg_id, sub_id, state, fields)) = xyz::xyz_parse_response(payload) {
             return Ok(RecvMsg::Xyz {
                 msg_id,
                 sub_id,
@@ -823,13 +992,11 @@ pub fn do_ib_key_2fa<S: Read + Write>(
                 stream.write_all(&reply)?;
                 log::debug!("2FA gate: heartbeat {} -> 531", ts);
             }
-            RecvMsg::Ns { msg_type, .. } if msg_type == NS_ERROR_RESPONSE
+            RecvMsg::Ns { msg_type, fields, .. } if msg_type == NS_ERROR_RESPONSE
                 || msg_type == NS_SECURE_ERROR =>
             {
-                return Err(ib_key_err(
-                    io::ErrorKind::Other,
-                    format!("2FA gate: server error type={}", msg_type),
-                ));
+                let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+                return Err(ns_error(msg_type, &fields));
             }
             other => {
                 // Unknown message during 2FA wait. Log and keep looping —
@@ -1441,6 +1608,76 @@ mod tests {
         let err = recv_secure(&mut cursor, &mut channel).unwrap_err();
         assert!(err.to_string().contains("Auth error"));
         assert!(err.to_string().contains("malformed user name"));
+    }
+
+    fn recv_secure_login_error(frames: &[&str]) -> (io::Error, Option<LoginError>) {
+        let mut wire = Vec::new();
+        for f in frames {
+            wire.extend_from_slice(&build_ns_frame(f));
+        }
+        let mut cursor = io::Cursor::new(wire);
+        let mut channel = SecureChannel::new();
+        let err = recv_secure(&mut cursor, &mut channel).unwrap_err();
+        let login = login_error(&err).cloned();
+        (err, login)
+    }
+
+    // ibx#423: the error answer code gives the kind; site down / not ready
+    // are the only retryable kinds.
+    #[test]
+    fn recv_secure_error_codes_give_kinds() {
+        let cases = [
+            ("50;519;4;site down;", LoginErrorKind::SiteDown, true, io::ErrorKind::ConnectionRefused),
+            ("50;519;5;site not ready;", LoginErrorKind::SiteNotReady, true, io::ErrorKind::ConnectionRefused),
+            ("50;519;1;lockedout;", LoginErrorKind::LockedOut, false, io::ErrorKind::PermissionDenied),
+            ("50;519;1;IP address 1.2.3.4;", LoginErrorKind::IpNotAuthorized, false, io::ErrorKind::PermissionDenied),
+            ("50;519;1;bad;", LoginErrorKind::BadCredentials, false, io::ErrorKind::PermissionDenied),
+            ("50;519;11;proxy;", LoginErrorKind::Restricted, false, io::ErrorKind::PermissionDenied),
+            ("50;519;14;mode;", LoginErrorKind::PaperUserInLiveMode, false, io::ErrorKind::PermissionDenied),
+            ("50;519;18;user;", LoginErrorKind::PaperLogonNotAllowed, false, io::ErrorKind::PermissionDenied),
+            ("50;519;23;pwd;", LoginErrorKind::PasswordRejected, false, io::ErrorKind::PermissionDenied),
+            ("50;519;99;other;", LoginErrorKind::Other, false, io::ErrorKind::Other),
+            ("50;519;x;not a number;", LoginErrorKind::Other, false, io::ErrorKind::Other),
+        ];
+        for (frame, kind, retryable, io_kind) in cases {
+            let (err, login) = recv_secure_login_error(&[frame]);
+            let login = login.unwrap_or_else(|| panic!("{frame}: no login error in {err}"));
+            assert_eq!(login.kind, kind, "{frame}");
+            assert_eq!(login.kind.is_retryable(), retryable, "{frame}");
+            assert_eq!(err.kind(), io_kind, "{frame}");
+        }
+        let (_, login) = recv_secure_login_error(&["50;519;4;site down;"]);
+        assert_eq!(login.unwrap(), LoginError { kind: LoginErrorKind::SiteDown, code: Some(4), text: "site down".into() });
+    }
+
+    // ibx#423: a secure-error answer refuses with either proceed flag; the
+    // unencrypted fallback is not supported.
+    #[test]
+    fn recv_secure_secure_error_refuses_with_either_flag() {
+        for (frame, says_fallback) in [("50;535;text;1;", true), ("50;535;text;0;", false)] {
+            let (err, login) = recv_secure_login_error(&[frame]);
+            let login = login.unwrap();
+            assert_eq!(login.kind, LoginErrorKind::SecureConnectionRefused);
+            assert!(!login.kind.is_retryable());
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(err.to_string().contains("not supported"), says_fallback, "{err}");
+        }
+    }
+
+    // ibx#423: a backup-host notice is skipped; the next message is read.
+    #[test]
+    fn recv_secure_skips_backup_host_notice() {
+        let (err, _) = recv_secure_login_error(&["50;527;x;", "50;524;ndc1.example:4000;"]);
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert!(err.to_string().starts_with("REDIRECT:"), "{err}");
+    }
+
+    #[test]
+    fn recv_msg_skips_backup_host_notice() {
+        let mut wire = build_ns_frame("50;527;x;");
+        wire.extend_from_slice(&frame_xyz(&xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 5, "user", &["PASSED"])));
+        let msg = recv_msg(&mut io::Cursor::new(wire)).unwrap();
+        assert!(matches!(msg, RecvMsg::Xyz { state: 5, .. }), "{msg:?}");
     }
 
     #[test]

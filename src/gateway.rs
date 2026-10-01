@@ -763,6 +763,9 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     let text = String::from_utf8_lossy(&payload);
     let parts: Vec<&str> = text.split(';').collect();
     let msg_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    if msg_type == ns::NS_SECURE_ERROR || msg_type == ns::NS_ERROR_RESPONSE {
+        return Err(session::ns_error(msg_type, &parts[2..]));
+    }
     if msg_type != ns::NS_SECURE_CONNECTION_START {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -883,11 +886,8 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         } else if msg_type == ns::NS_FIX_START {
             fix_ready = true;
             break;
-        } else if msg_type == ns::NS_ERROR_RESPONSE {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("CCP reconnect post-auth error: {}", inner_parts[2..].join(";")),
-            ));
+        } else if msg_type == ns::NS_ERROR_RESPONSE || msg_type == ns::NS_SECURE_ERROR {
+            return Err(session::ns_error(msg_type, &inner_parts[2..]));
         }
         // Ignore 530 keepalives and other types
     }
@@ -1024,8 +1024,22 @@ pub struct GatewayConfig {
 impl Gateway {
     /// Connect to IB: auth + logon + data farm connections.
     /// Returns Gateway + farm Connection + auth Connection + optional historical data Connection.
+    ///
+    /// While the server answers "site down" or "site not ready" the login is
+    /// retried after 5 to 15 s, as the reference retries those answers; any
+    /// other login error answer (bad credentials, lockout, ...) stops at once
+    /// (ibx#423).
     pub fn connect(config: &GatewayConfig) -> io::Result<(Self, Connection, Connection, Option<Connection>)> {
-        Self::connect_to_host(config, &config.host, 0)
+        loop {
+            match Self::connect_to_host(config, &config.host, 0) {
+                Err(e) if session::login_error(&e).is_some_and(|l| l.kind.is_retryable()) => {
+                    let delay = crate::engine::hot_loop::reconnect_backoff();
+                    log::warn!("{}; login retried in {:?}", e, delay);
+                    std::thread::sleep(delay);
+                }
+                result => return result,
+            }
+        }
     }
 
     /// Internal: connect to a specific host, with redirect depth tracking.
@@ -1079,11 +1093,8 @@ impl Gateway {
         let text = String::from_utf8_lossy(&payload);
         let parts: Vec<&str> = text.split(';').collect();
         let msg_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        if msg_type == ns::NS_SECURE_ERROR {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("DH error: {}", parts[2..].join(";")),
-            ));
+        if msg_type == ns::NS_SECURE_ERROR || msg_type == ns::NS_ERROR_RESPONSE {
+            return Err(session::ns_error(msg_type, &parts[2..]));
         }
         if msg_type != ns::NS_SECURE_CONNECTION_START {
             return Err(io::Error::new(
@@ -1232,11 +1243,8 @@ impl Gateway {
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
                 channel.decrypt(&ct)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-            } else if raw_type == ns::NS_SECURE_ERROR {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Post-auth secure error: {}", parts[2..].join(";")),
-                ));
+            } else if raw_type == ns::NS_SECURE_ERROR || raw_type == ns::NS_ERROR_RESPONSE {
+                return Err(session::ns_error(raw_type, &parts[2..]));
             } else if raw_type == ns::NS_REDIRECT {
                 let target = parts.get(2).unwrap_or(&"");
                 let redirect_host = target.split(':').next().unwrap_or(target);
@@ -1261,11 +1269,10 @@ impl Gateway {
                 log::info!("Data start: {}", inner_text);
                 fix_ready = true;
                 break;
-            } else if msg_type == ns::NS_ERROR_RESPONSE {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Post-auth error: {}", inner_parts[2..].join(";")),
-                ));
+            } else if msg_type == ns::NS_ERROR_RESPONSE || msg_type == ns::NS_SECURE_ERROR {
+                return Err(session::ns_error(msg_type, &inner_parts[2..]));
+            } else if msg_type == ns::NS_BACKUP_HOST {
+                log::info!("Backup host notice received (ignored)");
             } else {
                 log::info!("Post-auth msg type={}: {}", msg_type, inner_text);
             }

@@ -91,7 +91,17 @@ pub fn ns_recv<R: Read>(reader: &mut R) -> io::Result<(Vec<u8>, usize)> {
             format!("Expected #%#% magic, got {:?}", &header[..4]),
         ));
     }
-    let payload_len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
+    let raw_len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    // The reference reads the length as a signed int: with the high bit set
+    // it is negative and the frame fails, so the connection is dropped. Here
+    // it allocated up to 4 GB and waited for that many bytes (ibx#423).
+    if raw_len & 0x8000_0000 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("NS frame length {:#010x} is negative", raw_len),
+        ));
+    }
+    let payload_len = raw_len as usize;
     let mut payload = vec![0u8; payload_len];
     reader.read_exact(&mut payload)?;
     Ok((payload, payload_len + 8))
@@ -258,6 +268,18 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("#%#%"));
+    }
+
+    #[test]
+    fn recv_negative_length_fails_at_once() {
+        // High bit set: refused before any allocation or read (ibx#423).
+        let mut msg = Vec::new();
+        msg.extend_from_slice(NS_MAGIC);
+        msg.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xF0]);
+        let mut cursor = std::io::Cursor::new(&msg);
+        let err = ns_recv(&mut cursor).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("negative"), "{err}");
     }
 
     #[test]
