@@ -333,6 +333,26 @@ impl Connection {
         Ok(())
     }
 
+    /// Build a FIX message outside the sequence count, sign it, and send it.
+    /// The sequence counter does not move.
+    pub fn send_fix_unsequenced(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
+        let msg = fix::fix_build(fields, 0);
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!("WIRE> seq=0 {}", fix::fmt_pipe(&msg));
+        }
+        let (to_send, next_iv) = if self.sign_key.is_empty() {
+            (msg, None)
+        } else {
+            let (signed, iv) = fix::fix_sign(&msg, &self.sign_key, &self.sign_iv);
+            (signed, Some(iv))
+        };
+        self.stream.write_all(&to_send)?;
+        if let Some(iv) = next_iv {
+            self.sign_iv = iv;
+        }
+        Ok(())
+    }
+
     /// Build a message, compress, sign, and send. For farm subscribe/data messages.
     /// Uses seq=0 (separate seq space from heartbeats).
     ///

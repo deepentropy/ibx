@@ -2,6 +2,7 @@ pub mod farm;
 pub mod ccp;
 pub mod hmds;
 pub mod order_builder;
+pub mod liveness;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,23 +20,8 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use farm::FarmState;
 use ccp::CcpState;
 use hmds::HmdsState;
-
-/// Auth server heartbeat interval — single source in config (ibx#219
-/// removed the duplicate definitions here).
-const CCP_HEARTBEAT_SECS: u64 = crate::config::CCP_HEARTBEAT;
-/// Farm heartbeat interval — single source in config.
-const FARM_HEARTBEAT_SECS: u64 = crate::config::FARM_HEARTBEAT;
-/// Liveness (ibx#219), aligned with the gateway's transport thresholds:
-/// send a test request when nothing has been received for this long...
-const LIVENESS_TEST_SECS: u64 = 15;
-/// ...and declare the connection dead when nothing has been received for
-/// this long. The old scheme declared death at ~21s — racing the server's
-/// own ~35s reset and losing to transient stalls the server tolerates.
-const LIVENESS_DEAD_SECS: u64 = 35;
-/// Grace window after (re)connect before liveness is enforced (ibx#219):
-/// early-connection jitter must not trigger a false disconnect during a
-/// period the server itself treats as warm-up. Heartbeats are still sent.
-const LIVENESS_WARMUP_SECS: u64 = 60;
+pub use liveness::HeartbeatState;
+use liveness::FarmCheck;
 
 /// The pinned-core hot loop. Pushes events to SharedState + optional event channel.
 pub struct HotLoop {
@@ -91,55 +77,6 @@ pub struct HotLoop {
 /// Maximum HMDS reconnect attempts before giving up (ibx#187).
 /// Total wait at cap: 3+6+12+24+48 = 93s before final attempt fires.
 const HMDS_MAX_RECONNECT_ATTEMPTS: u32 = 6;
-
-/// Tracks last send/recv times and pending test requests for heartbeat management.
-pub struct HeartbeatState {
-    pub last_ccp_sent: Instant,
-    pub last_ccp_recv: Instant,
-    pub last_farm_sent: Instant,
-    pub last_farm_recv: Instant,
-    pub last_hmds_sent: Instant,
-    pub last_hmds_recv: Instant,
-    /// Pending test request for auth: (test_req_id, sent_at).
-    pub pending_ccp_test: Option<(String, Instant)>,
-    /// When each connection (re)connected — liveness is not enforced during
-    /// the warm-up window that follows (ibx#219).
-    pub ccp_up_since: Instant,
-    pub farm_up_since: Instant,
-    pub hmds_up_since: Instant,
-    /// Pending test request for farm: (test_req_id, sent_at).
-    pub pending_farm_test: Option<(String, Instant)>,
-    /// Pending test request for historical: (test_req_id, sent_at).
-    pub pending_hmds_test: Option<(String, Instant)>,
-    /// Counter for generating unique test request IDs.
-    test_req_counter: u32,
-}
-
-impl HeartbeatState {
-    fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            last_ccp_sent: now,
-            last_ccp_recv: now,
-            last_farm_sent: now,
-            last_farm_recv: now,
-            last_hmds_sent: now,
-            last_hmds_recv: now,
-            pending_ccp_test: None,
-            ccp_up_since: Instant::now(),
-            farm_up_since: Instant::now(),
-            hmds_up_since: Instant::now(),
-            pending_farm_test: None,
-            pending_hmds_test: None,
-            test_req_counter: 0,
-        }
-    }
-
-    fn next_test_id(&mut self) -> String {
-        self.test_req_counter += 1;
-        format!("T{}", self.test_req_counter)
-    }
-}
 
 impl HotLoop {
     pub fn new(shared: Arc<SharedState>, event_tx: Option<Sender<Event>>, core_id: Option<usize>) -> Self {
@@ -953,30 +890,34 @@ impl HotLoop {
     }
 
     fn check_heartbeats(&mut self) {
-        let now = Instant::now();
-        let ts = chrono_free_timestamp();
+        self.check_heartbeats_at(Instant::now());
+    }
 
-        // --- Auth heartbeat (skip if already disconnected) ---
-        if !self.ccp.disconnected {
-        if let Some(conn) = self.ccp_conn.as_mut() {
-            let since_sent = now.duration_since(self.hb.last_ccp_sent).as_secs();
-            let since_recv = now.duration_since(self.hb.last_ccp_recv).as_secs();
-
-            if since_sent >= CCP_HEARTBEAT_SECS {
-                let _ = conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
-                    (fix::TAG_SENDING_TIME, &ts),
-                ]);
-                self.hb.last_ccp_sent = now;
-            }
-
-            let warmed_up = now.duration_since(self.hb.ccp_up_since).as_secs() >= LIVENESS_WARMUP_SECS;
-            if warmed_up && since_recv > LIVENESS_TEST_SECS {
-                if since_recv > LIVENESS_DEAD_SECS {
-                    log::error!("CCP liveness timeout ({}s silent) — connection lost", since_recv);
-                    self.ccp.handle_disconnect(&mut self.context, &self.event_tx);
-                } else if self.hb.pending_ccp_test.is_none() {
+    /// Liveness of the three links at `now`, as the reference checks it
+    /// (ibx#419, see `liveness`). A dead link is closed and reported to the
+    /// clients by `report_link_changes` (1100, 2103, 2105).
+    pub(crate) fn check_heartbeats_at(&mut self, now: Instant) {
+        // --- Auth link monitor ---
+        if !self.ccp.disconnected && self.ccp_conn.is_some() {
+            let check = self.hb.poll_ccp(now);
+            if check.dead {
+                log::error!("Auth connection: nothing received for {:?}, connection reset",
+                    now.saturating_duration_since(self.hb.last_ccp_recv));
+                self.drop_ccp_link();
+            } else if check.heartbeat || check.test_request {
+                let ts = chrono_free_timestamp();
+                let conn = self.ccp_conn.as_mut().expect("checked above");
+                if check.heartbeat {
+                    let _ = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
+                        (fix::TAG_SENDING_TIME, &ts),
+                    ]);
+                    self.hb.last_ccp_sent = now;
+                }
+                if check.test_request {
                     let test_id = self.hb.next_test_id();
+                    log::warn!("Auth connection: nothing received for {:?}, test request {}",
+                        now.saturating_duration_since(self.hb.last_ccp_recv), test_id);
                     let _ = conn.send_fix(&[
                         (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
                         (fix::TAG_SENDING_TIME, &ts),
@@ -987,80 +928,62 @@ impl HotLoop {
                 }
             }
         }
-        }
 
-        // --- Farm heartbeat (skip if already disconnected) ---
-        if !self.farm.disconnected {
-        if let Some(conn) = self.farm_conn.as_mut() {
-            let since_sent = now.duration_since(self.hb.last_farm_sent).as_secs();
-            let since_recv = now.duration_since(self.hb.last_farm_recv).as_secs();
-
-            if since_sent >= FARM_HEARTBEAT_SECS {
-                let _ = conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
-                    (fix::TAG_SENDING_TIME, &ts),
-                ]);
-                self.hb.last_farm_sent = now;
-            }
-
-            let warmed_up = now.duration_since(self.hb.farm_up_since).as_secs() >= LIVENESS_WARMUP_SECS;
-            if warmed_up && since_recv > LIVENESS_TEST_SECS {
-                if since_recv > LIVENESS_DEAD_SECS {
-                    log::error!("Farm liveness timeout ({}s silent) — connection lost", since_recv);
-                    self.farm.handle_disconnect(&mut self.context, &self.event_tx);
-                } else if self.hb.pending_farm_test.is_none() {
+        // --- Market data farm: periodic test request ---
+        if !self.farm.disconnected && self.farm_conn.is_some() {
+            match self.hb.poll_farm(now) {
+                FarmCheck::Nothing => {}
+                FarmCheck::Ping => {
                     let test_id = self.hb.next_test_id();
-                    let _ = conn.send_fix(&[
-                        (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
-                        (fix::TAG_SENDING_TIME, &ts),
-                        (fix::TAG_TEST_REQ_ID, &test_id),
-                    ]);
+                    if let Some(conn) = self.farm_conn.as_mut() {
+                        let _ = send_farm_ping(conn, &test_id);
+                    }
                     self.hb.pending_farm_test = Some((test_id, now));
                     self.hb.last_farm_sent = now;
                 }
-            }
-        }
-        }
-
-        // --- Historical heartbeat (skip if disconnected or no historical activity) ---
-        let mut hmds_dead = false;
-        if !self.hmds.disconnected && self.hmds_conn.is_some() {
-        if let Some(conn) = self.hmds_conn.as_mut() {
-            let since_sent = now.duration_since(self.hb.last_hmds_sent).as_secs();
-            let since_recv = now.duration_since(self.hb.last_hmds_recv).as_secs();
-
-            if since_sent >= FARM_HEARTBEAT_SECS {
-                let _ = conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, fix::MSG_HEARTBEAT),
-                    (fix::TAG_SENDING_TIME, &ts),
-                ]);
-                self.hb.last_hmds_sent = now;
-            }
-
-            let warmed_up = now.duration_since(self.hb.hmds_up_since).as_secs() >= LIVENESS_WARMUP_SECS;
-            if warmed_up && since_recv > LIVENESS_TEST_SECS {
-                if since_recv > LIVENESS_DEAD_SECS {
-                    log::error!("HMDS liveness timeout ({}s silent) — connection lost", since_recv);
-                    self.hmds.disconnected = true;
-                    hmds_dead = true;
-                } else if self.hb.pending_hmds_test.is_none() {
-                    let test_id = self.hb.next_test_id();
-                    let _ = conn.send_fix(&[
-                        (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
-                        (fix::TAG_SENDING_TIME, &ts),
-                        (fix::TAG_TEST_REQ_ID, &test_id),
-                    ]);
-                    self.hb.pending_hmds_test = Some((test_id, now));
-                    self.hb.last_hmds_sent = now;
+                FarmCheck::Dead => {
+                    log::error!("Market data farm: no answer to the test request, connection reset");
+                    if let Some(conn) = self.farm_conn.as_mut() {
+                        conn.shutdown();
+                    }
+                    self.farm.handle_disconnect(&mut self.context, &self.event_tx);
                 }
             }
         }
+
+        // --- Historical farm: periodic test request ---
+        if !self.hmds.disconnected && self.hmds_conn.is_some() {
+            match self.hb.poll_hmds(now) {
+                FarmCheck::Nothing => {}
+                FarmCheck::Ping => {
+                    let test_id = self.hb.next_test_id();
+                    if let Some(conn) = self.hmds_conn.as_mut() {
+                        let _ = send_farm_ping(conn, &test_id);
+                    }
+                    self.hb.pending_hmds_test = Some((test_id, now));
+                    self.hb.last_hmds_sent = now;
+                }
+                FarmCheck::Dead => {
+                    log::error!("Historical farm: no answer to the test request, connection reset");
+                    if let Some(conn) = self.hmds_conn.as_mut() {
+                        conn.shutdown();
+                    }
+                    self.hmds.disconnected = true;
+                    // Drop the dead socket so the HMDS reconnect loop, which
+                    // only runs with no connection held, re-dials it (ibx#399).
+                    self.hmds_conn = None;
+                }
+            }
         }
-        // Drop the dead socket so the HMDS reconnect loop, which only runs
-        // with no connection held, re-dials it (ibx#399).
-        if hmds_dead {
-            self.hmds_conn = None;
+    }
+
+    /// Close the auth link and mark it lost; the reconnect and the 1100
+    /// report follow.
+    fn drop_ccp_link(&mut self) {
+        if let Some(conn) = self.ccp_conn.as_mut() {
+            conn.shutdown();
         }
+        self.ccp.handle_disconnect(&mut self.context, &self.event_tx);
     }
 
     fn pin_to_core(core: usize) {
@@ -1225,7 +1148,6 @@ impl HotLoop {
                 self.reconnect_farm(conn);
                 self.farm_reconnect_attempt = 0;
                 self.farm_next_attempt_at = None;
-                self.hb.farm_up_since = Instant::now();
                 self.pending_farm_reconnect = None;
             }
             Ok(Err(e)) => {
@@ -1288,7 +1210,6 @@ impl HotLoop {
                 self.reconnect_ccp(conn);
                 self.ccp_reconnect_attempt = 0;
                 self.ccp_next_attempt_at = None;
-                self.hb.ccp_up_since = Instant::now();
                 self.pending_ccp_reconnect = None;
             }
             Ok(Err(e)) => {
@@ -1363,8 +1284,7 @@ impl HotLoop {
                 log::info!("HMDS reconnect succeeded (attempt {})", self.hmds_reconnect_attempt);
                 self.hmds_conn = Some(conn);
                 self.hmds.disconnected = false;
-                self.hb.last_hmds_recv = Instant::now();
-                self.hb.last_hmds_sent = Instant::now();
+                self.hb.hmds_connected(Instant::now());
                 self.hmds_reconnect_attempt = 0;
                 self.hmds_next_attempt_at = None;
                 self.pending_hmds_reconnect = None;
@@ -1487,6 +1407,17 @@ impl HotLoop {
         self.shared.portfolio.set_position_fixed(fill.instrument, self.context.position_fixed(fill.instrument));
         emit(&self.event_tx, Event::Fill(*fill));
     }
+}
+
+/// The periodic farm test request, outside the sequence count, as the
+/// reference sends it (ibx#419).
+fn send_farm_ping(conn: &mut Connection, test_id: &str) -> io::Result<()> {
+    let ts = chrono_free_timestamp();
+    conn.send_fix_unsequenced(&[
+        (fix::TAG_MSG_TYPE, fix::MSG_TEST_REQUEST),
+        (fix::TAG_SENDING_TIME, &ts),
+        (fix::TAG_TEST_REQ_ID, test_id),
+    ])
 }
 
 // ── Helper functions used by subsystems ──
@@ -2217,6 +2148,108 @@ mod tests {
         assert!(!shared.take_connection_lost(), "the session is not closed");
     }
 
+    /// Bytes the peer of a loopback link has received so far.
+    fn received(server: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+        server.set_nonblocking(true).unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match server.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
+    fn contains(hay: &[u8], needle: &str) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+    }
+
+    // ibx#419: a silent auth link is reset at the first check after the
+    // pause of its last send (62 s), with nothing sent before; 1100 follows.
+    #[test]
+    fn silent_auth_link_is_reset_after_the_send_pause() {
+        let (mut engine, shared, mut servers) = engine_with_links();
+        let t0 = Instant::now();
+        engine.hb = HeartbeatState::new_at(t0);
+        engine.report_link_changes();
+        for s in 1..=61 {
+            engine.hb.last_farm_recv = t0 + Duration::from_secs(s);
+            engine.hb.pending_farm_test = None;
+            engine.hb.pending_hmds_test = None;
+            engine.check_heartbeats_at(t0 + Duration::from_secs(s));
+            assert!(!engine.ccp.disconnected, "alive at {} s", s);
+        }
+        assert!(received(&mut servers[0]).is_empty(), "nothing sent on the auth link during the pause");
+        engine.check_heartbeats_at(t0 + Duration::from_secs(62));
+        assert!(engine.ccp.disconnected, "reset at 62 s");
+        engine.report_link_changes();
+        let notices = shared.drain_connection_notices();
+        assert_eq!(notices.iter().map(|n| n.0).collect::<Vec<_>>(), vec![1100]);
+        assert!(!shared.take_connection_lost(), "the clients stay connected");
+    }
+
+    // ibx#419: a send on the auth link restarts the pause, so a link the
+    // engine keeps using is not reset by the monitor.
+    #[test]
+    fn auth_link_in_use_is_not_checked() {
+        let (mut engine, _shared, _servers) = engine_with_links();
+        let t0 = Instant::now();
+        engine.hb = HeartbeatState::new_at(t0);
+        for s in 1..=200 {
+            let now = t0 + Duration::from_secs(s);
+            if s % 30 == 0 {
+                engine.hb.last_ccp_sent = now;
+            }
+            engine.hb.pending_farm_test = None;
+            engine.hb.pending_hmds_test = None;
+            engine.check_heartbeats_at(now);
+        }
+        assert!(!engine.ccp.disconnected);
+    }
+
+    // ibx#419: farms get a test request every 60 s, outside the sequence count; one
+    // with no answer within 10 s is reset: 2103 and 2105.
+    #[test]
+    fn farm_test_request_every_minute_and_reset_without_answer() {
+        let (mut engine, shared, mut servers) = engine_with_links();
+        let t0 = Instant::now();
+        engine.hb = HeartbeatState::new_at(t0);
+        engine.report_link_changes();
+        // The auth link is in use all along: its monitor stays paused.
+        let at = |engine: &mut HotLoop, s: u64| {
+            engine.hb.last_ccp_sent = t0 + Duration::from_secs(s);
+            engine.check_heartbeats_at(t0 + Duration::from_secs(s));
+        };
+        for s in 1..=59 {
+            at(&mut engine, s);
+        }
+        assert!(received(&mut servers[1]).is_empty(), "no own heartbeat on the farm");
+        at(&mut engine, 60);
+        let sent = received(&mut servers[1]);
+        assert!(contains(&sent, "35=1\x0134=000000\x01"), "{:?}", String::from_utf8_lossy(&sent));
+        assert!(contains(&sent, "112=FixTestRequest"));
+        assert!(contains(&received(&mut servers[2]), "112=FixTestRequest"), "historical farm too");
+        // The market data farm answers, the historical farm does not.
+        engine.hb.pending_farm_test = None;
+        at(&mut engine, 69);
+        assert!(!engine.hmds.disconnected);
+        at(&mut engine, 70);
+        assert!(engine.hmds.disconnected && engine.hmds_conn.is_none());
+        assert!(!engine.farm.disconnected);
+        engine.report_link_changes();
+        assert_eq!(shared.drain_connection_notices().iter().map(|n| n.0).collect::<Vec<_>>(), vec![2105]);
+        // Next minute: no answer from the market data farm either.
+        at(&mut engine, 120);
+        at(&mut engine, 130);
+        assert!(engine.farm.disconnected);
+        engine.report_link_changes();
+        assert_eq!(shared.drain_connection_notices().iter().map(|n| n.0).collect::<Vec<_>>(), vec![2103]);
+    }
+
     // ibx#399: 1102 after the status replay end, at once with the farms up.
     #[test]
     fn restored_link_is_reported_after_the_status_replay() {
@@ -2245,20 +2278,6 @@ mod tests {
         engine.maybe_report_restored();
         assert_eq!(shared.drain_connection_notices(), vec![(1102,
             "Connectivity between client and server has been restored - data maintained. The following farms are connected: ushmds. The following farms are not connected: usfarm.".to_string())]);
-    }
-
-    // ibx#219: the liveness ladder must be ordered and inside the server's
-    // own thresholds (test at 15s, dead at 35s, warm-up 60s).
-    #[test]
-    fn liveness_thresholds_ordered() {
-        assert!(CCP_HEARTBEAT_SECS < LIVENESS_TEST_SECS);
-        assert!(LIVENESS_TEST_SECS < LIVENESS_DEAD_SECS);
-        assert_eq!(LIVENESS_TEST_SECS, 15);
-        assert_eq!(LIVENESS_DEAD_SECS, 35);
-        assert_eq!(LIVENESS_WARMUP_SECS, 60);
-        // The duplicate interval constants are gone — these now alias config.
-        assert_eq!(CCP_HEARTBEAT_SECS, crate::config::CCP_HEARTBEAT);
-        assert_eq!(FARM_HEARTBEAT_SECS, crate::config::FARM_HEARTBEAT);
     }
 
     #[test]

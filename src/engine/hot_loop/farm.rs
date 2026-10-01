@@ -1083,9 +1083,7 @@ impl FarmState {
     ) {
         *farm_conn = Some(conn);
         self.disconnected = false;
-        hb.last_farm_sent = Instant::now();
-        hb.last_farm_recv = Instant::now();
-        hb.pending_farm_test = None;
+        hb.farm_connected(Instant::now());
 
         // Snapshot active subscriptions and re-issue them on the new connection.
         // md_resub_info is the list to use: handle_disconnect already cleared

@@ -2593,9 +2593,7 @@ impl CcpState {
     ) {
         *ccp_conn = Some(conn);
         self.disconnected = false;
-        hb.last_ccp_sent = Instant::now();
-        hb.last_ccp_recv = Instant::now();
-        hb.pending_ccp_test = None;
+        hb.ccp_connected(Instant::now());
 
         if let Some(conn) = ccp_conn.as_mut() {
             let ts = chrono_free_timestamp();
