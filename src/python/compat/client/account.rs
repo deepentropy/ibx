@@ -131,7 +131,7 @@ impl EClient {
     fn req_account_updates_multi(
         &self, py: Python<'_>, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool,
     ) -> PyResult<()> {
-        if let Some(r) = self.not_connected(req_id as i64) { return r; }
+        if let Some(r) = self.not_connected(req_id) { return r; }
         let shared = self.shared_state()?;
         if let Err((code, message)) = self.core.subscribe_account_multi(req_id, account, model_code, ledger_and_nlv) {
             shared.orders.push_order_error(req_id, code, message);

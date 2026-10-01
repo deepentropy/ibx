@@ -9,7 +9,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::types::{
-    CompletedOrder, Fill, InstrumentId, MidnightSeed, NewsBulletin, OrderId,
+    CompletedOrder, Fill, InstrumentId, MidnightSeed, NewsBulletin, OrderId, ReqId,
     PositionInfo, Price, Qty, Side, PRICE_SCALE, QTY_SCALE,
 };
 use crossbeam_channel::Sender;
@@ -205,7 +205,7 @@ pub(crate) struct CcpState {
     /// gateway never answers (SessionReject, dead socket, lost reply)
     /// surfaces error 200 + contract_details_end instead of hanging
     /// forever (ibx#227).
-    pub(crate) pending_secdef: Vec<(u32, bool, Instant)>,
+    pub(crate) pending_secdef: Vec<(ReqId, bool, Instant)>,
     /// By-symbol lookups in flight: the request multiplier and the strike
     /// retry (ibx#410, ibx#435).
     pub(crate) pending_lookups: Vec<PendingLookup>,
@@ -215,13 +215,13 @@ pub(crate) struct CcpState {
     /// Matching-symbols requests sent and not answered: (own request id
     /// sent, API reqId). No deadline, as in the reference; cleared without
     /// an answer when the auth link drops (ibx#369).
-    pub(crate) pending_matching_symbols: Vec<(u32, u32)>,
+    pub(crate) pending_matching_symbols: Vec<(u32, ReqId)>,
     /// Next own request id of a matching-symbols request (ibx#369).
     pub(crate) next_matching_symbols_id: u32,
     /// keepUpToDate historical queries routed through CCP: (query_id, req_id)
-    pub(crate) pending_kut_historical: Vec<(String, u32)>,
+    pub(crate) pending_kut_historical: Vec<(String, ReqId)>,
     /// tickerId → req_id mapping for keepUpToDate 35=G bar updates
-    pub(crate) kut_ticker_map: std::collections::HashMap<u32, u32>,
+    pub(crate) kut_ticker_map: std::collections::HashMap<u32, ReqId>,
     /// tickerId → minTick for bar decoding
     pub(crate) kut_min_tick: std::collections::HashMap<u32, f64>,
     /// HMAC signing key for XML-carrying CCP messages (selective signing).
@@ -270,7 +270,7 @@ pub(crate) struct PendingResolve {
     /// Request number of the lookup.
     pub lookup_id: u32,
     /// API request id of the waiting request.
-    pub req_id: u32,
+    pub req_id: ReqId,
     pub request: crate::types::ControlCommand,
     pub deadline: Instant,
 }
@@ -304,7 +304,7 @@ pub(crate) fn request_with_con_id(request: crate::types::ControlCommand, con_id:
 
 /// Scanner result parked for contract-detail fan-out.
 pub(crate) struct PendingScannerEnrichment {
-    pub api_req_id: u32,
+    pub api_req_id: ReqId,
     pub result: crate::control::scanner::ScannerResult,
     pub awaiting: HashSet<i64>,
     pub deadline: Instant,
@@ -313,7 +313,7 @@ pub(crate) struct PendingScannerEnrichment {
 /// A contract row waiting for its trading schedule. The lookup's
 /// contract_details_end follows once none of its rows waits.
 pub(crate) struct PendingSchedulePair {
-    pub api_req_id: u32,
+    pub api_req_id: ReqId,
     pub join_key: String,
     pub def: crate::control::contracts::ContractDefinition,
     pub deadline: Instant,
@@ -324,7 +324,7 @@ pub(crate) struct PendingSchedulePair {
 /// Their replies only fill the market rules; the records wait here and
 /// become the rows once every request is answered (ibx#435).
 pub(crate) struct PendingFanout {
-    pub api_req_id: u32,
+    pub api_req_id: ReqId,
     /// Requests not answered yet: (request id, conId, exchange).
     pub outstanding: Vec<(String, u32, String)>,
     /// Number of requests sent.
@@ -339,7 +339,7 @@ pub(crate) struct PendingFanout {
 
 /// A by-symbol lookup in flight, kept for its answer (ibx#410, ibx#435).
 pub(crate) struct PendingLookup {
-    pub req_id: u32,
+    pub req_id: ReqId,
     pub lookup: SymbolLookup,
     /// Strike text of the one retry still allowed.
     pub retry_strike: Option<String>,
@@ -380,7 +380,7 @@ impl SymbolLookup {
 /// field. The request id is the request number after the name of the
 /// lookup, and a lookup by symbol with a source asks for expired contracts
 /// when the caller does (ibx#229).
-fn secdef_by_symbol_fields(req_id: u32, lookup: &SymbolLookup, strike: &str) -> Vec<(u32, String)> {
+fn secdef_by_symbol_fields(req_id: ReqId, lookup: &SymbolLookup, strike: &str) -> Vec<(u32, String)> {
     use crate::control::contracts::{lookup_symbol, SECDEF_BY_IDENTIFIER_NAME, SECDEF_BY_SYMBOL_NAME,
         TAG_IB_LOCAL_SYMBOL, TAG_IB_SOURCE, TAG_IB_TRADING_CLASS, TAG_SYMBOL};
     let f = &lookup.filters;
@@ -453,7 +453,7 @@ fn secdef_by_symbol_fields(req_id: u32, lookup: &SymbolLookup, strike: &str) -> 
 
 /// Write one by-symbol lookup on `conn` (ibx#410; also the conId lookup of
 /// a market data request, ibx#278).
-pub(crate) fn send_symbol_lookup_on(conn: &mut Connection, req_id: u32, lookup: &SymbolLookup, strike: &str) {
+pub(crate) fn send_symbol_lookup_on(conn: &mut Connection, req_id: ReqId, lookup: &SymbolLookup, strike: &str) {
     let ts = chrono_free_timestamp();
     let body = secdef_by_symbol_fields(req_id, lookup, strike);
     let mut fields: Vec<(u32, &str)> = Vec::with_capacity(body.len() + 1);
@@ -467,7 +467,7 @@ pub(crate) fn send_symbol_lookup_on(conn: &mut Connection, req_id: u32, lookup: 
 fn push_contract_row(
     shared: &SharedState,
     event_tx: &Option<Sender<Event>>,
-    req_id: u32,
+    req_id: ReqId,
     def: crate::control::contracts::ContractDefinition,
 ) {
     // The zone of its trading hours, for the zone rule of an order's
@@ -484,7 +484,7 @@ fn push_contract_row(
 
 /// Error 200 for a user lookup that found no contract, with no end, as
 /// the reference (ibx#400). Internal lookups end silently.
-fn push_not_found(req_id: u32, shared: &SharedState) {
+fn push_not_found(req_id: ReqId, shared: &SharedState) {
     if req_id < 0xF000_0000 {
         log::info!("Secdef lookup req_id={}: no security definition", req_id);
         shared.reference.push_historical_error(req_id, 200, NO_SECURITY_DEFINITION.to_string());
@@ -1855,7 +1855,7 @@ impl CcpState {
             return;
         }
         let now = Instant::now();
-        let mut expired: Vec<u32> = Vec::new();
+        let mut expired: Vec<ReqId> = Vec::new();
         self.pending_secdef.retain(|(req_id, _, deadline)| {
             if now >= *deadline {
                 if *req_id < 0xF000_0000 {
@@ -1916,7 +1916,7 @@ impl CcpState {
             .into_iter()
             .partition(|p| now >= p.deadline);
         self.pending_schedule_pair = waiting;
-        let mut req_ids: Vec<u32> = Vec::new();
+        let mut req_ids: Vec<ReqId> = Vec::new();
         for mut p in expired {
             log::warn!("Schedule pair timeout: api_req_id={} join_key={}", p.api_req_id, p.join_key);
             p.def.trading_hours = None;
@@ -1954,7 +1954,7 @@ impl CcpState {
             .partition(|p| p.join_key == join_key);
         self.pending_schedule_pair = waiting;
         let sched = crate::control::contracts::parse_schedule_response(msg);
-        let mut req_ids: Vec<u32> = Vec::new();
+        let mut req_ids: Vec<ReqId> = Vec::new();
         for mut pair in ready {
             if let Some(sched) = &sched {
                 pair.def.time_zone_id = if sched.timezone.is_empty() {
@@ -2085,7 +2085,7 @@ impl CcpState {
         }
     }
 
-    pub(crate) fn send_secdef_request(&mut self, req_id: u32, con_id: i64, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_secdef_request(&mut self, req_id: ReqId, con_id: i64, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         if let Some(conn) = ccp_conn.as_mut() {
             let con_id_str = con_id.to_string();
             let req_id_str = req_id.to_string();
@@ -2109,7 +2109,7 @@ impl CcpState {
         self.pending_secdef.push((req_id, true, Instant::now() + SECDEF_TIMEOUT));
     }
 
-    pub(crate) fn send_secdef_request_by_symbol(&mut self, req_id: u32, symbol: &str, sec_type: &str, exchange: &str, currency: &str, filters: &crate::types::SecDefFilters, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_secdef_request_by_symbol(&mut self, req_id: ReqId, symbol: &str, sec_type: &str, exchange: &str, currency: &str, filters: &crate::types::SecDefFilters, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let strike = if filters.strike > 0.0 { format!("{}", filters.strike) } else { String::new() };
         let lookup = SymbolLookup {
             symbol: symbol.to_string(),
@@ -2127,7 +2127,7 @@ impl CcpState {
     }
 
     /// Send one by-symbol lookup with the strike text given (empty: none).
-    fn send_symbol_lookup(&mut self, req_id: u32, lookup: &SymbolLookup, strike: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    fn send_symbol_lookup(&mut self, req_id: ReqId, lookup: &SymbolLookup, strike: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         if let Some(conn) = ccp_conn.as_mut() {
             send_symbol_lookup_on(conn, req_id, lookup, strike);
             log::info!("Sent secdef lookup: req_id={} symbol={} sec_type={} identifier={}",
@@ -2145,7 +2145,7 @@ impl CcpState {
 
     /// The strike retry of a lookup that found nothing (ibx#410): sent once,
     /// in place of the error. False when the lookup has no retry left.
-    fn retry_with_divided_strike(&mut self, req_id: u32, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) -> bool {
+    fn retry_with_divided_strike(&mut self, req_id: ReqId, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) -> bool {
         let Some(entry) = self.pending_lookups.iter_mut().find(|l| l.req_id == req_id) else { return false };
         let Some(strike) = entry.retry_strike.take() else { return false };
         let lookup = entry.lookup.clone();
@@ -2159,7 +2159,7 @@ impl CcpState {
     /// (ibx#400, ibx#410). Internal lookups end silently.
     fn no_security_definition(
         &mut self,
-        req_id: u32,
+        req_id: ReqId,
         shared: &SharedState,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
@@ -2172,7 +2172,7 @@ impl CcpState {
     }
 
     /// The pending by-symbol lookup of `req_id`, removed.
-    fn take_lookup(&mut self, req_id: u32) -> Option<SymbolLookup> {
+    fn take_lookup(&mut self, req_id: ReqId) -> Option<SymbolLookup> {
         let pos = self.pending_lookups.iter().position(|l| l.req_id == req_id)?;
         Some(self.pending_lookups.swap_remove(pos).lookup)
     }
@@ -2322,7 +2322,7 @@ impl CcpState {
     /// request waits for the answer.
     pub(crate) fn start_contract_resolve(
         &mut self,
-        req_id: u32,
+        req_id: ReqId,
         lookup: crate::types::ContractLookup,
         request: crate::types::ControlCommand,
         ccp_conn: &mut Option<Connection>,
@@ -2347,7 +2347,7 @@ impl CcpState {
             String::new()
         };
         if let Some(conn) = ccp_conn.as_mut().filter(|_| !self.disconnected) {
-            send_symbol_lookup_on(conn, lookup_id, &symbol_lookup, &strike);
+            send_symbol_lookup_on(conn, ReqId::from(lookup_id), &symbol_lookup, &strike);
             hb.last_ccp_sent = Instant::now();
             log::info!("Contract lookup {} for historical req_id={}: symbol={} sec_type={}",
                 lookup_id, req_id, symbol_lookup.symbol, symbol_lookup.sec_type);
@@ -2369,7 +2369,7 @@ impl CcpState {
     fn contract_resolve_reply(&mut self, lookup_id: &str, msg: &[u8], shared: &SharedState) -> bool {
         // The reply names the lookup as it was asked; its number is the key.
         let Some(number) = crate::control::contracts::secdef_request_number(lookup_id) else { return false };
-        let Some(idx) = self.pending_resolves.iter().position(|p| p.lookup_id == number) else { return false };
+        let Some(idx) = self.pending_resolves.iter().position(|p| ReqId::from(p.lookup_id) == number) else { return false };
         let pending = self.pending_resolves.swap_remove(idx);
         let records = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default();
         let mut con_ids: Vec<u32> = Vec::new();
@@ -2395,7 +2395,7 @@ impl CcpState {
             return;
         }
         let now = Instant::now();
-        let mut expired: Vec<u32> = Vec::new();
+        let mut expired: Vec<ReqId> = Vec::new();
         self.pending_resolves.retain(|p| {
             if now >= p.deadline {
                 log::warn!("Contract lookup {} timeout: req_id={}", p.lookup_id, p.req_id);
@@ -2438,7 +2438,7 @@ impl CcpState {
     /// join key (one schedule request per key). The end follows the last row.
     fn deliver_contract_rows(
         &mut self,
-        req_id: u32,
+        req_id: ReqId,
         records: Vec<crate::control::contracts::ContractDefinition>,
         shared: &SharedState,
         event_tx: &Option<Sender<Event>>,
@@ -2468,7 +2468,7 @@ impl CcpState {
     }
 
     /// contract_details_end once no row of the lookup waits for its schedule.
-    fn end_if_complete(&self, req_id: u32, shared: &SharedState, event_tx: &Option<Sender<Event>>) {
+    fn end_if_complete(&self, req_id: ReqId, shared: &SharedState, event_tx: &Option<Sender<Event>>) {
         if !self.pending_schedule_pair.iter().any(|p| p.api_req_id == req_id) {
             shared.reference.push_contract_details_end(req_id);
             emit(event_tx, Event::ContractDetailsEnd(req_id));
@@ -2521,7 +2521,7 @@ impl CcpState {
     /// link is down or the send fails, and then not kept.
     pub(crate) fn send_matching_symbols_request(
         &mut self,
-        req_id: u32,
+        req_id: ReqId,
         pattern: &str,
         ccp_conn: &mut Option<Connection>,
         hb: &mut HeartbeatState,
@@ -2976,7 +2976,7 @@ impl CcpState {
         let req_id = self.next_internal_secdef_id;
         self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
         self.auto_fetched_conids.insert(con_id);
-        self.send_secdef_request(req_id, con_id, ccp_conn, hb);
+        self.send_secdef_request(ReqId::from(req_id), con_id, ccp_conn, hb);
     }
 
     /// Park a scanner result and dispatch concurrent secdef requests for every cache-miss
@@ -2985,7 +2985,7 @@ impl CcpState {
     /// does internally for binary-API scanner clients.
     pub(crate) fn start_scanner_enrichment(
         &mut self,
-        api_req_id: u32,
+        api_req_id: ReqId,
         result: crate::control::scanner::ScannerResult,
         ccp_conn: &mut Option<Connection>,
         shared: &SharedState,
@@ -3011,7 +3011,7 @@ impl CcpState {
                 let req_id = self.next_internal_secdef_id;
                 self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
                 self.auto_fetched_conids.insert(con_id);
-                self.send_secdef_request(req_id, con_id, ccp_conn, hb);
+                self.send_secdef_request(ReqId::from(req_id), con_id, ccp_conn, hb);
             }
         }
         self.pending_scanner_enrichment.push(PendingScannerEnrichment {
@@ -3978,6 +3978,23 @@ mod tests {
             "end must fire so a blocked wait unblocks");
     }
 
+    // ibx#285: a negative API request id is the caller's, not an internal
+    // lookup: cast to an unsigned type it fell in the internal range and
+    // its timeout was dropped.
+    #[test]
+    fn sweep_times_out_a_negative_request_id_as_the_callers() {
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        let past = Instant::now() - std::time::Duration::from_secs(1);
+        ccp.pending_secdef.push((-7, true, past));
+
+        ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
+
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), vec![(-7, 200)]);
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![-7]);
+    }
+
     #[test]
     fn sweep_drops_internal_secdef_silently() {
         let mut ccp = CcpState::new();
@@ -4436,7 +4453,7 @@ mod tests {
         let schedule = pipe_msg(&format!("35=U|6040=107|6256={key}"));
         ccp.process_ccp_message(&schedule, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
 
-        let rows: Vec<(u32, u32, String, String)> = shared.reference.drain_contract_details().into_iter()
+        let rows: Vec<(ReqId, u32, String, String)> = shared.reference.drain_contract_details().into_iter()
             .map(|(rid, d)| (rid, d.con_id, d.symbol, d.market_rule_ids)).collect();
         assert_eq!(rows, [
             (100, 756733, "SPY".to_string(), "4563,109,110".to_string()),
@@ -5519,7 +5536,7 @@ mod reconnect_tests {
         use crate::control::contracts::tests::pipe_msg;
         use crate::types::{ContractLookup, ControlCommand};
 
-        fn bars(req_id: u32) -> ControlCommand {
+        fn bars(req_id: ReqId) -> ControlCommand {
             ControlCommand::FetchHistorical {
                 req_id, con_id: 0, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
                 end_date_time: String::new(), duration: "1 D".into(), bar_size: "1 hour".into(),

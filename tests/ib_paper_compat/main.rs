@@ -1005,7 +1005,7 @@ fn timeout_sweeps_phase_live() {
     let join = run_hot_loop(hot_loop);
 
     // Helper: wait for rows + end on a req_id, in order.
-    let wait_details = |req_id: u32, label: &str| -> (usize, bool, bool) {
+    let wait_details = |req_id: ReqId, label: &str| -> (usize, bool, bool) {
         let deadline = Instant::now() + Duration::from_secs(30);
         let (mut rows, mut end, mut row_after_end) = (0usize, false, false);
         while Instant::now() < deadline && !end {

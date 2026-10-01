@@ -1831,7 +1831,7 @@ fn historical_requests_without_con_id_ask_for_the_contract_first() {
     client.req_historical_ticks(4, &aapl, "", "20260102 10:00:00", 10, "TRADES", true).unwrap();
     client.req_historical_schedule(5, &aapl, "", "1 M", true).unwrap();
     client.req_fundamental_data(6, &aapl, "ReportSnapshot").unwrap();
-    for expected in 1..=6u32 {
+    for expected in 1..=6i64 {
         match rx.try_recv().unwrap() {
             ControlCommand::ResolveContract { req_id, lookup, request } => {
                 assert_eq!(req_id, expected);
@@ -4946,4 +4946,28 @@ fn negative_ids_round_trip() {
         Ok(ControlCommand::Order(OrderRequest::Cancel { order_id })) => assert_eq!(order_id, -7),
         other => panic!("expected the cancel, got {:?}", other),
     }
+}
+
+// ibx#285: a negative request id reaches the engine and comes back to the
+// wrapper unchanged; it was cast to an unsigned type on the way.
+#[test]
+fn a_negative_request_id_round_trips_through_the_engine_queues() {
+    let (client, rx, shared) = test_client();
+    client.cancel_historical_data(-3).unwrap();
+    client.cancel_mkt_depth(-4).unwrap();
+    match rx.try_recv() {
+        Ok(ControlCommand::CancelHistorical { req_id }) => assert_eq!(req_id, -3),
+        other => panic!("expected the historical cancel, got {:?}", other),
+    }
+    match rx.try_recv() {
+        Ok(ControlCommand::UnsubscribeDepth { req_id }) => assert_eq!(req_id, -4),
+        other => panic!("expected the depth cancel, got {:?}", other),
+    }
+
+    shared.reference.push_historical_error(-3, 162, "no data".into());
+    shared.reference.push_contract_details_end(-5);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "error:-3:162:no data"), "{:?}", w.events);
+    assert!(w.events.iter().any(|e| e == "contract_details_end:-5"), "{:?}", w.events);
 }

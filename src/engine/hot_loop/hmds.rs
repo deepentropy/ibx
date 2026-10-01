@@ -6,7 +6,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{InstrumentId, TbtType, PRICE_SCALE};
+use crate::types::{InstrumentId, ReqId, TbtType, PRICE_SCALE};
 use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, clone_for_event, find_body_after_tag, extract_raw_tag};
@@ -41,9 +41,9 @@ pub(crate) struct HmdsState {
     /// pacing limiter tripping) no longer hangs the request forever
     /// (ibx#231). keepUpToDate entries are exempt: they stay resident by
     /// design and their bars flow on a different path.
-    pub(crate) pending_historical: Vec<(String, u32, Instant)>,
+    pub(crate) pending_historical: Vec<(String, ReqId, Instant)>,
     /// In-flight head timestamp queries: (window id, req_id, deadline).
-    pub(crate) pending_head_ts: Vec<(String, u32, Instant)>,
+    pub(crate) pending_head_ts: Vec<(String, ReqId, Instant)>,
     /// Running numbers of the window ids of head timestamp, histogram and
     /// fundamentals queries (ibx#428).
     pub(crate) next_head_ts_window: u32,
@@ -76,15 +76,15 @@ pub(crate) struct HmdsState {
     /// In-flight histogram queries, summed over their frames until the
     /// last one (ibx#433).
     pub(crate) pending_histogram: Vec<PendingHistogram>,
-    pub(crate) pending_schedule: Vec<(String, u32)>,
-    pub(crate) pending_ticks: Vec<(String, u32, String)>,
+    pub(crate) pending_schedule: Vec<(String, ReqId)>,
+    pub(crate) pending_ticks: Vec<(String, ReqId, String)>,
     /// Real-time bar subscriptions, and the keepUpToDate queries whose
     /// ticker id came: 5-second bars are routed by ticker id.
     pub(crate) rtbar_subs: Vec<RtBarSub>,
     /// Most real-time bar requests at once (ibx#454), from the logon.
     pub(crate) max_real_time_requests: u32,
     /// req_ids that should keep streaming after initial batch (keepUpToDate=True).
-    pub(crate) keep_up_to_date_reqs: std::collections::HashSet<u32>,
+    pub(crate) keep_up_to_date_reqs: std::collections::HashSet<ReqId>,
     /// Bar requests answered from more than one server query (BID_ASK is a
     /// Bid query plus an Ask query, ibx#408). Each leg also has its own
     /// `pending_historical` entry; the bars of a leg are held here instead of
@@ -93,7 +93,7 @@ pub(crate) struct HmdsState {
     /// Scanner results parked for contract-detail enrichment before dispatch.
     /// Drained by the engine top-level after each hmds.poll, then handed to
     /// `CcpState::start_scanner_enrichment`.
-    pub(crate) cold_scanner_results: Vec<(u32, crate::control::scanner::ScannerResult)>,
+    pub(crate) cold_scanner_results: Vec<(ReqId, crate::control::scanner::ScannerResult)>,
     /// The historical routing table of the logon (#445); None until it
     /// came.
     pub(crate) routing: Option<crate::engine::routing::RoutingTable>,
@@ -165,7 +165,7 @@ pub(crate) const TBT_CANCEL_DELAY: std::time::Duration = std::time::Duration::fr
 #[derive(Debug, Clone)]
 pub(crate) struct PendingFundamental {
     pub(crate) window_id: String,
-    pub(crate) req_id: u32,
+    pub(crate) req_id: ReqId,
     pub(crate) con_id: u32,
     pub(crate) report: &'static str,
     /// The farm it was sent to, where its cancel goes.
@@ -192,7 +192,7 @@ const REPORT_CACHE_IDLE: std::time::Duration = std::time::Duration::from_secs(60
 pub(crate) struct RtBarSub {
     /// Window id of the query.
     pub(crate) query_id: String,
-    pub(crate) req_id: u32,
+    pub(crate) req_id: ReqId,
     /// Ticker id given by the server's acknowledgement.
     pub(crate) ticker_id: Option<u32>,
     pub(crate) min_tick: f64,
@@ -211,7 +211,7 @@ const INVALID_REAL_TIME_QUERY: &str = "Invalid Real-time Query";
 #[derive(Debug)]
 pub(crate) struct PendingHistogram {
     pub(crate) window_id: String,
-    pub(crate) req_id: u32,
+    pub(crate) req_id: ReqId,
     /// Idle deadline, pushed out by every frame.
     pub(crate) deadline: Instant,
     pub(crate) sum: crate::control::histogram::HistogramSum,
@@ -221,7 +221,7 @@ pub(crate) struct PendingHistogram {
 #[derive(Debug, Clone)]
 pub(crate) struct ScannerSub {
     pub(crate) scan_id: String,
-    pub(crate) req_id: u32,
+    pub(crate) req_id: ReqId,
     pub(crate) request: crate::control::scanner::ScannerSubscription,
     /// The subscribe message body, built once the scanner parameters are
     /// known (ibx#456), sent again after a reconnect.
@@ -235,7 +235,7 @@ pub(crate) struct ScannerSub {
 #[derive(Debug, Clone)]
 pub(crate) struct NewsQuery {
     pub(crate) id: String,
-    pub(crate) req_ids: Vec<u32>,
+    pub(crate) req_ids: Vec<ReqId>,
     pub(crate) query: String,
 }
 
@@ -264,7 +264,7 @@ pub(crate) struct BarLeg {
 /// A bar request answered from several server queries (BID_ASK, ibx#408).
 #[derive(Debug)]
 pub(crate) struct MultiLegBars {
-    pub(crate) req_id: u32,
+    pub(crate) req_id: ReqId,
     pub(crate) legs: Vec<BarLeg>,
     /// Bar frames of every leg, in arrival order: the combined bars are
     /// built from them once no leg is pending.
@@ -621,7 +621,7 @@ impl HmdsState {
                         // (ibx#428), with the reference code of its kind: 162
                         // for bars, schedules and head timestamps, 10188 for a
                         // histogram, 10187 for historical ticks.
-                        let mut released: Option<(u32, i32, String)> = None;
+                        let mut released: Option<(ReqId, i32, String)> = None;
                         if let Some(qid) = &query_id {
                             let wid = crate::control::historical::window_id(qid);
                             if let Some(pos) = self.pending_historical.iter().position(|(q, _, _)| q == wid) {
@@ -988,7 +988,7 @@ impl HmdsState {
 
     pub(crate) fn send_historical_request_ex(
         &mut self,
-        req_id: u32,
+        req_id: ReqId,
         con_id: i64,
         sec_type: &str,
         exchange: &str,
@@ -1100,7 +1100,7 @@ impl HmdsState {
     /// finished (ibx#408).
     fn on_leg_bars(
         &mut self,
-        req_id: u32,
+        req_id: ReqId,
         leg_qid: &str,
         resp: &crate::control::historical::HistoricalResponse,
         xml: &str,
@@ -1126,7 +1126,7 @@ impl HmdsState {
 
     /// A leg of a multi-query request was rejected by the server. The caller
     /// reports its error; the request gives no end (ibx#408).
-    fn on_leg_failed(&mut self, req_id: u32, leg_qid: &str) {
+    fn on_leg_failed(&mut self, req_id: ReqId, leg_qid: &str) {
         let Some(pos) = self.multi_leg.iter().position(|m| m.req_id == req_id) else { return };
         let m = &mut self.multi_leg[pos];
         if let Some(leg) = m.legs.iter_mut().find(|l| l.query_id == leg_qid) {
@@ -1174,7 +1174,7 @@ impl HmdsState {
 
     /// Cancel every in-flight query of a bar request (a BID_ASK request has
     /// two) and drop its held legs.
-    pub(crate) fn cancel_historical(&mut self, req_id: u32, hmds_conn: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
+    pub(crate) fn cancel_historical(&mut self, req_id: ReqId, hmds_conn: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
         for query_id in self.take_historical_cancels(req_id) {
             self.send_historical_cancel(&query_id, hmds_conn, hb);
         }
@@ -1182,7 +1182,7 @@ impl HmdsState {
 
     /// Forget a bar request and give the query ids still waiting, whose
     /// cancels go to the farms they were sent to (#445).
-    pub(crate) fn take_historical_cancels(&mut self, req_id: u32) -> Vec<String> {
+    pub(crate) fn take_historical_cancels(&mut self, req_id: ReqId) -> Vec<String> {
         self.keep_up_to_date_reqs.remove(&req_id);
         self.multi_leg.retain(|m| m.req_id != req_id);
         let mut cancelled = Vec::new();
@@ -1201,7 +1201,7 @@ impl HmdsState {
     /// Responses arrive on HMDS, not CCP (cross-connection routing).
     pub(crate) fn send_historical_request_via_ccp(
         &mut self,
-        req_id: u32,
+        req_id: ReqId,
         con_id: i64,
         sec_type: &str,
         exchange: &str,
@@ -1345,7 +1345,7 @@ impl HmdsState {
         }
     }
 
-    pub(crate) fn send_head_timestamp_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_head_timestamp_request(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // Same shared table as the bar paths — this was a third divergent
         // copy with a silent TRADES fallback (ibx#232).
         let data_type = match crate::control::historical::BarDataType::from_api_str(what_to_show) {
@@ -1507,7 +1507,7 @@ impl HmdsState {
 
     /// Start a scanner subscription (ibx#456): sent at once when the
     /// scanner parameters are known, else after they arrive.
-    pub(crate) fn send_scanner_subscribe(&mut self, req_id: u32, client_id: i64, request: crate::control::scanner::ScannerSubscription, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_scanner_subscribe(&mut self, req_id: ReqId, client_id: i64, request: crate::control::scanner::ScannerSubscription, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let scan_id = crate::control::scanner::scanner_subscription_id(client_id, req_id);
         self.pending_scanner.push(ScannerSub { scan_id, req_id, request, xml: None, sent: false });
         if self.scanner_params.is_some() {
@@ -1536,7 +1536,7 @@ impl HmdsState {
     /// local 162 first, then the desubscribe when a subscribe went out; an
     /// unknown request id gets 365 and nothing is sent. Returns true when
     /// the request id was live.
-    pub(crate) fn cancel_scanner(&mut self, req_id: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) -> bool {
+    pub(crate) fn cancel_scanner(&mut self, req_id: ReqId, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) -> bool {
         let Some(pos) = self.pending_scanner.iter().position(|s| s.req_id == req_id) else {
             shared.reference.push_historical_error(req_id, 365,
                 format!("No scanner subscription found for ticker id:{}", req_id));
@@ -1631,7 +1631,7 @@ impl HmdsState {
     }
 
     /// Send a news query, or join an equal one in flight (ibx#459).
-    fn send_news_query(queries: &mut Vec<NewsQuery>, req_id: u32, id: String, xml: String,
+    fn send_news_query(queries: &mut Vec<NewsQuery>, req_id: ReqId, id: String, xml: String,
                        hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let query = crate::control::news::news_query_text(&xml).to_string();
         if let Some(q) = queries.iter_mut().find(|q| q.query == query) {
@@ -1651,7 +1651,7 @@ impl HmdsState {
         queries.push(NewsQuery { id, req_ids: vec![req_id], query });
     }
 
-    pub(crate) fn send_historical_news_request(&mut self, req_id: u32, con_id: u32, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_historical_news_request(&mut self, req_id: ReqId, con_id: u32, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         self.next_news_query += 1;
         let req = crate::control::news::HistoricalNewsRequest {
             query_id: self.next_news_query.to_string(),
@@ -1670,7 +1670,7 @@ impl HmdsState {
         log::info!("Sent historical news request: req_id={} con_id={}", req_id, con_id);
     }
 
-    pub(crate) fn send_news_article_request(&mut self, req_id: u32, provider_code: &str, article_id: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_news_article_request(&mut self, req_id: ReqId, provider_code: &str, article_id: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         self.next_news_query += 1;
         let req = crate::control::news::NewsArticleRequest {
             query_id: self.next_news_query.to_string(),
@@ -1690,7 +1690,7 @@ impl HmdsState {
     /// query goes to `sink`, the farm of the fundamentals route (`farm`).
     /// The report type is the reference's (an unknown name is asked with
     /// no type); the query id is the provider and a session counter.
-    pub(crate) fn send_fundamental_data_request(&mut self, req_id: u32, con_id: u32, report_type: &str, farm: super::pool::FarmId, sink: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_fundamental_data_request(&mut self, req_id: ReqId, con_id: u32, report_type: &str, farm: super::pool::FarmId, sink: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState, shared: &SharedState) {
         if self.pending_fundamental.iter().any(|p| p.req_id == req_id) {
             shared.reference.push_historical_error(req_id, 322, "Error processing request.-'bL' : cause - Duplicate ticker id".into());
             return;
@@ -1731,7 +1731,7 @@ impl HmdsState {
     /// reply, a cancel of the query goes to its farm; after the reply, or
     /// for an unknown id, nothing is sent (#434). Returns the farm and the
     /// cancel message to send.
-    pub(crate) fn cancel_fundamental(&mut self, req_id: u32) -> Option<(super::pool::FarmId, String)> {
+    pub(crate) fn cancel_fundamental(&mut self, req_id: ReqId) -> Option<(super::pool::FarmId, String)> {
         let pos = self.pending_fundamental.iter().position(|p| p.req_id == req_id)?;
         let p = self.pending_fundamental.remove(pos);
         Some((p.farm, crate::control::fundamental::build_fundamental_cancel_xml(&p.window_id)))
@@ -1792,7 +1792,7 @@ impl HmdsState {
         }
     }
 
-    pub(crate) fn send_histogram_request(&mut self, req_id: u32, con_id: u32, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_histogram_request(&mut self, req_id: ReqId, con_id: u32, sec_type: &str, exchange: &str, use_rth: bool, period: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // An unreadable period is refused locally, as the reference (ibx#433).
         if crate::control::histogram::parse_period(period).is_none() {
             log::error!("histogram req_id={}: invalid time period {:?}", req_id, period);
@@ -1832,7 +1832,7 @@ impl HmdsState {
         });
     }
 
-    pub(crate) fn send_historical_ticks_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, start_date_time: &str, end_date_time: &str, number_of_ticks: u32, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    pub(crate) fn send_historical_ticks_request(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, start_date_time: &str, end_date_time: &str, number_of_ticks: u32, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
         let query_id = format!("tk_{}", qid);
@@ -1853,7 +1853,7 @@ impl HmdsState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn send_realtime_bar_subscribe(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, _symbol: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_realtime_bar_subscribe(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, _symbol: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // The reference checks, in its order (ibx#454): whatToShow (321),
         // a request id already streaming (102), the request limit (456).
         if crate::control::historical::realtime_bar_data(what_to_show).is_none() {
@@ -1896,7 +1896,7 @@ impl HmdsState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn send_schedule_request(&mut self, req_id: u32, con_id: i64, sec_type: &str, exchange: &str, end_date_time: &str, duration: &str, use_rth: bool, hmds_conn: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
+    pub(crate) fn send_schedule_request(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, end_date_time: &str, duration: &str, use_rth: bool, hmds_conn: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
         // Duration in the reference form (ibx#430); an unreadable one is
@@ -1934,7 +1934,7 @@ impl HmdsState {
             return;
         }
         let now = Instant::now();
-        let mut expired: Vec<(String, u32)> = Vec::new();
+        let mut expired: Vec<(String, ReqId)> = Vec::new();
         let kut = &self.keep_up_to_date_reqs;
         self.pending_historical.retain(|(qid, req_id, deadline)| {
             if now >= *deadline && !kut.contains(req_id) {
@@ -1986,7 +1986,7 @@ impl HmdsState {
             return;
         }
         let now = Instant::now();
-        let mut expired: Vec<(u32, i32, String)> = Vec::new();
+        let mut expired: Vec<(ReqId, i32, String)> = Vec::new();
         self.pending_head_ts.retain(|(wid, req_id, deadline)| {
             if now >= *deadline {
                 log::warn!("HMDS head timestamp timeout: req_id={} id={}", req_id, wid);
@@ -2150,12 +2150,12 @@ pub(crate) mod tests {
 
     // ── ibx#408: BID_ASK is two server queries answered as one request ──
 
-    fn send_bid_ask(hmds: &mut HmdsState, shared: &SharedState, req_id: u32) -> (String, String) {
+    fn send_bid_ask(hmds: &mut HmdsState, shared: &SharedState, req_id: ReqId) -> (String, String) {
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
         hmds.send_historical_request_ex(req_id, 416904, "IND", "CBOE", "", "3600 S", "1 min", "BID_ASK",
             true, false, "SPX", &mut conn, &mut hb, shared, false);
-        let legs: Vec<&(String, u32, Instant)> =
+        let legs: Vec<&(String, ReqId, Instant)> =
             hmds.pending_historical.iter().filter(|(_, r, _)| *r == req_id).collect();
         assert_eq!(legs.len(), 2, "BID_ASK must go out as two queries");
         (legs[0].0.clone(), legs[1].0.clone())
@@ -2391,7 +2391,7 @@ pub(crate) mod tests {
             &mut conn, &shared, &None, &mut hb);
         hmds.process_hmds_message(&head_ts_reply("TickHeadClient1;;265598@BEST Last;;0;;true;;0;;U", "19801212-14:30:00"),
             &mut conn, &shared, &None, &mut hb);
-        let got: Vec<(u32, String)> = shared.reference.drain_head_timestamps().into_iter()
+        let got: Vec<(ReqId, String)> = shared.reference.drain_head_timestamps().into_iter()
             .map(|(r, h)| (r, h.head_timestamp)).collect();
         assert_eq!(got, vec![(2, "19930129-14:30:00".to_string()), (1, "19801212-14:30:00".to_string())]);
         assert!(hmds.pending_head_ts.is_empty());
@@ -2463,7 +2463,7 @@ pub(crate) mod tests {
         hmds.process_hmds_message(&frame(false), &mut conn, &shared, &None, &mut hb);
         assert_eq!(hmds.pending_ticks.len(), 2, "not done yet");
         hmds.process_hmds_message(&frame(true), &mut conn, &shared, &None, &mut hb);
-        let got: Vec<(u32, bool)> = shared.reference.drain_historical_ticks().into_iter().map(|t| (t.0, t.3)).collect();
+        let got: Vec<(ReqId, bool)> = shared.reference.drain_historical_ticks().into_iter().map(|t| (t.0, t.3)).collect();
         assert_eq!(got, vec![(6, false), (6, true)]);
         assert_eq!(hmds.pending_ticks.len(), 1);
         assert_eq!(hmds.pending_ticks[0].0, "tk_7");
@@ -2556,7 +2556,7 @@ pub(crate) mod tests {
         let shared = SharedState::new();
         let past = Instant::now() - std::time::Duration::from_secs(1);
         hmds.pending_head_ts.push(("TickHeadClient1".to_string(), 1, past));
-        let pending = |w: &str, req_id: u32, deadline: Instant| PendingHistogram {
+        let pending = |w: &str, req_id: ReqId, deadline: Instant| PendingHistogram {
             window_id: w.to_string(), req_id, deadline, sum: Default::default(),
         };
         hmds.pending_histogram.push(pending("histogramQuery0", 2, past));
@@ -2644,7 +2644,7 @@ pub(crate) mod tests {
         msg
     }
 
-    fn rt_sub(query_id: &str, req_id: u32, ticker_id: Option<u32>) -> RtBarSub {
+    fn rt_sub(query_id: &str, req_id: ReqId, ticker_id: Option<u32>) -> RtBarSub {
         RtBarSub { query_id: query_id.to_string(), req_id, ticker_id, min_tick: 0.01, keep_up_to_date: false }
     }
 
@@ -2680,7 +2680,7 @@ pub(crate) mod tests {
         let msg = rtbar_frame(&[(5, 100, &payload), (6, 105, &payload), (7, 110, &payload)]);
         hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
         let bars = shared.market.drain_real_time_bars();
-        let got: Vec<(u32, u32)> = bars.iter().map(|(r, b)| (*r, b.timestamp)).collect();
+        let got: Vec<(ReqId, u32)> = bars.iter().map(|(r, b)| (*r, b.timestamp)).collect();
         assert_eq!(got, vec![(11, 100), (12, 105)]);
         assert!((bars[0].1.close - 150.0).abs() < 1e-9, "{:?}", bars[0].1);
     }
@@ -2751,7 +2751,7 @@ pub(crate) mod tests {
             (2, 102, "Duplicate ticker id".to_string()),
             (4, 456, "Max number of real time requests has been reached".to_string()),
         ]);
-        let reqs: Vec<u32> = hmds.rtbar_subs.iter().map(|s| s.req_id).collect();
+        let reqs: Vec<ReqId> = hmds.rtbar_subs.iter().map(|s| s.req_id).collect();
         assert_eq!(reqs, vec![2, 3]);
     }
 

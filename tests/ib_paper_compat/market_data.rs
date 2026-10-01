@@ -253,7 +253,7 @@ pub(super) fn phase_market_depth(conns: Conns, gw: &gateway::Gateway, config: &G
     as_client_session(&mut hot_loop, gw, config);
     let join = run_hot_loop(hot_loop);
 
-    let req_id = 93001u32;
+    let req_id: ReqId = 93001;
     control_tx
         .send(ControlCommand::SubscribeDepth {
             req_id,

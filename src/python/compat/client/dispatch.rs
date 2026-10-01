@@ -460,9 +460,9 @@ impl EClient {
         let depth_updates = shared.market.drain_depth_updates();
         for du in depth_updates {
             if du.market_maker.is_empty() {
-                call_wrapper!(self.wrapper, py, "update_mkt_depth", (du.req_id as i64, du.position, du.operation, du.side, du.price, du.size));
+                call_wrapper!(self.wrapper, py, "update_mkt_depth", (du.req_id, du.position, du.operation, du.side, du.price, du.size));
             } else {
-                call_wrapper!(self.wrapper, py, "update_mkt_depth_l2", (du.req_id as i64, du.position, du.market_maker.as_str(),
+                call_wrapper!(self.wrapper, py, "update_mkt_depth_l2", (du.req_id, du.position, du.market_maker.as_str(),
                      du.operation, du.side, du.price, du.size, du.is_smart_depth));
             }
         }
@@ -534,7 +534,7 @@ impl EClient {
         // Drain HMDS query errors -> error (ibx#186). Surface gateway-side validation
         // failures (e.g. "Invalid time length") that previously vanished silently.
         for (req_id, code, msg) in shared.reference.drain_historical_errors() {
-            call_wrapper!(self.wrapper, py, "error", (req_id as i64, code as i64, msg.as_str(), ""));
+            call_wrapper!(self.wrapper, py, "error", (req_id, code as i64, msg.as_str(), ""));
         }
 
         // Drain historical data -> historicalData + historicalDataEnd / historicalDataUpdate
@@ -549,14 +549,14 @@ impl EClient {
                 );
                 let bar_py = Py::new(py, bar_obj)?.into_any();
                 if is_update {
-                    call_wrapper!(self.wrapper, py, "historical_data_update", (req_id as i64, &bar_py));
+                    call_wrapper!(self.wrapper, py, "historical_data_update", (req_id, &bar_py));
                 } else {
-                    call_wrapper!(self.wrapper, py, "historical_data", (req_id as i64, &bar_py));
+                    call_wrapper!(self.wrapper, py, "historical_data", (req_id, &bar_py));
                 }
             }
             if response.is_complete && !is_update {
                 self.core.hist_initial_complete.lock().unwrap().insert(req_id);
-                call_wrapper!(self.wrapper, py, "historical_data_end", (req_id as i64, "", ""));
+                call_wrapper!(self.wrapper, py, "historical_data_end", (req_id, "", ""));
             }
         }
 
@@ -564,7 +564,7 @@ impl EClient {
         let head_ts = shared.reference.drain_head_timestamps();
         for (req_id, response) in head_ts {
             call_wrapper!(self.wrapper, py, "head_timestamp",
-                (req_id as i64, response.head_timestamp.as_str()));
+                (req_id, response.head_timestamp.as_str()));
         }
 
         // Drain contract details -> contractDetails + contractDetailsEnd
@@ -573,11 +573,11 @@ impl EClient {
             let details = ContractDetails::from_definition(py, &def);
             let details_py = Py::new(py, details)?.into_any();
             call_wrapper!(self.wrapper, py, "contract_details",
-                (req_id as i64, &details_py));
+                (req_id, &details_py));
         }
         let contract_ends = shared.reference.drain_contract_details_end();
         for req_id in contract_ends {
-            call_wrapper!(self.wrapper, py, "contract_details_end", (req_id as i64,));
+            call_wrapper!(self.wrapper, py, "contract_details_end", (req_id,));
         }
 
         // Drain matching symbols -> symbolSamples
@@ -596,7 +596,7 @@ impl EClient {
                 }).unwrap()
             }).collect();
             let list = pyo3::types::PyList::new(py, &descriptions)?;
-            call_wrapper!(self.wrapper, py, "symbol_samples", (req_id as i64, list.as_any()));
+            call_wrapper!(self.wrapper, py, "symbol_samples", (req_id, list.as_any()));
         }
 
         // Drain depth exchanges -> mktDepthExchanges
@@ -640,32 +640,32 @@ impl EClient {
                     }
                 }
                 let cd_py = Py::new(py, cd)?.into_any();
-                call_wrapper!(self.wrapper, py, "scanner_data", (req_id as i64, rank as i32, &cd_py,
+                call_wrapper!(self.wrapper, py, "scanner_data", (req_id, rank as i32, &cd_py,
                     entry.distance.as_str(), entry.benchmark.as_str(), entry.projection.as_str(), entry.legs.as_str()));
             }
-            call_wrapper!(self.wrapper, py, "scanner_data_end", (req_id as i64,));
+            call_wrapper!(self.wrapper, py, "scanner_data_end", (req_id,));
         }
 
         // Drain historical news -> historicalNews + historicalNewsEnd
         let news_results = shared.reference.drain_historical_news();
         for (req_id, headlines, has_more) in news_results {
             for h in &headlines {
-                call_wrapper!(self.wrapper, py, "historical_news", (req_id as i64, h.time.as_str(), h.provider_code.as_str(),
+                call_wrapper!(self.wrapper, py, "historical_news", (req_id, h.time.as_str(), h.provider_code.as_str(),
                      h.article_id.as_str(), h.headline.as_str()));
             }
-            call_wrapper!(self.wrapper, py, "historical_news_end", (req_id as i64, has_more));
+            call_wrapper!(self.wrapper, py, "historical_news_end", (req_id, has_more));
         }
 
         // Drain news articles -> newsArticle
         let articles = shared.reference.drain_news_articles();
         for (req_id, article_type, text) in articles {
-            call_wrapper!(self.wrapper, py, "news_article", (req_id as i64, article_type, text.as_str()));
+            call_wrapper!(self.wrapper, py, "news_article", (req_id, article_type, text.as_str()));
         }
 
         // Drain fundamental data -> fundamentalData
         let fundamentals = shared.reference.drain_fundamental_data();
         for (req_id, data) in fundamentals {
-            call_wrapper!(self.wrapper, py, "fundamental_data", (req_id as i64, data.as_str()));
+            call_wrapper!(self.wrapper, py, "fundamental_data", (req_id, data.as_str()));
         }
 
         // Drain histogram data -> histogram_data
@@ -675,7 +675,7 @@ impl EClient {
                 pyo3::types::PyTuple::new(py, &[e.price.into_pyobject(py).unwrap().into_any(), e.count.into_pyobject(py).unwrap().into_any()]).unwrap()
             }).collect();
             let py_list = pyo3::types::PyList::new(py, tuples)?;
-            call_wrapper!(self.wrapper, py, "histogram_data", (req_id as i64, py_list));
+            call_wrapper!(self.wrapper, py, "histogram_data", (req_id, py_list));
         }
 
         // Drain historical ticks
@@ -690,7 +690,7 @@ impl EClient {
                         ]).unwrap()
                     }).collect();
                     let list = pyo3::types::PyList::new(py, py_ticks)?;
-                    call_wrapper!(self.wrapper, py, "historical_ticks", (req_id as i64, list, done));
+                    call_wrapper!(self.wrapper, py, "historical_ticks", (req_id, list, done));
                 }
                 crate::types::HistoricalTickData::Last(ticks) => {
                     let py_ticks: Vec<Bound<'_, pyo3::types::PyTuple>> = ticks.iter().map(|t| {
@@ -703,7 +703,7 @@ impl EClient {
                         ]).unwrap()
                     }).collect();
                     let list = pyo3::types::PyList::new(py, py_ticks)?;
-                    call_wrapper!(self.wrapper, py, "historical_ticks_last", (req_id as i64, list, done));
+                    call_wrapper!(self.wrapper, py, "historical_ticks_last", (req_id, list, done));
                 }
                 crate::types::HistoricalTickData::BidAsk(ticks) => {
                     let py_ticks: Vec<Bound<'_, pyo3::types::PyTuple>> = ticks.iter().map(|t| {
@@ -716,7 +716,7 @@ impl EClient {
                         ]).unwrap()
                     }).collect();
                     let list = pyo3::types::PyList::new(py, py_ticks)?;
-                    call_wrapper!(self.wrapper, py, "historical_ticks_bid_ask", (req_id as i64, list, done));
+                    call_wrapper!(self.wrapper, py, "historical_ticks_bid_ask", (req_id, list, done));
                 }
             }
         }
@@ -732,10 +732,10 @@ impl EClient {
                     String::new(), // streaming bars carry no timezone (ibx#234)
                 );
                 let bar_py = Py::new(py, bar_obj)?.into_any();
-                call_wrapper!(self.wrapper, py, "historical_data_update", (req_id as i64, &bar_py));
+                call_wrapper!(self.wrapper, py, "historical_data_update", (req_id, &bar_py));
             } else {
                 call_wrapper!(self.wrapper, py, "real_time_bar", (
-                    req_id as i64,
+                    req_id,
                     bar.timestamp as i64,
                     bar.open, bar.high, bar.low, bar.close,
                     bar.volume, bar.wap, bar.count,
@@ -755,7 +755,7 @@ impl EClient {
             }).collect();
             let py_sessions = pyo3::types::PyList::new(py, sessions)?;
             call_wrapper!(self.wrapper, py, "historical_schedule", (
-                req_id as i64,
+                req_id,
                 resp.start_date_time.as_str(),
                 resp.end_date_time.as_str(),
                 resp.timezone.as_str(),

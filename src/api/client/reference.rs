@@ -18,13 +18,13 @@ impl EClient {
         what_to_show: &str, use_rth: bool, format_date: i32, keep_up_to_date: bool,
     ) -> Result<(), String> {
         if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration, bar_size, what_to_show, format_date) {
-            self.shared.reference.push_historical_error(req_id as u32, code, text);
+            self.shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
         }
         ClientCore::validate_historical_args(bar_size, what_to_show, keep_up_to_date)?;
         if what_to_show.eq_ignore_ascii_case("SCHEDULE") {
-            return self.send(ClientCore::resolve_first(req_id as u32, contract, ControlCommand::FetchHistoricalSchedule {
-                req_id: req_id as u32,
+            return self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistoricalSchedule {
+                req_id,
                 con_id: contract.con_id,
                 sec_type: contract.sec_type.clone(),
                 exchange: contract.exchange.clone(),
@@ -33,8 +33,8 @@ impl EClient {
                 use_rth,
             }));
         }
-        self.send(ClientCore::resolve_first(req_id as u32, contract, ControlCommand::FetchHistorical {
-            req_id: req_id as u32,
+        self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistorical {
+            req_id,
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
             sec_type: contract.sec_type.clone(),
@@ -51,15 +51,15 @@ impl EClient {
 
     /// Cancel historical data. Matches `cancelHistoricalData` in C++.
     pub fn cancel_historical_data(&self, req_id: i64) -> Result<(), String> {
-        self.send(ControlCommand::CancelHistorical { req_id: req_id as u32 })
+        self.send(ControlCommand::CancelHistorical { req_id })
     }
 
     /// Request head timestamp. Matches `reqHeadTimeStamp` in C++.
     pub fn req_head_time_stamp(
         &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool, _format_date: i32,
     ) -> Result<(), String> {
-        self.send(ClientCore::resolve_first(req_id as u32, contract, ControlCommand::FetchHeadTimestamp {
-            req_id: req_id as u32,
+        self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHeadTimestamp {
+            req_id,
             con_id: contract.con_id,
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),
@@ -73,7 +73,7 @@ impl EClient {
     /// Request contract details. Matches `reqContractDetails` in C++.
     pub fn req_contract_details(&self, req_id: i64, contract: &Contract) -> Result<(), String> {
         self.send(ControlCommand::FetchContractDetails {
-            req_id: req_id as u32,
+            req_id,
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
             sec_type: contract.sec_type.clone(),
@@ -111,14 +111,14 @@ impl EClient {
             }
         };
         self.send(ControlCommand::FetchMatchingSymbols {
-            req_id: req_id as u32,
+            req_id,
             pattern,
         })
     }
 
     /// Cancel head timestamp request. Matches `cancelHeadTimestamp` in C++.
     pub fn cancel_head_time_stamp(&self, req_id: i64) -> Result<(), String> {
-        self.send(ControlCommand::CancelHeadTimestamp { req_id: req_id as u32 })
+        self.send(ControlCommand::CancelHeadTimestamp { req_id })
     }
 
     /// Request market rule by ID. Matches `reqMarketRule` in C++.
@@ -164,7 +164,7 @@ impl EClient {
     ) -> Result<(), String> {
         match ClientCore::scanner_request(subscription, scanner_subscription_options, scanner_subscription_filter_options) {
             Ok(subscription) => self.send(ControlCommand::SubscribeScanner {
-                req_id: req_id as u32,
+                req_id,
                 client_id: self.core.client_id.load(std::sync::atomic::Ordering::Relaxed),
                 subscription,
             }),
@@ -177,7 +177,7 @@ impl EClient {
 
     /// Cancel a scanner subscription. Matches `cancelScannerSubscription` in C++.
     pub fn cancel_scanner_subscription(&self, req_id: i64) -> Result<(), String> {
-        self.send(ControlCommand::CancelScanner { req_id: req_id as u32 })
+        self.send(ControlCommand::CancelScanner { req_id })
     }
 
     // ── News ──
@@ -195,7 +195,7 @@ impl EClient {
             return Ok(());
         }
         self.send(ControlCommand::FetchHistoricalNews {
-            req_id: req_id as u32,
+            req_id,
             con_id: con_id as u32,
             provider_codes: provider_codes.into(),
             start_time: start_time.into(),
@@ -213,7 +213,7 @@ impl EClient {
             return Ok(());
         }
         self.send(ControlCommand::FetchNewsArticle {
-            req_id: req_id as u32,
+            req_id,
             provider_code: provider_code.into(),
             article_id: article_id.into(),
         })
@@ -224,11 +224,11 @@ impl EClient {
     /// Request fundamental data (e.g. ReportSnapshot, ReportsFinSummary). Matches `reqFundamentalData` in C++.
     pub fn req_fundamental_data(&self, req_id: i64, contract: &Contract, report_type: &str) -> Result<(), String> {
         if let Some((code, text)) = ClientCore::fundamental_refusal(&contract.sec_type) {
-            self.shared.reference.push_historical_error(req_id as u32, code, text);
+            self.shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
         }
-        self.send(ClientCore::resolve_first(req_id as u32, contract, ControlCommand::FetchFundamentalData {
-            req_id: req_id as u32,
+        self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchFundamentalData {
+            req_id,
             con_id: contract.con_id as u32,
             report_type: report_type.into(),
         }))
@@ -236,15 +236,15 @@ impl EClient {
 
     /// Cancel fundamental data. Matches `cancelFundamentalData` in C++.
     pub fn cancel_fundamental_data(&self, req_id: i64) -> Result<(), String> {
-        self.send(ControlCommand::CancelFundamentalData { req_id: req_id as u32 })
+        self.send(ControlCommand::CancelFundamentalData { req_id })
     }
 
     // ── Histogram ──
 
     /// Request price histogram data. Matches `reqHistogramData` in C++.
     pub fn req_histogram_data(&self, req_id: i64, contract: &Contract, use_rth: bool, period: &str) -> Result<(), String> {
-        self.send(ClientCore::resolve_first(req_id as u32, contract, ControlCommand::FetchHistogramData {
-            req_id: req_id as u32,
+        self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistogramData {
+            req_id,
             con_id: contract.con_id as u32,
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),
@@ -255,7 +255,7 @@ impl EClient {
 
     /// Cancel histogram data. Matches `cancelHistogramData` in C++.
     pub fn cancel_histogram_data(&self, req_id: i64) -> Result<(), String> {
-        self.send(ControlCommand::CancelHistogramData { req_id: req_id as u32 })
+        self.send(ControlCommand::CancelHistogramData { req_id })
     }
 
     // ── Historical Ticks ──
@@ -266,8 +266,8 @@ impl EClient {
         start_date_time: &str, end_date_time: &str,
         number_of_ticks: i32, what_to_show: &str, use_rth: bool,
     ) -> Result<(), String> {
-        self.send(ClientCore::resolve_first(req_id as u32, contract, ControlCommand::FetchHistoricalTicks {
-            req_id: req_id as u32,
+        self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistoricalTicks {
+            req_id,
             con_id: contract.con_id,
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),
@@ -286,8 +286,8 @@ impl EClient {
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, use_rth: bool,
     ) -> Result<(), String> {
-        self.send(ClientCore::resolve_first(req_id as u32, contract, ControlCommand::FetchHistoricalSchedule {
-            req_id: req_id as u32,
+        self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistoricalSchedule {
+            req_id,
             con_id: contract.con_id,
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),

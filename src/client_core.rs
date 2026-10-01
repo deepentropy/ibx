@@ -688,7 +688,7 @@ pub struct ClientCore {
 
     // Historical data keepUpToDate: req_ids that have completed initial batch.
     // Subsequent bars for these req_ids dispatch as historical_data_update.
-    pub hist_initial_complete: Mutex<HashSet<u32>>,
+    pub hist_initial_complete: Mutex<HashSet<ReqId>>,
 
     // News subscription state
     pub news_providers: Mutex<String>,
@@ -2717,7 +2717,7 @@ impl ClientCore {
     /// A historical-data request for a contract with no conId is looked up
     /// first, as the reference (ibx#427): the request is wrapped so the
     /// engine sends it once the contract is found. Others go as they are.
-    pub fn resolve_first(req_id: u32, contract: &crate::api::types::Contract, request: ControlCommand) -> ControlCommand {
+    pub fn resolve_first(req_id: ReqId, contract: &crate::api::types::Contract, request: ControlCommand) -> ControlCommand {
         if contract.con_id != 0 {
             return request;
         }

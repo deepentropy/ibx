@@ -134,7 +134,7 @@ pub struct ScannerResult {
 
 /// The subscription id of a client scanner: client id, then request id
 /// (ibx#457).
-pub fn scanner_subscription_id(client_id: i64, req_id: u32) -> String {
+pub fn scanner_subscription_id(client_id: i64, req_id: crate::types::ReqId) -> String {
     format!("APISCAN{}:{}", client_id, req_id)
 }
 

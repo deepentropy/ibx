@@ -233,7 +233,7 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config:
         shared.clone(), None, account_id.clone(), conns.farm, conns.ccp, Some(hmds), None,
     );
 
-    const REQ_ID: u32 = 18600;
+    const REQ_ID: ReqId = 18600;
     // The combo `bar_size=15 mins` + `duration=1 W` is technically within the IB
     // docs' allowed ranges but is rejected by the live gateway with
     // <QueryError>Invalid time length</QueryError>. If IB ever lifts this
@@ -248,7 +248,7 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config:
     let join = run_hot_loop(hot_loop);
 
     let mut deadline = Instant::now() + Duration::from_secs(15);
-    let mut error: Option<(u32, i32, String)> = None;
+    let mut error: Option<(ReqId, i32, String)> = None;
     let mut got_end_sentinel = false;
     let mut bars_seen: usize = 0;
 
@@ -1090,7 +1090,7 @@ pub(super) fn phase_historical_ohlc_validation(conns: Conns, _gw: &Gateway, _con
         shared.clone(), Some(event_tx), account_id.clone(), conns.farm, conns.ccp, conns.hmds, None,
     );
 
-    let req_id = 6001u32;
+    let req_id: ReqId = 6001;
     control_tx.send(ControlCommand::FetchHistorical {
         sec_type: "STK".into(), exchange: "SMART".into(),
         req_id,
@@ -1442,7 +1442,7 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config
 
     // Step 2: Fire 5 historical requests while order is pending
     let now = now_ib_timestamp();
-    for i in 0..5u32 {
+    for i in 0..5i64 {
         control_tx.send(ControlCommand::FetchHistorical {
             sec_type: "STK".into(), exchange: "SMART".into(),
             req_id: 30001 + i, con_id: 756733, symbol: "SPY".to_string(),

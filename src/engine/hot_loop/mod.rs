@@ -15,7 +15,7 @@ use crate::config::chrono_free_timestamp;
 use crate::gateway::{ccp_reconnect_host, connect_farm, reconnect_ccp_via, CcpReconnect, ReconnectAuth};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
-use crate::types::{ControlCommand, Fill, InstrumentId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
+use crate::types::{ControlCommand, Fill, InstrumentId, ReqId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 use farm::FarmState;
@@ -553,7 +553,7 @@ impl HotLoop {
     /// where a top route exists, else nothing), or the book of its own
     /// exchange (10092 when no depth route serves it); each entry goes to
     /// the farm of its route.
-    fn route_depth_subscribe(&mut self, req_id: u32, con_id: i64, exchange: String, sec_type: String, num_rows: i32, is_smart_depth: bool) {
+    fn route_depth_subscribe(&mut self, req_id: ReqId, con_id: i64, exchange: String, sec_type: String, num_rows: i32, is_smart_depth: bool) {
         let refuse = |shared: &SharedState, code: i64, text: String| shared.orders.push_order_error(i64::from(req_id), code, text);
         let invalid = |cause: &str| format!("Error validating request.-'bR' : cause - {}", cause);
         if exchange.trim().is_empty() {
@@ -662,7 +662,7 @@ impl HotLoop {
         let strike = if lookup.filters.strike > 0.0 { format!("{}", lookup.filters.strike) } else { String::new() };
         match self.ccp_conn.as_mut().filter(|_| !self.ccp.disconnected) {
             Some(conn) => {
-                ccp::send_symbol_lookup_on(conn, req_id, &lookup, &strike);
+                ccp::send_symbol_lookup_on(conn, ReqId::from(req_id), &lookup, &strike);
                 self.hb.last_ccp_sent = Instant::now();
                 log::info!("Market data for {} {}: contract lookup ({})", sub.symbol, sub.sec_type, req_id);
             }
@@ -933,7 +933,7 @@ impl HotLoop {
         self.shared.push_connection_notice(1102, message);
     }
 
-    fn emit_hmds_unavailable(&self, req_id: u32, from_historical: bool) {
+    fn emit_hmds_unavailable(&self, req_id: ReqId, from_historical: bool) {
         push_hmds_unavailable(&self.shared, req_id, from_historical);
     }
 
@@ -2229,7 +2229,7 @@ pub(crate) fn hmds_reconnect_backoff(attempt: u32) -> std::time::Duration {
 /// The reference's local refusals of a scanner subscription (ibx#457), in
 /// its order: the concurrent limit (a tenth of the ticker limit), then a
 /// request id that is already live. Both are 322.
-fn scanner_refusal(hmds: &HmdsState, req_id: u32) -> Option<String> {
+fn scanner_refusal(hmds: &HmdsState, req_id: ReqId) -> Option<String> {
     let cause = |c: &str| format!("Error processing request.-'co' : cause - {}", c);
     // The ticker limit of the logon, the one real-time bars use too.
     let max = hmds.max_real_time_requests / 10;
@@ -2248,7 +2248,7 @@ fn scanner_refusal(hmds: &HmdsState, req_id: u32) -> Option<String> {
 /// for historical-bar requests only — a terminal empty-bars response so
 /// `historical_data_end` fires. Without this, requests issued while HMDS is
 /// down hang silently (ibx#187).
-pub(crate) fn push_hmds_unavailable(shared: &SharedState, req_id: u32, from_historical: bool) {
+pub(crate) fn push_hmds_unavailable(shared: &SharedState, req_id: ReqId, from_historical: bool) {
     push_hmds_error(
         shared, req_id,
         "Historical data service connection is not available".to_string(),
@@ -2258,7 +2258,7 @@ pub(crate) fn push_hmds_unavailable(shared: &SharedState, req_id: u32, from_hist
 
 /// Surface an HMDS-side request failure: error 162 plus, for bar requests,
 /// the terminal completion sentinel so a blocked wait unblocks.
-pub(crate) fn push_hmds_error(shared: &SharedState, req_id: u32, message: String, from_historical: bool) {
+pub(crate) fn push_hmds_error(shared: &SharedState, req_id: ReqId, message: String, from_historical: bool) {
     const HMDS_ERROR_CODE: i32 = 162;
     shared.reference.push_historical_error(
         req_id,
@@ -3256,7 +3256,7 @@ mod tests {
         (engine, server, tx)
     }
 
-    fn scanner_cmd(req_id: u32, client_id: i64, scan_code: &str) -> ControlCommand {
+    fn scanner_cmd(req_id: ReqId, client_id: i64, scan_code: &str) -> ControlCommand {
         ControlCommand::SubscribeScanner {
             req_id, client_id,
             subscription: crate::control::scanner::ScannerSubscription {
@@ -3307,7 +3307,7 @@ mod tests {
             assert!(m.contains(&format!("<id>{id}</id>")) && m.contains(&format!("<scanCode>{code}</scanCode>")), "{m}");
             assert!(m.contains("<maxItems>10</maxItems><suspend>no</suspend>"), "as the reference: {m}");
         }
-        let got: Vec<(u32, u32, usize)> = engine.hmds.cold_scanner_results.iter()
+        let got: Vec<(ReqId, u32, usize)> = engine.hmds.cold_scanner_results.iter()
             .map(|(r, res)| (*r, res.con_ids[0], res.con_ids.len())).collect();
         assert_eq!(got, [(9006, 911617323, 10), (9005, 909360667, 10)]);
 
@@ -3348,7 +3348,7 @@ mod tests {
             "1:162:Historical Market Data Service error message:Scanner type with code X is disabled",
             "2:165:Historical Market Data Service query message:delayed",
         ]);
-        let rows: Vec<u32> = engine.hmds.cold_scanner_results.iter().map(|(r, _)| *r).collect();
+        let rows: Vec<ReqId> = engine.hmds.cold_scanner_results.iter().map(|(r, _)| *r).collect();
         assert_eq!(rows, [2]);
         assert_eq!(engine.hmds.pending_scanner.iter().map(|s| s.req_id).collect::<Vec<_>>(), [2]);
     }
@@ -3407,7 +3407,7 @@ mod tests {
         let shared = Arc::new(SharedState::new());
         let (mut engine, mut server, tx) = scanner_engine(&shared);
         engine.hmds.max_real_time_requests = 100;
-        let cmd = |req_id: u32, code: &str, rows: i32| ControlCommand::SubscribeScanner {
+        let cmd = |req_id: ReqId, code: &str, rows: i32| ControlCommand::SubscribeScanner {
             req_id, client_id: 5,
             subscription: crate::control::scanner::ScannerSubscription {
                 instrument: "STK".into(), location_code: "STK.US.MAJOR".into(),
@@ -3541,7 +3541,7 @@ mod tests {
         engine.inject_hmds_message(&news_reply("2-history;;NewsQuery;;0;;true;;0;;U", "200",
             "h\\:0=Dow|2026-03-03 14:02:00.0|DJ-N$1|0|1|DJ-N|265598\nhas_more=1\n"));
         engine.inject_hmds_message(&news_reply("1-history;;NewsQuery;;0;;true;;0;;U", "500", ""));
-        let news: Vec<(u32, usize, bool)> = shared.reference.drain_historical_news().into_iter()
+        let news: Vec<(ReqId, usize, bool)> = shared.reference.drain_historical_news().into_iter()
             .map(|(r, h, more)| (r, h.len(), more)).collect();
         assert_eq!(news, [(2, 1, true)]);
         assert_eq!(errors(&shared), [
@@ -3575,16 +3575,16 @@ mod tests {
         engine.inject_hmds_message(&scan("<Contract><contractID>1</contractID></Contract>"));
         engine.inject_hmds_message(&fund_reply);
         engine.inject_hmds_message(&scan("<Contract><contractID>2</contractID></Contract>"));
-        let rows: Vec<(u32, u32)> = engine.hmds.cold_scanner_results.iter().map(|(r, res)| (*r, res.con_ids[0])).collect();
+        let rows: Vec<(ReqId, u32)> = engine.hmds.cold_scanner_results.iter().map(|(r, res)| (*r, res.con_ids[0])).collect();
         assert_eq!(rows, [(460, 1), (460, 2)]);
         assert!(errors(&shared).is_empty());
         tx.send(ControlCommand::CancelScanner { req_id: 460 }).unwrap();
         engine.poll_control_commands();
 
-        let fund: Vec<u32> = shared.reference.drain_fundamental_data().into_iter().map(|(r, _)| r).collect();
+        let fund: Vec<ReqId> = shared.reference.drain_fundamental_data().into_iter().map(|(r, _)| r).collect();
         assert_eq!(fund, [470]);
         assert!(engine.hmds.pending_fundamental.is_empty());
-        let rows: Vec<u32> = engine.hmds.cold_scanner_results.iter().map(|(r, _)| *r).collect();
+        let rows: Vec<ReqId> = engine.hmds.cold_scanner_results.iter().map(|(r, _)| *r).collect();
         assert!(rows.is_empty(), "the cancel drops the parked rows: {rows:?}");
         assert_eq!(errors(&shared), ["460:162:Historical Market Data Service error message:API scanner subscription cancelled: 460"]);
     }
@@ -4464,7 +4464,7 @@ mod bars_routing_tests {
     use crate::bridge::SharedState;
     use crate::engine::routing::TableKind;
 
-    fn bars(req_id: u32, con_id: i64, exchange: &str, sec_type: &str, bar_size: &str) -> ControlCommand {
+    fn bars(req_id: ReqId, con_id: i64, exchange: &str, sec_type: &str, bar_size: &str) -> ControlCommand {
         ControlCommand::FetchHistorical {
             req_id, con_id, symbol: "X".into(), sec_type: sec_type.into(), exchange: exchange.into(),
             end_date_time: String::new(), duration: "1 D".into(), bar_size: bar_size.into(),
@@ -4546,7 +4546,7 @@ mod depth_tests {
         out
     }
 
-    fn depth(req_id: u32, con_id: i64, exchange: &str, sec_type: &str, rows: i32, smart: bool) -> ControlCommand {
+    fn depth(req_id: ReqId, con_id: i64, exchange: &str, sec_type: &str, rows: i32, smart: bool) -> ControlCommand {
         ControlCommand::SubscribeDepth {
             req_id, con_id, exchange: exchange.into(), sec_type: sec_type.into(), num_rows: rows, is_smart_depth: smart,
         }

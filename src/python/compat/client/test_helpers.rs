@@ -291,7 +291,7 @@ impl EClient {
     /// Push historical data into SharedState.
     #[doc(hidden)]
     fn _test_push_historical_data(
-        &self, req_id: u32, bars: Vec<(String, f64, f64, f64, f64, i64)>, is_complete: bool,
+        &self, req_id: ReqId, bars: Vec<(String, f64, f64, f64, f64, i64)>, is_complete: bool,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
         let bar_list: Vec<HistoricalBar> = bars.into_iter().map(|(time, o, h, l, c, v)| {
@@ -305,7 +305,7 @@ impl EClient {
 
     /// Push a head timestamp into SharedState.
     #[doc(hidden)]
-    fn _test_push_head_timestamp(&self, req_id: u32, timestamp: &str) -> PyResult<()> {
+    fn _test_push_head_timestamp(&self, req_id: ReqId, timestamp: &str) -> PyResult<()> {
         let shared = self.shared_state()?;
         shared.reference.push_head_timestamp(req_id, HeadTimestampResponse {
             head_timestamp: timestamp.to_string(), timezone: String::new(),

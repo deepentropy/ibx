@@ -7,7 +7,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::InstrumentId;
+use crate::types::{InstrumentId, ReqId};
 use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, fast_extract_msg_type, find_body_after_tag};
@@ -100,7 +100,7 @@ pub(crate) const MD_LOOKUP_IDS: u32 = 0x1000_0000;
 pub(crate) fn md_contract_reply(context: &mut Context, shared: &SharedState, req_id: &str, msg: &[u8]) -> bool {
     // The reply names the lookup as it was asked; its number is the key.
     let Some(number) = crate::control::contracts::secdef_request_number(req_id) else { return false };
-    let Some(idx) = context.md_lookups.iter().position(|(id, _, _)| *id == number) else { return false };
+    let Some(idx) = context.md_lookups.iter().position(|(id, _, _)| ReqId::from(*id) == number) else { return false };
     let (_, mut sub, _) = context.md_lookups.remove(idx);
     // A reply can list one contract once per exchange.
     let mut con_ids: Vec<i64> = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default()
@@ -209,7 +209,7 @@ pub(crate) struct DepthEntry {
 /// A depth request of the client (#452).
 #[derive(Debug, Clone)]
 pub(crate) struct DepthReq {
-    pub(crate) req_id: u32,
+    pub(crate) req_id: ReqId,
     pub(crate) con_id: i64,
     pub(crate) smart: bool,
     pub(crate) num_rows: i32,
@@ -225,9 +225,9 @@ pub(crate) struct FarmState {
     /// Active depth subscriptions: (req_id, is_smart_depth).
     pub(crate) depth_subs: Vec<(u32, bool)>,
     /// Maps (server_tag, farm) → (depth_req_id, is_smart_depth, min_tick) for active depth subscriptions.
-    pub(crate) depth_tag_to_req: Vec<(u32, u32, bool, f64, FarmId)>,
+    pub(crate) depth_tag_to_req: Vec<(u32, ReqId, bool, f64, FarmId)>,
     /// SmartDepth fan-out: maps internal sub_req → user's original req_id.
-    depth_fanout_map: Vec<(u32, u32)>,
+    depth_fanout_map: Vec<(u32, ReqId)>,
     /// Depth requests of the client and their entries (#452).
     pub(crate) depth_reqs: Vec<DepthReq>,
     /// Option resub info: (instrument, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887).
@@ -510,7 +510,7 @@ impl FarmState {
             let user_req = self.depth_fanout_map.iter()
                 .find(|(sub, _)| *sub == req_id)
                 .map(|(_, user)| *user)
-                .unwrap_or(req_id);
+                .unwrap_or(ReqId::from(req_id));
             self.depth_tag_to_req.push((server_tag, user_req, is_smart, min_tick, self.rx_farm));
             log::info!("Depth ack: server_tag {} -> req_id {} (levels={}, smart={}, min_tick={})",
                 server_tag, user_req, depth_levels, is_smart, min_tick);
@@ -874,7 +874,7 @@ impl FarmState {
     /// The caller made the local checks and picked the farms.
     pub(crate) fn start_depth(
         &mut self,
-        req_id: u32,
+        req_id: ReqId,
         con_id: i64,
         sec_type: &str,
         smart: bool,
@@ -953,7 +953,7 @@ impl FarmState {
     }
 
     /// A depth request of that id and kind is live (#452).
-    pub(crate) fn has_depth_req(&self, req_id: u32, smart: bool) -> bool {
+    pub(crate) fn has_depth_req(&self, req_id: ReqId, smart: bool) -> bool {
         self.depth_reqs.iter().any(|r| r.req_id == req_id && r.smart == smart)
     }
 
@@ -965,7 +965,7 @@ impl FarmState {
     /// End a depth request: its cancels, one message per farm with the
     /// entries that were sent, as the reference cancels (#452). None for
     /// an unknown request id.
-    pub(crate) fn stop_depth(&mut self, req_id: u32) -> Option<Vec<(FarmId, Vec<(u32, String)>)>> {
+    pub(crate) fn stop_depth(&mut self, req_id: ReqId) -> Option<Vec<(FarmId, Vec<(u32, String)>)>> {
         let pos = self.depth_reqs.iter().position(|r| r.req_id == req_id)?;
         let req = self.depth_reqs.remove(pos);
         let ids: Vec<u32> = req.entries.iter().filter(|e| e.live).map(|e| e.farm_req).collect();
@@ -1159,7 +1159,7 @@ impl FarmState {
         if body.len() < 4 { return; }
 
         // Try header stag at body[2..4] (common case).
-        let mut req_id: u32 = 0;
+        let mut req_id: ReqId = 0;
         let mut is_smart = false;
         let mut min_tick: f64 = 0.01;
         let mut pos = 2;
@@ -1239,7 +1239,7 @@ impl FarmState {
     }
 
     /// Look up a depth server_tag → (req_id, is_smart, min_tick).
-    fn lookup_depth_stag(&self, stag: u32) -> Option<(u32, bool, f64)> {
+    fn lookup_depth_stag(&self, stag: u32) -> Option<(ReqId, bool, f64)> {
         self.depth_tag_to_req.iter()
             .find(|(s, .., f)| *s == stag && *f == self.rx_farm)
             .map(|(_, r, sm, mt, _)| (*r, *sm, *mt))

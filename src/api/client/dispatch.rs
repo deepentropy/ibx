@@ -301,9 +301,9 @@ impl EClient {
         // Depth updates → update_mkt_depth / update_mkt_depth_l2
         for du in self.shared.market.drain_depth_updates() {
             if du.market_maker.is_empty() {
-                wrapper.update_mkt_depth(du.req_id as i64, du.position, du.operation, du.side, du.price, du.size);
+                wrapper.update_mkt_depth(du.req_id, du.position, du.operation, du.side, du.price, du.size);
             } else {
-                wrapper.update_mkt_depth_l2(du.req_id as i64, du.position, &du.market_maker, du.operation, du.side, du.price, du.size, du.is_smart_depth);
+                wrapper.update_mkt_depth_l2(du.req_id, du.position, &du.market_maker, du.operation, du.side, du.price, du.size, du.is_smart_depth);
             }
         }
     }
@@ -331,7 +331,7 @@ impl EClient {
         // fires wrapper.error first, then wrapper.historical_data_end. A
         // server-side rejection queues no terminal response (ibx#408).
         for (req_id, code, msg) in self.shared.reference.drain_historical_errors() {
-            wrapper.error(req_id as i64, code as i64, &msg, "");
+            wrapper.error(req_id, code as i64, &msg, "");
         }
 
         // Historical data → historical_data + historical_data_end
@@ -348,25 +348,25 @@ impl EClient {
                     bar_count: bar.count as i32,
                     timezone: response.timezone.clone(),
                 };
-                wrapper.historical_data(req_id as i64, &bd);
+                wrapper.historical_data(req_id, &bd);
             }
             if response.is_complete {
-                wrapper.historical_data_end(req_id as i64, "", "");
+                wrapper.historical_data_end(req_id, "", "");
             }
         }
 
         // Head timestamps → head_timestamp
         for (req_id, response) in self.shared.reference.drain_head_timestamps() {
-            wrapper.head_timestamp(req_id as i64, &response.head_timestamp);
+            wrapper.head_timestamp(req_id, &response.head_timestamp);
         }
 
         // Contract details → contract_details + contract_details_end
         for (req_id, def) in self.shared.reference.drain_contract_details() {
             let details = ContractDetails::from_definition(&def);
-            wrapper.contract_details(req_id as i64, &details);
+            wrapper.contract_details(req_id, &details);
         }
         for req_id in self.shared.reference.drain_contract_details_end() {
-            wrapper.contract_details_end(req_id as i64);
+            wrapper.contract_details_end(req_id);
         }
 
         // Matching symbols → symbol_samples
@@ -383,7 +383,7 @@ impl EClient {
                     issuer_id: m.issuer_id.clone(),
                 }
             }).collect();
-            wrapper.symbol_samples(req_id as i64, &descriptions);
+            wrapper.symbol_samples(req_id, &descriptions);
         }
 
         // Scanner params
@@ -409,23 +409,23 @@ impl EClient {
                     contract.trading_class = ac.trading_class;
                 }
                 let details = ContractDetails { contract, ..Default::default() };
-                wrapper.scanner_data(req_id as i64, rank as i32, &details,
+                wrapper.scanner_data(req_id, rank as i32, &details,
                     &entry.distance, &entry.benchmark, &entry.projection, &entry.legs);
             }
-            wrapper.scanner_data_end(req_id as i64);
+            wrapper.scanner_data_end(req_id);
         }
 
         // Historical news
         for (req_id, headlines, has_more) in self.shared.reference.drain_historical_news() {
             for h in &headlines {
-                wrapper.historical_news(req_id as i64, &h.time, &h.provider_code, &h.article_id, &h.headline);
+                wrapper.historical_news(req_id, &h.time, &h.provider_code, &h.article_id, &h.headline);
             }
-            wrapper.historical_news_end(req_id as i64, has_more);
+            wrapper.historical_news_end(req_id, has_more);
         }
 
         // News articles
         for (req_id, article_type, text) in self.shared.reference.drain_news_articles() {
-            wrapper.news_article(req_id as i64, article_type, &text);
+            wrapper.news_article(req_id, article_type, &text);
         }
 
         // Fundamental data
@@ -434,28 +434,28 @@ impl EClient {
             wrapper.mkt_depth_exchanges(&descriptions);
         }
         for (req_id, data) in self.shared.reference.drain_fundamental_data() {
-            wrapper.fundamental_data(req_id as i64, &data);
+            wrapper.fundamental_data(req_id, &data);
         }
 
         // Histogram data
         for (req_id, entries) in self.shared.reference.drain_histogram_data() {
             let items: Vec<(f64, i64)> = entries.iter().map(|e| (e.price, e.count)).collect();
-            wrapper.histogram_data(req_id as i64, &items);
+            wrapper.histogram_data(req_id, &items);
         }
 
         // Historical ticks — route to the variant-specific callback (iso ibapi).
         for (req_id, data, _query_id, done) in self.shared.reference.drain_historical_ticks() {
             match &data {
-                HistoricalTickData::Midpoint(_) => wrapper.historical_ticks(req_id as i64, &data, done),
-                HistoricalTickData::Last(_) => wrapper.historical_ticks_last(req_id as i64, &data, done),
-                HistoricalTickData::BidAsk(_) => wrapper.historical_ticks_bid_ask(req_id as i64, &data, done),
+                HistoricalTickData::Midpoint(_) => wrapper.historical_ticks(req_id, &data, done),
+                HistoricalTickData::Last(_) => wrapper.historical_ticks_last(req_id, &data, done),
+                HistoricalTickData::BidAsk(_) => wrapper.historical_ticks_bid_ask(req_id, &data, done),
             }
         }
 
         // Real-time bars
         for (req_id, bar) in self.shared.market.drain_real_time_bars() {
             wrapper.real_time_bar(
-                req_id as i64, bar.timestamp as i64,
+                req_id, bar.timestamp as i64,
                 bar.open, bar.high, bar.low, bar.close,
                 bar.volume, bar.wap, bar.count,
             );
@@ -467,7 +467,7 @@ impl EClient {
                 .map(|s| (s.ref_date.clone(), s.open_time.clone(), s.close_time.clone()))
                 .collect();
             wrapper.historical_schedule(
-                req_id as i64, &schedule.start_date_time, &schedule.end_date_time,
+                req_id, &schedule.start_date_time, &schedule.end_date_time,
                 &schedule.timezone, &sessions,
             );
         }

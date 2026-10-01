@@ -30,13 +30,13 @@ impl EClient {
     }
 
     fn cancel_calculate_implied_volatility(&self, req_id: i64) -> PyResult<()> {
-        if let Some(r) = self.not_connected(req_id as i64) { return r; }
+        if let Some(r) = self.not_connected(req_id) { return r; }
         let _ = req_id;
         Ok(())
     }
 
     fn cancel_calculate_option_price(&self, req_id: i64) -> PyResult<()> {
-        if let Some(r) = self.not_connected(req_id as i64) { return r; }
+        if let Some(r) = self.not_connected(req_id) { return r; }
         let _ = req_id;
         Ok(())
     }
@@ -110,7 +110,7 @@ impl EClient {
 
     #[pyo3(signature = (req_id, fa_data_type, cxml))]
     fn replace_fa(&self, py: Python<'_>, req_id: i64, fa_data_type: i32, cxml: &str) -> PyResult<()> {
-        if let Some(r) = self.not_connected(req_id as i64) { return r; }
+        if let Some(r) = self.not_connected(req_id) { return r; }
         // Not an FA session: error 321 for the request as the reference
         // (ibx#481).
         if !self.shared_state()?.reference.fa_session() {

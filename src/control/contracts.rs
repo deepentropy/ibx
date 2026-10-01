@@ -482,7 +482,7 @@ pub const SECDEF_BY_IDENTIFIER_NAME: &str = "FixSecDefReqByIdTypeValue";
 
 /// The request number of a definition reply's request id: the id without
 /// the name of its lookup (a bare number is taken as is).
-pub fn secdef_request_number(req_id: &str) -> Option<u32> {
+pub fn secdef_request_number(req_id: &str) -> Option<crate::types::ReqId> {
     req_id.strip_prefix(SECDEF_BY_IDENTIFIER_NAME)
         .or_else(|| req_id.strip_prefix(SECDEF_BY_SYMBOL_NAME))
         .unwrap_or(req_id)

@@ -27,7 +27,7 @@ impl EClient {
         regulatory_snapshot: bool,
         mkt_data_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
-        if let Some(r) = self.not_connected(req_id as i64) { return r; }
+        if let Some(r) = self.not_connected(req_id) { return r; }
         let tx = self.tx()?;
         let shared = self.shared_state()?;
         if let Some((code, text)) = self.core.duplicate_ticker_refusal(req_id) {
@@ -77,7 +77,7 @@ impl EClient {
 
     /// Cancel market data.
     pub fn cancel_mkt_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
-        if let Some(r) = self.not_connected(req_id as i64) { return r; }
+        if let Some(r) = self.not_connected(req_id) { return r; }
         let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
         if let Some(instrument) = instrument {
             let tx = self.tx()?;
@@ -103,7 +103,7 @@ impl EClient {
         number_of_ticks: i32,
         ignore_size: bool,
     ) -> PyResult<()> {
-        if let Some(r) = self.not_connected(req_id as i64) { return r; }
+        if let Some(r) = self.not_connected(req_id) { return r; }
         let tx = self.tx()?;
 
         // The reference's checks: 321 for a bad type or a combo, 10189 when
@@ -191,7 +191,7 @@ impl EClient {
         is_smart_depth: bool,
         mkt_depth_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
-        if let Some(r) = self.not_connected(req_id as i64) { return r; }
+        if let Some(r) = self.not_connected(req_id) { return r; }
         let _ = mkt_depth_options;
         // An empty exchange is refused by the engine, as the reference
         // refuses it (#452).
@@ -199,7 +199,7 @@ impl EClient {
         let sec_type = if contract.sec_type.is_empty() { "STK".to_string() } else { contract.sec_type.clone() };
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::SubscribeDepth {
-            req_id: req_id as u32,
+            req_id,
             con_id: contract.con_id,
             exchange,
             sec_type,
@@ -215,7 +215,7 @@ impl EClient {
         if let Some(r) = self.not_connected(-1) { return r; }
         let _ = is_smart_depth;
         let tx = self.tx()?;
-        send_cmd(py, &tx, ControlCommand::UnsubscribeDepth { req_id: req_id as u32 })?;
+        send_cmd(py, &tx, ControlCommand::UnsubscribeDepth { req_id })?;
         Ok(())
     }
 
@@ -231,11 +231,11 @@ impl EClient {
         use_rth: i32,
         real_time_bars_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
-        if let Some(r) = self.not_connected(req_id as i64) { return r; }
+        if let Some(r) = self.not_connected(req_id) { return r; }
         let tx = self.tx()?;
         let _ = (bar_size, real_time_bars_options);
         send_cmd(py, &tx, ControlCommand::SubscribeRealTimeBar {
-            req_id: req_id as u32,
+            req_id,
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
             sec_type: contract.sec_type.clone(),
@@ -248,9 +248,9 @@ impl EClient {
 
     /// Cancel real-time bars.
     fn cancel_real_time_bars(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
-        if let Some(r) = self.not_connected(req_id as i64) { return r; }
+        if let Some(r) = self.not_connected(req_id) { return r; }
         let tx = self.tx()?;
-        send_cmd(py, &tx, ControlCommand::CancelRealTimeBar { req_id: req_id as u32 })?;
+        send_cmd(py, &tx, ControlCommand::CancelRealTimeBar { req_id })?;
         Ok(())
     }
 

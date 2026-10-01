@@ -72,13 +72,13 @@ pub enum Event {
     /// Real-time news headline.
     News(TickNews),
     /// Historical bar data.
-    HistoricalData { req_id: u32, data: HistoricalResponse },
+    HistoricalData { req_id: ReqId, data: HistoricalResponse },
     /// Head timestamp response.
-    HeadTimestamp { req_id: u32, data: HeadTimestampResponse },
+    HeadTimestamp { req_id: ReqId, data: HeadTimestampResponse },
     /// Contract details response.
-    ContractDetails { req_id: u32, details: ContractDefinition },
+    ContractDetails { req_id: ReqId, details: ContractDefinition },
     /// End of contract details for a request.
-    ContractDetailsEnd(u32),
+    ContractDetailsEnd(ReqId),
     /// Position update.
     /// `position` is fixed-point (QTY_SCALE).
     PositionUpdate { instrument: InstrumentId, con_id: i64, position_fixed: Qty, avg_cost: Price },
@@ -209,7 +209,7 @@ pub struct MarketDataState {
     instrument_count: AtomicU64,
     tbt_trades: Mutex<Vec<TbtTrade>>,
     tbt_quotes: Mutex<Vec<TbtQuote>>,
-    real_time_bars: Mutex<Vec<(u32, RealTimeBar)>>,
+    real_time_bars: Mutex<Vec<(ReqId, RealTimeBar)>>,
     depth_updates: Mutex<Vec<DepthUpdate>>,
     tick_news: Mutex<Vec<TickNews>>,
     news_bulletins: Mutex<BulletinStore>,
@@ -336,7 +336,7 @@ impl MarketDataState {
         self.tbt_quotes.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_real_time_bars(&self) -> Vec<(u32, RealTimeBar)> {
+    pub fn drain_real_time_bars(&self) -> Vec<(ReqId, RealTimeBar)> {
         self.real_time_bars.lock().unwrap().drain(..).collect()
     }
 
@@ -376,7 +376,7 @@ impl MarketDataState {
     }
 
 
-    #[doc(hidden)] pub fn push_real_time_bar(&self, req_id: u32, bar: RealTimeBar) {
+    #[doc(hidden)] pub fn push_real_time_bar(&self, req_id: ReqId, bar: RealTimeBar) {
         self.real_time_bars.lock().unwrap().push((req_id, bar));
     }
 
@@ -385,7 +385,7 @@ impl MarketDataState {
     }
 
     /// Remove all buffered depth updates for a given req_id (called on cancel).
-    #[doc(hidden)] pub fn purge_depth_updates(&self, req_id: u32) {
+    #[doc(hidden)] pub fn purge_depth_updates(&self, req_id: ReqId) {
         self.depth_updates.lock().unwrap().retain(|u| u.req_id != req_id);
     }
 
@@ -564,22 +564,22 @@ impl OrderState {
 
 /// Historical data, contract definitions, scanners, news archives, market rules, contract cache.
 pub struct ReferenceState {
-    historical_data: Mutex<Vec<(u32, HistoricalResponse)>>,
-    head_timestamps: Mutex<Vec<(u32, HeadTimestampResponse)>>,
-    contract_details: Mutex<Vec<(u32, ContractDefinition)>>,
-    contract_details_end: Mutex<Vec<u32>>,
-    matching_symbols: Mutex<Vec<(u32, Vec<SymbolMatch>)>>,
+    historical_data: Mutex<Vec<(ReqId, HistoricalResponse)>>,
+    head_timestamps: Mutex<Vec<(ReqId, HeadTimestampResponse)>>,
+    contract_details: Mutex<Vec<(ReqId, ContractDefinition)>>,
+    contract_details_end: Mutex<Vec<ReqId>>,
+    matching_symbols: Mutex<Vec<(ReqId, Vec<SymbolMatch>)>>,
     scanner_params: Mutex<Vec<String>>,
-    scanner_data: Mutex<Vec<(u32, ScannerResult)>>,
-    historical_news: Mutex<Vec<(u32, Vec<NewsHeadline>, bool)>>,
-    news_articles: Mutex<Vec<(u32, i32, String)>>,
-    fundamental_data: Mutex<Vec<(u32, String)>>,
-    histogram_data: Mutex<Vec<(u32, Vec<HistogramEntry>)>>,
-    historical_ticks: Mutex<Vec<(u32, HistoricalTickData, String, bool)>>,
-    historical_schedules: Mutex<Vec<(u32, HistoricalScheduleResponse)>>,
+    scanner_data: Mutex<Vec<(ReqId, ScannerResult)>>,
+    historical_news: Mutex<Vec<(ReqId, Vec<NewsHeadline>, bool)>>,
+    news_articles: Mutex<Vec<(ReqId, i32, String)>>,
+    fundamental_data: Mutex<Vec<(ReqId, String)>>,
+    histogram_data: Mutex<Vec<(ReqId, Vec<HistogramEntry>)>>,
+    historical_ticks: Mutex<Vec<(ReqId, HistoricalTickData, String, bool)>>,
+    historical_schedules: Mutex<Vec<(ReqId, HistoricalScheduleResponse)>>,
     /// Errors surfaced by HMDS for in-flight reference queries (req_id, code, message).
     /// Drained by the dispatcher and forwarded to `Wrapper::error`. ibx#186.
-    historical_errors: Mutex<Vec<(u32, i32, String)>>,
+    historical_errors: Mutex<Vec<(ReqId, i32, String)>>,
     market_rules: Mutex<Vec<MarketRule>>,
     depth_exchanges_cache: Mutex<Vec<DepthMktDataDescription>>,
     depth_exchanges_pending: Mutex<bool>,
@@ -665,23 +665,23 @@ impl ReferenceState {
         }
     }
 
-    pub fn drain_historical_data(&self) -> Vec<(u32, HistoricalResponse)> {
+    pub fn drain_historical_data(&self) -> Vec<(ReqId, HistoricalResponse)> {
         self.historical_data.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_head_timestamps(&self) -> Vec<(u32, HeadTimestampResponse)> {
+    pub fn drain_head_timestamps(&self) -> Vec<(ReqId, HeadTimestampResponse)> {
         self.head_timestamps.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_contract_details(&self) -> Vec<(u32, ContractDefinition)> {
+    pub fn drain_contract_details(&self) -> Vec<(ReqId, ContractDefinition)> {
         self.contract_details.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_contract_details_end(&self) -> Vec<u32> {
+    pub fn drain_contract_details_end(&self) -> Vec<ReqId> {
         self.contract_details_end.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_matching_symbols(&self) -> Vec<(u32, Vec<SymbolMatch>)> {
+    pub fn drain_matching_symbols(&self) -> Vec<(ReqId, Vec<SymbolMatch>)> {
         self.matching_symbols.lock().unwrap().drain(..).collect()
     }
 
@@ -689,35 +689,35 @@ impl ReferenceState {
         self.scanner_params.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_scanner_data(&self) -> Vec<(u32, ScannerResult)> {
+    pub fn drain_scanner_data(&self) -> Vec<(ReqId, ScannerResult)> {
         self.scanner_data.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_historical_news(&self) -> Vec<(u32, Vec<NewsHeadline>, bool)> {
+    pub fn drain_historical_news(&self) -> Vec<(ReqId, Vec<NewsHeadline>, bool)> {
         self.historical_news.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_news_articles(&self) -> Vec<(u32, i32, String)> {
+    pub fn drain_news_articles(&self) -> Vec<(ReqId, i32, String)> {
         self.news_articles.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_fundamental_data(&self) -> Vec<(u32, String)> {
+    pub fn drain_fundamental_data(&self) -> Vec<(ReqId, String)> {
         self.fundamental_data.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_histogram_data(&self) -> Vec<(u32, Vec<HistogramEntry>)> {
+    pub fn drain_histogram_data(&self) -> Vec<(ReqId, Vec<HistogramEntry>)> {
         self.histogram_data.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_historical_ticks(&self) -> Vec<(u32, HistoricalTickData, String, bool)> {
+    pub fn drain_historical_ticks(&self) -> Vec<(ReqId, HistoricalTickData, String, bool)> {
         self.historical_ticks.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_historical_schedules(&self) -> Vec<(u32, HistoricalScheduleResponse)> {
+    pub fn drain_historical_schedules(&self) -> Vec<(ReqId, HistoricalScheduleResponse)> {
         self.historical_schedules.lock().unwrap().drain(..).collect()
     }
 
-    pub fn drain_historical_errors(&self) -> Vec<(u32, i32, String)> {
+    pub fn drain_historical_errors(&self) -> Vec<(ReqId, i32, String)> {
         self.historical_errors.lock().unwrap().drain(..).collect()
     }
 
@@ -762,23 +762,23 @@ impl ReferenceState {
 
     // ── Hot-loop-side writers ──
 
-    #[doc(hidden)] pub fn push_historical_data(&self, req_id: u32, response: HistoricalResponse) {
+    #[doc(hidden)] pub fn push_historical_data(&self, req_id: ReqId, response: HistoricalResponse) {
         self.historical_data.lock().unwrap().push((req_id, response));
     }
 
-    #[doc(hidden)] pub fn push_head_timestamp(&self, req_id: u32, response: HeadTimestampResponse) {
+    #[doc(hidden)] pub fn push_head_timestamp(&self, req_id: ReqId, response: HeadTimestampResponse) {
         self.head_timestamps.lock().unwrap().push((req_id, response));
     }
 
-    #[doc(hidden)] pub fn push_contract_details(&self, req_id: u32, def: ContractDefinition) {
+    #[doc(hidden)] pub fn push_contract_details(&self, req_id: ReqId, def: ContractDefinition) {
         self.contract_details.lock().unwrap().push((req_id, def));
     }
 
-    #[doc(hidden)] pub fn push_contract_details_end(&self, req_id: u32) {
+    #[doc(hidden)] pub fn push_contract_details_end(&self, req_id: ReqId) {
         self.contract_details_end.lock().unwrap().push(req_id);
     }
 
-    #[doc(hidden)] pub fn push_matching_symbols(&self, req_id: u32, matches: Vec<SymbolMatch>) {
+    #[doc(hidden)] pub fn push_matching_symbols(&self, req_id: ReqId, matches: Vec<SymbolMatch>) {
         self.matching_symbols.lock().unwrap().push((req_id, matches));
     }
 
@@ -786,40 +786,40 @@ impl ReferenceState {
         self.scanner_params.lock().unwrap().push(xml);
     }
 
-    #[doc(hidden)] pub fn push_scanner_data(&self, req_id: u32, result: ScannerResult) {
+    #[doc(hidden)] pub fn push_scanner_data(&self, req_id: ReqId, result: ScannerResult) {
         self.scanner_data.lock().unwrap().push((req_id, result));
     }
 
     /// Drop the queued results of a cancelled scanner (ibx#457).
-    #[doc(hidden)] pub fn discard_scanner_data(&self, req_id: u32) {
+    #[doc(hidden)] pub fn discard_scanner_data(&self, req_id: ReqId) {
         self.scanner_data.lock().unwrap().retain(|(r, _)| *r != req_id);
     }
 
-    #[doc(hidden)] pub fn push_historical_news(&self, req_id: u32, headlines: Vec<NewsHeadline>, has_more: bool) {
+    #[doc(hidden)] pub fn push_historical_news(&self, req_id: ReqId, headlines: Vec<NewsHeadline>, has_more: bool) {
         self.historical_news.lock().unwrap().push((req_id, headlines, has_more));
     }
 
-    #[doc(hidden)] pub fn push_news_article(&self, req_id: u32, article_type: i32, article_text: String) {
+    #[doc(hidden)] pub fn push_news_article(&self, req_id: ReqId, article_type: i32, article_text: String) {
         self.news_articles.lock().unwrap().push((req_id, article_type, article_text));
     }
 
-    #[doc(hidden)] pub fn push_fundamental_data(&self, req_id: u32, data: String) {
+    #[doc(hidden)] pub fn push_fundamental_data(&self, req_id: ReqId, data: String) {
         self.fundamental_data.lock().unwrap().push((req_id, data));
     }
 
-    #[doc(hidden)] pub fn push_histogram_data(&self, req_id: u32, entries: Vec<HistogramEntry>) {
+    #[doc(hidden)] pub fn push_histogram_data(&self, req_id: ReqId, entries: Vec<HistogramEntry>) {
         self.histogram_data.lock().unwrap().push((req_id, entries));
     }
 
-    #[doc(hidden)] pub fn push_historical_ticks(&self, req_id: u32, data: HistoricalTickData, what_to_show: String, done: bool) {
+    #[doc(hidden)] pub fn push_historical_ticks(&self, req_id: ReqId, data: HistoricalTickData, what_to_show: String, done: bool) {
         self.historical_ticks.lock().unwrap().push((req_id, data, what_to_show, done));
     }
 
-    #[doc(hidden)] pub fn push_historical_schedule(&self, req_id: u32, response: HistoricalScheduleResponse) {
+    #[doc(hidden)] pub fn push_historical_schedule(&self, req_id: ReqId, response: HistoricalScheduleResponse) {
         self.historical_schedules.lock().unwrap().push((req_id, response));
     }
 
-    #[doc(hidden)] pub fn push_historical_error(&self, req_id: u32, code: i32, message: String) {
+    #[doc(hidden)] pub fn push_historical_error(&self, req_id: ReqId, code: i32, message: String) {
         self.historical_errors.lock().unwrap().push((req_id, code, message));
     }
 

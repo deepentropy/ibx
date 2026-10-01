@@ -2,8 +2,14 @@
 /// Used as an index into pre-allocated arrays, so values are dense and small.
 pub type InstrumentId = u32;
 
-/// Engine-assigned order identifier.
+/// Order identifier: the API order id, or the server's for an order of
+/// an earlier session. Signed, as the API's ids; 64 bits, as the server's
+/// ids can be wider than the API's 32-bit ints.
 pub type OrderId = i64;
+
+/// Request and ticker id, as the API gives it. Signed like the
+/// reference's, whose ids are 32-bit ints; -1 names no request.
+pub type ReqId = i64;
 
 /// Fixed-point price: value * 10^8. Avoids floating-point on the hot path.
 /// Example: $150.25 = 15_025_000_000
@@ -1422,7 +1428,7 @@ pub struct NewsBulletin {
 /// A market depth (L2 order book) update.
 #[derive(Debug, Clone)]
 pub struct DepthUpdate {
-    pub req_id: u32,
+    pub req_id: ReqId,
     /// Book position (0-based).
     pub position: i32,
     /// Market maker ID (L2 only).
@@ -1600,7 +1606,7 @@ pub enum ControlCommand {
     /// `request` is sent with its conId; otherwise the request gets error
     /// 200 and no query is sent.
     ResolveContract {
-        req_id: u32,
+        req_id: ReqId,
         lookup: ContractLookup,
         request: Box<ControlCommand>,
     },
@@ -1667,7 +1673,7 @@ pub enum ControlCommand {
     RegisterInstrument { con_id: i64, symbol: String, sec_type: String, exchange: String, reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>> },
     /// Request historical bar data via historical data connection.
     FetchHistorical {
-        req_id: u32,
+        req_id: ReqId,
         con_id: i64,
         symbol: String,
         /// Security type of the API contract (ibx#305). Empty is a stock.
@@ -1688,10 +1694,10 @@ pub enum ControlCommand {
     /// `SharedState::last_ccp_rtt` when the reply arrives.
     Ping,
     /// Cancel a historical data request.
-    CancelHistorical { req_id: u32 },
+    CancelHistorical { req_id: ReqId },
     /// Request head timestamp via historical data connection.
     FetchHeadTimestamp {
-        req_id: u32,
+        req_id: ReqId,
         con_id: i64,
         /// Security type of the API contract (ibx#305). Empty is a stock.
         sec_type: String,
@@ -1702,7 +1708,7 @@ pub enum ControlCommand {
     },
     /// Request contract details via auth connection.
     FetchContractDetails {
-        req_id: u32,
+        req_id: ReqId,
         con_id: i64,
         symbol: String,
         sec_type: String,
@@ -1711,26 +1717,26 @@ pub enum ControlCommand {
         filters: SecDefFilters,
     },
     /// Cancel a head timestamp request.
-    CancelHeadTimestamp { req_id: u32 },
+    CancelHeadTimestamp { req_id: ReqId },
     /// Search for matching symbols via auth connection.
-    FetchMatchingSymbols { req_id: u32, pattern: String },
+    FetchMatchingSymbols { req_id: ReqId, pattern: String },
     /// Request available exchanges for market depth.
     FetchMktDepthExchanges,
     /// Request scanner parameter XML via historical data connection.
     FetchScannerParams,
     /// Subscribe to a scanner scan via historical data connection.
     SubscribeScanner {
-        req_id: u32,
+        req_id: ReqId,
         /// Client id of the session, part of the subscription id (ibx#457).
         client_id: i64,
         /// The checked request, with its filters (ibx#456).
         subscription: crate::control::scanner::ScannerSubscription,
     },
     /// Cancel a scanner subscription.
-    CancelScanner { req_id: u32 },
+    CancelScanner { req_id: ReqId },
     /// Request historical news via historical data connection.
     FetchHistoricalNews {
-        req_id: u32,
+        req_id: ReqId,
         con_id: u32,
         provider_codes: String,
         start_time: String,
@@ -1739,21 +1745,21 @@ pub enum ControlCommand {
     },
     /// Request a news article via historical data connection.
     FetchNewsArticle {
-        req_id: u32,
+        req_id: ReqId,
         provider_code: String,
         article_id: String,
     },
     /// Request fundamental data via historical data connection.
     FetchFundamentalData {
-        req_id: u32,
+        req_id: ReqId,
         con_id: u32,
         report_type: String,
     },
     /// Cancel fundamental data request.
-    CancelFundamentalData { req_id: u32 },
+    CancelFundamentalData { req_id: ReqId },
     /// Request histogram data via historical data connection.
     FetchHistogramData {
-        req_id: u32,
+        req_id: ReqId,
         con_id: u32,
         /// Security type of the API contract (ibx#305). Empty is a stock.
         sec_type: String,
@@ -1763,10 +1769,10 @@ pub enum ControlCommand {
         period: String,
     },
     /// Cancel histogram data request.
-    CancelHistogramData { req_id: u32 },
+    CancelHistogramData { req_id: ReqId },
     /// Request historical ticks via historical data connection.
     FetchHistoricalTicks {
-        req_id: u32,
+        req_id: ReqId,
         con_id: i64,
         /// Security type of the API contract (ibx#305). Empty is a stock.
         sec_type: String,
@@ -1780,7 +1786,7 @@ pub enum ControlCommand {
     },
     /// Subscribe to real-time 5-second bars via historical data connection.
     SubscribeRealTimeBar {
-        req_id: u32,
+        req_id: ReqId,
         con_id: i64,
         symbol: String,
         /// Security type of the API contract (ibx#305). Empty is a stock.
@@ -1791,10 +1797,10 @@ pub enum ControlCommand {
         use_rth: bool,
     },
     /// Cancel real-time bar subscription.
-    CancelRealTimeBar { req_id: u32 },
+    CancelRealTimeBar { req_id: ReqId },
     /// Request historical schedule via historical data connection.
     FetchHistoricalSchedule {
-        req_id: u32,
+        req_id: ReqId,
         con_id: i64,
         /// Security type of the API contract (ibx#305). Empty is a stock.
         sec_type: String,
@@ -1806,7 +1812,7 @@ pub enum ControlCommand {
     },
     /// Subscribe to market depth (L2) for a contract.
     SubscribeDepth {
-        req_id: u32,
+        req_id: ReqId,
         con_id: i64,
         exchange: String,
         sec_type: String,
@@ -1814,15 +1820,15 @@ pub enum ControlCommand {
         is_smart_depth: bool,
     },
     /// Unsubscribe from market depth.
-    UnsubscribeDepth { req_id: u32 },
+    UnsubscribeDepth { req_id: ReqId },
     /// Request news providers list (gateway-local).
-    FetchNewsProviders { req_id: u32 },
+    FetchNewsProviders { req_id: ReqId },
     /// Request SMART routing components.
-    FetchSmartComponents { req_id: u32, bbo_exchange: String },
+    FetchSmartComponents { req_id: ReqId, bbo_exchange: String },
     /// Request soft dollar tiers.
-    FetchSoftDollarTiers { req_id: u32 },
+    FetchSoftDollarTiers { req_id: ReqId },
     /// Request user info.
-    FetchUserInfo { req_id: u32 },
+    FetchUserInfo { req_id: ReqId },
     /// Graceful shutdown.
     Shutdown,
 }
