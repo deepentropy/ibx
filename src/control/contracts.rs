@@ -34,14 +34,21 @@ pub const TAG_IB_ORDER_TYPES: u32 = 6431;
 pub const TAG_IB_MARKET_RULE_ID: u32 = 6031;
 pub const TAG_IB_STOCK_TYPE: u32 = 8077;
 
-// Market rule tags.
-pub const TAG_MARKET_RULE_START: u32 = 6019; // value "1" starts a new rule block
-pub const TAG_MARKET_RULE_ID: u32 = 6031;    // rule ID integer
-pub const TAG_LOW_EDGE: u32 = 6023;          // price increment threshold
-pub const TAG_INCREMENT: u32 = 6027;         // tick size at that price level
-pub const TAG_MARKET_RULE_END: u32 = 6030;   // end marker
-/// Size increments of a rule (ibx#287).
+// Market rule table (ibx#437).
+/// Number of rules in the table; the table follows it.
+pub const TAG_MARKET_RULE_COUNT: u32 = 6019;
+/// Rule id: starts a rule and closes the previous one.
+pub const TAG_MARKET_RULE_ID: u32 = 6031;
+/// Low edge of an entry (the last one read is used by the next increment).
+pub const TAG_LOW_EDGE: u32 = 6023;
+/// Increment of an entry.
+pub const TAG_INCREMENT: u32 = 6027;
+/// Number of price increment entries of a rule (its first increment set).
+pub const TAG_PRICE_INCREMENT_COUNT: u32 = 6026;
+/// Number of size increment entries of a rule (its second set, ibx#287).
 pub const TAG_SIZE_INCREMENT_COUNT: u32 = 6030;
+/// First and last tag of a rule's fields.
+const MARKET_RULE_FIELDS: std::ops::RangeInclusive<u32> = 6020..=6031;
 /// Market type of the contract, for example USSTK.
 pub const TAG_IB_MARKET_TYPE: u32 = 6523;
 
@@ -312,7 +319,7 @@ pub fn parse_secdef_records(data: &[u8]) -> Option<Vec<ContractDefinition>> {
                 records.push(vec![(tag, val)]);
                 section = Record;
             }
-            (Header | Record, 146 | 6038 | TAG_MARKET_RULE_START) => section = Rules,
+            (Header | Record, 146 | 6038 | TAG_MARKET_RULE_COUNT) => section = Rules,
             (Rules | Details, 6344) => section = Details,
             (Rules | Details, TAG_IB_CON_ID) => {
                 details.push((val.parse().unwrap_or(0), Vec::new()));
@@ -499,73 +506,63 @@ pub struct MarketRule {
     pub price_increments: Vec<PriceIncrement>,
 }
 
-/// Parse market rules from a raw message.
-///
-/// Uses sequential tag parsing since rules are a repeating group.
+/// Parse the market rule table of a definition reply (ibx#437), as the
+/// reference reads it: the table follows its rule count and ends at the
+/// first field that is not a rule field; each rule id starts a rule; the
+/// counts are counts, and only the entries after the price increment count
+/// are the rule's price increments (the tier sets and the size set are
+/// skipped). An increment's low edge is the last low edge read.
 pub fn parse_market_rules(data: &[u8]) -> Vec<MarketRule> {
     use crate::protocol::fix::SOH;
 
-    let mut tags: Vec<(u32, String)> = Vec::new();
-    for part in data.split(|&b| b == SOH) {
-        if part.is_empty() { continue; }
-        let text = String::from_utf8_lossy(part);
-        if let Some((tag_str, val)) = text.split_once('=') {
-            if let Ok(tag) = tag_str.parse::<u32>() {
-                tags.push((tag, val.to_string()));
-            }
-        }
-    }
-
     let mut rules: Vec<MarketRule> = Vec::new();
+    let mut in_table = false;
     let mut current: Option<MarketRule> = None;
-    let mut pending_low_edge: Option<f64> = None;
-
-    for (tag, val) in &tags {
-        match *tag {
-            TAG_MARKET_RULE_START if val == "1" => {
-                // Flush previous rule if any
-                if let Some(rule) = current.take() {
-                    rules.push(rule);
-                }
-                current = Some(MarketRule {
-                    rule_id: 0,
-                    price_increments: Vec::new(),
-                });
-                pending_low_edge = None;
-            }
+    let mut price_entries_left = 0usize;
+    let mut low_edge: Option<f64> = None;
+    for part in data.split(|&b| b == SOH) {
+        let Ok(text) = std::str::from_utf8(part) else { continue };
+        let Some((tag, val)) = text.split_once('=') else { continue };
+        let Ok(tag) = tag.parse::<u32>() else { continue };
+        if tag == TAG_MARKET_RULE_COUNT {
+            rules.extend(current.take());
+            in_table = true;
+            price_entries_left = 0;
+            low_edge = None;
+            continue;
+        }
+        if !in_table {
+            continue;
+        }
+        match tag {
             TAG_MARKET_RULE_ID => {
-                if let Some(ref mut rule) = current {
-                    rule.rule_id = val.parse().unwrap_or(0);
-                }
+                rules.extend(current.take());
+                current = Some(MarketRule { rule_id: val.parse().unwrap_or(0), price_increments: Vec::new() });
+                price_entries_left = 0;
             }
-            TAG_LOW_EDGE => {
-                if current.is_some() {
-                    pending_low_edge = val.parse().ok();
-                }
-            }
+            TAG_PRICE_INCREMENT_COUNT => price_entries_left = val.parse().unwrap_or(0),
+            TAG_LOW_EDGE => low_edge = val.parse().ok(),
             TAG_INCREMENT => {
-                if let Some(ref mut rule) = current {
-                    if let Some(low_edge) = pending_low_edge.take() {
-                        if let Ok(increment) = val.parse::<f64>() {
-                            rule.price_increments.push(PriceIncrement { low_edge, increment });
-                        }
+                if price_entries_left > 0 {
+                    price_entries_left -= 1;
+                    if let (Some(rule), Some(low_edge), Ok(increment)) = (current.as_mut(), low_edge, val.parse::<f64>()) {
+                        rule.price_increments.push(PriceIncrement { low_edge, increment });
                     }
                 }
             }
-            TAG_MARKET_RULE_END => {
-                if let Some(rule) = current.take() {
-                    rules.push(rule);
+            // Any other count starts entries that are not price increments.
+            t if MARKET_RULE_FIELDS.contains(&t) => {
+                if matches!(t, 6022 | 6029 | TAG_SIZE_INCREMENT_COUNT) {
+                    price_entries_left = 0;
                 }
-                pending_low_edge = None;
             }
-            _ => {}
+            _ => {
+                rules.extend(current.take());
+                in_table = false;
+            }
         }
     }
-    // Flush last rule if no 6030 end marker was present
-    if let Some(rule) = current.take() {
-        rules.push(rule);
-    }
-
+    rules.extend(current.take());
     rules
 }
 
@@ -1017,13 +1014,15 @@ pub(crate) mod tests {
                 (TAG_LONG_NAME, "APPLE INC"),
                 (TAG_IB_VALID_EXCHANGES, "BEST,NYSE,ARCA"),
                 (TAG_IB_PRIMARY_EXCHANGE, "NASDAQ"),
-                // Inline price-increment block: min_tick is derived from the
-                // smallest increment, not the 6019 rule-start sentinel.
-                (TAG_MARKET_RULE_START, "1"),
+                // Rule table: min_tick is the smallest price increment.
+                (TAG_MARKET_RULE_COUNT, "1"),
                 (TAG_MARKET_RULE_ID, "26"),
+                (TAG_PRICE_INCREMENT_COUNT, "1"),
                 (TAG_LOW_EDGE, "0"),
                 (TAG_INCREMENT, "0.01"),
-                (TAG_MARKET_RULE_END, "1"),
+                (TAG_SIZE_INCREMENT_COUNT, "1"),
+                (TAG_LOW_EDGE, "0"),
+                (TAG_INCREMENT, "1"),
             ],
             1,
         );
@@ -1060,7 +1059,7 @@ pub(crate) mod tests {
                 (322, "*"),
                 (TAG_SECURITY_RESPONSE_TYPE, "4"),
                 (6038, "Y"),
-                (TAG_MARKET_RULE_START, "0"),
+                (TAG_MARKET_RULE_COUNT, "0"),
                 (6344, "0"),
             ],
             1,
@@ -1099,7 +1098,7 @@ pub(crate) mod tests {
                  6035={local}|6058=MNQ|541={date}|200={month}|6614={date}|231=2|6430=CME/FUT|"
             );
         }
-        text += "146=5|6038=Y|6019=1|6031=67|6023=0|6027=0.25|6030=1|6344=5|";
+        text += "146=5|6038=Y|6019=1|6031=67|6026=1|6023=0|6027=0.25|6030=1|6344=5|";
         for (id, _, _, _) in months {
             text += &format!("6008={id}|8499=1|6346=362687422|310=IND|306=Micro E-Mini Nasdaq-100 Index|6046=CME,|6523=USFUT|");
         }
@@ -1167,10 +1166,9 @@ pub(crate) mod tests {
         assert!(super::parse_secdef_response(&msg).is_none());
     }
 
-    // Regression for ibx#197: a US equity secdef carries an inline price-
-    // increment block whose start sentinel is `6019=1`. Tag 6019 must NOT be
-    // read as min_tick (it would yield 1.0) — min_tick is the smallest parsed
-    // increment.
+    // Regression for ibx#197: a US equity secdef carries a rule table
+    // after its rule count. The count must NOT be read as min_tick (it
+    // would yield 1.0) — min_tick is the smallest parsed increment.
     #[test]
     fn secdef_min_tick_from_price_increments_not_rule_sentinel() {
         let msg = fix::fix_build(
@@ -1180,19 +1178,19 @@ pub(crate) mod tests {
                 (TAG_IB_CON_ID, "4726868"),
                 (TAG_SECURITY_TYPE, "CS"),
                 (TAG_CURRENCY, "USD"),
-                // Inline market-rule block (6019="1" is the start sentinel).
-                (TAG_MARKET_RULE_START, "1"),
+                // Rule table with one rule of two price increments.
+                (TAG_MARKET_RULE_COUNT, "1"),
                 (TAG_MARKET_RULE_ID, "26"),
+                (TAG_PRICE_INCREMENT_COUNT, "2"),
                 (TAG_LOW_EDGE, "0"),
                 (TAG_INCREMENT, "0.0001"),
                 (TAG_LOW_EDGE, "1"),
                 (TAG_INCREMENT, "0.01"),
-                (TAG_MARKET_RULE_END, "1"),
             ],
             1,
         );
         let def = super::parse_secdef_response(&msg).unwrap();
-        // Smallest increment across bands, not the "1" rule sentinel.
+        // Smallest increment across bands, not the rule count.
         assert_eq!(def.min_tick, 0.0001);
     }
 
@@ -1569,14 +1567,14 @@ pub(crate) mod tests {
                 (TAG_MSG_TYPE, "d"),
                 (TAG_SYMBOL, "AAPL"),
                 (TAG_IB_CON_ID, "265598"),
-                // Market rule block
-                (TAG_MARKET_RULE_START, "1"),
+                // Rule table
+                (TAG_MARKET_RULE_COUNT, "1"),
                 (TAG_MARKET_RULE_ID, "26"),
+                (TAG_PRICE_INCREMENT_COUNT, "2"),
                 (TAG_LOW_EDGE, "0"),
                 (TAG_INCREMENT, "0.01"),
                 (TAG_LOW_EDGE, "1"),
                 (TAG_INCREMENT, "0.01"),
-                (TAG_MARKET_RULE_END, "1"),
             ],
             1,
         );
@@ -1595,20 +1593,19 @@ pub(crate) mod tests {
         let msg = fix::fix_build(
             &[
                 (TAG_MSG_TYPE, "d"),
+                (TAG_MARKET_RULE_COUNT, "2"),
                 // Rule 1: penny increments
-                (TAG_MARKET_RULE_START, "1"),
                 (TAG_MARKET_RULE_ID, "26"),
+                (TAG_PRICE_INCREMENT_COUNT, "1"),
                 (TAG_LOW_EDGE, "0"),
                 (TAG_INCREMENT, "0.01"),
-                (TAG_MARKET_RULE_END, "1"),
                 // Rule 2: nickel increments above $1
-                (TAG_MARKET_RULE_START, "1"),
                 (TAG_MARKET_RULE_ID, "42"),
+                (TAG_PRICE_INCREMENT_COUNT, "2"),
                 (TAG_LOW_EDGE, "0"),
                 (TAG_INCREMENT, "0.01"),
                 (TAG_LOW_EDGE, "1"),
                 (TAG_INCREMENT, "0.05"),
-                (TAG_MARKET_RULE_END, "1"),
             ],
             1,
         );
@@ -1645,9 +1642,9 @@ pub(crate) mod tests {
         let mut tags: Vec<(u32, &str)> = vec![
             (TAG_MSG_TYPE, "d"), (TAG_IB_CON_ID, "265598"), (TAG_SYMBOL, "AAPL"),
             (TAG_SECURITY_TYPE, sec_type), (TAG_CURRENCY, "USD"), (TAG_IB_MARKET_TYPE, market_type),
-            (TAG_MARKET_RULE_START, "1"), (TAG_MARKET_RULE_ID, "26"),
+            (TAG_MARKET_RULE_COUNT, "1"), (TAG_MARKET_RULE_ID, "26"),
             (6020, "0"), (6021, "0"), (6022, "1"), (TAG_LOW_EDGE, "0"), (6024, "4"), (6025, "2"),
-            (6026, "1"), (TAG_LOW_EDGE, "0"), (TAG_INCREMENT, "0.01"),
+            (TAG_PRICE_INCREMENT_COUNT, "1"), (TAG_LOW_EDGE, "0"), (TAG_INCREMENT, "0.01"),
             (6028, "0"), (6029, "1"), (TAG_LOW_EDGE, "0"), (6024, "6"), (6025, "0"),
         ];
         tags.push((TAG_SIZE_INCREMENT_COUNT, &count));
@@ -1691,13 +1688,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn parse_market_rules_no_end_marker() {
-        // Rule without explicit 6030 end marker -- should still be collected
+    fn parse_market_rules_last_rule_at_end_of_message() {
+        // The last rule is kept when the message ends inside the table.
         let msg = fix::fix_build(
             &[
                 (TAG_MSG_TYPE, "d"),
-                (TAG_MARKET_RULE_START, "1"),
+                (TAG_MARKET_RULE_COUNT, "1"),
                 (TAG_MARKET_RULE_ID, "10"),
+                (TAG_PRICE_INCREMENT_COUNT, "1"),
                 (TAG_LOW_EDGE, "0"),
                 (TAG_INCREMENT, "0.005"),
             ],
@@ -1708,5 +1706,50 @@ pub(crate) mod tests {
         assert_eq!(rules[0].rule_id, 10);
         assert_eq!(rules[0].price_increments.len(), 1);
         assert_eq!(rules[0].price_increments[0].increment, 0.005);
+    }
+
+    /// ibx#437: the captured two-rule table. Rule 32 has one price
+    /// increment, rule 109 two; the tier entries and the size set are not
+    /// price increments.
+    const TWO_RULE_TABLE: &str = "6019=2|6031=32|6020=0|6021=0|6022=1|6023=0|6024=4|6025=2|6026=1|6023=0|6027=0.01|6028=0|6029=1|6023=0|6024=6|6025=0|6030=1|6023=1|6027=1|6031=109|6020=0|6021=0|6022=1|6023=0|6024=4|6025=2|6026=2|6023=0|6027=0.01|6023=3|6027=0.05|6028=0|6029=1|6023=0|6024=6|6025=0|6030=1|6023=1|6027=1";
+
+    fn rule_pairs(rule: &MarketRule) -> Vec<(f64, f64)> {
+        rule.price_increments.iter().map(|p| (p.low_edge, p.increment)).collect()
+    }
+
+    #[test]
+    fn parse_market_rules_captured_two_rule_table() {
+        let msg = pipe_msg(&format!("35=d|320=1|55=AAPL|6008=265598|6031=32|146=1|6038=Y|{}|6344=1|6008=265598", TWO_RULE_TABLE));
+        let rules = parse_market_rules(&msg);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].rule_id, 32);
+        assert_eq!(rule_pairs(&rules[0]), vec![(0.0, 0.01)]);
+        assert_eq!(rules[1].rule_id, 109);
+        assert_eq!(rule_pairs(&rules[1]), vec![(0.0, 0.01), (3.0, 0.05)]);
+        // The size set of each rule is still read by the size parser.
+        let sizes = parse_size_increments(&msg);
+        assert_eq!(sizes.len(), 2);
+        assert!(sizes.iter().all(|p| (p.low_edge, p.increment) == (1.0, 1.0)));
+    }
+
+    #[test]
+    fn parse_market_rules_ignores_rule_ids_outside_the_table() {
+        // The record's own rule id and a rule id after the table are not
+        // rules.
+        let msg = pipe_msg("35=d|55=AAPL|6031=7|6019=1|6031=32|6026=1|6023=0|6027=0.01|6344=1|6031=8|6026=1|6023=0|6027=5");
+        let rules = parse_market_rules(&msg);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_id, 32);
+        assert_eq!(rule_pairs(&rules[0]), vec![(0.0, 0.01)]);
+    }
+
+    #[test]
+    fn min_tick_is_the_smallest_increment_of_the_record_rule() {
+        // Record on rule 109 in a two-rule table: its smallest increment.
+        let table = TWO_RULE_TABLE.replace("6026=2|6023=0|6027=0.01", "6026=2|6023=0|6027=0.02");
+        let msg = pipe_msg(&format!("35=d|320=1|55=AAPL|6008=265598|6031=109|146=1|6038=Y|{}|6344=1|6008=265598", table));
+        let def = super::parse_secdef_response(&msg).unwrap();
+        assert_eq!(def.market_rule_id, Some(109));
+        assert!((def.min_tick - 0.02).abs() < 1e-12, "{}", def.min_tick);
     }
 }

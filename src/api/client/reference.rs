@@ -93,12 +93,15 @@ impl EClient {
     }
 
     /// Request market rule by ID. Matches `reqMarketRule` in C++.
-    /// Looks up cached market rules delivered during connection init.
+    /// Answered from the rules of the definition replies received; an id
+    /// not received, or a rule with no price increments, gives 322
+    /// (ibx#437).
     pub fn req_market_rule(&self, market_rule_id: i32, wrapper: &mut impl crate::api::wrapper::Wrapper) {
-        if let Some(rule) = self.shared.reference.market_rule(market_rule_id) {
-            wrapper.market_rule(market_rule_id as i64, &rule.price_increments.iter()
+        match crate::client_core::market_rule_answer(self.shared.reference.market_rule(market_rule_id), market_rule_id) {
+            Ok(increments) => wrapper.market_rule(market_rule_id as i64, &increments.iter()
                 .map(|pi| crate::api::types::PriceIncrement { low_edge: pi.low_edge, increment: pi.increment })
-                .collect::<Vec<_>>());
+                .collect::<Vec<_>>()),
+            Err((code, message)) => wrapper.error(-1, code, &message, ""),
         }
     }
 

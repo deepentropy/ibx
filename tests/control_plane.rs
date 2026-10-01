@@ -38,13 +38,12 @@ fn contract_request_response_roundtrip() {
             (TAG_CURRENCY, "USD"),
             (TAG_LONG_NAME, "APPLE INC"),
             (TAG_IB_VALID_EXCHANGES, "BEST,NYSE,ARCA,BATS"),
-            // Inline price-increment block (6019="1" is the rule-start
-            // sentinel); min_tick is derived from the smallest increment.
-            (TAG_MARKET_RULE_START, "1"),
+            // Rule table; min_tick is the smallest price increment.
+            (TAG_MARKET_RULE_COUNT, "1"),
             (TAG_MARKET_RULE_ID, "26"),
+            (TAG_PRICE_INCREMENT_COUNT, "1"),
             (TAG_LOW_EDGE, "0"),
             (TAG_INCREMENT, "0.01"),
-            (TAG_MARKET_RULE_END, "1"),
         ],
         11,
     );

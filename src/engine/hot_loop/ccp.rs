@@ -4089,7 +4089,7 @@ mod tests {
     fn stock_reply(req_id: &str) -> Vec<u8> {
         pipe_msg(&format!(
             "35=d|43=N|320={req_id}|322=*|323=4|55=AAPL|167=STK|207=BEST|6008=265598|6031=4563|15=USD|58=NMS|\
-             6035=AAPL|6058=NMS|6430=1/STK/NASDAQ|146=1|6038=Y|6019=1|6031=4563|6023=0|6027=0.01|6030=1|6344=1|\
+             6035=AAPL|6058=NMS|6430=1/STK/NASDAQ|146=1|6038=Y|6019=1|6031=4563|6026=1|6023=0|6027=0.01|6030=1|6344=1|\
              6008=265598|6470=NASDAQ|306=APPLE INC|6046=BEST,AMEX,NYSE,"
         ))
     }
@@ -4097,7 +4097,7 @@ mod tests {
     fn exchange_reply(req_id: &str, exchange: &str, rule: &str) -> Vec<u8> {
         pipe_msg(&format!(
             "35=d|43=N|320={req_id}|322=*|323=4|55=AAPL|167=STK|207={exchange}|6008=265598|6031={rule}|15=USD|\
-             58=NMS|6035=AAPL|6058=NMS|146=1|6038=Y|6019=1|6031={rule}|6023=0|6027=0.01|6030=1"
+             58=NMS|6035=AAPL|6058=NMS|146=1|6038=Y|6019=1|6031={rule}|6026=1|6023=0|6027=0.01|6030=1"
         ))
     }
 
@@ -4164,7 +4164,7 @@ mod tests {
 
         // The symbol lookup answers first and asks one exchange rule.
         let msft = pipe_msg(&format!(
-            "35=d|43=N|320=101|322=*|323=4|{}146=1|6038=Y|6019=1|6031=4563|6023=0|6027=0.01|6030=1|6344=1|\
+            "35=d|43=N|320=101|322=*|323=4|{}146=1|6038=Y|6019=1|6031=4563|6026=1|6023=0|6027=0.01|6030=1|6344=1|\
              6008=272093|306=MICROSOFT CORP|6046=BEST,AMEX,",
             listing("MSFT", "272093", "BEST", key, "4563"),
         ));
@@ -4174,7 +4174,7 @@ mod tests {
 
         // Then the conId lookup: the contract once per exchange.
         let spy = pipe_msg(&format!(
-            "35=d|43=N|320=100|322=*|323=4|{}{}{}146=1|6038=Y|6019=1|6031=4563|6023=0|6027=0.01|6030=1|6344=1|\
+            "35=d|43=N|320=100|322=*|323=4|{}{}{}146=1|6038=Y|6019=1|6031=4563|6026=1|6023=0|6027=0.01|6030=1|6344=1|\
              6008=756733|306=SPDR S&P 500 ETF TRUST|6046=BEST,AMEX,NYSE,",
             listing("SPY", "756733", "BEST", key, "4563"),
             listing("SPY", "756733", "AMEX", "AMEX/STK#NOCROSS#LITE", "109"),

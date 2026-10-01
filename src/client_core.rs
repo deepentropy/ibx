@@ -158,6 +158,23 @@ fn pnl_account_refusal(class: &str, account: &str, own_account: &str) -> Result<
     Err((321, format!("Error validating request.-'{}' : cause - {}", class, cause)))
 }
 
+/// Answer of a market rule request (ibx#437), as the reference: the
+/// rule's price increments, or 322 when the id was not received in a
+/// definition reply, or when its rule has no price increments.
+pub fn market_rule_answer(
+    rule: Option<crate::control::contracts::MarketRule>,
+    market_rule_id: i32,
+) -> Result<Vec<crate::control::contracts::PriceIncrement>, (i64, String)> {
+    let refuse = |cause: String| Err((322, format!("Error processing request.-'cd' : cause - {}", cause)));
+    match rule {
+        None => refuse(format!("Market rule with id = {} is missing", market_rule_id)),
+        Some(rule) if rule.price_increments.is_empty() => {
+            refuse(format!("Price increment rule for market rule with id = {} is missing", market_rule_id))
+        }
+        Some(rule) => Ok(rule.price_increments),
+    }
+}
+
 /// PnL update (account-level).
 pub struct PnlUpdate {
     pub req_id: i64,

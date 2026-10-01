@@ -301,18 +301,21 @@ impl EClient {
     /// Request market rule details.
     fn req_market_rule(&self, py: Python<'_>, market_rule_id: i32) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        if let Some(shared) = self.shared.lock().unwrap().clone() {
-            if let Some(rule) = shared.reference.market_rule(market_rule_id) {
-                let increments: Vec<(f64, f64)> = rule.price_increments.iter()
-                    .map(|pi| (pi.low_edge, pi.increment)).collect();
-                let list = pyo3::types::PyList::new(py, increments.iter().map(|(low, inc)| {
-                    pyo3::types::PyTuple::new(py, &[*low, *inc]).unwrap()
+        let rule = self.shared.lock().unwrap().clone()
+            .and_then(|shared| shared.reference.market_rule(market_rule_id));
+        // An id not received, or a rule with no price increments: 322
+        // (ibx#437).
+        match crate::client_core::market_rule_answer(rule, market_rule_id) {
+            Ok(increments) => {
+                let list = pyo3::types::PyList::new(py, increments.iter().map(|pi| {
+                    pyo3::types::PyTuple::new(py, &[pi.low_edge, pi.increment]).unwrap()
                 }))?;
                 self.wrapper.call_method1(py, "market_rule", (market_rule_id as i64, list.as_any()))?;
-                return Ok(());
+            }
+            Err((code, message)) => {
+                self.wrapper.call_method1(py, "error", (-1i64, code, message.as_str(), ""))?;
             }
         }
-        log::warn!("req_market_rule: rule {} not in cache", market_rule_id);
         Ok(())
     }
 

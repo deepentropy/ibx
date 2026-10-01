@@ -2620,6 +2620,30 @@ fn process_msgs_dispatches_symbol_samples() {
     assert!(w.events.iter().any(|e| e == "symbol_samples:8:1"));
 }
 
+// ibx#437: a rule from a definition reply is answered; an unknown id or
+// a rule with no price increments gives 322 with request id -1.
+#[test]
+fn req_market_rule_answers_known_rules_and_refuses_others() {
+    use crate::control::contracts::{MarketRule, PriceIncrement};
+    let (client, _rx, shared) = test_client();
+    shared.reference.push_market_rules(vec![
+        MarketRule { rule_id: 109, price_increments: vec![
+            PriceIncrement { low_edge: 0.0, increment: 0.01 },
+            PriceIncrement { low_edge: 3.0, increment: 0.05 },
+        ] },
+        MarketRule { rule_id: 5, price_increments: vec![] },
+    ]);
+    let mut w = RecordingWrapper::default();
+    client.req_market_rule(109, &mut w);
+    client.req_market_rule(999999, &mut w);
+    client.req_market_rule(5, &mut w);
+    assert_eq!(w.events, vec![
+        "market_rule:109:2".to_string(),
+        "error:-1:322:Error processing request.-'cd' : cause - Market rule with id = 999999 is missing".to_string(),
+        "error:-1:322:Error processing request.-'cd' : cause - Price increment rule for market rule with id = 5 is missing".to_string(),
+    ]);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  process_msgs — scanner
 // ═══════════════════════════════════════════════════════════════════
