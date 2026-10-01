@@ -29,6 +29,8 @@ fn connect_caches_reconnect_credentials() {
         encoded: String::new(),
         hmds_host: String::new(),
         hmds_farm: String::new(),
+        farm_host: String::new(),
+        farm_name: String::new(),
         session_epoch: String::new(),
     });
     assert!(!hot_loop.has_reconnect_host(), "gateway leaves the host empty");

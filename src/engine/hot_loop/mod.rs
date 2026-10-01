@@ -483,7 +483,10 @@ impl HotLoop {
 
     /// A lost link is reported to every client at once, as the reference
     /// does (ibx#399): 1100 for the auth connection, 2103 / 2105 for the
-    /// market-data and historical farms. The clients stay connected.
+    /// market-data and historical farms. The clients stay connected. A farm
+    /// that is up again after its logon gives 2104 / 2106 with its name, as
+    /// in the reference; the auth link gives 1102 after its replay instead
+    /// (`maybe_report_restored`).
     fn report_link_changes(&mut self) {
         let now = self.current_links();
         let Some(before) = self.links.replace(now) else { return };
@@ -496,9 +499,16 @@ impl HotLoop {
         if before.farm && !now.farm {
             self.shared.push_connection_notice(2103, format!("Market data farm connection is broken:{}", self.farm_name));
         }
+        if !before.farm && now.farm {
+            self.shared.push_connection_notice(2104, format!("Market data farm connection is OK:{}", self.farm_name));
+        }
         if before.hmds && !now.hmds {
             let name = self.hmds_farm_name().to_string();
             self.shared.push_connection_notice(2105, format!("HMDS data farm connection is broken:{}", name));
+        }
+        if !before.hmds && now.hmds {
+            let name = self.hmds_farm_name().to_string();
+            self.shared.push_connection_notice(2106, format!("HMDS data farm connection is OK:{}", name));
         }
     }
 
@@ -1071,14 +1081,18 @@ impl HotLoop {
         };
         self.farm_reconnect_attempt += 1;
         let attempt = self.farm_reconnect_attempt;
-        log::info!("Farm auto-reconnect attempt {} starting (host={}, user={})", attempt, auth.host, auth.username);
+        // The farm of the session, not a fixed name: a regional account logs
+        // on again to its own farm, as in the reference (ibx#295).
+        let (farm_host, farm_name) = farm_reconnect_target(&auth, &self.farm_name);
+        log::info!("Farm auto-reconnect attempt {} starting (farm={}/{}, user={})",
+            attempt, farm_host, farm_name, auth.username);
 
         let (tx, rx) = crossbeam_channel::bounded(1);
         std::thread::Builder::new()
             .name(format!("farm-reconnect-{}", attempt))
             .spawn(move || {
                 let result = connect_farm(
-                    &auth.host, "usfarm",
+                    &farm_host, &farm_name,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
                     &auth.hw_info, &auth.encoded, 18,
@@ -1469,6 +1483,14 @@ pub(crate) fn reconnect_backoff() -> std::time::Duration {
     const FLOOR_MS: u64 = 5_000;
     const JITTER_MS: u64 = 10_000;
     std::time::Duration::from_millis(FLOOR_MS + rand::random::<u64>() % JITTER_MS)
+}
+
+/// Host and name for a market-data farm reconnect: the session's farm, else
+/// the auth host and `fallback_name` (the name used at login).
+fn farm_reconnect_target(auth: &ReconnectAuth, fallback_name: &str) -> (String, String) {
+    let host = if auth.farm_host.is_empty() { auth.host.clone() } else { auth.farm_host.clone() };
+    let name = if auth.farm_name.is_empty() { fallback_name.to_string() } else { auth.farm_name.clone() };
+    (host, name)
 }
 
 /// Up/down state of each connection, as reported to the clients.
@@ -2110,8 +2132,56 @@ mod tests {
             encoded: String::new(),
             hmds_host: "hmds.example".into(),
             hmds_farm: "ushmds".into(),
+            farm_host: String::new(),
+            farm_name: String::new(),
             session_epoch: String::new(),
         }
+    }
+
+    // ibx#295: the farm reconnect goes to the session's farm (host and name
+    // from the logon), not to the auth host under a fixed name.
+    #[test]
+    fn farm_reconnect_uses_the_session_farm() {
+        let mut auth = reconnect_auth_with_host("gw.example");
+        auth.farm_host = "zdc1.example".into();
+        auth.farm_name = "eufarm".into();
+        assert_eq!(farm_reconnect_target(&auth, "usfarm"), ("zdc1.example".to_string(), "eufarm".to_string()));
+        // No farm parsed: the auth host and the login name, as at login.
+        let auth = reconnect_auth_with_host("gw.example");
+        assert_eq!(farm_reconnect_target(&auth, "usfarm.nj"), ("gw.example".to_string(), "usfarm.nj".to_string()));
+    }
+
+    // ibx#399: a farm that is up again gives the farm-OK notice with its
+    // name; the first look reports nothing.
+    #[test]
+    fn restored_farms_are_reported_with_their_names() {
+        let (mut engine, shared, _servers) = engine_with_links();
+        engine.set_farm_name("eufarm".into());
+        engine.report_link_changes();
+        assert!(shared.drain_connection_notices().is_empty(), "first look: nothing to report");
+
+        engine.farm.disconnected = true;
+        engine.hmds.disconnected = true;
+        engine.report_link_changes();
+        let _ = shared.drain_connection_notices();
+
+        engine.farm.disconnected = false;
+        engine.hmds.disconnected = false;
+        engine.report_link_changes();
+        assert_eq!(shared.drain_connection_notices(), vec![
+            (2104, "Market data farm connection is OK:eufarm".to_string()),
+            (2106, "HMDS data farm connection is OK:ushmds".to_string()),
+        ]);
+        engine.report_link_changes();
+        assert!(shared.drain_connection_notices().is_empty(), "reported once");
+
+        // The auth link coming back gives no farm notice.
+        engine.ccp.disconnected = true;
+        engine.report_link_changes();
+        let _ = shared.drain_connection_notices();
+        engine.ccp.disconnected = false;
+        engine.report_link_changes();
+        assert!(shared.drain_connection_notices().is_empty(), "1102 comes after the replay, not here");
     }
 
     // ibx#399: with every transport down the loop spun at ~1M passes/s and

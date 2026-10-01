@@ -452,6 +452,12 @@ pub struct ReconnectAuth {
     /// Used by HMDS reconnect (ibx#187) — empty when no HMDS route was parsed.
     pub hmds_host: String,
     pub hmds_farm: String,
+    /// Market-data farm of the session (host and name from the logon
+    /// routing tag), used by the farm reconnect, as the reference reuses
+    /// the farm of the lost connection (ibx#295). Empty: the auth host and
+    /// the default farm name.
+    pub farm_host: String,
+    pub farm_name: String,
     /// Session epoch of the last logon reply, sent back on a reconnect logon
     /// so the server can resume the same session (ibx#422). Empty when the
     /// server sent none.
@@ -512,6 +518,8 @@ pub struct Gateway {
     pub session_epoch: String,
     /// Name of the market-data farm, for the farm status messages (ibx#399).
     pub farm_name: String,
+    /// Host of the market-data farm, for the farm reconnect (ibx#295).
+    pub farm_host: String,
 }
 
 /// Request ids of the routing-table requests: one process-wide counter
@@ -1776,6 +1784,7 @@ impl Gateway {
         let hmds_host_for_gw = mktdata_host.clone();
         let hmds_farm_for_gw = mktdata_farm.clone();
         let farm_name = trading_farm.clone();
+        let farm_host = trading_host.clone();
 
         // Parallel farm logons: validated against paper and live (each farm
         // logon is ~6 s sequentially; running them in parallel halves the
@@ -1829,6 +1838,7 @@ impl Gateway {
             hmds_farm: hmds_farm_for_gw,
             session_epoch,
             farm_name,
+            farm_host,
         };
         Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
@@ -1953,6 +1963,8 @@ impl Gateway {
             encoded: self.encoded.clone(),
             hmds_host: self.hmds_host.clone(),
             hmds_farm: self.hmds_farm.clone(),
+            farm_host: self.farm_host.clone(),
+            farm_name: self.farm_name.clone(),
             session_epoch: self.session_epoch.clone(),
         };
         if let Some(tx) = event_tx.as_ref() {
