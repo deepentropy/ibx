@@ -1548,7 +1548,10 @@ impl Order {
             good_after_time: self.good_after_time.clone(),
             good_till_date: self.good_till_date.clone(),
             oca_group: self.oca_group.clone(),
+            oca_type: self.oca_type,
             trailing_percent: self.trailing_percent,
+            trail_stop_price: self.trail_stop_price,
+            lmt_price_offset: self.lmt_price_offset,
             algo_strategy: self.algo_strategy.clone(),
             algo_params: self.algo_params.iter().map(|tv| crate::api::types::TagValue {
                 tag: tv.tag.clone(),
@@ -2443,6 +2446,43 @@ mod tests {
         assert_eq!(attrs.display_size, 50);
         assert!(attrs.hidden);
         assert_eq!(attrs.discretionary_amt, (0.05 * PRICE_SCALE_F) as Price);
+    }
+
+    // ibx#395: the OCA type, trail stop price and limit price offset reach
+    // the engine order; unset they stay unset.
+    #[test]
+    fn order_to_api_carries_oca_type_trail_stop_and_offset() {
+        let d = Order::default().to_api();
+        assert_eq!(d.oca_type, 0);
+        assert_eq!(d.trail_stop_price, f64::MAX);
+        assert_eq!(d.lmt_price_offset, f64::MAX);
+
+        let mut o = Order::default();
+        o.action = "SELL".into();
+        o.total_quantity = 10.0;
+        o.order_type = "TRAIL LIMIT".into();
+        o.aux_price = 1.0;
+        o.oca_group = "g1".into();
+        o.oca_type = 2;
+        o.trail_stop_price = 99.5;
+        o.lmt_price_offset = 0.25;
+        let api = o.to_api();
+        assert_eq!(api.oca_type, 2);
+        assert_eq!(api.trail_stop_price, 99.5);
+        assert_eq!(api.lmt_price_offset, 0.25);
+        assert_eq!(api.attrs().oca_type, 2);
+
+        match crate::client_core::ClientCore::build_order_request(&api, 7, 0).unwrap() {
+            ControlCommand::Order(OrderRequest::SubmitTrailingStopLimit { lmt_offset, lmt_price, trail_stop_price, .. })
+            | ControlCommand::Order(OrderRequest::SubmitEx {
+                kind: OrderKind::TrailingStopLimit { lmt_offset, lmt_price, trail_stop_price, .. }, ..
+            }) => {
+                assert_eq!(lmt_offset, (0.25 * PRICE_SCALE_F) as Price);
+                assert_eq!(lmt_price, None);
+                assert_eq!(trail_stop_price, (99.5 * PRICE_SCALE_F) as Price);
+            }
+            other => panic!("expected a trailing stop limit, got {other:?}"),
+        }
     }
 
     #[test]
