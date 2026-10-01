@@ -1647,10 +1647,11 @@ fn synthesize_pending_cancel(
     }
 }
 
-/// OCA type of a bracket child: its siblings are cancelled when one fills.
-/// A child with the default type is refused by the server as a mismatch
-/// with its siblings (ibx#311).
-const BRACKET_CHILD_OCA_TYPE: &str = "CancelOnFillWBlock";
+/// OCA type of a bracket child with no type given: the default type, as the
+/// reference sends it for a bracket whose children leave the type unset
+/// (ib-agent captures/pd-orders, 01/10/2026). A child whose type differs
+/// from its siblings' is refused by the server as a mismatch (ibx#311).
+const BRACKET_CHILD_OCA_TYPE: &str = "ReduceOnFillNonBlock";
 
 /// The parent link and OCA group of a bracket child (ibx#311, ibx#329):
 /// the parent's current order id, with the version of its last replace,
@@ -2391,10 +2392,10 @@ fn push_extended_attrs(
     if attrs.parent_id > 0 {
         // A bracket child, as the reference sends it (ibx#311, ibx#329):
         // the OCA group is the parent's id (a caller's group name is
-        // replaced), cancel on fill unless the caller set a type, and the
-        // link is the parent's current order id.
+        // replaced), the caller's type or the default one, and the link is
+        // the parent's current order id.
         let (link, group) = bracket_parent_link(context, attrs.parent_id);
-        let oca_type = if attrs.oca_type == 0 { BRACKET_CHILD_OCA_TYPE } else { oca_type_str(attrs.oca_type) };
+        let oca_type = oca_type_str(attrs.oca_type);
         fields.push((583, group));
         fields.push((6209, oca_type.to_string()));
         fields.push((6107, link));
@@ -2925,8 +2926,25 @@ mod tests {
             assert_eq!(tag(f, 11), Some(id));
             assert_eq!(tag(f, 6107), Some("3.0"));
             assert_eq!(tag(f, 583), Some("3"));
-            assert_eq!(tag(f, 6209), Some("CancelOnFillWBlock"));
+            assert_eq!(tag(f, 6209), Some("ReduceOnFillNonBlock"));
         }
+    }
+
+    // A bracket child with the OCA type unset gets the default type, as the
+    // reference's child of 01/10/2026 (ib-agent captures/pd-orders,
+    // pd_bracket_keys); a type the caller gives is kept (ib-agent#192 A5,
+    // B1, B11, all with the type set to cancel on fill).
+    #[test]
+    fn a_bracket_child_without_an_oca_type_gets_the_default_one() {
+        const CAPTURED: &str = "35=D|11=55485701.0|44=494.03|1=DU1|6010=fourleg|6122=c|583=55485700|6531=1/1/-4293003|8339=1|6121=57|6119=198|38=1|40=2|55=AAPL|167=STK|231=1.00|54=2|59=1|100=BEST|6210=BEST|6008=265598|6209=ReduceOnFillNonBlock|6088=Socket|6107=55485700.0|15=USD|6211=|6238=";
+        let want = captured(CAPTURED, &[583, 6209, 6107]);
+        let child = |oca_type| OrderRequest::SubmitLimitEx {
+            order_id: 55485701, instrument: 0, side: Side::Sell, qty: 1, price: px(494.03), tif: b'1',
+            attrs: crate::types::OrderAttrs { parent_id: 55485700, oca_type, ..Default::default() },
+        };
+        let ours = wire_tags(child(0));
+        assert_eq!(ours_as(&ours, &want), want);
+        assert_eq!(tag(&wire_tags(child(1)), 6209), Some("CancelOnFillWBlock"));
     }
 
     fn child_of(parent_id: OrderId, oca_type: u8) -> OrderRequest {
@@ -2952,7 +2970,7 @@ mod tests {
         }, child_of(100, 0));
         assert_eq!(tag(&modified, 6107), Some("100.1"));
         assert_eq!(tag(&modified, 583), Some("100"), "the caller's group name is replaced");
-        assert_eq!(tag(&modified, 6209), Some("CancelOnFillWBlock"), "default for a child");
+        assert_eq!(tag(&modified, 6209), Some("ReduceOnFillNonBlock"), "default for a child");
 
         // Before the server echoes the replace, the version ibx sent.
         let pending = wire_tags_with(|ctx| { ctx.modify_versions.insert(100, 2); }, child_of(100, 0));
@@ -4510,7 +4528,8 @@ mod tests {
                 algo: AlgoParams::Vwap { max_pct_vol: 0.1, no_take_liq: false, allow_past_end_time: true, start_time: String::new(), end_time: String::new() },
                 tif: b'0', attrs: Default::default() }),
             (CONDITION, ex(Side::Buy, K::Limit { price: px(237.82) }, b'0', condition)),
-            (CHILD, ex(Side::Sell, K::Limit { price: px(509.62) }, b'1', crate::types::OrderAttrs { parent_id: 1, ..Default::default() })),
+            // A5 set the OCA type to cancel on fill.
+            (CHILD, ex(Side::Sell, K::Limit { price: px(509.62) }, b'1', crate::types::OrderAttrs { parent_id: 1, oca_type: 1, ..Default::default() })),
             (STP, ex(Side::Sell, K::Stop { stop_price: px(235.14) }, b'0', crate::types::OrderAttrs { order_ref: "x".into(), ..Default::default() })),
         ];
         for (captured, req) in cases {
