@@ -202,7 +202,7 @@ pub(crate) const CAPTURED_AE: &str = "<AlgoExchange>
 	<AlgoAttributeContentHolderMap varName=\"commonAlgoAttributeContent\">
 		<AlgoAttributeContentHolder>
 			<name>IBALGO_COMMON</name>
-			<Array varName=\"algoAttribContents\" type=\"jattrib.algo.AlgoAttributeContent\">
+			<Array varName=\"algoAttribContents\">
 				<AlgoAttributeContent>
 					<shortName>strategy</shortName>
 					<required>true</required>
@@ -241,18 +241,18 @@ pub(crate) const CAPTURED_AL_STK: &str = "<AlgorithmsMap>
 		<shortName>ArrivalPx</shortName>
 		<description>Arrival Price</description>
 		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
-		<Array varName=\"attribContents\" type=\"jattrib.algo.AlgoAttributeContent\">
+		<Array varName=\"attribContents\">
 			<AlgoAttributeContent>
 				<shortName>maxPctVol</shortName>
 				<description>Max Percentage</description>
 				<valueClassName>Double</valueClassName>
-				<Object varName=\"minValue\" type=\"java.lang.Double\">0.01</Object>
-				<Object varName=\"maxValue\" type=\"java.lang.Double\">50.0</Object>
+				<Object varName=\"minValue\">0.01</Object>
+				<Object varName=\"maxValue\">50.0</Object>
 			</AlgoAttributeContent>
 			<AlgoAttributeContent>
 				<shortName>riskAversion</shortName>
 				<description>Urgency/Risk aversion</description>
-				<Object varName=\"defaultValue\" type=\"java.lang.String\">Neutral</Object>
+				<Object varName=\"defaultValue\">Neutral</Object>
 				<valueClassName>String</valueClassName>
 				<legalStringsName>RiskAversion</legalStringsName>
 			</AlgoAttributeContent>
@@ -267,7 +267,7 @@ pub(crate) const CAPTURED_AL_STK: &str = "<AlgorithmsMap>
 		<algoExchange>IBALGO</algoExchange>
 		<shortName>Adaptive</shortName>
 		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
-		<Array varName=\"attribContents\" type=\"jattrib.algo.AlgoAttributeContent\">
+		<Array varName=\"attribContents\">
 			<AlgoAttributeContent><shortName>monetaryValue</shortName><description>Cash Quantity</description></AlgoAttributeContent>
 			<AlgoAttributeContent>
 				<shortName>adaptivePriority</shortName>
@@ -280,12 +280,12 @@ pub(crate) const CAPTURED_AL_STK: &str = "<AlgorithmsMap>
 		<algoExchange>IBALGO</algoExchange>
 		<shortName>PctVol</shortName>
 		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
-		<Array varName=\"attribContents\" type=\"jattrib.algo.AlgoAttributeContent\">
+		<Array varName=\"attribContents\">
 			<AlgoAttributeContent>
 				<shortName>pctVol</shortName>
 				<description>Target Percentage</description>
-				<Object varName=\"minValue\" type=\"java.lang.Double\">0.01</Object>
-				<Object varName=\"maxValue\" type=\"java.lang.Double\">50.0</Object>
+				<Object varName=\"minValue\">0.01</Object>
+				<Object varName=\"maxValue\">50.0</Object>
 			</AlgoAttributeContent>
 			<AlgoAttributeContent><shortName>startTime</shortName><description>Start Time</description></AlgoAttributeContent>
 			<AlgoAttributeContent><shortName>endTime</shortName><description>End Time</description></AlgoAttributeContent>
@@ -296,12 +296,12 @@ pub(crate) const CAPTURED_AL_STK: &str = "<AlgorithmsMap>
 		<algoExchange>IBALGO</algoExchange>
 		<shortName>Vwap</shortName>
 		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
-		<Array varName=\"attribContents\" type=\"jattrib.algo.AlgoAttributeContent\">
+		<Array varName=\"attribContents\">
 			<AlgoAttributeContent>
 				<shortName>maxPctVol</shortName>
 				<description>Max Percentage</description>
-				<Object varName=\"minValue\" type=\"java.lang.Double\">0.01</Object>
-				<Object varName=\"maxValue\" type=\"java.lang.Double\">50.0</Object>
+				<Object varName=\"minValue\">0.01</Object>
+				<Object varName=\"maxValue\">50.0</Object>
 			</AlgoAttributeContent>
 			<AlgoAttributeContent><shortName>startTime</shortName><description>Start Time</description></AlgoAttributeContent>
 			<AlgoAttributeContent><shortName>endTime</shortName><description>End Time</description></AlgoAttributeContent>
@@ -313,7 +313,7 @@ pub(crate) const CAPTURED_AL_STK: &str = "<AlgorithmsMap>
 		<algoExchange>IBALGO</algoExchange>
 		<shortName>Twap</shortName>
 		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
-		<Array varName=\"attribContents\" type=\"jattrib.algo.AlgoAttributeContent\">
+		<Array varName=\"attribContents\">
 			<AlgoAttributeContent><shortName>startTime</shortName><description>Start Time</description></AlgoAttributeContent>
 			<AlgoAttributeContent><shortName>endTime</shortName><description>End Time</description></AlgoAttributeContent>
 			<AlgoAttributeContent><shortName>allowPastEndTime</shortName><description>Allow trading past end time</description></AlgoAttributeContent>

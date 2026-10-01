@@ -4247,7 +4247,7 @@ mod tests {
             (short_attrs("Away", 0, "", -1), BAD_SHORT_SLOT),
             (short_attrs("Away", 3, "", -1), BAD_SHORT_SLOT),
             (short_attrs("Away", 1, "", 0), NOT_SHORT_SALE_EXEMPT),
-            (short_attrs("Away", 1, "IBKR", -1), SLOT_1_NO_LOCATION),
+            (short_attrs("Away", 1, "TMBR", -1), SLOT_1_NO_LOCATION),
             (short_attrs("Away", 2, "", -1), SLOT_2_NEEDS_LOCATION),
         ];
         for (attrs, cause) in cases {
