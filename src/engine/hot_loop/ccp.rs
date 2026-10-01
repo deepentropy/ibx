@@ -1528,7 +1528,9 @@ impl CcpState {
                 _ => 3, // default
             };
             let algo_strategy = parsed.get(&847).cloned().unwrap_or_default();
-            let use_price_mgmt_algo: i32 = if algo_strategy == "Adaptive" { 1 } else { 0 };
+            // The price management flag the server echoes, 0 without it
+            // (ibx#492).
+            let use_price_mgmt_algo: i32 = i32::from(parsed.get(&8339).is_some_and(|v| v == "1"));
             let trail_stop_price: f64 = parsed.get(&6117)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(f64::MAX);
@@ -4826,17 +4828,26 @@ mod tests {
         ].into_iter().collect()
     }
 
+    // ibx#492: openOrder reads the price management flag the server
+    // echoes, 0 without it, as the reference (ORDER-PRICEMGMT.md 5);
     // ibx#248: a reported bracket key is kept and moves the group counter.
     #[test]
-    fn reports_give_the_bracket_key() {
+    fn reports_give_the_price_management_flag_and_the_bracket_key() {
         let mut ccp = CcpState::new();
         let mut context = Context::new();
         let shared = SharedState::new();
         let mut entry = recovery_frame(900_010, 1_005);
+        entry.insert(8339, "1".into());
         entry.insert(6531, "7/0/-6183061".into());
         ccp.handle_exec_report(&entry, &mut context, &shared, &None, "");
+        let info = shared.orders.get_order_info(900_010).expect("order info");
+        assert_eq!(info.order.use_price_mgmt_algo, 1);
         assert_eq!(context.bracket_keys.get(&900_010).map(|k| k.to_string()).as_deref(), Some("7/0/-6183061"));
         assert_eq!(context.bracket_groups, 7);
+
+        let entry = recovery_frame(900_011, 1_005);
+        ccp.handle_exec_report(&entry, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.get_order_info(900_011).expect("order info").order.use_price_mgmt_algo, 0);
     }
 
     // ibx#466: an order of an earlier session is looked up by the server's

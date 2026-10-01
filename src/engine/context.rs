@@ -120,6 +120,14 @@ pub struct Context {
     pub(crate) bracket_groups: u32,
     /// State of the bracket colour generator (ibx#248).
     pub(crate) bracket_rng: u64,
+    /// The session allows the price management flag (ibx#492).
+    pub(crate) price_mgmt_feature: bool,
+    /// The session's price management exclusions by exchange, None when
+    /// the logon has none (ibx#492).
+    pub(crate) price_mgmt_exclusions: Option<HashMap<String, Vec<String>>>,
+    /// Set while an order is encoded: it carries the price management flag
+    /// unless its order type is one the flag never goes with (ibx#492).
+    pub(crate) price_mgmt_send: bool,
     /// Round lot by conId, once its definition was read (ibx#287).
     pub(crate) round_lots: HashMap<i64, i64>,
     /// Requests waiting for their contract's definition, by conId, and the
@@ -186,6 +194,9 @@ impl Context {
             bracket_next_child: HashMap::new(),
             bracket_groups: 0,
             bracket_rng: crate::engine::bracket::seed(),
+            price_mgmt_feature: false,
+            price_mgmt_exclusions: None,
+            price_mgmt_send: false,
             round_lots: HashMap::new(),
             agg_groups: HashMap::new(),
             listing_exchanges: HashMap::new(),

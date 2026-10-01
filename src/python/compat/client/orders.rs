@@ -419,7 +419,7 @@ impl EClient {
             o.account = tracked.order.account.clone();
             o.perm_id = tracked.order.perm_id;
             o.oca_type = tracked.order.oca_type;
-            o.use_price_mgmt_algo = tracked.order.use_price_mgmt_algo;
+            o.use_price_mgmt_algo = (tracked.order.use_price_mgmt_algo != i32::MAX).then_some(tracked.order.use_price_mgmt_algo != 0);
             o.trail_stop_price = tracked.order.trail_stop_price;
             o.algo_strategy = tracked.order.algo_strategy.clone();
             let o_py = Py::new(py, o)?.into_any();

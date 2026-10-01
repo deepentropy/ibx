@@ -512,8 +512,9 @@ pub struct Order {
     pub submitter: String,
     #[pyo3(get, set)]
     pub trail_stop_price: f64,
+    /// None when unset, as the API (ibx#492).
     #[pyo3(get, set)]
-    pub use_price_mgmt_algo: i32,
+    pub use_price_mgmt_algo: Option<bool>,
     #[pyo3(get, set)]
     pub volatility: f64,
     #[pyo3(get, set)]
@@ -838,7 +839,7 @@ impl Default for Order {
             stock_ref_price: f64::MAX,
             submitter: String::new(),
             trail_stop_price: f64::MAX,
-            use_price_mgmt_algo: 0,
+            use_price_mgmt_algo: None,
             volatility: f64::MAX,
             volatility_type: 0,
             what_if_type: i32::MAX,
@@ -1444,9 +1445,9 @@ impl Order {
     #[setter(triggerPrice)]
     fn set_trigger_price_alias(&mut self, v: f64) { self.trigger_price = v; }
     #[getter(usePriceMgmtAlgo)]
-    fn get_use_price_mgmt_algo_alias(&self) -> i32 { self.use_price_mgmt_algo }
+    fn get_use_price_mgmt_algo_alias(&self) -> Option<bool> { self.use_price_mgmt_algo }
     #[setter(usePriceMgmtAlgo)]
-    fn set_use_price_mgmt_algo_alias(&mut self, v: i32) { self.use_price_mgmt_algo = v; }
+    fn set_use_price_mgmt_algo_alias(&mut self, v: Option<bool>) { self.use_price_mgmt_algo = v; }
     #[getter(volatilityType)]
     fn get_volatility_type_alias(&self) -> i32 { self.volatility_type }
     #[setter(volatilityType)]
@@ -1587,6 +1588,8 @@ impl Order {
             short_sale_slot: self.short_sale_slot,
             designated_location: self.designated_location.clone(),
             exempt_code: self.exempt_code,
+            // None is the API's unset value (ibx#492).
+            use_price_mgmt_algo: self.use_price_mgmt_algo.map_or(i32::MAX, i32::from),
             ..Default::default()
         }
     }

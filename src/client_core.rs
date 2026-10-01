@@ -778,6 +778,16 @@ fn aux_or_zero(v: f64) -> f64 {
 /// A TRAIL LIMIT's limit price, offset and stop price are what the server
 /// reports (44, 6370, 6117), as the reference's openOrder (ib-agent#194,
 /// ibx#491).
+/// usePriceMgmtAlgo as openOrder reports it (ibx#492): 0 or 1, never
+/// unset, as the reference; the value the server's report gives, else the
+/// caller's, unset read as 0.
+fn reported_price_mgmt(order: &mut ApiOrder, reported: Option<&ApiOrder>) {
+    order.use_price_mgmt_algo = match reported {
+        Some(r) => r.use_price_mgmt_algo,
+        None => i32::from(order.use_price_mgmt_algo != i32::MAX && order.use_price_mgmt_algo != 0),
+    };
+}
+
 fn reported_trail_limit(order: &mut ApiOrder, reported: &ApiOrder) {
     if !order.order_type.eq_ignore_ascii_case("TRAIL LIMIT") { return; }
     if reported.lmt_price != 0.0 { order.lmt_price = reported.lmt_price; }
@@ -1888,6 +1898,7 @@ impl ClientCore {
                     if order.account.is_empty() { order.account = i.order.account.clone(); }
                     reported_trail_limit(&mut order, &i.order);
                 }
+                reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
                 (t.contract, order, t.last_fill_price, self.client_id.load(Ordering::Relaxed))
             }
             (None, Some(i)) => (i.contract, i.order, 0.0, 0),
@@ -2010,9 +2021,11 @@ impl ClientCore {
                         o.contract.clone()
                     };
                     let mut order = o.order.clone();
-                    if let Some(info) = shared.orders.get_order_info(oid) {
+                    let info = shared.orders.get_order_info(oid);
+                    if let Some(info) = &info {
                         reported_trail_limit(&mut order, &info.order);
                     }
+                    reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
                     result.push((oid, TrackedOrder {
                         contract,
                         order,

@@ -404,6 +404,8 @@ pub struct OrderAttrs {
     pub clearing_intent: String,
     /// The short-sale instructions of a short-side order (ibx#417).
     pub short_sale: ShortSale,
+    /// The API usePriceMgmtAlgo: None when unset (ibx#492).
+    pub use_price_mgmt_algo: Option<bool>,
 }
 
 /// The short-sale instructions of an order (ibx#417): the API

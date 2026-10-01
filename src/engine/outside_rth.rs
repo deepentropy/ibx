@@ -43,6 +43,8 @@ pub(crate) struct RthTypes {
     /// protection (STPPROT) are in the list (ibx#493).
     pub mkt_prot: bool,
     pub stp_prot: bool,
+    /// The price check key (PRICECHK) is in the list (ibx#492).
+    pub price_chk: bool,
 }
 
 impl RthTypes {
@@ -71,6 +73,7 @@ impl RthTypes {
                 "PEGMID" | "PEGMID2" => t.peg_mid = true,
                 "MKTPROT" => t.mkt_prot = true,
                 "STPPROT" => t.stp_prot = true,
+                "PRICECHK" => t.price_chk = true,
                 _ => {}
             }
         }

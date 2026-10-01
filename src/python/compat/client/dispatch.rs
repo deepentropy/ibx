@@ -140,7 +140,7 @@ impl EClient {
         o.oca_type = src.oca_type;
         o.outside_rth = src.outside_rth;
         o.order_ref = src.order_ref.clone();
-        o.use_price_mgmt_algo = src.use_price_mgmt_algo;
+        o.use_price_mgmt_algo = (src.use_price_mgmt_algo != i32::MAX).then_some(src.use_price_mgmt_algo != 0);
         o.trail_stop_price = src.trail_stop_price;
         o.algo_strategy = src.algo_strategy.clone();
         o.what_if = src.what_if;

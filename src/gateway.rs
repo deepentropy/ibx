@@ -553,6 +553,11 @@ pub struct Gateway {
     pub depth_limit: usize,
     /// The logon feature list turns tick-by-tick data off (ibx#455).
     pub tick_by_tick_off: bool,
+    /// The logon feature list allows the price management flag (ibx#492).
+    pub price_mgmt: bool,
+    /// The logon's price management exclusion list, None when absent
+    /// (ibx#492).
+    pub price_mgmt_exclusions: Option<String>,
     /// Most real-time bar requests at once, from the logon (ibx#454).
     pub max_real_time_requests: u32,
     /// Logical-name → host URL map pushed by the gateway during logon. Empty when no
@@ -1497,6 +1502,8 @@ impl Gateway {
         // Logon values of the depth limit (#452).
         let mut depth_limit_fields: [Option<String>; 5] = Default::default();
         let mut tick_by_tick_off = false;
+        let mut price_mgmt = false;
+        let mut price_mgmt_exclusions: Option<String> = None;
         // Logon values of the real-time bar limit (ibx#454).
         let mut ticker_limit_tags: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
         let mut raw_misc_urls = String::new();
@@ -1637,7 +1644,11 @@ impl Gateway {
             if let Some(v) = fields.get(&6542) {
                 scale_us_lots |= features_scale_us_lots(v);
                 tick_by_tick_off |= features_have(v, "NOTICKBYTICK");
+                price_mgmt |= features_have(v, "PRICEMGMT");
                 deny_news |= features_have(v, "DENYNEWS");
+            }
+            if price_mgmt_exclusions.is_none() {
+                price_mgmt_exclusions = fields.get(&8146).cloned();
             }
             for (slot, tag) in tbt_limit_fields.iter_mut().zip([8421u32, 8422, 6594, 6848]) {
                 if slot.is_none() { *slot = fields.get(&tag).cloned(); }
@@ -2016,6 +2027,8 @@ impl Gateway {
             tick_by_tick_limit: tick_by_tick_limit(&tbt_limit_fields),
             depth_limit: depth_limit(&depth_limit_fields),
             tick_by_tick_off,
+            price_mgmt,
+            price_mgmt_exclusions,
             max_real_time_requests,
             misc_urls: parse_misc_urls(&raw_misc_urls),
             ccp_sign_key,
@@ -2159,6 +2172,7 @@ impl Gateway {
         hot_loop.set_control_rx(rx);
         hot_loop.set_account_id(self.account_id.clone());
         hot_loop.set_scale_us_lots(self.scale_us_lots);
+        hot_loop.set_price_mgmt(self.price_mgmt, self.price_mgmt_exclusions.as_deref());
         hot_loop.set_max_real_time_requests(self.max_real_time_requests);
         hot_loop.set_depth_limit(self.depth_limit);
         hot_loop.set_farm_name(self.farm_name.clone());

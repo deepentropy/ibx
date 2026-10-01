@@ -462,9 +462,10 @@ class TestSessionFeatures:
         assert isinstance(o.oca_type, int), f"oca_type not int: {type(o.oca_type)}"
         assert o.oca_type in (0, 3), f"Unexpected oca_type={o.oca_type}"
 
-        assert isinstance(o.use_price_mgmt_algo, int)
-        assert o.use_price_mgmt_algo == 0, \
-            f"Expected use_price_mgmt_algo=0 for LMT, got {o.use_price_mgmt_algo}"
+        # A stock limit order with the value unset carries the price
+        # management flag, as the reference, and reads it back (ibx#492).
+        assert o.use_price_mgmt_algo is True, \
+            f"Expected use_price_mgmt_algo True for a stock LMT, got {o.use_price_mgmt_algo}"
 
         # 6 constant fields (defaults)
         assert o.adjusted_order_type == "", \

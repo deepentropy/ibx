@@ -155,6 +155,12 @@ impl HotLoop {
         self.context.scale_us_lots = on;
     }
 
+    /// The logon's price management feature and exclusion list (ibx#492).
+    pub fn set_price_mgmt(&mut self, on: bool, exclusions: Option<&str>) {
+        self.context.price_mgmt_feature = on;
+        self.context.price_mgmt_exclusions = exclusions.map(crate::engine::price_mgmt::parse_exclusions);
+    }
+
     /// The routing table of a primary farm (#445): the market data table
     /// routes market data, the historical table historical requests.
     pub fn set_routing_table(&mut self, kind: crate::engine::routing::TableKind, text: &str) {

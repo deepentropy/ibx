@@ -376,7 +376,8 @@ impl Default for Order {
             stock_ref_price: f64::MAX,
             submitter: String::new(),
             trail_stop_price: f64::MAX,
-            use_price_mgmt_algo: 0,
+            // Unset, as the API (ibx#492).
+            use_price_mgmt_algo: i32::MAX,
             volatility: f64::MAX,
             volatility_type: 0,
             what_if_type: i32::MAX,
@@ -484,7 +485,14 @@ impl Order {
                 location: self.designated_location.clone(),
                 exempt_code: self.exempt_code,
             },
+            use_price_mgmt_algo: self.price_mgmt_algo(),
         }
+    }
+
+    /// The usePriceMgmtAlgo value: None when unset (`i32::MAX`, the API's
+    /// unset value), else whether it is non-zero (ibx#492).
+    pub fn price_mgmt_algo(&self) -> Option<bool> {
+        (self.use_price_mgmt_algo != i32::MAX).then_some(self.use_price_mgmt_algo != 0)
     }
 
     /// Check if the order has any extended attributes set.
@@ -517,6 +525,8 @@ impl Order {
             || self.short_sale_slot != 0
             || !self.designated_location.is_empty()
             || self.exempt_code != -1
+            // A usePriceMgmtAlgo the caller set (ibx#492).
+            || self.use_price_mgmt_algo != i32::MAX
     }
 }
 
@@ -955,6 +965,20 @@ mod tests {
         let mut o3 = Order::default();
         o3.display_size = 50;
         assert!(o3.has_extended_attrs());
+    }
+
+    // ibx#492: usePriceMgmtAlgo is unset by default, as the API; a value
+    // the caller sets rides the attributes.
+    #[test]
+    fn price_management_value_is_unset_by_default() {
+        let o = Order::default();
+        assert_eq!(o.use_price_mgmt_algo, i32::MAX);
+        assert_eq!(o.attrs().use_price_mgmt_algo, None);
+        for (v, want) in [(0, Some(false)), (1, Some(true))] {
+            let o = Order { use_price_mgmt_algo: v, ..Default::default() };
+            assert!(o.has_extended_attrs());
+            assert_eq!(o.attrs().use_price_mgmt_algo, want);
+        }
     }
 
     #[test]

@@ -92,6 +92,13 @@ pub(crate) fn drain_and_send_orders(
             context.rth_parked.push(rewrap(order_req));
             continue;
         }
+        // The price management flag, where the reference writes it; the
+        // contract definition of the order's exchange is asked once when
+        // the flag could apply (ibx#492).
+        match price_mgmt_flag(&order_req, context, conn, hb) {
+            Some(on) => context.price_mgmt_send = on,
+            None => { context.rth_parked.push(rewrap(order_req)); continue; }
+        }
         // The contract's currency (tag 15), USD when unknown (ibx#466).
         let currency: String = order_req.instrument()
             .map(|i| context.market.currency(i).to_string())
@@ -1419,7 +1426,7 @@ pub(crate) fn drain_and_send_orders(
                 let fields = modify_fields(
                     &clord_str, &orig_clord, account_id, qty, side_str, &symbol,
                     &sec_type_str, &con_id_str, kind, tif, &attrs, trail_limit_offset,
-                    bracket_key.as_deref());
+                    bracket_key.as_deref(), context.price_mgmt_send);
                 let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
                 conn.send_fix(&refs)
             }
@@ -1726,6 +1733,9 @@ fn send_new_order(
     if con_id > 0 { out.push((6008, &con_id_str)); }
     if what_if.is_some() { out.push((6091, "1")); }
     out.push((6122, "c"));
+    // The price management flag, decided for the request before encoding;
+    // never on the order types it does not go with (ibx#492).
+    if context.price_mgmt_send && !crate::engine::price_mgmt::excluded_frame(&out) { out.push((8339, "1")); }
     if let Some(id) = order_id { out.push((6121, id)); }
     out.push((6119, &client_id));
     // A stock's multiplier, as the reference writes it.
@@ -1798,6 +1808,9 @@ fn reference_rank(tag: u32) -> u16 {
         6939 => 92,
         6580 => 93,
         6942 => 94,
+        // The price management flag, most often last of the attributes in
+        // the reference's frames (captures of 28/09 and 01/10/2026).
+        8339 => 95,
         // Algo: its strategy fields, then the parameter group.
         849 => 100,
         847 => 101,
@@ -1941,6 +1954,7 @@ fn modify_fields(
     attrs: &crate::types::OrderAttrs,
     trail_limit_offset: Option<crate::types::Price>,
     bracket_key: Option<&str>,
+    price_mgmt: bool,
 ) -> Vec<(u32, String)> {
     use crate::types::OrderKind as K;
     let p = |v: crate::types::Price| format_price(v).to_string();
@@ -2072,6 +2086,8 @@ fn modify_fields(
     if attrs.outside_rth { f.push((6433, "1".to_string())); }
     if let Some(u) = trail_unit { f.push((6268, u.to_string())); }
     f.extend(bench_attrs);
+    // The price management flag, last of the attributes (ibx#492).
+    if price_mgmt && !crate::engine::price_mgmt::excluded_kind(&kind) { f.push((8339, "1".to_string())); }
     f.push((38, format_uint(qty as u64).to_string()));
     f.push((54, side.to_string()));
     f.push((40, ord_type.to_string()));
@@ -2204,6 +2220,35 @@ fn apply_outside_rth(
         }
     }
     true
+}
+
+/// Whether the orders of a request carry the price management flag
+/// (ibx#492), None while the contract definition it needs is asked for.
+/// Cheap checks first: the value, the session feature, combos, the
+/// exclusion list; the definition's price check key last.
+fn price_mgmt_flag(
+    req: &OrderRequest,
+    context: &mut Context,
+    conn: &mut Connection,
+    hb: &mut HeartbeatState,
+) -> Option<bool> {
+    use crate::engine::price_mgmt as pm;
+    if context.rth_parked.iter().any(|r| r.order_id() == req.order_id()) { return None; }
+    let Some((instrument, value)) = pm::parts(req) else { return Some(false) };
+    let Some(instrument) = instrument.or_else(|| context.order(req.order_id()).map(|o| o.instrument)) else { return Some(false) };
+    let (sec_type, exchange) = context.market.order_routing(instrument);
+    if !value.unwrap_or_else(|| pm::preset(&sec_type)) || !context.price_mgmt_feature || sec_type == "BAG" {
+        return Some(false);
+    }
+    let smart = context.market.con_id(instrument).and_then(|c| context.smart_components.get(&c)).map(Vec::as_slice);
+    if !pm::allowed(context.price_mgmt_exclusions.as_ref(), &exchange, &sec_type, smart) {
+        return Some(false);
+    }
+    match definition(context, conn, hb, instrument) {
+        Definition::NoContract => Some(false),
+        Definition::Waiting => None,
+        Definition::Known(types, _) => Some(types.price_chk),
+    }
 }
 
 /// How long an order waits for the definition its outside-RTH needs; then
@@ -4671,4 +4716,105 @@ mod tests {
         assert_eq!(late.rgb, key_of(&frames[0]).unwrap().rgb);
     }
 
+    /// A session that allows price management, with the paper exclusion
+    /// list and a stock definition that has the price check key.
+    fn price_mgmt_session(context: &mut Context) {
+        context.price_mgmt_feature = true;
+        context.price_mgmt_exclusions = Some(crate::engine::price_mgmt::parse_exclusions(
+            "*/CMDTY;*/CRYPTO;*/FUND;*/IOPT;*/SLB"));
+        context.rth_types.insert((265598, "BEST".to_string()), crate::engine::outside_rth::RthTypes {
+            sec_type: "STK".into(), types_known: true, price_chk: true, ..Default::default()
+        });
+    }
+
+    fn priced(value: Option<bool>) -> crate::types::OrderAttrs {
+        crate::types::OrderAttrs { use_price_mgmt_algo: value, ..Default::default() }
+    }
+
+    // ibx#492, ib-agent captures/200 (28/09/2026): a stock limit order
+    // with the value unset or on carries the flag, last of the attributes,
+    // on the new order and on the replace; with the value off it
+    // has none, and the reference never writes it off.
+    #[test]
+    fn a_stock_limit_carries_the_flag_unless_set_off() {
+        for (value, on) in [(None, true), (Some(true), true), (Some(false), false)] {
+            let (frames, _) = session_frames(price_mgmt_session, vec![
+                limit_ex(1, Side::Buy, 230 * P, priced(value)),
+                modify_limit(1, 231 * P, priced(value)),
+            ], 2);
+            for f in &frames {
+                assert_eq!(tag(f, 8339), on.then_some("1"), "{value:?} {f:?}");
+                if on {
+                    let next = if tag(f, 35) == Some("D") { 6121 } else { 38 };
+                    assert_eq!(pos(f, 8339) + 1, pos(f, next), "last of the attributes: {f:?}");
+                }
+            }
+        }
+        // A plain limit order is unset.
+        let (frames, _) = session_frames(price_mgmt_session, vec![OrderRequest::SubmitLimit {
+            order_id: 2, instrument: 0, side: Side::Buy, qty: 1, price: 230 * P,
+        }], 1);
+        assert_eq!(tag(&frames[0], 8339), Some("1"));
+    }
+
+    // ibx#492 (ORDER-PRICEMGMT.md 4.2, captures 28/09 and 01/10/2026):
+    // market, stop and trailing stop orders have no flag, nor the stop
+    // child of a bracket; MOC and stop limit have it.
+    #[test]
+    fn the_flag_skips_market_stop_and_trailing_types() {
+        use crate::types::OrderKind as K;
+        let ex = |order_id, kind| OrderRequest::SubmitEx { order_id, instrument: 0, side: Side::Sell, qty: 1, kind, tif: b'0', attrs: priced(Some(true)) };
+        let cases = [
+            (ex(1, K::Market), false),
+            (ex(2, K::Stop { stop_price: 90 * P }), false),
+            (ex(3, K::Mit { stop_price: 90 * P }), false),
+            (ex(4, K::TrailingStop { trail_amt: P, trail_stop_price: 0 }), false),
+            (ex(5, K::TrailPct { trail_pct: 100, trail_stop_price: 0 }), false),
+            (ex(6, K::StopLimit { price: 89 * P, stop_price: 90 * P }), true),
+            (ex(7, K::Moc), true),
+        ];
+        for (req, on) in cases {
+            let (frames, _) = session_frames(price_mgmt_session, vec![req], 1);
+            assert_eq!(tag(&frames[0], 8339).is_some(), on, "{:?}", tag(&frames[0], 40));
+        }
+        let (frames, _) = session_frames(price_mgmt_session, vec![OrderRequest::SubmitBracket {
+            parent_id: 3, tp_id: 4, sl_id: 5, instrument: 0, side: Side::Buy, qty: 1,
+            entry_price: 100 * P, take_profit: 110 * P, stop_loss: 90 * P,
+        }], 3);
+        let flags: Vec<bool> = frames.iter().map(|f| tag(f, 8339).is_some()).collect();
+        assert_eq!(flags, vec![true, true, false]);
+    }
+
+    // ibx#492 (ORDER-PRICEMGMT.md 4.1, 4.3): no flag without the session
+    // feature, for an excluded security type, for a type whose preset is
+    // not known, or when the definition lacks the price check key.
+    #[test]
+    fn the_flag_needs_the_feature_the_list_and_the_price_check_key() {
+        let lmt = || limit_ex(1, Side::Buy, 230 * P, priced(None));
+        let run = |setup: fn(&mut Context)| session_frames(setup, vec![lmt()], 1).0;
+        assert!(tag(&run(price_mgmt_session)[0], 8339).is_some());
+        assert!(tag(&run(|c| { price_mgmt_session(c); c.price_mgmt_feature = false; })[0], 8339).is_none());
+        assert!(tag(&run(|c| {
+            price_mgmt_session(c);
+            c.price_mgmt_exclusions = Some(crate::engine::price_mgmt::parse_exclusions("*/STK"));
+        })[0], 8339).is_none());
+        assert!(tag(&run(|c| {
+            price_mgmt_session(c);
+            c.rth_types.get_mut(&(265598, "BEST".to_string())).unwrap().price_chk = false;
+        })[0], 8339).is_none());
+        // An option with the value unset: its preset is not known.
+        assert!(tag(&run(|c| { price_mgmt_session(c); c.market.set_routing(0, "OPT", "SMART"); })[0], 8339).is_none());
+    }
+
+    // ibx#492: an order whose definition is not known waits for it; the
+    // definition is asked once, then the order goes with the flag.
+    #[test]
+    fn the_flag_waits_for_the_contract_definition() {
+        let (frames, context) = session_frames(|c| {
+            price_mgmt_session(c);
+            c.rth_types.clear();
+        }, vec![limit_ex(1, Side::Buy, 230 * P, priced(None))], 1);
+        assert_eq!(tag(&frames[0], 35), Some("c"), "the definition is asked first");
+        assert_eq!(context.rth_parked.len(), 1);
+    }
 }
