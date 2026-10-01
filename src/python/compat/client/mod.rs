@@ -194,6 +194,10 @@ impl EClient {
         let _ = port; // unused but kept for ibapi signature compat
         // The clientId of this client's executions (ibx#474).
         self.core.client_id.store(client_id as i64, Ordering::Relaxed);
+        // The client id every new order carries (ibx#466).
+        if let Some(shared) = self.shared.lock().unwrap().as_ref() {
+            shared.reference.set_api_client_id(client_id as i64);
+        }
 
         // Fire initial callbacks synchronously, matching official Python ibapi
         // where connect_ack signals "socket ready" before run() is called.

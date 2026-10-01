@@ -102,6 +102,8 @@ pub struct Context {
     /// Set while a short-side order is encoded: its short-sale fields
     /// (ibx#417).
     pub(crate) short_sale_send: Option<crate::types::ShortSale>,
+    /// The API client id the new orders carry (ibx#466).
+    pub(crate) api_client_id: i64,
     /// Sequence of the what-if ClOrdIDs of this session.
     pub(crate) next_what_if: u32,
     /// Requests with outside-RTH waiting for their lookup, in order; later
@@ -158,6 +160,7 @@ impl Context {
             what_ifs: HashMap::new(),
             what_if_send: None,
             short_sale_send: None,
+            api_client_id: 0,
             next_what_if: 0,
             scale_us_lots: false,
             round_lots: HashMap::new(),

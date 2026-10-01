@@ -604,6 +604,8 @@ pub struct ReferenceState {
     /// a short-side order pass the side check.
     super_user: AtomicBool,
     omnibus: AtomicBool,
+    /// The API client id the new orders carry (ibx#466); 0 until set.
+    api_client_id: std::sync::atomic::AtomicI64,
     /// Most contracts with tick-by-tick data at once, from the logon;
     /// u64::MAX until known (ibx#455).
     tick_by_tick_limit: AtomicU64,
@@ -650,6 +652,7 @@ impl ReferenceState {
             fa_session: std::sync::atomic::AtomicBool::new(false),
             super_user: AtomicBool::new(false),
             omnibus: AtomicBool::new(false),
+            api_client_id: std::sync::atomic::AtomicI64::new(0),
             tick_by_tick_limit: AtomicU64::new(u64::MAX),
             tick_by_tick_off: AtomicBool::new(false),
             account_config: Mutex::new(None),
@@ -963,6 +966,15 @@ impl ReferenceState {
     /// The logon's super user and omnibus flags (ibx#417).
     pub fn short_sale_flags(&self) -> (bool, bool) {
         (self.super_user.load(Ordering::Relaxed), self.omnibus.load(Ordering::Relaxed))
+    }
+
+    /// The API client id the new orders carry (ibx#466).
+    pub fn api_client_id(&self) -> i64 {
+        self.api_client_id.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)] pub fn set_api_client_id(&self, client_id: i64) {
+        self.api_client_id.store(client_id, Ordering::Relaxed);
     }
 
     #[doc(hidden)] pub fn set_short_sale_flags(&self, super_user: bool, omnibus: bool) {

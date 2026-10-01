@@ -25,6 +25,7 @@ pub(crate) fn drain_and_send_orders(
     }
 
     let orders: Vec<OrderRequest> = context.drain_pending_orders().collect();
+    context.api_client_id = shared.reference.api_client_id();
     let conn = match ccp_conn.as_mut() {
         Some(c) => c,
         None => return,
@@ -141,19 +142,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),   // ClOrdID
                     (1, account_id),    // Account
-                    (21, "2"),          // HandlInst = Automated
                     (55, &symbol),      // Symbol
                     (54, side_str),     // Side
                     (38, &qty_str),     // OrderQty
                     (40, "2"),          // OrdType = Limit
                     (44, &price_str),   // Price
                     (59, "0"),          // TIF = DAY
-                    (60, &now),         // TransactTime
                     (167, &sec_type_str),       // SecurityType = CommonStock
                     (100, &destination),
                     (6210, &destination),     // ExDestination
                     (15, currency.as_str()),        // Currency
-                    (204, "0"),         // CustomerOrFirm
                 ])
             }
             OrderRequest::SubmitStopLimit { order_id, instrument, side, qty, price, stop_price } => {
@@ -174,7 +172,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -183,12 +180,10 @@ pub(crate) fn drain_and_send_orders(
                     (99, &stop_str),    // StopPx
                     (6117, &stop_str), // stop trigger, as the reference (ibx#466)
                     (59, "0"),          // TIF = DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitLimitGtc { order_id, instrument, side, qty, price, outside_rth } => {
@@ -208,19 +203,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "2"),          // OrdType = Limit
                     (44, &price_str),
                     (59, "1"),          // TIF = GTC
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ];
                 if outside_rth {
                     fields.push((6433, "1")); // OutsideRTH
@@ -253,18 +245,15 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),    // Account
-                    (21, "2"),          // HandlInst = Automated
                     (55, &symbol),      // Symbol
                     (54, side_str),
                     (38, &qty_str),
                     (40, "1"),          // OrdType = Market
                     (59, "0"),          // TIF = DAY
-                    (60, &now),         // TransactTime
                     (167, &sec_type_str),       // SecurityType
                     (100, &destination),
                     (6210, &destination),     // ExDestination
                     (15, currency.as_str()),        // Currency
-                    (204, "0"),         // CustomerOrFirm
                 ])
             }
             OrderRequest::SubmitStop { order_id, instrument, side, qty, stop_price } => {
@@ -284,7 +273,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),          // HandlInst = Automated
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -292,12 +280,10 @@ pub(crate) fn drain_and_send_orders(
                     (99, &stop_str),    // StopPx
                     (6117, &stop_str), // stop trigger, as the reference (ibx#466)
                     (59, "0"),          // TIF = DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitStopGtc { order_id, instrument, side, qty, stop_price, outside_rth } => {
@@ -317,7 +303,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -325,12 +310,10 @@ pub(crate) fn drain_and_send_orders(
                     (99, &stop_str),
                     (6117, &stop_str), // stop trigger, as the reference (ibx#466)
                     (59, "1"),          // TIF = GTC
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ];
                 if outside_rth {
                     fields.push((6433, "1"));
@@ -355,7 +338,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -364,12 +346,10 @@ pub(crate) fn drain_and_send_orders(
                     (99, &stop_str),
                     (6117, &stop_str), // stop trigger, as the reference (ibx#466)
                     (59, "1"),          // TIF = GTC
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ];
                 if outside_rth {
                     fields.push((6433, "1"));
@@ -393,19 +373,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "2"),          // OrdType = Limit
                     (44, &price_str),
                     (59, "3"),          // TIF = IOC
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitLimitFok { order_id, instrument, side, qty, price } => {
@@ -425,19 +402,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "2"),          // OrdType = Limit
                     (44, &price_str),
                     (59, "4"),          // TIF = FOK
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitTrailingStop { order_id, instrument, side, qty, trail_amt, trail_stop_price } => {
@@ -462,7 +436,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -471,12 +444,10 @@ pub(crate) fn drain_and_send_orders(
                     (211, &trail_str), // PegOffset = trail amount
                     (18, "a"),          // ExecInst = TrailingStop
                     (59, "0"),          // TIF = DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ];
                 // Optional initial stop trigger (tag 6117), only when set
                 // (ib-agent#173).
@@ -508,7 +479,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -516,12 +486,10 @@ pub(crate) fn drain_and_send_orders(
                     (99, &trail_str),    // StopPx = trail amount
                     (211, &trail_str),   // PegOffset = trail amount
                     (59, "0"),           // TIF = DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ];
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
                 // The absolute limit price in 44 and no 6370, or the offset
@@ -556,7 +524,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -566,12 +533,10 @@ pub(crate) fn drain_and_send_orders(
                     (18, "a"),              // ExecInst = TrailingStop
                     (6268, "100"),          // Trail unit = percent
                     (59, "0"),              // TIF = DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ];
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
                 send_new_order(conn, context, instrument, &fields)
@@ -596,18 +561,15 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "5"),          // OrdType = Market on Close
                     (59, "0"),          // TIF = DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitLoc { order_id, instrument, side, qty, price } => {
@@ -627,19 +589,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "B"),          // OrdType = Limit on Close
                     (44, &price_str),   // Limit price
                     (59, "0"),          // TIF = DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitMit { order_id, instrument, side, qty, stop_price } => {
@@ -659,19 +618,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "J"),          // OrdType = Market if Touched
                     (99, &stop_str),    // StopPx = trigger price
                     (59, "0"),          // TIF = DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitLit { order_id, instrument, side, qty, price, stop_price } => {
@@ -692,7 +648,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -700,12 +655,10 @@ pub(crate) fn drain_and_send_orders(
                     (44, &price_str),   // Limit price
                     (99, &stop_str),    // StopPx = trigger price
                     (59, "0"),          // TIF = DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitBracket { parent_id, tp_id, sl_id, instrument, side, qty, entry_price, take_profit, stop_loss } => {
@@ -738,19 +691,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &parent_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "2"),          // Limit
                     (44, &entry_str),
                     (59, "0"),          // DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ]);
 
                 // 2. Take-profit child: limit exit, linked to parent, in OCA group
@@ -763,19 +713,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &tp_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, exit_side_str),
                     (38, &qty_str),
                     (40, "2"),          // Limit
                     (44, &tp_price_str),
                     (59, "1"),          // GTC
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                     (6107, &parent_link),      // ParentOrderID
                     (583, &oca_group),         // OCAGroup
                     (6209, BRACKET_CHILD_OCA_TYPE),
@@ -791,19 +738,17 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &sl_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, exit_side_str),
                     (38, &qty_str),
                     (40, "3"),          // Stop
                     (99, &sl_price_str),
+                    (6117, &sl_price_str), // stop trigger, as on every stop (ibx#466)
                     (59, "1"),          // GTC
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                     (6107, &parent_link),      // ParentOrderID
                     (583, &oca_group),         // OCAGroup
                     (6209, BRACKET_CHILD_OCA_TYPE),
@@ -829,7 +774,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -837,12 +781,10 @@ pub(crate) fn drain_and_send_orders(
                     (211, &offset_str),     // PegOffset
                     (18, "R"),              // ExecInst = Relative
                     (59, "0"),              // TIF = DAY
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitLimitOpg { order_id, instrument, side, qty, price } => {
@@ -862,19 +804,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "2"),              // OrdType = Limit
                     (44, &price_str),
                     (59, "2"),              // TIF = OPG (At the Opening)
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitAdaptive { order_id, instrument, side, qty, price, priority, tif, attrs } => {
@@ -893,7 +832,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, now.clone()),
                     (11, format!("{}.{}", order_id, ver)),
                     (1, account_id.to_string()),
-                    (21, "2".to_string()),
                     (55, symbol),
                     (54, fix_side(side).to_string()),
                     (38, format_uint(qty as u64).to_string()),
@@ -901,12 +839,10 @@ pub(crate) fn drain_and_send_orders(
                     (44, format_price(price).to_string()),
                     (18, "e".to_string()),              // ExecInst = algo
                     (59, tif_str(tif)),
-                    (60, now),
                     (167, sec_type_str),
                     (100, destination.clone()),
                     (6210, destination),
                     (15, currency.clone()),
-                    (204, "0".to_string()),
                 ];
                 push_dtc_flag(&mut fields, tif);
                 // Parent link, OCA group and the other attributes (ibx#318).
@@ -933,7 +869,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, now.clone()),
                     (11, format!("{}.{}", order_id, ver)),
                     (1, account_id.to_string()),
-                    (21, "2".to_string()),
                     (55, symbol),
                     (54, fix_side(side).to_string()),
                     (38, format_uint(qty as u64).to_string()),
@@ -941,12 +876,10 @@ pub(crate) fn drain_and_send_orders(
                     (44, format_price(price).to_string()),
                     (18, "e".to_string()),              // ExecInst = algo
                     (59, tif_str(tif)),
-                    (60, now),
                     (167, sec_type_str),
                     (100, destination.clone()),
                     (6210, destination),
                     (15, currency.clone()),
-                    (204, "0".to_string()),
                 ];
                 push_dtc_flag(&mut fields, tif);
                 // Parent link, OCA group and the other attributes (ibx#318).
@@ -995,19 +928,16 @@ pub(crate) fn drain_and_send_orders(
                 if price > 0 { fields.push((99, format_price_ref(price).to_string())); }
                 fields.extend([
                     (1, account_id.to_string()),
-                    (21, "2".to_string()),
                     (55, symbol),
                     (54, fix_side(side).to_string()),
                     (38, format_uint(qty as u64).to_string()),
                     (40, "PB".to_string()),     // OrdType = Pegged to Benchmark
                     (18, "R".to_string()),
                     (59, "0".to_string()),
-                    (60, now),
                     (167, sec_type_str),
                     (100, destination.clone()),
                     (6210, destination),
                     (15, currency.clone()),
-                    (204, "0".to_string()),
                 ]);
                 fields.extend(peg_bench_attrs(stock_ref_price, ref_con_id, is_peg_decrease,
                     pegged_change_amount, ref_change_amount, &ref_exchange, true));
@@ -1031,19 +961,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "2"),           // OrdType = Limit
                     (44, &price_str),    // Limit price
                     (59, "8"),           // TIF = Auction
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitMtlAuc { order_id, instrument, side, qty } => {
@@ -1062,18 +989,15 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "K"),           // OrdType = Market to Limit
                     (59, "8"),           // TIF = Auction
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             // Unwrapped above; a nested preview is dropped there.
@@ -1098,19 +1022,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),      // Decimal qty (e.g., "0.5")
                     (40, "2"),           // OrdType = Limit
                     (44, &price_str),
                     (59, "0"),
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitAdjustableStop { order_id, instrument, side, qty,
@@ -1136,19 +1057,16 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "3"),              // OrdType = Stop
                     (99, &stop_str),        // StopPx
                     (59, "0"),
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ];
                 fields.extend(adjustable.iter().map(|(t, s)| (*t, s.as_str())));
                 send_new_order(conn, context, instrument, &fields)
@@ -1169,18 +1087,15 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "K"),          // OrdType = Market to Limit
                     (59, "0"),
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitMktPrt { order_id, instrument, side, qty } => {
@@ -1199,18 +1114,15 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "U"),          // OrdType = Market with Protection
                     (59, "0"),
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitStpPrt { order_id, instrument, side, qty, stop_price } => {
@@ -1230,7 +1142,6 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
@@ -1238,12 +1149,10 @@ pub(crate) fn drain_and_send_orders(
                     (99, &stop_str),    // StopPx
                     (6117, &stop_str), // stop trigger, as the reference (ibx#466)
                     (59, "0"),
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitMidPrice { order_id, instrument, side, qty, price_cap } => {
@@ -1264,18 +1173,15 @@ pub(crate) fn drain_and_send_orders(
                     (fix::TAG_SENDING_TIME, &now),
                     (11, &clord_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "MIDPX"),      // OrdType = Mid-Price
                     (59, "0"),
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ];
                 let cap_str;
                 if price_cap > 0 {
@@ -1304,19 +1210,16 @@ pub(crate) fn drain_and_send_orders(
                     (11, &clord_str),
                     (99, &offset_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "SMKT"),       // OrdType = Snap to Market
                     (211, &offset_str),
                     (59, "0"),
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitSnapMid { order_id, instrument, side, qty, offset } => {
@@ -1339,19 +1242,16 @@ pub(crate) fn drain_and_send_orders(
                     (11, &clord_str),
                     (99, &offset_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "SMID"),       // OrdType = Snap to Midpoint
                     (211, &offset_str),
                     (59, "0"),
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitSnapPri { order_id, instrument, side, qty, offset } => {
@@ -1374,19 +1274,16 @@ pub(crate) fn drain_and_send_orders(
                     (11, &clord_str),
                     (99, &offset_str),
                     (1, account_id),
-                    (21, "2"),
                     (55, &symbol),
                     (54, side_str),
                     (38, &qty_str),
                     (40, "SREL"),       // OrdType = Snap to Primary
                     (211, &offset_str),
                     (59, "0"),
-                    (60, &now),
                     (167, &sec_type_str),
                     (100, &destination),
                     (6210, &destination),
                     (15, currency.as_str()),
-                    (204, "0"),
                 ])
             }
             OrderRequest::SubmitPegMkt { order_id, instrument, side, qty, price, offset }
@@ -1409,7 +1306,6 @@ pub(crate) fn drain_and_send_orders(
                 fields.extend(price_tags);
                 fields.extend([
                     (1, account_id.to_string()),
-                    (21, "2".to_string()),
                     (55, symbol),
                     (54, fix_side(side).to_string()),
                     (38, format_uint(qty as u64).to_string()),
@@ -1417,12 +1313,10 @@ pub(crate) fn drain_and_send_orders(
                 fields.extend(type_tags);
                 fields.extend([
                     (59, "0".to_string()),
-                    (60, now),
                     (167, sec_type_str),
                     (100, destination.clone()),
                     (6210, destination),
                     (15, currency.clone()),
-                    (204, "0".to_string()),
                 ]);
                 let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
                 send_new_order(conn, context, instrument, &refs)
@@ -1756,9 +1650,12 @@ fn oca_type_str(oca_type: u8) -> &'static str {
 /// its single new-order writer gives it (ibx#375), whatever encoder built
 /// the list. The contract id goes with the routing fields on every new
 /// order (ib-agent#192 B4, ibx#328); an instrument registered without one
-/// keeps the symbol-only form. A short-side order adds its short-sale
-/// fields (ibx#417); a what-if goes out under its own order id with the
-/// preview flag and without the OCA fields (ibx#462).
+/// keeps the symbol-only form. Every new order carries the fields the
+/// reference adds to all of them: the origin, the API order and client
+/// ids, the contract multiplier, the source and the two empty trailing
+/// fields (ibx#466). A short-side order adds its short-sale fields
+/// (ibx#417); a what-if goes out under its own order id with the preview
+/// flag and without the OCA fields (ibx#462).
 fn send_new_order(
     conn: &mut Connection,
     context: &Context,
@@ -1772,7 +1669,14 @@ fn send_new_order(
     let con_id = context.market.con_id(instrument).unwrap_or(0);
     let con_id_str = if con_id > 0 { con_id.to_string() } else { String::new() };
     let what_if = context.what_if_send.as_deref();
-    let mut out: Vec<(u32, &str)> = Vec::with_capacity(fields.len() + short_sale.len() + 2);
+    // The API order id, the id part of the order's own ClOrdID; it is an
+    // int in the API, so a larger id is left out.
+    let order_id = fields.iter().find(|&&(t, _)| t == 11)
+        .and_then(|&(_, v)| v.split('.').next())
+        .filter(|id| id.parse::<i32>().is_ok_and(|n| n >= 0));
+    let client_id = context.api_client_id.to_string();
+    let stock = fields.iter().any(|&(t, v)| t == 167 && v == "STK");
+    let mut out: Vec<(u32, &str)> = Vec::with_capacity(fields.len() + short_sale.len() + 10);
     for &(tag, value) in fields {
         match (tag, what_if) {
             (11, Some(clord)) => out.push((11, clord)),
@@ -1783,6 +1687,14 @@ fn send_new_order(
     out.extend(short_sale.iter().map(|(t, v)| (*t, v.as_str())));
     if con_id > 0 { out.push((6008, &con_id_str)); }
     if what_if.is_some() { out.push((6091, "1")); }
+    out.push((6122, "c"));
+    if let Some(id) = order_id { out.push((6121, id)); }
+    out.push((6119, &client_id));
+    // A stock's multiplier, as the reference writes it.
+    if stock { out.push((231, "1.00")); }
+    out.push((6088, "Socket"));
+    out.push((6211, ""));
+    out.push((6238, ""));
     in_reference_order(&mut out);
     conn.send_fix(&out)
 }
@@ -1851,7 +1763,6 @@ fn reference_rank(tag: u32) -> u16 {
         5957 | 5958 | 5960 => 102,
         6121 => 110,
         6119 => 111,
-        21 => 119,
         38 => 120,
         40 => 121,
         211 => 122,
@@ -1862,7 +1773,6 @@ fn reference_rank(tag: u32) -> u16 {
         54 => 127,
         59 => 128,
         6436 => 129,
-        60 => 130,
         100 => 131,
         6210 => 132,
         6008 => 133,
@@ -1875,7 +1785,6 @@ fn reference_rank(tag: u32) -> u16 {
         // The condition group.
         6136 | 6222 | 6137 | 6126 | 6123 | 6124 | 6127 | 6125 | 6223 | 6245 | 6263 | 6246 | 6947 => 140,
         15 => 150,
-        204 => 151,
         6211 => 152,
         6238 => 153,
         _ => u16::MAX,
@@ -2517,7 +2426,6 @@ fn send_order_ex(
         (fix::TAG_SENDING_TIME, now.clone()),
         (11, format!("{}.{}", order_id, ver)),
         (1, account_id.to_string()),
-        (21, "2".to_string()),
         (55, symbol),
         (54, fix_side(side).to_string()),
         (38, format_uint(qty as u64).to_string()),
@@ -2657,7 +2565,6 @@ fn send_order_ex(
 
     fields.push((59, tif_str));
     push_dtc_flag(&mut fields, tif);
-    fields.push((60, now));
     fields.push((167, sec_type_str.clone()));
     // Every type keeps the contract's routing, as the reference (ibx#413,
     // ibx#414): a forced directed exchange is refused for some of them.
@@ -2666,7 +2573,6 @@ fn send_order_ex(
     // alongside the destination (ib-agent#165).
     fields.push((6210, destination));
     fields.push((15, context.market.currency(instrument).to_string()));
-    fields.push((204, "0".to_string()));
 
     // Adjustable-stop tags in the same place as on the plain path (ibx#240).
     if let K::AdjustableStop { trigger_price, adjusted_order_type, adjusted_stop_price,
@@ -4507,5 +4413,65 @@ mod tests {
             assert!(mine.len() > 10, "{captured}");
             assert_eq!(mine, theirs, "{captured}");
         }
+    }
+
+    // ibx#466 (captured 25/09/2026, paper, AAPL, account masked): a new
+    // order is the reference's frame field for field, the origin, the API
+    // order and client ids, the multiplier, the source and the two empty
+    // trailing fields included, and no field the reference does not write.
+    #[test]
+    fn new_order_is_the_captured_frame() {
+        const LMT: &str = "35=D|11=7.0|44=337.93|1=DU1|6010=pm0925-fill-BUY|6122=c|6433=1|6121=7|6119=250|38=100|40=2|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.set_symbol(0, "AAPL".to_string());
+        context.rth_types.insert((265598, "BEST".to_string()), crate::engine::outside_rth::RthTypes {
+            rth: true, sec_type: "STK".into(), ..Default::default()
+        });
+        context.pending_orders.push(OrderRequest::SubmitLimitEx { order_id: 7, instrument: 0, side: Side::Buy, qty: 100,
+            price: px(337.93), tif: b'0',
+            attrs: crate::types::OrderAttrs { order_ref: "pm0925-fill-BUY".into(), outside_rth: true, ..Default::default() } });
+        let shared = Arc::new(SharedState::new());
+        shared.reference.set_api_client_id(250);
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        let mut buf = vec![0u8; 8192];
+        let n = server.read(&mut buf).unwrap();
+        let mut ours: Vec<(u32, String)> = order_body(buf[..n].split(|&b| b == fix::SOH)
+            .filter_map(|f| {
+                let (t, v) = std::str::from_utf8(f).ok()?.split_once('=')?;
+                Some((t.parse().ok()?, v.to_string()))
+            })
+            .collect());
+        ours.retain(|(t, _)| *t != 35);
+        let mut want = parse_frame(LMT);
+        want.retain(|(t, _)| *t != 35);
+        assert_eq!(ours, want);
+    }
+
+    // ibx#466: the API order id is an int; a larger order id is not sent.
+    #[test]
+    fn an_order_id_beyond_the_api_range_is_not_sent() {
+        let tags = wire_tags(OrderRequest::SubmitMarket { order_id: 1_790_000_000_000, instrument: 0, side: Side::Buy, qty: 1 });
+        assert!(tag(&tags, 6121).is_none());
+        assert_eq!(tag(&tags, 6119), Some("0"));
+        assert_eq!(tag(&tags, 6122), Some("c"));
+    }
+
+    // ibx#466: the stop child of a bracket carries the stop trigger, as
+    // every stop order.
+    #[test]
+    fn bracket_stop_child_carries_the_stop_trigger() {
+        let frames = wire_frames(OrderRequest::SubmitBracket {
+            parent_id: 3, tp_id: 4, sl_id: 5, instrument: 0, side: Side::Buy, qty: 1,
+            entry_price: 100 * P, take_profit: 110 * P, stop_loss: 90 * P,
+        }, 3);
+        assert_eq!(tag(&frames[2], 6117), tag(&frames[2], 99));
+        assert!(tag(&frames[1], 6117).is_none());
     }
 }
