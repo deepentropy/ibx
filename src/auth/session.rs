@@ -1145,8 +1145,15 @@ pub fn do_ib_key_2fa<S: Read + Write>(
             }
             other => {
                 // Unknown message during 2FA wait. Log and keep looping —
-                // the server may send other informational frames.
-                log::warn!("2FA gate: unexpected message {:?}", other);
+                // the server may send other informational frames. Only the
+                // type and state are logged, at debug level, as in the
+                // reference: the fields can carry session material (ibx#283).
+                match other {
+                    RecvMsg::Xyz { msg_id, state, .. } =>
+                        log::debug!("2FA gate: unexpected message id={} state={} (ignored)", msg_id, state),
+                    RecvMsg::Ns { msg_type, .. } =>
+                        log::debug!("2FA gate: unexpected message type={} (ignored)", msg_type),
+                }
                 let _ = IB_KEY_HEARTBEAT_CADENCE_SECS;  // referenced for docs
             }
         }
@@ -2066,6 +2073,19 @@ mod tests {
             }
             other => panic!("expected Approved, got {:?}", other),
         }
+    }
+
+    // ibx#283: an unknown state is ignored (logged by type and state only)
+    // and the wait goes on, as in the reference.
+    #[test]
+    fn ib_key_2fa_ignores_an_unknown_state() {
+        let unknown = xyz::xyz_build(xyz::XYZ_MSG_SWCR_TOKEN, 9, "user", &["secret-material"]);
+        let auth_finish = xyz::xyz_build(xyz::XYZ_MSG_TOKEN_AUTH, 5, "user", &["PASSED"]);
+        let mut incoming = frame_xyz(&unknown);
+        incoming.extend_from_slice(&frame_xyz(&auth_finish));
+        let mut stream = ScriptedStream::new(incoming);
+        let outcome = do_ib_key_2fa(&mut stream, "2a", far_future_deadline(), None).unwrap();
+        assert_eq!(outcome, IbKeyOutcome::Skipped);
     }
 
     #[test]
