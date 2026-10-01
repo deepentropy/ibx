@@ -439,6 +439,9 @@ pub struct OrderState {
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
     order_cache: Mutex<HashMap<OrderId, RichOrderInfo>>,
+    /// Set from a lost auth link to the end of the order replay after the
+    /// new logon: open-order requests wait for the replay (ibx#251).
+    open_orders_held: AtomicBool,
 }
 
 impl OrderState {
@@ -453,7 +456,21 @@ impl OrderState {
             what_if_responses: Mutex::new(Vec::with_capacity(8)),
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             order_cache: Mutex::new(HashMap::new()),
+            open_orders_held: AtomicBool::new(false),
         }
+    }
+
+    /// Hold the open-order requests (`true`, the auth link is lost) or let
+    /// them be answered (`false`, the order replay has ended), as the
+    /// reference does (ibx#251). Hot-loop side.
+    #[doc(hidden)]
+    pub fn set_open_orders_held(&self, held: bool) {
+        self.open_orders_held.store(held, Ordering::Release);
+    }
+
+    /// True while open-order requests wait for the order replay (ibx#251).
+    pub fn open_orders_held(&self) -> bool {
+        self.open_orders_held.load(Ordering::Acquire)
     }
 
     pub fn drain_fills(&self) -> Vec<Fill> {

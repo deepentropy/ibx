@@ -882,6 +882,9 @@ impl HotLoop {
             return;
         }
         if before.ccp && !now.ccp {
+            // Open-order requests wait for the order replay of the new
+            // logon, as in the reference (ibx#251).
+            self.shared.orders.set_open_orders_held(true);
             self.shared.push_connection_notice(1100, LINK_LOST.to_string());
         }
         if before.farm && !now.farm {
@@ -2948,8 +2951,10 @@ mod tests {
         engine.check_writes();
         assert!(engine.ccp.disconnected);
         assert!(!engine.farm.disconnected);
+        assert!(!shared.orders.open_orders_held());
         engine.report_link_changes();
         assert_eq!(shared.drain_connection_notices().iter().map(|n| n.0).collect::<Vec<_>>(), vec![1100]);
+        assert!(shared.orders.open_orders_held(), "open-order requests wait from the 1100 (ibx#251)");
     }
 
     // ibx#399: 1102 after the status replay end, at once with the farms up.

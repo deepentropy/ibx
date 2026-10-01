@@ -1009,6 +1009,10 @@ impl CcpState {
             if self.awaiting_status_replay {
                 self.awaiting_status_replay = false;
                 self.status_replay_end_at = Some(Instant::now());
+                // The held open-order requests are answered from the
+                // corrected orders (ibx#251).
+                shared.orders.set_open_orders_held(false);
+                shared.notify();
             }
             log::debug!("ExecReport: end of order status replay");
             return;
@@ -5514,8 +5518,10 @@ mod reconnect_tests {
         ccp.handle_exec_report(&trades_end, &mut context, &shared, &None, "DU1");
         assert!(ccp.status_replay_end_at.is_none(), "not the status replay end");
 
+        shared.orders.set_open_orders_held(true);
         let status_end = frame(&[(11, "*"), (55, "*"), (37, "*"), (20, "3"), (150, "0"), (39, "0"), (6008, "265598"), (38, "1")]);
         ccp.handle_exec_report(&status_end, &mut context, &shared, &None, "DU1");
+        assert!(!shared.orders.open_orders_held(), "open-order requests are answered from here (ibx#251)");
 
         assert!(context.order(0).is_none());
         assert_eq!(context.market.count(), 0, "no instrument registered for a marker");
@@ -5531,8 +5537,10 @@ mod reconnect_tests {
         let mut context = Context::new();
         let mut ccp = CcpState::new();
         let shared = SharedState::new();
+        shared.orders.set_open_orders_held(true);
         ccp.handle_exec_report(&frame(&[(11, "*"), (55, "*")]), &mut context, &shared, &None, "DU1");
         assert!(ccp.status_replay_end_at.is_none());
+        assert!(shared.orders.open_orders_held());
     }
 
     // ibx#251: a lost auth link leaves every order with its status, and

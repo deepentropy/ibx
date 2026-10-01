@@ -4999,3 +4999,45 @@ fn ids_outside_the_reference_range_drop_the_request() {
     assert!(!w.events.iter().any(|e| e.starts_with("error:")), "no error: {:?}", w.events);
     assert!(shared.orders.drain_order_errors().is_empty());
 }
+
+// ibx#251: an open-order request made while the auth link is lost gets no
+// answer until the order replay of the new logon has ended; then each kind
+// is answered once, after the replayed statuses, as in the reference.
+#[test]
+fn open_order_requests_wait_for_the_order_replay() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 10.0, ..Default::default() };
+    client.place_order(1, &spy(), &order).unwrap();
+
+    shared.orders.set_open_orders_held(true);
+    let mut w = RecordingWrapper::default();
+    client.req_open_orders(&mut w);
+    client.req_open_orders(&mut w);
+    client.req_all_open_orders(&mut w);
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "no answer during the outage: {:?}", w.events);
+
+    // The replay gives the order's status, then its end lets the requests through.
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: 1, instrument: 0, status: OrderStatus::Submitted,
+        filled_qty_fixed: 0, remaining_qty_fixed: crate::types::QTY_SCALE, avg_fill_price: 0,
+        perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    shared.orders.set_open_orders_held(false);
+    client.process_msgs(&mut w);
+    let kinds: Vec<&str> = w.events.iter().map(|e| {
+        if e.starts_with("open_order:1:Submitted") { "open_order" }
+        else if e.starts_with("order_status:1:Submitted") { "order_status" }
+        else if e == "open_order_end" { "end" }
+        else { e.as_str() }
+    }).collect();
+    assert_eq!(kinds, vec!["open_order", "order_status", "open_order", "end", "open_order", "end"]);
+
+    // Answered at once again when the link is up.
+    let mut w = RecordingWrapper::default();
+    client.req_open_orders(&mut w);
+    assert_eq!(w.events.last().map(String::as_str), Some("open_order_end"));
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.iter().filter(|e| *e == "open_order_end").count(), 1);
+}

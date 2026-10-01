@@ -193,6 +193,11 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "error", (-1i64, code, msg.as_str(), ""));
         }
 
+        // Open-order requests held while the auth link was lost: taken
+        // before the order updates and answered after them, so the answer
+        // has the replayed statuses (ibx#251).
+        let released = self.core.released_open_orders(shared);
+
         // Drain fills -> execDetails + orderStatus. The commission report
         // comes later, from its own server frame (ibx#471).
         let fills = shared.orders.drain_fills_with_exec();
@@ -351,6 +356,12 @@ impl EClient {
         // reference: no error, no status; the order status that answers the
         // engine's status request sets the state (ibx#252).
         shared.orders.drain_cancel_rejects();
+
+        for _ in released {
+            if let Err(e) = self.answer_open_orders(py, shared) {
+                callback_raised(py, "open_order", e)?;
+            }
+        }
 
         // Subscriptions the server rejected (ibx#444, ibx#447).
         for reject in shared.market.drain_md_rejects() {

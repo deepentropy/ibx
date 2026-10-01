@@ -521,6 +521,13 @@ pub struct StoredExecution {
 
 // ── Order tracking ──
 
+/// An open-order request: `req_open_orders` or `req_all_open_orders`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenOrdersRequest {
+    Open,
+    All,
+}
+
 /// A locally tracked order for `req_open_orders` / dispatch status updates.
 #[derive(Clone)]
 pub struct TrackedOrder {
@@ -667,6 +674,10 @@ pub struct ClientCore {
 
     // Open order tracking
     pub open_orders: Mutex<HashMap<OrderId, TrackedOrder>>,
+    /// Open-order requests made while the auth link was lost, answered at
+    /// the end of the order replay; one per kind, as the reference keeps
+    /// one per request kind and client (ibx#251).
+    pub held_open_orders: Mutex<Vec<OpenOrdersRequest>>,
     /// What-if previews waiting for their answer, by order id, oldest
     /// first: the contract and order the answer reports (ibx#462). Kept
     /// apart from the open orders.
@@ -817,6 +828,7 @@ impl ClientCore {
             client_id: AtomicI64::new(0),
             pending_commissions: Mutex::new(PendingCommissions::default()),
             open_orders: Mutex::new(HashMap::new()),
+            held_open_orders: Mutex::new(Vec::new()),
             what_if_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
             market_data_type: AtomicI32::new(1),
@@ -1938,6 +1950,32 @@ impl ClientCore {
             return Some((code, message.into()));
         }
         None
+    }
+
+    /// Hold an open-order request while the auth link is lost: it gets no
+    /// answer until the order replay of the new logon has ended, as in the
+    /// reference (ibx#251). A second request of the same kind replaces the
+    /// first. Returns false when the request is to be answered now.
+    pub fn hold_open_orders(&self, request: OpenOrdersRequest, shared: &SharedState) -> bool {
+        if !shared.orders.open_orders_held() {
+            return false;
+        }
+        let mut held = self.held_open_orders.lock().unwrap();
+        if !held.contains(&request) {
+            held.push(request);
+        }
+        true
+    }
+
+    /// The held open-order requests to answer now, in the order they were
+    /// made: none while the replay has not ended. Call it before the order
+    /// updates are dispatched, so the answer has the replayed statuses
+    /// (ibx#251).
+    pub fn released_open_orders(&self, shared: &SharedState) -> Vec<OpenOrdersRequest> {
+        if shared.orders.open_orders_held() {
+            return Vec::new();
+        }
+        std::mem::take(&mut *self.held_open_orders.lock().unwrap())
     }
 
     /// Collect open orders: merge local tracking with shared state.
@@ -3418,6 +3456,23 @@ impl ClientCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ibx#251: a request is held only while the order replay is pending,
+    // once per kind, and released in the order it was made.
+    #[test]
+    fn open_order_requests_are_held_until_the_replay_ends() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        assert!(!core.hold_open_orders(OpenOrdersRequest::Open, &shared), "answered at once");
+        shared.orders.set_open_orders_held(true);
+        assert!(core.hold_open_orders(OpenOrdersRequest::All, &shared));
+        assert!(core.hold_open_orders(OpenOrdersRequest::Open, &shared));
+        assert!(core.hold_open_orders(OpenOrdersRequest::All, &shared), "replaces the first");
+        assert!(core.released_open_orders(&shared).is_empty(), "still held");
+        shared.orders.set_open_orders_held(false);
+        assert_eq!(core.released_open_orders(&shared), vec![OpenOrdersRequest::All, OpenOrdersRequest::Open]);
+        assert!(core.released_open_orders(&shared).is_empty(), "once");
+    }
     use crate::types::SmartComponent;
 
     fn shared_with_components(comps: Vec<(i32, &str)>) -> SharedState {

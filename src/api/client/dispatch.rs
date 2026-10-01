@@ -51,6 +51,10 @@ impl EClient {
     // ── Order / Fill Dispatch ──
 
     fn dispatch_orders(&self, wrapper: &mut impl Wrapper) {
+        // Open-order requests held while the auth link was lost: taken
+        // before the order updates and answered after them, so the answer
+        // has the replayed statuses (ibx#251).
+        let released = self.core.released_open_orders(&self.shared);
         // Fills → order_status + exec_details. The commission report comes
         // later, from its own server frame (ibx#471).
         for (fill, fill_exec) in self.shared.orders.drain_fills_with_exec() {
@@ -195,6 +199,10 @@ impl EClient {
             let (contract, order) = self.core.take_what_if(wi.order_id)
                 .unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
             wrapper.open_order(wi.order_id, &contract, &order, &state);
+        }
+
+        for _ in released {
+            self.answer_open_orders(wrapper);
         }
     }
 

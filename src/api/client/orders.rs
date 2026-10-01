@@ -126,12 +126,29 @@ impl EClient {
     // ── Open Orders ──
 
     /// Request open orders for this client. Matches `reqOpenOrders` in C++.
+    ///
+    /// While the auth link is lost the request is answered only after the
+    /// order replay of the new logon, from `process_msgs` (ibx#251).
     pub fn req_open_orders(&self, wrapper: &mut impl Wrapper) {
-        self.req_all_open_orders(wrapper);
+        if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::Open, &self.shared) {
+            return;
+        }
+        self.answer_open_orders(wrapper);
     }
 
     /// Request all open orders. Matches `reqAllOpenOrders` in C++.
+    ///
+    /// Held like [`req_open_orders`](Self::req_open_orders) while the auth
+    /// link is lost (ibx#251).
     pub fn req_all_open_orders(&self, wrapper: &mut impl Wrapper) {
+        if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::All, &self.shared) {
+            return;
+        }
+        self.answer_open_orders(wrapper);
+    }
+
+    /// The open orders, then the end of the list.
+    pub(crate) fn answer_open_orders(&self, wrapper: &mut impl Wrapper) {
         for (order_id, tracked) in self.core.collect_open_orders(&self.shared) {
             let state = crate::api::types::OrderState {
                 status: tracked.status,

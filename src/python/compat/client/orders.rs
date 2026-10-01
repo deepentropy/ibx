@@ -9,6 +9,7 @@ use crate::api::types::{
     Contract as ApiContract, Order as ApiOrder, ExecutionFilter,
 };
 use crate::client_core::{ClientCore, ModifyPlan};
+use crate::bridge::SharedState;
 use crate::types::*;
 use super::{send_cmd, EClient};
 use super::super::contract::{Contract, Order, CommissionAndFeesReport, Execution};
@@ -147,57 +148,27 @@ impl EClient {
     }
 
     /// Request all open orders for this client.
+    ///
+    /// While the auth link is lost the request is answered only after the
+    /// order replay of the new logon, from the dispatch loop (ibx#251).
     fn req_open_orders(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
-        let orders = self.core.collect_open_orders(&shared);
-        for (order_id, tracked) in &orders {
-            let c_py = Py::new(py, Contract {
-                con_id: tracked.contract.con_id,
-                symbol: tracked.contract.symbol.clone(),
-                sec_type: tracked.contract.sec_type.clone(),
-                exchange: tracked.contract.exchange.clone(),
-                currency: tracked.contract.currency.clone(),
-                ..Default::default()
-            })?.into_any();
-            let mut o = Order::default();
-            o.order_id = tracked.order.order_id;
-            o.action = tracked.order.action.clone();
-            o.total_quantity = tracked.order.total_quantity;
-            o.order_type = tracked.order.order_type.clone();
-            o.lmt_price = tracked.order.lmt_price;
-            o.aux_price = tracked.order.aux_price;
-            o.tif = tracked.order.tif.clone();
-            o.account = tracked.order.account.clone();
-            o.perm_id = tracked.order.perm_id;
-            o.oca_type = tracked.order.oca_type;
-            o.use_price_mgmt_algo = tracked.order.use_price_mgmt_algo;
-            o.trail_stop_price = tracked.order.trail_stop_price;
-            o.algo_strategy = tracked.order.algo_strategy.clone();
-            let o_py = Py::new(py, o)?.into_any();
-            let mut state = super::super::contract::OrderState::default();
-            state.status = tracked.status.clone();
-            let state_py = Py::new(py, state)?.into_any();
-            self.wrapper.call_method(
-                py, "open_order",
-                (*order_id, &c_py, &o_py, &state_py),
-                None,
-            )?;
-            self.wrapper.call_method(
-                py, "order_status",
-                (*order_id, tracked.status.as_str(), tracked.filled, tracked.remaining,
-                 0.0f64, tracked.order.perm_id, tracked.order.parent_id, 0.0f64, 0i64, "", 0.0f64),
-                None,
-            )?;
+        if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::Open, &shared) {
+            return Ok(());
         }
-        self.wrapper.call_method0(py, "open_order_end")?;
-        Ok(())
+        self.answer_open_orders(py, &shared)
     }
 
-    /// Request all open orders across all clients.
+    /// Request all open orders across all clients. Held like
+    /// `req_open_orders` while the auth link is lost (ibx#251).
     fn req_all_open_orders(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.req_open_orders(py)
+        let shared = self.shared_state()?;
+        if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::All, &shared) {
+            return Ok(());
+        }
+        self.answer_open_orders(py, &shared)
     }
 
     /// Automatically bind future orders to this client.
@@ -419,6 +390,55 @@ impl EClient {
             }
             self.wrapper.call_method0(py, "completed_orders_end")?;
         }
+        Ok(())
+    }
+}
+
+impl EClient {
+    /// The open orders, each as open_order then order_status, then the end
+    /// of the list.
+    pub(crate) fn answer_open_orders(&self, py: Python<'_>, shared: &SharedState) -> PyResult<()> {
+        let orders = self.core.collect_open_orders(shared);
+        for (order_id, tracked) in &orders {
+            let c_py = Py::new(py, Contract {
+                con_id: tracked.contract.con_id,
+                symbol: tracked.contract.symbol.clone(),
+                sec_type: tracked.contract.sec_type.clone(),
+                exchange: tracked.contract.exchange.clone(),
+                currency: tracked.contract.currency.clone(),
+                ..Default::default()
+            })?.into_any();
+            let mut o = Order::default();
+            o.order_id = tracked.order.order_id;
+            o.action = tracked.order.action.clone();
+            o.total_quantity = tracked.order.total_quantity;
+            o.order_type = tracked.order.order_type.clone();
+            o.lmt_price = tracked.order.lmt_price;
+            o.aux_price = tracked.order.aux_price;
+            o.tif = tracked.order.tif.clone();
+            o.account = tracked.order.account.clone();
+            o.perm_id = tracked.order.perm_id;
+            o.oca_type = tracked.order.oca_type;
+            o.use_price_mgmt_algo = tracked.order.use_price_mgmt_algo;
+            o.trail_stop_price = tracked.order.trail_stop_price;
+            o.algo_strategy = tracked.order.algo_strategy.clone();
+            let o_py = Py::new(py, o)?.into_any();
+            let mut state = super::super::contract::OrderState::default();
+            state.status = tracked.status.clone();
+            let state_py = Py::new(py, state)?.into_any();
+            self.wrapper.call_method(
+                py, "open_order",
+                (*order_id, &c_py, &o_py, &state_py),
+                None,
+            )?;
+            self.wrapper.call_method(
+                py, "order_status",
+                (*order_id, tracked.status.as_str(), tracked.filled, tracked.remaining,
+                 0.0f64, tracked.order.perm_id, tracked.order.parent_id, 0.0f64, 0i64, "", 0.0f64),
+                None,
+            )?;
+        }
+        self.wrapper.call_method0(py, "open_order_end")?;
         Ok(())
     }
 }
