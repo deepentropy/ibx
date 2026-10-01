@@ -1755,6 +1755,15 @@ pub enum ControlCommand {
     },
     /// Cancel fundamental data request.
     CancelFundamentalData { req_id: ReqId },
+    /// Regulatory snapshot of a contract (ibx#446): one snapshot request to
+    /// the farm, answered into the instrument's record.
+    SubscribeSnapshot {
+        con_id: i64, symbol: String, exchange: String, sec_type: String,
+        reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>>,
+    },
+    /// End of a regulatory snapshot: its request is forgotten, nothing is
+    /// sent to the farm.
+    DropSnapshot { instrument: InstrumentId },
     /// Option calculation (implied volatility or price) of an option by
     /// conId, answered by the local option model.
     CalcOption {

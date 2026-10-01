@@ -217,6 +217,7 @@ pub struct MarketDataState {
     md_rejects: Mutex<Vec<MdReject>>,
     /// The request parameters of acked subscriptions (ibx#449).
     tick_req_params: Mutex<Vec<TickReqParams>>,
+    snapshot_acks: Mutex<Vec<TickReqParams>>,
     /// Tick-by-tick requests the server refused, with its text (ibx#455).
     tbt_errors: Mutex<Vec<(InstrumentId, TbtType, String)>>,
 }
@@ -274,6 +275,7 @@ impl MarketDataState {
             news_bulletins: Mutex::new(BulletinStore::default()),
             md_rejects: Mutex::new(Vec::new()),
             tick_req_params: Mutex::new(Vec::new()),
+            snapshot_acks: Mutex::new(Vec::new()),
             tbt_errors: Mutex::new(Vec::new()),
         }
     }
@@ -292,6 +294,16 @@ impl MarketDataState {
 
     pub fn drain_tick_req_params(&self) -> Vec<TickReqParams> {
         self.tick_req_params.lock().unwrap().drain(..).collect()
+    }
+
+    /// Acknowledgement of a regulatory snapshot request (ibx#446): the
+    /// permission and the raw BBO exchange code of its instrument.
+    #[doc(hidden)] pub fn push_snapshot_ack(&self, ack: TickReqParams) {
+        self.snapshot_acks.lock().unwrap().push(ack);
+    }
+
+    pub fn drain_snapshot_acks(&self) -> Vec<TickReqParams> {
+        self.snapshot_acks.lock().unwrap().drain(..).collect()
     }
 
     #[doc(hidden)] pub fn push_md_reject(&self, reject: MdReject) {

@@ -5042,3 +5042,100 @@ fn open_order_requests_wait_for_the_order_replay() {
     client.process_msgs(&mut w);
     assert_eq!(w.events.iter().filter(|e| *e == "open_order_end").count(), 1);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+//  Regulatory snapshot (ibx#446)
+// ═══════════════════════════════════════════════════════════════════
+
+#[derive(Default)]
+struct SnapRec { events: Vec<String> }
+impl Wrapper for SnapRec {
+    fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) { self.events.push(format!("error:{req_id}:{code}:{text}")); }
+    fn tick_price(&mut self, req_id: i64, tt: i32, p: f64, _: &crate::api::types::TickAttrib) { self.events.push(format!("price:{req_id}:{tt}:{p}")); }
+    fn tick_size(&mut self, req_id: i64, tt: i32, s: f64) { self.events.push(format!("size:{req_id}:{tt}:{s}")); }
+    fn tick_string(&mut self, req_id: i64, tt: i32, v: &str) { self.events.push(format!("string:{req_id}:{tt}:{v}")); }
+    fn tick_snapshot_end(&mut self, req_id: i64) { self.events.push(format!("end:{req_id}")); }
+    fn tick_req_params(&mut self, req_id: i64, _: f64, _: &str, _: i64) { self.events.push(format!("params:{req_id}")); }
+    fn market_data_type(&mut self, req_id: i64, t: i32) { self.events.push(format!("mdt:{req_id}:{t}")); }
+}
+
+/// Answer the snapshot registrations of the engine side with instrument 5.
+fn snapshot_engine(rx: crossbeam_channel::Receiver<ControlCommand>) -> std::thread::JoinHandle<Vec<String>> {
+    std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        while let Ok(cmd) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            match cmd {
+                ControlCommand::SubscribeSnapshot { reply_tx: Some(tx), con_id, .. } => {
+                    let _ = tx.send(Ok(5));
+                    seen.push(format!("snapshot:{con_id}"));
+                }
+                ControlCommand::DropSnapshot { instrument } => seen.push(format!("drop:{instrument}")),
+                ControlCommand::Subscribe { .. } => seen.push("subscribe".into()),
+                _ => {}
+            }
+        }
+        seen
+    })
+}
+
+#[test]
+fn regulatory_snapshot_delivers_one_batch_then_the_end() {
+    let (client, rx, shared) = test_client();
+    let engine = snapshot_engine(rx);
+    shared.reference.set_smart_components(vec![crate::types::SmartComponent {
+        bit_number: 0, exchange: "NYSE".into(), exchange_letter: "N".into(),
+    }]);
+    client.req_mkt_data(1, &spy(), "", false, true).unwrap();
+    // The same contract again: 10169; the same request id again: duplicate.
+    client.req_mkt_data(2, &spy(), "", false, true).unwrap();
+    client.req_mkt_data(1, &spy(), "", false, true).unwrap();
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("error:2:10169:Regulatory snapshot for SPY is already being fetched in ticker id=1")), "{:?}", w.events);
+    assert!(w.events.iter().any(|e| e.starts_with("error:1:322:")), "{:?}", w.events);
+    let s = crate::types::PRICE_SCALE;
+    let q = crate::types::QTY_SCALE;
+    shared.market.push_quote(5, &crate::types::Quote {
+        bid: 100 * s, ask: 101 * s, last: 100 * s, bid_size: 2 * q, ask_size: 3 * q, last_size: q,
+        volume: 50 * q, high: 102 * s, low: 99 * s, close: 98 * s,
+        bid_exch_mask: 1, ask_exch_mask: 1, last_exch_mask: 1, ..Default::default()
+    });
+    shared.market.push_snapshot_ack(crate::bridge::TickReqParams {
+        instrument: 5, min_tick: 0.01, bbo_exchange: "9c".into(), snapshot_permissions: 3,
+    });
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec![
+        "price:1:2:101", "size:1:3:3", "price:1:1:100", "size:1:0:2", "price:1:4:100", "size:1:5:1",
+        "string:1:33:N", "string:1:32:N", "string:1:84:N", "price:1:6:102", "price:1:7:99", "price:1:9:98",
+        "size:1:8:50", "end:1",
+    ]);
+    // Done: a cancel now is for an unknown request.
+    client.cancel_mkt_data(1).unwrap();
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("error:1:300:")));
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, vec!["snapshot:756733", "drop:5"]);
+}
+
+#[test]
+fn regulatory_snapshot_without_permission_and_cancel() {
+    let (client, rx, shared) = test_client();
+    let engine = snapshot_engine(rx);
+    client.req_mkt_data(1, &spy(), "", false, true).unwrap();
+    shared.market.push_snapshot_ack(crate::bridge::TickReqParams {
+        instrument: 5, min_tick: 0.01, bbo_exchange: "9c".into(), snapshot_permissions: 1,
+    });
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec!["error:1:10170:No permissions on Regulatory snapshot for SPY"]);
+    // A running fetch stops silently on cancel.
+    client.req_mkt_data(3, &spy(), "", false, true).unwrap();
+    client.cancel_mkt_data(3).unwrap();
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, vec!["snapshot:756733", "drop:5", "snapshot:756733", "drop:5"]);
+}

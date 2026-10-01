@@ -632,6 +632,10 @@ pub struct ClientCore {
     pub last_quotes: Mutex<HashMap<InstrumentId, [i64; 15]>>,
     // Snapshot req_ids — deliver first ticks then auto-cancel
     pub snapshot_reqs: Mutex<HashSet<i64>>,
+    /// Running regulatory snapshots (ibx#446) and the acknowledgements of
+    /// their instruments (permission, BBO exchange code).
+    pub reg_snapshots: Mutex<Vec<crate::control::regsnapshot::Fetch>>,
+    pub reg_snapshot_acks: Mutex<HashMap<InstrumentId, (i32, String)>>,
 
     // PnL subscription state
     /// Running req_pnl requests, with the last values sent (ibx#478).
@@ -819,6 +823,8 @@ impl ClientCore {
             con_id_to_instrument: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
             snapshot_reqs: Mutex::new(HashSet::new()),
+            reg_snapshots: Mutex::new(Vec::new()),
+            reg_snapshot_acks: Mutex::new(HashMap::new()),
             pnl_reqs: Mutex::new(HashMap::new()),
             pnl_quotes: Mutex::new(PnlQuotes::default()),
             currency_sent: Mutex::new(HashMap::new()),
@@ -860,6 +866,8 @@ impl ClientCore {
         self.con_id_to_instrument.lock().unwrap().clear();
         self.last_quotes.lock().unwrap().clear();
         self.snapshot_reqs.lock().unwrap().clear();
+        self.reg_snapshots.lock().unwrap().clear();
+        self.reg_snapshot_acks.lock().unwrap().clear();
         self.pnl_reqs.lock().unwrap().clear();
         *self.pnl_quotes.lock().unwrap() = PnlQuotes::default();
         self.currency_sent.lock().unwrap().clear();
@@ -1087,6 +1095,97 @@ impl ClientCore {
             self.news_instruments.lock().unwrap().insert(instrument_id);
         }
         Ok(instrument_id)
+    }
+
+    /// Start a regulatory snapshot (ibx#446): one fetch per contract; the
+    /// request goes to the farm as a snapshot request. A second fetch of a
+    /// contract being fetched gets 10169.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_regulatory_snapshot(
+        &self, shared: &SharedState, control_tx: &Sender<ControlCommand>, req_id: i64,
+        con_id: i64, symbol: &str, exchange: &str, sec_type: &str,
+    ) -> Result<(), String> {
+        if con_id == 0 {
+            return Err("regulatory snapshot: a contract without conId is not supported".into());
+        }
+        let running = self.reg_snapshots.lock().unwrap().iter().find(|f| f.con_id == con_id).map(|f| f.req_id);
+        if let Some(other) = running {
+            shared.orders.push_order_error(req_id, 10169,
+                format!("Regulatory snapshot for {} is already being fetched in ticker id={}", symbol, other));
+            return Ok(());
+        }
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        control_tx.send(ControlCommand::RegisterInstrument {
+            con_id, symbol: symbol.to_string(), sec_type: sec_type.to_string(), exchange: exchange.to_string(), reply_tx: None,
+        }).map_err(|e| format!("Engine stopped: {}", e))?;
+        control_tx.send(ControlCommand::SubscribeSnapshot {
+            con_id, symbol: symbol.to_string(), exchange: exchange.to_string(), sec_type: sec_type.to_string(),
+            reply_tx: Some(reply_tx),
+        }).map_err(|e| format!("Engine stopped: {}", e))?;
+        let instrument = Self::recv_registration(reply_rx)?;
+        self.reg_snapshots.lock().unwrap().push(crate::control::regsnapshot::Fetch::new(
+            req_id, con_id, instrument, symbol.to_string(), std::time::Instant::now(),
+        ));
+        Ok(())
+    }
+
+    /// Stop a regulatory snapshot (cancelMktData): nothing more is sent
+    /// for it. False when the request is not one.
+    pub fn cancel_regulatory_snapshot(&self, req_id: i64, control_tx: &Sender<ControlCommand>) -> bool {
+        let mut fetches = self.reg_snapshots.lock().unwrap();
+        let Some(pos) = fetches.iter().position(|f| f.req_id == req_id) else { return false };
+        let f = fetches.remove(pos);
+        self.reg_snapshot_acks.lock().unwrap().remove(&f.instrument);
+        let _ = control_tx.send(ControlCommand::DropSnapshot { instrument: f.instrument });
+        true
+    }
+
+    /// One look at every regulatory snapshot: the finished ones with their
+    /// ticks or their error.
+    #[allow(clippy::type_complexity)]
+    pub fn poll_regulatory_snapshots(
+        &self, shared: &SharedState, control_tx: &Sender<ControlCommand>,
+    ) -> Vec<(i64, Result<Vec<crate::control::regsnapshot::SnapshotTick>, (i64, String)>)> {
+        use crate::control::regsnapshot::{SnapshotFields, Step};
+        {
+            let mut acks = self.reg_snapshot_acks.lock().unwrap();
+            for a in shared.market.drain_snapshot_acks() {
+                acks.insert(a.instrument, (a.snapshot_permissions, a.bbo_exchange));
+            }
+        }
+        let mut fetches = self.reg_snapshots.lock().unwrap();
+        if fetches.is_empty() {
+            return Vec::new();
+        }
+        let now = std::time::Instant::now();
+        let exchange_map = !shared.reference.smart_components().is_empty();
+        let acks = self.reg_snapshot_acks.lock().unwrap().clone();
+        let mut out = Vec::new();
+        fetches.retain_mut(|f| {
+            let q = shared.market.quote(f.instrument);
+            let price = |v: Price| (v != 0).then(|| v as f64 / PRICE_SCALE_F);
+            let size = |v: Qty| (v != 0).then(|| v as f64 / QTY_SCALE_F);
+            let exch = |m: i64| (m != 0).then(|| render_exchange_mask(m, shared));
+            let fields = SnapshotFields {
+                bid: price(q.bid), ask: price(q.ask), last: price(q.last),
+                bid_size: size(q.bid_size), ask_size: size(q.ask_size), last_size: size(q.last_size),
+                bid_exchange: exch(q.bid_exch_mask), ask_exchange: exch(q.ask_exch_mask), last_exchange: exch(q.last_exch_mask),
+                high: price(q.high), low: price(q.low), close: price(q.close), volume: size(q.volume),
+                last_snapshot_time: None,
+            };
+            let ack = acks.get(&f.instrument).map(|(p, b)| (*p, b.as_str()));
+            let result = match f.poll(now, ack, &fields, exchange_map) {
+                Step::Wait => return true,
+                Step::Fail(code, text) => Err((code, text)),
+                Step::Deliver(ticks) => Ok(ticks),
+            };
+            let _ = control_tx.send(ControlCommand::DropSnapshot { instrument: f.instrument });
+            out.push((f.req_id, result));
+            false
+        });
+        let mut acks = self.reg_snapshot_acks.lock().unwrap();
+        acks.retain(|i, _| fetches.iter().any(|f| f.instrument == *i));
+        out
     }
 
     /// True when no P&L request runs and no P&L quote is held:
@@ -1663,7 +1762,8 @@ impl ClientCore {
     /// reference (the key is the request id only; ibx#444).
     pub fn duplicate_ticker_refusal(&self, req_id: i64) -> Option<(i64, String)> {
         (self.req_to_instrument.lock().unwrap().contains_key(&req_id)
-            || self.tbt_reqs.lock().unwrap().contains_key(&req_id))
+            || self.tbt_reqs.lock().unwrap().contains_key(&req_id)
+            || self.reg_snapshots.lock().unwrap().iter().any(|f| f.req_id == req_id))
             .then(|| (322, "Error processing request.-'bQ' : cause - Duplicate ticker id".to_string()))
     }
 

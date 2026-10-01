@@ -35,6 +35,13 @@ impl EClient {
             shared.orders.push_order_error(req_id, code, text);
             return Ok(());
         }
+        // A regulatory snapshot goes through its own fetcher (ibx#446).
+        if regulatory_snapshot {
+            let _ = mkt_data_options;
+            return py.detach(|| self.core.start_regulatory_snapshot(
+                &shared, &tx, req_id, contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+            )).map_err(PyRuntimeError::new_err);
+        }
 
         let filters = SecDefFilters {
             primary_exchange: contract.primary_exchange.clone(),
@@ -71,7 +78,7 @@ impl EClient {
             });
         }
 
-        let _ = (regulatory_snapshot, mkt_data_options);
+        let _ = mkt_data_options;
 
         Ok(())
     }
@@ -80,6 +87,12 @@ impl EClient {
     pub fn cancel_mkt_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("cancel_mkt_data", &[req_id]) { return Ok(()); }
+        // A running regulatory snapshot stops silently (ibx#446).
+        if let Ok(tx) = self.tx() {
+            if self.core.cancel_regulatory_snapshot(req_id, &tx) {
+                return Ok(());
+            }
+        }
         let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
         if let Some(instrument) = instrument {
             let tx = self.tx()?;

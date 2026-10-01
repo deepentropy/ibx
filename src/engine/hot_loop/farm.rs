@@ -219,6 +219,8 @@ pub(crate) struct DepthReq {
 pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
+    /// Farm request ids of regulatory snapshots (ibx#446), with their instrument.
+    pub(crate) snapshot_reqs: Vec<(u32, InstrumentId)>,
     pub(crate) instrument_md_reqs: Vec<(InstrumentId, Vec<u32>)>,
     /// The client's market data modes from reqMarketDataType (ibx#447).
     pub(crate) md_modes: crate::types::MarketDataModes,
@@ -250,6 +252,7 @@ impl FarmState {
         Self {
             next_md_req_id: 1,
             md_req_to_instrument: Vec::new(),
+            snapshot_reqs: Vec::new(),
             instrument_md_reqs: Vec::new(),
             md_modes: crate::types::MarketDataModes::default(),
             depth_subs: Vec::new(),
@@ -534,6 +537,17 @@ impl FarmState {
 
         context.market.register_farm_tag(self.rx_farm, server_tag, instrument);
         context.market.set_min_tick(instrument, min_tick);
+        // A regulatory snapshot (ibx#446): its permission and BBO exchange
+        // go to its fetcher, never as tickReqParams.
+        if self.snapshot_reqs.iter().any(|(id, _)| *id == req_id) {
+            let permissions = parts.get(4).and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0);
+            let bbo = parts.get(5).map(|s| s.trim().to_string()).unwrap_or_default();
+            log::info!("Regulatory snapshot ack: instrument {} server_tag {} permissions {} bbo {:?}", instrument, server_tag, permissions, bbo);
+            shared.market.push_snapshot_ack(crate::bridge::TickReqParams {
+                instrument, min_tick, bbo_exchange: bbo, snapshot_permissions: permissions,
+            });
+            return;
+        }
         // The size increment (ibx#287); absent from older acks.
         if let Some(size_min_tick) = parts.get(8).and_then(|v| v.parse::<f64>().ok()) {
             context.market.set_size_min_tick(instrument, size_min_tick);
@@ -686,6 +700,50 @@ impl FarmState {
                 hb.last_farm_sent = Instant::now();
             }
         }
+    }
+
+    /// Regulatory snapshot request (ibx#446): one entry with action
+    /// SNAPSHOT and request type 624, flagged for an API client, without
+    /// the streaming-client mark.
+    pub(crate) fn subscribe_snapshot(&mut self, sub: &MdSubscribe, farm: FarmId, sink: &mut dyn FixSink, hb: &mut HeartbeatState) {
+        if sub.con_id <= 0 {
+            log::error!("Regulatory snapshot for instrument {} without a conId: not sent", sub.instrument);
+            return;
+        }
+        let id = self.next_md_req_id;
+        self.next_md_req_id += 1;
+        self.md_req_to_instrument.push((id, sub.instrument));
+        self.snapshot_reqs.push((id, sub.instrument));
+        let con_id_str = sub.con_id.to_string();
+        let id_str = id.to_string();
+        let exchange = routing_exchange(&sub.exchange, &sub.sec_type);
+        let sec_type = fix_sec_type(&sub.sec_type);
+        let ts = chrono_free_timestamp();
+        let tags: Vec<(u32, &str)> = vec![
+            (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+            (fix::TAG_SENDING_TIME, &ts),
+            (263, "3"),
+            (146, "1"),
+            (262, &id_str),
+            (6008, &con_id_str),
+            (207, exchange),
+            (167, sec_type),
+            (264, "624"),
+            (9830, "1"),
+        ];
+        if sink.send_comp(&tags) {
+            log::info!("Sent 35=V regulatory snapshot on farm {}: con_id={} {} {} id={}", farm, sub.con_id, exchange, sec_type, id);
+            if farm == PRIMARY_MD {
+                hb.last_farm_sent = Instant::now();
+            }
+        }
+    }
+
+    /// Forget the request of a regulatory snapshot (ibx#446).
+    pub(crate) fn drop_snapshot(&mut self, instrument: InstrumentId) {
+        let ids: Vec<u32> = self.snapshot_reqs.iter().filter(|(_, i)| *i == instrument).map(|(id, _)| *id).collect();
+        self.snapshot_reqs.retain(|(_, i)| *i != instrument);
+        self.md_req_to_instrument.retain(|(id, _)| !ids.contains(id));
     }
 
     /// Whether a live top-of-book request uses `farm` (#445).
@@ -1509,6 +1567,49 @@ mod tests {
         assert_eq!(q.last, 25_501 * PRICE_SCALE / 100);
         assert_eq!(q.low, 0);
         assert_eq!(q.timestamp_ns, 1_790_159_186 * 1_000_000_000);
+    }
+
+    struct RecordingSink(Vec<Vec<(u32, String)>>);
+    impl FixSink for RecordingSink {
+        fn send_plain(&mut self, fields: &[(u32, &str)]) -> bool { self.send_comp(fields) }
+        fn send_comp(&mut self, fields: &[(u32, &str)]) -> bool {
+            self.0.push(fields.iter().map(|(t, v)| (*t, v.to_string())).collect());
+            true
+        }
+    }
+
+    // ibx#446: the regulatory snapshot asks one entry with action SNAPSHOT
+    // and type 624, without the streaming mark; its ack goes to the fetcher
+    // and never gives tickReqParams.
+    #[test]
+    fn regulatory_snapshot_request_and_ack() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let id = context.market.register(265598);
+        let sub = MdSubscribe {
+            con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            instrument: id, mode_9887: 0,
+        };
+        let mut sink = RecordingSink(Vec::new());
+        let mut hb = HeartbeatState::new();
+        farm.subscribe_snapshot(&sub, PRIMARY_MD, &mut sink, &mut hb);
+        let msg = &sink.0[0];
+        let tags: Vec<u32> = msg.iter().map(|(t, _)| *t).collect();
+        assert_eq!(tags, vec![35, 52, 263, 146, 262, 6008, 207, 167, 264, 9830]);
+        let value = |t: u32| msg.iter().find(|(x, _)| *x == t).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!((value(263), value(146), value(207), value(167), value(264), value(9830)),
+            ("3".into(), "1".into(), "BEST".into(), "CS".into(), "624".into(), "1".into()));
+        let req: u32 = value(262).parse().unwrap();
+        let ack = format!("8=O35=Q1101,{req},0.01,0,2,9c,,1,1");
+        farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+        assert!(shared.market.drain_tick_req_params().is_empty());
+        let acks = shared.market.drain_snapshot_acks();
+        assert_eq!(acks.len(), 1);
+        assert_eq!((acks[0].instrument, acks[0].snapshot_permissions, acks[0].bbo_exchange.as_str()), (id, 2, "9c"));
+        farm.drop_snapshot(id);
+        assert!(farm.snapshot_reqs.is_empty());
     }
 
     // ibx#287 (AAPL, captured with the lots scaling on): wire bid size 57

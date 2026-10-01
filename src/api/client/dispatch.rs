@@ -229,6 +229,25 @@ impl EClient {
             }
         }
 
+        // Regulatory snapshots that ended (ibx#446).
+        let attrib = crate::api::types::TickAttrib::default();
+        for (req_id, result) in self.core.poll_regulatory_snapshots(&self.shared, &self.control_tx) {
+            use crate::control::regsnapshot::SnapshotTick;
+            match result {
+                Ok(ticks) => {
+                    for t in ticks {
+                        match t {
+                            SnapshotTick::Price { tick_type, price } => wrapper.tick_price(req_id, tick_type, price, &attrib),
+                            SnapshotTick::Size { tick_type, size } => wrapper.tick_size(req_id, tick_type, size),
+                            SnapshotTick::Text { tick_type, value } => wrapper.tick_string(req_id, tick_type, &value),
+                        }
+                    }
+                    wrapper.tick_snapshot_end(req_id);
+                }
+                Err((code, text)) => wrapper.error(req_id, code, &text, ""),
+            }
+        }
+
         // Request parameters, once per request (ibx#449).
         for (req_id, min_tick, bbo_exchange, permissions) in self.core.take_tick_req_params(&self.shared) {
             wrapper.tick_req_params(req_id, min_tick, &bbo_exchange, permissions);

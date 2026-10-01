@@ -40,13 +40,22 @@ impl EClient {
     /// different modes and pick whichever feed has data.
     pub fn req_mkt_data_ex(
         &self, req_id: i64, contract: &Contract,
-        generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool,
+        generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool,
         mode_9887: i32,
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_mkt_data_ex", &[req_id, contract.con_id]) { return Ok(()); }
         if let Some((code, text)) = self.core.duplicate_ticker_refusal(req_id) {
             self.shared.orders.push_order_error(req_id, code, text);
             return Ok(());
+        }
+        // A regulatory snapshot goes through its own fetcher: one batch of
+        // ticks and the snapshot end, no request parameters, no market data
+        // type (ibx#446). It is billed on live accounts.
+        if regulatory_snapshot {
+            return self.core.start_regulatory_snapshot(
+                &self.shared, &self.control_tx, req_id, contract.con_id,
+                &contract.symbol, &contract.exchange, &contract.sec_type,
+            );
         }
         let filters = SecDefFilters {
             primary_exchange: contract.primary_exchange.clone(),
@@ -118,6 +127,10 @@ impl EClient {
     /// Cancel market data. Matches `cancelMktData` in C++.
     pub fn cancel_mkt_data(&self, req_id: i64) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("cancel_mkt_data", &[req_id]) { return Ok(()); }
+        // A running regulatory snapshot stops silently (ibx#446).
+        if self.core.cancel_regulatory_snapshot(req_id, &self.control_tx) {
+            return Ok(());
+        }
         let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
         if let Some(instrument) = instrument {
             self.send(ControlCommand::Unsubscribe { instrument })?;

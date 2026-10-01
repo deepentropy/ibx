@@ -383,6 +383,31 @@ impl EClient {
             }
         }
 
+        // Regulatory snapshots that ended (ibx#446).
+        if let Ok(tx) = self.tx() {
+            for (req_id, result) in self.core.poll_regulatory_snapshots(shared, &tx) {
+                use crate::control::regsnapshot::SnapshotTick;
+                match result {
+                    Ok(ticks) => {
+                        for t in ticks {
+                            match t {
+                                SnapshotTick::Price { tick_type, price } => {
+                                    let attrib_obj = Py::new(py, TickAttrib::default())?.into_any();
+                                    call_wrapper!(self.wrapper, py, "tick_price", (req_id, tick_type, price, &attrib_obj));
+                                }
+                                SnapshotTick::Size { tick_type, size } =>
+                                    call_wrapper!(self.wrapper, py, "tick_size", (req_id, tick_type, size)),
+                                SnapshotTick::Text { tick_type, value } =>
+                                    call_wrapper!(self.wrapper, py, "tick_string", (req_id, tick_type, value.as_str())),
+                            }
+                        }
+                        call_wrapper!(self.wrapper, py, "tick_snapshot_end", (req_id,));
+                    }
+                    Err((code, text)) => call_wrapper!(self.wrapper, py, "error", (req_id, code, text.as_str(), "")),
+                }
+            }
+        }
+
         // Request parameters, once per request (ibx#449).
         for (req_id, min_tick, bbo_exchange, permissions) in self.core.take_tick_req_params(shared) {
             call_wrapper!(self.wrapper, py, "tick_req_params", (req_id, min_tick, bbo_exchange.as_str(), permissions));

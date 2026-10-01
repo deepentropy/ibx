@@ -997,6 +997,26 @@ impl HotLoop {
                         }
                     }
                 }
+                ControlCommand::SubscribeSnapshot { con_id, symbol, exchange, sec_type, reply_tx } => {
+                    if let Some(id) = self.register_slot_or_reject(Some(con_id), symbol.clone(), &sec_type, &exchange, &reply_tx) {
+                        let sub = farm::MdSubscribe {
+                            con_id, symbol, exchange, sec_type, last_trade_date: String::new(), strike: 0.0,
+                            right: String::new(), multiplier: String::new(), instrument: id, mode_9887: 0,
+                        };
+                        if let Some(farm_id) = self.md_target(&sub) {
+                            if let Some(f) = self.pool.get_mut(farm_id) {
+                                f.note_request(Instant::now());
+                            }
+                            if let Some(sink) = farm_sink!(self, farm_id) {
+                                self.farm.subscribe_snapshot(&sub, farm_id, sink, &mut self.hb);
+                            }
+                        }
+                    }
+                }
+                ControlCommand::DropSnapshot { instrument } => {
+                    self.farm.drop_snapshot(instrument);
+                    self.try_reclaim_instrument(instrument);
+                }
                 ControlCommand::SubscribeBySymbol { symbol, sec_type, exchange, currency, filters, mode_9887, reply_tx } => {
                     if let Some(id) = self.register_slot_or_reject(None, symbol.clone(), &sec_type, &exchange, &reply_tx) {
                         let sub = farm::MdSubscribe {
