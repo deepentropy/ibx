@@ -1,5 +1,7 @@
 //! Diffie-Hellman key exchange for establishing shared secrets.
 
+use std::io;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use num_bigint::BigUint;
 use rand::RngCore;
@@ -92,9 +94,21 @@ impl SecureChannel {
     ///
     /// `fields` are the semicolon-split parts after version and msg_type:
     /// `[server_random_b64, server_pub_b64, ...]`
-    pub fn process_server_hello(&mut self, fields: &[&str]) {
-        let server_random = B64.decode(fields[0]).unwrap();
-        let server_pub_bytes = B64.decode(fields[1]).unwrap();
+    ///
+    /// A missing field or bad base64 is an `InvalidData` error and leaves the
+    /// channel without keys, so the caller fails the login; the reference
+    /// also turns a malformed hello into a login error (ibx#276).
+    pub fn process_server_hello(&mut self, fields: &[&str]) -> io::Result<()> {
+        let field = |i: usize, name: &str| -> io::Result<Vec<u8>> {
+            let value = fields.get(i).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("key exchange: no {} in the server hello", name))
+            })?;
+            B64.decode(value).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("key exchange: bad {} in the server hello: {}", name, e))
+            })
+        };
+        let server_random = field(0, "server random")?;
+        let server_pub_bytes = field(1, "server public value")?;
         let server_pub = BigUint::from_bytes_be(&server_pub_bytes);
 
         let n = dh_n();
@@ -127,6 +141,7 @@ impl SecureChannel {
         self.write_mac_key = Some(key_block[64..84].to_vec());
         self.read_mac_key = Some(key_block[84..104].to_vec());
         self.key_block = Some(key_block);
+        Ok(())
     }
 
     /// Encrypt plaintext using Encrypt-then-MAC.
@@ -395,6 +410,26 @@ mod tests {
         assert!(ch.key_block().is_none());
     }
 
+    // ibx#276: a malformed server hello is a login error, not a panic, and
+    // leaves the channel without keys.
+    #[test]
+    fn malformed_server_hello_is_an_error() {
+        let good = B64.encode([1u8; 32]);
+        let cases: [&[&str]; 4] = [
+            &[],
+            &[good.as_str()],
+            &["not base64!", good.as_str()],
+            &[good.as_str(), "@@@"],
+        ];
+        for fields in cases {
+            let mut ch = SecureChannel::new();
+            let err = ch.process_server_hello(fields).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{fields:?}");
+            assert!(err.to_string().contains("server hello"), "{err}");
+            assert!(ch.key_block().is_none(), "{fields:?}: no keys after a failure");
+        }
+    }
+
     #[test]
     fn key_block_some_after_server_hello() {
         // Create two channels and exchange keys between them to simulate
@@ -419,8 +454,8 @@ mod tests {
 
         // Each channel processes the other's hello as if it were a server response
         // process_server_hello expects [server_random_b64, server_pub_b64]
-        channel_a.process_server_hello(&[b_random, b_pub]);
-        channel_b.process_server_hello(&[a_random, a_pub]);
+        channel_a.process_server_hello(&[b_random, b_pub]).unwrap();
+        channel_b.process_server_hello(&[a_random, a_pub]).unwrap();
 
         // Both should now have key_blocks of 104 bytes
         let kb_a = channel_a.key_block().expect("channel_a should have key_block");
@@ -450,8 +485,8 @@ mod tests {
         let parts_b: Vec<&str> = payload_b.trim_end_matches(';').split(';').collect();
 
         // Each processes the other's hello
-        channel_a.process_server_hello(&[parts_b[4], parts_b[5]]);
-        channel_b.process_server_hello(&[parts_a[4], parts_a[5]]);
+        channel_a.process_server_hello(&[parts_b[4], parts_b[5]]).unwrap();
+        channel_b.process_server_hello(&[parts_a[4], parts_a[5]]).unwrap();
 
         // Both have valid key blocks
         assert_eq!(channel_a.key_block().unwrap().len(), 104);
