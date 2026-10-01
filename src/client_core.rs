@@ -630,8 +630,11 @@ pub struct ClientCore {
     pub con_id_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
     // Change detection for quote polling
     pub last_quotes: Mutex<HashMap<InstrumentId, [i64; 15]>>,
-    // Snapshot req_ids — deliver first ticks then auto-cancel
-    pub snapshot_reqs: Mutex<HashSet<i64>>,
+    /// Running plain snapshots by request id (ibx#446), their count read
+    /// without the lock, and the per-second snapshot limiter.
+    snapshot_reqs: Mutex<HashMap<i64, crate::control::snapshot::PlainSnapshot>>,
+    snapshot_count: std::sync::atomic::AtomicUsize,
+    snapshot_rate: Mutex<crate::control::snapshot::RateLimiter>,
     /// Running regulatory snapshots (ibx#446) and the acknowledgements of
     /// their instruments (permission, BBO exchange code).
     pub reg_snapshots: Mutex<Vec<crate::control::regsnapshot::Fetch>>,
@@ -822,7 +825,9 @@ impl ClientCore {
             instrument_to_req: Mutex::new(HashMap::new()),
             con_id_to_instrument: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
-            snapshot_reqs: Mutex::new(HashSet::new()),
+            snapshot_reqs: Mutex::new(HashMap::new()),
+            snapshot_count: std::sync::atomic::AtomicUsize::new(0),
+            snapshot_rate: Mutex::new(Default::default()),
             reg_snapshots: Mutex::new(Vec::new()),
             reg_snapshot_acks: Mutex::new(HashMap::new()),
             pnl_reqs: Mutex::new(HashMap::new()),
@@ -866,6 +871,7 @@ impl ClientCore {
         self.con_id_to_instrument.lock().unwrap().clear();
         self.last_quotes.lock().unwrap().clear();
         self.snapshot_reqs.lock().unwrap().clear();
+        self.snapshot_count.store(0, Ordering::Release);
         self.reg_snapshots.lock().unwrap().clear();
         self.reg_snapshot_acks.lock().unwrap().clear();
         self.pnl_reqs.lock().unwrap().clear();
@@ -1012,7 +1018,7 @@ impl ClientCore {
             self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
             self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
             if snapshot {
-                self.snapshot_reqs.lock().unwrap().insert(req_id);
+                self.start_snapshot(req_id, sec_type);
             }
             if wants_news {
                 self.news_instruments.lock().unwrap().insert(instrument_id);
@@ -1038,7 +1044,7 @@ impl ClientCore {
             self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
             self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
             if snapshot {
-                self.snapshot_reqs.lock().unwrap().insert(req_id);
+                self.start_snapshot(req_id, sec_type);
             }
             if wants_news {
                 self.news_instruments.lock().unwrap().insert(instrument_id);
@@ -1089,7 +1095,7 @@ impl ClientCore {
         self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
         self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
         if snapshot {
-            self.snapshot_reqs.lock().unwrap().insert(req_id);
+            self.start_snapshot(req_id, sec_type);
         }
         if wants_news {
             self.news_instruments.lock().unwrap().insert(instrument_id);
@@ -1292,6 +1298,7 @@ impl ClientCore {
             self.mdt_sent.lock().unwrap().remove(&req_id);
             self.delayed_reqs.lock().unwrap().remove(&req_id);
             self.tick_req_params_sent.lock().unwrap().remove(&req_id);
+            self.end_snapshot(req_id);
             let needs_news = self.news_instruments.lock().unwrap().remove(&instrument);
             // The slot stays while tick-by-tick data uses it.
             if !self.tbt_reqs.lock().unwrap().values().any(|(i, ..)| *i == instrument) {
@@ -2258,10 +2265,100 @@ impl ClientCore {
         QuotePollResult { ticks, string_ticks, timestamp, delivered }
     }
 
-    /// Check and consume snapshot completion for a req_id.
-    /// Returns true if this was a snapshot that just completed.
-    pub fn check_snapshot_done(&self, req_id: i64, delivered: bool) -> bool {
-        delivered && self.snapshot_reqs.lock().unwrap().remove(&req_id)
+    /// Start a plain snapshot of the request (ibx#446).
+    fn start_snapshot(&self, req_id: i64, sec_type: &str) {
+        let snapshot = crate::control::snapshot::PlainSnapshot::new(sec_type, std::time::Instant::now());
+        let mut snaps = self.snapshot_reqs.lock().unwrap();
+        snaps.insert(req_id, snapshot);
+        self.snapshot_count.store(snaps.len(), Ordering::Release);
+    }
+
+    /// Forget the plain snapshot of the request, if any.
+    fn end_snapshot(&self, req_id: i64) {
+        if self.snapshot_count.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let mut snaps = self.snapshot_reqs.lock().unwrap();
+        snaps.remove(&req_id);
+        self.snapshot_count.store(snaps.len(), Ordering::Release);
+    }
+
+    /// The local refusal of a snapshot request (ibx#446), before the
+    /// duplicate check, as the reference checks it: generic ticks, then the
+    /// per-second limit, which counts the request when it lets it go.
+    pub fn snapshot_refusal(&self, shared: &SharedState, generic_tick_list: &str, sec_type: &str) -> Option<(i64, String)> {
+        use crate::control::snapshot;
+        if snapshot::generic_ticks_refused(generic_tick_list, sec_type) {
+            return Some((321, snapshot::GENERIC_TICKS_REFUSED.to_string()));
+        }
+        let limit = shared.reference.snapshot_rate_limit();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64).unwrap_or(0);
+        if !self.snapshot_rate.lock().unwrap().allow(now, limit) {
+            return Some((321, snapshot::rate_refusal(limit)));
+        }
+        None
+    }
+
+    /// The ticks of a market data request since the last poll, and whether
+    /// its snapshot ended now: a stream gives every change; a plain
+    /// snapshot each tick type once, then its end (ibx#446).
+    pub fn poll_market_ticks(&self, shared: &SharedState, iid: InstrumentId, req_id: i64) -> (QuotePollResult, bool) {
+        if self.snapshot_count.load(Ordering::Acquire) > 0
+            && let Some(polled) = self.poll_snapshot_ticks(shared, iid, req_id, std::time::Instant::now())
+        {
+            return polled;
+        }
+        (self.poll_instrument_ticks(shared, iid, req_id), false)
+    }
+
+    /// The ticks of a plain snapshot not sent yet, in the reference's
+    /// order: bid, ask and last, each followed by its size as one price
+    /// message gives both; the volume; high, low, close, open; the
+    /// exchanges; the last time. `None` when the request is no snapshot.
+    /// The end comes when every tick type it waits for was sent, or at the
+    /// time limit.
+    pub fn poll_snapshot_ticks(
+        &self, shared: &SharedState, iid: InstrumentId, req_id: i64, now: std::time::Instant,
+    ) -> Option<(QuotePollResult, bool)> {
+        let mut snaps = self.snapshot_reqs.lock().unwrap();
+        let snap = snaps.get_mut(&req_id)?;
+        let q = shared.market.quote(iid);
+        let delayed = self.delayed_reqs.lock().unwrap().contains(&req_id);
+        let api = |tick_type: i32| if delayed { delayed_tick_type(tick_type) } else { tick_type };
+        let price = |tick_type: i32, v: i64| TickEvent { req_id, tick_type, value: v as f64 / PRICE_SCALE_F, is_price: true };
+        let size = |tick_type: i32, v: i64| TickEvent { req_id, tick_type, value: v as f64 / QTY_SCALE as f64, is_price: false };
+
+        let mut ticks = Vec::new();
+        for (p, s, pt, st) in [(q.bid, q.bid_size, 1, 0), (q.ask, q.ask_size, 2, 3), (q.last, q.last_size, 4, 5)] {
+            if p != 0 && snap.take(api(pt)) {
+                ticks.push(price(api(pt), p));
+                ticks.push(size(api(st), s));
+            }
+        }
+        if q.volume != 0 && snap.take(api(8)) {
+            ticks.push(size(api(8), q.volume));
+        }
+        for (v, tt) in [(q.high, 6), (q.low, 7), (q.close, 9), (q.open, 14)] {
+            if v != 0 && snap.take(api(tt)) {
+                ticks.push(price(api(tt), v));
+            }
+        }
+        let mut string_ticks = Vec::new();
+        for (mask, tt) in [(q.bid_exch_mask, TICK_BID_EXCHANGE), (q.ask_exch_mask, TICK_ASK_EXCHANGE), (q.last_exch_mask, TICK_LAST_EXCHANGE)] {
+            if mask != 0 && snap.take(tt) {
+                string_ticks.push(StringTickEvent { req_id, tick_type: tt, value: render_exchange_mask(mask, shared) });
+            }
+        }
+        let timestamp = (q.timestamp_ns != 0 && snap.take(TICK_LAST_TIMESTAMP))
+            .then_some(TimestampTick { req_id, timestamp_ns: q.timestamp_ns as i64 });
+        let delivered = !ticks.is_empty() || !string_ticks.is_empty() || timestamp.is_some();
+        let ended = snap.complete() || snap.timed_out(now);
+        if ended {
+            snaps.remove(&req_id);
+            self.snapshot_count.store(snaps.len(), Ordering::Release);
+        }
+        Some((QuotePollResult { ticks, string_ticks, timestamp, delivered }, ended))
     }
 
     /// Snapshot the current instrument→req_id mapping.

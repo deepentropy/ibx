@@ -2109,6 +2109,8 @@ impl Gateway {
         shared.reference.set_fa_session(self.fa_session);
         shared.reference.set_short_sale_flags(self.super_user, self.omnibus);
         shared.reference.set_tick_by_tick_limits(self.tick_by_tick_limit, self.tick_by_tick_off);
+        // The snapshot rate limit is the API ticker limit (ibx#446).
+        shared.reference.set_snapshot_rate_limit(self.max_real_time_requests);
         for xml in &self.algo_definitions {
             shared.reference.add_algo_definitions(xml);
         }

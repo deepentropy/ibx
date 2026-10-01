@@ -10,7 +10,7 @@
 //! - The HotLoop pushes to SharedState sub-containers directly.
 //! - External callers read snapshots and poll events without blocking the hot loop.
 
-use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use std::collections::HashMap;
@@ -644,6 +644,9 @@ pub struct ReferenceState {
     tick_by_tick_limit: AtomicU64,
     /// The logon turns tick-by-tick data off (ibx#455).
     tick_by_tick_off: AtomicBool,
+    /// Most snapshot requests per second, the API ticker limit of the
+    /// logon as the reference sets it; 100 until known (ibx#446).
+    snapshot_rate_limit: AtomicU32,
     /// Account config (6040=210): feature list and MiFID config id; None
     /// until known (ibx#425).
     account_config: Mutex<Option<(Vec<String>, String)>>,
@@ -690,6 +693,7 @@ impl ReferenceState {
             algo_definitions: Mutex::new(Default::default()),
             tick_by_tick_limit: AtomicU64::new(u64::MAX),
             tick_by_tick_off: AtomicBool::new(false),
+            snapshot_rate_limit: AtomicU32::new(100),
             account_config: Mutex::new(None),
             ccp_session_id: Mutex::new(String::new()),
             misc_urls: Mutex::new(HashMap::new()),
@@ -999,6 +1003,17 @@ impl ReferenceState {
     pub fn tick_by_tick_limits(&self) -> (Option<usize>, bool) {
         let limit = self.tick_by_tick_limit.load(Ordering::Relaxed);
         ((limit != u64::MAX).then_some(limit as usize), self.tick_by_tick_off.load(Ordering::Relaxed))
+    }
+
+    /// Most snapshot requests per second (ibx#446).
+    pub fn snapshot_rate_limit(&self) -> u32 {
+        self.snapshot_rate_limit.load(Ordering::Relaxed)
+    }
+
+    /// The API ticker limit of the logon; 0 or less keeps 100, as the
+    /// reference's limiter does.
+    #[doc(hidden)] pub fn set_snapshot_rate_limit(&self, limit: u32) {
+        self.snapshot_rate_limit.store(if limit > 0 { limit } else { 100 }, Ordering::Relaxed);
     }
 
     #[doc(hidden)] pub fn set_tick_by_tick_limits(&self, limit: usize, off: bool) {

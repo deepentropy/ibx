@@ -8,3 +8,4 @@ pub mod news;
 pub mod optcalc;
 pub mod regsnapshot;
 pub mod scanner;
+pub mod snapshot;

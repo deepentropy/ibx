@@ -418,7 +418,7 @@ impl EClient {
         let instruments = self.core.snapshot_instruments();
         let mut snapshot_done: Vec<i64> = Vec::new();
         for (iid, req_id) in instruments {
-            let result = self.core.poll_instrument_ticks(shared, iid, req_id);
+            let (result, snapshot_end) = self.core.poll_market_ticks(shared, iid, req_id);
 
             // Fire market_data_type once per subscription on first tick delivery
             if let Some(mdt) = self.core.check_mdt_needed(req_id, result.delivered) {
@@ -441,7 +441,7 @@ impl EClient {
                 let ts_secs = ts.timestamp_ns / 1_000_000_000;
                 call_wrapper!(self.wrapper, py, "tick_string", (ts.req_id, TICK_LAST_TIMESTAMP, ts_secs.to_string().as_str()));
             }
-            if self.core.check_snapshot_done(req_id, result.delivered) {
+            if snapshot_end {
                 call_wrapper!(self.wrapper, py, "tick_snapshot_end", (req_id,));
                 snapshot_done.push(req_id);
             }

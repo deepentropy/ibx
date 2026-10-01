@@ -8,8 +8,13 @@ impl EClient {
     // ── Market Data ──
 
     /// Subscribe to market data. Matches `reqMktData` in C++.
-    /// When `snapshot` is true, delivers the first available quote then calls
-    /// `tick_snapshot_end` and auto-cancels the subscription.
+    /// When `snapshot` is true, the request is a snapshot, as the
+    /// reference's: each tick type is sent once, then `tick_snapshot_end`
+    /// when the bid, ask, last, open and close came (with the option
+    /// computations for an option; the types a contract has none of are not
+    /// waited for), or 11 seconds after the start; then the request is
+    /// gone. A snapshot with generic ticks, or beyond the per-second
+    /// snapshot limit, is refused with error 321.
     ///
     /// `generic_tick_list` is NOT transmitted to the gateway, with one
     /// exception: "292" additionally subscribes per-contract news. Other
@@ -44,6 +49,14 @@ impl EClient {
         mode_9887: i32,
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_mkt_data_ex", &[req_id, contract.con_id]) { return Ok(()); }
+        // The snapshot checks come before the duplicate check, as the
+        // reference's (ibx#446).
+        if snapshot
+            && let Some((code, text)) = self.core.snapshot_refusal(&self.shared, generic_tick_list, &contract.sec_type)
+        {
+            self.shared.orders.push_order_error(req_id, code, text);
+            return Ok(());
+        }
         if let Some((code, text)) = self.core.duplicate_ticker_refusal(req_id) {
             self.shared.orders.push_order_error(req_id, code, text);
             return Ok(());

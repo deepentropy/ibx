@@ -31,6 +31,14 @@ impl EClient {
         if !crate::client_core::ClientCore::ids_fit("req_mkt_data", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         let shared = self.shared_state()?;
+        // The snapshot checks come before the duplicate check, as the
+        // reference's (ibx#446).
+        if snapshot
+            && let Some((code, text)) = self.core.snapshot_refusal(&shared, generic_tick_list, &contract.sec_type)
+        {
+            shared.orders.push_order_error(req_id, code, text);
+            return Ok(());
+        }
         if let Some((code, text)) = self.core.duplicate_ticker_refusal(req_id) {
             shared.orders.push_order_error(req_id, code, text);
             return Ok(());

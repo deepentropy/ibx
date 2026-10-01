@@ -5139,3 +5139,134 @@ fn regulatory_snapshot_without_permission_and_cancel() {
     let seen = engine.join().unwrap();
     assert_eq!(seen, vec!["snapshot:756733", "drop:5", "snapshot:756733", "drop:5"]);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+//  Plain snapshot (ibx#446)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Answer the subscriptions of the engine side with instrument 5; returns
+/// what was asked: subscribe (with the snapshot flag) and unsubscribe.
+fn top_engine(rx: crossbeam_channel::Receiver<ControlCommand>) -> std::thread::JoinHandle<Vec<String>> {
+    std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        while let Ok(cmd) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            match cmd {
+                ControlCommand::Subscribe { reply_tx: Some(tx), con_id, snapshot, .. } => {
+                    let _ = tx.send(Ok(5));
+                    seen.push(format!("subscribe:{con_id}:{snapshot}"));
+                }
+                ControlCommand::Unsubscribe { instrument } => seen.push(format!("unsubscribe:{instrument}")),
+                _ => {}
+            }
+        }
+        seen
+    })
+}
+
+fn spy_stk() -> Contract {
+    Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }
+}
+
+// Each tick type once, the size with its price; no end on a partial
+// batch; the end once bid, ask, last, close and open came; then the
+// request is gone and its farm request cancelled.
+#[test]
+fn plain_snapshot_sends_each_tick_type_once_then_the_end() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    shared.reference.set_smart_components(vec![crate::types::SmartComponent {
+        bit_number: 0, exchange: "NYSE".into(), exchange_letter: "N".into(),
+    }]);
+    client.req_mkt_data(1, &spy_stk(), "", true, false).unwrap();
+    let s = crate::types::PRICE_SCALE;
+    let q = crate::types::QTY_SCALE;
+    shared.market.push_quote(5, &crate::types::Quote {
+        bid: 100 * s, ask: 101 * s, bid_size: 2 * q, ask_size: 3 * q, bid_exch_mask: 1, ..Default::default()
+    });
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec![
+        "mdt:1:1", "price:1:1:100", "size:1:0:2", "price:1:2:101", "size:1:3:3", "string:1:32:N",
+    ]);
+    // The bid moves and the rest comes: the bid is not sent again.
+    shared.market.push_quote(5, &crate::types::Quote {
+        bid: 99 * s, ask: 101 * s, last: 100 * s, bid_size: 4 * q, ask_size: 3 * q, last_size: q,
+        volume: 50 * q, high: 102 * s, low: 97 * s, close: 98 * s, open: 99 * s,
+        bid_exch_mask: 1, ..Default::default()
+    });
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec![
+        "price:1:4:100", "size:1:5:1", "size:1:8:50", "price:1:6:102", "price:1:7:97", "price:1:9:98",
+        "price:1:14:99", "end:1",
+    ]);
+    // Done: nothing more, and a cancel now is for an unknown request.
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+    client.cancel_mkt_data(1).unwrap();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("error:1:300:")), "{:?}", w.events);
+    assert_eq!(engine.join().unwrap(), vec!["subscribe:756733:true", "unsubscribe:5"]);
+}
+
+// A snapshot that never completes ends 11 s after its start; a stream
+// never ends.
+#[test]
+fn plain_snapshot_ends_at_the_time_limit() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &spy_stk(), "", true, false).unwrap();
+    let s = crate::types::PRICE_SCALE;
+    shared.market.push_quote(5, &crate::types::Quote { bid: 100 * s, ..Default::default() });
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("end:")), "{:?}", w.events);
+    let start = std::time::Instant::now();
+    let (_, ended) = client.core.poll_snapshot_ticks(&shared, 5, 1, start + std::time::Duration::from_millis(5_000)).unwrap();
+    assert!(!ended);
+    let (polled, ended) = client.core.poll_snapshot_ticks(&shared, 5, 1, start + crate::control::snapshot::TIMEOUT).unwrap();
+    assert!(ended && polled.ticks.is_empty());
+    assert!(client.core.poll_snapshot_ticks(&shared, 5, 1, start).is_none(), "gone after its end");
+    drop(engine);
+}
+
+// A snapshot with legal generic ticks is refused with 321, before the
+// duplicate check; a list with an unknown tick, or a stream, goes on.
+#[test]
+fn plain_snapshot_with_generic_ticks_is_refused() {
+    let (client, rx, _shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &spy_stk(), "233", true, false).unwrap();
+    client.req_mkt_data(2, &spy_stk(), "233,13", true, false).unwrap();
+    // The same id again, with generic ticks: 321, not the duplicate 322.
+    client.req_mkt_data(2, &spy_stk(), "236", true, false).unwrap();
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    let refusal = "Error validating request.-'bQ' : cause - Snapshot market data subscription is not applicable to generic ticks";
+    assert_eq!(w.events.iter().filter(|e| e.starts_with("error:")).cloned().collect::<Vec<_>>(),
+        vec![format!("error:1:321:{refusal}"), format!("error:2:321:{refusal}")]);
+    assert_eq!(engine.join().unwrap(), vec!["subscribe:756733:true"]);
+}
+
+// The per-second limit is the API ticker limit of the logon; beyond it a
+// snapshot is refused with 321 and the reference's text.
+#[test]
+fn plain_snapshot_beyond_the_limit_is_refused() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    shared.reference.set_snapshot_rate_limit(1);
+    for req_id in 10..15 {
+        let mut c = spy_stk();
+        c.con_id = 756733 + req_id;
+        client.req_mkt_data(req_id, &c, "", true, false).unwrap();
+    }
+    let mut w = SnapRec::default();
+    client.process_msgs(&mut w);
+    let text = "Error validating request.-'bQ' : cause - Snapshot requests limitation exceeded:1 per 1 second(s)";
+    let refused = w.events.iter().filter(|e| e.ends_with(&format!(":321:{text}"))).count();
+    // Five requests span at most two seconds: at most two go.
+    assert!(refused >= 3, "{:?}", w.events);
+    let asked = engine.join().unwrap().iter().filter(|e| e.starts_with("subscribe:")).count();
+    assert_eq!(asked + refused, 5);
+}
