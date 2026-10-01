@@ -2803,9 +2803,31 @@ impl ClientCore {
     /// Every order the reference refuses before sending anything, with its
     /// error code and text. Nothing is sent for such an order.
     pub fn refusal_before_sending(order: &ApiOrder) -> Option<(i64, String)> {
-        Self::fractional_quantity_refusal(order)
-            .or_else(|| Self::good_after_time_refusal(order))
+        Self::read_refusal(order)
             .or_else(|| Self::order_rule_refusal(order))
+            .or_else(|| Self::fractional_quantity_refusal(order))
+    }
+
+    /// The refusals of the reference's reading of the order, in its order
+    /// (ibx#263): it keeps reading after a bad field and gives only the
+    /// last one. A negative discretionary amount and a trailing percent
+    /// given with a trailing amount are answered as 320 with the rule
+    /// text; a goodAfterTime that is not a date and time keeps its own
+    /// code.
+    fn read_refusal(order: &ApiOrder) -> Option<(i64, String)> {
+        let read_error = |cause: &str| Some((320, format!("Error reading request:{}", cause)));
+        let set = |v: f64| v != 0.0 && v != f64::MAX;
+        let mut last = None;
+        if order.discretionary_amt < 0.0 {
+            last = read_error("Discretionary amount does not conform to the minimum price variation for this contract ");
+        }
+        if let Some(refusal) = Self::good_after_time_refusal(order) {
+            last = Some(refusal);
+        }
+        if set(order.trailing_percent) && set(order.aux_price) {
+            last = read_error("Cannot specify Trailing Amount and Trailing Percent at the same time");
+        }
+        last
     }
 
     /// A goodTillDate the reference refuses before sending, with error 343
@@ -2843,6 +2865,10 @@ impl ClientCore {
     fn order_rule_refusal(order: &ApiOrder) -> Option<(i64, String)> {
         let refuse = |cause: &str| Some((321, format!("Error validating request.-'bH' : cause - {}", cause)));
         let order_type = order.order_type.to_uppercase();
+        // A quantity below 0 or above 999,999,999 (ibx#263).
+        if order.total_quantity < 0.0 || order.total_quantity > 999_999_999.0 {
+            return refuse("Order size does not conform to market rule.");
+        }
         // Midprice outside regular hours: refused whatever the time of day
         // (the flag alone, reference refusal 10210).
         if matches!(order_type.as_str(), "MIDPRICE" | "MIDPX") && order.outside_rth {
@@ -2856,6 +2882,13 @@ impl ClientCore {
         // before the limit fields (ib-agent#194, no final period).
         if order_type == "TRAIL LIMIT" && (order.trail_stop_price == f64::MAX || order.trail_stop_price == 0.0) {
             return refuse("Please enter a stop price");
+        }
+        // A trailing percent below 0 or above 100 (ibx#263).
+        let pct = order.trailing_percent;
+        if matches!(order_type.as_str(), "TRAIL" | "TRAIL LIMIT") && pct != 0.0 && pct != f64::MAX
+            && (pct < 0.0 || pct > 100.0)
+        {
+            return refuse("Invalid Trailing Percent value. Valid values are greater than 0 and less than 100.");
         }
         if order_type == "TRAIL LIMIT" {
             let price_set = order.lmt_price != 0.0 && order.lmt_price != f64::MAX;
@@ -3888,6 +3921,35 @@ mod tests {
         assert!(!core.pnl_quotes_idle());
         core.unsubscribe_pnl_single(6);
         assert!(core.pnl_quotes_idle());
+    }
+
+    // ibx#263: the reference's number rules, refused before sending: the
+    // reading errors as 320 (only the last one), the order rules as 321.
+    #[test]
+    fn number_rules_of_the_reference_are_refused() {
+        let rule = |cause: &str| Some((321, format!("Error validating request.-'bH' : cause - {}", cause)));
+        let read = |cause: &str| Some((320, format!("Error reading request:{}", cause)));
+        for qty in [-1.0, 1_000_000_000.0, f64::INFINITY] {
+            assert_eq!(ClientCore::refusal_before_sending(&ApiOrder { total_quantity: qty, ..lmt(100.0) }),
+                rule("Order size does not conform to market rule."), "{qty}");
+        }
+        assert_eq!(ClientCore::refusal_before_sending(&ApiOrder { total_quantity: 999_999_999.0, ..lmt(100.0) }), None);
+        let trail = |pct: f64| ApiOrder { order_type: "TRAIL".into(), trailing_percent: pct, ..lmt(0.0) };
+        for pct in [-0.5, 100.5, f64::INFINITY] {
+            assert_eq!(ClientCore::refusal_before_sending(&trail(pct)),
+                rule("Invalid Trailing Percent value. Valid values are greater than 0 and less than 100."), "{pct}");
+        }
+        assert_eq!(ClientCore::refusal_before_sending(&trail(1.5)), None);
+        let both = ApiOrder { aux_price: 0.5, ..trail(1.5) };
+        assert_eq!(ClientCore::refusal_before_sending(&both),
+            read("Cannot specify Trailing Amount and Trailing Percent at the same time"));
+        let disc = ApiOrder { discretionary_amt: -0.1, ..lmt(100.0) };
+        assert_eq!(ClientCore::refusal_before_sending(&disc),
+            read("Discretionary amount does not conform to the minimum price variation for this contract "));
+        // Only the last reading error is given.
+        let two = ApiOrder { discretionary_amt: -0.1, ..both };
+        assert_eq!(ClientCore::refusal_before_sending(&two).unwrap().1,
+            "Error reading request:Cannot specify Trailing Amount and Trailing Percent at the same time");
     }
 
     // ibx#468: two local refusals of the reference.
