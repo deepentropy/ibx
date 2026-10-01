@@ -215,6 +215,24 @@ impl SecureChannel {
     pub fn read_iv(&self) -> Option<&[u8]> {
         self.read_iv.as_deref()
     }
+
+    /// Test channel with all-zero keys and IVs: two of them encrypt for
+    /// each other.
+    #[cfg(test)]
+    pub(crate) fn zero_keys_for_test() -> Self {
+        Self {
+            client_random: [0u8; 32],
+            private_key: BigUint::from(0u32),
+            public_key: BigUint::from(0u32),
+            key_block: Some(vec![0u8; 104]),
+            write_aes_key: Some(vec![0u8; 16]),
+            read_aes_key: Some(vec![0u8; 16]),
+            write_iv: Some(vec![0u8; 16]),
+            read_iv: Some(vec![0u8; 16]),
+            write_mac_key: Some(vec![0u8; 20]),
+            read_mac_key: Some(vec![0u8; 20]),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -805,8 +805,8 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     log::info!("CCP reconnect CONNECT_REQUEST sent (session={}, hash={})", auth.server_session_id, token_hash);
 
     // Receive AUTH_START — may get NS_REDIRECT instead
-    let auth_start = match session::recv_secure(&mut tls, &mut channel) {
-        Ok(data) => data,
+    let auth_start = match session::recv_auth_start(&mut tls, &mut channel) {
+        Ok(start) => start,
         Err(e) if e.to_string().starts_with("REDIRECT:") => {
             let target = e.to_string().replace("REDIRECT:", "");
             let redirect_host = target.split(':').next().unwrap_or(&target).to_string();
@@ -821,12 +821,9 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         Err(e) => return Err(e),
     };
 
-    // Parse AUTH_START field[5] for auth mode: 2=SOFT_TOKEN, 0=SRP required
-    let auth_text = String::from_utf8_lossy(&auth_start);
-    let auth_fields: Vec<&str> = auth_text.split(';').collect();
-    let auth_mode: u32 = auth_fields.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-    if auth_mode == 2 {
+    // The soft flag of the auth start selects the session-token step, as in
+    // the reference; it is read only from a real auth start (ibx#353).
+    if auth_start.soft_flag != 0 {
         // SOFT_TOKEN challenge-response (4 states)
         do_ccp_soft_token(&mut tls, &auth.session_key)?;
 
@@ -844,7 +841,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
             }
         }
     } else {
-        // Server requires full SRP (auth_mode != 2). Re-run the SRP handshake
+        // Server requires full SRP (soft flag 0). Re-run the SRP handshake
         // with the credentials cached on ReconnectAuth — the same path
         // Gateway::connect uses on first login.
         log::info!("CCP reconnect: server requires SRP, running handshake with cached credentials");
@@ -868,7 +865,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         let raw_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
 
         let inner = if raw_type == ns::NS_SECURE_MESSAGE {
-            let ct = B64.decode(parts[2])
+            let ct = B64.decode(parts.get(2).copied().unwrap_or(""))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
             channel.decrypt(&ct)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
@@ -1006,11 +1003,11 @@ pub struct GatewayConfig {
     /// server-side deadline). Set lower to fail fast for unattended logins.
     /// Only consulted on non-paper logins; paper logins skip the gate entirely.
     pub ib_key_timeout_secs: u64,
-    /// Account-specific second-factor token sub-type used in the SWCR_TOKEN
-    /// state=1 init body (`M.D` field). Default `"2a"` matches the captured
-    /// reference profile; other accounts may use a different value. Capture
-    /// the live value via ib-agent's `SWCR_TOKEN_SUBTYPE` hook if the default
-    /// doesn't trigger the IBKey push for your account.
+    /// Override of the second-factor token sub-type sent in the SWCR_TOKEN
+    /// state=1 init body (`M.D` field). Empty (the default,
+    /// [`session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE`]): the value comes from the
+    /// second-factor list of the session's auth start, as the reference
+    /// does (ibx#279). Set it only to force another value.
     pub ib_key_token_sub_type: String,
     /// If set, the IBKey gate uses the **Challenge/Response** path instead
     /// of waiting for a mobile push approval. After the server delivers
@@ -1134,8 +1131,8 @@ impl Gateway {
         session::send_secure(&mut tls, &mut channel, connect_req.as_bytes())?;
 
         // Receive AUTH_START (may get a redirect instead for paper accounts)
-        let _auth_start = match session::recv_secure(&mut tls, &mut channel) {
-            Ok(data) => data,
+        let auth_start = match session::recv_auth_start(&mut tls, &mut channel) {
+            Ok(start) => start,
             Err(e) if e.to_string().starts_with("REDIRECT:") => {
                 let target = e.to_string().strip_prefix("REDIRECT:").unwrap().to_string();
                 // Extract host (strip port if present — auth always uses AUTH_PORT)
@@ -1158,7 +1155,20 @@ impl Gateway {
         // Captures the SOFT session token from AUTH_FINISH PASSED — this is
         // the token used for downstream farm logons (NOT the SRP session_key).
         let mut soft_token: Option<BigUint> = None;
-        if !config.paper {
+        // The second factor and its token sub-type come from the auth start
+        // of this session; the config value only overrides the sub-type
+        // (ibx#279). An empty list means no second factor, as in the
+        // reference.
+        let second_factor = if config.paper {
+            None
+        } else {
+            let token = auth_start.mobile_key_token(&config.ib_key_token_sub_type)?;
+            if token.is_none() {
+                log::info!("Auth start lists no second factor: none required");
+            }
+            token
+        };
+        if let Some(token_sub_type) = second_factor {
             let deadline = std::time::Instant::now()
                 + std::time::Duration::from_secs(config.ib_key_timeout_secs);
             // Live logins enter a human-approval window here: connect() blocks
@@ -1182,7 +1192,7 @@ impl Gateway {
             }
             match session::do_ib_key_2fa(
                 &mut tls,
-                &config.ib_key_token_sub_type,
+                &token_sub_type,
                 deadline,
                 config.code_provider.as_ref(),
             )? {
@@ -1239,7 +1249,7 @@ impl Gateway {
 
             // Decrypt if encrypted, otherwise use raw
             let inner = if raw_type == ns::NS_SECURE_MESSAGE {
-                let ct = B64.decode(parts[2])
+                let ct = B64.decode(parts.get(2).copied().unwrap_or(""))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
                 channel.decrypt(&ct)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?

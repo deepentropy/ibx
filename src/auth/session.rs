@@ -379,52 +379,197 @@ pub fn is_backup_host_notice(text: &str) -> bool {
     notice
 }
 
-/// Receive an encrypted response and decrypt.
+/// Receive the auth start (`NS_AUTH_START`) of a login, decrypting secure
+/// messages.
+///
+/// As in the reference, a secure message (`NS_SECURE_MESSAGE`) is decrypted and its plain
+/// text is handled by its own message type, not trusted as the auth start
+/// (ibx#353): an inner auth start is returned, an inner redirect gives the
+/// `REDIRECT:` error, an inner error answer gives its login error, a
+/// backup-host notice is skipped, and any other type is refused. An auth
+/// start sent without encryption is accepted, as the reference does.
+///
+/// Returns the plain text of the auth start.
 pub fn recv_secure<R: Read>(
     stream: &mut R,
     channel: &mut SecureChannel,
 ) -> io::Result<Vec<u8>> {
-    let text = loop {
-        let (payload, _) = ns::ns_recv(stream)?;
-        let text = String::from_utf8_lossy(&payload).into_owned();
-        if is_backup_host_notice(&text) {
-            continue;
+    let mut inner: Option<Vec<u8>> = None;
+    loop {
+        let bytes = match inner.take() {
+            Some(plain) => plain,
+            None => ns::ns_recv(stream)?.0,
+        };
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let parts: Vec<&str> = text.split(';').collect();
+        if parts.len() < 2 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "malformed NS response"));
         }
-        break text;
-    };
-    let parts: Vec<&str> = text.split(';').collect();
+        let msg_type: u32 = parts[1]
+            .parse()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid msg type"))?;
+        match msg_type {
+            NS_AUTH_START => return Ok(bytes),
+            NS_SECURE_ERROR | NS_ERROR_RESPONSE => return Err(ns_error(msg_type, &parts[2..])),
+            NS_REDIRECT => {
+                let target = parts.get(2).unwrap_or(&"");
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    format!("REDIRECT:{}", target),
+                ));
+            }
+            NS_BACKUP_HOST => {
+                log::info!("Backup host notice received (ignored)");
+            }
+            NS_SECURE_MESSAGE => {
+                let ct = B64
+                    .decode(parts.get(2).copied().unwrap_or(""))
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                let plain = channel
+                    .decrypt(&ct)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                inner = Some(plain);
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Expected the auth start, got message type {}", other),
+                ));
+            }
+        }
+    }
+}
 
-    if parts.len() < 2 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "malformed NS response"));
+/// Second factor of the mobile-key kind, the one this crate drives
+/// (`XYZ_MSG_SWCR_TOKEN`).
+pub const SECOND_FACTOR_MOBILE_KEY: u32 = 5;
+
+/// One entry of the second-factor list of the auth start: a type with an
+/// optional sub-type and suffix (ibx#279).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondFactor {
+    pub kind: u32,
+    pub subtype: u32,
+    pub suffix: String,
+}
+
+impl SecondFactor {
+    /// Parse one entry the way the reference does. `None` when the type or
+    /// the sub-type is not a number.
+    pub fn parse(entry: &str) -> Option<Self> {
+        let entry = entry.trim();
+        let (kind, rest) = match entry.split_once('.') {
+            Some((k, r)) => (k, r),
+            None => (entry, ""),
+        };
+        let kind = kind.parse().ok()?;
+        let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let (subtype, suffix) = rest.split_at(digits);
+        let subtype = if subtype.is_empty() { 0 } else { subtype.parse().ok()? };
+        Some(Self { kind, subtype, suffix: suffix.to_string() })
+    }
+}
+
+/// Fields of an auth start that the login uses, read where the reference
+/// reads them (ibx#353, ibx#279).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthStart {
+    /// Message version.
+    pub version: u32,
+    /// A password step is required.
+    pub password_required: bool,
+    /// Second factors of the session, in server order; empty when the
+    /// session has none.
+    pub second_factors: Vec<SecondFactor>,
+    /// Non-zero selects the session-token step.
+    pub soft_flag: u32,
+}
+
+/// Lowest auth start version whose first mobile-key message carries the
+/// token sub-type (reference rule).
+const SUB_TYPE_MIN_VERSION: u32 = 15;
+
+impl AuthStart {
+    /// Parse the plain text of an auth start. Refuses any other message
+    /// type. Empty fields keep their position.
+    pub fn parse(plain: &[u8]) -> io::Result<Self> {
+        let text = String::from_utf8_lossy(plain);
+        let text = text.strip_prefix("MISC").unwrap_or(&text);
+        let fields: Vec<&str> = text.split(';').collect();
+        let msg_type = fields.get(1).and_then(|t| t.parse::<u32>().ok());
+        if msg_type != Some(NS_AUTH_START) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Expected the auth start, got message type {:?}", fields.get(1).copied().unwrap_or("")),
+            ));
+        }
+        let number = |i: usize| fields.get(i).and_then(|f| f.trim().parse::<u32>().ok()).unwrap_or(0);
+        let second_factors = fields.get(4).copied().unwrap_or("")
+            .split(',')
+            .filter(|e| !e.trim().is_empty())
+            .filter_map(|e| {
+                let factor = SecondFactor::parse(e);
+                if factor.is_none() {
+                    log::warn!("Auth start: second-factor entry {:?} not understood", e);
+                }
+                factor
+            })
+            .collect();
+        Ok(Self {
+            version: number(0),
+            password_required: number(3) != 0,
+            second_factors,
+            soft_flag: number(5),
+        })
     }
 
-    let msg_type: u32 = parts[1]
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid msg type"))?;
-
-    if msg_type == NS_SECURE_ERROR || msg_type == ns::NS_ERROR_RESPONSE {
-        return Err(ns_error(msg_type, &parts[2..]));
-    }
-    if msg_type == NS_REDIRECT {
-        let target = parts.get(2).unwrap_or(&"");
-        return Err(io::Error::new(
-            io::ErrorKind::ConnectionReset,
-            format!("REDIRECT:{}", target),
-        ));
-    }
-    if msg_type != NS_SECURE_MESSAGE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Expected 534, got {}: {}", msg_type, text),
-        ));
+    /// The first mobile-key entry of the list, if any.
+    pub fn mobile_key(&self) -> Option<&SecondFactor> {
+        self.second_factors.iter().find(|f| f.kind == SECOND_FACTOR_MOBILE_KEY)
     }
 
-    let ct = B64
-        .decode(parts[2])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    channel
-        .decrypt(&ct)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    /// Second-factor step after the password step of a live login:
+    /// `Ok(None)` when the list is empty (no second factor, as in the
+    /// reference), `Ok(Some(sub_type))` for the first mobile-key entry, with
+    /// `override_sub_type` used instead when it is not empty, and an
+    /// `Unsupported` error when the list only has other kinds of factor.
+    ///
+    /// With several entries the reference preselects the factor used last
+    /// time or asks the user; here the first mobile-key entry is used.
+    pub fn mobile_key_token(&self, override_sub_type: &str) -> io::Result<Option<String>> {
+        if self.second_factors.is_empty() {
+            return Ok(None);
+        }
+        let factor = self.mobile_key().ok_or_else(|| {
+            let kinds: Vec<String> = self.second_factors.iter().map(|f| f.kind.to_string()).collect();
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("second factor of type {} is not supported (only type {})",
+                    kinds.join(", "), SECOND_FACTOR_MOBILE_KEY),
+            )
+        })?;
+        Ok(Some(if override_sub_type.is_empty() {
+            self.token_sub_type(factor)
+        } else {
+            override_sub_type.to_string()
+        }))
+    }
+
+    /// Token sub-type sent in the first mobile-key message for `factor`:
+    /// sub-type then suffix, only from `SUB_TYPE_MIN_VERSION` and with a
+    /// non-zero sub-type, else empty (reference rule).
+    pub fn token_sub_type(&self, factor: &SecondFactor) -> String {
+        if self.version >= SUB_TYPE_MIN_VERSION && factor.subtype > 0 {
+            format!("{}{}", factor.subtype, factor.suffix)
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// [`recv_secure`] then [`AuthStart::parse`].
+pub fn recv_auth_start<R: Read>(stream: &mut R, channel: &mut SecureChannel) -> io::Result<AuthStart> {
+    AuthStart::parse(&recv_secure(stream, channel)?)
 }
 
 /// Receive a framed message and classify as text or binary.
@@ -815,11 +960,11 @@ fn hex_dump(bytes: &[u8]) -> String {
 /// timeout measured in capture run B (~18 min).
 pub const IB_KEY_DEFAULT_TIMEOUT_SECS: u64 = 1080;
 
-/// Default IBKey token sub-type used in the SWCR_TOKEN state=1 body. Matches
-/// the captured reference profile in ib-agent#123. Some accounts/SWCR
-/// configurations require a different value — override via
-/// [`crate::gateway::GatewayConfig::ib_key_token_sub_type`].
-pub const IB_KEY_DEFAULT_TOKEN_SUB_TYPE: &str = "2a";
+/// Default of [`crate::gateway::GatewayConfig::ib_key_token_sub_type`]:
+/// empty, so the token sub-type sent in the SWCR_TOKEN state=1 body comes
+/// from the second-factor list of the session's auth start, as the
+/// reference does (ibx#279). A non-empty config value overrides it.
+pub const IB_KEY_DEFAULT_TOKEN_SUB_TYPE: &str = "";
 
 /// Cadence at which the server probes during the wait window.
 const IB_KEY_HEARTBEAT_CADENCE_SECS: u64 = 20;
@@ -1686,7 +1831,116 @@ mod tests {
         let mut cursor = io::Cursor::new(frame);
         let mut channel = SecureChannel::new();
         let err = recv_secure(&mut cursor, &mut channel).unwrap_err();
-        assert!(err.to_string().contains("Expected 534, got 999"));
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("got message type 999"), "{err}");
+    }
+
+    /// A secure message (`NS_SECURE_MESSAGE`) carrying `inner`, encrypted for a zero-key
+    /// channel.
+    fn secure_frame(inner: &str) -> Vec<u8> {
+        secure_frames(&[inner]).remove(0)
+    }
+
+    /// Secure messages in order, one sender channel (chained IVs).
+    fn secure_frames(inners: &[&str]) -> Vec<Vec<u8>> {
+        let mut server = SecureChannel::zero_keys_for_test();
+        inners.iter().map(|inner| {
+            let ct = B64.encode(server.encrypt(inner.as_bytes()));
+            build_ns_frame(&format!("50;534;{};", ct))
+        }).collect()
+    }
+
+    fn recv_secure_frames(frames: Vec<Vec<u8>>) -> io::Result<Vec<u8>> {
+        let mut cursor = io::Cursor::new(frames.concat());
+        let mut channel = SecureChannel::zero_keys_for_test();
+        recv_secure(&mut cursor, &mut channel)
+    }
+
+    const LIVE_AUTH_START: &str = "50;520;1;1;5.2a;0;1234567890123;1;1234567890123456789;OTPWAY;;";
+
+    // ibx#353: the decrypted text is handled by its own type.
+    #[test]
+    fn recv_secure_returns_only_a_real_auth_start() {
+        let plain = recv_secure_frames(vec![secure_frame(LIVE_AUTH_START)]).unwrap();
+        assert_eq!(plain, LIVE_AUTH_START.as_bytes());
+
+        // Inner redirect: followed as a redirect.
+        let err = recv_secure_frames(vec![secure_frame("50;524;ndc1.example:4001;")]).unwrap_err();
+        assert!(err.to_string().starts_with("REDIRECT:ndc1.example:4001"), "{err}");
+
+        // Inner error answer: its login error.
+        let err = recv_secure_frames(vec![secure_frame("50;519;5;not ready;")]).unwrap_err();
+        assert_eq!(login_error(&err).unwrap().kind, LoginErrorKind::SiteNotReady);
+
+        // Inner connect response: not an auth start, refused.
+        let err = recv_secure_frames(vec![secure_frame("50;523;host:4000;0;TST;")]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("got message type 523"), "{err}");
+
+        // Inner backup-host notice: skipped, the next frame is read.
+        let plain = recv_secure_frames(secure_frames(&["50;527;x;", LIVE_AUTH_START])).unwrap();
+        assert_eq!(plain, LIVE_AUTH_START.as_bytes());
+
+        // An auth start sent in clear is accepted, as the reference does.
+        let plain = recv_secure_frames(vec![build_ns_frame(LIVE_AUTH_START)]).unwrap();
+        assert_eq!(plain, LIVE_AUTH_START.as_bytes());
+
+        // A secure message with no ciphertext field is an error, not a panic.
+        assert!(recv_secure_frames(vec![build_ns_frame("50;534")]).is_err());
+    }
+
+    // ibx#279: the second-factor list and the soft flag at their fixed
+    // positions, empty fields kept.
+    #[test]
+    fn auth_start_fields_at_fixed_positions() {
+        let live = AuthStart::parse(LIVE_AUTH_START.as_bytes()).unwrap();
+        assert_eq!(live.version, 50);
+        assert!(live.password_required);
+        assert_eq!(live.second_factors, vec![SecondFactor { kind: 5, subtype: 2, suffix: "a".into() }]);
+        assert_eq!(live.soft_flag, 0);
+
+        let paper = AuthStart::parse(b"50;520;1;1;;0;1234567890123;1;1234567890123456789;OTPWAY;;").unwrap();
+        assert!(paper.second_factors.is_empty());
+        assert_eq!(paper.soft_flag, 0);
+
+        let reconnect = AuthStart::parse(b"50;520;1;0;;2;-1;0;0;;;").unwrap();
+        assert!(!reconnect.password_required);
+        assert_eq!(reconnect.soft_flag, 2);
+
+        // Not an auth start: refused, its fields are not read.
+        let err = AuthStart::parse(b"50;523;a;b;c;2;").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn second_factor_entries() {
+        let p = |s: &str| SecondFactor::parse(s);
+        assert_eq!(p("5.2a"), Some(SecondFactor { kind: 5, subtype: 2, suffix: "a".into() }));
+        assert_eq!(p("5.2i"), Some(SecondFactor { kind: 5, subtype: 2, suffix: "i".into() }));
+        assert_eq!(p("4.1"), Some(SecondFactor { kind: 4, subtype: 1, suffix: String::new() }));
+        assert_eq!(p("3"), Some(SecondFactor { kind: 3, subtype: 0, suffix: String::new() }));
+        assert_eq!(p("x.2a"), None);
+        let list = AuthStart::parse(b"50;520;1;1;4.2,5.2i;0;").unwrap();
+        assert_eq!(list.second_factors.len(), 2);
+        assert_eq!(list.mobile_key(), Some(&SecondFactor { kind: 5, subtype: 2, suffix: "i".into() }));
+    }
+
+    // ibx#279: the sub-type sent comes from the session's list; the config
+    // value only overrides it.
+    #[test]
+    fn mobile_key_token_from_the_auth_start() {
+        let start = |s: &str| AuthStart::parse(s.as_bytes()).unwrap();
+        assert_eq!(start(LIVE_AUTH_START).mobile_key_token("").unwrap(), Some("2a".into()));
+        assert_eq!(start("50;520;1;1;5.2i;0;").mobile_key_token("").unwrap(), Some("2i".into()));
+        assert_eq!(start("50;520;1;1;5.2i;0;").mobile_key_token("7z").unwrap(), Some("7z".into()));
+        // No sub-type, or a version below 15: empty sub-type.
+        assert_eq!(start("50;520;1;1;5;0;").mobile_key_token("").unwrap(), Some(String::new()));
+        assert_eq!(start("14;520;1;1;5.2a;0;").mobile_key_token("").unwrap(), Some(String::new()));
+        // Empty list: no second factor.
+        assert_eq!(start("50;520;1;1;;0;").mobile_key_token("").unwrap(), None);
+        // Only other kinds of factor: not supported.
+        let err = start("50;520;1;1;4.1;0;").mobile_key_token("").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
     }
 
     // ── Constants ───────────────────────────────────────────────────────
