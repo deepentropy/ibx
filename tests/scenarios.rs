@@ -61,7 +61,8 @@ fn order_lifecycle_partial_then_full_fill() {
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:100:Submitted")));
-    assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:BOT:120")));
+    // A live execution has no request: reqId -1, as the reference.
+    assert!(w.events.iter().any(|e| e.starts_with("exec_details:-1:BOT:120")), "{:?}", w.events);
 
     // Step 3: Remaining 80 fills
     shared.orders.push_fill(Fill {
@@ -73,7 +74,7 @@ fn order_lifecycle_partial_then_full_fill() {
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:100:Filled")));
-    assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:BOT:80")));
+    assert!(w.events.iter().any(|e| e.starts_with("exec_details:-1:BOT:80")), "{:?}", w.events);
 }
 
 /// Place order → cancel → verify cancelled status, no ghost position.
@@ -525,8 +526,14 @@ fn account_req_positions_reflects_fills() {
         con_id: 265598, position_fixed: (-50) as i64 * ibx::types::QTY_SCALE, avg_cost: 150 * PRICE_SCALE, ..Default::default()
     });
 
+    // The rows wait for the position store, as the reference: nothing
+    // before the account download is complete.
     let mut w = RecordingWrapper::default();
     client.req_positions(&mut w);
+    assert!(w.events.is_empty(), "{:?}", w.events);
+
+    shared.portfolio.set_account_download_complete();
+    client.process_msgs(&mut w);
 
     let positions: Vec<_> = w.events.iter().filter(|e| e.starts_with("position:")).collect();
     assert_eq!(positions.len(), 2);
@@ -762,7 +769,8 @@ fn engine_to_eclient_end_to_end() {
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("order_status:42:Filled")));
-    assert!(w.events.iter().any(|e| e.starts_with("exec_details:1:BOT:100")));
+    // A live execution has no request: reqId -1, as the reference.
+    assert!(w.events.iter().any(|e| e.starts_with("exec_details:-1:BOT:100")), "{:?}", w.events);
 }
 
 /// Short sell scenario: sell short → buy to cover → flat.
@@ -969,22 +977,30 @@ fn req_completed_orders_empty_still_fires_end() {
 //  PNL SUBSCRIPTION
 // ═══════════════════════════════════════════════════════════════════════
 
+/// The account P&L is the sum of the position rows, as the reference; with
+/// no quote the position is priced with the server's mark (ibx#238). It is
+/// sent again only when a value changes.
+fn set_aapl_position_marked(shared: &SharedState, mark: i64) {
+    shared.portfolio.set_position_info(PositionInfo {
+        con_id: 265598, position_fixed: (100) as i64 * ibx::types::QTY_SCALE,
+        avg_cost: 150 * PRICE_SCALE, ..Default::default()
+    });
+    shared.portfolio.set_position_marks(265598, mark * PRICE_SCALE, 0, 0, 0);
+}
+
 #[test]
 fn pnl_subscription_fires_on_change() {
     let (client, _rx, shared) = test_client();
 
     client.req_pnl(10, "DU123", "");
 
-    // Set initial account state with PnL
-    let mut acct = AccountState::default();
-    acct.daily_pnl = 500 * PRICE_SCALE;
-    acct.unrealized_pnl = 1000 * PRICE_SCALE;
-    acct.realized_pnl = 200 * PRICE_SCALE;
-    shared.portfolio.set_account(&acct);
+    // 100 shares, avg cost 150, mark 155, opened today: daily 500,
+    // unrealized 500, realized 0.
+    set_aapl_position_marked(&shared, 155);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("pnl:10:")), "PnL callback expected");
+    assert!(w.events.iter().any(|e| e == "pnl:10:500:500:0"), "PnL callback expected: {:?}", w.events);
 
     // Same values → no duplicate
     w.events.clear();
@@ -992,11 +1008,10 @@ fn pnl_subscription_fires_on_change() {
     assert!(!w.events.iter().any(|e| e.starts_with("pnl:")), "No duplicate PnL expected");
 
     // Changed values → fires again
-    acct.daily_pnl = 600 * PRICE_SCALE;
-    shared.portfolio.set_account(&acct);
+    set_aapl_position_marked(&shared, 156);
     w.events.clear();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("pnl:10:")), "Changed PnL should fire callback");
+    assert!(w.events.iter().any(|e| e == "pnl:10:600:600:0"), "Changed PnL should fire callback: {:?}", w.events);
 }
 
 #[test]
@@ -1004,9 +1019,7 @@ fn cancel_pnl_stops_dispatch() {
     let (client, _rx, shared) = test_client();
 
     client.req_pnl(10, "DU123", "");
-    let mut acct = AccountState::default();
-    acct.daily_pnl = 500 * PRICE_SCALE;
-    shared.portfolio.set_account(&acct);
+    set_aapl_position_marked(&shared, 155);
 
     // First call should fire
     let mut w = RecordingWrapper::default();
@@ -1015,8 +1028,7 @@ fn cancel_pnl_stops_dispatch() {
 
     // Cancel and change value
     client.cancel_pnl(10);
-    acct.daily_pnl = 999 * PRICE_SCALE;
-    shared.portfolio.set_account(&acct);
+    set_aapl_position_marked(&shared, 160);
 
     w.events.clear();
     client.process_msgs(&mut w);
@@ -1043,8 +1055,10 @@ fn pnl_single_dispatches_position_info() {
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("pnl_single:20:")), "PnL single callback expected");
     // 100 shares, avg cost 150, mark 155, opened today: daily 500, unrealized
-    // 500, realized 0, value 15500.
-    assert!(w.events.iter().any(|e| e == "pnl_single:20:100:500:500:0:15500"), "{:?}", w.events);
+    // 500, value 15500. Realized is unset (f64::MAX): no seed row and no fill
+    // realized today, as the reference (ibx#478).
+    let expected = format!("pnl_single:20:100:500:500:{}:15500", f64::MAX);
+    assert!(w.events.iter().any(|e| *e == expected), "{:?}", w.events);
 
     // Cancel should stop dispatch
     client.cancel_pnl_single(20);
@@ -1057,17 +1071,40 @@ fn pnl_single_dispatches_position_info() {
 //  ACCOUNT SUMMARY
 // ═══════════════════════════════════════════════════════════════════════
 
-#[test]
-fn account_summary_one_shot_delivery() {
-    let (client, _rx, shared) = test_client();
+/// The tag list of a request, as sent to the server (ibx#479).
+fn summary_subscription(rx: &crossbeam_channel::Receiver<ControlCommand>) -> Option<(String, String)> {
+    rx.try_iter().find_map(|c| match c {
+        ControlCommand::SubscribeAccountSummary { sr_id, tags, .. } => Some((sr_id, tags)),
+        _ => None,
+    })
+}
 
-    let mut acct = AccountState::default();
-    acct.net_liquidation = 100_000 * PRICE_SCALE;
-    acct.buying_power = 400_000 * PRICE_SCALE;
-    acct.available_funds = 50_000 * PRICE_SCALE;
-    shared.portfolio.set_account(&acct);
+fn summary_row(key: &str, value: &str, currency: &str) -> ibx::bridge::AccountRow {
+    ibx::bridge::AccountRow { key: key.into(), value: value.into(), currency: currency.into(), ledger: false }
+}
+
+/// A server subscription, as the reference: the tags go to the server, the
+/// rows are the ones it sends for the request, each batch ends with
+/// account_summary_end, and nothing is sent between batches (no timer).
+#[test]
+fn account_summary_delivers_each_server_batch() {
+    let (client, rx, shared) = test_client();
 
     client.req_account_summary(5, "All", "NetLiquidation,BuyingPower,AvailableFunds");
+    let (sr_id, tags) = summary_subscription(&rx).expect("a subscription sent to the server");
+    assert_eq!(tags, "NetLiquidation,BuyingPower,AvailableFunds");
+
+    shared.portfolio.push_account_summary_event(ibx::bridge::AccountSummaryEvent {
+        sr_id: sr_id.clone(), ledger: false, end: false,
+        rows: vec![
+            summary_row("NetLiquidation", "100000.00", "USD"),
+            summary_row("BuyingPower", "400000.00", "USD"),
+            summary_row("AvailableFunds", "50000.00", "USD"),
+        ],
+    });
+    shared.portfolio.push_account_summary_event(ibx::bridge::AccountSummaryEvent {
+        sr_id, ledger: false, end: true, rows: vec![],
+    });
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -1082,7 +1119,7 @@ fn account_summary_one_shot_delivery() {
     assert!(summaries.iter().any(|e| e.contains(":BuyingPower:")));
     assert!(summaries.iter().any(|e| e.contains(":AvailableFunds:")));
 
-    // Second call should NOT fire (one-shot, already consumed)
+    // No new server batch: nothing is sent again.
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(!w.events.iter().any(|e| e.starts_with("account_summary:")));
@@ -1105,25 +1142,21 @@ fn cancel_account_summary_prevents_delivery() {
     assert!(!w.events.iter().any(|e| e.starts_with("account_summary:")));
 }
 
+/// Empty tags are refused locally with 321, as the reference; nothing is
+/// sent to the server and no row or end follows.
 #[test]
-fn account_summary_empty_tags_returns_all() {
-    let (client, _rx, shared) = test_client();
+fn account_summary_empty_tags_refused_with_321() {
+    let (client, rx, _shared) = test_client();
 
-    let mut acct = AccountState::default();
-    acct.net_liquidation = 100_000 * PRICE_SCALE;
-    acct.buying_power = 400_000 * PRICE_SCALE;
-    acct.total_cash_value = 50_000 * PRICE_SCALE;
-    shared.portfolio.set_account(&acct);
-
-    // Empty tags string → all non-zero fields
     client.req_account_summary(7, "All", "");
+    assert!(summary_subscription(&rx).is_none(), "no subscription for empty tags");
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
 
-    let summaries: Vec<_> = w.events.iter().filter(|e| e.starts_with("account_summary:7:")).collect();
-    assert!(summaries.len() >= 3, "Expected at least 3 non-zero fields, got {}", summaries.len());
-    assert!(w.events.iter().any(|e| e == "account_summary_end:7"));
+    assert!(w.events.iter().any(|e| e == "error:7:321:Error validating request.-'b2' : cause - Tags cannot be null"), "{:?}", w.events);
+    assert!(!w.events.iter().any(|e| e.starts_with("account_summary:7:")), "{:?}", w.events);
+    assert!(!w.events.iter().any(|e| e == "account_summary_end:7"), "{:?}", w.events);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
