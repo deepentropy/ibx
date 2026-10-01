@@ -400,6 +400,9 @@ impl HotLoop {
         }
 
         self.running = true;
+        for conn in [&mut self.farm_conn, &mut self.ccp_conn, &mut self.hmds_conn].into_iter().flatten() {
+            conn.set_queued_writes(true);
+        }
 
         while self.running {
             self.context.loop_iterations += 1;
@@ -442,7 +445,11 @@ impl HotLoop {
             // 4. Check control_plane_rx (SPSC) for commands
             self.poll_control_commands();
 
-            // 5. Heartbeat check (auth 10s, farm 30s)
+            // 4b. Write what waits for a slow peer; a failed write drops
+            //     that link (ibx#254)
+            self.check_writes();
+
+            // 5. Liveness of the links (ibx#419)
             self.check_heartbeats();
 
             // 5b. Poll pending reconnects and schedule the next attempts
@@ -889,6 +896,51 @@ impl HotLoop {
         }
     }
 
+    /// Each link writes on its own (ibx#254): output a slow peer has not
+    /// taken waits on its connection and goes out here, so it stalls only
+    /// that link. A write error drops the link and the reconnect follows,
+    /// as in the reference; the frame is never sent again.
+    #[inline]
+    fn check_writes(&mut self) {
+        if !self.ccp.disconnected {
+            if let Some(conn) = self.ccp_conn.as_mut() {
+                if conn.has_queued_output() {
+                    let _ = conn.flush_queued();
+                }
+                if let Some(error) = conn.write_error() {
+                    log::error!("Auth connection: send: {}", error);
+                    self.drop_ccp_link();
+                }
+            }
+        }
+        if !self.farm.disconnected {
+            if let Some(conn) = self.farm_conn.as_mut() {
+                if conn.has_queued_output() {
+                    let _ = conn.flush_queued();
+                }
+                if let Some(error) = conn.write_error() {
+                    log::error!("Market data farm: send failed: {}", error);
+                    conn.shutdown();
+                    self.farm.handle_disconnect(&mut self.context, &self.event_tx);
+                }
+            }
+        }
+        if !self.hmds.disconnected {
+            if let Some(conn) = self.hmds_conn.as_mut() {
+                if conn.has_queued_output() {
+                    let _ = conn.flush_queued();
+                }
+                if let Some(error) = conn.write_error() {
+                    log::error!("Historical farm: send failed: {}", error);
+                    conn.shutdown();
+                    self.hmds.disconnected = true;
+                    // With no socket held the reconnect loop re-dials it.
+                    self.hmds_conn = None;
+                }
+            }
+        }
+    }
+
     fn check_heartbeats(&mut self) {
         self.check_heartbeats_at(Instant::now());
     }
@@ -1004,7 +1056,8 @@ impl HotLoop {
     }
 
     /// Replace the farm connection (after reconnection) and re-subscribe to all instruments.
-    pub fn reconnect_farm(&mut self, conn: Connection) {
+    pub fn reconnect_farm(&mut self, mut conn: Connection) {
+        conn.set_queued_writes(true);
         self.farm.reconnect(
             conn,
             &mut self.farm_conn,
@@ -1013,7 +1066,8 @@ impl HotLoop {
     }
 
     /// Replace the auth connection (after reconnection) and reconcile order state.
-    pub fn reconnect_ccp(&mut self, conn: Connection) {
+    pub fn reconnect_ccp(&mut self, mut conn: Connection) {
+        conn.set_queued_writes(true);
         self.ccp.reconnect(conn, &mut self.ccp_conn, &mut self.hb, &self.account_id);
     }
 
@@ -1280,8 +1334,9 @@ impl HotLoop {
             None => return,
         };
         match rx.try_recv() {
-            Ok(Ok(conn)) => {
+            Ok(Ok(mut conn)) => {
                 log::info!("HMDS reconnect succeeded (attempt {})", self.hmds_reconnect_attempt);
+                conn.set_queued_writes(true);
                 self.hmds_conn = Some(conn);
                 self.hmds.disconnected = false;
                 self.hb.hmds_connected(Instant::now());
@@ -2248,6 +2303,41 @@ mod tests {
         assert!(engine.farm.disconnected);
         engine.report_link_changes();
         assert_eq!(shared.drain_connection_notices().iter().map(|n| n.0).collect::<Vec<_>>(), vec![2103]);
+    }
+
+    // ibx#254: a farm whose peer stops reading stalls only the farm: the
+    // loop goes on and sends on the auth link. A write error drops the link
+    // it happened on (1100 for the auth link), without a retry.
+    #[test]
+    fn a_stalled_farm_does_not_block_the_other_links() {
+        let (mut engine, shared, mut servers) = engine_with_links();
+        for conn in [&mut engine.farm_conn, &mut engine.ccp_conn, &mut engine.hmds_conn].into_iter().flatten() {
+            conn.set_queued_writes(true);
+        }
+        engine.report_link_changes();
+        let big = vec![b'x'; 64 * 1024];
+        let farm = engine.farm_conn.as_mut().unwrap();
+        let mut n = 0;
+        while !farm.has_queued_output() {
+            farm.send_raw(&big).unwrap();
+            n += 1;
+            assert!(n < 10_000, "the socket buffers never filled");
+        }
+        engine.check_writes();
+        assert!(!engine.farm.disconnected, "a slow peer is not an error");
+        assert!(engine.farm_conn.as_ref().unwrap().has_queued_output());
+
+        engine.ccp_conn.as_mut().unwrap().send_raw(b"order").unwrap();
+        assert!(contains(&received(&mut servers[0]), "order"), "the auth link is not blocked");
+
+        let ccp = engine.ccp_conn.as_mut().unwrap();
+        ccp.shutdown();
+        assert!(ccp.send_raw(b"cancel").is_err());
+        engine.check_writes();
+        assert!(engine.ccp.disconnected);
+        assert!(!engine.farm.disconnected);
+        engine.report_link_changes();
+        assert_eq!(shared.drain_connection_notices().iter().map(|n| n.0).collect::<Vec<_>>(), vec![1100]);
     }
 
     // ibx#399: 1102 after the status replay end, at once with the farms up.

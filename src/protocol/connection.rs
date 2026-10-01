@@ -3,6 +3,7 @@
 //! Maintains per-connection state: buffer, seq counter,
 //! HMAC sign/read IVs (chained per message).
 
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 
@@ -45,6 +46,15 @@ impl Read for Stream {
     }
 }
 
+impl Stream {
+    fn tcp(&self) -> &TcpStream {
+        match self {
+            Self::Tls(s) => s.get_ref(),
+            Self::Raw(s) => s,
+        }
+    }
+}
+
 impl Write for Stream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
@@ -75,6 +85,16 @@ pub struct Connection {
     pub read_key: Vec<u8>,
     /// IV for verifying inbound messages (chains across messages).
     pub read_iv: Vec<u8>,
+    /// Frames accepted for sending but not yet written, oldest first
+    /// (queued writes only). `out_pos` bytes of the first are written.
+    out: VecDeque<Vec<u8>>,
+    out_pos: usize,
+    /// When set, a send never blocks the caller: what the socket does not
+    /// take at once waits in `out` and goes out with `flush_queued`.
+    queued_writes: bool,
+    /// The first write error. The connection is unusable from then on: the
+    /// owner drops it and reconnects; no frame is written again.
+    write_error: Option<(io::ErrorKind, String)>,
 }
 
 impl Connection {
@@ -95,6 +115,10 @@ impl Connection {
             sign_iv: Vec::new(),
             read_key: Vec::new(),
             read_iv: Vec::new(),
+            out: VecDeque::new(),
+            out_pos: 0,
+            queued_writes: false,
+            write_error: None,
         })
     }
 
@@ -115,6 +139,10 @@ impl Connection {
             sign_iv: Vec::new(),
             read_key: Vec::new(),
             read_iv: Vec::new(),
+            out: VecDeque::new(),
+            out_pos: 0,
+            queued_writes: false,
+            write_error: None,
         })
     }
 
@@ -302,17 +330,103 @@ impl Connection {
     /// be read any more (signature mismatch, ibx#275). Errors are ignored:
     /// the socket may be closed already.
     pub fn shutdown(&mut self) {
-        let tcp = match &self.stream {
-            Stream::Tls(s) => s.get_ref(),
-            Stream::Raw(s) => s,
+        let _ = self.stream.tcp().shutdown(std::net::Shutdown::Both);
+    }
+
+    /// Writes of this connection stop blocking the caller (ibx#254): each
+    /// connection keeps its own output, so a peer that stops reading
+    /// stalls only its own link, as in the reference. There is no write
+    /// timeout, as in the reference: the output waits until the peer reads
+    /// or the system fails the connection.
+    pub fn set_queued_writes(&mut self, on: bool) {
+        self.queued_writes = on;
+    }
+
+    /// Whether accepted frames are still waiting to be written.
+    #[inline]
+    pub fn has_queued_output(&self) -> bool {
+        !self.out.is_empty()
+    }
+
+    /// The write error that made this connection unusable, if any.
+    #[inline]
+    pub fn write_error(&self) -> Option<&str> {
+        self.write_error.as_ref().map(|(_, text)| text.as_str())
+    }
+
+    fn failed(&self) -> io::Error {
+        let (kind, text) = self.write_error.as_ref().expect("write error recorded");
+        io::Error::new(*kind, text.clone())
+    }
+
+    fn record_write_error(&mut self, e: io::Error) -> io::Error {
+        if self.write_error.is_none() {
+            self.write_error = Some((e.kind(), e.to_string()));
+        }
+        e
+    }
+
+    /// Hand one complete frame to the socket. Blocking mode: written at
+    /// once. Queued mode: written as far as the socket takes it without
+    /// waiting, the rest kept in order behind the frames already waiting.
+    /// An error marks the connection failed; the frame is never retried.
+    fn write_frame(&mut self, frame: Vec<u8>) -> io::Result<()> {
+        if self.write_error.is_some() {
+            return Err(self.failed());
+        }
+        if !self.queued_writes {
+            return self.stream.write_all(&frame).map_err(|e| self.record_write_error(e));
+        }
+        self.out.push_back(frame);
+        if self.out.len() == 1 {
+            self.flush_queued()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Write what the socket takes now of the waiting frames, in order,
+    /// without blocking. An error marks the connection failed.
+    pub fn flush_queued(&mut self) -> io::Result<()> {
+        if self.write_error.is_some() {
+            return Err(self.failed());
+        }
+        if self.out.is_empty() {
+            return Ok(());
+        }
+        if let Err(e) = self.stream.tcp().set_nonblocking(true) {
+            return Err(self.record_write_error(e));
+        }
+        let result = loop {
+            let Some(front) = self.out.front() else { break Ok(()) };
+            // A partial TLS record is completed by calling again with the
+            // same bytes, which this does.
+            match self.stream.write(&front[self.out_pos..]) {
+                Ok(0) => break Err(io::Error::new(io::ErrorKind::WriteZero, "socket accepted no bytes")),
+                Ok(n) => {
+                    self.out_pos += n;
+                    if self.out_pos >= front.len() {
+                        self.out.pop_front();
+                        self.out_pos = 0;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => break Err(e),
+            }
         };
-        let _ = tcp.shutdown(std::net::Shutdown::Both);
+        let restored = self.stream.tcp().set_nonblocking(false);
+        match result.and(restored) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(self.record_write_error(e)),
+        }
     }
 
     /// Build a FIX message, sign it, and send it. Increments seq and chains sign IV.
     ///
-    /// State (seq, sign_iv) is committed only after `write_all` returns Ok,
-    /// so a write error leaves the connection retryable rather than poisoned.
+    /// State (seq, sign_iv) is committed once the frame is accepted. A write
+    /// error makes the connection unusable: it is dropped and reconnected,
+    /// the frame is never retried, as in the reference (ibx#254).
     pub fn send_fix(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
         let next_seq = self.seq + 1;
         let msg = fix::fix_build(fields, next_seq);
@@ -325,7 +439,7 @@ impl Connection {
             let (signed, iv) = fix::fix_sign(&msg, &self.sign_key, &self.sign_iv);
             (signed, Some(iv))
         };
-        self.stream.write_all(&to_send)?;
+        self.write_frame(to_send)?;
         self.seq = next_seq;
         if let Some(iv) = next_iv {
             self.sign_iv = iv;
@@ -346,7 +460,7 @@ impl Connection {
             let (signed, iv) = fix::fix_sign(&msg, &self.sign_key, &self.sign_iv);
             (signed, Some(iv))
         };
-        self.stream.write_all(&to_send)?;
+        self.write_frame(to_send)?;
         if let Some(iv) = next_iv {
             self.sign_iv = iv;
         }
@@ -356,7 +470,7 @@ impl Connection {
     /// Build a message, compress, sign, and send. For farm subscribe/data messages.
     /// Uses seq=0 (separate seq space from heartbeats).
     ///
-    /// State (sign_iv) is committed only after `write_all` returns Ok.
+    /// State (sign_iv) is committed once the frame is accepted.
     pub fn send_fixcomp(&mut self, fields: &[(u32, &str)]) -> io::Result<()> {
         let msg = fix::fix_build(fields, 0);
         if log::log_enabled!(log::Level::Trace) {
@@ -369,7 +483,7 @@ impl Connection {
             let (signed, iv) = fix::fix_sign(&wrapped, &self.sign_key, &self.sign_iv);
             (signed, Some(iv))
         };
-        self.stream.write_all(&to_send)?;
+        self.write_frame(to_send)?;
         if let Some(iv) = next_iv {
             self.sign_iv = iv;
         }
@@ -378,8 +492,7 @@ impl Connection {
 
     /// Send raw bytes (pre-built message).
     pub fn send_raw(&mut self, data: &[u8]) -> io::Result<()> {
-        self.stream.write_all(data)?;
-        Ok(())
+        self.write_frame(data.to_vec())
     }
 
     /// Number of buffered bytes not yet extracted as frames.
@@ -536,7 +649,92 @@ mod tests {
             sign_iv: Vec::new(),
             read_key: Vec::new(),
             read_iv: Vec::new(),
+            out: VecDeque::new(),
+            out_pos: 0,
+            queued_writes: false,
+            write_error: None,
         }
+    }
+
+    fn loopback() -> (Connection, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (Connection::new_raw(client).unwrap(), server)
+    }
+
+    fn read_available(server: &mut std::net::TcpStream, want: usize) -> Vec<u8> {
+        server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; 1 << 16];
+        while out.len() < want {
+            match server.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
+    // ibx#254: with a peer that does not read, sends return at once and the
+    // output waits on the connection, in order; it goes out when the peer
+    // reads again. No timeout ends the wait.
+    #[test]
+    fn queued_writes_never_block_on_a_peer_that_does_not_read() {
+        let (mut conn, mut server) = loopback();
+        conn.set_queued_writes(true);
+        let frame = vec![b'x'; 64 * 1024];
+        let mut sent = 0usize;
+        let started = std::time::Instant::now();
+        while !conn.has_queued_output() {
+            conn.send_raw(&frame).unwrap();
+            sent += 1;
+            assert!(sent < 10_000, "the socket buffers never filled");
+        }
+        // More frames while the peer is stalled: accepted, not written.
+        for i in 0..20u8 {
+            conn.send_raw(&[b'#', i]).unwrap();
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "sends did not block");
+        assert!(conn.write_error().is_none());
+
+        let total = sent * frame.len() + 20 * 2;
+        let mut got = Vec::new();
+        while got.len() < total {
+            got.extend(read_available(&mut server, total - got.len()));
+            conn.flush_queued().unwrap();
+        }
+        assert!(!conn.has_queued_output());
+        assert_eq!(got.len(), total);
+        assert!(got[..sent * frame.len()].iter().all(|&b| b == b'x'));
+        let tail: Vec<u8> = (0..20u8).flat_map(|i| [b'#', i]).collect();
+        assert_eq!(&got[sent * frame.len()..], &tail[..], "frames in the order they were sent");
+    }
+
+    // ibx#254: a write error makes the connection unusable; the frame is
+    // not sent again and the sequence does not move.
+    #[test]
+    fn a_write_error_fails_the_connection_without_retry() {
+        let (mut conn, _server) = loopback();
+        conn.set_queued_writes(true);
+        conn.send_fix(&[(35, "0")]).unwrap();
+        assert_eq!(conn.seq, 1);
+        conn.shutdown();
+        assert!(conn.send_fix(&[(35, "0")]).is_err());
+        assert!(conn.write_error().is_some());
+        assert_eq!(conn.seq, 1, "a frame that failed takes no sequence number");
+        assert!(conn.send_raw(b"later").is_err(), "nothing is written after a failure");
+        assert!(conn.flush_queued().is_err());
+    }
+
+    // Before the engine takes a connection over, a send is written at once.
+    #[test]
+    fn blocking_writes_by_default() {
+        let (mut conn, mut server) = loopback();
+        conn.send_raw(b"hello").unwrap();
+        assert!(!conn.has_queued_output());
+        assert_eq!(read_available(&mut server, 5), b"hello");
     }
 
     #[test]
