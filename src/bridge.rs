@@ -449,6 +449,8 @@ pub struct ReferenceState {
     contract_cache: Mutex<HashMap<i64, api::Contract>>,
     /// Market names from contract details, by conId.
     market_names: Mutex<HashMap<i64, String>>,
+    /// Zone of the trading hours from contract details, by conId (ibx#335).
+    time_zone_ids: Mutex<HashMap<i64, String>>,
     /// Gateway-local init data (populated during connection, read-only after).
     smart_components: Mutex<Vec<crate::types::SmartComponent>>,
     news_providers: Mutex<Vec<crate::types::NewsProvider>>,
@@ -488,6 +490,7 @@ impl ReferenceState {
             depth_exchanges_pending: Mutex::new(false),
             contract_cache: Mutex::new(HashMap::new()),
             market_names: Mutex::new(HashMap::new()),
+            time_zone_ids: Mutex::new(HashMap::new()),
             smart_components: Mutex::new(Vec::new()),
             news_providers: Mutex::new(Vec::new()),
             soft_dollar_tiers: Mutex::new(Vec::new()),
@@ -580,6 +583,18 @@ impl ReferenceState {
     #[doc(hidden)] pub fn cache_market_name(&self, con_id: i64, market_name: &str) {
         if !market_name.is_empty() {
             self.market_names.lock().unwrap().insert(con_id, market_name.to_string());
+        }
+    }
+
+    /// Zone of a contract's trading hours (for example US/Eastern for
+    /// AAPL), when its contract details were received.
+    pub fn time_zone_id(&self, con_id: i64) -> Option<String> {
+        self.time_zone_ids.lock().unwrap().get(&con_id).cloned()
+    }
+
+    #[doc(hidden)] pub fn cache_time_zone_id(&self, con_id: i64, zone: &str) {
+        if !zone.is_empty() {
+            self.time_zone_ids.lock().unwrap().insert(con_id, zone.to_string());
         }
     }
 

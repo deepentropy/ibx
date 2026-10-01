@@ -947,6 +947,56 @@ fn place_order_bad_good_after_time_is_refused() {
     }
 }
 
+// ibx#335 (ib-agent#192 F6): a goodTillDate that does not parse, or whose
+// zone is not UTC, this machine's zone or the contract's zone, is refused
+// with 343; nothing is sent, the order does not go out without its expiry.
+#[test]
+fn place_order_bad_good_till_date_is_refused() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    shared.reference.cache_time_zone_id(756733, "US/Eastern");
+    let order = |gtd: &str| Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 100.0,
+        tif: "GTD".into(), good_till_date: gtd.into(), ..Default::default()
+    };
+    let machine = crate::gateway::machine_time_zone();
+    let mut refused = vec![(4, "20260930 16:00:00 Nowhere/Zone"), (5, "2026093")];
+    // Valid zone names, refused as in the capture; unless one is the
+    // zone of the machine running the test.
+    for (id, zone, gtd) in [
+        (6, "America/New_York", "20260930 16:00:00 America/New_York"),
+        (7, "EST5EDT", "20260930 16:00:00 EST5EDT"),
+        (8, "US/Pacific", "20260930 16:00:00 US/Pacific"),
+    ] {
+        if machine != zone {
+            refused.push((id, gtd));
+        }
+    }
+    for (id, bad) in &refused {
+        client.place_order(*id, &spy(), &order(bad)).unwrap();
+    }
+    assert!(rx.try_iter().all(|c| !matches!(c, ControlCommand::Order(_))), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    for (id, _) in &refused {
+        assert!(w.events.iter().any(|e| e.starts_with(&format!(
+            "error:{id}:343:End Time: The date, time, or time-zone entered is invalid.\n"))),
+            "{id}: {:?}", w.events);
+    }
+
+    // The contract's zone, and UTC: sent with the expiry in UTC (F6:
+    // 16:00 US/Eastern gives 20:00 UTC).
+    for (id, gtd) in [(10, "20260930 16:00:00 US/Eastern"), (11, "20260930 20:00:00 UTC"), (12, "20260930-20:00:00")] {
+        client.place_order(id, &spy(), &order(gtd)).unwrap();
+        match rx.try_recv().unwrap() {
+            ControlCommand::Order(OrderRequest::SubmitLimitEx { attrs, .. }) => {
+                assert_eq!(crate::config::unix_to_ib_utc_dash(attrs.good_till), "20260930-20:00:00", "{gtd}")
+            }
+            other => panic!("expected SubmitLimitEx, got {:?}", other),
+        }
+    }
+}
+
 #[test]
 fn place_order_trailing_stop_limit_without_stop_price_is_refused() {
     let (client, rx, shared) = test_client();

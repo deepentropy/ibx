@@ -180,8 +180,9 @@ fn ccp_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32, session_epo
 /// Session epoch of the server session, echoed on a reconnect logon (ibx#422).
 const TAG_SESSION_EPOCH: u32 = 6059;
 
-/// Time zone sent at logon: `IBX_TZ` when set, else the machine zone.
-fn machine_time_zone() -> String {
+/// Time zone sent at logon: `IBX_TZ` when set, else the machine zone. It
+/// is also the machine zone of an order's expiry zone rule (ibx#335).
+pub(crate) fn machine_time_zone() -> String {
     time_zone_or_system(std::env::var("IBX_TZ").ok())
 }
 

@@ -399,6 +399,11 @@ fn push_contract_row(
     req_id: u32,
     def: crate::control::contracts::ContractDefinition,
 ) {
+    // The zone of its trading hours, for the zone rule of an order's
+    // expiry (ibx#335).
+    if let Some(zone) = &def.time_zone_id {
+        shared.reference.cache_time_zone_id(def.con_id as i64, zone);
+    }
     let for_event = clone_for_event(event_tx, &def);
     shared.reference.push_contract_details(req_id, def);
     if let Some(details) = for_event {

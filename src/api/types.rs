@@ -413,10 +413,10 @@ impl Order {
 
     /// Build OrderAttrs from Order fields.
     pub fn attrs(&self) -> OrderAttrs {
-        // Parse the good-till expiry string into either a UTC instant (tag 126)
-        // or a calendar date (tag 432). On a parse error, log and drop the
-        // expiry — the order then surfaces a visible gateway rejection rather
-        // than silently carrying a wrong expiry.
+        // Parse the good-till expiry string into either a UTC instant or a
+        // calendar date. An expiry that does not parse is refused with 343
+        // before the order is built (ibx#335), so the drop below is not
+        // reached from place_order.
         let (good_till, good_till_date_ymd) =
             match crate::config::parse_ib_expiry(&self.good_till_date) {
                 Ok(None) => (0, 0),

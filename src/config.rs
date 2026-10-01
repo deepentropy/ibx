@@ -155,6 +155,36 @@ pub enum IbExpiry {
 /// the gateway's implied-timezone behavior is deprecated, so callers should
 /// pass an explicit zone or UTC.
 pub fn parse_ib_expiry(input: &str) -> Result<Option<IbExpiry>, String> {
+    Ok(parse_ib_expiry_zoned(input)?.map(|(expiry, _)| expiry))
+}
+
+/// The legacy US zone names, the way the server names a contract's zone
+/// (`US/Eastern`), with the zone each one stands for. Some systems ship
+/// them only in an optional package, so they are resolved here (ibx#335).
+const LEGACY_ZONES: &[(&str, &str)] = &[
+    ("US/Alaska", "America/Anchorage"),
+    ("US/Aleutian", "America/Adak"),
+    ("US/Arizona", "America/Phoenix"),
+    ("US/Central", "America/Chicago"),
+    ("US/East-Indiana", "America/Indiana/Indianapolis"),
+    ("US/Eastern", "America/New_York"),
+    ("US/Hawaii", "Pacific/Honolulu"),
+    ("US/Indiana-Starke", "America/Indiana/Knox"),
+    ("US/Michigan", "America/Detroit"),
+    ("US/Mountain", "America/Denver"),
+    ("US/Pacific", "America/Los_Angeles"),
+    ("US/Samoa", "Pacific/Pago_Pago"),
+];
+
+/// The zone a name stands for: a legacy US name gives its current zone,
+/// any other name is itself.
+pub fn canonical_zone(name: &str) -> &str {
+    LEGACY_ZONES.iter().find(|(legacy, _)| *legacy == name).map_or(name, |(_, zone)| zone)
+}
+
+/// `parse_ib_expiry`, with the zone name of the input as written (`None`
+/// when the input names no zone).
+pub fn parse_ib_expiry_zoned(input: &str) -> Result<Option<(IbExpiry, Option<&str>)>, String> {
     let s = input.trim();
     if s.is_empty() {
         return Ok(None);
@@ -174,7 +204,7 @@ pub fn parse_ib_expiry(input: &str) -> Result<Option<IbExpiry>, String> {
     // Strip the date, then an optional `-` or whitespace separator before the time.
     let rest = s[8..].strip_prefix('-').unwrap_or(&s[8..]).trim();
     if rest.is_empty() {
-        return Ok(Some(IbExpiry::DateOnly(ymd)));
+        return Ok(Some((IbExpiry::DateOnly(ymd), None)));
     }
 
     // Split the time token from an optional trailing timezone token.
@@ -211,9 +241,9 @@ pub fn parse_ib_expiry(input: &str) -> Result<Option<IbExpiry>, String> {
         }
     };
     let zoned = dt
-        .in_tz(zone)
+        .in_tz(canonical_zone(zone))
         .map_err(|e| format!("expiry '{}': unknown timezone '{}': {}", input, zone, e))?;
-    Ok(Some(IbExpiry::Instant(zoned.timestamp().as_second())))
+    Ok(Some((IbExpiry::Instant(zoned.timestamp().as_second()), tz)))
 }
 
 /// Parse an API date-time (`YYYYMMDD HH:MM:SS [zone]` or
@@ -292,6 +322,21 @@ mod expiry_tests {
         // parse -> seconds -> tag 126 wire string must be the dash UTC form.
         let secs = instant("20260620 18:00:00 US/Eastern");
         assert_eq!(unix_to_ib_utc_dash(secs), "20260620-22:00:00");
+    }
+
+    // ibx#335: the legacy US names resolve without the system's legacy
+    // zone data, to the zone each one stands for.
+    #[test]
+    fn legacy_us_zones_are_their_current_zones() {
+        for (legacy, zone) in LEGACY_ZONES {
+            assert_eq!(canonical_zone(legacy), *zone);
+            assert_eq!(instant(&format!("20260120 18:00:00 {legacy}")),
+                instant(&format!("20260120 18:00:00 {zone}")), "{legacy}");
+        }
+        assert_eq!(canonical_zone("Europe/Paris"), "Europe/Paris");
+        // The zone is given as written, for the zone rule of an order.
+        assert_eq!(parse_ib_expiry_zoned("20260620 18:00:00 US/Eastern").unwrap().unwrap().1, Some("US/Eastern"));
+        assert_eq!(parse_ib_expiry_zoned("20260620-18:00:00").unwrap().unwrap().1, None);
     }
 
     #[test]

@@ -2382,6 +2382,24 @@ impl ClientCore {
             .or_else(|| Self::order_rule_refusal(order))
     }
 
+    /// A goodTillDate the reference refuses before sending, with error 343
+    /// (ibx#335; ib-agent#192 F6): it is not a date and time, or its zone is
+    /// not UTC, the zone of this machine, or exactly the zone of the
+    /// contract's trading hours (`contract_zone`). The order is not sent,
+    /// rather than sent with no expiry. The contract's zone is known once
+    /// its details were received; until then any zone that resolves is
+    /// taken.
+    pub fn good_till_date_refusal(order: &ApiOrder, contract_zone: Option<&str>) -> Option<(i64, String)> {
+        let accepted = match crate::config::parse_ib_expiry_zoned(&order.good_till_date) {
+            Err(_) => false,
+            Ok(Some((_, Some(zone)))) => zone == "UTC"
+                || contract_zone.is_none_or(|c| c == zone)
+                || crate::gateway::machine_time_zone() == zone,
+            Ok(_) => true,
+        };
+        if accepted { None } else { Some((343, INVALID_DATE_TIME.replace("%s", "End Time"))) }
+    }
+
     /// A goodAfterTime that is not a date and time: error 337 with the
     /// reference's text, whose label for this field is "Start Time"
     /// (ibx#467). ibx needs the date; the reference also takes a time alone
@@ -3325,6 +3343,22 @@ mod tests {
         let sent: Vec<ControlCommand> = rx.try_iter().collect();
         assert_eq!(sent.len(), 1);
         assert!(matches!(&sent[0], ControlCommand::SetInstrumentCurrency { con_id: 1, currency } if currency == "EUR"));
+    }
+
+    // ibx#335: the zone of a goodTillDate is the machine's zone, UTC or
+    // the contract's zone; before the contract's zone is known, any zone
+    // that resolves is taken.
+    #[test]
+    fn good_till_date_zone_rule() {
+        let gtd = |s: &str| ApiOrder { tif: "GTD".into(), good_till_date: s.into(), ..lmt(100.0) };
+        let refused = |s: &str, zone: Option<&str>| ClientCore::good_till_date_refusal(&gtd(s), zone).map(|(code, _)| code);
+        assert_eq!(refused("", Some("US/Eastern")), None);
+        assert_eq!(refused("20260930", Some("US/Eastern")), None, "a date has no zone");
+        assert_eq!(refused("20260930 16:00:00 US/Central", Some("US/Central")), None);
+        assert_eq!(refused("20260930 16:00:00 America/Chicago", None), None);
+        assert_eq!(refused("20260930 16:00:00 Nowhere/Zone", None), Some(343));
+        let machine = crate::gateway::machine_time_zone();
+        assert_eq!(refused(&format!("20260930 16:00:00 {machine}"), Some("US/Eastern")), None);
     }
 
     // ibx#468: two local refusals of the reference.
