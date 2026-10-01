@@ -833,6 +833,27 @@ fn market_data_rejects_are_reported() {
     assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Unsubscribe { instrument: 1 })));
 }
 
+// ibx#447: market data types 1..=4 reach the engine; another value is
+// refused with 321 under id -1, as the reference, and sends nothing.
+#[test]
+fn market_data_type_outside_one_to_four_is_refused() {
+    let (client, rx, _shared) = test_client();
+    for t in [1, 2, 3, 4] {
+        client.req_market_data_type(t);
+    }
+    client.req_market_data_type(0);
+    client.req_market_data_type(5);
+    let sent: Vec<i32> = rx.try_iter().filter_map(|c| match c {
+        ControlCommand::SetMarketDataType { market_data_type } => Some(market_data_type),
+        _ => None,
+    }).collect();
+    assert_eq!(sent, [1, 2, 3, 4]);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let refused = "error:-1:321:Error validating request.-'b0' : cause - Invalid market data type".to_string();
+    assert_eq!(w.events.iter().filter(|e| **e == refused).count(), 2, "{:?}", w.events);
+}
+
 // ibx#425: customerAccount and professionalCustomer on an account whose
 // config has no CUSTACCT (the paper account) get error 145 with the
 // reference's text, and nothing is sent (captured 28/09/2026).

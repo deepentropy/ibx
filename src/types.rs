@@ -1218,6 +1218,43 @@ impl OrderBuffer {
     }
 }
 
+/// The client's market data modes, as the reference sets them from
+/// reqMarketDataType (ibx#447): 1 turns all off; 2 turns frozen on and
+/// leaves the delayed modes; 3 turns delayed on and delayed-frozen off,
+/// leaving frozen; 4 turns delayed and delayed-frozen on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MarketDataModes {
+    pub frozen: bool,
+    pub delayed: bool,
+    pub delayed_frozen: bool,
+}
+
+impl MarketDataModes {
+    /// Apply a reqMarketDataType value; false (nothing changed) outside
+    /// 1..=4, which the reference refuses.
+    pub fn apply(&mut self, market_data_type: i32) -> bool {
+        match market_data_type {
+            1 => *self = Self::default(),
+            2 => self.frozen = true,
+            3 => { self.delayed = true; self.delayed_frozen = false; }
+            4 => { self.delayed = true; self.delayed_frozen = true; }
+            _ => return false,
+        }
+        true
+    }
+
+    /// The per-entry mode code of a subscription, from the reference's
+    /// table: 0 real time, 1 delayed, 2 frozen, 3 delayed frozen.
+    pub fn entry_mode(frozen: bool, delayed: bool) -> i32 {
+        match (frozen, delayed) {
+            (false, false) => 0,
+            (false, true) => 1,
+            (true, false) => 2,
+            (true, true) => 3,
+        }
+    }
+}
+
 /// Tick-by-tick data type for subscription requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TbtType {
@@ -1427,9 +1464,9 @@ pub struct SecDefFilters {
 pub enum ControlCommand {
     /// Subscribe to market data for a contract.
     /// `exchange` and `sec_type` determine farm routing (empty = UsFarm default).
-    /// `mode_9887` encodes per-request market-data mode via FIX field 9887:
-    /// 0 = REALTIME (absent, default fan-out 264=442 BID_ASK + 264=443 LAST),
-    /// 1 = DELAYED, 2 = FROZEN, 3 = DELAYED_FROZEN (single 264=1 TOP + 9887=N).
+    /// `mode_9887` is the per-request market-data mode sent on each entry
+    /// of the bid/ask and last pair: 0 = REALTIME (none sent), 1 = DELAYED,
+    /// 2 = FROZEN, 3 = DELAYED_FROZEN (`MarketDataModes::entry_mode`).
     Subscribe {
         con_id: i64, symbol: String, exchange: String, sec_type: String,
         last_trade_date: String, strike: f64, right: String, multiplier: String,
@@ -1438,8 +1475,9 @@ pub enum ControlCommand {
     },
     /// Unsubscribe from market data for an instrument.
     Unsubscribe { instrument: InstrumentId },
-    /// The client's reqMarketDataType (1..4): 3 and 4 let a subscription the
-    /// server rejects switch to delayed data (ibx#447).
+    /// The client's reqMarketDataType (1..4), applied to the engine's
+    /// `MarketDataModes`: with delayed on, a subscription the server
+    /// rejects switches to delayed data (ibx#447).
     SetMarketDataType { market_data_type: i32 },
     /// Subscribe to tick-by-tick data via historical data connection.
     SubscribeTbt { con_id: i64, symbol: String, tbt_type: TbtType, reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>> },
@@ -1685,6 +1723,27 @@ pub struct MidnightSeed {
 mod tests {
     use super::*;
     use std::mem;
+
+    // ibx#447: the reference's reqMarketDataType table, and the entry mode
+    // of each frozen / delayed pair.
+    #[test]
+    fn market_data_modes_follow_the_reference_table() {
+        let mut m = MarketDataModes::default();
+        assert!(m.apply(3));
+        assert_eq!(m, MarketDataModes { frozen: false, delayed: true, delayed_frozen: false });
+        assert!(m.apply(2));
+        assert_eq!(m, MarketDataModes { frozen: true, delayed: true, delayed_frozen: false }, "2 keeps delayed");
+        assert!(m.apply(4));
+        assert_eq!(m, MarketDataModes { frozen: true, delayed: true, delayed_frozen: true });
+        assert!(m.apply(3));
+        assert_eq!(m, MarketDataModes { frozen: true, delayed: true, delayed_frozen: false }, "3 keeps frozen");
+        assert!(!m.apply(0) && !m.apply(5));
+        assert_eq!(m, MarketDataModes { frozen: true, delayed: true, delayed_frozen: false });
+        assert!(m.apply(1));
+        assert_eq!(m, MarketDataModes::default());
+        assert_eq!([(false, false), (false, true), (true, false), (true, true)]
+            .map(|(f, d)| MarketDataModes::entry_mode(f, d)), [0, 1, 2, 3]);
+    }
 
     // --- Quote layout ---
 

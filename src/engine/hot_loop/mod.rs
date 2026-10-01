@@ -587,7 +587,7 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::SetMarketDataType { market_data_type } => {
-                    self.farm.market_data_type = market_data_type;
+                    self.farm.md_modes.apply(market_data_type);
                 }
                 ControlCommand::Unsubscribe { instrument } => {
                     // Not sent yet: nothing to cancel on the farm.
@@ -2552,7 +2552,7 @@ mod tests {
             let mut engine = HotLoop::new(shared.clone(), None, None);
             let (c1, mut s1) = socket_pair();
             engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
-            engine.farm.market_data_type = market_data_type;
+            engine.farm.md_modes.apply(market_data_type);
             let jp = engine.context.market.register(13905804);
             engine.farm.send_mktdata_subscribe(13905804, "7203", "SMART", "STK", "", 0.0, "", "", jp, 0,
                 &mut engine.farm_conn, &mut engine.hb);

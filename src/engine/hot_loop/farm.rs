@@ -78,8 +78,8 @@ pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
     pub(crate) instrument_md_reqs: Vec<(InstrumentId, Vec<u32>)>,
-    /// The client's reqMarketDataType (ibx#447): 3 and 4 enable delayed data.
-    pub(crate) market_data_type: i32,
+    /// The client's market data modes from reqMarketDataType (ibx#447).
+    pub(crate) md_modes: crate::types::MarketDataModes,
     /// Active depth subscriptions: (req_id, is_smart_depth).
     pub(crate) depth_subs: Vec<(u32, bool)>,
     /// Maps server_tag → (depth_req_id, is_smart_depth, min_tick) for active depth subscriptions.
@@ -101,7 +101,7 @@ impl FarmState {
             next_md_req_id: 1,
             md_req_to_instrument: Vec::new(),
             instrument_md_reqs: Vec::new(),
-            market_data_type: 1,
+            md_modes: crate::types::MarketDataModes::default(),
             depth_subs: Vec::new(),
             depth_tag_to_req: Vec::new(),
             depth_fanout_map: Vec::new(),
@@ -562,13 +562,16 @@ impl FarmState {
                 None => hit.push((instrument, delayed, needs_sub)),
             }
         }
-        let delayed_enabled = matches!(self.market_data_type, 3 | 4);
+        let delayed_enabled = self.md_modes.delayed;
         for (instrument, delayed_available, needs_api_subscription) in hit {
             if delayed_enabled && delayed_available {
                 // Asked again with delayed data; the rejected ids stay with
                 // the subscription, so a cancel covers them too.
                 let Some(info) = self.md_resub_info.iter_mut().find(|(id, ..)| *id == instrument) else { continue };
-                info.8 = 1;
+                // The delayed entry mode, as captured for type 3. With type
+                // 4 too: when the reference asks for delayed-frozen data
+                // instead is not known (ibx#447).
+                info.8 = crate::types::MarketDataModes::entry_mode(false, true);
                 let (_, sym, exch, st, ltd, strike, right, mult, mode) = info.clone();
                 let Some(con_id) = context.market.con_id(instrument) else { continue };
                 self.send_mktdata_subscribe(con_id, &sym, &exch, &st, &ltd, strike, &right, &mult, instrument, mode, farm_conn, hb);

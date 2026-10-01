@@ -23,16 +23,17 @@ impl EClient {
         self.req_mkt_data_ex(req_id, contract, generic_tick_list, snapshot, regulatory_snapshot, 0)
     }
 
-    /// Like [`req_mkt_data`], but encodes the market-data mode per-request via
-    /// FIX field 9887, allowing parallel realtime + frozen subscriptions for
-    /// the same contract:
+    /// Like [`req_mkt_data`], but sends a market-data mode with the request,
+    /// allowing parallel realtime + frozen subscriptions for the same
+    /// contract. The request is always the bid/ask and last pair; the mode
+    /// rides on each of its entries:
     ///
-    /// | `mode_9887` | mode             | wire shape |
-    /// |-------------|------------------|---|
-    /// | `0`         | REALTIME         | `264=442` (BID_ASK) + `264=443` (LAST), no 9887 |
-    /// | `1`         | DELAYED          | `264=1` (TOP) + `9887=1` |
-    /// | `2`         | FROZEN           | `264=1` (TOP) + `9887=2` |
-    /// | `3`         | DELAYED_FROZEN   | `264=1` (TOP) + `9887=3` |
+    /// | `mode_9887` | mode             |
+    /// |-------------|------------------|
+    /// | `0`         | REALTIME (no mode sent) |
+    /// | `1`         | DELAYED          |
+    /// | `2`         | FROZEN           |
+    /// | `3`         | DELAYED_FROZEN   |
     ///
     /// The frozen sub keeps thinly-traded names streaming after-hours when the
     /// realtime feed is silent. Issue 3-4 parallel calls per contract with
@@ -162,13 +163,18 @@ impl EClient {
         self.shared.last_ccp_rtt()
     }
 
-    /// Set the market data type (ibx#447). With 3 (delayed) or 4, a
+    /// Set the market data type (ibx#447), as the reference sets its modes:
+    /// 1 all off, 2 frozen on, 3 delayed on, 4 delayed and delayed-frozen
+    /// on (2 keeps the delayed modes, 3 keeps frozen). With delayed on, a
     /// subscription the server rejects goes on with delayed data when the
     /// server has it: `market_data_type(reqId, 3)` then error 10167, as the
-    /// reference. Frozen data (2, and the frozen part of 4) is not
-    /// supported.
+    /// reference. The frozen modes are kept but no frozen subscription is
+    /// sent: when the reference asks for frozen data is not known. A value
+    /// outside 1..=4 gives error 321 with id -1.
     pub fn req_market_data_type(&self, market_data_type: i32) {
-        self.core.set_market_data_type(&self.control_tx, market_data_type);
+        if let Some((code, text)) = self.core.set_market_data_type(&self.control_tx, market_data_type) {
+            self.shared.orders.push_order_error(-1i64 as u64, code, text);
+        }
     }
 
     /// Set news provider codes for per-contract news ticks.

@@ -1422,15 +1422,21 @@ impl ClientCore {
     // ── Market data type tracking ──
 
     /// Store the requested market data type and give it to the engine
-    /// (ibx#447). 3 and 4 enable delayed data: a subscription the server
-    /// rejects with delayed data available goes on delayed. The frozen part
-    /// of 2 and 4 is not done.
-    pub fn set_market_data_type(&self, control_tx: &Sender<ControlCommand>, mdt: i32) {
+    /// (ibx#447), which sets its modes as the reference does
+    /// (`MarketDataModes`): with delayed on (3, 4, and 2 after them), a
+    /// subscription the server rejects with delayed data available goes on
+    /// delayed. A value outside 1..=4 is refused with 321 under id -1, as
+    /// the reference, and changes nothing.
+    pub fn set_market_data_type(&self, control_tx: &Sender<ControlCommand>, mdt: i32) -> Option<(i64, String)> {
+        if !(1..=4).contains(&mdt) {
+            return Some((321, "Error validating request.-'b0' : cause - Invalid market data type".to_string()));
+        }
         if matches!(mdt, 2 | 4) {
-            log::warn!("req_market_data_type({}): frozen data is not supported; delayed data is (ibx#447)", mdt);
+            log::warn!("req_market_data_type({}): no frozen subscription is sent; the frozen mode is kept (ibx#447)", mdt);
         }
         self.market_data_type.store(mdt, Ordering::Relaxed);
         let _ = control_tx.send(ControlCommand::SetMarketDataType { market_data_type: mdt });
+        None
     }
 
     /// A request switched to delayed data (ibx#447): its market data type
