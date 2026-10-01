@@ -3112,6 +3112,34 @@ fn process_msgs_dispatches_news_article() {
 //  process_msgs — fundamental data
 // ═══════════════════════════════════════════════════════════════════
 
+// #453: reqMktDepthExchanges is answered once per request, from the
+// depth routes of the routing table, to the Rust wrapper too.
+#[test]
+fn process_msgs_dispatches_mkt_depth_exchanges() {
+    let shared = std::sync::Arc::new(crate::bridge::SharedState::new());
+    let mut engine = crate::engine::hot_loop::HotLoop::new(shared.clone(), None, None);
+    engine.set_routing_table(crate::engine::routing::TableKind::MarketData,
+        "NASDAQ,STK,Top|Deep2|Deep,-1,*,h,4000,usfarm;MEMX,STK,Top,-1,*,h,4000,usfarm;BEST,STK,AggDeep,1,OTCBB,h,4000,usfarm");
+    let (tx, rx) = crossbeam_channel::bounded(4);
+    engine.set_control_rx(rx);
+    tx.send(ControlCommand::FetchMktDepthExchanges).unwrap();
+    engine.poll_once();
+    let mut rows: Vec<crate::types::DepthMktDataDescription> = shared.reference.drain_depth_exchanges().unwrap();
+    rows.sort_by(|a, b| (a.exchange.clone(), a.service_data_type.clone()).cmp(&(b.exchange.clone(), b.service_data_type.clone())));
+    let got: Vec<String> = rows.iter().map(|d| format!("{}/{}/{}/{}/{}", d.exchange, d.sec_type, d.listing_exch, d.service_data_type, d.agg_group)).collect();
+    assert_eq!(got, ["NASDAQ/STK//Deep/-1", "NASDAQ/STK//Deep2/-1", "SMART/STK/OTCBB/AggDeep/1"]);
+
+    let (client, _rx, shared) = test_client();
+    shared.reference.set_depth_exchanges(rows);
+    shared.reference.notify_depth_exchanges();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.iter().filter(|e| e.starts_with("mkt_depth_exchanges:")).count(), 1, "{:?}", w.events);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("mkt_depth_exchanges:")), "once per request");
+}
+
 #[test]
 fn process_msgs_dispatches_fundamental_data() {
     let (client, _rx, shared) = test_client();

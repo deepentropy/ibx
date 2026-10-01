@@ -600,8 +600,7 @@ impl EClient {
         }
 
         // Drain depth exchanges -> mktDepthExchanges
-        let depth_exchanges = shared.reference.drain_depth_exchanges();
-        if !depth_exchanges.is_empty() {
+        if let Some(depth_exchanges) = shared.reference.drain_depth_exchanges() {
             let descriptions: Vec<Py<DepthMktDataDescriptionPy>> = depth_exchanges.iter().map(|d| {
                 Py::new(py, DepthMktDataDescriptionPy {
                     exchange: d.exchange.clone(),

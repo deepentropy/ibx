@@ -831,18 +831,21 @@ impl ReferenceState {
         }
     }
 
-    pub fn drain_depth_exchanges(&self) -> Vec<DepthMktDataDescription> {
+    /// The answer to a reqMktDepthExchanges, once per request: the depth
+    /// routes (an empty list is an answer too, #453).
+    pub fn drain_depth_exchanges(&self) -> Option<Vec<DepthMktDataDescription>> {
         let mut pending = self.depth_exchanges_pending.lock().unwrap();
         if *pending {
             *pending = false;
-            self.depth_exchanges_cache.lock().unwrap().clone()
+            Some(self.depth_exchanges_cache.lock().unwrap().clone())
         } else {
-            Vec::new()
+            None
         }
     }
 
-    #[doc(hidden)] pub fn push_depth_exchanges(&self, descs: Vec<DepthMktDataDescription>) {
-        self.depth_exchanges_cache.lock().unwrap().extend(descs);
+    /// The depth routes of the routing table (#453).
+    #[doc(hidden)] pub fn set_depth_exchanges(&self, descs: Vec<DepthMktDataDescription>) {
+        *self.depth_exchanges_cache.lock().unwrap() = descs;
     }
 
     #[doc(hidden)] pub fn notify_depth_exchanges(&self) {

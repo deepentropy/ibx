@@ -919,7 +919,14 @@ impl HotLoop {
                     self.ccp.send_matching_symbols_request(req_id, &pattern, &mut self.ccp_conn, &mut self.hb, &self.shared);
                 }
                 ControlCommand::FetchMktDepthExchanges => {
-                    self.ccp.send_mkt_depth_exchanges_request(&mut self.ccp_conn, &mut self.hb, &self.shared);
+                    // Answered locally from the depth routes of the market
+                    // data routing table, as the reference (#453).
+                    let rows = self.farm.routing.as_ref().map(|t| t.depth_exchanges()).unwrap_or_default();
+                    self.shared.reference.set_depth_exchanges(rows.into_iter().map(|r| crate::types::DepthMktDataDescription {
+                        exchange: r.exchange, sec_type: r.sec_type, listing_exch: r.listing_exch,
+                        service_data_type: r.service_data_type, agg_group: r.agg_group,
+                    }).collect());
+                    self.shared.reference.notify_depth_exchanges();
                 }
                 ControlCommand::FetchScannerParams => {
                     self.hmds.req_scanner_params(&mut self.hmds_conn, &mut self.hb, &self.shared);

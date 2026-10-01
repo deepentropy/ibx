@@ -139,11 +139,13 @@ impl OnDemandFarm {
     }
 
     /// Messages waiting for the logon.
+    #[cfg(test)]
     pub(crate) fn queued(&self) -> usize {
         self.queue.len()
     }
 
     /// Logged on and usable.
+    #[cfg(test)]
     pub(crate) fn is_connected(&self) -> bool {
         self.conn.is_some()
     }

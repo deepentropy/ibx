@@ -429,6 +429,10 @@ impl EClient {
         }
 
         // Fundamental data
+        // reqMktDepthExchanges, answered from the routing table (#453).
+        if let Some(descriptions) = self.shared.reference.drain_depth_exchanges() {
+            wrapper.mkt_depth_exchanges(&descriptions);
+        }
         for (req_id, data) in self.shared.reference.drain_fundamental_data() {
             wrapper.fundamental_data(req_id as i64, &data);
         }

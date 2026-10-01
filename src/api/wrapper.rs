@@ -346,6 +346,12 @@ pub mod tests {
         fn fundamental_data(&mut self, req_id: i64, _data: &str) {
             self.events.push(format!("fundamental_data:{req_id}"));
         }
+        fn mkt_depth_exchanges(&mut self, descriptions: &[crate::types::DepthMktDataDescription]) {
+            let rows: Vec<String> = descriptions.iter()
+                .map(|d| format!("{}/{}/{}/{}/{}", d.exchange, d.sec_type, d.listing_exch, d.service_data_type, d.agg_group))
+                .collect();
+            self.events.push(format!("mkt_depth_exchanges:{}", rows.join(",")));
+        }
         fn symbol_samples(&mut self, req_id: i64, descriptions: &[ContractDescription]) {
             self.events.push(format!("symbol_samples:{req_id}:{}", descriptions.len()));
         }
