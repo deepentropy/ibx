@@ -69,6 +69,10 @@ const KNOWN_CONTROL_COMMAND_GAPS: &[(&str, &str)] = &[
          so a phase-model integration test cannot observe a non-empty result",
     ),
     (
+        "DropSnapshot",
+        "Sent only by the regulatory snapshot fetcher of the clients (req_mkt_data with          regulatory_snapshot) when a fetch ends; the regulatory snapshot is billed on live          accounts, so no phase sends it. Exercised by unit tests",
+    ),
+    (
         "SubscribeAccountSummary",
         "Sent only by EClient::req_account_summary; no phase of this suite sends it \
          (phase 106 reads the account state). Exercised against the server by \
