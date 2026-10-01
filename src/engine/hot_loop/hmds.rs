@@ -6,7 +6,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{InstrumentId, TbtType, PRICE_SCALE, MAX_INSTRUMENTS};
+use crate::types::{InstrumentId, TbtType, PRICE_SCALE};
 use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, clone_for_event, find_body_after_tag, extract_raw_tag};
@@ -30,8 +30,8 @@ const HISTOGRAM_ERROR: &str = "Failed to request histogram data";
 
 pub(crate) struct HmdsState {
     pub(crate) next_tbt_req_id: u32,
-    pub(crate) tbt_subscriptions: Vec<(InstrumentId, String, TbtType)>,
-    pub(crate) tbt_price_state: [(i64, i64, i64); MAX_INSTRUMENTS],
+    /// Tick-by-tick streams (ibx#404).
+    pub(crate) tbt_subscriptions: Vec<TbtSub>,
     pub(crate) next_hmds_query_id: u32,
     pub(crate) disconnected: bool,
     /// In-flight historical bar queries: (query_id, req_id, idle deadline).
@@ -99,6 +99,64 @@ pub(crate) struct HmdsState {
     /// The farm the messages being handled came from (#445).
     pub(crate) rx_farm: super::pool::FarmId,
 }
+
+/// A tick-by-tick stream (ibx#404): its query, the farm and stream id the
+/// acknowledgement gave, the increments it gave, and the running prices in
+/// ticks (the wire carries deltas).
+#[derive(Debug, Clone)]
+pub(crate) struct TbtSub {
+    pub(crate) instrument: InstrumentId,
+    /// Window id of the query (a stream prefix and a session counter).
+    pub(crate) window_id: String,
+    /// The whole query id.
+    pub(crate) query_id: String,
+    pub(crate) tbt_type: TbtType,
+    /// The farm the query went to; the acknowledgement's farm once it came.
+    pub(crate) farm: super::pool::FarmId,
+    pub(crate) rt_ticker_id: Option<u64>,
+    pub(crate) min_tick: f64,
+    pub(crate) size_min_tick: Option<f64>,
+    pub(crate) last: i64,
+    pub(crate) bid: i64,
+    pub(crate) ask: i64,
+    pub(crate) mid: i64,
+    /// No client left: the cancel goes at this time, or at the next tick
+    /// of the stream, as the reference does.
+    pub(crate) cancel_at: Option<Instant>,
+}
+
+impl TbtSub {
+    /// A live stream (not waiting for its cancel).
+    pub(crate) fn is_live(&self) -> bool {
+        self.cancel_at.is_none()
+    }
+
+    fn layout(&self) -> tick_decoder::TbtLayout {
+        let sized = self.size_min_tick.is_some();
+        match self.tbt_type {
+            TbtType::Last | TbtType::AllLast => tick_decoder::TbtLayout::Trade { sized },
+            TbtType::BidAsk => tick_decoder::TbtLayout::BidAsk { sized },
+            TbtType::MidPoint => tick_decoder::TbtLayout::MidPoint { sized },
+        }
+    }
+
+    /// A price in ticks as a fixed-point price.
+    fn price(&self, ticks: i64) -> i64 {
+        (ticks as f64 * self.min_tick * PRICE_SCALE as f64).round() as i64
+    }
+
+    /// A size in size increments as a size.
+    fn size(&self, raw: u64) -> i64 {
+        match self.size_min_tick {
+            Some(step) => (raw as f64 * step).round() as i64,
+            None => raw as i64,
+        }
+    }
+}
+
+/// How long a tick-by-tick stream with no client left waits before its
+/// cancel, as in the reference (ibx#404).
+pub(crate) const TBT_CANCEL_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// A fundamental data query waiting for its reply (#434).
 #[derive(Debug, Clone)]
@@ -225,7 +283,6 @@ impl HmdsState {
         Self {
             next_tbt_req_id: 1,
             tbt_subscriptions: Vec::new(),
-            tbt_price_state: [(0, 0, 0); MAX_INSTRUMENTS],
             next_hmds_query_id: 1000,
             disconnected: false,
             pending_historical: Vec::new(),
@@ -499,6 +556,9 @@ impl HmdsState {
                             shared.reference.push_historical_schedule(req_id, resp);
                         }
                     }
+                    else if xml_tag.contains("<ResultSetTickerId>") && xml_tag.contains("<rtTickerId>") {
+                        self.on_tbt_ack(xml_tag, shared);
+                    }
                     else if let Some(ticker_id_str) = crate::control::historical::parse_ticker_id(xml_tag) {
                         let min_tick = crate::control::historical::extract_xml_tag(xml_tag, "minTick")
                             .and_then(|s| s.parse::<f64>().ok())
@@ -585,11 +645,10 @@ impl HmdsState {
                             } else if let Some(pos) = self.pending_scanner.iter().position(|s| s.scan_id == *qid) {
                                 let req_id = self.pending_scanner.remove(pos).req_id;
                                 released = Some((req_id, 162, error_msg.clone()));
-                            } else if let Some(pos) = self.tbt_subscriptions.iter().position(|(_, q, _)| q == qid) {
+                            } else if let Some(pos) = self.tbt_subscriptions.iter().position(|s| s.window_id == wid) {
                                 // A refused tick-by-tick request ends with
                                 // 10189 and the server's text (ibx#455).
-                                let (instrument, _, tbt_type) = self.tbt_subscriptions.remove(pos);
-                                self.tbt_price_state[instrument as usize] = (0, 0, 0);
+                                let TbtSub { instrument, tbt_type, .. } = self.tbt_subscriptions.remove(pos);
                                 log::warn!("HMDS QueryError for tick-by-tick {} query_id={}: {}", tbt_type.as_str(), qid, error_msg);
                                 shared.market.push_tbt_error(instrument, tbt_type, error_msg);
                                 return;
@@ -682,57 +741,106 @@ impl HmdsState {
         }
     }
 
+    /// The acknowledgement of a tick-by-tick query (ibx#404): the stream
+    /// id the server numbers per farm, the price and size increments. A
+    /// stream id that is not above 0 ends the request with 10189, as the
+    /// reference.
+    fn on_tbt_ack(&mut self, xml: &str, shared: &SharedState) {
+        use crate::control::historical::extract_xml_tag;
+        let wid = reply_window_id(xml);
+        let Some(pos) = self.tbt_subscriptions.iter().position(|s| s.window_id == wid) else {
+            log::info!("Tick-by-tick acknowledgement for no live query: {:?}", wid);
+            return;
+        };
+        let rt: i64 = extract_xml_tag(xml, "rtTickerId").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        if rt <= 0 {
+            let sub = self.tbt_subscriptions.remove(pos);
+            shared.market.push_tbt_error(sub.instrument, sub.tbt_type, INVALID_REAL_TIME_QUERY.to_string());
+            return;
+        }
+        let farm = self.rx_farm;
+        let sub = &mut self.tbt_subscriptions[pos];
+        sub.rt_ticker_id = Some(rt as u64);
+        sub.farm = farm;
+        sub.min_tick = extract_xml_tag(xml, "minTick").and_then(|v| v.trim().parse().ok()).unwrap_or(0.01);
+        sub.size_min_tick = extract_xml_tag(xml, "sizeMinTick").and_then(|v| v.trim().parse().ok());
+        (sub.last, sub.bid, sub.ask, sub.mid) = (0, 0, 0, 0);
+        log::info!("Tick-by-tick {} {}: stream {} on farm {}, minTick {}, sizeMinTick {:?}",
+            sub.tbt_type.as_str(), sub.window_id, rt, farm, sub.min_tick, sub.size_min_tick);
+    }
+
+    /// A tick-by-tick frame (ibx#404): each entry goes to the stream of its
+    /// id on this farm and is read by that stream's type; prices are the
+    /// running sum of the deltas times the price increment, sizes times the
+    /// size increment. An entry of a stream waiting for its cancel makes
+    /// the cancel go now and is not delivered.
     fn handle_tbt_data(&mut self, msg: &[u8], shared: &SharedState, event_tx: &Option<Sender<Event>>) {
         let body = match find_body_after_tag(msg, b"35=E\x01") {
             Some(b) => b,
             None => return,
         };
-        let entries = tick_decoder::decode_ticks_35e(body);
-        for entry in &entries {
-            let instrument = match self.tbt_subscriptions.first() {
-                Some((id, _, _)) => *id,
-                None => return,
-            };
-            // A price or size out of range ends the message, as a
-            // malformed block does (ibx#272).
-            match entry {
-                tick_decoder::TbtEntry::Trade { timestamp, price_cents_delta, size, exchange, conditions } => {
-                    let (Some(cents), Ok(size)) = (self.update_tbt_price(instrument, *price_cents_delta), i64::try_from(*size)) else {
-                        log::warn!("Tick-by-tick trade out of range dropped with the rest of its message");
-                        return;
+        let sig_pos = body.windows(6).position(|w| w == b"\x018349=");
+        let body = if let Some(pos) = sig_pos { &body[..pos] } else { body };
+        let farm = self.rx_farm;
+        let subs = &self.tbt_subscriptions;
+        let (entries, stop) = tick_decoder::decode_tbt_frame(body, |rt| {
+            subs.iter().find(|s| s.farm == farm && s.rt_ticker_id == Some(rt)).map(TbtSub::layout)
+        });
+        match stop {
+            tick_decoder::TbtStop::Done => {}
+            tick_decoder::TbtStop::UnknownStream(rt) =>
+                log::warn!("Tick-by-tick entry of unknown stream {} on farm {}: rest of the frame skipped", rt, farm),
+            tick_decoder::TbtStop::Malformed =>
+                log::warn!("Tick-by-tick frame malformed: {} entries kept", entries.len()),
+        }
+        let now = Instant::now();
+        for entry in entries {
+            let Some(sub) = self.tbt_subscriptions.iter_mut()
+                .find(|s| s.farm == farm && s.rt_ticker_id == Some(entry.rt_ticker_id)) else { continue };
+            if sub.cancel_at.is_some() {
+                sub.cancel_at = Some(now);
+                continue;
+            }
+            match entry.fields {
+                tick_decoder::TbtFields::Trade { price_delta, size, exchange, conditions, .. } => {
+                    // A price out of range is dropped (ibx#272).
+                    let Some(last) = sub.last.checked_add(price_delta) else {
+                        log::warn!("Tick-by-tick trade out of range dropped");
+                        continue;
                     };
-                    let Some(price) = cents.checked_mul(PRICE_SCALE / 100) else {
-                        log::warn!("Tick-by-tick trade out of range dropped with the rest of its message");
-                        return;
-                    };
+                    sub.last = last;
                     let trade = crate::types::TbtTrade {
-                        instrument,
-                        price,
-                        size,
-                        timestamp: *timestamp,
-                        exchange: exchange.clone(),
-                        conditions: conditions.clone(),
+                        instrument: sub.instrument,
+                        price: sub.price(last),
+                        size: sub.size(size),
+                        timestamp: entry.time,
+                        exchange,
+                        conditions,
                     };
                     shared.market.push_tbt_trade(trade.clone());
                     emit(event_tx, Event::TbtTrade(trade));
                 }
-                tick_decoder::TbtEntry::Quote { timestamp, bid_cents_delta, ask_cents_delta, bid_size, ask_size } => {
-                    let scaled = self.update_tbt_bid_ask(instrument, *bid_cents_delta, *ask_cents_delta)
-                        .and_then(|(b, a)| Some((b.checked_mul(PRICE_SCALE / 100)?, a.checked_mul(PRICE_SCALE / 100)?)));
-                    let (Some((bid, ask)), Ok(bid_size), Ok(ask_size)) = (scaled, i64::try_from(*bid_size), i64::try_from(*ask_size)) else {
-                        log::warn!("Tick-by-tick quote out of range dropped with the rest of its message");
-                        return;
+                tick_decoder::TbtFields::BidAsk { bid_delta, ask_delta, bid_size, ask_size, .. } => {
+                    let (Some(bid), Some(ask)) = (sub.bid.checked_add(bid_delta), sub.ask.checked_add(ask_delta)) else {
+                        log::warn!("Tick-by-tick quote out of range dropped");
+                        continue;
                     };
+                    (sub.bid, sub.ask) = (bid, ask);
                     let quote = crate::types::TbtQuote {
-                        instrument,
-                        bid,
-                        ask,
-                        bid_size,
-                        ask_size,
-                        timestamp: *timestamp,
+                        instrument: sub.instrument,
+                        bid: sub.price(bid),
+                        ask: sub.price(ask),
+                        bid_size: sub.size(bid_size),
+                        ask_size: sub.size(ask_size),
+                        timestamp: entry.time,
                     };
                     shared.market.push_tbt_quote(quote);
                     emit(event_tx, Event::TbtQuote(quote));
+                }
+                tick_decoder::TbtFields::MidPoint { delta } => {
+                    // Kept in step; the API has no midpoint output in ibx.
+                    sub.mid = sub.mid.saturating_add(delta);
+                    log::trace!("Tick-by-tick midpoint {} for instrument {}", sub.price(sub.mid), sub.instrument);
                 }
             }
         }
@@ -771,43 +879,38 @@ impl HmdsState {
         }
     }
 
-    #[inline]
-    /// The running last price plus a delta; None, with the state kept, when
-    /// the sum is out of range (ibx#272).
-    fn update_tbt_price(&mut self, instrument: InstrumentId, delta: i64) -> Option<i64> {
-        let entry = &mut self.tbt_price_state[instrument as usize];
-        entry.0 = entry.0.checked_add(delta)?;
-        Some(entry.0)
-    }
-
-    /// The running bid and ask plus their deltas; None, with the state
-    /// kept, when a sum is out of range (ibx#272).
-    #[inline]
-    fn update_tbt_bid_ask(&mut self, instrument: InstrumentId, bid_delta: i64, ask_delta: i64) -> Option<(i64, i64)> {
-        let entry = &mut self.tbt_price_state[instrument as usize];
-        let bid = entry.1.checked_add(bid_delta)?;
-        let ask = entry.2.checked_add(ask_delta)?;
-        entry.1 = bid;
-        entry.2 = ask;
-        Some((bid, ask))
-    }
-
+    /// Send a tick-by-tick query (ibx#404, ibx#455) to `sink`, the farm
+    /// of its route (`farm`), as the reference writes it: the query id is
+    /// a stream prefix with a session counter and the chart name of the
+    /// contract and type; the contract's routing exchange (the
+    /// high-precision book for a currency pair) and security type; each
+    /// type under its own API name; the past ticks only when asked for. The
+    /// size filter's form is not known, so it is not sent.
     pub(crate) fn send_tbt_subscribe(
         &mut self,
         con_id: i64,
         instrument: InstrumentId,
+        symbol: &str,
+        exchange: &str,
+        sec_type: &str,
         tbt_type: TbtType,
         number_of_ticks: i32,
         ignore_size: bool,
-        hmds_conn: &mut Option<Connection>,
+        farm: super::pool::FarmId,
+        sink: &mut dyn super::pool::FixSink,
         hb: &mut HeartbeatState,
     ) {
-        let req_id = self.next_tbt_req_id;
+        let n = self.next_tbt_req_id;
         self.next_tbt_req_id += 1;
-        // Each type under its own API name; the past ticks only when asked
-        // for; elements in the reference's order (ibx#455). The size
-        // filter's form is not known, so it is not sent.
         let tbt_type_str = tbt_type.as_str();
+        let sec_type = if sec_type.is_empty() { "STK" } else { sec_type };
+        let api_exchange = if exchange.is_empty() { "SMART" } else { exchange };
+        let mut wire_exchange = super::farm::routing_exchange(exchange, sec_type);
+        if sec_type == "CASH" && wire_exchange == "IDEALPRO" {
+            wire_exchange = "FXSUBPIP";
+        }
+        let window_id = format!("rtTicker{n}");
+        let query_id = format!("{window_id};;{symbol}@{api_exchange}{tbt_type_str};;1;;true;;0;;U");
         let time_length = if number_of_ticks > 0 {
             format!("<timeLength>{number_of_ticks} t</timeLength>")
         } else {
@@ -817,67 +920,66 @@ impl HmdsState {
             log::warn!("Tick-by-tick {} con_id={}: ignoreSize is not sent", tbt_type_str, con_id);
         }
         let xml = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
              <ListOfQueries>\
              <Query>\
-             <id>tbt_{req_id}</id>\
+             <id>{query_id}</id>\
              <contractID>{con_id}</contractID>\
-             <exchange>BEST</exchange>\
-             <secType>CS</secType>\
-             <expired>no</expired>\
+             <exchange>{wire_exchange}</exchange>\
+             <secType>{sec_type}</secType>\
              <type>TickData</type>\
              <data>{tbt_type_str}</data>\
              <refresh>ticks</refresh>\
              {time_length}\
              <source>API</source>\
+             <needTotalValue>false</needTotalValue>\
+             <wholeDays>false</wholeDays>\
              </Query>\
              </ListOfQueries>"
         );
-        if let Some(conn) = hmds_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "W"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6118, &xml),
-            ]);
-            log::info!("Sent TBT subscribe: con_id={} type={} req_id={}", con_id, tbt_type_str, req_id);
-            hb.last_hmds_sent = Instant::now();
+        let ts = chrono_free_timestamp();
+        if sink.send_plain(&[(fix::TAG_MSG_TYPE, "W"), (fix::TAG_SENDING_TIME, &ts), (6118, &xml)]) {
+            if farm == super::pool::PRIMARY_HMDS {
+                hb.last_hmds_sent = Instant::now();
+            }
+            log::info!("Sent tick-by-tick query {} on farm {}: con_id={} type={}", window_id, farm, con_id, tbt_type_str);
         }
-        let ticker_id = format!("tbt_{}", req_id);
-        self.tbt_subscriptions.push((instrument, ticker_id, tbt_type));
+        self.tbt_subscriptions.push(TbtSub {
+            instrument, window_id, query_id, tbt_type, farm, rt_ticker_id: None,
+            min_tick: 0.01, size_min_tick: None, last: 0, bid: 0, ask: 0, mid: 0, cancel_at: None,
+        });
     }
 
-    pub(crate) fn send_tbt_unsubscribe(
-        &mut self,
-        instrument: InstrumentId,
-        hmds_conn: &mut Option<Connection>,
-        hb: &mut HeartbeatState,
-    ) {
-        let idx = match self.tbt_subscriptions.iter().position(|(id, _, _)| *id == instrument) {
-            Some(i) => i,
-            None => return,
-        };
-        let (_, ticker_id, _) = self.tbt_subscriptions.remove(idx);
-        if let Some(conn) = hmds_conn.as_mut() {
-            let xml = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                 <ListOfCancelQueries>\
-                 <CancelQuery>\
-                 <id>ticker:{tid}</id>\
-                 </CancelQuery>\
-                 </ListOfCancelQueries>",
-                tid = ticker_id,
-            );
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "Z"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6118, &xml),
-            ]);
-            log::info!("Sent TBT unsubscribe: instrument={} ticker_id={}", instrument, ticker_id);
-            hb.last_hmds_sent = Instant::now();
+    /// The client left a tick-by-tick stream of the instrument: its cancel
+    /// goes 15 s later, or at the stream's next tick (ibx#404).
+    pub(crate) fn send_tbt_unsubscribe(&mut self, instrument: InstrumentId, now: Instant) {
+        if let Some(sub) = self.tbt_subscriptions.iter_mut().find(|s| s.instrument == instrument && s.is_live()) {
+            sub.cancel_at = Some(now + TBT_CANCEL_DELAY);
         }
-        self.tbt_price_state[instrument as usize] = (0, 0, 0);
+    }
+
+    /// The cancels that are due: the farm and the cancel message of each
+    /// (the stream id once acknowledged, else the query id).
+    pub(crate) fn take_due_tbt_cancels(&mut self, now: Instant) -> Vec<(super::pool::FarmId, String)> {
+        if self.tbt_subscriptions.iter().all(|s| s.cancel_at.is_none_or(|t| t > now)) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        self.tbt_subscriptions.retain(|s| {
+            if !s.cancel_at.is_some_and(|t| t <= now) {
+                return true;
+            }
+            let id = match s.rt_ticker_id {
+                Some(rt) => format!("rtTicker:{rt}"),
+                None => s.query_id.clone(),
+            };
+            out.push((s.farm, format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <ListOfCancelQueries><CancelQuery><id>{id}</id></CancelQuery></ListOfCancelQueries>"
+            )));
+            false
+        });
+        out
     }
 
     pub(crate) fn send_historical_request_ex(
@@ -1939,19 +2041,6 @@ fn reply_window_id(xml: &str) -> &str {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-
-    // ibx#272: a running tick-by-tick price that would leave the range is
-    // refused and the state kept.
-    #[test]
-    fn tbt_price_sums_are_checked() {
-        let mut hmds = HmdsState::new();
-        assert_eq!(hmds.update_tbt_price(0, 100), Some(100));
-        assert_eq!(hmds.update_tbt_price(0, i64::MAX), None);
-        assert_eq!(hmds.update_tbt_price(0, 1), Some(101));
-        assert_eq!(hmds.update_tbt_bid_ask(0, i64::MIN, 0), Some((i64::MIN, 0)));
-        assert_eq!(hmds.update_tbt_bid_ask(0, -1, 5), None);
-        assert_eq!(hmds.update_tbt_bid_ask(0, 1, 5), Some((i64::MIN + 1, 5)));
-    }
 
     fn make_query_error_msg(query_id: &str, error: &str) -> Vec<u8> {
         let xml = format!(

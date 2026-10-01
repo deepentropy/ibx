@@ -295,32 +295,10 @@ impl HotLoop {
         if !lot_needed && !self.needs_agg_group(sub) {
             return false;
         }
-        if !self.context.lot_lookups.iter().any(|(_, c, _)| *c == sub.con_id) {
-            let Some(conn) = self.ccp_conn.as_mut().filter(|_| !self.ccp.disconnected) else {
-                log::warn!("No auth connection to read the definition of con_id {}: subscribing with a round lot of 1", sub.con_id);
-                self.context.market.set_round_lot(id, 1);
-                return false;
-            };
-            let req_id = format!("ibxlot{}", self.context.next_lot_lookup);
-            self.context.next_lot_lookup = self.context.next_lot_lookup.wrapping_add(1);
-            let ts = chrono_free_timestamp();
-            let con_id_str = sub.con_id.to_string();
-            let exchange = match sub.exchange.to_ascii_uppercase().as_str() {
-                "" | "SMART" => "BEST".to_string(),
-                other => other.to_string(),
-            };
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "c"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (320, &req_id),
-                (321, "2"),
-                (146, "1"),
-                (6008, &con_id_str),
-                (6004, &exchange),
-            ]);
-            self.hb.last_ccp_sent = Instant::now();
-            log::info!("Definition of con_id {} on {} asked for its round lot and group ({})", sub.con_id, exchange, req_id);
-            self.context.lot_lookups.push((req_id, sub.con_id, Instant::now() + farm::LOT_LOOKUP_TIMEOUT));
+        if !self.ask_definition(sub.con_id, &sub.exchange) {
+            log::warn!("No auth connection to read the definition of con_id {}: subscribing with a round lot of 1", sub.con_id);
+            self.context.market.set_round_lot(id, 1);
+            return false;
         }
         self.context.lot_parked.push(sub.clone());
         true
@@ -355,6 +333,77 @@ impl HotLoop {
         }
         let (name, host) = (route.farm.clone(), route.host.clone());
         Some(self.pool.ensure(&name, &host, FarmKind::MarketData, Instant::now()))
+    }
+
+    /// Send the tick-by-tick cancels that are due, each to its stream's
+    /// farm (ibx#404).
+    fn send_due_tbt_cancels(&mut self, now: Instant) {
+        for (id, xml) in self.hmds.take_due_tbt_cancels(now) {
+            let ts = chrono_free_timestamp();
+            if let Some(sink) = farm_sink!(self, id) {
+                sink.send_plain(&[(fix::TAG_MSG_TYPE, "Z"), (fix::TAG_SENDING_TIME, &ts), (6118, &xml)]);
+            }
+        }
+    }
+
+    /// The aggregate group of a contract for a route on `route_exchange`:
+    /// its own for a SMART route, else none.
+    fn agg_group_for(&self, con_id: i64, route_exchange: &str) -> i32 {
+        if route_exchange == "BEST" {
+            self.context.agg_groups.get(&con_id).copied().unwrap_or(-1)
+        } else {
+            -1
+        }
+    }
+
+    /// A historical request whose route needs the contract's aggregate
+    /// group (a SMART route, with a historical routing table) waits for the
+    /// contract's definition when the group is not known; it comes back
+    /// to the command loop once the definition is read (or after the
+    /// lookup's deadline). True when parked.
+    fn park_for_hmds_definition(&mut self, con_id: i64, exchange: &str, sec_type: &str, cmd: ControlCommand) -> bool {
+        let st = if sec_type.is_empty() { "STK" } else { sec_type };
+        let needs = self.hmds.routing.is_some()
+            && con_id > 0
+            && farm::routing_exchange(exchange, st) == "BEST"
+            && !self.context.agg_groups.contains_key(&con_id);
+        if !needs || !self.ask_definition(con_id, exchange) {
+            return false;
+        }
+        self.context.def_parked.push((con_id, cmd));
+        true
+    }
+
+    /// Ask the auth connection for a contract's definition, unless a lookup
+    /// for it is in flight. False when it cannot be asked.
+    fn ask_definition(&mut self, con_id: i64, exchange: &str) -> bool {
+        if self.context.lot_lookups.iter().any(|(_, c, _)| *c == con_id) {
+            return true;
+        }
+        let Some(conn) = self.ccp_conn.as_mut().filter(|_| !self.ccp.disconnected) else {
+            return false;
+        };
+        let req_id = format!("ibxlot{}", self.context.next_lot_lookup);
+        self.context.next_lot_lookup = self.context.next_lot_lookup.wrapping_add(1);
+        let ts = chrono_free_timestamp();
+        let con_id_str = con_id.to_string();
+        let exchange = match exchange.to_ascii_uppercase().as_str() {
+            "" | "SMART" => "BEST".to_string(),
+            other => other.to_string(),
+        };
+        let _ = conn.send_fix(&[
+            (fix::TAG_MSG_TYPE, "c"),
+            (fix::TAG_SENDING_TIME, &ts),
+            (320, &req_id),
+            (321, "2"),
+            (146, "1"),
+            (6008, &con_id_str),
+            (6004, &exchange),
+        ]);
+        self.hb.last_ccp_sent = Instant::now();
+        log::info!("Definition of con_id {} on {} asked ({})", con_id, exchange, req_id);
+        self.context.lot_lookups.push((req_id, con_id, Instant::now() + farm::LOT_LOOKUP_TIMEOUT));
+        true
     }
 
     /// Name of the primary historical farm.
@@ -516,8 +565,13 @@ impl HotLoop {
         }
     }
 
-    /// Send the subscriptions whose round lot came in (ibx#287).
+    /// Send the subscriptions whose round lot came in (ibx#287), and give
+    /// the requests that waited for a definition back to the command loop.
     fn send_lot_ready(&mut self) {
+        if !self.context.def_ready.is_empty() {
+            let ready = std::mem::take(&mut self.context.def_ready);
+            self.ccp.resolved_requests.extend(ready);
+        }
         if self.context.lot_ready.is_empty() { return; }
         for sub in std::mem::take(&mut self.context.lot_ready) {
             self.route_md_subscribe(&sub);
@@ -542,7 +596,9 @@ impl HotLoop {
         {
             return;
         }
-        if self.hmds.tbt_subscriptions.iter().any(|(id, _, _)| *id == instrument) {
+        // A stream waiting for its cancel has no client: it does not hold
+        // the slot.
+        if self.hmds.tbt_subscriptions.iter().any(|s| s.instrument == instrument && s.is_live()) {
             return;
         }
         if self.ccp.news_subscriptions.iter().any(|(id, _)| *id == instrument) {
@@ -602,8 +658,11 @@ impl HotLoop {
                 &self.event_tx, &mut self.hb,
             );
 
-            // 1b''. The server tag cleaner (#292), once a minute.
-            self.clean_server_tags(Instant::now());
+            // 1b''. The server tag cleaner (#292), once a minute, and the
+            //       tick-by-tick cancels that are due (ibx#404).
+            let now = Instant::now();
+            self.clean_server_tags(now);
+            self.send_due_tbt_cancels(now);
 
             // 1b'. Farms opened on demand (#445): read, then connect,
             //      heartbeat and close them by their rules.
@@ -827,13 +886,36 @@ impl HotLoop {
                     self.route_md_cancel(instrument);
                     self.try_reclaim_instrument(instrument);
                 }
-                ControlCommand::SubscribeTbt { con_id, symbol, tbt_type, number_of_ticks, ignore_size, reply_tx } => {
-                    if let Some(id) = self.register_or_reject(con_id, symbol, "", "", &reply_tx) {
-                        self.hmds.send_tbt_subscribe(con_id, id, tbt_type, number_of_ticks, ignore_size, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::SubscribeTbt { con_id, symbol, exchange, sec_type, tbt_type, number_of_ticks, ignore_size, reply_tx } => {
+                    if let Some(id) = self.register_or_reject(con_id, symbol.clone(), &sec_type, &exchange, &reply_tx) {
+                        // The farm of a SMART contract's route needs its
+                        // aggregate group: the request waits for the
+                        // definition when it is not known (ibx#404).
+                        let again = ControlCommand::SubscribeTbt {
+                            con_id, symbol: symbol.clone(), exchange: exchange.clone(), sec_type: sec_type.clone(),
+                            tbt_type, number_of_ticks, ignore_size, reply_tx: None,
+                        };
+                        if self.park_for_hmds_definition(con_id, &exchange, &sec_type, again) {
+                            continue;
+                        }
+                        let st = if sec_type.is_empty() { "STK" } else { sec_type.as_str() };
+                        let route_exchange = farm::routing_exchange(&exchange, st).to_string();
+                        let agg_group = self.agg_group_for(con_id, &route_exchange);
+                        match self.hmds_target(&route_exchange, agg_group, st, crate::engine::routing::DataType::DayChart) {
+                            // No route: refused as the reference refuses it.
+                            None => self.shared.market.push_tbt_error(id, tbt_type,
+                                format!("{} tick-by-tick requests are not supported for {}", tbt_type.as_str(), symbol)),
+                            Some(farm_id) => {
+                                if let Some(sink) = farm_sink!(self, farm_id) {
+                                    self.hmds.send_tbt_subscribe(con_id, id, &symbol, &exchange, &sec_type, tbt_type,
+                                        number_of_ticks, ignore_size, farm_id, sink, &mut self.hb);
+                                }
+                            }
+                        }
                     }
                 }
                 ControlCommand::UnsubscribeTbt { instrument } => {
-                    self.hmds.send_tbt_unsubscribe(instrument, &mut self.hmds_conn, &mut self.hb);
+                    self.hmds.send_tbt_unsubscribe(instrument, Instant::now());
                     self.try_reclaim_instrument(instrument);
                 }
                 ControlCommand::SubscribeNews { con_id, symbol, providers, reply_tx } => {
@@ -1068,12 +1150,12 @@ impl HotLoop {
                     for instrument in instruments {
                         self.route_md_cancel(instrument);
                     }
-                    // Unsubscribe all TBT subscriptions before stopping
-                    let tbt_instruments: Vec<InstrumentId> = self.hmds.tbt_subscriptions
-                        .iter().map(|(id, _, _)| *id).collect();
-                    for instrument in tbt_instruments {
-                        self.hmds.send_tbt_unsubscribe(instrument, &mut self.hmds_conn, &mut self.hb);
+                    // Cancel all tick-by-tick streams at once before stopping
+                    let now = Instant::now();
+                    for sub in self.hmds.tbt_subscriptions.iter_mut() {
+                        sub.cancel_at = Some(now);
                     }
+                    self.send_due_tbt_cancels(now);
                     // Unsubscribe all news subscriptions before stopping
                     let news_instruments: Vec<InstrumentId> = self.ccp.news_subscriptions
                         .iter().map(|(id, _)| *id).collect();
@@ -3469,7 +3551,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(8);
         engine.set_control_rx(rx);
         let tbt = |tbt_type, number_of_ticks| ControlCommand::SubscribeTbt {
-            con_id: 265598, symbol: String::new(), tbt_type, number_of_ticks, ignore_size: false, reply_tx: None,
+            con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "STK".into(), tbt_type, number_of_ticks, ignore_size: false, reply_tx: None,
         };
         tx.send(tbt(crate::types::TbtType::Last, 10)).unwrap();
         tx.send(tbt(crate::types::TbtType::MidPoint, 0)).unwrap();
@@ -3499,7 +3581,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(8);
         engine.set_control_rx(rx);
         tx.send(subscribe_cmd(265598, "STK")).unwrap();
-        tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), tbt_type: crate::types::TbtType::BidAsk, number_of_ticks: 0, ignore_size: false, reply_tx: None }).unwrap();
+        tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), exchange: "SMART".into(), sec_type: "STK".into(), tbt_type: crate::types::TbtType::BidAsk, number_of_ticks: 0, ignore_size: false, reply_tx: None }).unwrap();
         tx.send(ControlCommand::SubscribeNews { con_id: 265598, symbol: String::new(), providers: String::new(), reply_tx: None }).unwrap();
         engine.poll_once();
         let id = engine.context.market.instrument_by_con_id(265598).unwrap();
@@ -3511,7 +3593,7 @@ mod tests {
 
         // Farm down: the subscription waits for the reconnect, the slot stays.
         engine.farm.handle_disconnect(&mut engine.context, &None);
-        tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), tbt_type: crate::types::TbtType::BidAsk, number_of_ticks: 0, ignore_size: false, reply_tx: None }).unwrap();
+        tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), exchange: "SMART".into(), sec_type: "STK".into(), tbt_type: crate::types::TbtType::BidAsk, number_of_ticks: 0, ignore_size: false, reply_tx: None }).unwrap();
         tx.send(ControlCommand::UnsubscribeTbt { instrument: id }).unwrap();
         engine.poll_once();
         assert_eq!(engine.context.market.con_id(id), Some(265598));
@@ -3983,5 +4065,227 @@ mod tag_cleaner_tests {
         engine.context.market.register_trade_tag(0, 12345, id);
         engine.inject_farm_message(&msg);
         assert_eq!(shared.market.drain_tick_news().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tbt_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use crate::bridge::SharedState;
+    use crate::engine::routing::TableKind;
+
+    fn loopback() -> (Connection, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (Connection::new_raw(client).unwrap(), server)
+    }
+
+    fn plain_sent(server: &mut std::net::TcpStream) -> Vec<String> {
+        use std::io::Read;
+        server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = server.read(&mut chunk) {
+            if n == 0 { break; }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&buf).replace('\x01', "|")
+            .split("8=FIX").filter(|m| !m.is_empty()).map(|m| format!("8=FIX{m}")).collect()
+    }
+
+    fn vlq(val: u64) -> Vec<u8> {
+        let mut v = val;
+        let mut groups = vec![(v & 0x7F) as u8];
+        v >>= 7;
+        while v > 0 {
+            groups.push((v & 0x7F) as u8);
+            v >>= 7;
+        }
+        groups.reverse();
+        let last = groups.len() - 1;
+        groups[last] |= 0x80;
+        groups
+    }
+
+    fn text(s: &str) -> Vec<u8> {
+        if s.is_empty() { return vec![0x80]; }
+        let mut out = s.as_bytes().to_vec();
+        let last = out.len() - 1;
+        out[last] |= 0x80;
+        out
+    }
+
+    fn tbt_frame(entries: &[u8]) -> Vec<u8> {
+        let mut msg = b"8=O\x019=0\x0135=E\x01".to_vec();
+        msg.extend_from_slice(&((entries.len() * 8) as u16).to_be_bytes());
+        msg.extend_from_slice(entries);
+        msg
+    }
+
+    fn ack(window_query_id: &str, rt: u32, min_tick: &str, size_min_tick: &str) -> Vec<u8> {
+        let xml = format!("<ResultSetTickerId><id>{window_query_id}</id><rtTickerId>{rt}</rtTickerId><minTick>{min_tick}</minTick><sizeMinTick>{size_min_tick}</sizeMinTick><eoq>false</eoq></ResultSetTickerId>");
+        fix::fix_build(&[(35, "W"), (6118, &xml)], 1)
+    }
+
+    fn subscribe(engine: &mut HotLoop, tx: &crossbeam_channel::Sender<ControlCommand>, con_id: i64, symbol: &str, exchange: &str, sec_type: &str, tbt_type: crate::types::TbtType) {
+        tx.send(ControlCommand::SubscribeTbt {
+            con_id, symbol: symbol.into(), exchange: exchange.into(), sec_type: sec_type.into(),
+            tbt_type, number_of_ticks: 0, ignore_size: false, reply_tx: None,
+        }).unwrap();
+        engine.poll_once();
+    }
+
+    // ibx#404 (captured, issue comment): the query id is the stream prefix
+    // with a counter and the chart name; the contract's own routing exchange (the
+    // high-precision book for a currency pair) and security type.
+    #[test]
+    fn query_names_the_stream_and_the_contract() {
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (conn, mut side) = loopback();
+        engine.hmds_conn = Some(conn);
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+        subscribe(&mut engine, &tx, 12087792, "EUR", "IDEALPRO", "CASH", crate::types::TbtType::BidAsk);
+        subscribe(&mut engine, &tx, 815824267, "MNQ", "CME", "FUT", crate::types::TbtType::AllLast);
+        subscribe(&mut engine, &tx, 265598, "AAPL", "SMART", "STK", crate::types::TbtType::Last);
+        let sent = plain_sent(&mut side);
+        assert_eq!(sent.len(), 3, "{sent:?}");
+        assert!(sent[0].contains("<id>rtTicker1;;EUR@IDEALPROBidAsk;;1;;true;;0;;U</id><contractID>12087792</contractID><exchange>FXSUBPIP</exchange><secType>CASH</secType>"), "{}", sent[0]);
+        assert!(sent[1].contains("<id>rtTicker2;;MNQ@CMEAllLast;;1;;true;;0;;U</id>") && sent[1].contains("<exchange>CME</exchange><secType>FUT</secType>"), "{}", sent[1]);
+        assert!(sent[2].contains("<exchange>BEST</exchange><secType>STK</secType>"), "{}", sent[2]);
+    }
+
+    // ibx#404: ticks go to the stream of their id on their farm, read by
+    // the stream's type, prices as running sums times the price increment,
+    // sizes times the size increment; two streams on one frame each get
+    // their own ticks.
+    #[test]
+    fn ticks_go_to_the_stream_of_their_id() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (conn, _side) = loopback();
+        engine.hmds_conn = Some(conn);
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+        subscribe(&mut engine, &tx, 815824267, "MNQ", "CME", "FUT", crate::types::TbtType::BidAsk);
+        subscribe(&mut engine, &tx, 815824267, "MNQ", "CME", "FUT", crate::types::TbtType::AllLast);
+        engine.inject_hmds_message(&ack("rtTicker1;;MNQ@CMEBidAsk;;1;;true;;0;;U", 1, "0.25", "1"));
+        engine.inject_hmds_message(&ack("rtTicker2;;MNQ@CMEAllLast;;1;;true;;0;;U", 2, "0.25", "1"));
+        let mnq = engine.context.market.instrument_by_con_id(815824267).unwrap();
+
+        let mut e = Vec::new();
+        // Stream 2 (trades): 100000 ticks, attributes 12, size 3, CME.
+        e.extend(vlq(2)); e.extend(vlq(1_790_000_000)); e.extend(vlq(100_000)); e.extend(vlq(12)); e.extend(vlq(3));
+        e.extend(text("CME")); e.extend(text(""));
+        // Stream 1 (bid/ask): 99999 / 100001 ticks, sizes 4 / 5.
+        e.extend(vlq(1)); e.extend(vlq(1_790_000_001)); e.extend(vlq(99_999)); e.extend(vlq(100_001)); e.extend(vlq(0));
+        e.extend(vlq(4)); e.extend(vlq(5));
+        // Stream 2 again: one tick down (signed one-byte -1).
+        e.extend(vlq(2)); e.extend(vlq(1_790_000_002)); e.push(0xFF); e.extend(vlq(12)); e.extend(vlq(1));
+        e.extend(text("CME")); e.extend(text(""));
+        engine.inject_hmds_message(&tbt_frame(&e));
+
+        let trades = shared.market.drain_tbt_trades();
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].instrument, mnq);
+        assert_eq!(trades[0].price, 25_000 * PRICE_SCALE);
+        assert_eq!(trades[0].size, 3);
+        assert_eq!(trades[0].exchange, "CME");
+        assert_eq!(trades[1].price, 25_000 * PRICE_SCALE - PRICE_SCALE / 4);
+        let quotes = shared.market.drain_tbt_quotes();
+        assert_eq!(quotes.len(), 1);
+        assert_eq!((quotes[0].bid, quotes[0].ask), (24_999 * PRICE_SCALE + 3 * PRICE_SCALE / 4, 25_000 * PRICE_SCALE + PRICE_SCALE / 4));
+        assert_eq!((quotes[0].bid_size, quotes[0].ask_size), (4, 5));
+        assert_eq!(quotes[0].timestamp, 1_790_000_001);
+
+        // The same stream id on another farm is another stream.
+        engine.hmds.rx_farm = 5;
+        engine.inject_hmds_message(&tbt_frame(&[vlq(1), vlq(1), vlq(1), vlq(1), vlq(0), vlq(1), vlq(1)].concat()));
+        engine.hmds.rx_farm = pool::PRIMARY_HMDS;
+        assert!(shared.market.drain_tbt_quotes().is_empty());
+    }
+
+    // ibx#404: with no client left the cancel of the stream id goes 15 s
+    // later, or at once on the stream's next tick, on its farm.
+    #[test]
+    fn cancel_by_stream_id_after_the_delay_or_the_next_tick() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (conn, mut side) = loopback();
+        engine.hmds_conn = Some(conn);
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+        subscribe(&mut engine, &tx, 815824267, "MNQ", "CME", "FUT", crate::types::TbtType::AllLast);
+        subscribe(&mut engine, &tx, 12087792, "EUR", "IDEALPRO", "CASH", crate::types::TbtType::BidAsk);
+        engine.inject_hmds_message(&ack("rtTicker1;;MNQ@CMEAllLast;;1;;true;;0;;U", 7, "0.25", "1"));
+        engine.inject_hmds_message(&ack("rtTicker2;;EUR@IDEALPROBidAsk;;1;;true;;0;;U", 8, "0.00005", "1"));
+        let _ = plain_sent(&mut side);
+        let mnq = engine.context.market.instrument_by_con_id(815824267).unwrap();
+        let eur = engine.context.market.instrument_by_con_id(12087792).unwrap();
+        let t0 = Instant::now();
+        tx.send(ControlCommand::UnsubscribeTbt { instrument: mnq }).unwrap();
+        tx.send(ControlCommand::UnsubscribeTbt { instrument: eur }).unwrap();
+        engine.poll_once();
+        engine.send_due_tbt_cancels(t0);
+        assert!(plain_sent(&mut side).is_empty(), "not at once");
+
+        // A tick of stream 7 sends its cancel; it is not delivered.
+        let mut e = Vec::new();
+        e.extend(vlq(7)); e.extend(vlq(1)); e.extend(vlq(4)); e.extend(vlq(12)); e.extend(vlq(1)); e.extend(text("CME")); e.extend(text(""));
+        engine.inject_hmds_message(&tbt_frame(&e));
+        assert!(shared.market.drain_tbt_trades().is_empty());
+        engine.send_due_tbt_cancels(Instant::now());
+        let sent = plain_sent(&mut side);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].contains("|35=Z|") && sent[0].contains("<CancelQuery><id>rtTicker:7</id></CancelQuery>"), "{}", sent[0]);
+
+        engine.send_due_tbt_cancels(t0 + Duration::from_secs(14));
+        assert!(plain_sent(&mut side).is_empty());
+        engine.send_due_tbt_cancels(t0 + Duration::from_secs(16));
+        let sent = plain_sent(&mut side);
+        assert!(sent.len() == 1 && sent[0].contains("<id>rtTicker:8</id>"), "{sent:?}");
+        assert!(engine.hmds.tbt_subscriptions.is_empty());
+    }
+
+    // ibx#404: with a historical routing table, a currency pair goes to
+    // the farm of its row (opened on demand, the query waits); a SMART
+    // stock whose group is not known waits for its definition, then goes
+    // to the farm of its group; with no row, 10189 at once.
+    #[test]
+    fn routed_by_the_historical_table() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (conn, mut side) = loopback();
+        engine.hmds_conn = Some(conn);
+        let (ccp, mut ccp_side) = loopback();
+        engine.ccp_conn = Some(ccp);
+        engine.set_routing_table(TableKind::Historical, "BEST,STK,DayChart|EODChart|Bar5Sec,1,*,cdc1.example,4000,ushmds;\
+            BEST,STK,DayChart|EODChart|Bar5Sec,3,*,zdc1.example,4000,euhmds;\
+            IDEALPRO,CASH,DayChart|EODChart|Bar5Sec,4,*,ndc1.example,4000,cashhmds");
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        engine.set_control_rx(rx);
+        subscribe(&mut engine, &tx, 12087792, "EUR", "IDEALPRO", "CASH", crate::types::TbtType::BidAsk);
+        let cash = engine.pool.find("cashhmds").expect("cashhmds opened on demand");
+        assert_eq!(engine.pool.get(cash).unwrap().queued(), 1);
+
+        subscribe(&mut engine, &tx, 14094, "BMW", "SMART", "STK", crate::types::TbtType::Last);
+        let asked = plain_sent(&mut ccp_side);
+        assert!(asked.len() == 1 && asked[0].contains("|35=c|") && asked[0].contains("|6008=14094|"), "{asked:?}");
+        let req_id = asked[0].split('|').find_map(|p| p.strip_prefix("320=")).unwrap().to_string();
+        let reply = fix::fix_build(&[(35, "d"), (320, &req_id), (6008, "14094"), (167, "CS"), (6178, "3")], 1);
+        assert!(farm::round_lot_reply(&mut engine.context, &req_id, &reply));
+        engine.send_lot_ready();
+        engine.poll_once();
+        let eu = engine.pool.find("euhmds").expect("group 3 is euhmds");
+        assert_eq!(engine.pool.get(eu).unwrap().queued(), 1);
+        assert!(plain_sent(&mut side).is_empty(), "nothing on the primary farm");
+
+        subscribe(&mut engine, &tx, 815824267, "MNQ", "CME", "FUT", crate::types::TbtType::AllLast);
+        let mnq = engine.context.market.instrument_by_con_id(815824267).unwrap();
+        assert_eq!(shared.market.drain_tbt_errors(),
+            [(mnq, crate::types::TbtType::AllLast, "AllLast tick-by-tick requests are not supported for MNQ".to_string())]);
     }
 }

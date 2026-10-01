@@ -128,7 +128,8 @@ impl EClient {
         // (ibx#271).
         py.detach(|| self.core.register_tbt(
             &shared, &tx, req_id,
-            contract.con_id, &contract.symbol, tbt_type, number_of_ticks, ignore_size,
+            contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+            tbt_type, number_of_ticks, ignore_size,
         )).map_err(|e| PyRuntimeError::new_err(e))?;
         Ok(())
     }

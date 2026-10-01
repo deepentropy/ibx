@@ -1275,6 +1275,8 @@ impl ClientCore {
         req_id: i64,
         con_id: i64,
         symbol: &str,
+        exchange: &str,
+        sec_type: &str,
         tbt_type: TbtType,
         number_of_ticks: i32,
         ignore_size: bool,
@@ -1283,6 +1285,8 @@ impl ClientCore {
         control_tx.send(ControlCommand::SubscribeTbt {
             con_id,
             symbol: symbol.to_string(),
+            exchange: exchange.to_string(),
+            sec_type: sec_type.to_string(),
             tbt_type,
             number_of_ticks,
             ignore_size,

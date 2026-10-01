@@ -69,6 +69,8 @@ pub(crate) fn sweep_round_lot_lookups(context: &mut Context) {
         if *deadline <= now { expired.push((id.clone(), *con_id)); false } else { true }
     });
     for (id, con_id) in expired {
+        // The group stays unknown: routed as a contract with none.
+        context.agg_groups.entry(con_id).or_insert(-1);
         log::warn!(
             "No definition for con_id {} within {:?} ({}): subscribing with a round lot of 1, so its bid, ask and last sizes are not in round lots",
             con_id, LOT_LOOKUP_TIMEOUT, id,
@@ -129,6 +131,10 @@ pub(crate) fn sweep_md_lookups(context: &mut Context, shared: &SharedState) {
 }
 
 fn release_lot_parked(context: &mut Context, con_id: i64, lot: i64) {
+    // Requests that waited for the definition go back to the loop.
+    let (ready, parked): (Vec<_>, Vec<_>) = std::mem::take(&mut context.def_parked).into_iter().partition(|(c, _)| *c == con_id);
+    context.def_parked = parked;
+    context.def_ready.extend(ready.into_iter().map(|(_, cmd)| cmd));
     let (ready, parked): (Vec<MdSubscribe>, Vec<MdSubscribe>) =
         std::mem::take(&mut context.lot_parked).into_iter().partition(|s| s.con_id == con_id);
     context.lot_parked = parked;

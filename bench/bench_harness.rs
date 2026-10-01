@@ -133,6 +133,8 @@ impl BenchSession {
             .send(ControlCommand::SubscribeTbt {
                 con_id,
                 symbol: symbol.to_string(),
+                exchange: "SMART".into(),
+                sec_type: "STK".into(),
                 tbt_type,
                 number_of_ticks: 0,
                 ignore_size: false,

@@ -1636,7 +1636,8 @@ pub enum ControlCommand {
     /// `number_of_ticks` above 0 asks for that many past ticks first;
     /// `ignore_size` reaches the engine but is not sent yet (ibx#455).
     SubscribeTbt {
-        con_id: i64, symbol: String, tbt_type: TbtType, number_of_ticks: i32, ignore_size: bool,
+        con_id: i64, symbol: String, exchange: String, sec_type: String,
+        tbt_type: TbtType, number_of_ticks: i32, ignore_size: bool,
         reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>>,
     },
     /// Unsubscribe from tick-by-tick data.

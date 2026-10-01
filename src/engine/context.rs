@@ -114,6 +114,10 @@ pub struct Context {
     pub(crate) scale_us_lots: bool,
     /// Round lot by conId, once its definition was read (ibx#287).
     pub(crate) round_lots: HashMap<i64, i64>,
+    /// Requests waiting for their contract's definition, by conId, and the
+    /// ones whose definition came, to be handled again (ibx#404).
+    pub(crate) def_parked: Vec<(i64, crate::types::ControlCommand)>,
+    pub(crate) def_ready: Vec<crate::types::ControlCommand>,
     /// Aggregate group by conId, once its definition was read (#445).
     pub(crate) agg_groups: HashMap<i64, i32>,
     /// SMART component exchanges by conId, once its definition was read
@@ -170,6 +174,8 @@ impl Context {
             scale_us_lots: false,
             round_lots: HashMap::new(),
             agg_groups: HashMap::new(),
+            def_parked: Vec::new(),
+            def_ready: Vec::new(),
             smart_components: HashMap::new(),
             lot_lookups: Vec::new(),
             lot_parked: Vec::new(),

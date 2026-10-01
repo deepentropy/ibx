@@ -470,100 +470,153 @@ pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<RtBar> {
     })
 }
 
-/// Marker bytes for tick-by-tick 35=E binary entries.
-pub const TBT_MARKER_ALL_LAST: u8 = 0x81;
-pub const TBT_MARKER_BID_ASK: u8 = 0x82;
-
-/// A decoded tick-by-tick entry from 35=E.
-#[derive(Debug, Clone)]
-pub enum TbtEntry {
-    /// AllLast trade tick.
-    Trade {
-        timestamp: u64,
-        price_cents_delta: i64,
-        size: u64,
-        exchange: String,
-        conditions: String,
-    },
-    /// BidAsk quote tick.
-    Quote {
-        timestamp: u64,
-        bid_cents_delta: i64,
-        ask_cents_delta: i64,
-        bid_size: u64,
-        ask_size: u64,
-    },
+/// How the entries of one tick-by-tick stream are laid out (ibx#404): the
+/// stream's type, which is not on the wire, and whether its acknowledgement
+/// gave a size increment (the field order differs without one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TbtLayout {
+    Trade { sized: bool },
+    BidAsk { sized: bool },
+    MidPoint { sized: bool },
 }
 
-/// Decode tick-by-tick entries from a 35=E binary payload.
-///
-/// `body` is the raw message body after stripping FIX framing and HMAC.
-/// Prices are signed VLQ deltas in cents from a running state (caller tracks).
-pub fn decode_ticks_35e(body: &[u8]) -> Vec<TbtEntry> {
-    let mut entries = Vec::new();
-    let mut pos = 0;
+/// The fields of one tick-by-tick entry, raw: price deltas in ticks, sizes
+/// in size increments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TbtFields {
+    Trade { price_delta: i64, attribs: u64, size: u64, exchange: String, conditions: String },
+    BidAsk { bid_delta: i64, ask_delta: i64, attribs: u64, bid_size: u64, ask_size: u64 },
+    MidPoint { delta: i64 },
+}
 
-    while pos < body.len() {
-        let marker = body[pos];
-        pos += 1;
+/// One tick-by-tick entry: the stream id the server gave in its
+/// acknowledgement, the time (Unix seconds) and the fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TbtRawEntry {
+    pub rt_ticker_id: u64,
+    pub time: u64,
+    pub fields: TbtFields,
+}
 
-        match marker {
-            TBT_MARKER_ALL_LAST => {
-                // A malformed number ends the decode without the entry
-                // (ibx#272).
-                let Some((ts, n)) = read_vlq_bounded(body, pos) else { break };
-                pos += n;
-                let Some((price_raw, n)) = read_vlq_bounded(body, pos) else { break };
-                let price_delta = vlq_signed(price_raw, n);
-                pos += n;
-                let Some((_attribs, n)) = read_vlq_bounded(body, pos) else { break };
-                pos += n;
-                let Some((size, n)) = read_vlq_bounded(body, pos) else { break };
-                pos += n;
-                if pos >= body.len() { break; }
-                let (exchange, n) = read_hibit_str(body, pos);
-                pos += n;
-                if pos >= body.len() { break; }
-                let (conditions, n) = read_hibit_str(body, pos);
-                pos += n;
+/// Why the decode of a frame stopped before its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TbtStop {
+    /// Every entry was read.
+    Done,
+    /// An entry of a stream with no known layout: the rest is skipped.
+    UnknownStream(u64),
+    /// A number or text ran past the data (ibx#272).
+    Malformed,
+}
 
-                entries.push(TbtEntry::Trade {
-                    timestamp: ts,
-                    price_cents_delta: price_delta,
-                    size,
-                    exchange,
-                    conditions,
-                });
-            }
-            TBT_MARKER_BID_ASK => {
-                let Some((ts, n)) = read_vlq_bounded(body, pos) else { break };
-                pos += n;
-                let Some((bid_raw, n)) = read_vlq_bounded(body, pos) else { break };
-                let bid_delta = vlq_signed(bid_raw, n);
-                pos += n;
-                let Some((ask_raw, n)) = read_vlq_bounded(body, pos) else { break };
-                let ask_delta = vlq_signed(ask_raw, n);
-                pos += n;
-                let Some((_attribs, n)) = read_vlq_bounded(body, pos) else { break };
-                pos += n;
-                let Some((bid_size, n)) = read_vlq_bounded(body, pos) else { break };
-                pos += n;
-                let Some((ask_size, n)) = read_vlq_bounded(body, pos) else { break };
-                pos += n;
+/// A signed number and its width, or None past the data.
+fn read_svlq(data: &[u8], pos: &mut usize) -> Option<i64> {
+    let (v, n) = read_vlq_bounded(data, *pos)?;
+    *pos += n;
+    Some(vlq_signed(v, n))
+}
 
-                entries.push(TbtEntry::Quote {
-                    timestamp: ts,
-                    bid_cents_delta: bid_delta,
-                    ask_cents_delta: ask_delta,
-                    bid_size,
-                    ask_size,
-                });
-            }
-            _ => break, // unknown marker, stop parsing
-        }
+fn read_uvlq(data: &[u8], pos: &mut usize) -> Option<u64> {
+    let (v, n) = read_vlq_bounded(data, *pos)?;
+    *pos += n;
+    Some(v)
+}
+
+/// A size of one number, or of two (low part, then high part) when the
+/// attribute bit says so.
+fn read_size(data: &[u8], pos: &mut usize, wide: bool) -> Option<u64> {
+    let low = read_uvlq(data, pos)?;
+    if !wide {
+        return Some(low);
     }
+    let high = read_uvlq(data, pos)?;
+    Some((low & 0xFFFF_FFFF) | (high << 32))
+}
 
-    entries
+fn read_text(data: &[u8], pos: &mut usize, end: usize) -> Option<String> {
+    if *pos >= end {
+        return None;
+    }
+    let (s, n) = read_hibit_str(&data[..end], *pos);
+    *pos += n;
+    Some(s.trim().to_string())
+}
+
+fn read_fields(data: &[u8], pos: &mut usize, end: usize, layout: TbtLayout) -> Option<TbtFields> {
+    let d = &data[..end];
+    Some(match layout {
+        TbtLayout::Trade { sized: true } => {
+            let price_delta = read_svlq(d, pos)?;
+            let attribs = read_uvlq(d, pos)?;
+            let size = read_size(d, pos, attribs & 0x10 != 0)?;
+            let exchange = read_text(data, pos, end)?;
+            let conditions = read_text(data, pos, end)?;
+            TbtFields::Trade { price_delta, attribs, size, exchange, conditions }
+        }
+        TbtLayout::Trade { sized: false } => {
+            let price_delta = read_svlq(d, pos)?;
+            let size = read_uvlq(d, pos)?;
+            let attribs = read_uvlq(d, pos)?;
+            let exchange = read_text(data, pos, end)?;
+            let conditions = read_text(data, pos, end)?;
+            TbtFields::Trade { price_delta, attribs, size, exchange, conditions }
+        }
+        TbtLayout::BidAsk { sized: true } => {
+            let bid_delta = read_svlq(d, pos)?;
+            let ask_delta = read_svlq(d, pos)?;
+            let attribs = read_uvlq(d, pos)?;
+            let bid_size = read_size(d, pos, attribs & 0x04 != 0)?;
+            let ask_size = read_size(d, pos, attribs & 0x08 != 0)?;
+            TbtFields::BidAsk { bid_delta, ask_delta, attribs, bid_size, ask_size }
+        }
+        TbtLayout::BidAsk { sized: false } => {
+            let bid_delta = read_svlq(d, pos)?;
+            let ask_delta = read_svlq(d, pos)?;
+            let bid_size = read_uvlq(d, pos)?;
+            let ask_size = read_uvlq(d, pos)?;
+            let attribs = read_uvlq(d, pos)?;
+            TbtFields::BidAsk { bid_delta, ask_delta, attribs, bid_size, ask_size }
+        }
+        TbtLayout::MidPoint { sized: true } => {
+            let delta = read_svlq(d, pos)?;
+            let attribs = read_uvlq(d, pos)?;
+            read_size(d, pos, attribs & 0x02 != 0)?;
+            TbtFields::MidPoint { delta }
+        }
+        TbtLayout::MidPoint { sized: false } => {
+            let delta = read_svlq(d, pos)?;
+            read_uvlq(d, pos)?;
+            TbtFields::MidPoint { delta }
+        }
+    })
+}
+
+/// Decode a tick-by-tick frame (ibx#404), as the reference reads it: each
+/// entry names its stream, and its fields are laid out by the stream's
+/// type, which `layout_of` gives for a stream id. Reading stops at the
+/// declared size, at a number past the data, or at a stream with no layout
+/// (its entry size is not known).
+pub fn decode_tbt_frame(body: &[u8], mut layout_of: impl FnMut(u64) -> Option<TbtLayout>) -> (Vec<TbtRawEntry>, TbtStop) {
+    let mut out = Vec::new();
+    if body.len() < 2 {
+        return (out, TbtStop::Malformed);
+    }
+    let data = &body[2..];
+    // The declared size wraps on a long frame.
+    let mut bits = u16::from_be_bytes([body[0], body[1]]) as usize;
+    while bits + 65_536 <= data.len() * 8 {
+        bits += 65_536;
+    }
+    let end = bits.div_ceil(8).min(data.len());
+    let mut pos = 0;
+    while pos < end {
+        let Some(rt_ticker_id) = read_uvlq(&data[..end], &mut pos) else { return (out, TbtStop::Malformed) };
+        let Some(time) = read_uvlq(&data[..end], &mut pos) else { return (out, TbtStop::Malformed) };
+        let Some(layout) = layout_of(rt_ticker_id) else { return (out, TbtStop::UnknownStream(rt_ticker_id)) };
+        let Some(fields) = read_fields(data, &mut pos, end, layout) else { return (out, TbtStop::Malformed) };
+        out.push(TbtRawEntry { rt_ticker_id, time, fields });
+    }
+    (out, TbtStop::Done)
 }
 
 #[cfg(test)]
@@ -1118,10 +1171,6 @@ mod tests {
         assert_eq!(read_vlq_bounded(&[0x85], 1), None);
         assert_eq!(read_vlq_bounded(&[0x85], 5), None);
 
-        // A tick-by-tick entry with an unterminated price is not decoded.
-        let mut body = vec![TBT_MARKER_ALL_LAST, 0x85];
-        body.extend_from_slice(&[0x01; 12]);
-        assert!(decode_ticks_35e(&body).is_empty());
     }
 
     #[test]
@@ -1256,14 +1305,13 @@ mod tests {
         assert!((bar.wap - expected_wap).abs() < 1e-9);
     }
 
-    // ── decode_ticks_35e tests ────────────────────────────────────────
+    // ── decode_tbt_frame tests (ibx#404) ──────────────────────────────
 
     /// Helper: encode a VLQ value into bytes (hi-bit terminated).
     fn encode_vlq(val: u64) -> Vec<u8> {
         if val == 0 {
             return vec![0x80];
         }
-        // Find how many 7-bit groups we need
         let mut v = val;
         let mut groups = Vec::new();
         while v > 0 {
@@ -1272,7 +1320,7 @@ mod tests {
         }
         groups.reverse();
         let last = groups.len() - 1;
-        groups[last] |= 0x80; // hi-bit on last byte
+        groups[last] |= 0x80;
         groups
     }
 
@@ -1281,122 +1329,121 @@ mod tests {
         if s.is_empty() {
             return vec![0x80];
         }
-        let bytes = s.as_bytes();
-        let mut out = bytes.to_vec();
+        let mut out = s.as_bytes().to_vec();
         let last = out.len() - 1;
         out[last] |= 0x80;
         out
     }
 
-    #[test]
-    fn decode_35e_single_trade() {
-        let mut payload = Vec::new();
-        payload.push(TBT_MARKER_ALL_LAST);
-        payload.extend(encode_vlq(1000));    // timestamp
-        payload.extend(encode_vlq(5));       // price delta = +5 (1 byte VLQ, val < 64 = positive)
-        payload.extend(encode_vlq(0));       // attribs
-        payload.extend(encode_vlq(100));     // size
-        payload.extend(encode_hibit_str("ARCA"));   // exchange
-        payload.extend(encode_hibit_str(""));       // conditions
-
-        let entries = decode_ticks_35e(&payload);
-        assert_eq!(entries.len(), 1);
-        match &entries[0] {
-            TbtEntry::Trade { timestamp, price_cents_delta, size, exchange, conditions } => {
-                assert_eq!(*timestamp, 1000);
-                assert_eq!(*price_cents_delta, 5);
-                assert_eq!(*size, 100);
-                assert_eq!(exchange, "ARCA");
-                assert_eq!(conditions, "");
-            }
-            _ => panic!("expected Trade"),
-        }
+    fn frame(entries: &[u8]) -> Vec<u8> {
+        let bits = (entries.len() * 8) as u16;
+        let mut f = bits.to_be_bytes().to_vec();
+        f.extend_from_slice(entries);
+        f
     }
 
+    // The captured entry (18/06/2026, seq 11117): stream 5, time
+    // 1781772222, price 61900 ticks, attributes 12, size 100, ARCA, T; then
+    // the next entry of stream 1.
     #[test]
-    fn decode_35e_single_quote() {
-        let mut payload = Vec::new();
-        payload.push(TBT_MARKER_BID_ASK);
-        payload.extend(encode_vlq(2000));    // timestamp
-        payload.extend(encode_vlq(3));       // bid delta = +3
-        payload.extend(encode_vlq(7));       // ask delta = +7
-        payload.extend(encode_vlq(0));       // attribs
-        payload.extend(encode_vlq(500));     // bid_size
-        payload.extend(encode_vlq(300));     // ask_size
-
-        let entries = decode_ticks_35e(&payload);
-        assert_eq!(entries.len(), 1);
-        match &entries[0] {
-            TbtEntry::Quote { timestamp, bid_cents_delta, ask_cents_delta, bid_size, ask_size } => {
-                assert_eq!(*timestamp, 2000);
-                assert_eq!(*bid_cents_delta, 3);
-                assert_eq!(*ask_cents_delta, 7);
-                assert_eq!(*bid_size, 500);
-                assert_eq!(*ask_size, 300);
-            }
-            _ => panic!("expected Quote"),
-        }
+    fn decode_captured_trade_entry() {
+        let mut e = vec![0x85, 0x06, 0x51, 0x4e, 0x5f, 0xbe, 0x03, 0x63, 0xcc, 0x8c, 0xe4, 0x41, 0x52, 0x43, 0xc1, 0x20, 0x20, 0x54, 0xa0];
+        e.extend(encode_vlq(1));
+        e.extend(encode_vlq(1_781_772_223));
+        e.extend(encode_vlq(127)); // -1 tick
+        e.extend(encode_vlq(12));
+        e.extend(encode_vlq(5));
+        e.extend(encode_hibit_str("NYSE"));
+        e.extend(encode_hibit_str(""));
+        let (got, stop) = decode_tbt_frame(&frame(&e), |_| Some(TbtLayout::Trade { sized: true }));
+        assert_eq!(stop, TbtStop::Done);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], TbtRawEntry {
+            rt_ticker_id: 5, time: 1_781_772_222,
+            fields: TbtFields::Trade { price_delta: 61900, attribs: 12, size: 100, exchange: "ARCA".into(), conditions: "T".into() },
+        });
+        assert_eq!(got[1].rt_ticker_id, 1);
+        assert!(matches!(got[1].fields, TbtFields::Trade { price_delta: -1, size: 5, .. }));
     }
 
+    // The layout comes from the stream, not from the first byte: stream 1
+    // as bid/ask, stream 2 as trades; wide sizes take two numbers.
     #[test]
-    fn decode_35e_mixed_trade_and_quote() {
-        let mut payload = Vec::new();
-        // Trade
-        payload.push(TBT_MARKER_ALL_LAST);
-        payload.extend(encode_vlq(100));
-        payload.extend(encode_vlq(10));
-        payload.extend(encode_vlq(0));
-        payload.extend(encode_vlq(50));
-        payload.extend(encode_hibit_str("NYSE"));
-        payload.extend(encode_hibit_str("@"));
-        // Quote
-        payload.push(TBT_MARKER_BID_ASK);
-        payload.extend(encode_vlq(200));
-        payload.extend(encode_vlq(1));
-        payload.extend(encode_vlq(2));
-        payload.extend(encode_vlq(0));
-        payload.extend(encode_vlq(1000));
-        payload.extend(encode_vlq(800));
+    fn decode_by_the_layout_of_each_stream() {
+        let mut e = Vec::new();
+        e.extend(encode_vlq(1));
+        e.extend(encode_vlq(1000));
+        e.extend(encode_vlq(10));   // bid delta
+        e.extend(encode_vlq(12));   // ask delta
+        e.extend(encode_vlq(0x04)); // wide bid size
+        e.extend(encode_vlq(7));
+        e.extend(encode_vlq(1));    // high part
+        e.extend(encode_vlq(3));
+        e.extend(encode_vlq(2));
+        e.extend(encode_vlq(1001));
+        e.extend(encode_vlq(5));
+        e.extend(encode_vlq(0));
+        e.extend(encode_vlq(100));
+        e.extend(encode_hibit_str("ISLAND"));
+        e.extend(encode_hibit_str(""));
+        let layout = |id| match id {
+            1 => Some(TbtLayout::BidAsk { sized: true }),
+            2 => Some(TbtLayout::Trade { sized: true }),
+            _ => None,
+        };
+        let (got, stop) = decode_tbt_frame(&frame(&e), layout);
+        assert_eq!(stop, TbtStop::Done);
+        assert_eq!(got[0].fields, TbtFields::BidAsk { bid_delta: 10, ask_delta: 12, attribs: 4, bid_size: 7 | (1 << 32), ask_size: 3 });
+        assert!(matches!(&got[1].fields, TbtFields::Trade { exchange, .. } if exchange == "ISLAND"));
 
-        let entries = decode_ticks_35e(&payload);
-        assert_eq!(entries.len(), 2);
-        assert!(matches!(&entries[0], TbtEntry::Trade { .. }));
-        assert!(matches!(&entries[1], TbtEntry::Quote { .. }));
+        // A stream with no layout stops the decode there.
+        let (got, stop) = decode_tbt_frame(&frame(&e), |id| (id == 2).then_some(TbtLayout::Trade { sized: true }));
+        assert!(got.is_empty());
+        assert_eq!(stop, TbtStop::UnknownStream(1));
     }
 
+    // Without a size increment the fields come in another order; the
+    // midpoint layouts read their size and drop it.
     #[test]
-    fn decode_35e_negative_price_delta() {
-        // VLQ 1 byte: value 64 = -64 (upper half)
-        let mut payload = Vec::new();
-        payload.push(TBT_MARKER_ALL_LAST);
-        payload.extend(encode_vlq(500));
-        // Encode -1: 1-byte VLQ val=127 → vlq_signed(127,1) = -1
-        payload.push(0xFF); // 0x7F | 0x80 = 0xFF → val=127, n=1
-        payload.extend(encode_vlq(0));
-        payload.extend(encode_vlq(25));
-        payload.extend(encode_hibit_str(""));
-        payload.extend(encode_hibit_str(""));
-
-        let entries = decode_ticks_35e(&payload);
-        assert_eq!(entries.len(), 1);
-        match &entries[0] {
-            TbtEntry::Trade { price_cents_delta, .. } => {
-                assert_eq!(*price_cents_delta, -1);
-            }
-            _ => panic!("expected Trade"),
-        }
+    fn decode_unsized_and_midpoint_layouts() {
+        let mut e = Vec::new();
+        e.extend(encode_vlq(3));
+        e.extend(encode_vlq(50));
+        e.extend(encode_vlq(9));   // bid
+        e.extend(encode_vlq(11));  // ask
+        e.extend(encode_vlq(200)); // bid size
+        e.extend(encode_vlq(300)); // ask size
+        e.extend(encode_vlq(1));   // attribs
+        e.extend(encode_vlq(4));
+        e.extend(encode_vlq(51));
+        e.extend(encode_vlq(20));  // mid delta
+        e.extend(encode_vlq(2));   // wide size
+        e.extend(encode_vlq(1));
+        e.extend(encode_vlq(0));
+        let layout = |id| match id {
+            3 => Some(TbtLayout::BidAsk { sized: false }),
+            4 => Some(TbtLayout::MidPoint { sized: true }),
+            _ => None,
+        };
+        let (got, stop) = decode_tbt_frame(&frame(&e), layout);
+        assert_eq!(stop, TbtStop::Done);
+        assert_eq!(got[0].fields, TbtFields::BidAsk { bid_delta: 9, ask_delta: 11, attribs: 1, bid_size: 200, ask_size: 300 });
+        assert_eq!(got[1].fields, TbtFields::MidPoint { delta: 20 });
     }
 
+    // A truncated number ends the decode without the entry (ibx#272); the
+    // bit count bounds the read.
     #[test]
-    fn decode_35e_empty() {
-        assert!(decode_ticks_35e(&[]).is_empty());
-    }
-
-    #[test]
-    fn decode_35e_unknown_marker_stops() {
-        let mut payload = Vec::new();
-        payload.push(0x99); // unknown
-        payload.extend(encode_vlq(100));
-        assert!(decode_ticks_35e(&payload).is_empty());
+    fn decode_stops_on_truncated_data() {
+        let mut e = Vec::new();
+        e.extend(encode_vlq(1));
+        e.extend(encode_vlq(1000));
+        e.push(0x05); // unterminated price
+        let (got, stop) = decode_tbt_frame(&frame(&e), |_| Some(TbtLayout::Trade { sized: true }));
+        assert!(got.is_empty());
+        assert_eq!(stop, TbtStop::Malformed);
+        assert_eq!(decode_tbt_frame(&[], |_| None).1, TbtStop::Malformed);
+        let (got, stop) = decode_tbt_frame(&[0, 0, 0x81, 0x82], |_| None);
+        assert!(got.is_empty() && stop == TbtStop::Done, "a zero bit count holds no entry");
     }
 }
