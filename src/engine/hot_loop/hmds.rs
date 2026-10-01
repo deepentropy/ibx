@@ -63,13 +63,11 @@ pub(crate) enum LegState {
     Failed,
 }
 
-/// One leg of a multi-query bar request: its query id, the bars received so
-/// far and its state.
+/// One leg of a multi-query bar request: its query id and its state.
 #[derive(Debug)]
 pub(crate) struct BarLeg {
     pub(crate) query_id: String,
     pub(crate) data_type: crate::control::historical::BarDataType,
-    pub(crate) bars: Vec<crate::control::historical::HistoricalBar>,
     pub(crate) state: LegState,
 }
 
@@ -78,6 +76,13 @@ pub(crate) struct BarLeg {
 pub(crate) struct MultiLegBars {
     pub(crate) req_id: u32,
     pub(crate) legs: Vec<BarLeg>,
+    /// Bar frames of every leg, in arrival order: the combined bars are
+    /// built from them once no leg is pending.
+    pub(crate) frames: Vec<(crate::control::historical::BarDataType, Vec<crate::control::historical::LegBar>)>,
+    /// Time zone of the replies.
+    pub(crate) timezone: String,
+    /// Chart name of the request, for the no-data error.
+    pub(crate) name: String,
 }
 
 /// Error text of a server-side rejection of a historical bar query, as the
@@ -263,7 +268,7 @@ impl HmdsState {
                                 if is_complete {
                                     self.pending_historical.remove(pos);
                                 }
-                                self.on_leg_bars(req_id, &leg_qid, resp, shared);
+                                self.on_leg_bars(req_id, &leg_qid, &resp, xml_tag, shared, event_tx);
                                 return;
                             }
                             // Bar completion rides <eoq>true> in the final segmented
@@ -805,14 +810,23 @@ impl HmdsState {
                 leg_states.push(BarLeg {
                     query_id: query_id.clone(),
                     data_type: leg_type,
-                    bars: Vec::new(),
                     state: LegState::Pending,
                 });
             }
             self.pending_historical.push((query_id, req_id, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
         }
         if !leg_states.is_empty() {
-            self.multi_leg.push(MultiLegBars { req_id, legs: leg_states });
+            // Chart name as the reference: symbol, API exchange and the
+            // name of the first leg.
+            let exchange = if exchange.trim().is_empty() { "SMART" } else { exchange.trim() };
+            let name = format!("{}@{} {}", symbol, exchange, legs[0].as_str());
+            self.multi_leg.push(MultiLegBars {
+                req_id,
+                legs: leg_states,
+                frames: Vec::new(),
+                timezone: String::new(),
+                name,
+            });
         }
     }
 
@@ -822,18 +836,26 @@ impl HmdsState {
         &mut self,
         req_id: u32,
         leg_qid: &str,
-        resp: crate::control::historical::HistoricalResponse,
+        resp: &crate::control::historical::HistoricalResponse,
+        xml: &str,
         shared: &SharedState,
+        event_tx: &Option<Sender<Event>>,
     ) {
         let Some(pos) = self.multi_leg.iter().position(|m| m.req_id == req_id) else { return };
         let m = &mut self.multi_leg[pos];
         if let Some(leg) = m.legs.iter_mut().find(|l| l.query_id == leg_qid) {
-            leg.bars.extend(resp.bars);
+            let bars = crate::control::historical::parse_leg_bars(xml);
+            if !bars.is_empty() {
+                m.frames.push((leg.data_type, bars));
+            }
             if resp.is_complete && leg.state == LegState::Pending {
                 leg.state = LegState::Done;
             }
+            if m.timezone.is_empty() {
+                m.timezone = resp.timezone.clone();
+            }
         }
-        self.finish_multi_leg(pos, shared);
+        self.finish_multi_leg(pos, shared, event_tx);
     }
 
     /// A leg of a multi-query request was rejected by the server. The caller
@@ -849,9 +871,12 @@ impl HmdsState {
         }
     }
 
-    /// Release a multi-query request once no leg is pending. If a leg failed,
-    /// its error was the answer and nothing else is delivered.
-    fn finish_multi_leg(&mut self, pos: usize, shared: &SharedState) {
+    /// Answer a multi-query request once no leg is pending: the combined
+    /// bars and the end, as the reference does after all its queries end.
+    /// If a leg failed, its error was the answer and nothing else is
+    /// delivered. No bar in any leg gives error 162 with the no-data text
+    /// of the reference, and no end.
+    fn finish_multi_leg(&mut self, pos: usize, shared: &SharedState, event_tx: &Option<Sender<Event>>) {
         if self.multi_leg[pos].legs.iter().any(|l| l.state == LegState::Pending) {
             return;
         }
@@ -859,23 +884,26 @@ impl HmdsState {
         if m.legs.iter().any(|l| l.state == LegState::Failed) {
             return;
         }
-        // How one API bar is built from the Bid bar and the Ask bar of the
-        // same period is not established yet (ibx#408). Until it is, the
-        // request fails loudly instead of delivering one leg as if it were
-        // the combined series.
-        let counts: Vec<String> = m.legs.iter()
-            .map(|l| format!("{} {}", l.data_type.as_str(), l.bars.len()))
-            .collect();
-        log::warn!(
-            "historical req_id={}: BID_ASK legs received ({}), combination not implemented",
-            m.req_id, counts.join(", "),
-        );
-        super::push_hmds_error(
-            shared, m.req_id,
-            "BID_ASK: the Bid and Ask bars were received but combining them into \
-             one bar series is not implemented yet".to_string(),
-            true,
-        );
+        let bars = crate::control::historical::combine_bid_ask(&m.frames);
+        if bars.is_empty() {
+            log::warn!("historical req_id={}: no bar in any leg", m.req_id);
+            shared.reference.push_historical_error(
+                m.req_id, 162,
+                historical_service_error(&format!("HMDS query returned no data: {}", m.name)),
+            );
+            return;
+        }
+        let resp = crate::control::historical::HistoricalResponse {
+            query_id: m.legs[0].query_id.clone(),
+            timezone: m.timezone,
+            bars,
+            is_complete: true,
+        };
+        let for_event = clone_for_event(event_tx, &resp);
+        shared.reference.push_historical_data(m.req_id, resp);
+        if let Some(data) = for_event {
+            emit(event_tx, Event::HistoricalData { req_id: m.req_id, data });
+        }
     }
 
     /// Cancel every in-flight query of a bar request (a BID_ASK request has
@@ -932,9 +960,8 @@ impl HmdsState {
         // path only (ibx#232). Unsupported streaming sizes reject loudly.
         let data_type = match crate::control::historical::BarDataType::from_api_str(what_to_show) {
             Ok(dt) if dt.legs().len() > 1 => {
-                // A two-query streaming request is not supported: its live
-                // bars would need the same Bid/Ask combination that the batch
-                // path does not have yet (ibx#408).
+                // A two-query request has no live updates: the reference
+                // refuses BID_ASK with keepUpToDate (ibx#408).
                 let e = format!(
                     "what_to_show '{}' is not supported with keep_up_to_date=true",
                     what_to_show,
@@ -1526,32 +1553,82 @@ mod tests {
         assert!(hmds.multi_leg.is_empty());
     }
 
+    fn make_leg_msg(query_id: &str, eoq: bool, bars: &[(&str, f64, f64, f64)]) -> Vec<u8> {
+        let mut xml = format!(
+            "<ResultSetBar><id>{}</id><eoq>{}</eoq><tz>US/Eastern</tz><Events>",
+            query_id, if eoq { "true" } else { "false" },
+        );
+        for (time, high, low, avg) in bars {
+            xml.push_str(&format!(
+                "<Bar><time>{}</time><open>0</open><close>0</close><high>{}</high>                 <low>{}</low><timeAvg>{}</timeAvg></Bar>",
+                time, high, low, avg,
+            ));
+        }
+        xml.push_str("</Events></ResultSetBar>");
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"35=W6118=");
+        msg.extend_from_slice(xml.as_bytes());
+        msg.push(0x01);
+        msg
+    }
+
     #[test]
-    fn bid_ask_legs_are_held_until_both_finish() {
+    fn bid_ask_legs_are_held_until_both_finish_then_combined() {
         let mut hmds = HmdsState::new();
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
         let (bid, ask) = send_bid_ask(&mut hmds, &shared, 8);
 
-        hmds.process_hmds_message(&make_bar_msg(&bid, false), &mut conn, &shared, &None, &mut hb);
-        hmds.process_hmds_message(&make_bar_msg(&bid, true), &mut conn, &shared, &None, &mut hb);
+        hmds.process_hmds_message(&make_leg_msg(&bid, false, &[("20260227-20:30:00", 266.63, 266.30, 266.466)]),
+            &mut conn, &shared, &None, &mut hb);
+        hmds.process_hmds_message(&make_leg_msg(&bid, true, &[("20260227-20:31:00", 266.38, 266.00, 266.154)]),
+            &mut conn, &shared, &None, &mut hb);
         assert!(shared.reference.drain_historical_data().is_empty(), "one leg must not be delivered");
-        assert_eq!(hmds.multi_leg[0].legs[0].bars.len(), 2);
         assert_eq!(hmds.multi_leg[0].legs[0].state, LegState::Done);
+        assert_eq!(hmds.multi_leg[0].frames.len(), 2);
         assert_eq!(hmds.pending_historical.len(), 1, "the Ask leg is still in flight");
 
-        hmds.process_hmds_message(&make_bar_msg(&ask, true), &mut conn, &shared, &None, &mut hb);
+        hmds.process_hmds_message(&make_leg_msg(&ask, true, &[
+            ("20260227-20:30:00", 266.70, 266.40, 266.520),
+            ("20260227-20:32:00", 266.20, 266.00, 266.100),
+        ]), &mut conn, &shared, &None, &mut hb);
         assert!(hmds.pending_historical.is_empty());
         assert!(hmds.multi_leg.is_empty());
-        // The Bid/Ask combination is not implemented: the request ends with a
-        // local error instead of one leg's bars.
-        let errors = shared.reference.drain_historical_errors();
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].2.contains("not implemented"), "got: {}", errors[0].2);
+        assert!(shared.reference.drain_historical_errors().is_empty());
         let hist = shared.reference.drain_historical_data();
-        assert_eq!(hist.len(), 1);
-        assert!(hist[0].1.is_complete && hist[0].1.bars.is_empty());
+        assert_eq!(hist.len(), 1, "one answer with the end");
+        let (rid, resp) = &hist[0];
+        assert_eq!(*rid, 8);
+        assert!(resp.is_complete);
+        assert_eq!(resp.timezone, "US/Eastern");
+        let b: Vec<_> = resp.bars.iter()
+            .map(|b| (b.time.as_str(), b.open, b.high, b.low, b.close)).collect();
+        assert_eq!(b, vec![
+            // Both legs: open and low from Bid, close and high from Ask.
+            ("20260227-20:30:00", 266.466, 266.70, 266.30, 266.520),
+            // Bid only.
+            ("20260227-20:31:00", 266.154, 266.154, 266.00, 266.154),
+            // Ask only.
+            ("20260227-20:32:00", 266.100, 266.20, 266.100, 266.100),
+        ]);
+    }
+
+    #[test]
+    fn bid_ask_with_no_bar_in_any_leg_gives_the_no_data_error() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        let (bid, ask) = send_bid_ask(&mut hmds, &shared, 11);
+        hmds.process_hmds_message(&make_leg_msg(&bid, true, &[]), &mut conn, &shared, &None, &mut hb);
+        hmds.process_hmds_message(&make_leg_msg(&ask, true, &[]), &mut conn, &shared, &None, &mut hb);
+        assert_eq!(shared.reference.drain_historical_errors(), vec![(
+            11, 162,
+            "Historical Market Data Service error message:HMDS query returned no data: SPX@CBOE Bid".to_string(),
+        )]);
+        assert!(shared.reference.drain_historical_data().is_empty(), "no end after the error");
+        assert!(hmds.multi_leg.is_empty());
     }
 
     #[test]

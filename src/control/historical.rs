@@ -406,6 +406,89 @@ pub fn parse_bar_response(xml: &str) -> Option<HistoricalResponse> {
     })
 }
 
+/// One bar of the Bid or the Ask query of a BID_ASK request: the fields the
+/// combined bar is built from (ibx#408).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegBar {
+    pub time: String,
+    pub high: f64,
+    pub low: f64,
+    pub time_avg: f64,
+}
+
+/// The bars of one bar reply frame of a Bid or Ask query (ibx#408).
+pub fn parse_leg_bars(xml: &str) -> Vec<LegBar> {
+    let mut bars = Vec::new();
+    let mut search_start = 0;
+    while let Some(bar_start) = xml[search_start..].find("<Bar>") {
+        let abs_start = search_start + bar_start;
+        let bar_end = match xml[abs_start..].find("</Bar>") {
+            Some(e) => abs_start + e + 6,
+            None => break,
+        };
+        let bar_xml = &xml[abs_start..bar_end];
+        let num = |tag: &str| extract_xml_tag(bar_xml, tag)
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        bars.push(LegBar {
+            time: extract_xml_tag(bar_xml, "time").unwrap_or("").to_string(),
+            high: num("high"),
+            low: num("low"),
+            time_avg: num("timeAvg"),
+        });
+        search_start = bar_end;
+    }
+    bars
+}
+
+/// The bars of a BID_ASK request from its Bid and Ask frames, given in
+/// arrival order (ibx#408). Bars are keyed by bar time, as the reference:
+/// the Bid bar gives the open (its time average) and the low, the Ask bar
+/// gives the close (its time average) and raises the high to its own high.
+/// A bar found in one leg only keeps that leg's values: Bid only, open,
+/// high and close are the Bid time average; Ask only, open, low and close
+/// are the Ask time average. The combined bars carry no volume, average
+/// price or trade count. Sorted by bar time.
+pub fn combine_bid_ask(frames: &[(BarDataType, Vec<LegBar>)]) -> Vec<HistoricalBar> {
+    let mut series: std::collections::BTreeMap<String, HistoricalBar> = std::collections::BTreeMap::new();
+    for (leg, bars) in frames {
+        let is_bid = match leg {
+            BarDataType::Bid => true,
+            BarDataType::Ask => false,
+            _ => continue,
+        };
+        for b in bars {
+            match series.get_mut(&b.time) {
+                Some(bar) if is_bid => {
+                    bar.open = b.time_avg;
+                    bar.low = b.low;
+                }
+                Some(bar) => {
+                    bar.close = b.time_avg;
+                    if b.high > bar.high {
+                        bar.high = b.high;
+                    }
+                }
+                None => {
+                    let (open, high, low, close) = if is_bid {
+                        (b.time_avg, b.time_avg, b.low, b.time_avg)
+                    } else {
+                        (b.time_avg, b.high, b.time_avg, b.time_avg)
+                    };
+                    series.insert(b.time.clone(), HistoricalBar {
+                        time: b.time.clone(),
+                        open, high, low, close,
+                        volume: 0,
+                        wap: 0.0,
+                        count: 0,
+                    });
+                }
+            }
+        }
+    }
+    series.into_values().collect()
+}
+
 /// Extract the ticker ID from a ResultSetTickerId response (for real-time bar subscriptions).
 pub fn parse_ticker_id(xml: &str) -> Option<String> {
     if !xml.contains("<ResultSetTickerId>") {
@@ -863,6 +946,56 @@ mod tests {
         ] {
             assert_eq!(dt.legs(), &[dt]);
         }
+    }
+
+    // ibx#408: BID_ASK bars from the Bid leg and the Ask leg.
+    fn leg(time: &str, high: f64, low: f64, time_avg: f64) -> LegBar {
+        LegBar { time: time.to_string(), high, low, time_avg }
+    }
+
+    #[test]
+    fn combine_bid_ask_from_both_legs() {
+        let bid = vec![leg("20260227-20:30:00", 266.63, 266.30, 266.466), leg("20260227-20:31:00", 266.38, 266.00, 266.154)];
+        let ask = vec![leg("20260227-20:30:00", 266.70, 266.40, 266.520), leg("20260227-20:32:00", 266.20, 266.00, 266.100)];
+        let ohlc = |bars: Vec<HistoricalBar>| bars.into_iter()
+            .map(|b| (b.time, b.open, b.high, b.low, b.close, b.volume, b.wap, b.count))
+            .collect::<Vec<_>>();
+
+        let bid_first = ohlc(combine_bid_ask(&[(BarDataType::Bid, bid.clone()), (BarDataType::Ask, ask.clone())]));
+        assert_eq!(bid_first, vec![
+            ("20260227-20:30:00".to_string(), 266.466, 266.70, 266.30, 266.520, 0, 0.0, 0),
+            ("20260227-20:31:00".to_string(), 266.154, 266.154, 266.00, 266.154, 0, 0.0, 0),
+            ("20260227-20:32:00".to_string(), 266.100, 266.20, 266.100, 266.100, 0, 0.0, 0),
+        ]);
+        // Ask first: same bars, sorted by time.
+        let ask_first = ohlc(combine_bid_ask(&[(BarDataType::Ask, ask), (BarDataType::Bid, bid)]));
+        assert_eq!(ask_first, bid_first);
+    }
+
+    #[test]
+    fn combine_bid_ask_high_is_the_larger_of_the_bid_average_and_the_ask_high() {
+        // Bid bar first: its placeholder high is the Bid time average; an
+        // Ask high below it does not lower the high.
+        let bars = combine_bid_ask(&[
+            (BarDataType::Bid, vec![leg("t1", 10.0, 9.0, 9.8)]),
+            (BarDataType::Ask, vec![leg("t1", 9.7, 9.5, 9.6)]),
+        ]);
+        assert_eq!((bars[0].open, bars[0].high, bars[0].low, bars[0].close), (9.8, 9.8, 9.0, 9.6));
+        // Ask bar first: the high is the Ask high, the Bid sets open and low.
+        let bars = combine_bid_ask(&[
+            (BarDataType::Ask, vec![leg("t1", 9.7, 9.5, 9.6)]),
+            (BarDataType::Bid, vec![leg("t1", 10.0, 9.0, 9.8)]),
+        ]);
+        assert_eq!((bars[0].open, bars[0].high, bars[0].low, bars[0].close), (9.8, 9.7, 9.0, 9.6));
+    }
+
+    #[test]
+    fn parse_leg_bars_reads_time_average() {
+        let xml = "<ResultSetBar><id>q</id><eoq>true</eoq><Events>\
+                   <Bar><time>20260227-20:30:00</time><endTime>20260227-20:31:00</endTime>\
+                   <open>266.63</open><close>266.33</close><high>266.63</high><low>266.3</low>\
+                   <timeAvg>266.466</timeAvg></Bar></Events></ResultSetBar>";
+        assert_eq!(parse_leg_bars(xml), vec![leg("20260227-20:30:00", 266.63, 266.3, 266.466)]);
     }
 
     #[test]
