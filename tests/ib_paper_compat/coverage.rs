@@ -68,6 +68,29 @@ const KNOWN_CONTROL_COMMAND_GAPS: &[(&str, &str)] = &[
          SharedState, consumed before any phase's hot loop runs — not re-requestable, \
          so a phase-model integration test cannot observe a non-empty result",
     ),
+    (
+        "SubscribeAccountSummary",
+        "Sent only by EClient::req_account_summary; no phase of this suite sends it \
+         (phase 106 reads the account state). Exercised against the server by \
+         tests/rust_api_gt.rs (req_account_summary) and by unit tests",
+    ),
+    (
+        "CancelAccountSummary",
+        "Sent only by EClient::cancel_account_summary (and by a reused request id); no \
+         phase of this suite sends it. Exercised against the server by tests/rust_api_gt.rs \
+         (cancel_account_summary) and by unit tests",
+    ),
+    (
+        "SetInstrumentCurrency",
+        "Sent only by EClient::place_order for a contract with a currency; the order phases \
+         of this suite submit on the engine directly. Exercised against the server by \
+         tests/rust_api_gt.rs (place_order on SPY USD) and by unit tests",
+    ),
+    (
+        "SetMarketDataType",
+        "Sent only by EClient::req_market_data_type; no phase of this suite and no Rust \
+         server test sends it. Unit tests only",
+    ),
 ];
 
 const KNOWN_RUST_API_GAPS: &[(&str, &str)] = &[
