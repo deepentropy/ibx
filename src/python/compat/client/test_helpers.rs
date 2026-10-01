@@ -109,6 +109,14 @@ impl EClient {
         Ok(())
     }
 
+    /// Hold or release the open-order requests, as a lost auth link and the
+    /// end of the order replay do (ibx#251).
+    #[doc(hidden)]
+    fn _test_set_open_orders_held(&self, held: bool) -> PyResult<()> {
+        self.shared_state()?.orders.set_open_orders_held(held);
+        Ok(())
+    }
+
     /// Push an order update into SharedState.
     #[doc(hidden)]
     fn _test_push_order_update(
