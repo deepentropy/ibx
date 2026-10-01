@@ -48,6 +48,7 @@ impl EClient {
         let shared = self.shared_state()?;
         let session_account = self.account_id.lock().unwrap().clone().unwrap_or_default();
         if let Some((code, message)) = ClientCore::refusal_before_sending(&api_order)
+            .or_else(|| ClientCore::algo_definition_refusal(&api_order, &shared.reference))
             .or_else(|| ClientCore::account_config_refusal(
                 &api_order, shared.reference.account_features().as_deref(), &session_account))
             .or_else(|| ClientCore::good_till_date_refusal(

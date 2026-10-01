@@ -3683,10 +3683,12 @@ fn fractional_quantity_is_refused_before_sending() {
 
 // ibx#263: bad algo parameter values were turned into defaults and sent.
 // The reference refuses each captured case before sending, with these
-// codes and texts (ib-agent#192 B10a-e).
+// codes and texts (ib-agent#192 B9b, B10a-e), from the algo definitions
+// the server sent.
 #[test]
 fn bad_algo_parameter_values_are_refused_before_sending() {
-    let cases: [(&str, &str, &str, &str); 5] = [
+    let cases: [(&str, &str, &str, &str); 6] = [
+        ("Twap", "strategyType", "Marketable", "443:Order processing failed. Unknown algo attribute:strategyType"),
         ("Adaptive", "adaptivePriority", "Bogus", "145:Error in validating entry fields -Bogus"),
         ("ArrivalPx", "riskAversion", "Bogus", "145:Error in validating entry fields -Bogus"),
         ("Vwap", "maxPctVol", "NaN",
@@ -3699,6 +3701,8 @@ fn bad_algo_parameter_values_are_refused_before_sending() {
     for (i, (strategy, tag, value, expected)) in cases.into_iter().enumerate() {
         let (client, rx, shared) = test_client();
         shared.market.set_instrument_count(1);
+        shared.reference.add_algo_definitions(crate::control::algo::CAPTURED_AE);
+        shared.reference.add_algo_definitions(crate::control::algo::CAPTURED_AL_STK);
         let id = 100 + i as i64;
         let order = Order {
             action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 1.0,

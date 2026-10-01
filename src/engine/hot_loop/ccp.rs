@@ -839,6 +839,11 @@ impl CcpState {
                             }
                         }
                         "60" => self.handle_commission_report(&parsed, shared),
+                        // An algo definition answer (ibx#263).
+                        "54" => if let Some(xml) = parsed.get(&6118) {
+                            log::info!("Algo definitions received for {:?}", parsed.get(&6364));
+                            shared.reference.add_algo_definitions(xml);
+                        },
                         "102" => self.handle_exchange_list(msg, shared),
                         "107" => self.handle_schedule_reply(msg, shared, event_tx),
                         _ => {}

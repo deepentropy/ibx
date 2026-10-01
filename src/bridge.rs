@@ -606,6 +606,8 @@ pub struct ReferenceState {
     omnibus: AtomicBool,
     /// The API client id the new orders carry (ibx#466); 0 until set.
     api_client_id: std::sync::atomic::AtomicI64,
+    /// The algo definitions the server sent (ibx#263).
+    algo_definitions: Mutex<crate::control::algo::AlgoDefinitions>,
     /// Most contracts with tick-by-tick data at once, from the logon;
     /// u64::MAX until known (ibx#455).
     tick_by_tick_limit: AtomicU64,
@@ -653,6 +655,7 @@ impl ReferenceState {
             super_user: AtomicBool::new(false),
             omnibus: AtomicBool::new(false),
             api_client_id: std::sync::atomic::AtomicI64::new(0),
+            algo_definitions: Mutex::new(Default::default()),
             tick_by_tick_limit: AtomicU64::new(u64::MAX),
             tick_by_tick_off: AtomicBool::new(false),
             account_config: Mutex::new(None),
@@ -966,6 +969,18 @@ impl ReferenceState {
     /// The logon's super user and omnibus flags (ibx#417).
     pub fn short_sale_flags(&self) -> (bool, bool) {
         (self.super_user.load(Ordering::Relaxed), self.omnibus.load(Ordering::Relaxed))
+    }
+
+    /// The refusal of an algo order by the algo definitions the server
+    /// sent (ibx#263); None when it passes or its algorithm is not
+    /// defined (yet).
+    pub fn algo_refusal(&self, algorithm: &str, values: &[(&str, &str)]) -> Option<(i64, String)> {
+        crate::control::algo::refusal(&self.algo_definitions.lock().unwrap(), algorithm, values)
+    }
+
+    /// Keep one algo definition answer (ibx#263).
+    pub fn add_algo_definitions(&self, xml: &str) {
+        self.algo_definitions.lock().unwrap().add(xml);
     }
 
     /// The API client id the new orders carry (ibx#466).

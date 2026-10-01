@@ -508,6 +508,8 @@ pub struct Gateway {
     /// Account config (6040=210): feature list (6542) and MiFID config id
     /// (8234); None when the answer was not in the login burst (ibx#425).
     pub account_config: Option<(Vec<String>, String)>,
+    /// The algo definition answers of the login burst (ibx#263).
+    pub algo_definitions: Vec<String>,
     /// The logon feature list asks for US stock sizes in round lots
     /// (ibx#287).
     pub scale_us_lots: bool,
@@ -1601,8 +1603,12 @@ impl Gateway {
         for _ in 0..92 {
             send_init(&[(35, "U"), (52, &now), (6040, "80")])?;
         }
+        // The algo definitions the reference asks for stock algos (ibx#263).
+        for key in crate::control::algo::DEFINITION_KEYS {
+            send_init(&[(35, "U"), (52, &now), (6040, "53"), (6364, key)])?;
+        }
         tls.flush()?;
-        log::info!("Init sequence sent ({} messages, seq now {})", 99, ccp_seq);
+        log::info!("Init sequence sent ({} messages, seq now {})", ccp_seq - 1, ccp_seq);
 
         // Drain init responses — extract account ID + farm routing tags.
         // Per ib-agent#134 read-throughput investigation (2026-05-05):
@@ -1646,6 +1652,8 @@ impl Gateway {
         // Scan init response for account ID and gateway-local init tags
         let init_str = String::from_utf8_lossy(&scan_data);
         let account_config = parse_account_config(&init_str);
+        let algo_definitions = parse_algo_definitions(&init_str);
+        log::info!("Algo definitions in the login burst: {}", algo_definitions.len());
         match &account_config {
             Some((features, mifid)) => log::info!("Account config: features {:?}, MiFID config {:?}", features, mifid),
             None => log::warn!("No account config answer in the login burst"),
@@ -1893,6 +1901,7 @@ impl Gateway {
             super_user,
             omnibus,
             account_config,
+            algo_definitions,
             scale_us_lots,
             tick_by_tick_limit: tick_by_tick_limit(&tbt_limit_fields),
             tick_by_tick_off,
@@ -1973,6 +1982,9 @@ impl Gateway {
         shared.reference.set_fa_session(self.fa_session);
         shared.reference.set_short_sale_flags(self.super_user, self.omnibus);
         shared.reference.set_tick_by_tick_limits(self.tick_by_tick_limit, self.tick_by_tick_off);
+        for xml in &self.algo_definitions {
+            shared.reference.add_algo_definitions(xml);
+        }
         if let Some((features, mifid)) = &self.account_config {
             shared.reference.set_account_config(features.clone(), mifid.clone());
         }
@@ -2089,6 +2101,14 @@ pub fn build_mktdata_unsubscribe(md_req_id: &str, seq: u32) -> Vec<u8> {
 /// Re-exports for backward compatibility.
 pub use crate::config::{chrono_free_timestamp, days_to_ymd};
 
+/// The algo definition answers of the login burst (ibx#263): the XML of
+/// each.
+fn parse_algo_definitions(init: &str) -> Vec<String> {
+    init.split("8=FIX").filter(|frame| frame.contains("\x016040=54\x01")).filter_map(|frame| {
+        frame.split('\x01').find_map(|p| p.strip_prefix("6118=")).map(String::from)
+    }).collect()
+}
+
 /// The init burst as the logon tag scan reads it: the received bytes, then
 /// the inflated content of every `8=FIXCOMP` frame in them (ib-agent#129).
 /// The compressed body is ~30 kB on the wire and expands to ~48 kB plaintext
@@ -2197,6 +2217,16 @@ fn init_scan_buffer(init_data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ibx#263: the algo definition answers of the login burst are kept,
+    // one XML each; other frames are not.
+    #[test]
+    fn algo_definitions_are_read_from_the_login_burst() {
+        let burst = "8=FIX.4.1\x0135=U\x016040=54\x016364=IBALGO-AE\x016118=<AlgoExchange/>\x0110=1\x01"
+            .to_string() + "8=FIX.4.1\x0135=U\x016040=210\x016118=x\x0110=2\x01"
+            + "8=FIX.4.1\x0135=U\x016040=54\x016364=IBALGO-AL-STK\x016118=<AlgorithmsMap/>\x0110=3\x01";
+        assert_eq!(parse_algo_definitions(&burst), ["<AlgoExchange/>", "<AlgorithmsMap/>"]);
+    }
 
     // ibx#317: the tag scan sees the inflated init burst, and the bytes that
     // seed the connection buffer stay as received. The inflated copy used

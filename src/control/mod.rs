@@ -1,4 +1,5 @@
 pub mod account;
+pub mod algo;
 pub mod contracts;
 pub mod fundamental;
 pub mod histogram;

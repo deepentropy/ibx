@@ -2804,7 +2804,6 @@ impl ClientCore {
     /// error code and text. Nothing is sent for such an order.
     pub fn refusal_before_sending(order: &ApiOrder) -> Option<(i64, String)> {
         Self::fractional_quantity_refusal(order)
-            .or_else(|| Self::algo_param_refusal(order))
             .or_else(|| Self::good_after_time_refusal(order))
             .or_else(|| Self::order_rule_refusal(order))
     }
@@ -2868,46 +2867,20 @@ impl ClientCore {
         None
     }
 
-    /// Algo parameter values the reference refuses before sending
-    /// (ib-agent#192 B10). ibx used to turn them into defaults: an unknown
-    /// choice became Normal or Neutral, a negative percentage went out
-    /// (ibx#263). Only the rules the capture showed; a value that does not
-    /// parse as a number is left to the existing handling.
-    fn algo_param_refusal(order: &ApiOrder) -> Option<(i64, String)> {
+    /// Algo parameters the reference refuses before sending, checked
+    /// against the algo definitions the server sent (ibx#263): 443 for a
+    /// parameter the algorithm does not have, 145 for a value not in the
+    /// parameter's legal values, 441 for a number out of its bounds. ibx
+    /// used to turn bad values into defaults and to check constant
+    /// bounds. An algorithm the definitions do not have (yet) is not
+    /// checked here.
+    pub fn algo_definition_refusal(order: &ApiOrder, reference: &crate::bridge::ReferenceState) -> Option<(i64, String)> {
         if order.algo_strategy.is_empty() {
             return None;
         }
-        let limit = |label: &str, what: &str, bound: &str| {
-            Some((441, format!(
-                "Algo attributes validation failed: '{}' is invalid: Value is {} {}.. ", label, what, bound)))
-        };
-        for tv in &order.algo_params {
-            let value = tv.value.as_str();
-            if value.is_empty() {
-                continue;
-            }
-            let known_choice = match tv.tag.as_str() {
-                "adaptivePriority" => Some(matches!(value, "Urgent" | "Normal" | "Patient")),
-                "riskAversion" => Some(matches!(value.to_lowercase().as_str(),
-                    "get_done" | "getdone" | "aggressive" | "neutral" | "passive")),
-                _ => None,
-            };
-            if known_choice == Some(false) {
-                return Some((145, format!("Error in validating entry fields -{}", value)));
-            }
-            let Ok(number) = value.parse::<f64>() else { continue };
-            match tv.tag.as_str() {
-                // A NaN fails the upper bound check in the reference.
-                "maxPctVol" if number.is_nan() || number > 50.0 =>
-                    return limit("Max Percentage", "greater than maximum value", "50.0"),
-                "maxPctVol" if number < 0.01 =>
-                    return limit("Max Percentage", "less than minimum value", "0.01"),
-                "pctVol" if number < 0.01 =>
-                    return limit("Target Percentage", "less than minimum value", "0.01"),
-                _ => {}
-            }
-        }
-        None
+        let values: Vec<(&str, &str)> = order.algo_params.iter()
+            .map(|tv| (tv.tag.as_str(), tv.value.as_str())).collect();
+        reference.algo_refusal(&order.algo_strategy, &values)
     }
 
     /// Status to report with a fill that leaves part of the order open.
