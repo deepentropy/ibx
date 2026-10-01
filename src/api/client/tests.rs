@@ -855,6 +855,36 @@ fn market_data_rejects_are_reported() {
     assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Unsubscribe { instrument: 1 })));
 }
 
+// ibx#449: tickReqParams reaches the client once per request id, also
+// when a later ack of the request (a delayed fallback) gives it again.
+#[test]
+fn tick_req_params_is_sent_once_per_request() {
+    let (client, _rx, shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(5, 0);
+    client.core.instrument_to_req.lock().unwrap().insert(0, 5);
+    let params = |min_tick: f64, bbo: &str| crate::bridge::TickReqParams {
+        instrument: 0, min_tick, bbo_exchange: bbo.into(), snapshot_permissions: 3,
+    };
+    shared.market.push_tick_req_params(params(0.01, "9c0001"));
+    shared.market.push_tick_req_params(params(0.01, "9c0001"));
+    shared.market.push_tick_req_params(crate::bridge::TickReqParams { instrument: 9, ..params(0.25, "50006") });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    shared.market.push_tick_req_params(params(0.01, "9c0001"));
+    client.process_msgs(&mut w);
+    let sent: Vec<&String> = w.events.iter().filter(|e| e.starts_with("tick_req_params")).collect();
+    assert_eq!(sent, ["tick_req_params:5:0.01:9c0001:3"], "unknown instruments give nothing");
+
+    // A new request on the id gets its own.
+    let _ = client.cancel_mkt_data(5);
+    client.core.req_to_instrument.lock().unwrap().insert(5, 0);
+    client.core.instrument_to_req.lock().unwrap().insert(0, 5);
+    shared.market.push_tick_req_params(params(0.01, "9c0001"));
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.contains(&"tick_req_params:5:0.01:9c0001:3".to_string()), "{:?}", w.events);
+}
+
 // ibx#447: market data types 1..=4 reach the engine; another value is
 // refused with 321 under id -1, as the reference, and sends nothing.
 #[test]

@@ -314,6 +314,9 @@ pub mod tests {
         ) {
             self.events.push(format!("tbt_bidask:{req_id}:{time}:{bid_price}:{ask_price}:{bid_size}:{ask_size}"));
         }
+        fn tick_req_params(&mut self, ticker_id: i64, min_tick: f64, bbo_exchange: &str, snapshot_permissions: i64) {
+            self.events.push(format!("tick_req_params:{ticker_id}:{min_tick}:{bbo_exchange}:{snapshot_permissions}"));
+        }
         fn position(&mut self, account: &str, contract: &Contract, pos: f64, avg_cost: f64) {
             self.events.push(format!("position:{account}:{}:{pos}:{avg_cost}", contract.con_id));
         }

@@ -206,6 +206,21 @@ pub struct MarketDataState {
     news_bulletins: Mutex<Vec<NewsBulletin>>,
     /// Subscriptions the market data server rejected (ibx#444, ibx#447).
     md_rejects: Mutex<Vec<MdReject>>,
+    /// The request parameters of acked subscriptions (ibx#449).
+    tick_req_params: Mutex<Vec<TickReqParams>>,
+}
+
+/// What a client reports as tickReqParams for a subscription, from its
+/// bid/ask ack (ibx#449): the minimum tick, the BBO exchange code with the
+/// security type code the reference appends, and the snapshot permissions
+/// (0 irrelevant, 1 no top, 2 snapshot, 3 real-time top, 4 snapshot, no
+/// API).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TickReqParams {
+    pub instrument: InstrumentId,
+    pub min_tick: f64,
+    pub bbo_exchange: String,
+    pub snapshot_permissions: i32,
 }
 
 /// A top-of-book subscription the server rejected, and what the client
@@ -247,7 +262,16 @@ impl MarketDataState {
             tick_news: Mutex::new(Vec::with_capacity(32)),
             news_bulletins: Mutex::new(Vec::with_capacity(16)),
             md_rejects: Mutex::new(Vec::new()),
+            tick_req_params: Mutex::new(Vec::new()),
         }
+    }
+
+    #[doc(hidden)] pub fn push_tick_req_params(&self, params: TickReqParams) {
+        self.tick_req_params.lock().unwrap().push(params);
+    }
+
+    pub fn drain_tick_req_params(&self) -> Vec<TickReqParams> {
+        self.tick_req_params.lock().unwrap().drain(..).collect()
     }
 
     #[doc(hidden)] pub fn push_md_reject(&self, reject: MdReject) {

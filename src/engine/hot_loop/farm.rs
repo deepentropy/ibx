@@ -279,7 +279,7 @@ impl FarmState {
             b"P" => self.handle_tick_data(msg, context, shared, event_tx),
             b"Q" => {
                 log::info!("Farm 35=Q subscription ack received");
-                self.handle_subscription_ack(msg, context);
+                self.handle_subscription_ack(msg, context, shared);
             }
             b"0" => {}
             b"1" => {
@@ -367,7 +367,7 @@ impl FarmState {
         self.tick_buf = ticks;
     }
 
-    fn handle_subscription_ack(&mut self, msg: &[u8], context: &mut Context) {
+    fn handle_subscription_ack(&mut self, msg: &[u8], context: &mut Context, shared: &SharedState) {
         let body = match find_body_after_tag(msg, b"35=Q\x01") {
             Some(b) => b,
             None => return,
@@ -428,6 +428,18 @@ impl FarmState {
             context.market.set_size_min_tick(instrument, size_min_tick);
         }
         log::info!("Subscribed instrument {} -> server_tag {}, minTick {}", instrument, server_tag, min_tick);
+
+        // The bid/ask entry of the pair (the first of each pair of ids)
+        // gives the request parameters (ibx#449).
+        let bid_ask = self.instrument_md_reqs.iter().find(|(id, _)| *id == instrument)
+            .and_then(|(_, reqs)| reqs.iter().position(|r| *r == req_id))
+            .is_some_and(|p| p % 2 == 0);
+        if bid_ask {
+            let sec_type = context.market.order_routing(instrument).0;
+            if let Some(params) = tick_req_params(instrument, min_tick, &parts, &sec_type) {
+                shared.market.push_tick_req_params(params);
+            }
+        }
     }
 
     fn handle_ticker_setup(&mut self, msg: &[u8], context: &mut Context) {
@@ -1174,6 +1186,42 @@ impl FarmState {
     }
 }
 
+/// The reference's security type code (`SecType` value), appended in hex
+/// to a short BBO exchange code (ibx#449).
+fn sec_type_code(sec_type: &str) -> Option<u8> {
+    Some(match sec_type {
+        "STK" => 1, "CFD" => 2, "OPT" => 3, "FOP" => 4, "WAR" => 5, "FUT" => 6, "FWD" => 7,
+        "BAG" => 8, "CASH" => 10, "IND" => 11, "BOND" => 12, "BILL" => 13, "FIXED" => 14,
+        "FUND" => 15, "SLB" => 16, "NEWS" => 17, "CMDTY" => 18, "BSK" => 19, "IOPT" => 20,
+        "ICU" => 21, "ICS" => 22, "PHYSS" => 23, "CRYPTO" => 24,
+        _ => return None,
+    })
+}
+
+/// tickReqParams from the fields of a bid/ask ack, as the reference builds
+/// it (ibx#449): the BBO exchange code, unless it is the "no exchange"
+/// value (never kept), with the security type code in four hex digits
+/// appended when it has four characters or less; the snapshot permissions
+/// from the ack when
+/// a BBO exchange is kept, else 0. None when there is nothing to report.
+fn tick_req_params(instrument: InstrumentId, min_tick: f64, parts: &[&str], sec_type: &str)
+    -> Option<crate::bridge::TickReqParams>
+{
+    let code = parts.get(5).map(|s| s.trim()).filter(|s| !s.is_empty() && *s != "ffffffff");
+    let bbo_exchange = match (code, code.and_then(|_| sec_type_code(sec_type))) {
+        (Some(c), Some(t)) if c.len() <= 4 => format!("{}{:04X}", c, t),
+        (Some(c), _) => c.to_string(),
+        (None, _) => String::new(),
+    };
+    let snapshot_permissions = match code {
+        Some(_) => parts.get(4).and_then(|s| s.trim().parse::<i32>().ok()).filter(|p| (0..=4).contains(p)).unwrap_or(0),
+        None => 0,
+    };
+    (min_tick > 0.0 || !bbo_exchange.is_empty() || snapshot_permissions != 0).then(|| crate::bridge::TickReqParams {
+        instrument, min_tick, bbo_exchange, snapshot_permissions,
+    })
+}
+
 /// The reference's reading of a reject's API access value (6763), as
 /// `ApiAccess.apiRequiresSubscription`: a list (`,` or `#`) or a single
 /// number means an API subscription is needed (10089); empty or `-` does
@@ -1252,7 +1300,7 @@ mod tests {
         let mut context = Context::new();
         let id = context.market.register(265598);
         farm.md_req_to_instrument.push((5, id));
-        farm.handle_subscription_ack(b"8=O\x0135=Q\x011101,5,0.01,0,3,9c,,1,1", &mut context);
+        farm.handle_subscription_ack(b"8=O\x0135=Q\x011101,5,0.01,0,3,9c,,1,1", &mut context, &shared);
         farm.handle_ticker_setup(b"8=O\x0135=L\x01265598,0.01,1098,,1", &mut context);
         context.market.set_round_lot(id, 40);
         let msg = tick_message(&[
@@ -1275,6 +1323,36 @@ mod tests {
         assert_eq!(q.volume, 50 * QTY_SCALE); // 5000 x 0.01
     }
 
+    // ibx#449: the bid/ask ack gives the request parameters, with the
+    // reference's rules for the BBO exchange (the captured values of AAPL,
+    // MNQ and EUR.USD); the last ack gives none.
+    #[test]
+    fn bid_ask_ack_gives_the_request_parameters() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let mut first_ids = Vec::new();
+        for (con_id, sec_type) in [(265598, "STK"), (770561201, "FUT"), (12087792, "CASH")] {
+            let id = context.market.register(con_id);
+            context.market.set_routing(id, sec_type, "");
+            farm.send_mktdata_subscribe(con_id, "", "SMART", sec_type, "", 0.0, "", "", id, 0, &mut None, &mut hb);
+            first_ids.push((id, farm.next_md_req_id - 2));
+        }
+        let acks = [("45", "0.01", "9c"), ("228", "0.25", "5"), ("24", "0.00001", "ffffffff")];
+        for ((_, bid_ask), (tag, tick, bbo)) in first_ids.iter().zip(acks) {
+            for r in [bid_ask, &(bid_ask + 1)] {
+                let ack = format!("8=O\x0135=Q\x01{tag},{r},{tick},0,3,{bbo},,1,1");
+                farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+            }
+        }
+        let got = shared.market.drain_tick_req_params();
+        let want = |i: usize, min_tick: f64, bbo: &str, perms: i32| crate::bridge::TickReqParams {
+            instrument: first_ids[i].0, min_tick, bbo_exchange: bbo.into(), snapshot_permissions: perms,
+        };
+        assert_eq!(got, [want(0, 0.01, "9c0001", 3), want(1, 0.25, "50006", 3), want(2, 0.00001, "", 0)]);
+    }
+
     // ibx#289: an ack that comes after the unsubscribe binds nothing, also
     // when the slot went to another contract meanwhile.
     #[test]
@@ -1294,7 +1372,7 @@ mod tests {
         let other = context.market.register(4391);
         assert_eq!(other, id);
         let ack = format!("8=O\x0135=Q\x011101,{},0.25,0,3,5,,1,1", ids[0]);
-        farm.handle_subscription_ack(ack.as_bytes(), &mut context);
+        farm.handle_subscription_ack(ack.as_bytes(), &mut context, &SharedState::new());
         assert_eq!(context.market.instrument_by_server_tag(1101), None);
         assert_eq!(context.market.min_tick(other), 0.0);
     }

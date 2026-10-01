@@ -647,6 +647,8 @@ pub struct ClientCore {
     pub mdt_sent: Mutex<HashSet<i64>>,
     /// Market data requests that switched to delayed data (ibx#447).
     pub delayed_reqs: Mutex<HashSet<i64>>,
+    /// Market data requests whose tickReqParams was sent (ibx#449).
+    pub tick_req_params_sent: Mutex<HashSet<i64>>,
 
     // Historical data keepUpToDate: req_ids that have completed initial batch.
     // Subsequent bars for these req_ids dispatch as historical_data_update.
@@ -768,6 +770,7 @@ impl ClientCore {
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
             delayed_reqs: Mutex::new(HashSet::new()),
+            tick_req_params_sent: Mutex::new(HashSet::new()),
             hist_initial_complete: Mutex::new(HashSet::new()),
             news_providers: Mutex::new("BRFG*BRFUPDN".into()),
             news_instruments: Mutex::new(HashSet::new()),
@@ -804,6 +807,7 @@ impl ClientCore {
         self.market_data_type.store(1, Ordering::Relaxed);
         self.mdt_sent.lock().unwrap().clear();
         self.delayed_reqs.lock().unwrap().clear();
+        self.tick_req_params_sent.lock().unwrap().clear();
         self.hist_initial_complete.lock().unwrap().clear();
         *self.news_providers.lock().unwrap() = "BRFG*BRFUPDN".into();
         self.news_instruments.lock().unwrap().clear();
@@ -1111,6 +1115,7 @@ impl ClientCore {
             self.last_quotes.lock().unwrap().remove(&instrument);
             self.mdt_sent.lock().unwrap().remove(&req_id);
             self.delayed_reqs.lock().unwrap().remove(&req_id);
+            self.tick_req_params_sent.lock().unwrap().remove(&req_id);
             let needs_news = self.news_instruments.lock().unwrap().remove(&instrument);
             self.forget_instrument(instrument);
             (Some(instrument), needs_news)
@@ -1475,6 +1480,23 @@ impl ClientCore {
     pub fn set_delayed(&self, req_id: i64) {
         self.mdt_sent.lock().unwrap().insert(req_id);
         self.delayed_reqs.lock().unwrap().insert(req_id);
+    }
+
+    /// The tickReqParams to report, (reqId, minTick, bboExchange,
+    /// snapshotPermissions): once per request id, as the reference
+    /// (ibx#449); a later ack of the same request (a delayed fallback)
+    /// gives none.
+    pub fn take_tick_req_params(&self, shared: &SharedState) -> Vec<(i64, f64, String, i64)> {
+        let params = shared.market.drain_tick_req_params();
+        if params.is_empty() {
+            return Vec::new();
+        }
+        let mut sent = self.tick_req_params_sent.lock().unwrap();
+        params.into_iter().filter_map(|p| {
+            let req_id = self.req_id_for_instrument(p.instrument);
+            (req_id >= 0 && sent.insert(req_id))
+                .then_some((req_id, p.min_tick, p.bbo_exchange, p.snapshot_permissions as i64))
+        }).collect()
     }
 
     /// A market data request whose id is already live: error 322, as the

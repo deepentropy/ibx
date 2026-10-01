@@ -377,6 +377,11 @@ impl EClient {
             }
         }
 
+        // Request parameters, once per request (ibx#449).
+        for (req_id, min_tick, bbo_exchange, permissions) in self.core.take_tick_req_params(shared) {
+            call_wrapper!(self.wrapper, py, "tick_req_params", (req_id, min_tick, bbo_exchange.as_str(), permissions));
+        }
+
         // Poll quotes for changes -> tickPrice/tickSize
         // Poll quotes via shared ClientCore (same logic as Rust dispatch)
         let instruments = self.core.snapshot_instruments();

@@ -225,6 +225,11 @@ impl EClient {
             }
         }
 
+        // Request parameters, once per request (ibx#449).
+        for (req_id, min_tick, bbo_exchange, permissions) in self.core.take_tick_req_params(&self.shared) {
+            wrapper.tick_req_params(req_id, min_tick, &bbo_exchange, permissions);
+        }
+
         // Quote polling → tick_price / tick_size (via ClientCore)
         let instruments = self.core.snapshot_instruments();
         let attrib = crate::api::types::TickAttrib::default();
