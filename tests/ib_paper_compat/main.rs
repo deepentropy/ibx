@@ -59,6 +59,27 @@ macro_rules! check_ne {
     };
 }
 
+/// Print a phase header and start counting the failures of that phase.
+macro_rules! phase {
+    ($($arg:tt)+) => {{
+        crate::common::begin_phase();
+        println!($($arg)+);
+    }};
+}
+
+/// Print the PASS line of a phase only when the phase recorded no failure.
+/// A failed check does not stop the phase, so the line after it is reached
+/// either way.
+macro_rules! pass {
+    ($($arg:tt)+) => {
+        if crate::common::phase_failures() == 0 {
+            println!($($arg)+);
+        } else {
+            println!("  FAILED: {} failure(s) in this phase\n", crate::common::phase_failures());
+        }
+    };
+}
+
 mod account;
 mod common;
 mod connection;
@@ -111,7 +132,7 @@ fn compat_suite() {
     };
 
     if needs_ticks {
-        println!("--- RAW SUBSCRIBE TEST ---");
+        phase!("--- RAW SUBSCRIBE TEST ---");
         let conn = &mut conns.farm;
         let result = conn.send_fixcomp(&[
             (fix::TAG_MSG_TYPE, "V"),
@@ -200,7 +221,7 @@ fn compat_suite() {
         }
         println!();
     } else {
-        println!("--- RAW SUBSCRIBE TEST ---\n  SKIP: {:?} — no ticks expected\n", session);
+        phase!("--- RAW SUBSCRIBE TEST ---\n  SKIP: {:?} — no ticks expected\n", session);
     }
 
     conns = account::phase_account_pnl(conns);
@@ -213,7 +234,7 @@ fn compat_suite() {
     if needs_ticks {
         conns = account::phase_enriched_exec_details(conns);
     } else {
-        println!("--- Phase 133: Enriched exec_details ---\n  SKIP: {:?} — needs fills\n", session);
+        phase!("--- Phase 133: Enriched exec_details ---\n  SKIP: {:?} — needs fills\n", session);
     }
     conns = account::phase_pnl_subscription(conns);
     conns = account::phase_pnl_subscribe_command(conns);
@@ -238,9 +259,9 @@ fn compat_suite() {
         conns = market_data::phase_multi_instrument(conns);
         conns = account::phase_account_data(conns);
     } else {
-        println!("--- Phase 2: Market Data Ticks (AAPL) ---\n  SKIP: {:?} — no ticks expected\n", session);
-        println!("--- Phase 3: Multi-Instrument Subscription (AAPL+MSFT+SPY) ---\n  SKIP: {:?} — no ticks expected\n", session);
-        println!("--- Phase 4: Account Data Reception ---\n  SKIP: {:?} — needs ticks to trigger\n", session);
+        phase!("--- Phase 2: Market Data Ticks (AAPL) ---\n  SKIP: {:?} — no ticks expected\n", session);
+        phase!("--- Phase 3: Multi-Instrument Subscription (AAPL+MSFT+SPY) ---\n  SKIP: {:?} — no ticks expected\n", session);
+        phase!("--- Phase 4: Account Data Reception ---\n  SKIP: {:?} — needs ticks to trigger\n", session);
     }
 
     conns = orders::phase_outside_rth(conns);
@@ -302,15 +323,15 @@ fn compat_suite() {
     if needs_ticks && conns.hmds.is_some() {
         conns = market_data::phase_tbt_subscribe(conns);
     } else {
-        println!("--- Phase 61: Tick-by-Tick Data (SPY) ---\n  SKIP: needs ticks+HMDS\n");
+        phase!("--- Phase 61: Tick-by-Tick Data (SPY) ---\n  SKIP: needs ticks+HMDS\n");
     }
 
     if needs_moc {
         conns = orders::phase_moc_order(conns);
         conns = orders::phase_loc_order(conns);
     } else {
-        println!("--- Phase 27: MOC Order (SPY) ---\n  SKIP: {:?} et_min={} — only before 3:45 PM ET\n", session, et_min);
-        println!("--- Phase 28: LOC Order (SPY) ---\n  SKIP: {:?} et_min={} — only before 3:45 PM ET\n", session, et_min);
+        phase!("--- Phase 27: MOC Order (SPY) ---\n  SKIP: {:?} et_min={} — only before 3:45 PM ET\n", session, et_min);
+        phase!("--- Phase 28: LOC Order (SPY) ---\n  SKIP: {:?} et_min={} — only before 3:45 PM ET\n", session, et_min);
     }
 
     conns = market_data::phase_subscribe_unsubscribe(conns);
@@ -325,10 +346,10 @@ fn compat_suite() {
         conns = orders::phase_bracket_fill_cascade(conns);
         conns = orders::phase_pnl_after_round_trip(conns);
     } else {
-        println!("--- Phase 6: Market Order Round-Trip (SPY) ---\n  SKIP: {:?} — needs ticks+fills\n", session);
-        println!("--- Phase 17: Commission Tracking (GTC+OutsideRTH fill) ---\n  SKIP: {:?} — needs fills\n", session);
-        println!("--- Phase 51: Bracket Fill Cascade (SPY) ---\n  SKIP: {:?} — needs fills\n", session);
-        println!("--- Phase 52: PnL After Round Trip (SPY) ---\n  SKIP: {:?} — needs fills\n", session);
+        phase!("--- Phase 6: Market Order Round-Trip (SPY) ---\n  SKIP: {:?} — needs ticks+fills\n", session);
+        phase!("--- Phase 17: Commission Tracking (GTC+OutsideRTH fill) ---\n  SKIP: {:?} — needs fills\n", session);
+        phase!("--- Phase 51: Bracket Fill Cascade (SPY) ---\n  SKIP: {:?} — needs fills\n", session);
+        phase!("--- Phase 52: PnL After Round Trip (SPY) ---\n  SKIP: {:?} — needs fills\n", session);
     }
 
     conns = heartbeat::phase_heartbeat_timeout_detection(conns);
@@ -350,7 +371,7 @@ fn compat_suite() {
     if needs_ticks {
         conns = account::phase_position_tracking(conns);
     } else {
-        println!("--- Phase 97: Position Tracking (SPY) ---\n  SKIP: {:?} — needs fills\n", session);
+        phase!("--- Phase 97: Position Tracking (SPY) ---\n  SKIP: {:?} — needs fills\n", session);
     }
     conns = connection::phase_connection_recovery(conns, &gw, &config);
     conns = ensure_ccp_alive(conns, &mut gw, &config);
@@ -363,14 +384,14 @@ fn compat_suite() {
     if needs_ticks {
         conns = market_data::phase_streaming_validation(conns);
     } else {
-        println!("--- Phase 102: Streaming Data Validation (SPY) ---\n  SKIP: {:?} — needs ticks\n", session);
+        phase!("--- Phase 102: Streaming Data Validation (SPY) ---\n  SKIP: {:?} — needs ticks\n", session);
     }
     conns = historical::phase_historical_ohlc_validation(conns, &gw, &config);
     conns = error_handling::phase_ib_error_handling(conns);
     if needs_ticks {
         conns = connection::phase_reconnection_state_recovery(conns, &gw, &config);
     } else {
-        println!("--- Phase 105: Reconnection State Recovery ---\n  SKIP: {:?} — needs ticks\n", session);
+        phase!("--- Phase 105: Reconnection State Recovery ---\n  SKIP: {:?} — needs ticks\n", session);
     }
     conns = account::phase_account_summary(conns);
 
@@ -378,7 +399,7 @@ fn compat_suite() {
     if needs_ticks {
         conns = market_data::phase_tick_stress_test(conns);
     } else {
-        println!("--- Phase 110: Tick Stress Test (SPY+AAPL+MSFT) ---\n  SKIP: {:?} — needs ticks\n", session);
+        phase!("--- Phase 110: Tick Stress Test (SPY+AAPL+MSFT) ---\n  SKIP: {:?} — needs ticks\n", session);
     }
     conns = historical::phase_large_historical_dataset(conns, &gw, &config);
     conns = historical::phase_dst_boundary_historical(conns, &gw, &config);
@@ -400,7 +421,7 @@ fn compat_suite() {
     if needs_ticks {
         conns = orders::phase_cancel_filled_order(conns);
     } else {
-        println!("--- Phase 124: Cancel Filled Order ---\n  SKIP: {:?} — needs fills\n", session);
+        phase!("--- Phase 124: Cancel Filled Order ---\n  SKIP: {:?} — needs fills\n", session);
     }
 
     // ── P1: Matching symbols via ControlCommand channel ──
@@ -410,7 +431,7 @@ fn compat_suite() {
     if needs_ticks && conns.hmds.is_some() {
         conns = market_data::phase_tbt_unsubscribe(conns);
     } else {
-        println!("--- Phase 126: TBT Unsubscribe ---\n  SKIP: needs ticks+HMDS\n");
+        phase!("--- Phase 126: TBT Unsubscribe ---\n  SKIP: needs ticks+HMDS\n");
     }
 
     // ── P1: Cancel data requests (historical, fundamental, histogram, head timestamp) ──
@@ -420,14 +441,14 @@ fn compat_suite() {
     if needs_ticks && conns.hmds.is_some() {
         conns = market_data::phase_tbt_and_quotes_dual_stream(conns);
     } else {
-        println!("--- Phase 128: TBT + Regular Quotes Dual Stream ---\n  SKIP: needs ticks+HMDS\n");
+        phase!("--- Phase 128: TBT + Regular Quotes Dual Stream ---\n  SKIP: needs ticks+HMDS\n");
     }
 
     // ── P2: Concurrent subscribe stress (10 instruments) ──
     if needs_ticks {
         conns = market_data::phase_concurrent_subscribe_stress(conns);
     } else {
-        println!("--- Phase 129: Concurrent Subscribe Stress ---\n  SKIP: {:?} — needs ticks\n", session);
+        phase!("--- Phase 129: Concurrent Subscribe Stress ---\n  SKIP: {:?} — needs ticks\n", session);
     }
 
     // ── P2: Historical data + live orders coexistence ──

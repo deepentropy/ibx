@@ -7,7 +7,7 @@ use ibx::protocol::fixcomp;
 use ibx::protocol::connection::Frame;
 
 pub(super) fn phase_forex_order(conns: Conns) -> Conns {
-    println!("--- Phase 98: Forex Order Lifecycle (EUR.USD) ---");
+    phase!("--- Phase 98: Forex Order Lifecycle (EUR.USD) ---");
 
     // First, look up EUR.USD contract
     let now = ibx::gateway::chrono_free_timestamp();
@@ -118,13 +118,13 @@ pub(super) fn phase_forex_order(conns: Conns) -> Conns {
         if skip_unacked_if_closed(order_acked) { return conns; }
         check!(order_acked, "Forex order should be acknowledged");
         check!(order_cancelled, "Forex order should be cancelled");
-        println!("  PASS\n");
+        pass!("  PASS\n");
     }
     conns
 }
 
 pub(super) fn phase_futures_order(conns: Conns) -> Conns {
-    println!("--- Phase 99: Futures Contract Details (MES) ---");
+    phase!("--- Phase 99: Futures Contract Details (MES) ---");
 
     // Look up MES (Micro E-mini S&P 500)
     let now = ibx::gateway::chrono_free_timestamp();
@@ -241,13 +241,13 @@ pub(super) fn phase_futures_order(conns: Conns) -> Conns {
         if skip_unacked_if_closed(order_acked) { return conns; }
         check!(order_acked, "Futures order should be acknowledged");
         check!(order_cancelled, "Futures order should be cancelled");
-        println!("  PASS\n");
+        pass!("  PASS\n");
     }
     conns
 }
 
 pub(super) fn phase_options_order(conns: Conns) -> Conns {
-    println!("--- Phase 100: Options Contract Details + Order (SPY options) ---");
+    phase!("--- Phase 100: Options Contract Details + Order (SPY options) ---");
 
     // Look up SPY options
     let now = ibx::gateway::chrono_free_timestamp();
@@ -373,13 +373,13 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
         if skip_unacked_if_closed(order_acked) { return conns; }
         check!(order_acked, "Option order should be acknowledged");
         check!(order_cancelled, "Option order should be cancelled");
-        println!("  PASS\n");
+        pass!("  PASS\n");
     }
     conns
 }
 
 pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
-    println!("--- Phase 101: Concurrent Orders in Flight (3 simultaneous limit orders) ---");
+    phase!("--- Phase 101: Concurrent Orders in Flight (3 simultaneous limit orders) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -457,6 +457,6 @@ pub(super) fn phase_concurrent_orders(conns: Conns) -> Conns {
 
     check_eq!(acked_count, 3, "All 3 orders should be acknowledged");
     check_eq!(cancelled_count, 3, "All 3 orders should be cancelled");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }

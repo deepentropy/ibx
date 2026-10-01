@@ -5,7 +5,7 @@ use std::net::TcpListener;
 use ibx::gateway::{Gateway, GatewayConfig};
 
 pub(super) fn phase_ccp_auth(gw: &Gateway, has_hmds: bool, connect_time: Duration) {
-    println!("--- Phase 1: CCP Auth + Farm Logon ---");
+    phase!("--- Phase 1: CCP Auth + Farm Logon ---");
 
     check!(!gw.account_id.is_empty(), "Account ID should be non-empty after CCP logon");
     println!("  Account ID: {}", gw.account_id);
@@ -30,7 +30,7 @@ pub(super) fn phase_ccp_auth(gw: &Gateway, has_hmds: bool, connect_time: Duratio
     }
 
     check!(connect_time < Duration::from_secs(60), "Connection took too long: {:?}", connect_time);
-    println!("  PASS ({:.3}s)\n", connect_time.as_secs_f64());
+    pass!("  PASS ({:.3}s)\n", connect_time.as_secs_f64());
 }
 
 /// Phase: connect the optional extra farms.
@@ -42,7 +42,7 @@ pub(super) fn phase_ccp_auth(gw: &Gateway, has_hmds: bool, connect_time: Duratio
 /// runs before `Conns` is built. The session then dies here and the first
 /// CCP-dependent phase fails far away with a misleading error.
 pub(super) fn phase_extra_farms(gw: &Gateway, config: &GatewayConfig, ccp: &mut Connection) {
-    println!("--- Phase 18: Additional Farm Connections ---");
+    phase!("--- Phase 18: Additional Farm Connections ---");
 
     let farms = ["cashhmds", "secdefil", "fundfarm", "usopt", "cashfarm", "usfuture", "eufarm", "jfarm"];
     let mut connected = 0;
@@ -71,11 +71,11 @@ pub(super) fn phase_extra_farms(gw: &Gateway, config: &GatewayConfig, ccp: &mut 
     }
 
     println!("  {}/{} extra farms connected", connected, farms.len());
-    println!("  PASS\n");
+    pass!("  PASS\n");
 }
 
 pub(super) fn phase_graceful_shutdown(conns: Conns) -> Conns {
-    println!("--- Phase 5: Graceful Shutdown ---");
+    phase!("--- Phase 5: Graceful Shutdown ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -112,12 +112,12 @@ pub(super) fn phase_graceful_shutdown(conns: Conns) -> Conns {
     let hmds = hl.hmds_conn.take();
 
     println!("  Shutdown in {:.3}s", shutdown_time.as_secs_f64());
-    println!("  PASS\n");
+    pass!("  PASS\n");
     Conns { farm, ccp, hmds, account_id }
 }
 
 pub(super) fn phase_connection_recovery(conns: Conns, _gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 96: Connection Recovery (simulated farm drop) ---");
+    phase!("--- Phase 96: Connection Recovery (simulated farm drop) ---");
 
     // We use a dummy TCP listener as a fake farm connection that we can close
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind local listener");
@@ -172,7 +172,7 @@ pub(super) fn phase_connection_recovery(conns: Conns, _gw: &Gateway, config: &Ga
 
     if got_disconnect {
         println!("  Disconnected event received");
-        println!("  PASS\n");
+        pass!("  PASS\n");
     } else {
         println!("  SKIP: No Disconnected event (hot loop may have exited before emitting)\n");
     }
@@ -180,7 +180,7 @@ pub(super) fn phase_connection_recovery(conns: Conns, _gw: &Gateway, config: &Ga
 }
 
 pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _config: &GatewayConfig) -> Conns {
-    println!("--- Phase 105: Reconnection with State Recovery ---");
+    phase!("--- Phase 105: Reconnection with State Recovery ---");
 
     // Step 1: Subscribe to market data, verify we get ticks
     let account_id = conns.account_id;
@@ -243,12 +243,12 @@ pub(super) fn phase_reconnection_state_recovery(conns: Conns, _gw: &Gateway, _co
     let conns2 = shutdown_and_reclaim(&control_tx2, join2, conns1.account_id);
 
     check!(got_ticks_after, "Should receive ticks after reconnection");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns2
 }
 
 pub(super) fn phase_auth_wrong_password(config: &GatewayConfig) {
-    println!("--- Phase 118: Authentication Failure (wrong password) ---");
+    phase!("--- Phase 118: Authentication Failure (wrong password) ---");
 
     let bad_config = GatewayConfig {
         username: config.username.clone(),
@@ -272,13 +272,13 @@ pub(super) fn phase_auth_wrong_password(config: &GatewayConfig) {
     println!("  Error: {}", err_msg);
     println!("  Failed in {:.3}s (expected)", elapsed.as_secs_f64());
     check!(elapsed < Duration::from_secs(30), "Auth failure should not take >30s");
-    println!("  PASS\n");
+    pass!("  PASS\n");
 }
 
 // ─── Phase 131: RegisterInstrument via ControlCommand channel ───
 
 pub(super) fn phase_register_instrument_channel(conns: Conns) -> Conns {
-    println!("--- Phase 131: RegisterInstrument via ControlCommand Channel ---");
+    phase!("--- Phase 131: RegisterInstrument via ControlCommand Channel ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -318,14 +318,14 @@ pub(super) fn phase_register_instrument_channel(conns: Conns) -> Conns {
 
     check!(count >= 3, "Should have at least 3 registered instruments, got {}", count);
     println!("  Events received: {}", got_event);
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 132: UpdateParam Smoke Test ───
 
 pub(super) fn phase_update_param(conns: Conns) -> Conns {
-    println!("--- Phase 132: UpdateParam Smoke Test (no-op parameter) ---");
+    phase!("--- Phase 132: UpdateParam Smoke Test (no-op parameter) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -387,6 +387,6 @@ pub(super) fn phase_update_param(conns: Conns) -> Conns {
     check!(order_acked, "Order should be acknowledged after UpdateParam");
     check!(terminal, "Order should reach terminal state");
     println!("  UpdateParam processed, hot loop still functional");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }

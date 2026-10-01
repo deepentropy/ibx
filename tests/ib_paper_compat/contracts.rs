@@ -7,7 +7,7 @@ use ibx::protocol::fixcomp;
 use ibx::protocol::connection::Frame;
 
 pub(super) fn phase_contract_details(conns: Conns) -> Conns {
-    println!("--- Phase 12: Contract Details Lookup (SPY, conId=756733) ---");
+    phase!("--- Phase 12: Contract Details Lookup (SPY, conId=756733) ---");
 
     // Step 1: Create HotLoop with real connections
     let account_id = conns.account_id;
@@ -55,12 +55,12 @@ pub(super) fn phase_contract_details(conns: Conns) -> Conns {
 
     // Step 5: Clean up
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 pub(super) fn phase_contract_details_by_symbol(conns: Conns) -> Conns {
-    println!("--- Phase 78: Contract Details by Symbol Search (AAPL) ---");
+    phase!("--- Phase 78: Contract Details by Symbol Search (AAPL) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -99,12 +99,12 @@ pub(super) fn phase_contract_details_by_symbol(conns: Conns) -> Conns {
     println!("  {} ({}) conId={} MinTick={}", def.symbol, def.long_name, def.con_id, def.min_tick);
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 pub(super) fn phase_trading_hours(conns: &mut Conns) {
-    println!("--- Phase 80: Trading Hours (schedule subscription, AAPL) ---");
+    phase!("--- Phase 80: Trading Hours (schedule subscription, AAPL) ---");
 
     let now = ibx::gateway::chrono_free_timestamp();
     if let Err(e) = conns.farm.send_fixcomp(&[
@@ -176,11 +176,11 @@ pub(super) fn phase_trading_hours(conns: &mut Conns) {
     check!(!sched.trading_hours.is_empty());
     check!(!sched.liquid_hours.is_empty());
     check!(sched.liquid_hours.len() <= sched.trading_hours.len());
-    println!("  PASS\n");
+    pass!("  PASS\n");
 }
 
 pub(super) fn phase_matching_symbols(conns: Conns) -> Conns {
-    println!("--- Phase 81: Matching Symbols Search (pattern=\"SPY\") ---");
+    phase!("--- Phase 81: Matching Symbols Search (pattern=\"SPY\") ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -219,12 +219,12 @@ pub(super) fn phase_matching_symbols(conns: Conns) -> Conns {
     } else {
         println!("  WARNING: SPY STK not found in matches");
     }
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 pub(super) fn phase_market_rule_id(conns: Conns) -> Conns {
-    println!("--- Phase 84: Market Rule ID (SPY, tag 6031) ---");
+    phase!("--- Phase 84: Market Rule ID (SPY, tag 6031) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -262,14 +262,14 @@ pub(super) fn phase_market_rule_id(conns: Conns) -> Conns {
     println!("  market_rule_id={:?} min_tick={}", def.market_rule_id, def.min_tick);
     check!(def.market_rule_id.is_some(), "SPY should have a market rule ID (tag 6031)");
     check!(def.market_rule_id.unwrap() > 0);
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 125: Matching Symbols via ControlCommand channel ───
 
 pub(super) fn phase_matching_symbols_channel(conns: Conns) -> Conns {
-    println!("--- Phase 125: Matching Symbols via Channel (pattern=\"AAPL\") ---");
+    phase!("--- Phase 125: Matching Symbols via Channel (pattern=\"AAPL\") ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -310,12 +310,12 @@ pub(super) fn phase_matching_symbols_channel(conns: Conns) -> Conns {
         return conns;
     }
     check!(match_count > 0, "Should have at least one match for 'AAPL'");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
-    println!("--- Phase 86: Contract Details via Event Channel (SPY) ---");
+    phase!("--- Phase 86: Contract Details via Event Channel (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -372,6 +372,6 @@ pub(super) fn phase_contract_details_channel(conns: Conns) -> Conns {
     } else {
         println!("  ContractDetailsEnd not received (single-conId request — non-fatal)");
     }
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }

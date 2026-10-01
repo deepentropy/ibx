@@ -7,7 +7,7 @@ use ibx::protocol::fix;
 use ibx::protocol::fixcomp;
 
 pub(super) fn phase_market_data(conns: Conns) -> Conns {
-    println!("--- Phase 2: Market Data Ticks (AAPL) ---");
+    phase!("--- Phase 2: Market Data Ticks (AAPL) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -78,12 +78,12 @@ pub(super) fn phase_market_data(conns: Conns) -> Conns {
     }
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
-    println!("  PASS ({} ticks)\n", tick_count);
+    pass!("  PASS ({} ticks)\n", tick_count);
     conns
 }
 
 pub(super) fn phase_multi_instrument(conns: Conns) -> Conns {
-    println!("--- Phase 3: Multi-Instrument Subscription (AAPL+MSFT+SPY) ---");
+    phase!("--- Phase 3: Multi-Instrument Subscription (AAPL+MSFT+SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -178,7 +178,7 @@ pub(super) fn phase_multi_instrument(conns: Conns) -> Conns {
             "At least 2 of 3 instruments should have data, got {}",
             instruments_with_data
         );
-        println!(
+        pass!(
             "  PASS ({} ticks, {} instruments with data)\n",
             tick_count, instruments_with_data
         );
@@ -187,7 +187,7 @@ pub(super) fn phase_multi_instrument(conns: Conns) -> Conns {
 }
 
 pub(super) fn phase_subscribe_unsubscribe(conns: Conns) -> Conns {
-    println!("--- Phase 16: Subscribe + Unsubscribe Cleanup ---");
+    phase!("--- Phase 16: Subscribe + Unsubscribe Cleanup ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -229,12 +229,12 @@ pub(super) fn phase_subscribe_unsubscribe(conns: Conns) -> Conns {
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
     println!("  Total ticks: {}", tick_count);
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 pub(super) fn phase_market_depth(conns: Conns, gw: &gateway::Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 130: Market Depth Subscribe/Unsubscribe (SPY) ---");
+    phase!("--- Phase 130: Market Depth Subscribe/Unsubscribe (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -275,13 +275,13 @@ pub(super) fn phase_market_depth(conns: Conns, gw: &gateway::Gateway, config: &G
     if depth_updates.is_empty() {
         println!("  SKIP: No depth updates observed in 4s (market conditions / entitlement)\n");
     } else {
-        println!("  PASS ({} depth updates)\n", depth_updates.len());
+        pass!("  PASS ({} depth updates)\n", depth_updates.len());
     }
     conns
 }
 
 pub(super) fn phase_news_ticks(conns: Conns) -> Conns {
-    println!("--- Phase 131: News Tick Subscribe/Unsubscribe (AAPL) ---");
+    phase!("--- Phase 131: News Tick Subscribe/Unsubscribe (AAPL) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -324,7 +324,7 @@ pub(super) fn phase_news_ticks(conns: Conns) -> Conns {
     if news_events == 0 && drained_news.is_empty() {
         println!("  SKIP: No tick news in 8s (normal if no live headlines)\n");
     } else {
-        println!(
+        pass!(
             "  PASS ({} event news, {} drained headlines)\n",
             news_events,
             drained_news.len()
@@ -334,7 +334,7 @@ pub(super) fn phase_news_ticks(conns: Conns) -> Conns {
 }
 
 pub(super) fn phase_tbt_subscribe(conns: Conns) -> Conns {
-    println!("--- Phase 61: Tick-by-Tick Data (SPY via HMDS) ---");
+    phase!("--- Phase 61: Tick-by-Tick Data (SPY via HMDS) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -406,7 +406,7 @@ pub(super) fn phase_tbt_subscribe(conns: Conns) -> Conns {
 
     std::thread::sleep(Duration::from_secs(5));
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
-    println!(
+    pass!(
         "  PASS ({} trades, {} quotes)\n",
         tbt_trade_count, tbt_quote_count
     );
@@ -414,7 +414,7 @@ pub(super) fn phase_tbt_subscribe(conns: Conns) -> Conns {
 }
 
 pub(super) fn phase_streaming_validation(conns: Conns) -> Conns {
-    println!("--- Phase 102: Streaming Data Validation (SPY tick quality) ---");
+    phase!("--- Phase 102: Streaming Data Validation (SPY tick quality) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -507,12 +507,12 @@ pub(super) fn phase_streaming_validation(conns: Conns) -> Conns {
         price_reasonable,
         "Prices should be in reasonable range for SPY"
     );
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 pub(super) fn phase_forex_market_data(conns: Conns) -> Conns {
-    println!("--- Phase 107: Forex Market Data Ticks (EUR.USD — session-independent) ---");
+    phase!("--- Phase 107: Forex Market Data Ticks (EUR.USD — session-independent) ---");
 
     // Look up EUR.USD con_id first
     let now = ibx::gateway::chrono_free_timestamp();
@@ -654,13 +654,13 @@ pub(super) fn phase_forex_market_data(conns: Conns) -> Conns {
             "  {} ticks received, bid_seen={} ask_seen={}",
             tick_count, bid_seen, ask_seen
         );
-        println!("  PASS\n");
+        pass!("  PASS\n");
     }
     conns
 }
 
 pub(super) fn phase_forex_streaming_validation(conns: Conns) -> Conns {
-    println!("--- Phase 108: Forex Streaming Validation (EUR.USD — session-independent) ---");
+    phase!("--- Phase 108: Forex Streaming Validation (EUR.USD — session-independent) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -720,13 +720,13 @@ pub(super) fn phase_forex_streaming_validation(conns: Conns) -> Conns {
     } else {
         check!(spread_valid, "Spread should not be crossed");
         println!("  {} ticks, spread_valid={}", tick_count, spread_valid);
-        println!("  PASS\n");
+        pass!("  PASS\n");
     }
     conns
 }
 
 pub(super) fn phase_forex_reconnection(conns: Conns) -> Conns {
-    println!("--- Phase 109: Forex Reconnection Recovery (EUR.USD — session-independent) ---");
+    phase!("--- Phase 109: Forex Reconnection Recovery (EUR.USD — session-independent) ---");
 
     // Step 1: Subscribe, get forex ticks
     let account_id = conns.account_id;
@@ -819,14 +819,14 @@ pub(super) fn phase_forex_reconnection(conns: Conns) -> Conns {
         got_ticks_after,
         "Should receive forex ticks after reconnection"
     );
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns2
 }
 
 // ─── Phase 110: High-frequency tick stress test (issue #95) ───
 
 pub(super) fn phase_tick_stress_test(conns: Conns) -> Conns {
-    println!("--- Phase 110: High-Frequency Tick Stress Test (SPY+AAPL+MSFT, 30s) ---");
+    phase!("--- Phase 110: High-Frequency Tick Stress Test (SPY+AAPL+MSFT, 30s) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -931,14 +931,14 @@ pub(super) fn phase_tick_stress_test(conns: Conns) -> Conns {
         "Timestamps should be monotonically increasing"
     );
 
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 126: TBT Subscribe + Unsubscribe lifecycle ───
 
 pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
-    println!("--- Phase 126: TBT Subscribe + Unsubscribe (SPY via HMDS) ---");
+    phase!("--- Phase 126: TBT Subscribe + Unsubscribe (SPY via HMDS) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1029,14 +1029,14 @@ pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
         "Too many TBT events after unsubscribe: {} (expected <=3)",
         tbt_after
     );
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 128: TBT + Regular Quotes Dual Stream ───
 
 pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
-    println!("--- Phase 128: TBT + Regular Quotes Dual Stream (SPY) ---");
+    phase!("--- Phase 128: TBT + Regular Quotes Dual Stream (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1138,11 +1138,11 @@ pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
     );
 
     if got_tick && got_tbt {
-        println!("  PASS (both streams active simultaneously)\n");
+        pass!("  PASS (both streams active simultaneously)\n");
     } else if got_tick {
-        println!("  PASS (regular ticks only — HMDS TBT may not be streaming)\n");
+        pass!("  PASS (regular ticks only — HMDS TBT may not be streaming)\n");
     } else {
-        println!("  PASS (TBT only — regular ticks delayed)\n");
+        pass!("  PASS (TBT only — regular ticks delayed)\n");
     }
     conns
 }
@@ -1150,7 +1150,7 @@ pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
 // ─── Phase 129: Concurrent Subscribe Stress (10 instruments) ───
 
 pub(super) fn phase_concurrent_subscribe_stress(conns: Conns) -> Conns {
-    println!("--- Phase 129: Concurrent Subscribe Stress (10 instruments, 20s) ---");
+    phase!("--- Phase 129: Concurrent Subscribe Stress (10 instruments, 20s) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1232,6 +1232,6 @@ pub(super) fn phase_concurrent_subscribe_stress(conns: Conns) -> Conns {
         "Expected ticks from >=3 instruments, got {}",
         per_instrument.len()
     );
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }

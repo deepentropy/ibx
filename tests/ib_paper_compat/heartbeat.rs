@@ -4,7 +4,7 @@ use super::common::*;
 use std::net::TcpListener;
 
 pub(super) fn phase_heartbeat_keepalive(conns: Conns) -> Conns {
-    println!("--- Phase 13: Heartbeat Keepalive (20s > CCP 10s interval) ---");
+    phase!("--- Phase 13: Heartbeat Keepalive (20s > CCP 10s interval) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -28,12 +28,12 @@ pub(super) fn phase_heartbeat_keepalive(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     check!(!disconnected, "Connection dropped after {:.1}s — heartbeat mechanism failed", elapsed.as_secs_f64());
-    println!("  PASS ({:.1}s, no disconnect)\n", elapsed.as_secs_f64());
+    pass!("  PASS ({:.1}s, no disconnect)\n", elapsed.as_secs_f64());
     conns
 }
 
 pub(super) fn phase_farm_heartbeat_keepalive(conns: Conns) -> Conns {
-    println!("--- Phase 55: Farm Heartbeat Keepalive (65s > 2x farm 30s interval) ---");
+    phase!("--- Phase 55: Farm Heartbeat Keepalive (65s > 2x farm 30s interval) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -56,13 +56,13 @@ pub(super) fn phase_farm_heartbeat_keepalive(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     check!(!disconnected, "Farm disconnected after {:.1}s — heartbeat failed", elapsed.as_secs_f64());
-    println!("  PASS ({:.1}s, no disconnect, survived 2x farm heartbeat interval)\n", elapsed.as_secs_f64());
+    pass!("  PASS ({:.1}s, no disconnect, survived 2x farm heartbeat interval)\n", elapsed.as_secs_f64());
     conns
 }
 
 pub(super) fn phase_heartbeat_timeout_detection(conns: Conns) -> Conns {
     use ibx::engine::hot_loop::liveness::{CCP_DEAD_LIMIT, CCP_SEND_PAUSE};
-    println!("--- Phase 56: Heartbeat Timeout Detection (simulated stale CCP) ---");
+    phase!("--- Phase 56: Heartbeat Timeout Detection (simulated stale CCP) ---");
 
     let account_id = conns.account_id;
 
@@ -124,7 +124,7 @@ pub(super) fn phase_heartbeat_timeout_detection(conns: Conns) -> Conns {
 
     println!("  1100 at {:?} (expected {:?} to {:?})", lost_at, earliest, latest);
     println!("  Loop survived the reset (graceful shutdown succeeded)");
-    println!("  PASS
+    pass!("  PASS
 ");
 
     Conns { farm: reclaimed.farm, ccp: real_ccp, hmds: reclaimed.hmds, account_id }

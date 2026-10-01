@@ -3,7 +3,7 @@
 use super::common::*;
 
 pub(super) fn phase_ib_error_handling(conns: Conns) -> Conns {
-    println!("--- Phase 104: IB-Side Error Handling (invalid requests) ---");
+    phase!("--- Phase 104: IB-Side Error Handling (invalid requests) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -55,7 +55,7 @@ pub(super) fn phase_ib_error_handling(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if got_error_or_reject {
-        println!("  PASS\n");
+        pass!("  PASS\n");
     } else {
         // The order may have been silently ignored or the hot loop handled it
         println!("  SKIP: No rejection/error received (order may have been filtered)\n");
@@ -66,7 +66,7 @@ pub(super) fn phase_ib_error_handling(conns: Conns) -> Conns {
 // ─── Phase 114: Pacing violation recovery — rapid historical requests (issue #94) ───
 
 pub(super) fn phase_pacing_violation_recovery(conns: Conns) -> Conns {
-    println!("--- Phase 114: Pacing Violation Recovery (10 rapid historical requests) ---");
+    phase!("--- Phase 114: Pacing Violation Recovery (10 rapid historical requests) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -132,9 +132,9 @@ pub(super) fn phase_pacing_violation_recovery(conns: Conns) -> Conns {
         // Historical server may be fully rate-limited from prior historical phases
         println!("  SKIP: No responses — HMDS likely pacing-limited from prior phases\n");
     } else if responses_received.len() == num_requests as usize {
-        println!("  PASS (all {} requests completed)\n", num_requests);
+        pass!("  PASS (all {} requests completed)\n", num_requests);
     } else {
-        println!("  PASS ({}/{} completed — pacing may have throttled some)\n", responses_received.len(), num_requests);
+        pass!("  PASS ({}/{} completed — pacing may have throttled some)\n", responses_received.len(), num_requests);
     }
     conns
 }

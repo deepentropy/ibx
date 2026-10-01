@@ -11,7 +11,7 @@ use ibx::protocol::fixcomp;
 use ibx::protocol::connection::Frame;
 
 pub(super) fn phase_historical_data(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 11: Historical Data Bars (SPY, 1 day of 5-min bars) ---");
+    phase!("--- Phase 11: Historical Data Bars (SPY, 1 day of 5-min bars) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(
@@ -83,12 +83,12 @@ pub(super) fn phase_historical_data(mut conns: Conns, gw: &Gateway, config: &Gat
     }
     println!("  First bar: O={:.2} H={:.2} L={:.2} C={:.2} V={}",
         first.open, first.high, first.low, first.close, first.volume);
-    println!("  PASS ({} bars)\n", all_bars.len());
+    pass!("  PASS ({} bars)\n", all_bars.len());
     conns
 }
 
 pub(super) fn phase_historical_daily_bars(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 76: Historical Daily Bars (SPY, 5 days of 1-day bars) ---");
+    phase!("--- Phase 76: Historical Daily Bars (SPY, 5 days of 1-day bars) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -149,12 +149,12 @@ pub(super) fn phase_historical_daily_bars(mut conns: Conns, gw: &Gateway, config
         check!(bar.volume > 0, "Volume should be positive: {}", bar.volume);
         println!("  {} O={:.2} H={:.2} L={:.2} C={:.2} V={}", bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume);
     }
-    println!("  PASS ({} daily bars)\n", all_bars.len());
+    pass!("  PASS ({} daily bars)\n", all_bars.len());
     conns
 }
 
 pub(super) fn phase_cancel_historical(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 77: Cancel Historical Request (SPY) ---");
+    phase!("--- Phase 77: Cancel Historical Request (SPY) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -204,7 +204,7 @@ pub(super) fn phase_cancel_historical(mut conns: Conns, gw: &Gateway, config: &G
     std::thread::sleep(Duration::from_secs(2));
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
-    println!("  PASS (cancel sent through hot_loop, connection intact)\n");
+    pass!("  PASS (cancel sent through hot_loop, connection intact)\n");
     conns
 }
 
@@ -213,7 +213,7 @@ pub(super) fn phase_cancel_historical(mut conns: Conns, gw: &Gateway, config: &G
 /// error (code 162) rather than leaking the pending entry forever. Like the
 /// official API, no historical_data_end follows the error (ibx#408).
 pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 186: HMDS QueryError surfaces (15 mins / 1 W rejection) ---");
+    phase!("--- Phase 186: HMDS QueryError surfaces (15 mins / 1 W rejection) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(
@@ -293,14 +293,14 @@ pub(super) fn phase_query_error_surfaces(mut conns: Conns, gw: &Gateway, config:
                 "no historical_data_end may follow a server rejection (ibx#408)"
             );
             check_eq!(bars_seen, 0, "no bars should be delivered for a rejected request");
-            println!("  PASS (error surfaced, no end)\n");
+            pass!("  PASS (error surfaced, no end)\n");
         }
     }
     conns
 }
 
 pub(super) fn phase_head_timestamp(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 79: Head Timestamp (SPY, TRADES) ---");
+    phase!("--- Phase 79: Head Timestamp (SPY, TRADES) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -343,12 +343,12 @@ pub(super) fn phase_head_timestamp(mut conns: Conns, gw: &Gateway, config: &Gate
     check!(resp.head_timestamp.starts_with("199"), "SPY TRADES head timestamp should be in 1990s, got {}", resp.head_timestamp);
     check!(!resp.timezone.is_empty(), "Timezone should not be empty");
     println!("  headTS={} tz={}", resp.head_timestamp, resp.timezone);
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 pub(super) fn phase_scanner_subscription(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 82: Scanner Subscription (TOP_PERC_GAIN, STK.US.MAJOR) ---");
+    phase!("--- Phase 82: Scanner Subscription (TOP_PERC_GAIN, STK.US.MAJOR) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -403,12 +403,12 @@ pub(super) fn phase_scanner_subscription(mut conns: Conns, gw: &Gateway, config:
     for (i, cid) in r.con_ids.iter().enumerate().take(3) {
         println!("  Rank {}: conId={}", i, cid);
     }
-    println!("  PASS ({} contracts)\n", r.con_ids.len());
+    pass!("  PASS ({} contracts)\n", r.con_ids.len());
     conns
 }
 
 pub(super) fn phase_fundamental_data(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 83: Fundamental Data (AAPL, ReportSnapshot) ---");
+    phase!("--- Phase 83: Fundamental Data (AAPL, ReportSnapshot) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -451,7 +451,7 @@ pub(super) fn phase_fundamental_data(mut conns: Conns, gw: &Gateway, config: &Ga
         println!("  SKIP: No fundamental data received (may require subscription)\n");
         return conns;
     }
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
@@ -470,7 +470,7 @@ pub(super) fn phase_fundamental_data(mut conns: Conns, gw: &Gateway, config: &Ga
 ///   → real server → FIX response → hot_loop parses j.c codec + ZIP
 ///   → SharedState → drain_historical_news → verify headline values
 pub(super) fn phase_historical_news(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 85: Historical News (AAPL, end-to-end) ---");
+    phase!("--- Phase 85: Historical News (AAPL, end-to-end) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -538,12 +538,12 @@ pub(super) fn phase_historical_news(mut conns: Conns, gw: &Gateway, config: &Gat
         println!("  SKIP: No news response received (may require news subscription)\n");
         return bg_conns;
     }
-    println!("  PASS\n");
+    pass!("  PASS\n");
     bg_conns
 }
 
 pub(super) fn phase_historical_ticks(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 88: Historical Ticks (SPY, TRADES) ---");
+    phase!("--- Phase 88: Historical Ticks (SPY, TRADES) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -619,13 +619,13 @@ pub(super) fn phase_historical_ticks(mut conns: Conns, gw: &Gateway, config: &Ga
         println!("  SKIP: No historical ticks received\n");
     } else {
         check_eq!(monotonic_violations, 0, "Timestamps should be monotonically increasing");
-        println!("  PASS ({} ticks, timestamps monotonic)\n", tick_count);
+        pass!("  PASS ({} ticks, timestamps monotonic)\n", tick_count);
     }
     conns
 }
 
 pub(super) fn phase_histogram_data(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 89: Histogram Data (SPY, 1 week) ---");
+    phase!("--- Phase 89: Histogram Data (SPY, 1 week) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -672,13 +672,13 @@ pub(super) fn phase_histogram_data(mut conns: Conns, gw: &Gateway, config: &Gate
         if let Some(first) = entries.first() {
             println!("  First: price={:.2} count={}", first.price, first.count);
         }
-        println!("  PASS\n");
+        pass!("  PASS\n");
     }
     conns
 }
 
 pub(super) fn phase_historical_schedule(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 90: Historical Schedule (SPY) ---");
+    phase!("--- Phase 90: Historical Schedule (SPY) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -728,7 +728,7 @@ pub(super) fn phase_historical_schedule(mut conns: Conns, gw: &Gateway, config: 
             println!("    {} open={} close={}", s.ref_date, s.open_time, s.close_time);
         }
         check!(!sched.sessions.is_empty(), "Schedule should contain sessions");
-        println!("  PASS\n");
+        pass!("  PASS\n");
     } else {
         println!("  SKIP: No schedule data received\n");
     }
@@ -736,7 +736,7 @@ pub(super) fn phase_historical_schedule(mut conns: Conns, gw: &Gateway, config: 
 }
 
 pub(super) fn phase_realtime_bars(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 91: Real-Time Bars (SPY, 5-second) ---");
+    phase!("--- Phase 91: Real-Time Bars (SPY, 5-second) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -787,13 +787,13 @@ pub(super) fn phase_realtime_bars(mut conns: Conns, gw: &Gateway, config: &Gatew
         let bar = &bars[0];
         println!("  First bar: O={:.2} H={:.2} L={:.2} C={:.2} V={:.0}", bar.open, bar.high, bar.low, bar.close, bar.volume);
         check!(bar.high >= bar.low, "High should be >= Low");
-        println!("  PASS ({} bars)\n", bars.len());
+        pass!("  PASS ({} bars)\n", bars.len());
     }
     conns
 }
 
 pub(super) fn phase_news_article(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 92: News Article Fetch (AAPL) ---");
+    phase!("--- Phase 92: News Article Fetch (AAPL) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -872,7 +872,7 @@ pub(super) fn phase_news_article(mut conns: Conns, gw: &Gateway, config: &Gatewa
 
         let conns = shutdown_and_reclaim(&control_tx, join, account_id);
         if got_article {
-            println!("  PASS\n");
+            pass!("  PASS\n");
         } else {
             println!("  SKIP: Article body not received\n");
         }
@@ -885,7 +885,7 @@ pub(super) fn phase_news_article(mut conns: Conns, gw: &Gateway, config: &Gatewa
 }
 
 pub(super) fn phase_fundamental_data_channel(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 93: Fundamental Data via HotLoop (AAPL) ---");
+    phase!("--- Phase 93: Fundamental Data via HotLoop (AAPL) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -926,7 +926,7 @@ pub(super) fn phase_fundamental_data_channel(mut conns: Conns, gw: &Gateway, con
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if got_data {
-        println!("  PASS\n");
+        pass!("  PASS\n");
     } else {
         println!("  SKIP: No fundamental data received (may require subscription)\n");
     }
@@ -934,7 +934,7 @@ pub(super) fn phase_fundamental_data_channel(mut conns: Conns, gw: &Gateway, con
 }
 
 pub(super) fn phase_parallel_historical(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 94: Parallel Historical Requests (SPY: 1d/5min, 5d/1day, 1w/1h) ---");
+    phase!("--- Phase 94: Parallel Historical Requests (SPY: 1d/5min, 5d/1day, 1w/1h) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -997,7 +997,7 @@ pub(super) fn phase_parallel_historical(mut conns: Conns, gw: &Gateway, config: 
 
     let count = received.iter().filter(|r| **r).count();
     if count == 3 {
-        println!("  PASS (all 3 responses received)\n");
+        pass!("  PASS (all 3 responses received)\n");
     } else if count > 0 {
         println!("  PARTIAL: {}/3 responses received\n", count);
     } else {
@@ -1007,7 +1007,7 @@ pub(super) fn phase_parallel_historical(mut conns: Conns, gw: &Gateway, config: 
 }
 
 pub(super) fn phase_scanner_params(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 95: Scanner Parameters + HOT_BY_VOLUME Scan ---");
+    phase!("--- Phase 95: Scanner Parameters + HOT_BY_VOLUME Scan ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -1081,7 +1081,7 @@ pub(super) fn phase_scanner_params(mut conns: Conns, gw: &Gateway, config: &Gate
 }
 
 pub(super) fn phase_historical_ohlc_validation(conns: Conns, _gw: &Gateway, _config: &GatewayConfig) -> Conns {
-    println!("--- Phase 103: Historical Bar OHLC Validation (SPY 1-hour bars) ---");
+    phase!("--- Phase 103: Historical Bar OHLC Validation (SPY 1-hour bars) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1167,14 +1167,14 @@ pub(super) fn phase_historical_ohlc_validation(conns: Conns, _gw: &Gateway, _con
 
     check!(ohlc_valid, "All bars should have valid OHLC relationships");
     check!(volume_valid, "All bars should have non-negative volume");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 111: Large historical dataset — 1 year daily bars (issue #99) ───
 
 pub(super) fn phase_large_historical_dataset(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 111: Large Historical Dataset (SPY, 1 year of daily bars) ---");
+    phase!("--- Phase 111: Large Historical Dataset (SPY, 1 year of daily bars) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -1237,14 +1237,14 @@ pub(super) fn phase_large_historical_dataset(mut conns: Conns, gw: &Gateway, con
     println!("  Duplicate timestamps: {}", duplicate_timestamps);
     check!(total_bars >= 200, "1 year should have 200+ trading days, got {}", total_bars);
     check_eq!(duplicate_timestamps, 0, "No duplicate bar timestamps expected");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 112: DST boundary historical data (issue #98) ───
 
 pub(super) fn phase_dst_boundary_historical(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 112: DST Boundary Historical Data (SPY, bars spanning March DST) ---");
+    phase!("--- Phase 112: DST Boundary Historical Data (SPY, bars spanning March DST) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(&config.host, "ushmds", &config.username, &config.password, config.paper, &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 17) {
@@ -1312,14 +1312,14 @@ pub(super) fn phase_dst_boundary_historical(mut conns: Conns, gw: &Gateway, conf
 
     // 2 weeks of RTH = ~10 trading days * ~7 hours = ~70 bars
     check!(bars.len() >= 40, "2 weeks of hourly RTH should have 40+ bars, got {}", bars.len());
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 127: Cancel Data Requests (historical, fundamental, histogram, head timestamp) ───
 
 pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 127: Cancel Data Requests (4 cancel ControlCommands) ---");
+    phase!("--- Phase 127: Cancel Data Requests (4 cancel ControlCommands) ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(
@@ -1401,14 +1401,14 @@ pub(super) fn phase_cancel_data_requests(mut conns: Conns, gw: &Gateway, config:
     // Cancelled requests should produce no responses (or at most partial data
     // that arrived before the cancel was processed — we tolerate that)
     println!("  All 4 cancel commands processed without crash");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 130: Historical Data + Live Orders Coexistence ───
 
 pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config: &GatewayConfig) -> Conns {
-    println!("--- Phase 130: Historical Data + Live Orders Coexistence ---");
+    phase!("--- Phase 130: Historical Data + Live Orders Coexistence ---");
 
     ccp_keepalive(&mut conns.ccp);
     let hmds = match connect_farm(
@@ -1515,7 +1515,7 @@ pub(super) fn phase_historical_and_orders(mut conns: Conns, gw: &Gateway, config
     if hist_responses.is_empty() {
         println!("  SKIP: No historical responses — HMDS pacing limited\n");
     } else {
-        println!("  PASS (order lifecycle + {} historical responses coexisted)\n", hist_responses.len());
+        pass!("  PASS (order lifecycle + {} historical responses coexisted)\n", hist_responses.len());
     }
     conns
 }

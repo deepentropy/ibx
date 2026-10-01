@@ -105,7 +105,7 @@ const KNOWN_RUST_API_GAPS: &[(&str, &str)] = &[
 ];
 
 pub(super) fn phase_endpoint_coverage(conns: Conns) -> Conns {
-    println!("--- Phase 132: Endpoint Coverage Manifest ---");
+    phase!("--- Phase 132: Endpoint Coverage Manifest ---");
 
     let all_variants = enum_variants_from_types("ControlCommand");
     let tested: BTreeSet<&str> = TESTED_CONTROL_COMMANDS.iter().copied().collect();
@@ -150,7 +150,7 @@ pub(super) fn phase_endpoint_coverage(conns: Conns) -> Conns {
         "Untracked ControlCommand variants in coverage manifest: {:?}",
         missing
     );
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 

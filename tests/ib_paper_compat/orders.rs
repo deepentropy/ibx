@@ -5,7 +5,7 @@ use super::common::*;
 // ─── Phase 6: Market order round-trip ───
 
 pub(super) fn phase_market_order(conns: Conns) -> Conns {
-    println!("--- Phase 6: Market Order Round-Trip (SPY) ---");
+    phase!("--- Phase 6: Market Order Round-Trip (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -91,14 +91,14 @@ pub(super) fn phase_market_order(conns: Conns) -> Conns {
     println!("  Buy: ${:.4} (RTT {:.3}ms)", buy_price as f64 / PRICE_SCALE as f64, buy_rtt_us as f64 / 1000.0);
     println!("  Sell: ${:.4} (RTT {:.3}ms)", sell_price as f64 / PRICE_SCALE as f64, sell_rtt_us as f64 / 1000.0);
     println!("  Mean RTT: {:.3}ms", (buy_rtt_us + sell_rtt_us) as f64 / 2000.0);
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 7: Limit order submit + cancel ───
 
 pub(super) fn phase_limit_order(conns: Conns) -> Conns {
-    println!("--- Phase 7: Limit Order Submit + Cancel (SPY) ---");
+    phase!("--- Phase 7: Limit Order Submit + Cancel (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -178,7 +178,7 @@ pub(super) fn phase_limit_order(conns: Conns) -> Conns {
     check!(order_cancelled, "Order was never cancelled");
 
     println!("  Submit→Ack: {:.3}ms  Cancel→Conf: {:.3}ms", submit_ack_us as f64 / 1000.0, cancel_conf_us as f64 / 1000.0);
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
@@ -197,7 +197,7 @@ pub(super) fn phase_stop_order(conns: Conns) -> Conns {
 // ─── Phase 9: Order modify (35=G) ───
 
 pub(super) fn phase_modify_order(conns: Conns) -> Conns {
-    println!("--- Phase 9: Order Modify (35=G) + Cancel (SPY) ---");
+    phase!("--- Phase 9: Order Modify (35=G) + Cancel (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -261,7 +261,7 @@ pub(super) fn phase_modify_order(conns: Conns) -> Conns {
     check!(modify_sent, "Modify was never sent");
     check!(modify_acked, "Modify was never acknowledged");
     check!(order_cancelled, "Modified order was never cancelled");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
@@ -286,7 +286,7 @@ pub(super) fn phase_stop_limit_order(conns: Conns) -> Conns {
 // ─── Phase 17: Commission tracking ───
 
 pub(super) fn phase_commission(conns: Conns) -> Conns {
-    println!("--- Phase 17: Commission Tracking (GTC+OutsideRTH fill) ---");
+    phase!("--- Phase 17: Commission Tracking (GTC+OutsideRTH fill) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -357,9 +357,9 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
     check!((bp - sp).abs() / bp < 0.05, "Buy/sell prices should be within 5%: buy={} sell={}", bp, sp);
     if buy_comm > 0 {
         check!(bc < 10.0, "Commission unreasonably high: ${:.4}", bc);
-        println!("  PASS (commission=${:.4})\n", bc);
+        pass!("  PASS (commission=${:.4})\n", bc);
     } else {
-        println!("  PASS (commission=0 — paper account does not report tag 12)\n");
+        pass!("  PASS (commission=0 — paper account does not report tag 12)\n");
     }
     conns
 }
@@ -367,7 +367,7 @@ pub(super) fn phase_commission(conns: Conns) -> Conns {
 // ─── Phase 10b: Outside RTH GTC Stop ───
 
 pub(super) fn phase_outside_rth_stop(conns: Conns) -> Conns {
-    println!("--- Phase 10b: Outside RTH GTC Stop Order (SPY) ---");
+    phase!("--- Phase 10b: Outside RTH GTC Stop Order (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -420,14 +420,14 @@ pub(super) fn phase_outside_rth_stop(conns: Conns) -> Conns {
     if skip_unacked_if_closed(order_acked) { return conns; }
     check!(order_acked, "GTC stop outside RTH was never acknowledged");
     check!(order_cancelled, "GTC stop outside RTH was never cancelled");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 9b: Modify Order Qty ───
 
 pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
-    println!("--- Phase 9b: Order Modify Qty (SPY) ---");
+    phase!("--- Phase 9b: Order Modify Qty (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -491,7 +491,7 @@ pub(super) fn phase_modify_qty(conns: Conns) -> Conns {
     check!(modify_sent, "Modify was never sent");
     check!(modify_acked_local, "Qty modify was never acknowledged");
     check!(order_cancelled, "Modified order was never cancelled");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
@@ -516,7 +516,7 @@ pub(super) fn phase_trailing_stop_limit(conns: Conns) -> Conns {
 // ─── Phase 21: Limit IOC ───
 
 pub(super) fn phase_limit_ioc(conns: Conns) -> Conns {
-    println!("--- Phase 21: Limit IOC Order (SPY) ---");
+    phase!("--- Phase 21: Limit IOC Order (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -558,14 +558,14 @@ pub(super) fn phase_limit_ioc(conns: Conns) -> Conns {
         return conns;
     }
     check!(order_cancelled, "IOC order was not cancelled (should expire immediately at $1)");
-    println!("  PASS (IOC cancelled as expected — no fill at $1)\n");
+    pass!("  PASS (IOC cancelled as expected — no fill at $1)\n");
     conns
 }
 
 // ─── Phase 22: Limit FOK ───
 
 pub(super) fn phase_limit_fok(conns: Conns) -> Conns {
-    println!("--- Phase 22: Limit FOK Order (SPY) ---");
+    phase!("--- Phase 22: Limit FOK Order (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -607,7 +607,7 @@ pub(super) fn phase_limit_fok(conns: Conns) -> Conns {
         return conns;
     }
     check!(order_cancelled, "FOK order was not cancelled (should expire immediately at $1)");
-    println!("  PASS (FOK cancelled as expected — no fill at $1)\n");
+    pass!("  PASS (FOK cancelled as expected — no fill at $1)\n");
     conns
 }
 
@@ -668,7 +668,7 @@ pub(super) fn phase_loc_order(conns: Conns) -> Conns {
 // ─── Phase 29: Bracket Order ───
 
 pub(super) fn phase_bracket_order(conns: Conns) -> Conns {
-    println!("--- Phase 29: Bracket Order (SPY) ---");
+    phase!("--- Phase 29: Bracket Order (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -727,7 +727,7 @@ pub(super) fn phase_bracket_order(conns: Conns) -> Conns {
     if skip_unacked_if_closed(parent_acked) { return conns; }
     check!(parent_acked, "Parent order was never acknowledged");
     println!("  Parent acked: {}, Cancelled: {} orders", parent_acked, cancelled_count);
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
@@ -800,7 +800,7 @@ pub(super) fn phase_trailing_stop_pct(conns: Conns) -> Conns {
 // ─── Phase 37: OCA Group ───
 
 pub(super) fn phase_oca_group(conns: Conns) -> Conns {
-    println!("--- Phase 37: OCA Group (SPY) ---");
+    phase!("--- Phase 37: OCA Group (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -866,7 +866,7 @@ pub(super) fn phase_oca_group(conns: Conns) -> Conns {
     check!(order1_acked, "Order 1 never acked");
     check!(order2_acked, "Order 2 never acked");
     println!("  Order1 acked: {}, Order2 acked: {}, Cancelled: {}", order1_acked, order2_acked, cancelled_count);
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
@@ -1136,7 +1136,7 @@ pub(super) fn phase_box_top_order(conns: Conns) -> Conns {
 // ─── Phase 72: What-If Order ───
 
 pub(super) fn phase_what_if_order(conns: Conns) -> Conns {
-    println!("--- Phase 72: What-If Order (SPY) ---");
+    phase!("--- Phase 72: What-If Order (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1221,7 +1221,7 @@ pub(super) fn phase_what_if_order(conns: Conns) -> Conns {
     if commission > 0 {
         println!("  Commission: ${:.2}", commission as f64 / PRICE_SCALE as f64);
         check!(dispatcher_validated, "Dispatcher path (open_order only, with the margin fields) failed validation");
-        println!("  PASS\n");
+        pass!("  PASS\n");
     } else {
         println!("  SKIP: Commission=0 (pre-market / no active quote)\n");
     }
@@ -1231,7 +1231,7 @@ pub(super) fn phase_what_if_order(conns: Conns) -> Conns {
 // ─── Phase 73: Cash Quantity Order ───
 
 pub(super) fn phase_cash_qty_order(conns: Conns) -> Conns {
-    println!("--- Phase 73: Cash Quantity Order (SPY) ---");
+    phase!("--- Phase 73: Cash Quantity Order (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1285,7 +1285,7 @@ pub(super) fn phase_cash_qty_order(conns: Conns) -> Conns {
     if skip_unacked_if_closed(order_acked) { return conns; }
     check!(order_acked, "Order was never acknowledged");
     check!(order_cancelled, "Order was never cancelled");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
@@ -1312,7 +1312,7 @@ pub(super) fn phase_adjustable_stop_order(conns: Conns) -> Conns {
 // ─── Phase 51: Bracket Fill Cascade ───
 
 pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
-    println!("--- Phase 51: Bracket Fill Cascade (SPY) ---");
+    phase!("--- Phase 51: Bracket Fill Cascade (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1407,14 +1407,14 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
     }
     check!(tp_active, "Take-profit child was never activated after entry fill");
     check!(sl_active, "Stop-loss child was never activated after entry fill");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 52: PnL After Round Trip ───
 
 pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
-    println!("--- Phase 52: PnL After Round Trip (SPY) ---");
+    phase!("--- Phase 52: PnL After Round Trip (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1494,9 +1494,9 @@ pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
     println!("  Buy filled: {}, Sell filled: {}", buy_filled, sell_filled);
     if pnl_updated {
         println!("  RealizedPnL changed: ${:.2}", realized_pnl as f64 / PRICE_SCALE as f64);
-        println!("  PASS\n");
+        pass!("  PASS\n");
     } else {
-        println!("  PASS (PnL not yet updated — paper account delay is expected)\n");
+        pass!("  PASS (PnL not yet updated — paper account delay is expected)\n");
     }
     conns
 }
@@ -1504,7 +1504,7 @@ pub(super) fn phase_pnl_after_round_trip(conns: Conns) -> Conns {
 // ─── Phase 87: CancelReject Event path (issue #78) ───
 
 pub(super) fn phase_cancel_reject(conns: Conns) -> Conns {
-    println!("--- Phase 87: CancelReject Event (bogus order cancel) ---");
+    phase!("--- Phase 87: CancelReject Event (bogus order cancel) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1564,7 +1564,7 @@ pub(super) fn phase_cancel_reject(conns: Conns) -> Conns {
         return conns;
     }
     if got_reject {
-        println!("  PASS\n");
+        pass!("  PASS\n");
     } else {
         // CancelReject may not be emitted if IB silently ignores the second cancel
         println!("  SKIP: No CancelReject received (IB may silently ignore duplicate cancel)\n");
@@ -1575,7 +1575,7 @@ pub(super) fn phase_cancel_reject(conns: Conns) -> Conns {
 // ─── Phase 113: Rapid order dedup and interleaving (issue #100) ───
 
 pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
-    println!("--- Phase 113: Rapid Order Submission + Dedup (5 orders, SPY) ---");
+    phase!("--- Phase 113: Rapid Order Submission + Dedup (5 orders, SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1653,14 +1653,14 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
     check_eq!(duplicate_acks, 0, "No duplicate OrderUpdate(Submitted) for same order_id");
     if skip_unacked_if_closed(acked.len() >= 3) { return conns; }
     check!(acked.len() >= 3, "At least 3 of 5 orders should be acknowledged, got {}", acked.len());
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 115: Modify both price and qty simultaneously ───
 
 pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
-    println!("--- Phase 115: Modify Price + Qty Simultaneously (SPY) ---");
+    phase!("--- Phase 115: Modify Price + Qty Simultaneously (SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1726,14 +1726,14 @@ pub(super) fn phase_modify_price_and_qty(conns: Conns) -> Conns {
     check!(modify_sent, "Modify was never sent");
     check!(modify_acked, "Modify (price+qty) was never acknowledged");
     check!(order_cancelled, "Modified order was never cancelled");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 116: Double modify chain ───
 
 pub(super) fn phase_double_modify(conns: Conns) -> Conns {
-    println!("--- Phase 116: Double Modify Chain (SPY: $1→$2→$3) ---");
+    phase!("--- Phase 116: Double Modify Chain (SPY: $1→$2→$3) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1802,14 +1802,14 @@ pub(super) fn phase_double_modify(conns: Conns) -> Conns {
     if skip_unacked_if_closed(phase >= 3) { return conns; }
     check!(phase >= 3, "Did not complete double modify chain (reached phase {})", phase);
     check!(order_cancelled, "Final modified order was never cancelled");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 117: Cancel during modify (race condition) ───
 
 pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
-    println!("--- Phase 117: Cancel During Modify (race condition, SPY) ---");
+    phase!("--- Phase 117: Cancel During Modify (race condition, SPY) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1874,14 +1874,14 @@ pub(super) fn phase_cancel_during_modify(conns: Conns) -> Conns {
     check!(order_acked, "Order was never acknowledged");
     check!(race_sent, "Race condition commands were never sent");
     check!(order_cancelled, "Order was never cancelled (neither original nor modified)");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 123: Global Cancel (CancelAll — emergency kill switch) ───
 
 pub(super) fn phase_global_cancel(conns: Conns) -> Conns {
-    println!("--- Phase 123: Global Cancel (3 orders → CancelAll) ---");
+    phase!("--- Phase 123: Global Cancel (3 orders → CancelAll) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -1947,14 +1947,14 @@ pub(super) fn phase_global_cancel(conns: Conns) -> Conns {
     check!(cancel_all_sent, "CancelAll was never sent (not all orders acked)");
     check_eq!(cancelled.len(), 3, "Expected 3 cancellations, got {}", cancelled.len());
     println!("  All 3 orders cancelled via CancelAll");
-    println!("  PASS\n");
+    pass!("  PASS\n");
     conns
 }
 
 // ─── Phase 124: Cancel Filled Order (expect CancelReject) ───
 
 pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
-    println!("--- Phase 124: Cancel Filled Order (expect CancelReject) ---");
+    phase!("--- Phase 124: Cancel Filled Order (expect CancelReject) ---");
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -2056,9 +2056,9 @@ pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
     // IB may silently ignore cancel on filled order (no CancelReject),
     // or it may send one. Either way, the system didn't crash.
     if got_cancel_reject {
-        println!("  PASS (CancelReject received as expected)\n");
+        pass!("  PASS (CancelReject received as expected)\n");
     } else {
-        println!("  PASS (cancel silently ignored — no crash, no CancelReject)\n");
+        pass!("  PASS (cancel silently ignored — no crash, no CancelReject)\n");
     }
     conns
 }

@@ -21,12 +21,33 @@ pub(super) use ibx::types::*;
 /// end of the suite, unless the phase declares it expected with a reason.
 static REJECTIONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
+thread_local! {
+    /// Failures recorded since the current phase began (`phase!`). Per
+    /// thread: the test entries of this binary can run side by side.
+    static PHASE_FAILURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Start counting the failures of a new phase.
+pub(super) fn begin_phase() {
+    PHASE_FAILURES.with(|c| c.set(0));
+}
+
+/// Failures recorded since the current phase began.
+pub(super) fn phase_failures() -> usize {
+    PHASE_FAILURES.with(|c| c.get())
+}
+
+fn count_phase_failure() {
+    PHASE_FAILURES.with(|c| c.set(c.get() + 1));
+}
+
 /// Record a rejection as a failure. The server's reason is in the
 /// "ExecReport REJECTED" log line (run with RUST_LOG=warn).
 pub(super) fn record_rejection(what: &str) {
     println!("  FAIL: {} (rejected by the server)
 ", what);
     REJECTIONS.lock().unwrap().push(what.to_string());
+    count_phase_failure();
 }
 
 /// Record a phase failure without stopping the suite, so the phases after it
@@ -35,6 +56,7 @@ pub(super) fn record_failure(what: &str) {
     println!("  FAIL: {}
 ", what);
     REJECTIONS.lock().unwrap().push(what.to_string());
+    count_phase_failure();
 }
 
 /// A rejection the server always gives for this account or session, with
@@ -603,7 +625,7 @@ pub(super) fn run_submit_cancel_phase_or_refused(
     fill_or_cancel: bool,
     accepted_refusal: Option<i64>,
 ) -> Conns {
-    println!("--- {} ---", phase_name);
+    phase!("--- {} ---", phase_name);
 
     let account_id = conns.account_id;
     let shared = Arc::new(SharedState::new());
@@ -723,7 +745,7 @@ pub(super) fn run_submit_cancel_phase_or_refused(
 
     if refused_as_reference {
         let (code, text) = order_errors.iter().find(|(code, _)| Some(*code) == accepted_refusal).unwrap();
-        println!("  PASS (refused locally as the reference: {} {})
+        pass!("  PASS (refused locally as the reference: {} {})
 ", code, text);
         return conns;
     }
@@ -737,8 +759,8 @@ pub(super) fn run_submit_cancel_phase_or_refused(
         check!(order_filled || order_cancelled,
             "Order was neither filled nor cancelled (acknowledged: {}, cancel sent: {}, statuses: {:?}, errors: {:?})",
             order_acked, cancel_sent, statuses, order_errors);
-        if order_filled { println!("  PASS (filled)\n"); }
-        else if order_cancelled { println!("  PASS (cancelled)\n"); }
+        if order_filled { pass!("  PASS (filled)\n"); }
+        else if order_cancelled { pass!("  PASS (cancelled)\n"); }
         else { println!(); }
     } else {
         // Session-aware gate: some order types (Relative/pegged, snapshot, midprice)
@@ -751,7 +773,7 @@ pub(super) fn run_submit_cancel_phase_or_refused(
         }
         check!(order_acked, "Order was never acknowledged (errors: {:?})", order_errors);
         check!(order_cancelled, "Order was never cancelled (statuses: {:?}, errors: {:?})", statuses, order_errors);
-        println!("  PASS\n");
+        pass!("  PASS\n");
     }
     conns
 }
