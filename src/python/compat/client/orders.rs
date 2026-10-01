@@ -34,12 +34,12 @@ impl EClient {
             .map_err(|e| PyRuntimeError::new_err(e))?;
         // After the checks above, which refuse an invalid order even with no
         // connection (ibx#115).
-        if let Some(r) = self.not_connected(order_id as i64) { return r; }
+        if let Some(r) = self.not_connected(order_id) { return r; }
 
         let tx = self.tx()?;
 
         let oid = if order_id > 0 {
-            order_id as u64
+            order_id
         } else {
             self.next_order_id.fetch_add(1, Ordering::Relaxed)
         };
@@ -98,7 +98,7 @@ impl EClient {
             ..Default::default()
         };
         let mut tracked_order = api_order.clone();
-        tracked_order.order_id = oid as i64;
+        tracked_order.order_id = oid;
         self.core.cache_contract(contract.con_id, api_contract.clone());
         if tracked_order.what_if {
             self.core.track_what_if(oid, api_contract, tracked_order);
@@ -114,7 +114,7 @@ impl EClient {
     fn cancel_order(&self, py: Python<'_>, order_id: i64, manual_order_cancel_time: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
-        send_cmd(py, &tx, ControlCommand::Order(OrderRequest::Cancel { order_id: order_id as u64 }))?;
+        send_cmd(py, &tx, ControlCommand::Order(OrderRequest::Cancel { order_id }))?;
         let _ = manual_order_cancel_time;
         Ok(())
     }
@@ -135,7 +135,7 @@ impl EClient {
     #[pyo3(signature = (num_ids=1))]
     fn req_ids(&self, py: Python<'_>, num_ids: i32) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        let next_id = self.next_order_id.load(Ordering::Relaxed) as i64;
+        let next_id = self.next_order_id.load(Ordering::Relaxed);
         self.wrapper.call_method1(py, "next_valid_id", (next_id,))?;
         let _ = num_ids;
         Ok(())
@@ -143,7 +143,7 @@ impl EClient {
 
     /// Get the next order ID (local counter, auto-increments).
     fn next_order_id(&self) -> i64 {
-        self.next_order_id.fetch_add(1, Ordering::Relaxed) as i64
+        self.next_order_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Request all open orders for this client.
@@ -180,12 +180,12 @@ impl EClient {
             let state_py = Py::new(py, state)?.into_any();
             self.wrapper.call_method(
                 py, "open_order",
-                (*order_id as i64, &c_py, &o_py, &state_py),
+                (*order_id, &c_py, &o_py, &state_py),
                 None,
             )?;
             self.wrapper.call_method(
                 py, "order_status",
-                (*order_id as i64, tracked.status.as_str(), tracked.filled, tracked.remaining,
+                (*order_id, tracked.status.as_str(), tracked.filled, tracked.remaining,
                  0.0f64, tracked.order.perm_id, tracked.order.parent_id, 0.0f64, 0i64, "", 0.0f64),
                 None,
             )?;

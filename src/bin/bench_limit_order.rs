@@ -49,7 +49,7 @@ fn main() {
     let mut submit_stats = LatencyStats::new(iterations as usize);
     let mut cancel_stats = LatencyStats::new(iterations as usize);
     let mut total_stats = LatencyStats::new(iterations as usize);
-    let mut order_id = 1u64;
+    let mut order_id = 1i64;
 
     for i in 0..iterations {
         // Submit limit order at $1.00 (far from market, won't fill)

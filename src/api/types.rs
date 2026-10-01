@@ -451,7 +451,7 @@ impl Order {
             } else {
                 String::new()
             },
-            parent_id: self.parent_id.max(0) as u64,
+            parent_id: self.parent_id.max(0),
             discretionary_amt: (self.discretionary_amt * PRICE_SCALE_F) as Price,
             sweep_to_fill: self.sweep_to_fill,
             all_or_none: self.all_or_none,

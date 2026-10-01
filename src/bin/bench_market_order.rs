@@ -49,7 +49,7 @@ fn main() {
     let mut buy_stats = LatencyStats::new(iterations as usize);
     let mut sell_stats = LatencyStats::new(iterations as usize);
     let mut rtt_stats = LatencyStats::new(iterations as usize);
-    let mut order_id = 1u64;
+    let mut order_id = 1i64;
 
     for i in 0..iterations {
         // BUY

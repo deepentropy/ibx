@@ -22,7 +22,7 @@ impl EClient {
         ClientCore::validate_order_contract(&contract.sec_type)?;
 
         let oid = if order_id > 0 {
-            order_id as u64
+            order_id
         } else {
             self.next_order_id.fetch_add(1, Ordering::Relaxed)
         };
@@ -76,7 +76,7 @@ impl EClient {
     /// Cancel an order. Matches `cancelOrder` in C++.
     pub fn cancel_order(&self, order_id: i64, _manual_order_cancel_time: &str) -> Result<(), String> {
         self.send(ControlCommand::Order(OrderRequest::Cancel {
-            order_id: order_id as u64,
+            order_id,
         }))
     }
 
@@ -99,7 +99,7 @@ impl EClient {
             .find(|(_, tracked)| tracked.order.perm_id == perm_id)
             .map(|(oid, _)| oid)
             .ok_or_else(|| format!("cancel_order_by_perm_id: permId {} not found in open orders", perm_id))?;
-        self.cancel_order(order_id as i64, "")
+        self.cancel_order(order_id, "")
     }
 
     /// Cancel all orders. Matches `reqGlobalCancel` in C++.
@@ -114,13 +114,13 @@ impl EClient {
 
     /// Request next valid order ID. Matches `reqIds` in C++.
     pub fn req_ids(&self, wrapper: &mut impl Wrapper) {
-        let next_id = self.next_order_id.load(Ordering::Relaxed) as i64;
+        let next_id = self.next_order_id.load(Ordering::Relaxed);
         wrapper.next_valid_id(next_id);
     }
 
     /// Get the next order ID (local counter).
     pub fn next_order_id(&self) -> i64 {
-        self.next_order_id.fetch_add(1, Ordering::Relaxed) as i64
+        self.next_order_id.fetch_add(1, Ordering::Relaxed)
     }
 
     // ── Open Orders ──
@@ -137,7 +137,7 @@ impl EClient {
                 status: tracked.status,
                 ..Default::default()
             };
-            wrapper.open_order(order_id as i64, &tracked.contract, &tracked.order, &state);
+            wrapper.open_order(order_id, &tracked.contract, &tracked.order, &state);
         }
         wrapper.open_order_end();
     }
@@ -161,7 +161,7 @@ impl EClient {
                 wrapper.completed_order(&contract, &info.order, &state);
             } else {
                 let contract = Contract::default();
-                let api_order = Order { order_id: order.order_id as i64, ..Default::default() };
+                let api_order = Order { order_id: order.order_id, ..Default::default() };
                 let state = crate::api::types::OrderState {
                     status: status_str.into(),
                     ..Default::default()

@@ -85,12 +85,12 @@ pub fn map_req_instrument(&self, req_id: i64, instrument: InstrumentId)
 Pre-populate the order tracker (for testing the dispatcher path without going through the engine's place-order flow).
 
 ```rust
-pub fn track_order_for_test( &self, order_id: u64, contract: ApiContract, order: ApiOrder, instrument: InstrumentId, )
+pub fn track_order_for_test( &self, order_id: OrderId, contract: ApiContract, order: ApiOrder, instrument: InstrumentId, )
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `order_id` | `u64` | Order identifier. Must be unique per session. |
+| `order_id` | `OrderId` (`i64`) | Order identifier. Must be unique per session. |
 | `contract` | `ApiContract` | Contract specification (symbol, secType, exchange, currency, etc.). |
 | `order` | `ApiOrder` | Order parameters (action, quantity, type, price, TIF, etc.). |
 | `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |

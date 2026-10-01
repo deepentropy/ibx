@@ -3,7 +3,7 @@
 pub type InstrumentId = u32;
 
 /// Engine-assigned order identifier.
-pub type OrderId = u64;
+pub type OrderId = i64;
 
 /// Fixed-point price: value * 10^8. Avoids floating-point on the hot path.
 /// Example: $150.25 = 15_025_000_000
@@ -365,7 +365,7 @@ pub struct OrderAttrs {
     /// When non-empty, takes precedence over numeric `oca_group`.
     pub oca_group_str: String,
     /// Parent order ID (IB tag 6107). 0 = no parent. Links child orders to parent in brackets.
-    pub parent_id: u64,
+    pub parent_id: OrderId,
     /// Discretionary amount (IB tag 9813). 0 = not set. Fixed-point Price value.
     /// The amount above the limit price that the order may trade at.
     pub discretionary_amt: Price,
@@ -1993,7 +1993,7 @@ mod tests {
         let mut buf = OrderBuffer::new();
         let cap_before = buf.buf.capacity();
         for i in 0..MAX_PENDING_ORDERS {
-            buf.push(OrderRequest::Cancel { order_id: i as u64 });
+            buf.push(OrderRequest::Cancel { order_id: i as OrderId });
         }
         // Capacity should not have grown (pre-allocated)
         assert_eq!(buf.buf.capacity(), cap_before);
@@ -2147,7 +2147,7 @@ mod tests {
         let mut buf = OrderBuffer::new();
         for cycle in 0..10 {
             for i in 0..5 {
-                buf.push(OrderRequest::Cancel { order_id: (cycle * 5 + i) as u64 });
+                buf.push(OrderRequest::Cancel { order_id: (cycle * 5 + i) as OrderId });
             }
             let drained: Vec<_> = buf.drain().collect();
             assert_eq!(drained.len(), 5);

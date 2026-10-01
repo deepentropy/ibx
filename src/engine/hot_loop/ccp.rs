@@ -9,7 +9,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::types::{
-    CompletedOrder, Fill, InstrumentId, MidnightSeed, NewsBulletin,
+    CompletedOrder, Fill, InstrumentId, MidnightSeed, NewsBulletin, OrderId,
     PositionInfo, Price, Qty, Side, PRICE_SCALE, QTY_SCALE,
 };
 use crossbeam_channel::Sender;
@@ -83,7 +83,7 @@ fn order_message_399(
     parsed: &std::collections::HashMap<u32, String>,
     text: &str,
     context: &Context,
-    clord_id: u64,
+    clord_id: OrderId,
     shared: &SharedState,
 ) -> String {
     let action = match parsed.get(&54).map(|s| s.as_str()) {
@@ -150,16 +150,16 @@ fn parent_order_id(parsed: &std::collections::HashMap<u32, String>, context: &Co
         return 0;
     };
     let id_part = link.split('.').next().unwrap_or(link);
-    let Ok(id) = id_part.parse::<u64>() else {
+    let Ok(id) = id_part.parse::<OrderId>() else {
         return 0;
     };
     let same_id = |clord: &String| clord.split('.').next() == Some(id_part);
     if context.order(id).is_some() || context.last_clord.get(&id).is_some_and(same_id) {
-        return id as i64;
+        return id;
     }
     context.last_clord.iter()
         .find(|(_, clord)| same_id(clord))
-        .map_or(id as i64, |(&order_id, _)| order_id as i64)
+        .map_or(id, |(&order_id, _)| order_id)
 }
 
 fn perm_id_from_fix_order_id(s: &str) -> i64 {
@@ -192,7 +192,7 @@ pub(crate) struct CcpState {
     /// commission window.
     pub(crate) exec_realized: std::collections::HashMap<String, (i64, f64)>,
     /// Order messages already reported as 399, by order and text (ibx#465).
-    pub(crate) order_messages_sent: HashSet<(u64, String)>,
+    pub(crate) order_messages_sent: HashSet<(OrderId, String)>,
     pub(crate) exec_realized_order: VecDeque<String>,
     pub(crate) news_subscriptions: Vec<(InstrumentId, u32)>,
     pub(crate) disconnected: bool,
@@ -1034,7 +1034,7 @@ impl CcpState {
             let stripped = s.strip_prefix('C').unwrap_or(s);
             // Strip versioned suffix (.0, .1, .2) from modify-chained ClOrdIDs
             let base = stripped.split('.').next().unwrap_or(stripped);
-            base.parse::<u64>().ok()
+            base.parse::<OrderId>().ok()
         }).unwrap_or(0);
         let mut clord_id = context.recovered_keys.get(&server_id).copied().unwrap_or(server_id);
 
@@ -1048,7 +1048,7 @@ impl CcpState {
         if is_new_ack && context.order(clord_id).is_none() {
             // The API order id only names the order to the caller (ibx#466):
             // taken when no order of this session has it.
-            let api_id = parsed.get(&6121).and_then(|s| s.parse::<u64>().ok())
+            let api_id = parsed.get(&6121).and_then(|s| s.parse::<OrderId>().ok())
                 .filter(|&id| id != 0 && id != server_id && context.order(id).is_none()
                     && !context.recovered_keys.values().any(|&k| k == id));
             if let Some(api_id) = api_id {
@@ -1527,7 +1527,7 @@ impl CcpState {
                 _ => trail_stop_price,
             };
             let order = api::Order {
-                order_id: clord_id as i64,
+                order_id: clord_id,
                 action: if action.is_empty() { fb_action.to_string() } else { action.to_string() },
                 total_quantity: total_qty,
                 order_type: if order_type_str.is_empty() { fb_ord_type.to_string() } else { order_type_str.to_string() },
@@ -1590,7 +1590,7 @@ impl CcpState {
                 } else { String::new() },
                 shares: last_shares as f64,
                 price: last_px,
-                order_id: clord_id as i64,
+                order_id: clord_id,
                 cum_qty,
                 avg_price: avg_px,
                 last_liquidity: last_liq,
@@ -1650,7 +1650,7 @@ impl CcpState {
         parsed: &std::collections::HashMap<u32, String>,
         context: &mut Context,
         shared: &SharedState,
-        clord_id: u64,
+        clord_id: OrderId,
         exec_id: &str,
         last_px: f64,
         last_shares: Qty,
@@ -1701,7 +1701,7 @@ impl CcpState {
             price: last_px,
             perm_id: parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0),
             // The placing client's order id when the report carries it.
-            order_id: parsed.get(&6121).and_then(|s| s.parse().ok()).unwrap_or(clord_id as i64),
+            order_id: parsed.get(&6121).and_then(|s| s.parse().ok()).unwrap_or(clord_id),
             cum_qty: parsed.get(&14).and_then(|s| parse_qty(s)).unwrap_or(0) as f64 / QTY_SCALE as f64,
             avg_price: parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0),
             last_liquidity: parsed.get(&851).and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -1736,7 +1736,7 @@ impl CcpState {
             clord, reject_type, reason_code, reason);
 
         let Some((oid, version)) = clord.split_once('.')
-            .and_then(|(id, ver)| Some((id.parse::<u64>().ok()?, ver.parse::<u32>().ok()?)))
+            .and_then(|(id, ver)| Some((id.parse::<OrderId>().ok()?, ver.parse::<u32>().ok()?)))
         else { return };
         if version == 0 || context.modify_versions.get(&oid) != Some(&version) {
             log::info!("CancelReject: {} is not the current version of order {}, ignored", clord, oid);
@@ -4781,7 +4781,7 @@ mod tests {
 
     // A session-start recovery entry (150=0/39=0) for an order this session
     // does not know.
-    fn recovery_frame(order_id: u64, con_id: i64) -> std::collections::HashMap<u32, String> {
+    fn recovery_frame(order_id: OrderId, con_id: i64) -> std::collections::HashMap<u32, String> {
         [
             (11u32, format!("{}.0", order_id)), (150, "0".into()), (39, "0".into()),
             (6008, con_id.to_string()), (55, "TEST".into()), (54, "1".into()),
@@ -4818,6 +4818,28 @@ mod tests {
         other.insert(6121, "16".into());
         ccp.handle_exec_report(&other, &mut context, &shared, &None, "");
         assert!(context.order(900_002).is_some(), "kept under the server's id");
+    }
+
+    // ibx#285: order ids are signed; an earlier session's order with a
+    // negative API order id (an auto-bound order) is kept under that id and
+    // its later reports reach it, as with a positive one.
+    #[test]
+    fn a_negative_api_order_id_names_a_recovered_order() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut entry = recovery_frame(900_003, 1_005);
+        entry.insert(6121, "-2".into());
+        ccp.handle_exec_report(&entry, &mut context, &shared, &None, "");
+        assert!(context.order(-2).is_some(), "kept under its API order id");
+        assert!(context.order(900_003).is_none());
+
+        let mut cancelled = recovery_frame(900_003, 1_005);
+        cancelled.insert(150, "4".into());
+        cancelled.insert(39, "4".into());
+        ccp.handle_exec_report(&cancelled, &mut context, &shared, &None, "");
+        assert_eq!(context.finished_status(-2), Some(crate::types::OrderStatus::Cancelled));
+        assert!(shared.orders.drain_order_updates().iter().any(|u| u.order_id == -2));
     }
 
     // ibx#257: a recovered order on a new contract, with the instrument table

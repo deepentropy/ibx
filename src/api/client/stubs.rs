@@ -44,7 +44,7 @@ impl EClient {
     pub fn request_fa(&self, _fa_data_type: i32) {
         if !self.shared.reference.fa_session() {
             let (id, code, text) = crate::client_core::REQUEST_FA_NOT_FA;
-            self.shared.orders.push_order_error(id as u64, code, text.to_string());
+            self.shared.orders.push_order_error(id, code, text.to_string());
             return;
         }
         log::warn!("request_fa: not yet implemented — needs FIX capture");
@@ -56,7 +56,7 @@ impl EClient {
     pub fn replace_fa(&self, req_id: i64, _fa_data_type: i32, _cxml: &str) {
         if !self.shared.reference.fa_session() {
             let (code, text) = crate::client_core::REPLACE_FA_NOT_FA;
-            self.shared.orders.push_order_error(req_id as u64, code, text.to_string());
+            self.shared.orders.push_order_error(req_id, code, text.to_string());
             return;
         }
         log::warn!("replace_fa: not yet implemented — needs FIX capture");

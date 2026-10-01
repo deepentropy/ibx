@@ -6,7 +6,7 @@ use crate::config::{chrono_free_timestamp, unix_to_ib_utc_dash};
 use crate::engine::context::Context;
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
-use crate::types::{AlgoParams, OrderCondition, OrderRequest, OrderStatus, OrderUpdate, Side};
+use crate::types::{AlgoParams, OrderCondition, OrderId, OrderRequest, OrderStatus, OrderUpdate, Side};
 
 use super::{HeartbeatState, format_price, format_price_ref, format_qty, format_uint};
 
@@ -682,7 +682,7 @@ pub(crate) fn drain_and_send_orders(
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 // Order ids in the versioned form of every other order, so
                 // a cancel or a later child refers to what the server holds.
-                let clord = |id: u64| format!("{}.{}", id, context.modify_versions.get(&id).copied().unwrap_or(0));
+                let clord = |id: OrderId| format!("{}.{}", id, context.modify_versions.get(&id).copied().unwrap_or(0));
                 let parent_str = clord(parent_id);
                 let tp_str = clord(tp_id);
                 let sl_str = clord(sl_id);
@@ -1343,7 +1343,7 @@ pub(crate) fn drain_and_send_orders(
                 result
             }
             OrderRequest::CancelAll { instrument } => {
-                let open_ids: Vec<u64> = context.open_orders_for(instrument)
+                let open_ids: Vec<OrderId> = context.open_orders_for(instrument)
                     .iter()
                     .map(|o| o.order_id)
                     .collect();
@@ -2765,7 +2765,7 @@ mod tests {
     use super::*;
     use crate::types::Order;
 
-    fn order(oid: u64, filled: u32, status: OrderStatus) -> Order {
+    fn order(oid: OrderId, filled: u32, status: OrderStatus) -> Order {
         Order {
             order_id: oid, instrument: 0, side: Side::Buy, price: 100,
             qty_fixed: (10) as i64 * crate::types::QTY_SCALE, filled_fixed: filled as i64 * crate::types::QTY_SCALE, status, ord_type: b'2', tif: b'0', stop_price: 0,
@@ -2892,7 +2892,7 @@ mod tests {
         }
     }
 
-    fn child_of(parent_id: u64, oca_type: u8) -> OrderRequest {
+    fn child_of(parent_id: OrderId, oca_type: u8) -> OrderRequest {
         OrderRequest::SubmitEx {
             order_id: 7, instrument: 0, side: Side::Sell, qty: 1,
             kind: crate::types::OrderKind::Limit { price: 110 * P }, tif: b'1',
@@ -3079,7 +3079,7 @@ mod tests {
 
     /// Send one Modify for a working order `order_id` (AAPL, the given side)
     /// and return the fields, framing and timestamps removed.
-    fn replace_fields(order_id: u64, side: Side, qty: u32, kind: crate::types::OrderKind,
+    fn replace_fields(order_id: OrderId, side: Side, qty: u32, kind: crate::types::OrderKind,
                       tif: u8, attrs: crate::types::OrderAttrs) -> Vec<(u32, String)> {
         wire_tags_with(
             |ctx| {
@@ -3256,7 +3256,7 @@ mod tests {
     }
 
     /// The what-if request the API mapping builds for `order`.
-    fn what_if_of(order: crate::api::types::Order, order_id: u64) -> OrderRequest {
+    fn what_if_of(order: crate::api::types::Order, order_id: OrderId) -> OrderRequest {
         api_request(&crate::api::types::Order { what_if: true, ..order }, order_id)
     }
 
@@ -3412,7 +3412,7 @@ mod tests {
 
     /// Run one Modify of order 5 through `drain_and_send_orders`; return the
     /// bytes sent and the order errors raised.
-    fn modify_of(existing: Option<Order>) -> (usize, Vec<(u64, i64, String)>) {
+    fn modify_of(existing: Option<Order>) -> (usize, Vec<(i64, i64, String)>) {
         use std::io::Read;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -3467,7 +3467,7 @@ mod tests {
 
     /// Run one Cancel of order 5 through `drain_and_send_orders` after
     /// `setup`; return the bytes sent and the order errors raised.
-    fn cancel_of(setup: impl FnOnce(&mut Context)) -> (usize, Vec<(u64, i64, String)>) {
+    fn cancel_of(setup: impl FnOnce(&mut Context)) -> (usize, Vec<(i64, i64, String)>) {
         use std::io::Read;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -3923,7 +3923,7 @@ mod tests {
     }
 
     /// The request the API mapping builds for `order` on instrument 0.
-    fn api_request(order: &crate::api::types::Order, order_id: u64) -> OrderRequest {
+    fn api_request(order: &crate::api::types::Order, order_id: OrderId) -> OrderRequest {
         match crate::client_core::ClientCore::build_order_request(order, order_id, 0) {
             Ok(crate::types::ControlCommand::Order(req)) => req,
             other => panic!("unexpected {other:?}"),
@@ -4164,7 +4164,7 @@ mod tests {
     /// Drain one request on a session with the given logon flags and
     /// account: the frames sent and the errors given.
     fn short_sale_run(super_user: bool, omnibus: bool, account: &str, req: OrderRequest)
-        -> (Vec<Vec<(u32, String)>>, Vec<(u64, i64, String)>)
+        -> (Vec<Vec<(u32, String)>>, Vec<(i64, i64, String)>)
     {
         use std::io::Read;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4195,7 +4195,7 @@ mod tests {
         (frames, shared.orders.drain_order_errors())
     }
 
-    fn short_limit(order_id: u64, attrs: crate::types::OrderAttrs) -> OrderRequest {
+    fn short_limit(order_id: OrderId, attrs: crate::types::OrderAttrs) -> OrderRequest {
         OrderRequest::SubmitLimitEx { order_id, instrument: 0, side: Side::ShortSell, qty: 1,
             price: 100 * P, tif: b'0', attrs }
     }
@@ -4208,7 +4208,7 @@ mod tests {
         }
     }
 
-    fn side_refusal(order_id: u64, cause: &str) -> Vec<(u64, i64, String)> {
+    fn side_refusal(order_id: OrderId, cause: &str) -> Vec<(i64, i64, String)> {
         vec![(order_id, 321, format!("Error validating request.-'bH' : cause - {}", cause))]
     }
 

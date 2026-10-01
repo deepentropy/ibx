@@ -31,7 +31,7 @@ impl EClient {
         let tx = self.tx()?;
         let shared = self.shared_state()?;
         if let Some((code, text)) = self.core.duplicate_ticker_refusal(req_id) {
-            shared.orders.push_order_error(req_id as u64, code, text);
+            shared.orders.push_order_error(req_id, code, text);
             return Ok(());
         }
 
@@ -87,7 +87,7 @@ impl EClient {
             }
         } else {
             // An unknown request id: error 300, as the reference (ibx#444).
-            self.shared_state()?.orders.push_order_error(req_id as u64, 300, format!("Can't find EId with tickerId:{}", req_id));
+            self.shared_state()?.orders.push_order_error(req_id, 300, format!("Can't find EId with tickerId:{}", req_id));
         }
         Ok(())
     }
@@ -113,7 +113,7 @@ impl EClient {
         let tbt_type = match self.core.tbt_refusal(&shared, contract.con_id, &contract.sec_type, tick_type, local_symbol) {
             Ok(t) => t,
             Err((code, text)) => {
-                shared.orders.push_order_error(req_id as u64, code, text);
+                shared.orders.push_order_error(req_id, code, text);
                 return Ok(());
             }
         };
@@ -175,7 +175,7 @@ impl EClient {
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         if let Some((code, text)) = py.detach(|| self.core.set_market_data_type(&tx, market_data_type)) {
-            self.shared_state()?.orders.push_order_error(-1i64 as u64, code, text);
+            self.shared_state()?.orders.push_order_error(-1, code, text);
         }
         Ok(())
     }

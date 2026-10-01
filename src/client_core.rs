@@ -667,13 +667,13 @@ pub struct ClientCore {
     pub pending_commissions: Mutex<PendingCommissions>,
 
     // Open order tracking
-    pub open_orders: Mutex<HashMap<u64, TrackedOrder>>,
+    pub open_orders: Mutex<HashMap<OrderId, TrackedOrder>>,
     /// What-if previews waiting for their answer, by order id, oldest
     /// first: the contract and order the answer reports (ibx#462). Kept
     /// apart from the open orders.
-    pub what_if_orders: Mutex<HashMap<u64, std::collections::VecDeque<(ApiContract, ApiOrder)>>>,
+    pub what_if_orders: Mutex<HashMap<OrderId, std::collections::VecDeque<(ApiContract, ApiOrder)>>>,
     // Ids of tracked orders that were filled or cancelled: never sent again (ibx#463).
-    pub finished_orders: Mutex<HashSet<u64>>,
+    pub finished_orders: Mutex<HashSet<OrderId>>,
 
     // Market data type callback tracking
     pub market_data_type: AtomicI32,
@@ -1716,7 +1716,7 @@ impl ClientCore {
     /// 207 as exchange, the placing client (this client when the report has
     /// none), modelCode, and the orderRef of the report or of the tracked
     /// order. Fields the report did not carry keep their value.
-    pub fn apply_fill_exec(&self, ex: &mut ApiExecution, fe: &crate::bridge::FillExec, order_id: u64) {
+    pub fn apply_fill_exec(&self, ex: &mut ApiExecution, fe: &crate::bridge::FillExec, order_id: OrderId) {
         if !fe.exec_id.is_empty() {
             ex.exec_id = fe.exec_id.clone();
         }
@@ -1818,14 +1818,14 @@ impl ClientCore {
     // ── Open order tracking ──
 
     /// Check if an order with this ID is currently tracked (for modify detection).
-    pub fn is_order_tracked(&self, order_id: u64) -> bool {
+    pub fn is_order_tracked(&self, order_id: OrderId) -> bool {
         self.open_orders.lock().unwrap().contains_key(&order_id)
     }
 
     /// Track a newly placed order. For a modify of a tracked order, the
     /// status and fill counts stay as the server last reported them: the
     /// engine can still refuse the modify (ibx#463).
-    pub fn track_order(&self, order_id: u64, contract: ApiContract, mut order: ApiOrder, instrument: InstrumentId) {
+    pub fn track_order(&self, order_id: OrderId, contract: ApiContract, mut order: ApiOrder, instrument: InstrumentId) {
         // Kept with the time in force the reference reports for it, which
         // a modify must restate (ibx#467).
         order.tif = Self::held_tif(&order).to_string();
@@ -1847,7 +1847,7 @@ impl ClientCore {
     /// `status`: the tracked order as the caller placed it when this client
     /// placed it, else the order the server reports; the order state of the
     /// latest report (ibx#473). `None` for an order known to neither.
-    pub fn order_view(&self, order_id: u64, shared: &SharedState, status: &str) -> Option<OrderView> {
+    pub fn order_view(&self, order_id: OrderId, shared: &SharedState, status: &str) -> Option<OrderView> {
         let tracked = self.open_orders.lock().unwrap().get(&order_id).cloned();
         let info = shared.orders.get_order_info(order_id);
         let mut state = info.as_ref().map(|i| i.order_state.clone()).unwrap_or_default();
@@ -1855,7 +1855,7 @@ impl ClientCore {
         let (contract, order, last_fill_price, client_id) = match (tracked, info) {
             (Some(t), info) => {
                 let mut order = t.order;
-                order.order_id = order_id as i64;
+                order.order_id = order_id;
                 if let Some(i) = &info {
                     if order.perm_id == 0 { order.perm_id = i.order.perm_id; }
                     if order.account.is_empty() { order.account = i.order.account.clone(); }
@@ -1876,14 +1876,14 @@ impl ClientCore {
 
     /// Keep the price of an order's last print for later order_status
     /// callbacks (ibx#473).
-    pub fn record_last_fill_price(&self, order_id: u64, price: f64) {
+    pub fn record_last_fill_price(&self, order_id: OrderId, price: f64) {
         if let Some(o) = self.open_orders.lock().unwrap().get_mut(&order_id) {
             o.last_fill_price = price;
         }
     }
 
     /// Update a tracked order after a fill. Removes the order if fully filled.
-    pub fn update_order_fill(&self, order_id: u64, status: &str, filled: f64, remaining: f64) {
+    pub fn update_order_fill(&self, order_id: OrderId, status: &str, filled: f64, remaining: f64) {
         let mut orders = self.open_orders.lock().unwrap();
         if remaining == 0.0 {
             if orders.remove(&order_id).is_some() {
@@ -1897,7 +1897,7 @@ impl ClientCore {
     }
 
     /// Update a tracked order status from an order update event.
-    pub fn update_order_status(&self, order_id: u64, status: &str, filled: f64, remaining: f64) {
+    pub fn update_order_status(&self, order_id: OrderId, status: &str, filled: f64, remaining: f64) {
         let mut orders = self.open_orders.lock().unwrap();
         if let Some(o) = orders.get_mut(&order_id) {
             o.status = status.into();
@@ -1914,7 +1914,7 @@ impl ClientCore {
     /// (ibx#463). A new order with that id would be a second real order.
     /// A pending cancel is checked by the engine, which holds the current
     /// status. A what-if is not a modify and is not checked.
-    pub fn refusal_for_order_id(&self, order_id: u64, order: &ApiOrder) -> Option<(i64, String)> {
+    pub fn refusal_for_order_id(&self, order_id: OrderId, order: &ApiOrder) -> Option<(i64, String)> {
         if order.what_if {
             return None;
         }
@@ -1927,8 +1927,8 @@ impl ClientCore {
 
     /// Collect open orders: merge local tracking with shared state.
     /// Returns (order_id, contract, order, status, filled, remaining) for non-terminal orders.
-    pub fn collect_open_orders(&self, shared: &SharedState) -> Vec<(u64, TrackedOrder)> {
-        let mut result: Vec<(u64, TrackedOrder)> = Vec::new();
+    pub fn collect_open_orders(&self, shared: &SharedState) -> Vec<(OrderId, TrackedOrder)> {
+        let mut result: Vec<(OrderId, TrackedOrder)> = Vec::new();
 
         // Drain shared order cache first to enrich local tracking
         let shared_orders = shared.orders.drain_open_orders();
@@ -2933,7 +2933,7 @@ impl ClientCore {
     /// The reference keeps the order's working status on a fill and has no
     /// partially-filled status: a fill on an order last reported as
     /// PreSubmitted stays PreSubmitted, otherwise Submitted (ib-agent#192 C8).
-    pub fn partial_fill_status(&self, order_id: u64) -> &'static str {
+    pub fn partial_fill_status(&self, order_id: OrderId) -> &'static str {
         match self.open_orders.lock().unwrap().get(&order_id).map(|t| t.status.as_str()) {
             Some("PreSubmitted") => "PreSubmitted",
             _ => "Submitted",
@@ -2941,18 +2941,18 @@ impl ClientCore {
     }
 
     /// Order type of a tracked order, as the caller placed it.
-    pub fn tracked_order_type(&self, order_id: u64) -> Option<String> {
+    pub fn tracked_order_type(&self, order_id: OrderId) -> Option<String> {
         self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.order_type.clone())
     }
 
     /// Keep a what-if preview for its answer (ibx#462).
-    pub fn track_what_if(&self, order_id: u64, contract: ApiContract, order: ApiOrder) {
+    pub fn track_what_if(&self, order_id: OrderId, contract: ApiContract, order: ApiOrder) {
         self.what_if_orders.lock().unwrap().entry(order_id).or_default().push_back((contract, order));
     }
 
     /// The contract and order of the oldest what-if preview of `order_id`
     /// in flight, removed (ibx#462).
-    pub fn take_what_if(&self, order_id: u64) -> Option<(ApiContract, ApiOrder)> {
+    pub fn take_what_if(&self, order_id: OrderId) -> Option<(ApiContract, ApiOrder)> {
         let mut previews = self.what_if_orders.lock().unwrap();
         let queue = previews.get_mut(&order_id)?;
         let first = queue.pop_front();
@@ -2962,7 +2962,7 @@ impl ClientCore {
 
     /// A tracked order as the caller placed it (the order a modify is
     /// checked against).
-    pub fn tracked_order(&self, order_id: u64) -> Option<ApiOrder> {
+    pub fn tracked_order(&self, order_id: OrderId) -> Option<ApiOrder> {
         self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.clone())
     }
 
@@ -3120,7 +3120,7 @@ impl ClientCore {
     /// anything; so does this. `working` is the order as it was placed.
     pub fn build_modify_request(
         order: &ApiOrder,
-        order_id: u64,
+        order_id: OrderId,
         working: &ApiOrder,
     ) -> Result<ModifyPlan, String> {
         if let Some((code, message)) = Self::modify_change_refusal(order, working) {
@@ -3152,7 +3152,7 @@ impl ClientCore {
     /// This is the shared order-type match block used by both Rust and Python.
     pub fn build_order_request(
         order: &ApiOrder,
-        order_id: u64,
+        order_id: OrderId,
         instrument: InstrumentId,
     ) -> Result<ControlCommand, String> {
         // A what-if first (ibx#462): the order as it would be placed, of

@@ -106,7 +106,7 @@ impl EClient {
         let pattern = match crate::client_core::matching_symbols_pattern(pattern) {
             Ok(pattern) => pattern,
             Err((code, message)) => {
-                self.shared.orders.push_order_error(req_id as u64, code, message);
+                self.shared.orders.push_order_error(req_id, code, message);
                 return Ok(());
             }
         };
@@ -169,7 +169,7 @@ impl EClient {
                 subscription,
             }),
             Err((code, text)) => {
-                self.shared.orders.push_order_error(req_id as u64, code, text);
+                self.shared.orders.push_order_error(req_id, code, text);
                 Ok(())
             }
         }
@@ -191,7 +191,7 @@ impl EClient {
     ) -> Result<(), String> {
         let sources = self.shared.reference.news_sources();
         if let Some((code, text)) = ClientCore::historical_news_refusal(provider_codes, max_results as i64, &sources) {
-            self.shared.orders.push_order_error(req_id as u64, code, text);
+            self.shared.orders.push_order_error(req_id, code, text);
             return Ok(());
         }
         self.send(ControlCommand::FetchHistoricalNews {
@@ -209,7 +209,7 @@ impl EClient {
     pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &str) -> Result<(), String> {
         let sources = self.shared.reference.news_sources();
         if let Some((code, text)) = ClientCore::news_article_refusal(provider_code, article_id, &sources) {
-            self.shared.orders.push_order_error(req_id as u64, code, text);
+            self.shared.orders.push_order_error(req_id, code, text);
             return Ok(());
         }
         self.send(ControlCommand::FetchNewsArticle {

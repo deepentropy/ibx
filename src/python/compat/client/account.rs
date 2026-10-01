@@ -15,7 +15,7 @@ impl EClient {
         // Several requests can run; an empty or unknown account gives 321, a
         // request id already running gives 102 (ibx#478).
         if let Err((code, message)) = self.core.request_pnl(req_id, account, &self.account()) {
-            self.shared_state()?.orders.push_order_error(req_id as u64, code, message);
+            self.shared_state()?.orders.push_order_error(req_id, code, message);
             return Ok(());
         }
         let tx = self.tx()?;
@@ -29,7 +29,7 @@ impl EClient {
         if let Some(r) = self.not_connected(-1) { return r; }
         // A request id not running gives 10185 (ibx#478).
         if let Some((code, message)) = self.core.cancel_pnl_request(req_id) {
-            self.shared_state()?.orders.push_order_error(req_id as u64, code, message);
+            self.shared_state()?.orders.push_order_error(req_id, code, message);
             return Ok(());
         }
         let tx = self.tx()?;
@@ -43,7 +43,7 @@ impl EClient {
         if let Some(r) = self.not_connected(-1) { return r; }
         // Same checks as req_pnl (ibx#478).
         if let Err((code, message)) = self.core.request_pnl_single(req_id, account, &self.account(), con_id) {
-            self.shared_state()?.orders.push_order_error(req_id as u64, code, message);
+            self.shared_state()?.orders.push_order_error(req_id, code, message);
         }
         let _ = model_code;
         Ok(())
@@ -54,7 +54,7 @@ impl EClient {
         if let Some(r) = self.not_connected(-1) { return r; }
         // A request id not running gives 10186 (ibx#478).
         if let Some((code, message)) = self.core.cancel_pnl_single_request(req_id) {
-            self.shared_state()?.orders.push_order_error(req_id as u64, code, message);
+            self.shared_state()?.orders.push_order_error(req_id, code, message);
         }
         Ok(())
     }
@@ -75,7 +75,7 @@ impl EClient {
                     sr_id: plan.sr_id, tags: plan.wire_tags, group: plan.group,
                 });
             }
-            Err((code, message)) => self.shared_state()?.orders.push_order_error(req_id as u64, code, message),
+            Err((code, message)) => self.shared_state()?.orders.push_order_error(req_id, code, message),
         }
         Ok(())
     }
@@ -112,7 +112,7 @@ impl EClient {
         if let Some(r) = self.not_connected(-1) { return r; }
         // An unsubscribe answers error 2100 with id -1 (ibx#475).
         if let Some((code, message)) = self.core.subscribe_account_updates(subscribe) {
-            self.shared_state()?.orders.push_order_error(-1i64 as u64, code, message);
+            self.shared_state()?.orders.push_order_error(-1, code, message);
         }
         Ok(())
     }
@@ -134,7 +134,7 @@ impl EClient {
         if let Some(r) = self.not_connected(req_id as i64) { return r; }
         let shared = self.shared_state()?;
         if let Err((code, message)) = self.core.subscribe_account_multi(req_id, account, model_code, ledger_and_nlv) {
-            shared.orders.push_order_error(req_id as u64, code, message);
+            shared.orders.push_order_error(req_id, code, message);
             return Ok(());
         }
         self.dispatch_multi(py, &shared)

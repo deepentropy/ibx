@@ -70,13 +70,13 @@ impl EClient {
             // (ibx#473).
             let client_id = match self.core.order_view(fill.order_id, &self.shared, status) {
                 Some(view) => {
-                    wrapper.open_order(fill.order_id as i64, &view.contract, &view.order, &view.state);
+                    wrapper.open_order(fill.order_id, &view.contract, &view.order, &view.state);
                     view.client_id
                 }
                 None => 0,
             };
             wrapper.order_status(
-                fill.order_id as i64, status, filled_f, remaining_f,
+                fill.order_id, status, filled_f, remaining_f,
                 avg_f, perm_id, parent_id, price_f, client_id, "", 0.0,
             );
             self.core.record_last_fill_price(fill.order_id, price_f);
@@ -92,7 +92,7 @@ impl EClient {
                 ex.side = side_str.into();
                 ex.shares = shares_f;
                 ex.price = price_f;
-                ex.order_id = fill.order_id as i64;
+                ex.order_id = fill.order_id;
                 ex.cum_qty = filled_f;
                 ex.avg_price = avg_f;
                 let contract = if info.contract.con_id != 0 {
@@ -106,7 +106,7 @@ impl EClient {
                     side: side_str.into(),
                     shares: shares_f,
                     price: price_f,
-                    order_id: fill.order_id as i64,
+                    order_id: fill.order_id,
                     cum_qty: filled_f,
                     avg_price: avg_f,
                     ..Default::default()
@@ -129,7 +129,7 @@ impl EClient {
         // Executions of orders this session does not track: stored for
         // req_executions, with no live callback (ibx#314).
         for (contract, mut exec, fill_exec) in self.shared.orders.drain_untracked_executions() {
-            let order_id = exec.order_id as u64;
+            let order_id = exec.order_id;
             self.core.apply_fill_exec(&mut exec, &fill_exec, order_id);
             if let Some(report) = self.core.push_execution(-1, contract, exec, fill_exec.time_secs) {
                 wrapper.commission_and_fees_report(&report);
@@ -147,7 +147,7 @@ impl EClient {
         // → error, ahead of the status: the reference reports a server
         // reject as error 201 before the Inactive status (ibx#250).
         for (order_id, code, msg) in self.shared.orders.drain_order_errors() {
-            wrapper.error(order_id as i64, code, &msg, "");
+            wrapper.error(order_id, code, &msg, "");
         }
 
         // Order updates → open_order + order_status for every report of a
@@ -158,11 +158,11 @@ impl EClient {
             let remaining_f = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
             let view = self.core.order_view(update.order_id, &self.shared, status);
             if let Some(v) = view.as_ref().filter(|_| status != "Cancelled") {
-                wrapper.open_order(update.order_id as i64, &v.contract, &v.order, &v.state);
+                wrapper.open_order(update.order_id, &v.contract, &v.order, &v.state);
             }
             let (last_fill_price, client_id) = view.map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
             wrapper.order_status(
-                update.order_id as i64, status, filled_f,
+                update.order_id, status, filled_f,
                 remaining_f, update.avg_fill_price as f64 / PRICE_SCALE_F,
                 update.perm_id, update.parent_id, last_fill_price, client_id, "", 0.0,
             );
@@ -175,7 +175,7 @@ impl EClient {
             // cancel or modify is 10147.
             let code = 10147;
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
-            wrapper.error(reject.order_id as i64, code, &msg, "");
+            wrapper.error(reject.order_id, code, &msg, "");
         }
 
         // What-if → open_order(contract, order, OrderState) only, as the
@@ -198,7 +198,7 @@ impl EClient {
             };
             let (contract, order) = self.core.take_what_if(wi.order_id)
                 .unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
-            wrapper.open_order(wi.order_id as i64, &contract, &order, &state);
+            wrapper.open_order(wi.order_id, &contract, &order, &state);
         }
     }
 

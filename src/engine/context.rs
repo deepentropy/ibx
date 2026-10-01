@@ -78,7 +78,7 @@ pub struct Context {
     pub(crate) last_clord: HashMap<OrderId, String>,
     /// Orders of an earlier session kept under their API order id: the
     /// server's order id to that key (ibx#466).
-    pub(crate) recovered_keys: HashMap<u64, OrderId>,
+    pub(crate) recovered_keys: HashMap<OrderId, OrderId>,
     /// ClOrdID of the cancel sent for each order, until the order ends or
     /// the cancel is rejected. Reports carrying it are about the cancel, not
     /// a new version of the order (ibx#464).
@@ -197,7 +197,7 @@ impl Context {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                secs * 1000
+                secs as i64 * 1000
             },
             recv_at: Instant::now(),
             loop_iterations: 0,
@@ -1427,7 +1427,7 @@ mod tests {
 
     // ── ibx#212: monotonic status guard ──
 
-    fn submitted_order(ctx: &mut Context, oid: u64) {
+    fn submitted_order(ctx: &mut Context, oid: OrderId) {
         ctx.insert_order(Order {
             order_id: oid, instrument: 0, side: Side::Buy, price: 100,
             qty_fixed: (100) as i64 * crate::types::QTY_SCALE, filled_fixed: (0) as i64 * crate::types::QTY_SCALE, status: OrderStatus::Submitted,

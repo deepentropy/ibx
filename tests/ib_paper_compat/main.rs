@@ -804,7 +804,7 @@ fn submit_ex_bracket_child_phase_live() {
         tif: b'1', // GTC
         attrs: ibx::types::OrderAttrs {
             parent_id,
-            oca_group: parent_id,
+            oca_group: u64::try_from(parent_id).unwrap(),
             outside_rth: true,
             ..ibx::types::OrderAttrs::default()
         },
@@ -815,7 +815,7 @@ fn submit_ex_bracket_child_phase_live() {
     // Wait for both to ack.
     let deadline = Instant::now() + Duration::from_secs(30);
     let (mut parent_acked, mut child_acked) = (false, false);
-    let mut rejected: Option<u64> = None;
+    let mut rejected: Option<OrderId> = None;
     while Instant::now() < deadline && !(parent_acked && child_acked) && rejected.is_none() {
         if let Ok(Event::OrderUpdate(u)) = event_rx.recv_timeout(Duration::from_millis(100)) {
             println!("  [update] oid={} status={:?} parentId={}", u.order_id, u.status, u.parent_id);

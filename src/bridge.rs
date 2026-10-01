@@ -432,12 +432,13 @@ pub struct OrderState {
     untracked_executions: Mutex<Vec<(api::Contract, api::Execution, FillExec)>>,
     order_updates: Mutex<Vec<OrderUpdate>>,
     cancel_rejects: Mutex<Vec<CancelReject>>,
-    /// Order errors raised before sending, keyed by the full order id (ibx#349).
-    order_errors: Mutex<Vec<(u64, i64, String)>>,
+    /// Errors raised before sending: (request or order id as the API gives
+    /// it, -1 for none; code; message) (ibx#349, ibx#285).
+    order_errors: Mutex<Vec<(i64, i64, String)>>,
     what_if_responses: Mutex<Vec<WhatIfResponse>>,
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
-    order_cache: Mutex<HashMap<u64, RichOrderInfo>>,
+    order_cache: Mutex<HashMap<OrderId, RichOrderInfo>>,
 }
 
 impl OrderState {
@@ -483,7 +484,7 @@ impl OrderState {
     }
 
     /// Order errors raised before anything was sent: (order id, code, message).
-    pub fn drain_order_errors(&self) -> Vec<(u64, i64, String)> {
+    pub fn drain_order_errors(&self) -> Vec<(i64, i64, String)> {
         self.order_errors.lock().unwrap().drain(..).collect()
     }
 
@@ -499,7 +500,7 @@ impl OrderState {
     /// Terminal entries (Filled / Cancelled / Inactive / etc.) are filtered out
     /// so `req_open_orders` does not leak historical orders that are still cached
     /// for `req_completed_orders` lookups.
-    pub fn drain_open_orders(&self) -> Vec<(u64, RichOrderInfo)> {
+    pub fn drain_open_orders(&self) -> Vec<(OrderId, RichOrderInfo)> {
         let lock = self.order_cache.lock().unwrap();
         lock.iter()
             .filter(|(_, v)| crate::client_core::is_open_status(&v.order_state.status))
@@ -508,13 +509,13 @@ impl OrderState {
     }
 
     /// Get enriched order info by order_id.
-    pub fn get_order_info(&self, order_id: u64) -> Option<RichOrderInfo> {
+    pub fn get_order_info(&self, order_id: OrderId) -> Option<RichOrderInfo> {
         self.order_cache.lock().unwrap().get(&order_id).cloned()
     }
 
     /// Remove an enriched entry. Called after a completed order has been
     /// delivered to the user, to bound `order_cache` growth in long sessions.
-    pub fn remove_order_info(&self, order_id: u64) {
+    pub fn remove_order_info(&self, order_id: OrderId) {
         self.order_cache.lock().unwrap().remove(&order_id);
     }
 
@@ -544,7 +545,7 @@ impl OrderState {
         self.cancel_rejects.lock().unwrap().push(reject);
     }
 
-    #[doc(hidden)] pub fn push_order_error(&self, order_id: u64, code: i64, message: String) {
+    #[doc(hidden)] pub fn push_order_error(&self, order_id: i64, code: i64, message: String) {
         self.order_errors.lock().unwrap().push((order_id, code, message));
     }
 
@@ -556,7 +557,7 @@ impl OrderState {
         self.completed_orders.lock().unwrap().push(order);
     }
 
-    #[doc(hidden)] pub fn push_order_info(&self, order_id: u64, info: RichOrderInfo) {
+    #[doc(hidden)] pub fn push_order_info(&self, order_id: OrderId, info: RichOrderInfo) {
         self.order_cache.lock().unwrap().insert(order_id, info);
     }
 }

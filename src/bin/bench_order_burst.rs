@@ -57,7 +57,7 @@ fn main() {
     );
 
     for i in 0..burst_size {
-        let order_id = (i + 1) as u64;
+        let order_id = (i + 1) as i64;
         let price = (100 + i as i64) * (PRICE_SCALE / 100); // $1.00, $1.01, ...
         submit_times.insert(order_id, Instant::now());
         session.send_order(OrderRequest::SubmitLimitGtc {
@@ -118,7 +118,7 @@ fn main() {
         start.elapsed().as_secs_f64(),
     );
     for i in 0..burst_size {
-        let order_id = (i + 1) as u64;
+        let order_id = (i + 1) as i64;
         session.send_order(OrderRequest::Cancel { order_id });
     }
 

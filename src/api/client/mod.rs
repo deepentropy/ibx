@@ -41,7 +41,7 @@ mod stubs;
 #[cfg(test)]
 mod tests;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -135,7 +135,7 @@ pub struct EClient {
     /// True once `connection_closed` has been delivered, so it fires at most
     /// once per session.
     pub(crate) close_notified: AtomicBool,
-    pub(crate) next_order_id: AtomicU64,
+    pub(crate) next_order_id: AtomicI64,
     pub(crate) core: ClientCore,
     pub(crate) session_token_bytes: Vec<u8>,
     pub(crate) token_type: String,
@@ -220,7 +220,7 @@ impl EClient {
         let start_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() * 1000;
+            .as_secs() as i64 * 1000;
 
         Ok(Self {
             shared,
@@ -229,7 +229,7 @@ impl EClient {
             account_id,
             connected: AtomicBool::new(true),
             close_notified: AtomicBool::new(false),
-            next_order_id: AtomicU64::new(start_id),
+            next_order_id: AtomicI64::new(start_id),
             core: ClientCore::new(),
             session_token_bytes,
             token_type,
@@ -248,7 +248,7 @@ impl EClient {
         let start_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() * 1000;
+            .as_secs() as i64 * 1000;
         Self {
             shared,
             control_tx,
@@ -256,7 +256,7 @@ impl EClient {
             account_id,
             connected: AtomicBool::new(true),
             close_notified: AtomicBool::new(false),
-            next_order_id: AtomicU64::new(start_id),
+            next_order_id: AtomicI64::new(start_id),
             core: ClientCore::new(),
             session_token_bytes: Vec::new(),
             token_type: String::new(),
@@ -276,7 +276,7 @@ impl EClient {
     #[doc(hidden)]
     pub fn track_order_for_test(
         &self,
-        order_id: u64,
+        order_id: OrderId,
         contract: ApiContract,
         order: ApiOrder,
         instrument: InstrumentId,

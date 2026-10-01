@@ -87,7 +87,7 @@ impl EClient {
     #[doc(hidden)]
     #[pyo3(signature = (instrument, order_id, side, price, qty, remaining, commission=0.0))]
     fn _test_push_fill(
-        &self, instrument: u32, order_id: u64, side: &str,
+        &self, instrument: u32, order_id: OrderId, side: &str,
         price: f64, qty: i64, remaining: i64, commission: f64,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
@@ -112,7 +112,7 @@ impl EClient {
     /// Push an order update into SharedState.
     #[doc(hidden)]
     fn _test_push_order_update(
-        &self, order_id: u64, instrument: u32, status: &str,
+        &self, order_id: OrderId, instrument: u32, status: &str,
         filled_qty: i64, remaining_qty: i64,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
@@ -147,7 +147,7 @@ impl EClient {
     ))]
     fn _test_push_completed_order(
         &self,
-        order_id: u64, instrument: u32, status: &str, filled_qty: i64,
+        order_id: OrderId, instrument: u32, status: &str, filled_qty: i64,
         symbol: &str, action: &str, total_quantity: f64, lmt_price: f64,
         completed_status: &str, completed_time: &str, commission_and_fees_currency: &str,
         warning_text: &str, commission_and_fees: f64,
@@ -172,7 +172,7 @@ impl EClient {
                 ..Default::default()
             },
             order: ApiOrder {
-                order_id: order_id as i64,
+                order_id: order_id,
                 action: action.to_string(),
                 total_quantity,
                 order_type: "LMT".into(),
@@ -196,7 +196,7 @@ impl EClient {
     /// Track an order locally (for req_open_orders regression tests).
     #[doc(hidden)]
     fn _test_track_order(
-        &self, order_id: u64, instrument: u32,
+        &self, order_id: OrderId, instrument: u32,
         symbol: &str, action: &str, total_quantity: f64, lmt_price: f64,
     ) -> PyResult<()> {
         use crate::api::types::{Contract as ApiContract, Order as ApiOrder};
@@ -208,7 +208,7 @@ impl EClient {
             ..Default::default()
         };
         let order = ApiOrder {
-            order_id: order_id as i64,
+            order_id: order_id,
             action: action.to_string(),
             total_quantity,
             order_type: "LMT".into(),
@@ -229,7 +229,7 @@ impl EClient {
     ))]
     fn _test_push_what_if(
         &self,
-        order_id: u64, instrument: u32,
+        order_id: OrderId, instrument: u32,
         init_margin_before: f64, maint_margin_before: f64, equity_with_loan_before: f64,
         init_margin_after: f64, maint_margin_after: f64, equity_with_loan_after: f64,
         commission: f64,
@@ -251,7 +251,7 @@ impl EClient {
 
     /// Push a cancel reject into SharedState.
     #[doc(hidden)]
-    fn _test_push_cancel_reject(&self, order_id: u64, instrument: u32, reason_code: i32) -> PyResult<()> {
+    fn _test_push_cancel_reject(&self, order_id: OrderId, instrument: u32, reason_code: i32) -> PyResult<()> {
         let shared = self.shared_state()?;
         shared.orders.push_cancel_reject(CancelReject {
             order_id, instrument, reject_type: 1, reason_code, timestamp_ns: 100,

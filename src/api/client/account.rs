@@ -50,7 +50,7 @@ impl EClient {
     /// request id already running gives 102 (ibx#478).
     pub fn req_pnl(&self, req_id: i64, account: &str, _model_code: &str) {
         if let Err((code, message)) = self.core.request_pnl(req_id, account, &self.account_id) {
-            self.shared.orders.push_order_error(req_id as u64, code, message);
+            self.shared.orders.push_order_error(req_id, code, message);
         }
     }
 
@@ -58,7 +58,7 @@ impl EClient {
     /// A request id not running gives 10185 (ibx#478).
     pub fn cancel_pnl(&self, req_id: i64) {
         if let Some((code, message)) = self.core.cancel_pnl_request(req_id) {
-            self.shared.orders.push_order_error(req_id as u64, code, message);
+            self.shared.orders.push_order_error(req_id, code, message);
         }
     }
 
@@ -66,7 +66,7 @@ impl EClient {
     /// Same checks as `req_pnl` (ibx#478).
     pub fn req_pnl_single(&self, req_id: i64, account: &str, _model_code: &str, con_id: i64) {
         if let Err((code, message)) = self.core.request_pnl_single(req_id, account, &self.account_id, con_id) {
-            self.shared.orders.push_order_error(req_id as u64, code, message);
+            self.shared.orders.push_order_error(req_id, code, message);
         }
     }
 
@@ -74,7 +74,7 @@ impl EClient {
     /// A request id not running gives 10186 (ibx#478).
     pub fn cancel_pnl_single(&self, req_id: i64) {
         if let Some((code, message)) = self.core.cancel_pnl_single_request(req_id) {
-            self.shared.orders.push_order_error(req_id as u64, code, message);
+            self.shared.orders.push_order_error(req_id, code, message);
         }
     }
 
@@ -93,7 +93,7 @@ impl EClient {
                     sr_id: plan.sr_id, tags: plan.wire_tags, group: plan.group,
                 });
             }
-            Err((code, message)) => self.shared.orders.push_order_error(req_id as u64, code, message),
+            Err((code, message)) => self.shared.orders.push_order_error(req_id, code, message),
         }
     }
 
@@ -110,7 +110,7 @@ impl EClient {
     pub fn req_account_updates(&self, subscribe: bool, _acct_code: &str) {
         // An unsubscribe answers error 2100 with id -1 (ibx#475).
         if let Some((code, message)) = self.core.subscribe_account_updates(subscribe) {
-            self.shared.orders.push_order_error(-1i64 as u64, code, message);
+            self.shared.orders.push_order_error(-1, code, message);
         }
     }
 

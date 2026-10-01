@@ -554,7 +554,7 @@ impl HotLoop {
     /// exchange (10092 when no depth route serves it); each entry goes to
     /// the farm of its route.
     fn route_depth_subscribe(&mut self, req_id: u32, con_id: i64, exchange: String, sec_type: String, num_rows: i32, is_smart_depth: bool) {
-        let refuse = |shared: &SharedState, code: i64, text: String| shared.orders.push_order_error(req_id as u64, code, text);
+        let refuse = |shared: &SharedState, code: i64, text: String| shared.orders.push_order_error(i64::from(req_id), code, text);
         let invalid = |cause: &str| format!("Error validating request.-'bR' : cause - {}", cause);
         if exchange.trim().is_empty() {
             return refuse(&self.shared, 321, invalid("Please enter exchange."));
@@ -1263,7 +1263,7 @@ impl HotLoop {
                 ControlCommand::UnsubscribeDepth { req_id } => {
                     match self.farm.stop_depth(req_id) {
                         // An unknown request id: 310, as the reference.
-                        None => self.shared.orders.push_order_error(req_id as u64, 310,
+                        None => self.shared.orders.push_order_error(i64::from(req_id), 310,
                             format!("Can't find the subscribed market depth with tickerId:{}", req_id)),
                         Some(msgs) => self.send_farm_messages(msgs),
                     }

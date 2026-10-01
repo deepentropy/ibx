@@ -4063,7 +4063,7 @@ fn queued_data_is_dispatched_before_connection_closed() {
 //  Commission reports from their own server frame (ibx#471)
 // ═══════════════════════════════════════════════════════════════════
 
-fn aapl_fill(order_id: u64) -> Fill {
+fn aapl_fill(order_id: OrderId) -> Fill {
     Fill {
         instrument: 0, order_id, side: Side::Buy, price: 336 * PRICE_SCALE,
         qty_fixed: 100 * crate::types::QTY_SCALE, remaining_fixed: 0,
@@ -4303,7 +4303,7 @@ impl Wrapper for StatusRecorder {
     }
 }
 
-fn update(order_id: u64, status: OrderStatus, filled: i64) -> OrderUpdate {
+fn update(order_id: OrderId, status: OrderStatus, filled: i64) -> OrderUpdate {
     OrderUpdate {
         order_id, instrument: 0, status,
         filled_qty_fixed: filled * crate::types::QTY_SCALE,
@@ -4920,4 +4920,30 @@ fn server_version_and_connection_time() {
     let time = client.tws_connection_time();
     assert_eq!(time.split(' ').next().map(str::len), Some(8), "{}", time);
     assert_eq!(time, client.tws_connection_time(), "fixed at connect");
+}
+
+// ibx#285: ids are signed, as the reference's: error -1 and a negative
+// order id reach the wrapper as they were given, and a cancel of a
+// negative order id reaches the engine with that id.
+#[test]
+fn negative_ids_round_trip() {
+    let (client, rx, shared) = test_client();
+    client.req_market_data_type(9);
+    shared.orders.push_order_error(-7, 201, "Order rejected - reason:test".into());
+    shared.orders.push_order_update(OrderUpdate {
+        order_id: -7, instrument: 0, status: OrderStatus::Rejected,
+        filled_qty_fixed: 0, remaining_qty_fixed: 0, avg_fill_price: 0,
+        perm_id: 0, parent_id: 0, timestamp_ns: 0,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("error:-1:321:")), "{:?}", w.events);
+    assert!(w.events.iter().any(|e| e == "error:-7:201:Order rejected - reason:test"), "{:?}", w.events);
+    assert!(w.events.iter().any(|e| e.starts_with("order_status:-7:Inactive")), "{:?}", w.events);
+
+    client.cancel_order(-7, "").unwrap();
+    match rx.try_recv() {
+        Ok(ControlCommand::Order(OrderRequest::Cancel { order_id })) => assert_eq!(order_id, -7),
+        other => panic!("expected the cancel, got {:?}", other),
+    }
 }

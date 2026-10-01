@@ -450,7 +450,7 @@ pub(super) fn phase_enriched_order_cache(conns: Conns) -> Conns {
             wrapper.completed_order(&info.contract, &info.order, &state);
         } else {
             let c = api::Contract::default();
-            let o = api::Order { order_id: co.order_id as i64, ..Default::default() };
+            let o = api::Order { order_id: co.order_id, ..Default::default() };
             let s = api::OrderState { status: status_str.into(), ..Default::default() };
             wrapper.completed_order(&c, &o, &s);
         }
@@ -592,7 +592,7 @@ pub(super) fn phase_enriched_open_orders(conns: Conns) -> Conns {
     let mut wrapper = OoWrapper { orders: Vec::new() };
     for (oid, info) in shared.orders.drain_open_orders() {
         if !matches!(info.order_state.status.as_str(), "Filled" | "Cancelled" | "Inactive") {
-            wrapper.open_order(oid as i64, &info.contract, &info.order, &info.order_state);
+            wrapper.open_order(oid, &info.contract, &info.order, &info.order_state);
         }
     }
 
@@ -830,7 +830,7 @@ pub(super) fn phase_enriched_exec_details(conns: Conns) -> Conns {
             side: side_str.into(),
             shares: fill.qty_fixed as f64 / ibx::types::QTY_SCALE as f64,
             price: price_f,
-            order_id: fill.order_id as i64,
+            order_id: fill.order_id,
             ..Default::default()
         };
         let c = shared.orders.get_order_info(fill.order_id)

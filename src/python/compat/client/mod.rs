@@ -8,7 +8,7 @@ mod dispatch;
 mod stubs;
 mod test_helpers;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -48,7 +48,7 @@ pub struct EClient {
     pub(crate) shared: Mutex<Option<Arc<SharedState>>>,
     /// Set by connect(), cleared by disconnect().
     pub(crate) control_tx: Mutex<Option<Sender<ControlCommand>>>,
-    pub(crate) next_order_id: AtomicU64,
+    pub(crate) next_order_id: AtomicI64,
     pub(crate) _thread: Mutex<Option<thread::JoinHandle<()>>>,
     /// Set by connect(), cleared by disconnect().
     pub(crate) account_id: Mutex<Option<String>>,
@@ -98,7 +98,7 @@ impl EClient {
             wrapper,
             shared: Mutex::new(None),
             control_tx: Mutex::new(None),
-            next_order_id: AtomicU64::new(0),
+            next_order_id: AtomicI64::new(0),
             _thread: Mutex::new(None),
             account_id: Mutex::new(None),
             connected: AtomicBool::new(false),
@@ -174,7 +174,7 @@ impl EClient {
         let start_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() * 1000;
+            .as_secs() as i64 * 1000;
 
         let handle = thread::Builder::new()
             .name("ib-engine-hotloop".into())
@@ -203,7 +203,7 @@ impl EClient {
         // where connect_ack signals "socket ready" before run() is called.
         self.wrapper.call_method0(py, "connect_ack")?;
         self.wrapper.call_method1(py, "managed_accounts", (self.account().as_str(),))?;
-        self.wrapper.call_method1(py, "next_valid_id", (start_id as i64,))?;
+        self.wrapper.call_method1(py, "next_valid_id", (start_id,))?;
 
         Ok(())
     }

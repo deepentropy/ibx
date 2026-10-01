@@ -110,7 +110,7 @@ pub(super) fn connect_paper(
 /// order cache is filled from execution reports, so after a replace
 /// confirmation it holds the new values. A replace that keeps the order's
 /// status emits no status update, so this is how a phase sees it land.
-pub(super) fn confirmed_price_qty(shared: &SharedState, order_id: u64) -> Option<(f64, f64)> {
+pub(super) fn confirmed_price_qty(shared: &SharedState, order_id: OrderId) -> Option<(f64, f64)> {
     shared.orders.get_order_info(order_id).map(|i| (i.order.lmt_price, i.order.total_quantity))
 }
 
@@ -237,8 +237,8 @@ pub(super) fn next_order_id() -> OrderId {
     let base = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as u64 * 1000;
-    base + (SEQ.fetch_add(1, Ordering::Relaxed) % 1000)
+        .as_millis() as OrderId * 1000;
+    base + (SEQ.fetch_add(1, Ordering::Relaxed) % 1000) as OrderId
 }
 
 /// Check if CCP connection is alive and reconnect the full gateway if not.

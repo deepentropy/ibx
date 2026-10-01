@@ -1042,7 +1042,7 @@ impl FarmState {
         } else {
             (354, "Requested market data is not subscribed.")
         };
-        shared.orders.push_order_error(req.req_id as u64, code, text.to_string());
+        shared.orders.push_order_error(i64::from(req.req_id), code, text.to_string());
         true
     }
 

@@ -46,7 +46,7 @@ fn main() {
     let instrument = warmup(&session.event_rx, warmup_ticks, start);
 
     // Submit initial order at $1.00
-    let base_order_id = 1u64;
+    let base_order_id = 1i64;
     let mut current_order_id = base_order_id;
 
     println!(

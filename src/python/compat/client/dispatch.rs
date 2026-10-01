@@ -113,7 +113,7 @@ impl EClient {
     }
 
     /// open_order for an order after a server report (ibx#473).
-    fn send_open_order(&self, py: Python<'_>, order_id: u64, view: &crate::client_core::OrderView) -> PyResult<()> {
+    fn send_open_order(&self, py: Python<'_>, order_id: OrderId, view: &crate::client_core::OrderView) -> PyResult<()> {
         let c = Contract {
             con_id: view.contract.con_id,
             symbol: view.contract.symbol.clone(),
@@ -127,7 +127,7 @@ impl EClient {
         };
         let src = &view.order;
         let mut o = Order::default();
-        o.order_id = order_id as i64;
+        o.order_id = order_id;
         o.action = src.action.clone();
         o.total_quantity = src.total_quantity;
         o.order_type = src.order_type.clone();
@@ -152,7 +152,7 @@ impl EClient {
         let c_py = Py::new(py, c)?.into_any();
         let o_py = Py::new(py, o)?.into_any();
         let state_py = Py::new(py, state)?.into_any();
-        call_wrapper!(self.wrapper, py, "open_order", (order_id as i64, &c_py, &o_py, &state_py));
+        call_wrapper!(self.wrapper, py, "open_order", (order_id, &c_py, &o_py, &state_py));
         Ok(())
     }
 
@@ -224,7 +224,7 @@ impl EClient {
                 }
                 None => 0,
             };
-            call_wrapper!(self.wrapper, py, "order_status", (fill.order_id as i64, status, cum_qty, remaining,
+            call_wrapper!(self.wrapper, py, "order_status", (fill.order_id, status, cum_qty, remaining,
                  avg_price, perm_id, parent_id, price, client_id, "", 0.0f64));
             self.core.record_last_fill_price(fill.order_id, price);
 
@@ -247,7 +247,7 @@ impl EClient {
                 shares,
                 price,
                 perm_id,
-                order_id: fill.order_id as i64,
+                order_id: fill.order_id,
                 cum_qty,
                 avg_price,
                 ..Default::default()
@@ -275,7 +275,7 @@ impl EClient {
                 price,
                 perm_id,
                 client_id: api_exec.client_id,
-                order_id: fill.order_id as i64,
+                order_id: fill.order_id,
                 liquidation: 0,
                 cum_qty,
                 avg_price,
@@ -305,7 +305,7 @@ impl EClient {
         // Executions of orders this session does not track: stored for
         // req_executions, with no live callback (ibx#314).
         for (contract, mut exec, fill_exec) in shared.orders.drain_untracked_executions() {
-            let order_id = exec.order_id as u64;
+            let order_id = exec.order_id;
             self.core.apply_fill_exec(&mut exec, &fill_exec, order_id);
             if let Some(cr) = self.core.push_execution(-1, contract, exec, fill_exec.time_secs) {
                 self.send_commission_report(py, &cr)?;
@@ -323,7 +323,7 @@ impl EClient {
         // -> error, ahead of the status: the reference reports a server
         // reject as error 201 before the Inactive status (ibx#250).
         for (order_id, code, msg) in shared.orders.drain_order_errors() {
-            call_wrapper!(self.wrapper, py, "error", (order_id as i64, code, msg.as_str(), ""));
+            call_wrapper!(self.wrapper, py, "error", (order_id, code, msg.as_str(), ""));
         }
 
         // Drain order updates -> orderStatus
@@ -339,7 +339,7 @@ impl EClient {
                 self.send_open_order(py, update.order_id, v)?;
             }
             let (last_fill_price, client_id) = view.map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
-            call_wrapper!(self.wrapper, py, "order_status", (update.order_id as i64, status, filled,
+            call_wrapper!(self.wrapper, py, "order_status", (update.order_id, status, filled,
                  remaining, update.avg_fill_price as f64 / PRICE_SCALE_F,
                  update.perm_id, update.parent_id, last_fill_price, client_id, "", 0.0f64));
 
@@ -354,7 +354,7 @@ impl EClient {
             // cancel or modify is 10147.
             let code = 10147i64;
             let msg = format!("Order {} cancel/modify rejected (reason: {})", reject.order_id, reject.reason_code);
-            call_wrapper!(self.wrapper, py, "error", (reject.order_id as i64, code, msg.as_str(), ""));
+            call_wrapper!(self.wrapper, py, "error", (reject.order_id, code, msg.as_str(), ""));
         }
 
         // Subscriptions the server rejected (ibx#444, ibx#447).
@@ -528,7 +528,7 @@ impl EClient {
             };
             let state_py = Py::new(py, state)?.into_any();
             call_wrapper!(self.wrapper, py, "open_order",
-                (wi.order_id as i64, &contract_py, &order_py, &state_py));
+                (wi.order_id, &contract_py, &order_py, &state_py));
         }
 
         // Drain HMDS query errors -> error (ibx#186). Surface gateway-side validation

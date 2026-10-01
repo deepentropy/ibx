@@ -1327,9 +1327,9 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut tick_count = 0u32;
-    let mut parent_id: Option<u64> = None;
-    let mut tp_id: Option<u64> = None;
-    let mut sl_id: Option<u64> = None;
+    let mut parent_id: Option<OrderId> = None;
+    let mut tp_id: Option<OrderId> = None;
+    let mut sl_id: Option<OrderId> = None;
     let mut entry_filled = false;
     let mut tp_active = false;
     let mut sl_active = false;
@@ -1588,7 +1588,7 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
 
     // Submit 5 limit orders rapidly at different prices
     let base_oid = next_order_id();
-    let order_ids: Vec<u64> = (0..5).map(|i| base_oid + i * 1000).collect();
+    let order_ids: Vec<OrderId> = (0..5).map(|i| base_oid + i * 1000).collect();
     for (i, &oid) in order_ids.iter().enumerate() {
         let price = (1 + i as i64) * 1_00_000_000; // $1, $2, $3, $4, $5
         control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimit {
@@ -1599,12 +1599,12 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
     let join = run_hot_loop(hot_loop);
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    let mut acked: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    let mut cancelled: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    let mut rejected: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut acked: std::collections::HashSet<OrderId> = std::collections::HashSet::new();
+    let mut cancelled: std::collections::HashSet<OrderId> = std::collections::HashSet::new();
+    let mut rejected: std::collections::HashSet<OrderId> = std::collections::HashSet::new();
     let mut cancel_batch_sent = false;
     let mut duplicate_acks = 0u32;
-    let mut seen_status: std::collections::HashSet<(u64, u8)> = std::collections::HashSet::new();
+    let mut seen_status: std::collections::HashSet<(OrderId, u8)> = std::collections::HashSet::new();
 
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
@@ -1969,7 +1969,7 @@ pub(super) fn phase_cancel_filled_order(conns: Conns) -> Conns {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut tick_count = 0u32;
     let mut phase = 0u8; // 0=wait ticks, 1=buy sent, 2=filled→cancel sent, 3=sell sent
-    let mut buy_order_id = 0u64;
+    let mut buy_order_id = 0 as OrderId;
     let mut got_cancel_reject = false;
     let mut got_order_reject = false;
     let mut instrument_id = 0u32;
