@@ -611,6 +611,25 @@ fn account_pnl_phase_live() {
     assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
 }
 
+/// Focused live entry for the rapid order submission phase (ibx#493). Run:
+///   cargo test --test ib_paper_compat rapid_order_dedup_phase_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn rapid_order_dedup_phase_live() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let (gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
+        .expect("Gateway::connect() failed");
+    let conns = Conns { farm: farm_conn, ccp: ccp_conn, hmds: hmds_conn, account_id: gw.account_id.clone() };
+    let conns = orders::phase_rapid_order_dedup(conns);
+    let _ = connection::phase_graceful_shutdown(conns);
+    let rejected = take_rejections();
+    assert!(rejected.is_empty(), "{} failure(s): {:?}", rejected.len(), rejected);
+}
+
 /// Focused live entry for the tick-by-tick unsubscribe phase (ibx#404). Needs a
 /// live market for ticks. Run:
 ///   cargo test --test ib_paper_compat tbt_unsubscribe_phase_live -- --ignored --nocapture

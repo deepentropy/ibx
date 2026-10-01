@@ -1643,19 +1643,33 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
     let mut cancelled: std::collections::HashSet<OrderId> = std::collections::HashSet::new();
     let mut rejected: std::collections::HashSet<OrderId> = std::collections::HashSet::new();
     let mut cancel_batch_sent = false;
-    let mut duplicate_acks = 0u32;
-    let mut seen_status: std::collections::HashSet<(OrderId, u8)> = std::collections::HashSet::new();
+    // Every status update of each order, in order. The reference sends an
+    // order status for every server report of a known order, with no
+    // de-duplication (ib-agent ORDER-STATUS.md section 1 "API push" and
+    // section 7, `jclient.dS.a(dk, fq)@677`), so the same status can come
+    // twice (ibx#473). What must not happen: an update for an order this
+    // phase did not submit, or a status going back (a working status after
+    // a later one, or after the order ended).
+    let mut sequences: std::collections::HashMap<OrderId, Vec<OrderStatus>> = std::collections::HashMap::new();
+    let mut foreign_updates = 0u32;
+    let mut backward: Vec<(OrderId, OrderStatus, OrderStatus)> = Vec::new();
 
     while Instant::now() < deadline {
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Event::OrderUpdate(update)) => {
+                if !order_ids.contains(&update.order_id) {
+                    foreign_updates += 1;
+                    continue;
+                }
+                let seq = sequences.entry(update.order_id).or_default();
+                if let Some(&last) = seq.last() {
+                    if update.status.rank() < last.rank() || (last.is_terminal() && update.status != last) {
+                        backward.push((update.order_id, last, update.status));
+                    }
+                }
+                seq.push(update.status);
                 match update.status {
                     OrderStatus::PreSubmitted | OrderStatus::Submitted => {
-                        // PreSubmitted then Submitted is one order being routed;
-                        // only the same status twice is a duplicate.
-                        if !seen_status.insert((update.order_id, update.status as u8)) {
-                            duplicate_acks += 1;
-                        }
                         acked.insert(update.order_id);
                         // Once all 5 are acked, cancel them all
                         if acked.len() == 5 && !cancel_batch_sent {
@@ -1682,15 +1696,21 @@ pub(super) fn phase_rapid_order_dedup(conns: Conns) -> Conns {
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
-    println!("  Acked: {} Cancelled: {} Rejected: {} Duplicate acks: {}",
-        acked.len(), cancelled.len(), rejected.len(), duplicate_acks);
+    let repeats: usize = sequences.values()
+        .map(|seq| seq.windows(2).filter(|w| w[0] == w[1]).count()).sum();
+    println!("  Acked: {} Cancelled: {} Rejected: {} Repeated statuses: {}",
+        acked.len(), cancelled.len(), rejected.len(), repeats);
+    for oid in &order_ids {
+        println!("  order {}: {:?}", oid, sequences.get(oid).map(Vec::as_slice).unwrap_or(&[]));
+    }
 
     if rejected.len() == order_ids.len() {
         record_rejection("All orders rejected", &shared);
         return conns;
     }
 
-    check_eq!(duplicate_acks, 0, "No duplicate OrderUpdate(Submitted) for same order_id");
+    check_eq!(foreign_updates, 0, "No OrderUpdate for an order id this phase did not submit");
+    check!(backward.is_empty(), "No order status went back (order, from, to): {:?}", backward);
     if skip_unacked_if_closed(acked.len() >= 3) { return conns; }
     check!(acked.len() >= 3, "At least 3 of 5 orders should be acknowledged, got {}", acked.len());
     pass!("  PASS\n");
