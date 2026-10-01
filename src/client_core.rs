@@ -2557,6 +2557,12 @@ impl ClientCore {
         self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.order_type.clone())
     }
 
+    /// A tracked order as the caller placed it (the order a modify is
+    /// checked against).
+    pub fn tracked_order(&self, order_id: u64) -> Option<ApiOrder> {
+        self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.clone())
+    }
+
     /// The order kind with its prices, as the extended submit path builds it
     /// from the same `Order` fields. Used for a replace, which restates the
     /// order type and its prices (ibx#247).
@@ -2653,17 +2659,41 @@ impl ClientCore {
         }
     }
 
+    /// The reference's refusals of a modify that changes what an order
+    /// cannot change (ibx#463), in the order it checks them: the side
+    /// (105), the OCA group when both are set (10326), the OCA type when
+    /// both are set (10327). `working` is the order as it was placed.
+    pub fn modify_change_refusal(order: &ApiOrder, working: &ApiOrder) -> Option<(i64, String)> {
+        if order.side().ok() != working.side().ok() {
+            return Some((105, "Order being modified does not match original order".into()));
+        }
+        if !order.oca_group.is_empty() && !working.oca_group.is_empty() && order.oca_group != working.oca_group {
+            return Some((10326, "OCA group revision is not allowed".into()));
+        }
+        let oca_type = |o: &ApiOrder| (1..=4).contains(&o.oca_type).then_some(o.oca_type);
+        if let (Some(new), Some(old)) = (oca_type(order), oca_type(working)) {
+            if new != old {
+                return Some((10327, "OCA group type revision is not allowed".into()));
+            }
+        }
+        None
+    }
+
     /// Build the replace for an order that is already working, from the full
     /// `Order` the caller passed (ibx#247 ibx#324 ibx#334 ibx#349).
     ///
-    /// The reference refuses a change of order type before sending anything
-    /// (error 329, ib-agent#192 A4b); so does this.
+    /// The reference refuses a change of side or OCA group (ibx#463) and a
+    /// change of order type (error 329, ib-agent#192 A4b) before sending
+    /// anything; so does this. `working` is the order as it was placed.
     pub fn build_modify_request(
         order: &ApiOrder,
         order_id: u64,
-        working_order_type: &str,
+        working: &ApiOrder,
     ) -> Result<ModifyPlan, String> {
-        if !working_order_type.eq_ignore_ascii_case(&order.order_type) {
+        if let Some((code, message)) = Self::modify_change_refusal(order, working) {
+            return Ok(ModifyPlan::Refused { code, message });
+        }
+        if !working.order_type.eq_ignore_ascii_case(&order.order_type) {
             return Ok(ModifyPlan::Refused {
                 code: 329,
                 message: format!(

@@ -47,8 +47,8 @@ impl EClient {
 
         // If orderId is already tracked, this is a modification: replace it
         // with the full wanted state (ibx#247).
-        let cmd = if let Some(working_type) = self.core.tracked_order_type(oid) {
-            match ClientCore::build_modify_request(order, oid, &working_type)? {
+        let cmd = if let Some(working) = self.core.tracked_order(oid) {
+            match ClientCore::build_modify_request(order, oid, &working)? {
                 ModifyPlan::Send(cmd) => cmd,
                 ModifyPlan::Refused { code, message } => {
                     // Refused before sending, like the reference: the caller

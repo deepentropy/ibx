@@ -3106,6 +3106,48 @@ fn modify_price_and_qty_simultaneously() {
     assert!(found, "Resubmit with same orderId should emit Modify with new price and qty");
 }
 
+// ibx#463: the reference refuses a modify that changes the side (105),
+// the OCA group (10326) or the OCA type (10327) before sending anything
+// (jextend.bH.d(pe)@165, @836, @905). The order stays as placed.
+#[test]
+fn modify_of_side_or_oca_is_refused_before_sending() {
+    let placed = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(), lmt_price: 150.0,
+        oca_group: "G1".into(), oca_type: 2, ..Default::default()
+    };
+    let cases = [
+        (Order { action: "SELL".into(), ..placed.clone() }, 105, "Order being modified does not match original order"),
+        (Order { oca_group: "G2".into(), ..placed.clone() }, 10326, "OCA group revision is not allowed"),
+        (Order { oca_type: 1, ..placed.clone() }, 10327, "OCA group type revision is not allowed"),
+    ];
+    for (modified, code, text) in cases {
+        let (client, rx, shared) = test_client();
+        shared.market.set_instrument_count(1);
+        client.place_order(70, &spy(), &placed).unwrap();
+        while rx.try_recv().is_ok() {}
+        client.place_order(70, &spy(), &modified).unwrap();
+        assert!(rx.try_recv().is_err(), "{code}: no replace is sent");
+        assert_eq!(shared.orders.drain_order_errors(), [(70, code, text.to_string())]);
+        assert_eq!(client.core.tracked_order(70).map(|o| (o.action, o.oca_group, o.oca_type)),
+            Some(("BUY".to_string(), "G1".to_string(), 2)), "{code}: the order stays as placed");
+    }
+
+    // A group or type given on one side only is not a change; the same
+    // values are a plain modify.
+    for modified in [
+        Order { oca_group: String::new(), oca_type: 0, lmt_price: 149.0, ..placed.clone() },
+        Order { lmt_price: 149.0, ..placed.clone() },
+    ] {
+        let (client, rx, shared) = test_client();
+        shared.market.set_instrument_count(1);
+        client.place_order(71, &spy(), &placed).unwrap();
+        while rx.try_recv().is_ok() {}
+        client.place_order(71, &spy(), &modified).unwrap();
+        assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::Modify { order_id: 71, .. }))));
+        assert!(shared.orders.drain_order_errors().is_empty());
+    }
+}
+
 #[test]
 fn modify_order_type_lmt_to_stp() {
     let (client, rx, shared) = test_client();

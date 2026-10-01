@@ -67,8 +67,8 @@ impl EClient {
 
         // If orderId is already tracked, this is a modification: replace it
         // with the full wanted state (ibx#247).
-        let cmd = if let Some(working_type) = self.core.tracked_order_type(oid) {
-            match ClientCore::build_modify_request(&api_order, oid, &working_type)
+        let cmd = if let Some(working) = self.core.tracked_order(oid) {
+            match ClientCore::build_modify_request(&api_order, oid, &working)
                 .map_err(|e| PyRuntimeError::new_err(e))?
             {
                 ModifyPlan::Send(cmd) => cmd,
