@@ -1752,82 +1752,139 @@ fn oca_type_str(oca_type: u8) -> &'static str {
     }
 }
 
-/// Send a new order with the contract id right after the secondary routing
-/// field, where the reference puts it on every new order (ib-agent#192 B4,
-/// ibx#328). An instrument registered without a contract id keeps the
-/// symbol-only form.
+/// Send a new order as the reference writes it: every field in the place
+/// its single new-order writer gives it (ibx#375), whatever encoder built
+/// the list. The contract id goes with the routing fields on every new
+/// order (ib-agent#192 B4, ibx#328); an instrument registered without one
+/// keeps the symbol-only form. A short-side order adds its short-sale
+/// fields (ibx#417); a what-if goes out under its own order id with the
+/// preview flag and without the OCA fields (ibx#462).
 fn send_new_order(
     conn: &mut Connection,
     context: &Context,
     instrument: crate::types::InstrumentId,
     fields: &[(u32, &str)],
 ) -> std::io::Result<()> {
-    // The short-sale fields of a short-side order follow the account and
-    // its expiry fields, as the reference writes them (ibx#417).
     let short_sale: Fields = match &context.short_sale_send {
         Some(s) if fields.iter().any(|&(t, v)| t == 54 && v == "5") => short_sale_fields(s),
         _ => Vec::new(),
     };
-    let with_short;
-    let fields = if short_sale.is_empty() {
-        fields
-    } else {
-        let at = fields.iter().rposition(|&(t, _)| matches!(t, 1 | 126 | 432)).map_or(fields.len(), |i| i + 1);
-        let mut out: Vec<(u32, &str)> = fields[..at].to_vec();
-        out.extend(short_sale.iter().map(|(t, v)| (*t, v.as_str())));
-        out.extend_from_slice(&fields[at..]);
-        with_short = out;
-        &with_short[..]
-    };
     let con_id = context.market.con_id(instrument).unwrap_or(0);
-    if let Some(clord) = context.what_if_send.as_deref() {
-        let preview = what_if_fields(fields, clord, con_id);
-        let refs: Vec<(u32, &str)> = preview.iter().map(|(t, v)| (*t, v.as_str())).collect();
-        return conn.send_fix(&refs);
-    }
-    if con_id <= 0 {
-        return conn.send_fix(fields);
-    }
-    let con_id_str = con_id.to_string();
-    let mut out: Vec<(u32, &str)> = Vec::with_capacity(fields.len() + 1);
+    let con_id_str = if con_id > 0 { con_id.to_string() } else { String::new() };
+    let what_if = context.what_if_send.as_deref();
+    let mut out: Vec<(u32, &str)> = Vec::with_capacity(fields.len() + short_sale.len() + 2);
     for &(tag, value) in fields {
-        out.push((tag, value));
-        if tag == 6210 {
-            out.push((6008, &con_id_str));
+        match (tag, what_if) {
+            (11, Some(clord)) => out.push((11, clord)),
+            (583 | 6209, Some(_)) => {}
+            _ => out.push((tag, value)),
         }
     }
+    out.extend(short_sale.iter().map(|(t, v)| (*t, v.as_str())));
+    if con_id > 0 { out.push((6008, &con_id_str)); }
+    if what_if.is_some() { out.push((6091, "1")); }
+    in_reference_order(&mut out);
     conn.send_fix(&out)
+}
+
+/// Put new-order fields in the order of the reference's new-order writer
+/// (ibx#375; the writer read from the code, its order checked against the
+/// captured frames of ib-agent#192 B8 and B9). The sort is stable: the
+/// pairs of a repeating group (algo parameters, conditions) share one
+/// place and keep their order. The order attributes are written by the
+/// reference in no fixed order; they get one fixed place each here, as
+/// seen in captured frames where it could be.
+fn in_reference_order(fields: &mut [(u32, &str)]) {
+    fields.sort_by_key(|&(tag, _)| reference_rank(tag));
+}
+
+/// The place of a field in the reference's new-order writer (ibx#375).
+fn reference_rank(tag: u32) -> u16 {
+    match tag {
+        fix::TAG_MSG_TYPE => 0,
+        fix::TAG_SENDING_TIME => 1,
+        11 => 10,
+        44 => 20,
+        99 => 21,
+        1 => 30,
+        126 | 432 => 32,
+        // Short-sale fields.
+        114 => 40,
+        5700 => 41,
+        6086 => 42,
+        1688 => 43,
+        // Adjustable stop.
+        6257 => 50,
+        6261 => 51,
+        6258 => 52,
+        6259 => 53,
+        6262 => 54,
+        6260 => 55,
+        6117 => 60,
+        // Order attributes.
+        583 => 70,
+        6010 => 71,
+        6122 => 72,
+        6433 => 73,
+        6115 => 74,
+        6370 => 75,
+        6268 => 76,
+        6269 => 77,
+        111 => 78,
+        110 => 79,
+        6135 => 80,
+        8534 => 81,
+        6207 => 82,
+        6636 => 83,
+        168 => 84,
+        9813 => 85,
+        6102 => 86,
+        5920 => 87,
+        6941 => 88,
+        6938 => 89,
+        6939 => 90,
+        6580 => 91,
+        6942 => 92,
+        // Algo: its strategy fields, then the parameter group.
+        849 => 100,
+        847 => 101,
+        5957 | 5958 | 5960 => 102,
+        6121 => 110,
+        6119 => 111,
+        21 => 119,
+        38 => 120,
+        40 => 121,
+        211 => 122,
+        18 => 123,
+        55 => 124,
+        167 => 125,
+        231 => 126,
+        54 => 127,
+        59 => 128,
+        6436 => 129,
+        60 => 130,
+        100 => 131,
+        6210 => 132,
+        6008 => 133,
+        6209 => 134,
+        6088 => 135,
+        6091 => 136,
+        6107 => 137,
+        6128 => 138,
+        6151 => 139,
+        // The condition group.
+        6136 | 6222 | 6137 | 6126 | 6123 | 6124 | 6127 | 6125 | 6223 | 6245 | 6263 | 6246 | 6947 => 140,
+        15 => 150,
+        204 => 151,
+        6211 => 152,
+        6238 => 153,
+        _ => u16::MAX,
+    }
 }
 
 /// Version part of the what-if ClOrdIDs, far above any replace count, so
 /// a preview never takes an id an order of the same number uses (ibx#462).
 const WHAT_IF_CLORD_BASE: u32 = 1_000_000;
-
-/// A new order's fields as its what-if preview, as the reference writes
-/// it (ibx#462): the preview's own ClOrdID, the preview flag before the
-/// currency, the contract id after the routing, and no OCA group or type
-/// (the reference drops both from a preview).
-fn what_if_fields(fields: &[(u32, &str)], clord: &str, con_id: i64) -> Fields {
-    let mut out: Fields = Vec::with_capacity(fields.len() + 2);
-    let mut flagged = false;
-    for &(tag, value) in fields {
-        match tag {
-            11 => out.push((11, clord.to_string())),
-            583 | 6209 => {}
-            15 if !flagged => {
-                out.push((6091, "1".to_string()));
-                flagged = true;
-                out.push((15, value.to_string()));
-            }
-            _ => out.push((tag, value.to_string())),
-        }
-        if tag == 6210 && con_id > 0 {
-            out.push((6008, con_id.to_string()));
-        }
-    }
-    if !flagged { out.push((6091, "1".to_string())); }
-    out
-}
 
 /// The adjustable-stop tags (ib-agent#49), shared by the plain and extended
 /// paths so both emit the same values in the same order.
@@ -2981,8 +3038,9 @@ mod tests {
 
     const P: i64 = crate::types::PRICE_SCALE;
 
-    // The plain adjustable stop must keep its captured shape after the tags
-    // moved into a shared helper (ibx#240 refactor).
+    // The plain adjustable stop keeps its values (ibx#240); its fields are
+    // where the reference's writer puts them, right after the account,
+    // the trailing unit with the order attributes (ibx#375).
     #[test]
     fn plain_adjustable_stop_keeps_its_captured_shape() {
         let tags = wire_tags(OrderRequest::SubmitAdjustableStop {
@@ -2992,9 +3050,10 @@ mod tests {
             adjusted_stop_price: 10 * P, adjusted_stop_limit_price: 0,
             adjusted_trailing_amount: P / 2, adjustable_trailing_unit: 0,
         });
-        let tail: Vec<u32> = tags[pos(&tags, 204) + 1..].iter().map(|(t, _)| *t)
-            .filter(|t| *t != 10).collect(); // drop the checksum
-        assert_eq!(tail, vec![6257, 6261, 6258, 6259, 6260, 6269]);
+        let at = pos(&tags, 1) + 1;
+        let block: Vec<u32> = tags[at..at + 5].iter().map(|(t, _)| *t).collect();
+        assert_eq!(block, vec![6257, 6261, 6258, 6259, 6260]);
+        assert!(pos(&tags, 6269) > pos(&tags, 6260) && pos(&tags, 6269) < pos(&tags, 38));
         assert_eq!(tag(&tags, 59), Some("0"));
         assert_eq!(tag(&tags, 6261), Some("T"));
         assert_eq!(tag(&tags, 6260), Some("0.5"));
@@ -3029,8 +3088,9 @@ mod tests {
         assert_eq!(tag(&tags, 6261), Some("3"));
         assert_eq!(tag(&tags, 6258), Some("12"));
         assert_eq!(tag(&tags, 6259), Some("10"));
-        // Same placement as the plain path: right after 204, before the attrs.
-        assert_eq!(pos(&tags, 6257), pos(&tags, 204) + 1);
+        // Same placement as the plain path: right after the account,
+        // before the attributes (ibx#375).
+        assert_eq!(pos(&tags, 6257), pos(&tags, 1) + 1);
         assert!(pos(&tags, 6259) < pos(&tags, 583));
         assert!(tag(&tags, 6260).is_none(), "trail tags only for a trail conversion");
     }
@@ -4315,5 +4375,137 @@ mod tests {
             OrderRequest::SubmitMarket { order_id: 9, instrument: 0, side: Side::ShortSell, qty: 1 });
         assert!(errors.is_empty());
         assert_eq!((tag(&frames[0], 54), tag(&frames[0], 114), tag(&frames[0], 6086)), (Some("5"), Some("N"), Some("0")));
+    }
+
+    /// A new order's fields without the session fields (framing, sequence,
+    /// times, checksum).
+    fn order_body(tags: Vec<(u32, String)>) -> Vec<(u32, String)> {
+        tags.into_iter().filter(|(t, _)| !matches!(t, 8 | 9 | 34 | 52 | 60 | 10)).collect()
+    }
+
+    // ibx#375: every order type goes out field for field the same through
+    // its own request and through the extended one, in the order of the
+    // reference's single new-order writer.
+    #[test]
+    fn both_encoders_write_one_order_like_the_reference() {
+        use crate::types::{AdjustedOrderType, OrderKind as K};
+        let (id, side, qty) = (40, Side::Sell, 3);
+        let cases: Vec<(OrderRequest, K, u8, crate::types::OrderAttrs)> = vec![
+            (OrderRequest::SubmitLimit { order_id: id, instrument: 0, side, qty, price: 100 * P }, K::Limit { price: 100 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitMarket { order_id: id, instrument: 0, side, qty }, K::Market, b'0', Default::default()),
+            (OrderRequest::SubmitStop { order_id: id, instrument: 0, side, qty, stop_price: 90 * P }, K::Stop { stop_price: 90 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitStopLimit { order_id: id, instrument: 0, side, qty, price: 89 * P, stop_price: 90 * P },
+                K::StopLimit { price: 89 * P, stop_price: 90 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitLimitGtc { order_id: id, instrument: 0, side, qty, price: 100 * P, outside_rth: true },
+                K::Limit { price: 100 * P }, b'1', crate::types::OrderAttrs { outside_rth: true, ..Default::default() }),
+            (OrderRequest::SubmitStopGtc { order_id: id, instrument: 0, side, qty, stop_price: 90 * P, outside_rth: false },
+                K::Stop { stop_price: 90 * P }, b'1', Default::default()),
+            (OrderRequest::SubmitStopLimitGtc { order_id: id, instrument: 0, side, qty, price: 89 * P, stop_price: 90 * P, outside_rth: true },
+                K::StopLimit { price: 89 * P, stop_price: 90 * P }, b'1', crate::types::OrderAttrs { outside_rth: true, ..Default::default() }),
+            (OrderRequest::SubmitLimitIoc { order_id: id, instrument: 0, side, qty, price: 100 * P }, K::Limit { price: 100 * P }, b'3', Default::default()),
+            (OrderRequest::SubmitLimitFok { order_id: id, instrument: 0, side, qty, price: 100 * P }, K::Limit { price: 100 * P }, b'4', Default::default()),
+            (OrderRequest::SubmitLimitOpg { order_id: id, instrument: 0, side, qty, price: 100 * P }, K::Limit { price: 100 * P }, b'2', Default::default()),
+            (OrderRequest::SubmitLimitAuc { order_id: id, instrument: 0, side, qty, price: 100 * P }, K::Limit { price: 100 * P }, b'8', Default::default()),
+            (OrderRequest::SubmitMtlAuc { order_id: id, instrument: 0, side, qty }, K::Mtl, b'8', Default::default()),
+            (OrderRequest::SubmitTrailingStop { order_id: id, instrument: 0, side, qty, trail_amt: P / 2, trail_stop_price: 90 * P },
+                K::TrailingStop { trail_amt: P / 2, trail_stop_price: 90 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitTrailingStopLimit { order_id: id, instrument: 0, side, qty, lmt_offset: P / 10, lmt_price: None, trail_amt: P / 2, trail_stop_price: 90 * P },
+                K::TrailingStopLimit { lmt_offset: P / 10, lmt_price: None, trail_amt: P / 2, trail_stop_price: 90 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitTrailingStopPct { order_id: id, instrument: 0, side, qty, trail_pct: 150, trail_stop_price: 90 * P },
+                K::TrailPct { trail_pct: 150, trail_stop_price: 90 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitMoc { order_id: id, instrument: 0, side, qty }, K::Moc, b'0', Default::default()),
+            (OrderRequest::SubmitLoc { order_id: id, instrument: 0, side, qty, price: 100 * P }, K::Loc { price: 100 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitMit { order_id: id, instrument: 0, side, qty, stop_price: 90 * P }, K::Mit { stop_price: 90 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitLit { order_id: id, instrument: 0, side, qty, price: 89 * P, stop_price: 90 * P },
+                K::Lit { price: 89 * P, stop_price: 90 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitRel { order_id: id, instrument: 0, side, qty, offset: P / 10 }, K::Rel { offset: P / 10 }, b'0', Default::default()),
+            (OrderRequest::SubmitMtl { order_id: id, instrument: 0, side, qty }, K::Mtl, b'0', Default::default()),
+            (OrderRequest::SubmitMktPrt { order_id: id, instrument: 0, side, qty }, K::MktPrt, b'0', Default::default()),
+            (OrderRequest::SubmitStpPrt { order_id: id, instrument: 0, side, qty, stop_price: 90 * P }, K::StpPrt { stop_price: 90 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitMidPrice { order_id: id, instrument: 0, side, qty, price_cap: 100 * P }, K::MidPrice { price_cap: 100 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitSnapMkt { order_id: id, instrument: 0, side, qty, offset: P / 20 }, K::SnapMkt { offset: P / 20 }, b'0', Default::default()),
+            (OrderRequest::SubmitSnapMid { order_id: id, instrument: 0, side, qty, offset: P / 20 }, K::SnapMid { offset: P / 20 }, b'0', Default::default()),
+            (OrderRequest::SubmitSnapPri { order_id: id, instrument: 0, side, qty, offset: P / 20 }, K::SnapPri { offset: P / 20 }, b'0', Default::default()),
+            (OrderRequest::SubmitPegMkt { order_id: id, instrument: 0, side, qty, price: 100 * P, offset: P / 20 },
+                K::PegMkt { price: 100 * P, offset: P / 20 }, b'0', Default::default()),
+            (OrderRequest::SubmitPegMid { order_id: id, instrument: 0, side, qty, price: 100 * P, offset: 0 },
+                K::PegMid { price: 100 * P, offset: 0 }, b'0', Default::default()),
+            (OrderRequest::SubmitPegBench { order_id: id, instrument: 0, side, qty, price: 100 * P, ref_con_id: 7,
+                is_peg_decrease: true, pegged_change_amount: P / 10, ref_change_amount: P / 5, stock_ref_price: 99 * P, ref_exchange: "ARCA".into() },
+                K::PegBench { starting_price: 100 * P, stock_ref_price: 99 * P, ref_con_id: 7, is_peg_decrease: true,
+                    pegged_change_amount: P / 10, ref_change_amount: P / 5 }, b'0',
+                crate::types::OrderAttrs { reference_exchange: "ARCA".into(), ..Default::default() }),
+            (OrderRequest::SubmitAdjustableStop { order_id: id, instrument: 0, side, qty, stop_price: 90 * P, trigger_price: 95 * P,
+                adjusted_order_type: AdjustedOrderType::Trail, adjusted_stop_price: 91 * P, adjusted_stop_limit_price: 0,
+                adjusted_trailing_amount: P / 2, adjustable_trailing_unit: 0 },
+                K::AdjustableStop { stop_price: 90 * P, trigger_price: 95 * P, adjusted_order_type: AdjustedOrderType::Trail,
+                    adjusted_stop_price: 91 * P, adjusted_stop_limit_price: 0, adjusted_trailing_amount: P / 2, adjustable_trailing_unit: 0 },
+                b'0', Default::default()),
+        ];
+        for (plain, kind, tif, attrs) in cases {
+            let label = format!("{plain:?}");
+            let ours = order_body(wire_tags(plain));
+            let ex = order_body(wire_tags(OrderRequest::SubmitEx { order_id: id, instrument: 0, side, qty, kind, tif, attrs }));
+            assert_eq!(ours, ex, "{label}");
+            let ranks: Vec<u16> = ours.iter().map(|(t, _)| reference_rank(*t)).collect();
+            assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "{label}: {ours:?}");
+            assert!(ranks.iter().all(|r| *r != u16::MAX), "{label}: a field with no place: {ours:?}");
+        }
+    }
+
+    /// Fields the reference writes in no fixed order (its order
+    /// attributes).
+    fn is_attribute(tag: u32) -> bool {
+        (70..100).contains(&reference_rank(tag))
+    }
+
+    /// The fields of `ours` that `captured` also has, attributes left out,
+    /// in our order and in the captured order.
+    fn common_order(ours: &[(u32, String)], captured: &str) -> (Vec<u32>, Vec<u32>) {
+        let reference: Vec<u32> = parse_frame(captured).into_iter().map(|(t, _)| t)
+            .filter(|t| !is_attribute(*t)).collect();
+        let mine: Vec<u32> = ours.iter().map(|(t, _)| *t)
+            .filter(|t| !is_attribute(*t) && reference.contains(t)).collect();
+        let theirs: Vec<u32> = reference.into_iter().filter(|t| mine.contains(t)).collect();
+        (mine, theirs)
+    }
+
+    // ibx#375: the fields come in the order of the captured reference
+    // frames (ib-agent#192 B8, B9, B2, A5; the stop order of ibx#466).
+    #[test]
+    fn new_orders_follow_the_captured_field_order() {
+        use crate::types::OrderKind as K;
+        const MIDPX: &str = "35=D|11=1.0|44=237.82|1=DU1|6122=c|6121=74|6119=192|38=1|40=MIDPX|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const PEG_MID: &str = "35=D|11=1.0|44=237.82|1=DU1|6122=c|6121=76|6119=192|38=1|40=P|211=0.00|18=M|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const TRAIL: &str = "35=D|11=1.0|99=101.92|1=DU1|6115=0|6122=c|6268=0|6121=77|6119=192|38=1|40=P|211=101.92|18=a|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const TRAIL_LIMIT: &str = "35=D|11=1.0|99=101.92|1=DU1|6117=237.82|6115=0|6370=0.50|6122=c|6268=0|6121=78|6119=192|38=1|40=TSL|211=101.92|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const VWAP: &str = "35=D|11=1.0|44=237.82|1=DU1|6122=c|849=0.1|847=Vwap|5957=2|5958=noTakeLiq|5960=0|5958=allowPastEndTime|5960=1|6121=80|6119=192|38=1|40=2|18=e|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const CONDITION: &str = "35=D|11=1.0|44=237.82|1=DU1|6122=c|6121=55|6119=192|38=1|40=2|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|6128=0|6151=0|6136=1|6222=1|6137=n|6126=>=|6123=265598|6124=BEST|6127=0|6125=509.62|6223=|6245=|6263=|6246=|6947=|15=USD|6211=|6238=";
+        const CHILD: &str = "35=D|11=2.0|44=509.62|1=DU1|583=1|6122=c|6121=39|6119=192|38=200|40=2|55=AAPL|167=STK|231=1.00|54=2|59=1|100=BEST|6210=BEST|6008=265598|6209=CancelOnFillWBlock|6088=Socket|6107=1.0|15=USD|6211=|6238=";
+        const STP: &str = "35=D|11=1.0|99=235.14|1=DU1|6117=235.14|6010=x|6122=c|6115=0|6121=10|6119=250|38=1|40=3|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        let ex = |side: Side, kind: K, tif: u8, attrs: crate::types::OrderAttrs| OrderRequest::SubmitEx {
+            order_id: 1, instrument: 0, side, qty: 1, kind, tif, attrs };
+        let condition = crate::types::OrderAttrs {
+            conditions: vec![OrderCondition::Price { con_id: 265598, exchange: "SMART".into(), price: px(509.62), is_more: true, trigger_method: 0 }],
+            ..Default::default()
+        };
+        let cases: Vec<(&str, OrderRequest)> = vec![
+            (MIDPX, ex(Side::Buy, K::MidPrice { price_cap: px(237.82) }, b'0', Default::default())),
+            (PEG_MID, ex(Side::Buy, K::PegMid { price: px(237.82), offset: 0 }, b'0', Default::default())),
+            (TRAIL, ex(Side::Sell, K::TrailingStop { trail_amt: px(101.92), trail_stop_price: 0 }, b'0', Default::default())),
+            (TRAIL_LIMIT, ex(Side::Sell, K::TrailingStopLimit { lmt_offset: px(0.5), lmt_price: None, trail_amt: px(101.92), trail_stop_price: px(237.82) }, b'0', Default::default())),
+            (VWAP, OrderRequest::SubmitAlgo { order_id: 1, instrument: 0, side: Side::Buy, qty: 1, price: px(237.82),
+                algo: AlgoParams::Vwap { max_pct_vol: 0.1, no_take_liq: false, allow_past_end_time: true, start_time: String::new(), end_time: String::new() },
+                tif: b'0', attrs: Default::default() }),
+            (CONDITION, ex(Side::Buy, K::Limit { price: px(237.82) }, b'0', condition)),
+            (CHILD, ex(Side::Sell, K::Limit { price: px(509.62) }, b'1', crate::types::OrderAttrs { parent_id: 1, ..Default::default() })),
+            (STP, ex(Side::Sell, K::Stop { stop_price: px(235.14) }, b'0', crate::types::OrderAttrs { order_ref: "x".into(), ..Default::default() })),
+        ];
+        for (captured, req) in cases {
+            let ours = wire_tags(req);
+            let (mine, theirs) = common_order(&ours, captured);
+            assert!(mine.len() > 10, "{captured}");
+            assert_eq!(mine, theirs, "{captured}");
+        }
     }
 }
