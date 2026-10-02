@@ -25,6 +25,11 @@ use super::{HeartbeatState, emit, clone_for_event, parse_price_tag, parse_qty, d
 /// (ibx#369).
 pub(crate) const MATCHING_SYMBOLS_SEND_FAILED: &str =
     "Failed to request matching symbols:Error sending message to a CCP.";
+/// Head of the API error 10159 of a matching-symbols reply that carries an
+/// error text: the text follows (ibx#369).
+const MATCHING_SYMBOLS_FAILED: &str = "Failed to request matching symbols:";
+/// Pause after each matching-symbols send, as the reference (ibx#369).
+const MATCHING_SYMBOLS_SEND_GAP: std::time::Duration = std::time::Duration::from_millis(1000);
 
 const SECDEF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Error 200 text for a lookup that found no contract (ibx#400).
@@ -218,6 +223,19 @@ pub(crate) struct CcpState {
     pub(crate) pending_matching_symbols: Vec<(u32, ReqId)>,
     /// Next own request id of a matching-symbols request (ibx#369).
     pub(crate) next_matching_symbols_id: u32,
+    /// The matching-symbols request waiting to be sent: only the latest
+    /// one is kept, a replaced one gets no answer, as in the reference
+    /// (ibx#369).
+    pub(crate) matching_waiting: Option<(ReqId, String)>,
+    /// Send permits of the matching-symbols pacing (ibx#369): one request
+    /// in flight until its pending mark or its answer; the loss of the
+    /// auth link gives one back.
+    pub(crate) matching_permits: u32,
+    /// No matching-symbols request goes out before this time: 1 s after
+    /// each send (ibx#369).
+    pub(crate) matching_next_send: Option<Instant>,
+    /// Requests whose pending mark came (their permit was given back).
+    pub(crate) matching_acked: Vec<u32>,
     /// keepUpToDate historical queries routed through CCP: (query_id, req_id)
     pub(crate) pending_kut_historical: Vec<(String, ReqId)>,
     /// tickerId → req_id mapping for keepUpToDate 35=G bar updates
@@ -525,6 +543,10 @@ impl CcpState {
             market_rule_by_exchange: std::collections::HashMap::new(),
             pending_matching_symbols: Vec::new(),
             next_matching_symbols_id: 1,
+            matching_waiting: None,
+            matching_permits: 1,
+            matching_next_send: None,
+            matching_acked: Vec::new(),
             pending_kut_historical: Vec::new(),
             kut_ticker_map: std::collections::HashMap::new(),
             kut_min_tick: std::collections::HashMap::new(),
@@ -810,45 +832,7 @@ impl CcpState {
                                 self.optcalc.xml_reply(&id, &xml, ccp_conn, hb, shared);
                             }
                         }
-                        "186" => {
-                            if let Some(matches) = crate::control::contracts::parse_matching_symbols_response(msg) {
-                                // A 186 frame is the real answer only when it
-                                // carries the match-count tag 146 — present
-                                // even when the count is zero. Frames without
-                                // it are not-ready acks: popping on one would
-                                // deliver a bogus empty answer and orphan the
-                                // data frame that follows (observed live; the
-                                // same ack-then-data shape as the what-if
-                                // path). See ibx#228.
-                                if extract_tag_value(msg, b"146=").is_none() {
-                                    log::debug!("matching-symbols ack frame (no tag 146) — awaiting data frame");
-                                } else {
-                                // Match the reply to its request by the own
-                                // request id it echoes, never by position: an
-                                // unknown or missing id is dropped, as in the
-                                // reference (ibx#228, ibx#369).
-                                let echoed = extract_tag_value(msg, b"320=")
-                                    .and_then(|v| v.parse::<u32>().ok());
-                                let pos = echoed.and_then(|rid| {
-                                    self.pending_matching_symbols.iter().position(|p| p.0 == rid)
-                                });
-                                if let Some(pos) = pos {
-                                    let (_, req_id) = self.pending_matching_symbols.remove(pos);
-                                    // An empty result is a legitimate answer
-                                    // ("no such symbol") and MUST be delivered:
-                                    // dropping it left the caller waiting forever
-                                    // and the stale queue head misattributed
-                                    // every later reply (ibx#228).
-                                    shared.reference.push_matching_symbols(req_id, matches);
-                                } else {
-                                    log::warn!(
-                                        "matching-symbols reply dropped: Unknown request ID {:?} (pending {:?})",
-                                        echoed, self.pending_matching_symbols,
-                                    );
-                                }
-                                }
-                            }
-                        }
+                        "186" => self.handle_matching_symbols_reply(msg, &parsed, shared),
                         "60" => self.handle_commission_report(&parsed, shared),
                         // An algo definition answer (ibx#263).
                         "54" => if let Some(xml) = parsed.get(&6118) {
@@ -2550,9 +2534,9 @@ impl CcpState {
         }
     }
 
-    /// A matching-symbols request, as the reference sends it (ibx#369):
-    /// with an own request id; refused at once with 10159 when the auth
-    /// link is down or the send fails, and then not kept.
+    /// A matching-symbols request (ibx#369): it waits for the pacing of
+    /// the reference, which keeps only the latest waiting request (the one
+    /// it replaces gets nothing), then goes out with an own request id.
     pub(crate) fn send_matching_symbols_request(
         &mut self,
         req_id: ReqId,
@@ -2561,38 +2545,111 @@ impl CcpState {
         hb: &mut HeartbeatState,
         shared: &SharedState,
     ) {
-        let wire_id = self.next_matching_symbols_id;
-        self.next_matching_symbols_id = self.next_matching_symbols_id.wrapping_add(1).max(1);
-        let sent = match ccp_conn.as_mut().filter(|_| !self.disconnected) {
-            None => false,
-            Some(conn) => {
-                let wire_id_str = wire_id.to_string();
-                let ts = chrono_free_timestamp();
-                let result = conn.send_fix(&[
-                    (fix::TAG_MSG_TYPE, "U"),
-                    (fix::TAG_SENDING_TIME, &ts),
-                    (6040, "185"),
-                    (320, &wire_id_str),
-                    (58, pattern),
-                ]);
-                hb.last_ccp_sent = Instant::now();
-                result.is_ok()
+        if let Some((replaced, _)) = self.matching_waiting.replace((req_id, pattern.to_string())) {
+            log::info!("Matching symbols request {} replaced by {} before it was sent", replaced, req_id);
+        }
+        self.pump_matching_symbols(Instant::now(), ccp_conn, hb, shared);
+    }
+
+    /// Send the waiting matching-symbols request when the pacing allows it
+    /// (ibx#369): a send permit (one request in flight until its pending
+    /// mark or its answer) and 1 s after the last send. A request that
+    /// cannot be sent gets 10159 at once and is not kept; no pause follows.
+    pub(crate) fn pump_matching_symbols(
+        &mut self,
+        now: Instant,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+        shared: &SharedState,
+    ) {
+        while self.matching_waiting.is_some()
+            && self.matching_permits > 0
+            && self.matching_next_send.is_none_or(|at| now >= at)
+        {
+            let Some((req_id, pattern)) = self.matching_waiting.take() else { return };
+            let wire_id = self.next_matching_symbols_id;
+            self.next_matching_symbols_id = self.next_matching_symbols_id.wrapping_add(1).max(1);
+            let sent = match ccp_conn.as_mut().filter(|_| !self.disconnected) {
+                None => false,
+                Some(conn) => {
+                    let wire_id_str = wire_id.to_string();
+                    let ts = chrono_free_timestamp();
+                    let result = conn.send_fix(&[
+                        (fix::TAG_MSG_TYPE, "U"),
+                        (fix::TAG_SENDING_TIME, &ts),
+                        (6040, "185"),
+                        (320, &wire_id_str),
+                        (58, &pattern),
+                    ]);
+                    hb.last_ccp_sent = Instant::now();
+                    result.is_ok()
+                }
+            };
+            if sent {
+                log::info!("Sent matching symbols request: req_id={} id={} pattern='{}'", req_id, wire_id, pattern);
+                self.pending_matching_symbols.push((wire_id, req_id));
+                self.matching_permits -= 1;
+                self.matching_next_send = Some(now + MATCHING_SYMBOLS_SEND_GAP);
+            } else {
+                log::warn!("Matching symbols request {} not sent: auth connection down", req_id);
+                shared.reference.push_historical_error(req_id, 10159, MATCHING_SYMBOLS_SEND_FAILED.to_string());
             }
+        }
+    }
+
+    /// A matching-symbols reply (ibx#369), matched by the own request id
+    /// it echoes only: an unknown id is dropped. A pending mark gives the
+    /// send permit back; an answer with an error text is error 10159 with
+    /// that text, else the rows; the permit comes back with the answer
+    /// unless the pending mark already gave it.
+    fn handle_matching_symbols_reply(
+        &mut self,
+        msg: &[u8],
+        parsed: &std::collections::HashMap<u32, String>,
+        shared: &SharedState,
+    ) {
+        let echoed = parsed.get(&320).and_then(|v| v.trim().parse::<u32>().ok());
+        let Some(pos) = echoed.and_then(|rid| self.pending_matching_symbols.iter().position(|p| p.0 == rid)) else {
+            log::warn!(
+                "matching-symbols reply dropped: Unknown request ID {:?} (pending {:?})",
+                echoed, self.pending_matching_symbols,
+            );
+            return;
         };
-        if sent {
-            log::info!("Sent matching symbols request: req_id={} id={} pattern='{}'", req_id, wire_id, pattern);
-            self.pending_matching_symbols.push((wire_id, req_id));
-        } else {
-            log::warn!("Matching symbols request {} not sent: auth connection down", req_id);
-            shared.reference.push_historical_error(req_id, 10159, MATCHING_SYMBOLS_SEND_FAILED.to_string());
+        let wire_id = self.pending_matching_symbols[pos].0;
+        let pending_mark = parsed.get(&8164).and_then(|v| v.trim().parse::<i64>().ok()).unwrap_or(0) != 0;
+        if pending_mark {
+            log::debug!("matching-symbols request {} pending: send permit given back", wire_id);
+            if !self.matching_acked.contains(&wire_id) {
+                self.matching_acked.push(wire_id);
+            }
+            self.matching_permits += 1;
+            return;
+        }
+        let (_, req_id) = self.pending_matching_symbols.remove(pos);
+        match parsed.get(&58) {
+            Some(text) => shared.reference.push_historical_error(req_id, 10159, format!("{}{}", MATCHING_SYMBOLS_FAILED, text)),
+            // An empty result is a legitimate answer ("no such symbol") and
+            // is delivered (ibx#228).
+            None => shared.reference.push_matching_symbols(
+                req_id,
+                crate::control::contracts::parse_matching_symbols_response(msg).unwrap_or_default(),
+            ),
+        }
+        match self.matching_acked.iter().position(|id| *id == wire_id) {
+            Some(i) => { self.matching_acked.swap_remove(i); }
+            None => self.matching_permits += 1,
         }
     }
 
     pub(crate) fn handle_disconnect(&mut self, _context: &mut Context, _event_tx: &Option<Sender<Event>>) {
         self.disconnected = true;
         // Matching-symbols requests end without an answer and are not sent
-        // again, as in the reference (ibx#369).
+        // again, as in the reference (ibx#369); its send permit is given
+        // back, and the waiting request stays.
         self.pending_matching_symbols.clear();
+        self.matching_acked.clear();
+        self.matching_permits += 1;
         self.awaiting_status_replay = false;
         self.status_replay_end_at = None;
         // The orders keep their status, as in the reference: the clients get
@@ -4560,13 +4617,14 @@ mod tests {
         crate::protocol::fix::fix_build(&fields, 1)
     }
 
-    /// A 186 frame with no match-count tag: the not-ready ack that precedes
-    /// the data frame.
+    /// The pending mark that precedes the data frame (captured
+    /// 02/10/2026: `35=U|6040=186|320=41|8164=1`).
     fn matching_symbols_ack(req_id: &str) -> Vec<u8> {
         crate::protocol::fix::fix_build(&[
             (crate::protocol::fix::TAG_MSG_TYPE, "U"),
             (6040, "186"),
             (320, req_id),
+            (8164, "1"),
         ], 1)
     }
 
@@ -4754,17 +4812,125 @@ mod tests {
         let mut conn = Some(Connection::new_raw(client).unwrap());
         let mut hb = HeartbeatState::new();
         ccp.send_matching_symbols_request(500, "AAPL", &mut conn, &mut hb, &shared);
+        // The second one waits for the answer of the first and the pause.
         ccp.send_matching_symbols_request(501, "MSFT", &mut conn, &mut hb, &shared);
+        let msg = matching_symbols_msg("1", &[("AAPL", "265598")]);
+        ccp.process_ccp_message(&msg, &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        ccp.pump_matching_symbols(Instant::now() + MATCHING_SYMBOLS_SEND_GAP, &mut conn, &mut hb, &shared);
         let wire = sent_frames(&mut server);
         assert!(wire.contains("|320=1|58=AAPL|") && wire.contains("|320=2|58=MSFT|"), "{}", wire);
         assert!(!wire.contains("320=500"));
-        assert_eq!(ccp.pending_matching_symbols, vec![(1, 500), (2, 501)]);
+        assert_eq!(ccp.pending_matching_symbols, vec![(2, 501)]);
+        assert_eq!(shared.reference.drain_matching_symbols().iter().map(|d| d.0).collect::<Vec<_>>(), vec![500]);
         assert!(shared.reference.drain_historical_errors().is_empty());
 
         let msg = matching_symbols_msg("2", &[("MSFT", "272093")]);
         ccp.process_ccp_message(&msg, &mut None, &mut context, &shared, &None, &mut hb, "DU1");
         let delivered = shared.reference.drain_matching_symbols();
         assert_eq!(delivered.iter().map(|d| d.0).collect::<Vec<_>>(), vec![501]);
+    }
+
+    /// A connected auth link for the pacing tests, with its server end.
+    fn paced_link() -> (Option<Connection>, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (Some(Connection::new_raw(client).unwrap()), server)
+    }
+
+    fn sent_patterns(server: &mut std::net::TcpStream) -> Vec<String> {
+        sent_frames(server).split('|').filter_map(|f| f.strip_prefix("58=").map(String::from)).collect()
+    }
+
+    // ibx#369, captured 02/10/2026 (b1_369_matching_pacing): AA, AAP, MSF
+    // and IB back to back, NVD 1.5 s later. The reference sent AA at once,
+    // IB 1 s later (AAP and MSF were replaced and got nothing), NVD 1 s
+    // after IB.
+    #[test]
+    fn matching_symbols_pacing_as_captured() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (mut conn, mut server) = paced_link();
+        let mut hb = HeartbeatState::new();
+        let t0 = Instant::now();
+        for (req, pattern) in [(9550, "AA"), (9551, "AAP"), (9552, "MSF"), (9553, "IB")] {
+            ccp.send_matching_symbols_request(req, pattern, &mut conn, &mut hb, &shared);
+        }
+        assert_eq!(sent_patterns(&mut server), ["AA"]);
+        assert_eq!(ccp.matching_waiting.as_ref().map(|w| w.0), Some(9553), "only the latest waits");
+        // The pending mark gives the permit back; the pause still holds IB.
+        ccp.process_ccp_message(&matching_symbols_ack("1"), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        ccp.pump_matching_symbols(t0 + std::time::Duration::from_millis(500), &mut conn, &mut hb, &shared);
+        assert!(sent_patterns(&mut server).is_empty());
+        ccp.process_ccp_message(&matching_symbols_msg("1", &[("AA", "251962528")]), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        let t1 = t0 + MATCHING_SYMBOLS_SEND_GAP + std::time::Duration::from_millis(5);
+        ccp.pump_matching_symbols(t1, &mut conn, &mut hb, &shared);
+        assert_eq!(sent_patterns(&mut server), ["IB"]);
+        ccp.send_matching_symbols_request(9554, "NVD", &mut conn, &mut hb, &shared);
+        ccp.process_ccp_message(&matching_symbols_ack("2"), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        ccp.process_ccp_message(&matching_symbols_msg("2", &[("IBM", "8314")]), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        ccp.pump_matching_symbols(t1 + std::time::Duration::from_millis(999), &mut conn, &mut hb, &shared);
+        assert!(sent_patterns(&mut server).is_empty(), "1 s after the last send");
+        ccp.pump_matching_symbols(t1 + MATCHING_SYMBOLS_SEND_GAP, &mut conn, &mut hb, &shared);
+        assert_eq!(sent_patterns(&mut server), ["NVD"]);
+        ccp.process_ccp_message(&matching_symbols_msg("3", &[("NVDA", "4815747")]), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        let answered: Vec<ReqId> = shared.reference.drain_matching_symbols().iter().map(|d| d.0).collect();
+        assert_eq!(answered, vec![9550, 9553, 9554]);
+        assert!(shared.reference.drain_historical_errors().is_empty(), "the replaced requests get no error");
+    }
+
+    // ibx#369: without a pending mark the permit comes back with the
+    // answer only; the next request waits for it even after the pause.
+    #[test]
+    fn matching_symbols_wait_for_the_answer_without_pending_mark() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (mut conn, mut server) = paced_link();
+        let mut hb = HeartbeatState::new();
+        let later = Instant::now() + std::time::Duration::from_secs(5);
+        ccp.send_matching_symbols_request(1, "AA", &mut conn, &mut hb, &shared);
+        ccp.send_matching_symbols_request(2, "IB", &mut conn, &mut hb, &shared);
+        ccp.pump_matching_symbols(later, &mut conn, &mut hb, &shared);
+        assert_eq!(sent_patterns(&mut server), ["AA"]);
+        ccp.process_ccp_message(&matching_symbols_msg("1", &[]), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        ccp.pump_matching_symbols(later, &mut conn, &mut hb, &shared);
+        assert_eq!(sent_patterns(&mut server), ["IB"]);
+    }
+
+    // ibx#369: an answer with an error text is error 10159 with that text,
+    // and gives the permit back.
+    #[test]
+    fn matching_symbols_reply_with_error_text() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let mut hb = HeartbeatState::new();
+        ccp.pending_matching_symbols.push((4, 40));
+        ccp.matching_permits = 0;
+        let msg = crate::protocol::fix::fix_build(&[
+            (crate::protocol::fix::TAG_MSG_TYPE, "U"), (6040, "186"), (320, "4"), (58, "Too many requests"),
+        ], 1);
+        ccp.process_ccp_message(&msg, &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(shared.reference.drain_historical_errors(),
+            vec![(40, 10159, "Failed to request matching symbols:Too many requests".to_string())]);
+        assert!(shared.reference.drain_matching_symbols().is_empty());
+        assert!(ccp.pending_matching_symbols.is_empty());
+        assert_eq!(ccp.matching_permits, 1);
+    }
+
+    // ibx#369: the loss of the auth link gives the permit back; the
+    // waiting request stays and goes out when it can.
+    #[test]
+    fn matching_symbols_link_loss_keeps_the_waiting_request() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (mut conn, mut server) = paced_link();
+        let mut hb = HeartbeatState::new();
+        let later = Instant::now() + MATCHING_SYMBOLS_SEND_GAP + std::time::Duration::from_millis(5);
+        ccp.send_matching_symbols_request(1, "AA", &mut conn, &mut hb, &shared);
+        ccp.send_matching_symbols_request(2, "IB", &mut conn, &mut hb, &shared);
+        assert_eq!(ccp.matching_permits, 0);
+        ccp.handle_disconnect(&mut context, &None);
+        assert_eq!(ccp.matching_permits, 1);
+        ccp.disconnected = false;
+        ccp.pump_matching_symbols(later, &mut conn, &mut hb, &shared);
+        assert_eq!(sent_patterns(&mut server), ["AA", "IB"]);
+        assert_eq!(ccp.pending_matching_symbols.iter().map(|p| p.1).collect::<Vec<_>>(), vec![2]);
     }
 
     // ibx#369: with the auth link down, or when the send fails, 10159 at

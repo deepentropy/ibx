@@ -643,6 +643,7 @@ impl HotLoop {
         self.ccp.sweep_contract_details(&self.shared, &self.event_tx, &mut self.ccp_conn, &mut self.hb);
         self.ccp.sweep_contract_resolves(&self.shared);
         self.ccp.optcalc.progress(&mut self.ccp_conn, &mut self.hb, &self.shared);
+        self.ccp.pump_matching_symbols(Instant::now(), &mut self.ccp_conn, &mut self.hb, &self.shared);
         order_builder::sweep_rth_lookups(&mut self.context);
         farm::sweep_md_lookups(&mut self.context, &self.shared);
         self.send_md_resolved();
