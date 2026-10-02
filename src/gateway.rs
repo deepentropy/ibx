@@ -868,7 +868,7 @@ fn signature_mismatch(farm_id: &str) -> io::Error {
 }
 
 /// Reconnect to the CCP (order/auth) server using cached session credentials.
-/// Performs TLS + DH + CONNECT_REQUEST, then attempts SOFT_TOKEN auth with cached K.
+/// Performs TLS + CONNECT_REQUEST (no key exchange, ibx#423), then attempts SOFT_TOKEN auth with cached K.
 /// If the server signals at AUTH_START that it requires full SRP, transparently
 /// falls back to a fresh SRP handshake using the cached `username`/`password`
 /// in `ReconnectAuth` (the same path used by `Gateway::connect`).
@@ -923,7 +923,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     }
     log::info!("CCP reconnect to {}:{} (attempt {})", host, AUTH_PORT, depth + 1);
 
-    // TLS + DH key exchange
+    // TLS, with no key exchange: the reference's SSL mode (ibx#423).
     let addr = format!("{}:{}", host, AUTH_PORT)
         .to_socket_addrs()?
         .next()
@@ -935,14 +935,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     let mut tls = connector
         .connect(host, tcp)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
     let mut channel = SecureChannel::new();
-    let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
-    tls.write_all(&dh_msg)?;
-
-    // A refused encryption lets the login go on in clear (ibx#423).
-    let mut secure = session::read_key_exchange_answer(&mut tls, &mut channel)
-        .map_err(|e| if session::login_error(&e).is_some() { e } else { io::Error::new(e.kind(), format!("CCP reconnect {}", e)) })?;
 
     // CONNECT_REQUEST with SOFT_TOKEN flag + token hash (field 9)
     let flags = session::FLAG_OK_TO_REDIRECT
@@ -971,11 +964,10 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         auth.encoded,
         token_hash,
     );
-    session::send_ns(&mut tls, &mut channel, secure, connect_req.as_bytes())?;
-    log::info!("CCP reconnect CONNECT_REQUEST sent (session={}, hash={})", auth.server_session_id, token_hash);
+    log::info!("CCP reconnect CONNECT_REQUEST (session={}, hash={})", auth.server_session_id, token_hash);
 
     // Receive AUTH_START — may get NS_REDIRECT instead
-    let auth_start = match session::recv_auth_start_ccp(&mut tls, &mut channel, &mut secure, connect_req.as_bytes()) {
+    let (auth_start, refused) = match ccp_login_start(&mut tls, &mut channel, connect_req.as_bytes()) {
         Ok(start) => start,
         Err(e) if e.to_string().starts_with("REDIRECT:") => {
             let target = e.to_string().replace("REDIRECT:", "");
@@ -1049,7 +1041,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
 
         if msg_type == ns::NS_CONNECT_RESPONSE {
             let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
-            session::send_ns(&mut tls, &mut channel, secure, newcomm.as_bytes())?;
+            session::send_plain(&mut tls, newcomm.as_bytes())?;
         } else if msg_type == ns::NS_FIX_START {
             fix_ready = true;
             break;
@@ -1099,9 +1091,28 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     let mut conn = Connection::new(tls)?;
     conn.seq = 1; // the logon
     log::info!("CCP reconnect complete (seq={})", conn.seq);
-    Ok(CcpReconnect { conn, session_epoch, ns_secure_refused: !secure })
+    Ok(CcpReconnect { conn, session_epoch, ns_secure_refused: refused })
 }
 
+
+/// Start of a login on the auth connection, in the reference's SSL mode
+/// (jts.ini `[Logon] UseSSL=true`, the setting of the captured gateway):
+/// the connect request `connect_req` goes in clear inside TLS, with no key
+/// exchange before it, then the auth start is read (ibx#423). The second
+/// value is set when the server refused the encryption with the permission
+/// to go on: the connect request was sent again in clear, and the farms
+/// opened after this login skip their key exchange. Every auth login
+/// (first login, reconnect, redirect) starts here.
+fn ccp_login_start<S: Read + Write>(
+    stream: &mut S,
+    channel: &mut SecureChannel,
+    connect_req: &[u8],
+) -> io::Result<(session::AuthStart, bool)> {
+    session::send_plain(stream, connect_req)?;
+    let mut refused = false;
+    let start = session::recv_auth_start_ccp(stream, channel, &mut refused, connect_req)?;
+    Ok((start, refused))
+}
 
 /// SOFT_TOKEN challenge-response over the TLS/NS channel (for CCP reconnect).
 fn do_ccp_soft_token<S: Read + Write>(stream: &mut S, session_key: &BigUint) -> io::Result<()> {
@@ -1253,20 +1264,11 @@ impl Gateway {
             .connect(host, tcp)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-        // Key exchange
+        // No key exchange on the TLS socket: the reference's SSL mode
+        // (ibx#423).
         let mut channel = SecureChannel::new();
-        let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
-        tls.write_all(&dh_msg)?;
 
-        // The server may refuse the encryption and let the login go on in
-        // clear; the farms of the session then log on in clear too, as the
-        // reference does (ibx#423).
-        let mut secure = session::read_key_exchange_answer(&mut tls, &mut channel)?;
-        if secure {
-            log::info!("Auth key exchange complete");
-        }
-
-        // Send CONNECT_REQUEST (encrypted)
+        // CONNECT_REQUEST, in clear inside TLS
         let flags = session::FLAG_OK_TO_REDIRECT
             | session::FLAG_VERSION
             | session::FLAG_VERSION_PRESENT
@@ -1292,10 +1294,12 @@ impl Gateway {
             session_id,
             encoded
         );
-        session::send_ns(&mut tls, &mut channel, secure, connect_req.as_bytes())?;
 
-        // Receive AUTH_START (may get a redirect instead for paper accounts)
-        let auth_start = match session::recv_auth_start_ccp(&mut tls, &mut channel, &mut secure, connect_req.as_bytes()) {
+        // Receive AUTH_START (may get a redirect instead for paper accounts).
+        // When the server refuses the encryption with the permission to go
+        // on, the farms of the session log on in clear, as the reference
+        // does (ibx#423).
+        let (auth_start, refused) = match ccp_login_start(&mut tls, &mut channel, connect_req.as_bytes()) {
             Ok(start) => start,
             Err(e) if e.to_string().starts_with("REDIRECT:") => {
                 let target = e.to_string().strip_prefix("REDIRECT:").unwrap().to_string();
@@ -1446,7 +1450,7 @@ impl Gateway {
                 log::info!("Post-auth: connect response received");
                 // Send port type change (required before data start)
                 let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
-                session::send_ns(&mut tls, &mut channel, secure, newcomm.as_bytes())?;
+                session::send_plain(&mut tls, newcomm.as_bytes())?;
                 log::info!("Port type change sent");
             } else if msg_type == ns::NS_FIX_START {
                 log::info!("Data start: {}", inner_text);
@@ -1926,18 +1930,10 @@ impl Gateway {
         // Auth connection (non-blocking TLS for hot loop)
         let mut ccp_conn = Connection::new(tls)?;
         ccp_conn.seq = ccp_seq;
-        // CCP HMAC signing IV: derived by AES-CBC encrypting the logon message.
-        // The logon was sent as plaintext over TLS, but the AES-CBC computation
-        // evolves the IV — last 16 bytes of ciphertext = new IV for HMAC signing.
-        let ccp_sign_key = channel.key_block().map(|kb| kb[64..84].to_vec()).unwrap_or_default();
-        let ccp_sign_iv = if let Some(kb) = channel.key_block() {
-            let aes_key = &kb[0..16];
-            let initial_iv = &kb[32..48];
-            let ciphertext = crate::auth::crypto::aes_cbc_encrypt(aes_key, initial_iv, &logon_msg);
-            ciphertext[ciphertext.len() - 16..].to_vec()
-        } else {
-            Vec::new()
-        };
+        // No key exchange on the auth connection, so no signing key: its
+        // messages go unsigned, as the reference's (ibx#423).
+        let ccp_sign_key = Vec::new();
+        let ccp_sign_iv = Vec::new();
         // Seed init burst into connection buffer so the hot loop processes 8=O account data
         ccp_conn.seed_buffer(&init_data);
 
@@ -1987,11 +1983,11 @@ impl Gateway {
             let enc = &encoded;
             let trading_handle = scope.spawn(move || {
                 connect_farm_opts(&trading_host, &trading_farm, username, password,
-                    paper, ssid, token, hw, enc, 18, true, secure)
+                    paper, ssid, token, hw, enc, 18, true, !refused)
             });
             let mktdata_handle = scope.spawn(move || {
                 connect_farm_opts(&mktdata_host, &mktdata_farm, username, password,
-                    paper, ssid, token, hw, enc, 17, true, secure)
+                    paper, ssid, token, hw, enc, 17, true, !refused)
             });
             let trading = trading_handle.join().expect("trading farm thread panicked");
             let mktdata = mktdata_handle.join().expect("mktdata farm thread panicked");
@@ -2040,7 +2036,7 @@ impl Gateway {
             farm_host,
             md_routing,
             hmds_routing,
-            ns_secure_refused: !secure,
+            ns_secure_refused: refused,
         };
         Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
@@ -2360,6 +2356,99 @@ fn init_scan_buffer(init_data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An auth connection: reads the framed `frames`, records what is
+    /// written.
+    struct AuthWire {
+        input: io::Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl AuthWire {
+        fn new(frames: &[&str]) -> Self {
+            let mut wire = Vec::new();
+            for f in frames {
+                wire.extend_from_slice(ns::NS_MAGIC);
+                wire.extend_from_slice(&(f.len() as u32).to_be_bytes());
+                wire.extend_from_slice(f.as_bytes());
+            }
+            Self { input: io::Cursor::new(wire), output: Vec::new() }
+        }
+
+        /// The texts of the frames written, in order.
+        fn sent(&self) -> Vec<String> {
+            let mut cursor = io::Cursor::new(self.output.clone());
+            let mut out = Vec::new();
+            while (cursor.position() as usize) < self.output.len() {
+                out.push(String::from_utf8(ns::ns_recv(&mut cursor).unwrap().0).unwrap());
+            }
+            out
+        }
+    }
+
+    impl Read for AuthWire {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.input.read(buf) }
+    }
+
+    impl Write for AuthWire {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.output.extend_from_slice(buf); Ok(buf.len()) }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    /// The connect request of the reference's login of 02/10/2026, masked.
+    const CAPTURED_CONNECT: &str = "38;521;S{user};1585197;50;27;{hwid}|XX:XX:XX:XX:XX:XX;6abf4c1c.03bc;17.0.10.0.101/W/en_US/G;";
+    /// The auth start the server answered it with.
+    const CAPTURED_AUTH_START: &str = "50;520;1;1;;0;2311454642000;1;6840198100420923956;OTPWAY;;";
+
+    // ibx#423: on the TLS auth connection the reference sends the connect
+    // request in clear as its first message, with no key exchange before
+    // it (gateway capture of 02/10/2026: TLS to port 4001, then 521, then
+    // the auth start; no 532 on the auth connection in any archived login).
+    #[test]
+    fn auth_login_starts_with_the_connect_request_in_clear() {
+        let mut wire = AuthWire::new(&[CAPTURED_AUTH_START]);
+        let (start, refused) = ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes()).unwrap();
+        assert_eq!(wire.sent(), vec![CAPTURED_CONNECT.to_string()]);
+        assert!(!wire.sent().iter().any(|f| f.contains(";532;")), "no key exchange request");
+        assert!(start.password_required);
+        assert!(!refused);
+    }
+
+    // ibx#423: a refusal of the encryption with the permission to go on
+    // sends the connect request again in clear; the farms of the session
+    // then skip their key exchange.
+    #[test]
+    fn auth_login_refused_encryption_with_proceed_goes_on() {
+        let mut wire = AuthWire::new(&["50;535;no crypto;1;", CAPTURED_AUTH_START]);
+        let (_, refused) = ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes()).unwrap();
+        assert_eq!(wire.sent(), vec![CAPTURED_CONNECT.to_string(), CAPTURED_CONNECT.to_string()]);
+        assert!(refused);
+
+        let mut wire = AuthWire::new(&["50;535;no crypto;0;"]);
+        let err = ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes()).unwrap_err();
+        assert_eq!(session::login_error(&err).unwrap().kind, session::LoginErrorKind::SecureConnectionRefused);
+        assert_eq!(wire.sent(), vec![CAPTURED_CONNECT.to_string()]);
+    }
+
+    // ibx#423: a redirect ends this connection after the connect request;
+    // the login to the new host starts the same way.
+    #[test]
+    fn auth_login_redirect_after_the_connect_request() {
+        let mut wire = AuthWire::new(&["38;524;cdc1.example:4000;"]);
+        let err = ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes()).unwrap_err();
+        assert_eq!(err.to_string(), "REDIRECT:cdc1.example:4000");
+        assert_eq!(wire.sent(), vec![CAPTURED_CONNECT.to_string()]);
+    }
+
+    // ibx#423: an encrypted message on the auth connection, which has no
+    // key exchange, is an error, not a panic.
+    #[test]
+    fn auth_login_encrypted_message_without_key_exchange_is_an_error() {
+        let mut wire = AuthWire::new(&["50;534;AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA;"]);
+        let err = ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("Decryptor is not valid"), "{err}");
+    }
 
     /// A farm server on a local socket: answers the key exchange request
     /// with `key_answer` (none when no request is expected), then reads the

@@ -250,19 +250,19 @@ pub fn read_key_exchange_answer<R: Read>(stream: &mut R, channel: &mut SecureCha
 }
 
 /// [`recv_auth_start`], for the auth connection: when the server refuses the
-/// encryption and lets the login go on, the session goes on in clear
-/// (`secure` is cleared) and the connect request `connect_req` is sent
-/// again in clear, as the reference does (ibx#423).
+/// encryption and lets the login go on, `refused` is set and the connect
+/// request `connect_req` is sent again in clear, as the reference does
+/// (ibx#423). The farms opened after such a login skip their key exchange.
 pub fn recv_auth_start_ccp<S: Read + Write>(
     stream: &mut S,
     channel: &mut SecureChannel,
-    secure: &mut bool,
+    refused: &mut bool,
     connect_req: &[u8],
 ) -> io::Result<AuthStart> {
     loop {
         match recv_auth_start(stream, channel) {
             Err(e) if proceeds_in_clear(&e) => {
-                *secure = false;
+                *refused = true;
                 send_plain(stream, connect_req)?;
                 log::info!("Connect request sent again in clear");
             }
@@ -2070,17 +2070,17 @@ mod tests {
     fn auth_start_wait_sends_the_connect_request_again_in_clear() {
         let mut stream = Duplex::new(&["50;535;no crypto;1;", "50;520;0;1;;0;"]);
         let mut channel = SecureChannel::new();
-        let mut secure = true;
-        let start = recv_auth_start_ccp(&mut stream, &mut channel, &mut secure, b"38;521;user;").unwrap();
-        assert!(!secure);
+        let mut refused = false;
+        let start = recv_auth_start_ccp(&mut stream, &mut channel, &mut refused, b"38;521;user;").unwrap();
+        assert!(refused);
         assert!(start.password_required);
         assert_eq!(stream.output, build_ns_frame("38;521;user;"), "the connect request, in clear");
 
         let mut stream = Duplex::new(&["50;535;no crypto;0;"]);
-        let mut secure = true;
-        let err = recv_auth_start_ccp(&mut stream, &mut channel, &mut secure, b"38;521;user;").unwrap_err();
+        let mut refused = false;
+        let err = recv_auth_start_ccp(&mut stream, &mut channel, &mut refused, b"38;521;user;").unwrap_err();
         assert_eq!(login_error(&err).unwrap().kind, LoginErrorKind::SecureConnectionRefused);
-        assert!(secure && stream.output.is_empty());
+        assert!(!refused && stream.output.is_empty());
     }
 
     #[test]
