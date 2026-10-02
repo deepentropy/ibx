@@ -43,11 +43,13 @@ impl EClient {
         Ok(())
     }
 
-    /// Map a reqId to an instrument slot.
+    /// Map a reqId to an instrument slot. The request takes every tick of
+    /// the instrument, its headlines too.
     #[doc(hidden)]
     fn _test_map_instrument(&self, req_id: i64, instrument: u32) {
         self.core.req_to_instrument.lock().unwrap().insert(req_id, instrument);
-        self.core.instrument_to_req.lock().unwrap().insert(instrument, req_id);
+        self.core.instrument_to_req.lock().unwrap().entry(instrument).or_default().push(req_id);
+        self.core.md_news.lock().unwrap().insert(req_id, String::new());
     }
 
     /// Set instrument count on SharedState.

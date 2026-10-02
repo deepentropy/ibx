@@ -218,6 +218,9 @@ pub struct MarketDataState {
     news_bulletins: Mutex<BulletinStore>,
     /// Subscriptions the market data server rejected (ibx#444, ibx#447).
     md_rejects: Mutex<Vec<MdReject>>,
+    /// Requests given without a conId whose contract another request had
+    /// subscribed: (their own slot, the slot they joined) (ibx#444).
+    md_merges: Mutex<Vec<(InstrumentId, InstrumentId)>>,
     /// The request parameters of acked subscriptions (ibx#449).
     tick_req_params: Mutex<Vec<TickReqParams>>,
     snapshot_acks: Mutex<Vec<TickReqParams>>,
@@ -282,6 +285,7 @@ impl MarketDataState {
             tick_news: Mutex::new(Vec::with_capacity(32)),
             news_bulletins: Mutex::new(BulletinStore::default()),
             md_rejects: Mutex::new(Vec::new()),
+            md_merges: Mutex::new(Vec::new()),
             tick_req_params: Mutex::new(Vec::new()),
             snapshot_acks: Mutex::new(Vec::new()),
             tbt_errors: Mutex::new(Vec::new()),
@@ -320,6 +324,18 @@ impl MarketDataState {
 
     pub fn drain_md_rejects(&self) -> Vec<MdReject> {
         self.md_rejects.lock().unwrap().drain(..).collect()
+    }
+
+    /// A request on slot `from` joined the subscription of slot `into`
+    /// (ibx#444).
+    #[doc(hidden)] pub fn push_md_merge(&self, from: InstrumentId, into: InstrumentId) {
+        self.md_merges.lock().unwrap().push((from, into));
+    }
+
+    pub fn drain_md_merges(&self) -> Vec<(InstrumentId, InstrumentId)> {
+        let mut merges = self.md_merges.lock().unwrap();
+        if merges.is_empty() { return Vec::new(); }
+        merges.drain(..).collect()
     }
 
     /// Read a quote snapshot (lock-free via SeqLock).

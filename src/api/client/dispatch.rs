@@ -209,22 +209,12 @@ impl EClient {
     // ── Quote Dispatch ──
 
     fn dispatch_quotes(&self, wrapper: &mut impl Wrapper) {
-        // Subscriptions the server rejected (ibx#444, ibx#447).
-        for reject in self.shared.market.drain_md_rejects() {
-            let instrument = reject.instrument();
-            let req_id = self.core.req_id_for_instrument(instrument);
-            if req_id < 0 { continue; }
-            let (code, text, gone) = crate::client_core::ClientCore::md_reject_error(&reject);
-            if !gone {
-                self.core.set_delayed(req_id);
-                wrapper.market_data_type(req_id, 3);
-            }
-            wrapper.error(req_id, code, text, "");
-            if gone {
-                if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
-                    let _ = self.control_tx.send(ControlCommand::Unsubscribe { instrument });
-                }
-            }
+        // Requests that joined a subscription, and subscriptions the
+        // server rejected (ibx#444, ibx#447).
+        let (notices, commands) = self.core.take_md_rejects(&self.shared);
+        Self::md_notices(wrapper, notices);
+        for command in commands {
+            let _ = self.control_tx.send(command);
         }
 
         // Regulatory snapshots that ended (ibx#446).
@@ -245,6 +235,10 @@ impl EClient {
                 Err((code, text)) => wrapper.error(req_id, code, &text, ""),
             }
         }
+
+        // What the requests that joined a running subscription get at once
+        // (ibx#444).
+        Self::md_notices(wrapper, self.core.take_md_joins());
 
         // Request parameters, once per request (ibx#449), after the market
         // data type (ibx#446).
@@ -329,16 +323,34 @@ impl EClient {
         }
     }
 
+    /// The callbacks of market data requests beside their ticks (ibx#444).
+    fn md_notices(wrapper: &mut impl Wrapper, notices: Vec<crate::client_core::MdNotice>) {
+        use crate::client_core::MdNotice;
+        for notice in notices {
+            match notice {
+                MdNotice::MarketDataType { req_id, market_data_type } => wrapper.market_data_type(req_id, market_data_type),
+                MdNotice::TickReqParams { req_id, min_tick, bbo_exchange, permissions } =>
+                    wrapper.tick_req_params(req_id, min_tick, &bbo_exchange, permissions),
+                MdNotice::Error { req_id, code, text } => wrapper.error(req_id, code, &text, ""),
+                MdNotice::News { req_id, news } => wrapper.tick_news(
+                    req_id, news.timestamp, &news.provider_code, &news.article_id, &news.headline, &news.extra_data,
+                ),
+            }
+        }
+    }
+
     // ── Historical / News / Account Dispatch ──
 
     fn dispatch_data(&self, wrapper: &mut impl Wrapper) {
-        // News → tick_news
+        // News → tick_news, to each request of the contract whose news
+        // key has the provider (ibx#444)
         for news in self.shared.market.drain_tick_news() {
-            let req_id = self.core.req_id_for_instrument(news.instrument);
-            wrapper.tick_news(
-                req_id, news.timestamp,
-                &news.provider_code, &news.article_id, &news.headline, &news.extra_data,
-            );
+            for req_id in self.core.route_tick_news(&news) {
+                wrapper.tick_news(
+                    req_id, news.timestamp,
+                    &news.provider_code, &news.article_id, &news.headline, &news.extra_data,
+                );
+            }
         }
 
         // News bulletins → update_news_bulletin (popups always, every type

@@ -139,38 +139,11 @@ impl PlainSnapshot {
     }
 }
 
-/// The generic tick ids a snapshot of this security type may name; a list
-/// of them makes the snapshot refused. The news tick also depends on the
-/// session's news service, which is taken as on.
-fn generic_tick_legal(id: i32, sec_type: &str) -> bool {
-    match id {
-        100 | 101 | 104 | 105 | 106 | 165 | 225 | 233 | 236 | 258 | 47 | 292 | 293 | 294 | 295 | 318 | 375
-        | 411 | 460 | 512 | 577 | 586 | 588 | 614 | 619 | 623 | 220 | 221 | 232 => true,
-        456 | 59 => sec_type_in(sec_type, &["STK", "FUT", "OPT", "IND", "FOP", "CFD", "SLB"]),
-        162 => sec_type_in(sec_type, &["IND"]),
-        595 => sec_type_in(sec_type, &["STK", "CFD", "OPT", "FOP", "WAR", "IOPT", "FUT", "FWD", "BOND", "BILL", "SLB", "CRYPTO"]),
-        _ => false,
-    }
-}
-
-/// A snapshot with this generic tick list is refused: the list names at
-/// least one tick and every one is a legal tick for the security type. A
-/// list with one unknown or illegal tick is dropped as a whole, so the
-/// snapshot goes on, as the reference's parser gives no list then. The
-/// `mdoff` word is no tick; a tick may carry a `:` parameter.
+/// A snapshot with this generic tick list is refused: the list is valid
+/// for the security type (ibx#450). A list with one unknown or illegal tick
+/// is no list for the reference's parser, so the snapshot goes on.
 pub fn generic_ticks_refused(list: &str, sec_type: &str) -> bool {
-    let mut any = false;
-    for token in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
-        if token.eq_ignore_ascii_case("mdoff") {
-            continue;
-        }
-        let id = token.split(':').next().unwrap_or("");
-        match id.parse::<i32>() {
-            Ok(id) if generic_tick_legal(id, sec_type) => any = true,
-            _ => return false,
-        }
-    }
-    any
+    crate::control::generic_tick::parse(list, sec_type).is_some()
 }
 
 /// The snapshot requests of the session in the current second, as the
@@ -276,6 +249,8 @@ mod tests {
         assert!(!generic_ticks_refused("mdoff", "STK"));
         // One unknown or illegal id drops the whole list: no refusal.
         assert!(!generic_ticks_refused("233,13", "STK"));
+        assert!(!generic_ticks_refused("292:", "STK"));
+        assert!(!generic_ticks_refused("512", "STK"));
         assert!(!generic_ticks_refused("abc", "STK"));
         assert!(!generic_ticks_refused("162", "STK"));
         assert!(generic_ticks_refused("162", "IND"));
