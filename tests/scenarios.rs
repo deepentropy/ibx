@@ -864,7 +864,7 @@ fn mixed_news_between_orders() {
     shared.market.push_tick_news(TickNews {
         instrument: 0,
         provider_code: "BRFG".into(), article_id: "BRFG$200".into(),
-        headline: "Fed holds rates".into(), timestamp: 1700000000,
+        headline: "Fed holds rates".into(), timestamp: 1700000000000, extra_data: String::new(),
     });
 
     // Fill after news
@@ -923,7 +923,7 @@ fn mixed_all_data_types_single_process() {
     shared.market.push_tick_news(TickNews {
         instrument: 0,
         provider_code: "DJ".into(), article_id: "DJ$1".into(),
-        headline: "Breaking".into(), timestamp: 0,
+        headline: "Breaking".into(), timestamp: 0, extra_data: String::new(),
     });
 
     // Scanner params

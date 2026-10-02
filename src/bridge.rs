@@ -240,7 +240,7 @@ pub struct TickReqParams {
 
 /// A top-of-book subscription the server rejected, and what the client
 /// reports for it (ibx#444, ibx#447).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MdReject {
     /// Delayed data enabled and available: the subscription went on with
     /// delayed data (marketDataType 3 and error 10167).
@@ -252,6 +252,9 @@ pub enum MdReject {
     /// A subscription given without a conId whose lookup found no single
     /// contract: error 200, the subscription is gone (ibx#278).
     NoSecurityDefinition { instrument: InstrumentId },
+    /// A request with the news tick refused once its contract was known:
+    /// error 10094 with this text, nothing was sent (ibx#458).
+    NewsRefused { instrument: InstrumentId, text: String },
 }
 
 impl MdReject {
@@ -260,7 +263,8 @@ impl MdReject {
         match *self {
             MdReject::Delayed { instrument }
             | MdReject::NotSubscribed { instrument, .. }
-            | MdReject::NoSecurityDefinition { instrument } => instrument,
+            | MdReject::NoSecurityDefinition { instrument }
+            | MdReject::NewsRefused { instrument, .. } => instrument,
         }
     }
 }

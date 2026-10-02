@@ -186,6 +186,79 @@ fn news_source_subscribed(code: &str, sources: &[String]) -> bool {
     !code.is_empty() && sources.iter().any(|s| s.eq_ignore_ascii_case(code))
 }
 
+/// The news tick (292) of a generic tick list, as the reference's parser
+/// reads it (ibx#458): tokens split on `,` and trimmed, `mdoff` is no tick,
+/// `292:CODES` names the provider codes. `292:` with nothing after the
+/// colon makes the reference refuse the whole list (321).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NewsTick {
+    /// No news tick in the list.
+    None,
+    /// `292`: the default providers.
+    Default,
+    /// `292:CODES`: the codes, `+` separated.
+    Codes(String),
+    /// `292:`: the list is not valid.
+    Invalid,
+}
+
+pub(crate) fn news_tick(generic_tick_list: &str) -> NewsTick {
+    for token in generic_tick_list.split(',').map(str::trim) {
+        let (id, param) = match token.split_once(':') {
+            Some((id, param)) => (id.trim(), Some(param)),
+            None => (token, None),
+        };
+        if id.parse::<i32>() != Ok(292) {
+            continue;
+        }
+        return match param {
+            None => NewsTick::Default,
+            Some("") => NewsTick::Invalid,
+            Some(codes) => NewsTick::Codes(codes.to_string()),
+        };
+    }
+    NewsTick::None
+}
+
+/// Security types the reference calls derivatives: no news for them.
+const NEWS_DERIVATIVES: [&str; 9] = ["FUT", "OPT", "FOP", "WAR", "IOPT", "CFD", "FWD", "SLB", "ICS"];
+
+/// The provider key of a news tick (ibx#458), or the text of the
+/// reference's 10094: a derivative contract is refused; explicit `codes`
+/// must each be a subscribed API news source (an unknown or unchecked code
+/// gets the "unchecked" text, the failures joined with `,`); without codes,
+/// every subscribed source. The key is the codes sorted, without repeats,
+/// in the sources' own spelling.
+pub(crate) fn news_providers(sec_type: &str, codes: Option<&str>, sources: &[String]) -> Result<Vec<String>, String> {
+    if NEWS_DERIVATIVES.contains(&sec_type.to_ascii_uppercase().as_str()) {
+        return Err("API News error:Derivative contracts cannot be used to subscribe to news, please use the underlying \
+            (Stocks, Cash, News Topics, and certain Indexes are supported).".to_string());
+    }
+    let mut key: Vec<String> = match codes {
+        None => sources.to_vec(),
+        Some(codes) => {
+            // A Java split on `+`: trailing empty codes are dropped.
+            let mut list: Vec<&str> = codes.split('+').collect();
+            while list.len() > 1 && list.last() == Some(&"") { list.pop(); }
+            let mut key = Vec::new();
+            let mut failed: Vec<String> = Vec::new();
+            for code in list {
+                match sources.iter().find(|s| news_source_subscribed(code, std::slice::from_ref(s))) {
+                    Some(source) => key.push(source.clone()),
+                    None => failed.push(format!("Source code unchecked in API news Settings: {}", code)),
+                }
+            }
+            if !failed.is_empty() {
+                return Err(format!("API News error:{}", failed.join(",")));
+            }
+            key
+        }
+    };
+    key.sort();
+    key.dedup();
+    Ok(key)
+}
+
 /// The reference's account checks of a P&L request (ibx#478): 321 for an
 /// empty account or one this session is not logged in to.
 fn pnl_account_refusal(class: &str, account: &str, own_account: &str) -> Result<(), (i64, String)> {
@@ -846,9 +919,6 @@ pub struct ClientCore {
     /// from the market data maps, so both can run on one contract (ibx#455).
     pub tbt_reqs: Mutex<HashMap<i64, (InstrumentId, i64, TbtType)>>,
 
-    // News subscription state
-    pub news_providers: Mutex<String>,
-    pub news_instruments: Mutex<HashSet<InstrumentId>>,
 
     // Contract cache for enrichment
     pub contract_cache: Mutex<HashMap<i64, ApiContract>>,
@@ -1071,8 +1141,6 @@ impl ClientCore {
             tick_req_params_sent: Mutex::new(HashSet::new()),
             farm_auto_reqs: Mutex::new(HashSet::new()),
             tbt_reqs: Mutex::new(HashMap::new()),
-            news_providers: Mutex::new("BRFG*BRFUPDN".into()),
-            news_instruments: Mutex::new(HashSet::new()),
             contract_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -1114,8 +1182,6 @@ impl ClientCore {
         self.tick_req_params_sent.lock().unwrap().clear();
         self.farm_auto_reqs.lock().unwrap().clear();
         self.tbt_reqs.lock().unwrap().clear();
-        *self.news_providers.lock().unwrap() = "BRFG*BRFUPDN".into();
-        self.news_instruments.lock().unwrap().clear();
         self.contract_cache.lock().unwrap().clear();
     }
 
@@ -1190,12 +1256,14 @@ impl ClientCore {
     // ── Subscription management ──
 
     /// Register a market data subscription mapping.
-    /// If `generic_tick_list` contains "292", also subscribes to per-contract news.
+    /// With the news tick (292) in `generic_tick_list`, the request's news
+    /// entry follows its top of book (ibx#458); the caller made the checks
+    /// of `news_tick_refusal` for a contract with a conId.
     /// A contract without a conId is looked up by the engine first, as the
     /// reference does, with the currency and `filters` (ibx#278).
     pub fn register_mkt_data(
         &self,
-        _shared: &SharedState,
+        shared: &SharedState,
         control_tx: &Sender<ControlCommand>,
         req_id: i64,
         con_id: i64,
@@ -1212,18 +1280,24 @@ impl ClientCore {
             filters.last_trade_date_or_contract_month.as_str(), filters.strike,
             filters.right.as_str(), filters.multiplier.as_str(),
         );
-        // News subscription if generic_tick_list contains 292
-        let wants_news = generic_tick_list.split(',')
-            .any(|t| t.trim() == "292" || t.trim() == "mdoff,292" || t.trim().ends_with("292"));
-        if wants_news {
-            let providers = self.news_providers.lock().unwrap().clone();
-            let _ = control_tx.send(ControlCommand::SubscribeNews {
-                con_id,
-                symbol: symbol.to_string(),
-                providers,
-                reply_tx: None,
-            });
-        }
+        // The news tick of the request (ibx#458): its provider key, or the
+        // 10094 it ends with once the contract is known.
+        let news = match news_tick(generic_tick_list) {
+            NewsTick::Default => Some(None),
+            NewsTick::Codes(codes) => Some(Some(codes)),
+            NewsTick::None | NewsTick::Invalid => None,
+        }.map(|codes| match news_providers(sec_type, codes.as_deref(), &shared.reference.news_sources()) {
+            Ok(providers) => (providers.join(","), None),
+            Err(text) => (String::new(), Some(text)),
+        });
+        let send_news = |instrument: InstrumentId| {
+            if let Some((providers, refusal)) = &news {
+                let _ = control_tx.send(ControlCommand::SubscribeNews {
+                    instrument, con_id, exchange: exchange.to_string(), sec_type: sec_type.to_string(),
+                    providers: providers.clone(), refusal: refusal.clone(),
+                });
+            }
+        };
 
         // A quote ibx subscribed to for the P&L becomes the caller's
         // subscription: no second subscription to the server.
@@ -1236,9 +1310,7 @@ impl ClientCore {
                 self.start_snapshot(req_id, sec_type);
             }
             self.note_auto_execution(req_id, sec_type, exchange);
-            if wants_news {
-                self.news_instruments.lock().unwrap().insert(instrument_id);
-            }
+            send_news(instrument_id);
             return Ok(instrument_id);
         }
 
@@ -1263,9 +1335,7 @@ impl ClientCore {
                 self.start_snapshot(req_id, sec_type);
             }
             self.note_auto_execution(req_id, sec_type, exchange);
-            if wants_news {
-                self.news_instruments.lock().unwrap().insert(instrument_id);
-            }
+            send_news(instrument_id);
             return Ok(instrument_id);
         }
 
@@ -1315,9 +1385,7 @@ impl ClientCore {
             self.start_snapshot(req_id, sec_type);
         }
         self.note_auto_execution(req_id, sec_type, exchange);
-        if wants_news {
-            self.news_instruments.lock().unwrap().insert(instrument_id);
-        }
+        send_news(instrument_id);
         Ok(instrument_id)
     }
 
@@ -1509,7 +1577,7 @@ impl ClientCore {
 
     /// Unregister a market data subscription.
     /// Returns `(instrument_id, needs_news_unsub)`.
-    pub fn unregister_mkt_data(&self, req_id: i64) -> (Option<InstrumentId>, bool) {
+    pub fn unregister_mkt_data(&self, req_id: i64) -> Option<InstrumentId> {
         if let Some(instrument) = self.req_to_instrument.lock().unwrap().remove(&req_id) {
             self.instrument_to_req.lock().unwrap().remove(&instrument);
             self.last_quotes.lock().unwrap().remove(&instrument);
@@ -1518,14 +1586,13 @@ impl ClientCore {
             self.tick_req_params_sent.lock().unwrap().remove(&req_id);
             self.farm_auto_reqs.lock().unwrap().remove(&req_id);
             self.end_snapshot(req_id);
-            let needs_news = self.news_instruments.lock().unwrap().remove(&instrument);
             // The slot stays while tick-by-tick data uses it.
             if !self.tbt_reqs.lock().unwrap().values().any(|(i, ..)| *i == instrument) {
                 self.forget_instrument(instrument);
             }
-            (Some(instrument), needs_news)
+            Some(instrument)
         } else {
-            (None, false)
+            None
         }
     }
 
@@ -1546,9 +1613,6 @@ impl ClientCore {
         });
     }
 
-    pub fn set_news_providers(&self, providers: &str) {
-        *self.news_providers.lock().unwrap() = providers.to_string();
-    }
 
     // ── Contract cache ──
 
@@ -2027,6 +2091,22 @@ impl ClientCore {
         }).collect()
     }
 
+    /// The news tick check of a market data request whose contract is
+    /// known (a conId): error 10094 before anything is sent, as the
+    /// reference (ibx#458). A contract without a conId is checked by the
+    /// engine once its lookup found it.
+    pub fn news_tick_refusal(&self, shared: &SharedState, generic_tick_list: &str, con_id: i64, sec_type: &str) -> Option<(i64, String)> {
+        if con_id == 0 {
+            return None;
+        }
+        let codes = match news_tick(generic_tick_list) {
+            NewsTick::Default => None,
+            NewsTick::Codes(codes) => Some(codes),
+            NewsTick::None | NewsTick::Invalid => return None,
+        };
+        news_providers(sec_type, codes.as_deref(), &shared.reference.news_sources()).err().map(|text| (10094, text))
+    }
+
     /// A market data request whose id is already live: error 322, as the
     /// reference (the key is the request id only; ibx#444).
     pub fn duplicate_ticker_refusal(&self, req_id: i64) -> Option<(i64, String)> {
@@ -2040,9 +2120,9 @@ impl ClientCore {
     /// whether the subscription is gone (ibx#444, ibx#447). The texts are the
     /// reference's; for 354 and 10089 on this path any contract suffix the
     /// reference adds is not captured.
-    pub fn md_reject_error(reject: &crate::bridge::MdReject) -> (i64, &'static str, bool) {
+    pub fn md_reject_error(reject: &crate::bridge::MdReject) -> (i64, &str, bool) {
         use crate::bridge::MdReject;
-        match *reject {
+        match reject {
             MdReject::Delayed { .. } =>
                 (10167, "Requested market data is not subscribed. Displaying delayed market data.", false),
             MdReject::NotSubscribed { needs_api_subscription: true, .. } =>
@@ -2052,6 +2132,7 @@ impl ClientCore {
             MdReject::NotSubscribed { .. } => (354, "Requested market data is not subscribed.", true),
             MdReject::NoSecurityDefinition { .. } =>
                 (200, crate::engine::hot_loop::ccp::NO_SECURITY_DEFINITION, true),
+            MdReject::NewsRefused { text, .. } => (10094, text.as_str(), true),
         }
     }
 

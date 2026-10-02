@@ -1670,14 +1670,19 @@ pub struct FamilyCode {
     pub family_code_str: String,
 }
 
-/// A real-time news headline from 8=O|35=G tick type 0x1E90.
+/// A news headline of a contract's news tick (ibx#458), as the reference
+/// gives it to tickNews.
 #[derive(Debug, Clone)]
 pub struct TickNews {
     pub instrument: InstrumentId,
     pub provider_code: String,
     pub article_id: String,
+    /// The headline without its leading `{...}` part.
     pub headline: String,
-    pub timestamp: u64,
+    /// Time of the headline, epoch milliseconds.
+    pub timestamp: i64,
+    /// The text between the first `{` and the next `}` of the raw headline.
+    pub extra_data: String,
 }
 
 /// A historical tick (midpoint), as the official `HistoricalTick` (ibx#432):
@@ -1848,10 +1853,17 @@ pub enum ControlCommand {
     },
     /// Unsubscribe from tick-by-tick data.
     UnsubscribeTbt { instrument: InstrumentId },
-    /// Subscribe to per-contract news ticks via CCP (264=292).
-    SubscribeNews { con_id: i64, symbol: String, providers: String, reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>> },
-    /// Unsubscribe from per-contract news ticks.
-    UnsubscribeNews { instrument: InstrumentId },
+    /// The news tick of a market data request (generic tick 292, ibx#458),
+    /// given after its `Subscribe` / `SubscribeBySymbol`: the news entry
+    /// goes to the farm of the contract's route with the request's top of
+    /// book. `providers` is the provider key (codes sorted, comma
+    /// separated); a `refusal` (the text of error 10094) ends the request
+    /// once its contract is known, before anything is sent. The news entry
+    /// is cancelled with the request (`Unsubscribe`).
+    SubscribeNews {
+        instrument: InstrumentId, con_id: i64, exchange: String, sec_type: String,
+        providers: String, refusal: Option<String>,
+    },
     /// Subscribe to whole-account P&L via CCP (6040=142).
     SubscribePnl { req_id: i64, account: String },
     /// Cancel P&L subscription.

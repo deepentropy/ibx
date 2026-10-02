@@ -9,7 +9,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::types::{
-    CompletedOrder, Fill, InstrumentId, MidnightSeed, NewsBulletin, OrderId, ReqId,
+    CompletedOrder, Fill, MidnightSeed, NewsBulletin, OrderId, ReqId,
     PositionInfo, Price, Qty, Side, PRICE_SCALE, QTY_SCALE,
 };
 use crossbeam_channel::Sender;
@@ -199,7 +199,6 @@ pub(crate) struct CcpState {
     /// Order messages already reported as 399, by order and text (ibx#465).
     pub(crate) order_messages_sent: HashSet<(OrderId, String)>,
     pub(crate) exec_realized_order: VecDeque<String>,
-    pub(crate) news_subscriptions: Vec<(InstrumentId, u32)>,
     pub(crate) disconnected: bool,
     /// (req_id, is_single_shot). Single-shot = known-conId lookup whose
     /// first 35=d reply is also the last (server emits no 323=5/6 terminator
@@ -590,7 +589,6 @@ impl CcpState {
             exec_realized: std::collections::HashMap::with_capacity(256),
             order_messages_sent: HashSet::new(),
             exec_realized_order: VecDeque::with_capacity(256),
-            news_subscriptions: Vec::new(),
             disconnected: false,
             pending_secdef: Vec::new(),
             optcalc: super::optcalc::OptCalc::default(),
@@ -2060,62 +2058,6 @@ impl CcpState {
         let _ = conn.send_fix(&fields);
         hb.last_ccp_sent = Instant::now();
         log::info!("Sent account summary {}: {}", if subscribe.is_some() { "subscribe" } else { "cancel" }, sr_id);
-    }
-
-    pub(crate) fn send_news_subscribe(
-        &mut self,
-        con_id: i64,
-        instrument: InstrumentId,
-        providers: &str,
-        req_id: u32,
-        ccp_conn: &mut Option<Connection>,
-        hb: &mut HeartbeatState,
-    ) {
-        self.news_subscriptions.push((instrument, req_id));
-        if let Some(conn) = ccp_conn.as_mut() {
-            let req_id_str = req_id.to_string();
-            let con_id_str = con_id.to_string();
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                (fix::TAG_SENDING_TIME, &ts),
-                (263, "1"),
-                (146, "1"),
-                (262, &req_id_str),
-                (6008, &con_id_str),
-                (207, "NEWS"),
-                (167, "CS"),
-                (264, "292"),
-                (6472, providers),
-            ]);
-            hb.last_ccp_sent = Instant::now();
-            log::info!("Sent news subscribe: con_id={} req_id={} providers={}", con_id, req_id, providers);
-        }
-    }
-
-    pub(crate) fn send_news_unsubscribe(
-        &mut self,
-        instrument: InstrumentId,
-        ccp_conn: &mut Option<Connection>,
-        hb: &mut HeartbeatState,
-    ) {
-        let req_id = match self.news_subscriptions.iter().position(|(id, _)| *id == instrument) {
-            Some(pos) => {
-                let (_, rid) = self.news_subscriptions.remove(pos);
-                rid
-            }
-            None => return,
-        };
-        if let Some(conn) = ccp_conn.as_mut() {
-            let req_id_str = req_id.to_string();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-                (262, &req_id_str),
-                (263, "2"),
-            ]);
-            hb.last_ccp_sent = Instant::now();
-            log::info!("Sent news unsubscribe: instrument={:?} req_id={}", instrument, req_id);
-        }
     }
 
     pub(crate) fn send_secdef_request(&mut self, req_id: ReqId, con_id: i64, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {

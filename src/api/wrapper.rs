@@ -341,9 +341,9 @@ pub mod tests {
             self.events.push(format!("news_bulletin:{msg_id}:{msg_type}:{message}:{orig_exchange}"));
         }
         fn tick_news(
-            &mut self, _: i64, _: i64, provider_code: &str, article_id: &str, headline: &str, _: &str,
+            &mut self, ticker_id: i64, timestamp: i64, provider_code: &str, article_id: &str, headline: &str, extra_data: &str,
         ) {
-            self.events.push(format!("tick_news:{provider_code}:{article_id}:{headline}"));
+            self.events.push(format!("tick_news:{ticker_id}:{timestamp}:{provider_code}:{article_id}:{headline}:{extra_data}"));
         }
         fn histogram_data(&mut self, req_id: i64, items: &[(f64, i64)]) {
             self.events.push(format!("histogram_data:{req_id}:{}", items.len()));

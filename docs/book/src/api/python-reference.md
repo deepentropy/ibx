@@ -432,20 +432,6 @@ def req_completed_orders(api_only=false))
 
 ## Market Data
 
-#### `set_news_providers`
-
-Set news provider codes for per-contract news ticks (e.g. "BRFG*BRFUPDN").
-
-```python
-def set_news_providers(providers))
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `providers` | `str` | News provider list. |
-
----
-
 #### `req_mkt_data`
 
 Request market data for a contract.
@@ -1822,7 +1808,7 @@ Per-contract news tick.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `ticker_id` | `int` | Ticker/request ID. |
-| `time_stamp` | `int` | Timestamp string. |
+| `time_stamp` | `int` | Time of the headline, epoch milliseconds. |
 | `provider_code` | `str` | News provider code (e.g. `"BRFG"`). |
 | `article_id` | `str` | News article identifier. |
 | `headline` | `str` | News headline text. |

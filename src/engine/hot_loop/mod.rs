@@ -330,6 +330,12 @@ impl HotLoop {
             log::info!("No top-of-book entry for the NEWS contract {}", sub.symbol);
             return None;
         }
+        self.md_route(sub)
+    }
+
+    /// The farm of the route of a contract's market data (#445), for its
+    /// top of book and its news (ibx#458).
+    fn md_route(&mut self, sub: &farm::MdSubscribe) -> Option<pool::FarmId> {
         let Some(table) = self.farm.routing.as_ref() else { return Some(PRIMARY_MD) };
         let sec_type = if sub.sec_type.is_empty() { "STK" } else { sub.sec_type.as_str() };
         let exchange = farm::routing_exchange(&sub.exchange, sec_type);
@@ -454,14 +460,64 @@ impl HotLoop {
         Some(self.pool.ensure(&name, &host, FarmKind::Historical, Instant::now()))
     }
 
-    /// Send a top-of-book subscription to the farm of its route (#445).
+    /// Send a top-of-book subscription to the farm of its route (#445),
+    /// then the news entry of its request on the same farm (ibx#458). A
+    /// request whose news tick is refused ends with 10094 instead, nothing
+    /// sent, as the reference.
     fn route_md_subscribe(&mut self, sub: &farm::MdSubscribe) {
-        let Some(id) = self.md_target(sub) else { return };
+        let news = self.farm.news_waiting.iter().position(|(id, ..)| *id == sub.instrument)
+            .map(|pos| self.farm.news_waiting.remove(pos));
+        if let Some((_, _, Some(text))) = &news {
+            self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument: sub.instrument, text: text.clone() });
+            return;
+        }
+        // A NEWS contract has no top of book.
+        let news_contract = sub.sec_type.eq_ignore_ascii_case("NEWS");
+        if news_contract && news.is_none() {
+            log::info!("No top-of-book entry for the NEWS contract {}", sub.symbol);
+            return;
+        }
+        let Some(id) = self.md_route(sub) else { return };
         if let Some(f) = self.pool.get_mut(id) {
             f.note_request(Instant::now());
         }
-        let Some(sink) = farm_sink!(self, id) else { return };
-        self.farm.subscribe_top(sub, id, sink, &mut self.hb);
+        if !news_contract {
+            let Some(sink) = farm_sink!(self, id) else { return };
+            self.farm.subscribe_top(sub, id, sink, &mut self.hb);
+        }
+        if let Some((_, providers, None)) = news {
+            let msgs = self.farm.start_news(sub.instrument, sub.con_id, &sub.sec_type, &providers, id);
+            self.send_farm_messages(msgs);
+        }
+    }
+
+    /// The news tick of a request (ibx#458): with its top of book when that
+    /// waits (a lookup, a round lot, an aggregate group); else at once, on
+    /// the farm of the contract's route.
+    fn subscribe_news(&mut self, instrument: InstrumentId, con_id: i64, exchange: String, sec_type: String,
+                      providers: String, refusal: Option<String>) {
+        let waits = self.context.lot_parked.iter().chain(&self.context.lot_ready).chain(&self.context.md_resolved)
+            .chain(self.context.md_lookups.iter().map(|(_, s, _)| s))
+            .any(|s| s.instrument == instrument);
+        if waits {
+            self.farm.news_waiting.retain(|(id, ..)| *id != instrument);
+            self.farm.news_waiting.push((instrument, providers, refusal));
+            return;
+        }
+        if let Some(text) = refusal {
+            self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument, text });
+            return;
+        }
+        let sub = farm::MdSubscribe {
+            con_id, symbol: String::new(), exchange, sec_type, last_trade_date: String::new(), strike: 0.0,
+            right: String::new(), multiplier: String::new(), instrument, mode_9887: 0, snapshot: false,
+        };
+        let Some(id) = self.md_route(&sub) else { return };
+        if let Some(f) = self.pool.get_mut(id) {
+            f.note_request(Instant::now());
+        }
+        let msgs = self.farm.start_news(instrument, con_id, &sub.sec_type, &providers, id);
+        self.send_farm_messages(msgs);
     }
 
     /// Cancel the top of book of an instrument on each farm it went to
@@ -479,6 +535,10 @@ impl HotLoop {
                 }
             }
         }
+        // The news entry of the request goes with it, after its top of
+        // book, as the reference's cancels (ibx#458).
+        let msgs = self.farm.stop_news(instrument);
+        self.send_farm_messages(msgs);
     }
 
     /// The server tag cleaner (#292), as the reference runs it every 60 s:
@@ -736,9 +796,6 @@ impl HotLoop {
         // A stream waiting for its cancel has no client: it does not hold
         // the slot.
         if self.hmds.tbt_subscriptions.iter().any(|s| s.instrument == instrument && s.is_live()) {
-            return;
-        }
-        if self.ccp.news_subscriptions.iter().any(|(id, _)| *id == instrument) {
             return;
         }
         if self.context.market.unregister(instrument).is_some() {
@@ -1084,17 +1141,8 @@ impl HotLoop {
                     self.hmds.send_tbt_unsubscribe(instrument, Instant::now());
                     self.try_reclaim_instrument(instrument);
                 }
-                ControlCommand::SubscribeNews { con_id, symbol, providers, reply_tx } => {
-                    if let Some(id) = self.register_or_reject(con_id, symbol, "", "", &reply_tx) {
-                        // Allocate req_id from farm's counter (shared ID space)
-                        let req_id = self.farm.next_md_req_id;
-                        self.farm.next_md_req_id += 1;
-                        self.ccp.send_news_subscribe(con_id, id, &providers, req_id, &mut self.ccp_conn, &mut self.hb);
-                    }
-                }
-                ControlCommand::UnsubscribeNews { instrument } => {
-                    self.ccp.send_news_unsubscribe(instrument, &mut self.ccp_conn, &mut self.hb);
-                    self.try_reclaim_instrument(instrument);
+                ControlCommand::SubscribeNews { instrument, con_id, exchange, sec_type, providers, refusal } => {
+                    self.subscribe_news(instrument, con_id, exchange, sec_type, providers, refusal);
                 }
                 ControlCommand::UpdateParam { key, value } => {
                     let _ = (key, value);
@@ -1375,12 +1423,9 @@ impl HotLoop {
                         sub.cancel_at = Some(now);
                     }
                     self.send_due_tbt_cancels(now);
-                    // Unsubscribe all news subscriptions before stopping
-                    let news_instruments: Vec<InstrumentId> = self.ccp.news_subscriptions
-                        .iter().map(|(id, _)| *id).collect();
-                    for instrument in news_instruments {
-                        self.ccp.send_news_unsubscribe(instrument, &mut self.ccp_conn, &mut self.hb);
-                    }
+                    // Cancel the news entries left (NEWS contracts) before stopping
+                    let msgs = self.farm.stop_all_news();
+                    self.send_farm_messages(msgs);
                     self.running = false;
                     self.shared.set_connection_lost();
                     emit(&self.event_tx, Event::Disconnected);
@@ -1567,7 +1612,8 @@ impl HotLoop {
             &mut self.context, &mut self.hb,
         );
         self.resend_unsent_subscriptions();
-        let msgs = self.farm.resend_depth(PRIMARY_MD);
+        let mut msgs = self.farm.resend_depth(PRIMARY_MD);
+        msgs.extend(self.farm.resend_news(PRIMARY_MD));
         self.send_farm_messages(msgs);
     }
 
@@ -1620,6 +1666,7 @@ impl HotLoop {
         if kind == FarmKind::MarketData {
             self.farm.farm_lost(id, &mut self.context);
             self.farm.depth_farm_lost(id);
+            self.farm.news_farm_lost(id);
         }
         let event = self.pool.on_lost(id, wanted, Instant::now());
         self.pool_notice(&event);
@@ -1657,7 +1704,8 @@ impl HotLoop {
                     self.pool_notice(&event);
                     if self.pool.get(id).is_some_and(|f| f.kind == FarmKind::MarketData) {
                         self.resend_unsent_subscriptions();
-                        let msgs = self.farm.resend_depth(id);
+                        let mut msgs = self.farm.resend_depth(id);
+                        msgs.extend(self.farm.resend_news(id));
                         self.send_farm_messages(msgs);
                     }
                 }
@@ -3816,7 +3864,7 @@ mod tests {
         assert_eq!(engine.hmds.tbt_subscriptions.len(), 1, "the refused query is gone, the other stays");
     }
 
-    // ibx#291: dropping the tick-by-tick or news consumer of a contract
+    // ibx#291: dropping the tick-by-tick consumer of a contract
     // keeps the slot while its market data runs, also while the farm is
     // down; the market data cancel then frees it.
     #[test]
@@ -3827,12 +3875,10 @@ mod tests {
         engine.set_control_rx(rx);
         tx.send(subscribe_cmd(265598, "STK")).unwrap();
         tx.send(ControlCommand::SubscribeTbt { con_id: 265598, symbol: String::new(), exchange: "SMART".into(), sec_type: "STK".into(), tbt_type: crate::types::TbtType::BidAsk, number_of_ticks: 0, ignore_size: false, reply_tx: None }).unwrap();
-        tx.send(ControlCommand::SubscribeNews { con_id: 265598, symbol: String::new(), providers: String::new(), reply_tx: None }).unwrap();
         engine.poll_once();
         let id = engine.context.market.instrument_by_con_id(265598).unwrap();
 
         tx.send(ControlCommand::UnsubscribeTbt { instrument: id }).unwrap();
-        tx.send(ControlCommand::UnsubscribeNews { instrument: id }).unwrap();
         engine.poll_once();
         assert_eq!(engine.context.market.con_id(id), Some(265598));
 
@@ -4284,32 +4330,240 @@ mod tag_cleaner_tests {
         m.unregister(b);
         assert_eq!(m.instrument_by_server_tag(1098), None);
     }
+}
 
-    // #292: a news tick for a tag of no known request is dropped, never
-    // given to slot 0.
-    #[test]
-    fn news_tick_of_an_unknown_tag_is_dropped() {
+#[cfg(test)]
+mod news_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use crate::bridge::SharedState;
+
+    const ALL: &str = "BRFG,BRFUPDN,DJ-N,DJ-RTA,DJ-RTE,DJ-RTG,DJ-RTPRO,DJNL";
+
+    fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    /// The compressed messages the engine wrote, without the header,
+    /// sequence and time tags.
+    fn sent(server: &mut std::net::TcpStream) -> Vec<String> {
+        use std::io::Read;
+        server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = server.read(&mut chunk) {
+            if n == 0 { break; }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let mut out = Vec::new();
+        let mut rest = &buf[..];
+        while let Some(len) = crate::protocol::fixcomp::fixcomp_length(rest) {
+            for m in crate::protocol::fixcomp::fixcomp_decompress(&rest[..len]).unwrap() {
+                let text = String::from_utf8_lossy(&m).replace('\x01', "|");
+                out.push(text.split('|').filter(|f| !f.is_empty())
+                    .filter(|f| !["8=", "9=", "34=", "52=", "10="].iter().any(|p| f.starts_with(p)))
+                    .map(|f| format!("{f}|")).collect());
+            }
+            rest = &rest[len..];
+        }
+        out
+    }
+
+    fn engine() -> (HotLoop, Arc<SharedState>, std::net::TcpStream, Sender<ControlCommand>) {
         let shared = Arc::new(SharedState::new());
         let mut engine = HotLoop::new(shared.clone(), None, None);
-        engine.context.market.register(265598);
-        let mut body = vec![0x1E, 0x90, 0, 0, 0x30, 0x39, 0, 0, 0, 0, 0, 1];
-        body.extend_from_slice(&3u32.to_be_bytes());
-        body.extend_from_slice(b"BRF");
-        body.extend_from_slice(&[0; 4]);
-        body.extend_from_slice(&2u16.to_be_bytes());
-        body.extend_from_slice(b"a1");
-        body.extend_from_slice(&[0; 8]);
-        body.extend_from_slice(&1u32.to_be_bytes());
-        body.extend_from_slice(b"h");
-        let mut msg = b"8=O\x0135=G\x01".to_vec();
-        msg.extend_from_slice(&body);
-        engine.inject_farm_message(&msg);
-        assert!(shared.market.drain_tick_news().is_empty());
-        // The same tick once the tag is known is delivered.
+        let (c, server) = socket_pair();
+        engine.farm_conn = Some(Connection::new_raw(c).unwrap());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        engine.set_control_rx(rx);
+        (engine, shared, server, tx)
+    }
+
+    fn aapl(tx: &Sender<ControlCommand>, engine: &mut HotLoop, providers: &str) -> InstrumentId {
+        tx.send(ControlCommand::Subscribe {
+            con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            mode_9887: 0, snapshot: false, reply_tx: None,
+        }).unwrap();
+        engine.poll_once();
         let id = engine.context.market.instrument_by_con_id(265598).unwrap();
-        engine.context.market.register_trade_tag(0, 12345, id, 0.01);
-        engine.inject_farm_message(&msg);
-        assert_eq!(shared.market.drain_tick_news().len(), 1);
+        tx.send(ControlCommand::SubscribeNews {
+            instrument: id, con_id: 265598, exchange: "SMART".into(), sec_type: "STK".into(),
+            providers: providers.into(), refusal: None,
+        }).unwrap();
+        engine.poll_once();
+        id
+    }
+
+    /// The inbound farm frames of a recorded reference scenario, from `from_seq` on.
+    fn fixture_farm_frames(scenario: &str, from_seq: u64) -> Vec<Vec<u8>> {
+        use base64::Engine as _;
+        let path = format!("{}/tests/fixtures/gw1040/scenarios/{}", env!("CARGO_MANIFEST_DIR"), scenario);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut out = Vec::new();
+        for line in text.lines().skip(1) {
+            let rec: serde_json::Value = serde_json::from_str(line).unwrap();
+            if rec["leg"] != "fix_in" || rec["conn"] != "usfarm" || rec["seq"].as_u64().unwrap() < from_seq { continue; }
+            out.push(base64::engine::general_purpose::STANDARD.decode(rec["raw_b64"].as_str().unwrap()).unwrap());
+        }
+        out
+    }
+
+    // ibx#458 (captured 02/10/2026): the news entry follows the top of book
+    // on the contract's farm, in its own message, with the provider key,
+    // the streaming-client mark and the API flag; its cancel follows the
+    // top-of-book cancel, without the mark.
+    #[test]
+    fn news_entry_on_the_farm_and_its_cancel() {
+        let (mut engine, _shared, mut farm_side, tx) = engine();
+        let id = aapl(&tx, &mut engine, ALL);
+        let out = sent(&mut farm_side);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out[0].contains("|264=442|") && out[0].contains("|262=1|") && out[0].contains("|262=2|"), "{}", out[0]);
+        // Captured: 35=V|263=1|146=1|262=35|6008=265598|207=NEWS|167=CS|264=292|6472=...|6088=Socket|9830=1
+        assert_eq!(out[1], format!("35=V|263=1|146=1|262=3|6008=265598|207=NEWS|167=CS|264=292|6472={ALL}|6088=Socket|9830=1|"));
+
+        tx.send(ControlCommand::Unsubscribe { instrument: id }).unwrap();
+        engine.poll_once();
+        let out = sent(&mut farm_side);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out[0].starts_with("35=V|263=2|146=2|"), "{}", out[0]);
+        // Captured: 35=V|263=2|146=2|262=38|...|9830=1|262=35|6008=265598|207=NEWS|167=CS|264=292|6472=...|9830=1
+        assert_eq!(out[1], format!("35=V|263=2|146=1|262=3|6008=265598|207=NEWS|167=CS|264=292|6472={ALL}|9830=1|"));
+        assert!(engine.farm.news.is_empty());
+        assert_eq!(engine.context.market.con_id(id), None, "the slot is freed");
+    }
+
+    // ibx#458: no provider key (no news source), no 6472.
+    #[test]
+    fn empty_provider_key_is_not_written() {
+        let (mut engine, _shared, mut farm_side, tx) = engine();
+        aapl(&tx, &mut engine, "");
+        let out = sent(&mut farm_side);
+        assert_eq!(out[1], "35=V|263=1|146=1|262=3|6008=265598|207=NEWS|167=CS|264=292|6088=Socket|9830=1|");
+    }
+
+    // ibx#458, golden frames of b1_458_news_dup (02/10/2026): the ack of the
+    // news entry binds its server tag; the empty frames give nothing; the
+    // headlines reach tickNews with the time in milliseconds, the headline
+    // without its {...} part and that part as extra data. An article already
+    // given is not given again; a tag of no news entry is dropped (#292).
+    #[test]
+    fn captured_news_frames_reach_tick_news() {
+        let (mut engine, shared, _farm_side, tx) = engine();
+        let id = aapl(&tx, &mut engine, ALL);
+        // A headline before the ack: its tag is not known.
+        let frames = fixture_farm_frames("20261002/b1_458_news_dup.jsonl", 15490);
+        let g = |seq_frame: &[u8]| seq_frame.windows(6).any(|w| w == b"\x0135=G\x01");
+        let g_frames: Vec<&Vec<u8>> = frames.iter().filter(|f| g(f)).collect();
+        // 15490, 15497 (empty), 15503 (AAPL, 5 entries), then the MSFT ones.
+        engine.inject_farm_message(g_frames[2]);
+        assert!(shared.market.drain_tick_news().is_empty(), "no news entry has this tag yet");
+
+        // Captured ack of the news entry: 25064,35,0.01,0,0,9c,,0,1 (our id is 3).
+        engine.inject_farm_message(b"8=O\x019=0045\x0135=Q\x0125064,3,0.01,0,0,9c,,0,1\x018349=7E2367C2\x01");
+        assert!(shared.market.drain_tick_req_params().is_empty(), "a news ack gives no request parameters");
+        engine.inject_farm_message(g_frames[0]);
+        engine.inject_farm_message(g_frames[1]);
+        assert!(shared.market.drain_tick_news().is_empty(), "empty frames");
+        engine.inject_farm_message(g_frames[2]);
+        let news: Vec<(InstrumentId, i64, String, String, String, String)> = shared.market.drain_tick_news().into_iter()
+            .map(|n| (n.instrument, n.timestamp, n.provider_code, n.article_id, n.headline, n.extra_data)).collect();
+        let row = |t: i64, p: &str, a: &str, h: &str, x: &str| (id, t, p.to_string(), a.to_string(), h.to_string(), x.to_string());
+        let math = "The New Math of AI: Are Those Trillion-Dollar Numbers for Real? -- Barrons.com";
+        // The client got the first four (events.jsonl, req 9580).
+        assert_eq!(news[..4], [
+            row(1790893800000, "DJ-RTPRO", "DJ-RTPRO$1f790db1", "VP Newstead Sells 2,399 Of Apple Inc >AAPL", "A:800015:L:en"),
+            row(1790920800000, "DJ-N", "DJ-N$1f798bd2", math, "L:en:A:800015"),
+            row(1790920800000, "DJ-RTG", "DJ-RTG$1f798bd2", math, "L:en:A:800015"),
+            row(1790920800000, "DJ-RTPRO", "DJ-RTPRO$1f798bd2", math, "L:en:A:800015"),
+        ]);
+        // The reference held back the fifth (Chinese and English story);
+        // its rule is not known (ibx#458).
+        assert_eq!(news.len(), 5);
+        assert_eq!(news[4].3, "DJ-N$1f79997f");
+        assert_eq!(news[4].4, "Apple Bids to Put China in Its Fold -- WSJ");
+
+        // The same articles again (the reference sent AMZN repeats with
+        // the first number 3, never given again): nothing.
+        engine.inject_farm_message(g_frames[2]);
+        assert!(shared.market.drain_tick_news().is_empty());
+
+        // The MSFT frame's tag (25065) has no news entry here.
+        engine.inject_farm_message(g_frames[5]);
+        assert!(shared.market.drain_tick_news().is_empty());
+    }
+
+    // ibx#458: a request without a conId has its news tick checked once the
+    // lookup found the contract; a refused one ends with 10094 and nothing
+    // goes to the farm. An accepted one goes with its top of book.
+    #[test]
+    fn news_tick_waits_for_the_lookup() {
+        use crate::control::contracts::tests::pipe_msg;
+        let (mut engine, shared, mut farm_side, tx) = engine();
+        let (c2, mut ccp_side) = socket_pair();
+        engine.ccp_conn = Some(Connection::new_raw(c2).unwrap());
+        let mut ids = Vec::new();
+        for (symbol, refusal) in [("NVDA", Some("API News error:Source code unchecked in API news Settings: XYZ")), ("MSFT", None)] {
+            let (reply, answer) = crossbeam_channel::bounded(1);
+            tx.send(ControlCommand::SubscribeBySymbol {
+                symbol: symbol.into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(),
+                filters: Default::default(), mode_9887: 0, snapshot: false, reply_tx: Some(reply),
+            }).unwrap();
+            engine.poll_once();
+            let id = answer.recv().unwrap().unwrap();
+            tx.send(ControlCommand::SubscribeNews {
+                instrument: id, con_id: 0, exchange: "SMART".into(), sec_type: "STK".into(),
+                providers: "DJ-N".into(), refusal: refusal.map(String::from),
+            }).unwrap();
+            engine.poll_once();
+            ids.push(id);
+        }
+        assert!(shared.market.drain_md_rejects().is_empty(), "not before the contract is known");
+        let asked: Vec<String> = {
+            use std::io::Read;
+            ccp_side.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = ccp_side.read(&mut chunk) { if n == 0 { break; } buf.extend_from_slice(&chunk[..n]); }
+            String::from_utf8_lossy(&buf).replace('\x01', "|").split("|320=").skip(1)
+                .map(|m| m.split('|').next().unwrap().to_string()).collect()
+        };
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        let reply = |id: &str, body: &str| pipe_msg(&format!("35=d|43=N|320={id}|322=*|323=4|{body}"));
+        let mut context = std::mem::replace(&mut engine.context, Context::new());
+        assert!(farm::md_contract_reply(&mut context, &shared, &asked[0], &reply(&asked[0], "55=NVDA|167=STK|207=BEST|6008=4815747|15=USD|")));
+        assert!(farm::md_contract_reply(&mut context, &shared, &asked[1], &reply(&asked[1], "55=MSFT|167=STK|207=BEST|6008=272093|15=USD|")));
+        engine.context = context;
+        engine.send_md_resolved();
+        assert_eq!(shared.market.drain_md_rejects(), [crate::bridge::MdReject::NewsRefused {
+            instrument: ids[0], text: "API News error:Source code unchecked in API news Settings: XYZ".into() }]);
+        let out = sent(&mut farm_side);
+        assert_eq!(out.len(), 2, "only MSFT: {out:?}");
+        assert!(out[0].contains("|6008=272093|") && out[0].contains("|264=442|"), "{}", out[0]);
+        assert!(out[1].contains("|6008=272093|207=NEWS|167=CS|264=292|6472=DJ-N|6088=Socket|9830=1|"), "{}", out[1]);
+    }
+
+    // ibx#458: the news entry of a lost farm goes out again, with a new id,
+    // when the farm is back; its old tag no longer binds.
+    #[test]
+    fn news_entry_is_sent_again_after_a_farm_loss() {
+        let (mut engine, shared, mut farm_side, tx) = engine();
+        aapl(&tx, &mut engine, "BRFG");
+        let _ = sent(&mut farm_side);
+        engine.inject_farm_message(b"8=O\x0135=Q\x0125064,3,0.01,0,0,9c,,0,1\x01");
+        assert_eq!(engine.farm.news[0].tag, Some(25064));
+        engine.farm.handle_disconnect(&mut engine.context, &None);
+        assert!(!engine.farm.news[0].live && engine.farm.news[0].tag.is_none());
+        let (c, mut farm_side) = socket_pair();
+        engine.reconnect_farm(Connection::new_raw(c).unwrap());
+        let out = sent(&mut farm_side);
+        assert!(out.iter().any(|m| m == "35=V|263=1|146=1|262=6|6008=265598|207=NEWS|167=CS|264=292|6472=BRFG|6088=Socket|9830=1|"), "{out:?}");
+        assert!(shared.market.drain_tick_news().is_empty());
     }
 }
 

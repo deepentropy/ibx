@@ -215,10 +215,8 @@ impl EClient {
             }
             wrapper.error(req_id, code, text, "");
             if gone {
-                let (instrument, needs_news) = self.core.unregister_mkt_data(req_id);
-                if let Some(instrument) = instrument {
+                if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
                     let _ = self.control_tx.send(ControlCommand::Unsubscribe { instrument });
-                    if needs_news { let _ = self.control_tx.send(ControlCommand::UnsubscribeNews { instrument }); }
                 }
             }
         }
@@ -332,8 +330,8 @@ impl EClient {
         for news in self.shared.market.drain_tick_news() {
             let req_id = self.core.req_id_for_instrument(news.instrument);
             wrapper.tick_news(
-                req_id, news.timestamp as i64,
-                &news.provider_code, &news.article_id, &news.headline, "",
+                req_id, news.timestamp,
+                &news.provider_code, &news.article_id, &news.headline, &news.extra_data,
             );
         }
 
