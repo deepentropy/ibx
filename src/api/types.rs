@@ -714,7 +714,7 @@ pub struct TickAttrib {
 // ── TickAttribLast ──
 
 /// ibapi-compatible TickAttribLast for tick_by_tick_all_last callback.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TickAttribLast {
     pub past_limit: bool,
     pub unreported: bool,
@@ -723,7 +723,7 @@ pub struct TickAttribLast {
 // ── TickAttribBidAsk ──
 
 /// ibapi-compatible TickAttribBidAsk for tick_by_tick_bid_ask callback.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TickAttribBidAsk {
     pub bid_past_low: bool,
     pub ask_past_high: bool,

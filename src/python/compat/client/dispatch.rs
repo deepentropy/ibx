@@ -571,27 +571,31 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "error", (req_id, code as i64, msg.as_str(), ""));
         }
 
-        // Drain historical data -> historicalData + historicalDataEnd / historicalDataUpdate
+        // Drain historical data -> historicalData + historicalDataEnd
         let hist_data = shared.reference.drain_historical_data();
         for (req_id, response) in hist_data {
-            let is_update = self.core.hist_initial_complete.lock().unwrap().contains(&req_id);
             for bar in &response.bars {
                 let bar_obj = BarData::new(
                     bar.time.clone(), bar.open, bar.high, bar.low, bar.close,
-                    bar.volume, bar.wap, bar.count as i32,
+                    bar.volume, bar.wap, bar.count,
                     response.timezone.clone(),
                 );
                 let bar_py = Py::new(py, bar_obj)?.into_any();
-                if is_update {
-                    call_wrapper!(self.wrapper, py, "historical_data_update", (req_id, &bar_py));
-                } else {
-                    call_wrapper!(self.wrapper, py, "historical_data", (req_id, &bar_py));
-                }
+                call_wrapper!(self.wrapper, py, "historical_data", (req_id, &bar_py));
             }
-            if response.is_complete && !is_update {
-                self.core.hist_initial_complete.lock().unwrap().insert(req_id);
-                call_wrapper!(self.wrapper, py, "historical_data_end", (req_id, "", ""));
+            if response.is_complete {
+                call_wrapper!(self.wrapper, py, "historical_data_end", (req_id, response.start.as_str(), response.end.as_str()));
             }
+        }
+
+        // keepUpToDate: the whole current bar each time (ibx#429).
+        for (req_id, bar) in shared.reference.drain_historical_updates() {
+            let bar_obj = BarData::new(
+                bar.time, bar.open, bar.high, bar.low, bar.close,
+                bar.volume, bar.wap, bar.count, String::new(),
+            );
+            let bar_py = Py::new(py, bar_obj)?.into_any();
+            call_wrapper!(self.wrapper, py, "historical_data_update", (req_id, &bar_py));
         }
 
         // Drain head timestamps -> headTimestamp
@@ -722,69 +726,57 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "histogram_data", (req_id, py_list));
         }
 
-        // Drain historical ticks
+        // Drain historical ticks -> the official tick objects (ibx#432)
         let hist_ticks = shared.reference.drain_historical_ticks();
         for (req_id, data, _what, done) in hist_ticks {
+            use super::super::tick_types::{HistoricalTick, HistoricalTickBidAsk, HistoricalTickLast, TickAttribBidAsk, TickAttribLast};
             match data {
                 crate::types::HistoricalTickData::Midpoint(ticks) => {
-                    let py_ticks: Vec<Bound<'_, pyo3::types::PyTuple>> = ticks.iter().map(|t| {
-                        pyo3::types::PyTuple::new(py, &[
-                            t.time.as_str().into_pyobject(py).unwrap().into_any(),
-                            t.price.into_pyobject(py).unwrap().into_any(),
-                        ]).unwrap()
-                    }).collect();
-                    let list = pyo3::types::PyList::new(py, py_ticks)?;
+                    let objs = ticks.iter().map(|t| Py::new(py, HistoricalTick { time: t.time, price: t.price, size: t.size }))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    let list = pyo3::types::PyList::new(py, objs)?;
                     call_wrapper!(self.wrapper, py, "historical_ticks", (req_id, list, done));
                 }
                 crate::types::HistoricalTickData::Last(ticks) => {
-                    let py_ticks: Vec<Bound<'_, pyo3::types::PyTuple>> = ticks.iter().map(|t| {
-                        pyo3::types::PyTuple::new(py, &[
-                            t.time.as_str().into_pyobject(py).unwrap().into_any(),
-                            t.price.into_pyobject(py).unwrap().into_any(),
-                            t.size.into_pyobject(py).unwrap().into_any(),
-                            t.exchange.as_str().into_pyobject(py).unwrap().into_any(),
-                            t.special_conditions.as_str().into_pyobject(py).unwrap().into_any(),
-                        ]).unwrap()
-                    }).collect();
-                    let list = pyo3::types::PyList::new(py, py_ticks)?;
+                    let objs = ticks.iter().map(|t| {
+                        let attrib = Py::new(py, TickAttribLast {
+                            past_limit: t.tick_attrib_last.past_limit,
+                            unreported: t.tick_attrib_last.unreported,
+                        })?;
+                        Py::new(py, HistoricalTickLast {
+                            time: t.time, tick_attrib_last: attrib, price: t.price, size: t.size,
+                            exchange: t.exchange.clone(), special_conditions: t.special_conditions.clone(),
+                        })
+                    }).collect::<PyResult<Vec<_>>>()?;
+                    let list = pyo3::types::PyList::new(py, objs)?;
                     call_wrapper!(self.wrapper, py, "historical_ticks_last", (req_id, list, done));
                 }
                 crate::types::HistoricalTickData::BidAsk(ticks) => {
-                    let py_ticks: Vec<Bound<'_, pyo3::types::PyTuple>> = ticks.iter().map(|t| {
-                        pyo3::types::PyTuple::new(py, &[
-                            t.time.as_str().into_pyobject(py).unwrap().into_any(),
-                            t.bid_price.into_pyobject(py).unwrap().into_any(),
-                            t.ask_price.into_pyobject(py).unwrap().into_any(),
-                            t.bid_size.into_pyobject(py).unwrap().into_any(),
-                            t.ask_size.into_pyobject(py).unwrap().into_any(),
-                        ]).unwrap()
-                    }).collect();
-                    let list = pyo3::types::PyList::new(py, py_ticks)?;
+                    let objs = ticks.iter().map(|t| {
+                        let attrib = Py::new(py, TickAttribBidAsk {
+                            bid_past_low: t.tick_attrib_bid_ask.bid_past_low,
+                            ask_past_high: t.tick_attrib_bid_ask.ask_past_high,
+                        })?;
+                        Py::new(py, HistoricalTickBidAsk {
+                            time: t.time, tick_attrib_bid_ask: attrib, price_bid: t.price_bid, price_ask: t.price_ask,
+                            size_bid: t.size_bid, size_ask: t.size_ask,
+                        })
+                    }).collect::<PyResult<Vec<_>>>()?;
+                    let list = pyo3::types::PyList::new(py, objs)?;
                     call_wrapper!(self.wrapper, py, "historical_ticks_bid_ask", (req_id, list, done));
                 }
             }
         }
 
-        // Drain real-time bars -> real_time_bar or historical_data_update (keepUpToDate)
+        // Drain real-time bars -> real_time_bar
         let rtbars = shared.market.drain_real_time_bars();
         for (req_id, bar) in rtbars {
-            if self.core.hist_initial_complete.lock().unwrap().contains(&req_id) {
-                // keepUpToDate bar → dispatch as historical_data_update
-                let bar_obj = BarData::new(
-                    format!("{}", bar.timestamp), bar.open, bar.high, bar.low, bar.close,
-                    bar.volume as i64, bar.wap, bar.count,
-                    String::new(), // streaming bars carry no timezone (ibx#234)
-                );
-                let bar_py = Py::new(py, bar_obj)?.into_any();
-                call_wrapper!(self.wrapper, py, "historical_data_update", (req_id, &bar_py));
-            } else {
-                call_wrapper!(self.wrapper, py, "real_time_bar", (
-                    req_id,
-                    bar.timestamp as i64,
-                    bar.open, bar.high, bar.low, bar.close,
-                    bar.volume, bar.wap, bar.count,
-                ));
-            }
+            call_wrapper!(self.wrapper, py, "real_time_bar", (
+                req_id,
+                bar.timestamp as i64,
+                bar.open, bar.high, bar.low, bar.close,
+                bar.volume, bar.wap, bar.count,
+            ));
         }
 
         // Drain historical schedules -> historical_schedule

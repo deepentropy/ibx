@@ -290,6 +290,9 @@ pub mod tests {
         fn historical_data(&mut self, req_id: i64, bar: &BarData) {
             self.events.push(format!("historical_data:{req_id}:{}", bar.date));
         }
+        fn historical_data_update(&mut self, req_id: i64, bar: &BarData) {
+            self.events.push(format!("historical_data_update:{req_id}:{}:{}:{}:{}", bar.date, bar.close, bar.volume, bar.bar_count));
+        }
         fn historical_data_end(&mut self, req_id: i64, _: &str, _: &str) {
             self.events.push(format!("historical_data_end:{req_id}"));
         }

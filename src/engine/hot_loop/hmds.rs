@@ -77,9 +77,20 @@ pub(crate) struct HmdsState {
     /// last one (ibx#433).
     pub(crate) pending_histogram: Vec<PendingHistogram>,
     pub(crate) pending_schedule: Vec<(String, ReqId)>,
+    /// Historical ticks queries waiting for their last frame: window id,
+    /// request id, data name.
     pub(crate) pending_ticks: Vec<(String, ReqId, String)>,
-    /// Real-time bar subscriptions, and the keepUpToDate queries whose
-    /// ticker id came: 5-second bars are routed by ticker id.
+    /// formatDate of the head timestamp requests waiting (ibx#431).
+    pub(crate) head_ts_format: std::collections::HashMap<ReqId, i32>,
+    /// How the bars of each bar request are written (ibx#431), until its
+    /// answer ended (keepUpToDate: until its cancel).
+    pub(crate) bar_requests: Vec<BarRequestInfo>,
+    /// keepUpToDate requests and their bar series (ibx#429).
+    pub(crate) live_bars: Vec<LiveBars>,
+    /// The last 5-second bar of each farm and ticker id: a keepUpToDate
+    /// request whose history ends after it takes it then (ibx#429).
+    pub(crate) router_bars: Vec<(super::pool::FarmId, u32, u32, crate::types::RealTimeBar)>,
+    /// Real-time bar subscriptions: 5-second bars are routed by ticker id.
     pub(crate) rtbar_subs: Vec<RtBarSub>,
     /// Most real-time bar requests at once (ibx#454), from the logon.
     pub(crate) max_real_time_requests: u32,
@@ -196,8 +207,43 @@ pub(crate) struct RtBarSub {
     /// Ticker id given by the server's acknowledgement.
     pub(crate) ticker_id: Option<u32>,
     pub(crate) min_tick: f64,
-    /// A keepUpToDate bar query, not a real-time bar request.
-    pub(crate) keep_up_to_date: bool,
+}
+
+/// How the bars of a bar request are written (ibx#431): formatDate, bars
+/// shorter than a day or not, the instrument zone (the contract's trading
+/// hours zone when known, else the reply's zone), and the start and end
+/// of the request in Unix seconds for historicalDataEnd.
+#[derive(Debug, Clone)]
+pub(crate) struct BarRequestInfo {
+    pub(crate) req_id: ReqId,
+    pub(crate) format_date: i32,
+    pub(crate) intraday: bool,
+    pub(crate) zone: Option<String>,
+    pub(crate) start: i64,
+    pub(crate) end: i64,
+}
+
+/// A keepUpToDate bar request (ibx#429): its query, the 5-second router
+/// the server gave it, and its bar series, into which every 5-second bar
+/// is merged once the history came.
+#[derive(Debug, Clone)]
+pub(crate) struct LiveBars {
+    pub(crate) req_id: ReqId,
+    /// Window id and whole id of the query.
+    pub(crate) window_id: String,
+    pub(crate) query_id: String,
+    /// The farm the query went to; the router's ticker id is on it.
+    pub(crate) farm: super::pool::FarmId,
+    pub(crate) ticker_id: Option<u32>,
+    pub(crate) min_tick: f64,
+    pub(crate) bar_size: crate::control::historical::BarSize,
+    /// Trades: volumes and counts are summed; other data keep them unset.
+    pub(crate) trades: bool,
+    pub(crate) series: Vec<crate::control::historical::SeriesBar>,
+    pub(crate) sessions: Vec<(i64, i64)>,
+    pub(crate) history_done: bool,
+    /// Zone of the reply, for the dates of bars of a day or longer.
+    pub(crate) reply_zone: String,
 }
 
 /// Most real-time bar requests when the logon gives no limit, as the
@@ -281,6 +327,25 @@ fn historical_service_error(server_text: &str) -> String {
     crate::control::historical::join_error_text("Historical Market Data Service error message", server_text)
 }
 
+impl BarRequestInfo {
+    /// The instrument zone: the contract's when known, else the reply's,
+    /// else the machine zone.
+    pub(crate) fn zone_or(&self, reply_zone: &str) -> String {
+        match &self.zone {
+            Some(z) => z.clone(),
+            None if !reply_zone.is_empty() => reply_zone.to_string(),
+            None => crate::gateway::machine_time_zone(),
+        }
+    }
+
+    /// A bar time as the reference writes it (ibx#431).
+    pub(crate) fn bar_time(&self, secs: i64, reply_zone: &str) -> String {
+        let zone = self.zone_or(reply_zone);
+        let day_zone = if reply_zone.is_empty() { zone.as_str() } else { reply_zone };
+        crate::control::historical::bar_time(secs, self.format_date, self.intraday, &zone, day_zone)
+    }
+}
+
 impl HmdsState {
     pub(crate) fn new() -> Self {
         Self {
@@ -307,6 +372,10 @@ impl HmdsState {
             pending_histogram: Vec::new(),
             pending_schedule: Vec::new(),
             pending_ticks: Vec::new(),
+            head_ts_format: std::collections::HashMap::new(),
+            bar_requests: Vec::new(),
+            live_bars: Vec::new(),
+            router_bars: Vec::new(),
             rtbar_subs: Vec::new(),
             max_real_time_requests: DEFAULT_MAX_REAL_TIME_REQUESTS,
             keep_up_to_date_reqs: std::collections::HashSet::new(),
@@ -322,7 +391,7 @@ impl HmdsState {
     /// tick-by-tick, scanner): no historical farm is closed as dormant
     /// while one exists, as in the reference (#445).
     pub(crate) fn has_live_listener(&self) -> bool {
-        !self.rtbar_subs.is_empty() || !self.tbt_subscriptions.is_empty() || !self.pending_scanner.is_empty()
+        !self.rtbar_subs.is_empty() || !self.live_bars.is_empty() || !self.tbt_subscriptions.is_empty() || !self.pending_scanner.is_empty()
     }
 
     pub(crate) fn poll(
@@ -465,7 +534,7 @@ impl HmdsState {
                         xml_tag.len(),
                         &xml_tag[..xml_tag.len().min(200)],
                     );
-                    if let Some(resp) = crate::control::historical::parse_bar_response(xml_tag) {
+                    if let Some(mut resp) = crate::control::historical::parse_bar_response(xml_tag) {
                         let wid = crate::control::historical::window_id(&resp.query_id);
                         if let Some(pos) = self.pending_historical.iter().position(|(qid, _, _)| qid == wid) {
                             let (_, req_id, _) = self.pending_historical[pos];
@@ -487,6 +556,17 @@ impl HmdsState {
                                 "HMDS W matched: req_id={} query_id={:?} eoq={} bars={}",
                                 req_id, resp.query_id, is_complete, resp.bars.len()
                             );
+                            // A live request keeps its series (ibx#429).
+                            if let Some(live) = self.live_bars.iter_mut().find(|l| l.req_id == req_id) {
+                                let (bars, sessions) = crate::control::historical::parse_series(xml_tag);
+                                live.series.extend(bars);
+                                live.sessions.extend(sessions);
+                                live.history_done |= is_complete;
+                                if live.reply_zone.is_empty() {
+                                    live.reply_zone = resp.timezone.clone();
+                                }
+                            }
+                            self.write_bar_times(req_id, &mut resp, is_complete);
                             // Clone only when someone is listening on the event
                             // channel — a bar batch is a deep copy (ibx#242).
                             let for_event = clone_for_event(event_tx, &resp);
@@ -496,6 +576,10 @@ impl HmdsState {
                             }
                             if is_complete && !self.keep_up_to_date_reqs.contains(&req_id) {
                                 self.pending_historical.remove(pos);
+                                self.bar_requests.retain(|b| b.req_id != req_id);
+                            }
+                            if is_complete {
+                                self.replay_router_bar(req_id, shared);
                             }
                         } else {
                             // ibx#182 follow-up: diagnostic bisect — when parse_bar_response
@@ -507,10 +591,15 @@ impl HmdsState {
                             );
                         }
                     }
-                    else if let Some(resp) = crate::control::historical::parse_head_timestamp_response(xml_tag) {
+                    else if let Some(mut resp) = crate::control::historical::parse_head_timestamp_response(xml_tag) {
                         let wid = reply_window_id(xml_tag);
                         if let Some(pos) = self.pending_head_ts.iter().position(|(q, _, _)| q == wid) {
                             let (_, req_id, _) = self.pending_head_ts.remove(pos);
+                            // The time by formatDate, as the reference writes it (ibx#431).
+                            let format_date = self.head_ts_format.remove(&req_id).unwrap_or(1);
+                            if let Some(secs) = crate::control::historical::parse_server_time(&resp.head_timestamp) {
+                                resp.head_timestamp = crate::control::historical::head_timestamp_text(secs, format_date);
+                            }
                             let for_event = clone_for_event(event_tx, &resp);
                             shared.reference.push_head_timestamp(req_id, resp);
                             if let Some(data) = for_event {
@@ -541,13 +630,15 @@ impl HmdsState {
                         if let Some(pos) = self.pending_ticks.iter().position(|(qid, _, _)| qid == wid) {
                             let what_to_show = self.pending_ticks[pos].2.clone();
                             let req_id = self.pending_ticks[pos].1;
-                            if let Some((_, data, done)) = crate::control::historical::parse_tick_response(xml_tag, &what_to_show) {
-                                // Every frame is delivered; the last one ends the
-                                // request, as the reference.
-                                if done {
+                            if let Some(frame) = crate::control::historical::parse_tick_response(xml_tag) {
+                                // Every frame is delivered at once; the last one
+                                // ends the request, as the reference (ibx#432).
+                                if frame.done {
                                     self.pending_ticks.remove(pos);
                                 }
-                                shared.reference.push_historical_ticks(req_id, data, what_to_show, done);
+                                if let Some(data) = frame.data {
+                                    shared.reference.push_historical_ticks(req_id, data, what_to_show, frame.done);
+                                }
                             }
                         } else {
                             log::warn!("HMDS ticks reply for no pending request: id={:?}", wid);
@@ -573,7 +664,7 @@ impl HmdsState {
                         // exact window id (ibx#454). A ticker id that is not
                         // above 0 is error 420 and ends the request.
                         let wid = reply_window_id(xml_tag);
-                        if let Some(pos) = self.rtbar_subs.iter().position(|s| !s.keep_up_to_date && s.query_id == wid) {
+                        if let Some(pos) = self.rtbar_subs.iter().position(|s| s.query_id == wid) {
                             matched = true;
                             if ticker_id == 0 {
                                 let sub = self.rtbar_subs.remove(pos);
@@ -587,21 +678,14 @@ impl HmdsState {
                             }
                         }
                         if !matched {
-                            // Check keepUpToDate historical queries
-                            let wid = reply_window_id(xml_tag);
-                            for (qid, req_id, _) in &self.pending_historical {
-                                if qid == wid && self.keep_up_to_date_reqs.contains(req_id) {
-                                    // Store as rtbar subscription so 35=G bars get dispatched
-                                    self.rtbar_subs.push(RtBarSub {
-                                        query_id: qid.clone(),
-                                        req_id: *req_id,
-                                        ticker_id: Some(ticker_id),
-                                        min_tick,
-                                        keep_up_to_date: true,
-                                    });
-                                    matched = true;
-                                    break;
-                                }
+                            // The 5-second router of a keepUpToDate request, on
+                            // the farm the reply came from (ibx#429).
+                            let farm = self.rx_farm;
+                            if let Some(live) = self.live_bars.iter_mut().find(|l| l.window_id == wid) {
+                                live.ticker_id = Some(ticker_id);
+                                live.min_tick = min_tick;
+                                live.farm = farm;
+                                matched = true;
                             }
                         }
                         if !matched {
@@ -627,10 +711,13 @@ impl HmdsState {
                             if let Some(pos) = self.pending_historical.iter().position(|(q, _, _)| q == wid) {
                                 let (leg_qid, req_id, _) = self.pending_historical.remove(pos);
                                 self.keep_up_to_date_reqs.remove(&req_id);
+                                self.live_bars.retain(|l| l.req_id != req_id);
+                                self.bar_requests.retain(|b| b.req_id != req_id);
                                 self.on_leg_failed(req_id, &leg_qid);
                                 released = Some((req_id, 162, historical_service_error(&error_msg)));
                             } else if let Some(pos) = self.pending_head_ts.iter().position(|(q, _, _)| q == wid) {
                                 let (_, req_id, _) = self.pending_head_ts.remove(pos);
+                                self.head_ts_format.remove(&req_id);
                                 released = Some((req_id, 162, historical_service_error(&error_msg)));
                             } else if let Some(pos) = self.pending_histogram.iter().position(|h| h.window_id == wid) {
                                 let req_id = self.pending_histogram.remove(pos).req_id;
@@ -641,7 +728,7 @@ impl HmdsState {
                             } else if let Some(pos) = self.pending_schedule.iter().position(|(q, _)| q == wid) {
                                 let (_, req_id) = self.pending_schedule.remove(pos);
                                 released = Some((req_id, 162, historical_service_error(&error_msg)));
-                            } else if let Some(pos) = self.rtbar_subs.iter().position(|s| !s.keep_up_to_date && s.query_id == wid) {
+                            } else if let Some(pos) = self.rtbar_subs.iter().position(|s| s.query_id == wid) {
                                 // A rejected real-time bar query: 420 with the server
                                 // text, and the request ends (ibx#454).
                                 let req_id = self.rtbar_subs.remove(pos).req_id;
@@ -850,9 +937,12 @@ impl HmdsState {
         }
     }
 
-    /// A 5-second bar frame holds several bars (ibx#454). A bar for a
-    /// ticker id with no subscription is answered with a cancel of that
-    /// ticker id, as the reference.
+    /// A 5-second bar frame holds several bars (ibx#454). Each bar goes to
+    /// the real-time bar request of its ticker id, and is merged into the
+    /// series of every keepUpToDate request on that router, which gets the
+    /// whole changed bar as an update (ibx#429). A bar for a ticker id
+    /// with no request is answered with a cancel of that ticker id, as the
+    /// reference.
     fn handle_rtbar_data(&mut self, msg: &[u8], shared: &SharedState, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let body = match find_body_after_tag(msg, b"35=G\x01") {
             Some(b) => b,
@@ -860,26 +950,89 @@ impl HmdsState {
         };
         let sig_pos = body.windows(6).position(|w| w == b"\x018349=");
         let body = if let Some(pos) = sig_pos { &body[..pos] } else { body };
+        let farm = self.rx_farm;
         let mut unknown: Vec<u32> = Vec::new();
         for (ticker_id, timestamp, payload) in rtbar_entries(body) {
-            let sub = self.rtbar_subs.iter().find(|s| s.ticker_id == Some(ticker_id));
-            let (req_id, min_tick) = match sub {
-                Some(s) => (s.req_id, s.min_tick),
-                None => {
-                    if !unknown.contains(&ticker_id) {
-                        unknown.push(ticker_id);
-                    }
-                    continue;
+            let sub = self.rtbar_subs.iter()
+                .find(|s| farm == super::pool::PRIMARY_HMDS && s.ticker_id == Some(ticker_id))
+                .map(|s| (s.req_id, s.min_tick));
+            let live_tick = self.live_bars.iter()
+                .find(|l| l.farm == farm && l.ticker_id == Some(ticker_id))
+                .map(|l| l.min_tick);
+            if sub.is_none() && live_tick.is_none() {
+                if !unknown.contains(&ticker_id) {
+                    unknown.push(ticker_id);
                 }
-            };
-            if let Some(mut bar) = crate::control::historical::decode_bar_payload(payload, min_tick) {
-                bar.timestamp = timestamp;
-                shared.market.push_real_time_bar(req_id, bar);
+                continue;
+            }
+            if let Some((req_id, min_tick)) = sub {
+                if let Some(mut bar) = crate::control::historical::decode_bar_payload(payload, min_tick) {
+                    bar.timestamp = timestamp;
+                    shared.market.push_real_time_bar(req_id, bar);
+                }
+            }
+            if let Some(min_tick) = live_tick {
+                if let Some(mut bar) = crate::control::historical::decode_bar_payload(payload, min_tick) {
+                    bar.timestamp = timestamp;
+                    self.router_bars.retain(|(f, t, _, _)| !(*f == farm && *t == ticker_id));
+                    self.router_bars.push((farm, ticker_id, timestamp, bar));
+                    let reqs: Vec<ReqId> = self.live_bars.iter()
+                        .filter(|l| l.farm == farm && l.ticker_id == Some(ticker_id) && l.history_done)
+                        .map(|l| l.req_id).collect();
+                    for req_id in reqs {
+                        self.update_live_bar(req_id, timestamp, &bar, shared);
+                    }
+                }
             }
         }
         for ticker_id in unknown {
             log::info!("HMDS 5-second bar for unknown ticker id {}: cancelling it", ticker_id);
+            // The connection given is the one of the farm the bar came from.
             self.send_historical_cancel(&ticker_id.to_string(), hmds_conn, hb);
+        }
+    }
+
+    /// Merge a 5-second bar into a keepUpToDate request's series and send
+    /// the whole bar it changed as an update (ibx#429).
+    fn update_live_bar(&mut self, req_id: ReqId, time: u32, bar: &crate::types::RealTimeBar, shared: &SharedState) {
+        let Some(live) = self.live_bars.iter_mut().find(|l| l.req_id == req_id) else { return };
+        let reply_zone = live.reply_zone.clone();
+        let Some(i) = crate::control::historical::merge_five_seconds(
+            &mut live.series, &live.sessions, live.bar_size, live.trades, time as i64, bar,
+        ) else { return };
+        let b = live.series[i].clone();
+        let mut out = crate::control::historical::HistoricalBar {
+            time: String::new(), open: b.open, high: b.high, low: b.low, close: b.close,
+            volume: b.volume, wap: b.wap, count: b.count,
+        };
+        if let Some(info) = self.bar_requests.iter().find(|r| r.req_id == req_id) {
+            out.time = info.bar_time(b.start, &reply_zone);
+        }
+        shared.reference.push_historical_update(req_id, out);
+    }
+
+    /// A keepUpToDate request whose history just ended takes the last
+    /// 5-second bar its router gave before (ibx#429).
+    fn replay_router_bar(&mut self, req_id: ReqId, shared: &SharedState) {
+        let Some(live) = self.live_bars.iter().find(|l| l.req_id == req_id) else { return };
+        let (farm, ticker) = (live.farm, live.ticker_id);
+        let Some(&(_, _, time, bar)) = self.router_bars.iter().find(|(f, t, _, _)| *f == farm && Some(*t) == ticker) else { return };
+        self.update_live_bar(req_id, time, &bar, shared);
+    }
+
+    /// Write the bar times of an answer as the reference writes them, and,
+    /// at its end, the start and end of the request (ibx#431).
+    fn write_bar_times(&self, req_id: ReqId, resp: &mut crate::control::historical::HistoricalResponse, is_complete: bool) {
+        let Some(info) = self.bar_requests.iter().find(|r| r.req_id == req_id) else { return };
+        for bar in &mut resp.bars {
+            if let Some(secs) = crate::control::historical::parse_server_time(&bar.time) {
+                bar.time = info.bar_time(secs, &resp.timezone);
+            }
+        }
+        if is_complete {
+            let zone = info.zone_or(&resp.timezone);
+            resp.start = crate::control::historical::zoned_time(info.start, &zone);
+            resp.end = crate::control::historical::zoned_time(info.end, &zone);
         }
     }
 
@@ -986,6 +1139,13 @@ impl HmdsState {
         out
     }
 
+    /// Send a bar request to `hmds_conn`, the farm of its route (`farm`),
+    /// one query per leg. `symbol` is the symbol of the chart name of a
+    /// live query; `zone` the contract's trading hours zone when known. The
+    /// end date goes in UTC; the start and end of the request are kept for
+    /// historicalDataEnd (ibx#431). A keepUpToDate request keeps its bar
+    /// series for the updates (ibx#429).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn send_historical_request_ex(
         &mut self,
         req_id: ReqId,
@@ -1003,12 +1163,15 @@ impl HmdsState {
         hb: &mut HeartbeatState,
         shared: &SharedState,
         include_expired: bool,
+        format_date: i32,
+        zone: Option<String>,
+        farm: super::pool::FarmId,
     ) {
         // The reference checks, refused with its codes and texts and no
-        // end (ibx#430). The client checks first; this is the engine-side
-        // backstop for raw control-channel callers.
+        // end (ibx#430, ibx#429). The client checks first; this is the
+        // engine-side backstop for raw control-channel callers.
         let checked = match crate::control::historical::check_bar_request(
-            end_date_time, duration, bar_size, what_to_show, None,
+            end_date_time, duration, bar_size, what_to_show, None, keep_up_to_date, sec_type,
         ) {
             Ok(c) => c,
             Err((code, text)) => {
@@ -1024,12 +1187,20 @@ impl HmdsState {
             self.send_schedule_request(req_id, con_id, sec_type, exchange, end_date_time, duration, use_rth, hmds_conn, hb);
             return;
         }
-        let end_date_time = if end_date_time.is_empty() {
-            crate::gateway::chrono_free_timestamp().to_string()
-        } else {
-            end_date_time.to_string()
-        };
-        let end_date_time = end_date_time.as_str();
+        let machine_zone = crate::gateway::machine_time_zone();
+        let now = crate::control::historical::now_secs();
+        let end = crate::control::historical::parse_request_time(end_date_time, &machine_zone, now)
+            .ok().flatten().map_or(now, |t| t.secs);
+        self.bar_requests.retain(|b| b.req_id != req_id);
+        self.bar_requests.push(BarRequestInfo {
+            req_id,
+            format_date,
+            intraday: bs.is_intraday(),
+            zone,
+            start: crate::control::historical::duration_start(end, duration, &machine_zone),
+            end,
+        });
+        let end_date_time = crate::control::historical::server_time(end);
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
 
@@ -1053,7 +1224,7 @@ impl HmdsState {
                 sec_type: sec_type.to_string(),
                 exchange: exchange.to_string(),
                 data_type: leg_type,
-                end_time: end_date_time.to_string(),
+                end_time: end_date_time.clone(),
                 duration: duration.to_string(),
                 bar_size: bs,
                 use_rth,
@@ -1068,8 +1239,8 @@ impl HmdsState {
                 (fix::TAG_SENDING_TIME, &ts),
                 (6118, &xml),
             ]) {
-                log::info!("Sent historical request: req_id={} con_id={} bar_size={} data={}",
-                    req_id, con_id, bar_size, leg_type.as_str());
+                log::info!("Sent historical request: req_id={} con_id={} bar_size={} data={} live={}",
+                    req_id, con_id, bar_size, leg_type.as_str(), keep_up_to_date);
                 hb.last_hmds_sent = Instant::now();
             }
             if legs.len() > 1 {
@@ -1077,6 +1248,24 @@ impl HmdsState {
                     query_id: query_id.clone(),
                     data_type: leg_type,
                     state: LegState::Pending,
+                });
+            }
+            if keep_up_to_date {
+                self.keep_up_to_date_reqs.insert(req_id);
+                self.live_bars.retain(|l| l.req_id != req_id);
+                self.live_bars.push(LiveBars {
+                    req_id,
+                    window_id: query_id.clone(),
+                    query_id: crate::control::historical::extract_xml_tag(&xml, "id").unwrap_or("").to_string(),
+                    farm,
+                    ticker_id: None,
+                    min_tick: 0.01,
+                    bar_size: bs,
+                    trades: leg_type == crate::control::historical::BarDataType::Trades,
+                    series: Vec::new(),
+                    sessions: Vec::new(),
+                    history_done: false,
+                    reply_zone: String::new(),
                 });
             }
             self.pending_historical.push((query_id, req_id, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
@@ -1159,12 +1348,15 @@ impl HmdsState {
             );
             return;
         }
-        let resp = crate::control::historical::HistoricalResponse {
+        let mut resp = crate::control::historical::HistoricalResponse {
             query_id: m.legs[0].query_id.clone(),
             timezone: m.timezone,
             bars,
             is_complete: true,
+            ..Default::default()
         };
+        self.write_bar_times(m.req_id, &mut resp, true);
+        self.bar_requests.retain(|b| b.req_id != m.req_id);
         let for_event = clone_for_event(event_tx, &resp);
         shared.reference.push_historical_data(m.req_id, resp);
         if let Some(data) = for_event {
@@ -1172,180 +1364,77 @@ impl HmdsState {
         }
     }
 
-    /// Cancel every in-flight query of a bar request (a BID_ASK request has
-    /// two) and drop its held legs.
-    pub(crate) fn cancel_historical(&mut self, req_id: ReqId, hmds_conn: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
-        for query_id in self.take_historical_cancels(req_id) {
-            self.send_historical_cancel(&query_id, hmds_conn, hb);
+    /// cancelHistoricalData, as the reference answers it (ibx#431,
+    /// ibx#429): a request that is not running gets 366; a running one gets
+    /// 162 "API historical data query cancelled", its queries still waiting
+    /// are cancelled by their ids, and the 5-second router of a
+    /// keepUpToDate request is cancelled (`ticker:{id}`) once no other
+    /// request uses it. Gives the farm and the body of each cancel to send.
+    pub(crate) fn cancel_bar_request(&mut self, req_id: ReqId, shared: &SharedState) -> Vec<(super::pool::FarmId, String)> {
+        let known = self.pending_historical.iter().any(|(_, r, _)| *r == req_id)
+            || self.live_bars.iter().any(|l| l.req_id == req_id)
+            || self.pending_schedule.iter().any(|(_, r)| *r == req_id);
+        if !known {
+            shared.reference.push_historical_error(req_id, 366,
+                format!("No historical data query found for ticker id:{}", req_id));
+            return Vec::new();
         }
-    }
-
-    /// Forget a bar request and give the query ids still waiting, whose
-    /// cancels go to the farms they were sent to (#445).
-    pub(crate) fn take_historical_cancels(&mut self, req_id: ReqId) -> Vec<String> {
+        shared.reference.push_historical_error(req_id, 162,
+            historical_service_error(&format!("API historical data query cancelled: {}", req_id)));
+        shared.reference.purge_historical_updates(req_id);
+        let mut out = Vec::new();
+        let live = self.live_bars.iter().position(|l| l.req_id == req_id).map(|i| self.live_bars.remove(i));
         self.keep_up_to_date_reqs.remove(&req_id);
         self.multi_leg.retain(|m| m.req_id != req_id);
-        let mut cancelled = Vec::new();
+        self.bar_requests.retain(|b| b.req_id != req_id);
+        let mut waiting = Vec::new();
         self.pending_historical.retain(|(qid, rid, _)| {
             if *rid == req_id {
-                cancelled.push(qid.clone());
+                waiting.push(qid.clone());
                 false
             } else {
                 true
             }
         });
-        cancelled
-    }
-
-    /// Send keepUpToDate historical request via CCP (FIXCOMP compressed).
-    /// Responses arrive on HMDS, not CCP (cross-connection routing).
-    pub(crate) fn send_historical_request_via_ccp(
-        &mut self,
-        req_id: ReqId,
-        con_id: i64,
-        sec_type: &str,
-        exchange: &str,
-        end_date_time: &str,
-        duration: &str,
-        bar_size: &str,
-        what_to_show: &str,
-        use_rth: bool,
-        symbol: &str,
-        ccp_conn: &mut Option<Connection>,
-        hb: &mut HeartbeatState,
-        sign_key: &[u8],
-        sign_iv: &std::sync::Mutex<Vec<u8>>,
-        shared: &SharedState,
-        include_expired: bool,
-    ) -> bool {
-        // The reference checks of every bar request (ibx#430).
-        let duration = match crate::control::historical::check_bar_request(
-            end_date_time, duration, bar_size, what_to_show, None,
-        ) {
-            Ok(c) => c.duration,
-            Err((code, text)) => {
-                log::error!("keepUpToDate req_id={}: {} {}", req_id, code, text);
-                shared.reference.push_historical_error(req_id, code, text);
-                return false;
+        for qid in waiting {
+            match &live {
+                Some(l) if l.history_done => {}
+                Some(l) => out.push((l.farm, crate::control::historical::query_cancel_xml(&l.query_id))),
+                None => {
+                    let farm = self.query_farms.remove(&qid).unwrap_or(super::pool::PRIMARY_HMDS);
+                    out.push((farm, crate::control::historical::query_cancel_xml(&qid)));
+                }
             }
-        };
-        // Reuse the same request builder but with keep_up_to_date=true
-        let end_date_time = if end_date_time.is_empty() {
-            crate::gateway::chrono_free_timestamp().to_string()
-        } else {
-            end_date_time.to_string()
-        };
-        let qid = self.next_hmds_query_id;
-        self.next_hmds_query_id += 1;
-
-        // Same shared table as the batch path — the second, five-entry copy
-        // silently downgraded "1 min" (and 16 other sizes) to Min5 on this
-        // path only (ibx#232). Unsupported streaming sizes reject loudly.
-        let data_type = match crate::control::historical::BarDataType::from_api_str(what_to_show) {
-            Ok(dt) if dt.legs().len() > 1 => {
-                // A two-query request has no live updates: the reference
-                // refuses BID_ASK with keepUpToDate (ibx#408).
-                let e = format!(
-                    "what_to_show '{}' is not supported with keep_up_to_date=true",
-                    what_to_show,
-                );
-                log::error!("keepUpToDate req_id={}: {}", req_id, e);
-                super::push_hmds_error(shared, req_id, e, true);
-                return false;
-            }
-            Ok(dt) => dt,
-            Err(e) => {
-                log::error!("keepUpToDate req_id={}: {}", req_id, e);
-                super::push_hmds_error(shared, req_id, e, true);
-                return false;
-            }
-        };
-        let bs = match crate::control::historical::BarSize::from_api_str(bar_size) {
-            Ok(bs) if bs.supports_keep_up_to_date() => bs,
-            Ok(_) => {
-                let e = format!(
-                    "bar_size '{}' is not supported with keep_up_to_date=true: \
-                     supported sizes are 1 secs, 5 secs, 5 mins, 1 hour, 1 day",
-                    bar_size,
-                );
-                log::error!("keepUpToDate req_id={}: {}", req_id, e);
-                super::push_hmds_error(shared, req_id, e, true);
-                return false;
-            }
-            Err(e) => {
-                log::error!("keepUpToDate req_id={}: {}", req_id, e);
-                super::push_hmds_error(shared, req_id, e, true);
-                return false;
-            }
-        };
-
-        let query_id = format!("hist_{}", qid);
-        let req = crate::control::historical::HistoricalRequest {
-            query_id: query_id.clone(),
-            con_id,
-            symbol: symbol.to_string(),
-            sec_type: sec_type.to_string(),
-            exchange: exchange.to_string(),
-            data_type,
-            end_time: end_date_time,
-            duration: duration.to_string(),
-            bar_size: bs,
-            use_rth,
-            keep_up_to_date: true,
-            include_expired,
-        };
-
-        let xml = crate::control::historical::build_query_xml(&req);
-        if let Some(conn) = ccp_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            // FIXCOMP compress + selective HMAC 8349 signing
-            let raw = fix::fix_build(&[
-                (fix::TAG_MSG_TYPE, "W"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6118, &xml),
-            ], 0);
-            let compressed = fixcomp::fixcomp_build(&raw);
-            let to_send = if !sign_key.is_empty() {
-                let mut iv_guard = sign_iv.lock().unwrap();
-                let (signed, new_iv) = fix::fix_sign(&compressed, sign_key, &iv_guard);
-                *iv_guard = new_iv;
-                signed
-            } else {
-                compressed
-            };
-            // Debug: dump first 80 bytes hex for wire comparison
-            let hex: String = to_send.iter().take(80).map(|b| format!("{:02x}", b)).collect();
-            log::info!("CCP keepUpToDate 35=W: {} bytes, hex={}", to_send.len(), hex);
-            let _ = conn.send_raw(&to_send);
-            hb.last_ccp_sent = Instant::now();
         }
-        self.pending_historical.push((query_id, req_id, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
-        true
+        if let Some(pos) = self.pending_schedule.iter().position(|(_, r)| *r == req_id) {
+            let (qid, _) = self.pending_schedule.remove(pos);
+            out.push((super::pool::PRIMARY_HMDS, crate::control::historical::query_cancel_xml(&qid)));
+        }
+        if let Some(LiveBars { farm, ticker_id: Some(tid), .. }) = live {
+            let shared_router = self.live_bars.iter().any(|l| l.farm == farm && l.ticker_id == Some(tid))
+                || (farm == super::pool::PRIMARY_HMDS && self.rtbar_subs.iter().any(|s| s.ticker_id == Some(tid)));
+            if !shared_router {
+                self.router_bars.retain(|(f, t, _, _)| !(*f == farm && *t == tid));
+                out.push((farm, ticker_cancel_xml(tid)));
+            }
+        }
+        out
     }
 
-    pub(crate) fn send_historical_cancel(&mut self, query_id: &str, hmds_conn: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
-        {
-            let xml = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                 <ListOfCancelQueries>\
-                 <CancelQuery>\
-                 <id>ticker:{tid}</id>\
-                 </CancelQuery>\
-                 </ListOfCancelQueries>",
-                tid = query_id,
-            );
-            let ts = chrono_free_timestamp();
-            if hmds_conn.send_plain(&[
-                (fix::TAG_MSG_TYPE, "Z"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6118, &xml),
-            ]) {
-                hb.last_hmds_sent = Instant::now();
-            }
+    /// Send a cancel body built by [`Self::cancel_bar_request`].
+    pub(crate) fn send_cancel_xml(xml: &str, sink: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
+        let ts = chrono_free_timestamp();
+        if sink.send_plain(&[(fix::TAG_MSG_TYPE, "Z"), (fix::TAG_SENDING_TIME, &ts), (6118, xml)]) {
+            hb.last_hmds_sent = Instant::now();
         }
     }
 
-    pub(crate) fn send_head_timestamp_request(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_historical_cancel(&mut self, ticker_id: &str, hmds_conn: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState) {
+        Self::send_cancel_xml(&crate::control::historical::query_cancel_xml(&format!("ticker:{}", ticker_id)), hmds_conn, hb);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_head_timestamp_request(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, what_to_show: &str, use_rth: bool, format_date: i32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // Same shared table as the bar paths — this was a third divergent
         // copy with a silent TRADES fallback (ibx#232).
         let data_type = match crate::control::historical::BarDataType::from_api_str(what_to_show) {
@@ -1381,6 +1470,7 @@ impl HmdsState {
             hb.last_hmds_sent = Instant::now();
         }
         self.pending_head_ts.push((window_id, req_id, Instant::now() + HEAD_TIMESTAMP_TIMEOUT));
+        self.head_ts_format.insert(req_id, format_date);
     }
 
     pub(crate) fn send_scanner_params_request(&mut self, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
@@ -1832,24 +1922,76 @@ impl HmdsState {
         });
     }
 
-    pub(crate) fn send_historical_ticks_request(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, start_date_time: &str, end_date_time: &str, number_of_ticks: u32, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+    /// Send a historical ticks query (ibx#432) to `sink`, the farm of its
+    /// route (`farm`), as the reference does: the local checks again
+    /// (the client sent their warnings and refusals), a request id still
+    /// waiting gets 102, a date in a zone that is not UTC, the machine zone
+    /// or the contract's zone (`zone`, when known) gets 10314; else the
+    /// query goes out, and its frames are matched by window id.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_historical_ticks_request(
+        &mut self, req_id: ReqId, con_id: i64, symbol: &str, sec_type: &str, exchange: &str,
+        start_date_time: &str, end_date_time: &str, number_of_ticks: i32, what_to_show: &str,
+        use_rth: bool, ignore_size: bool, zone: Option<&str>, farm: super::pool::FarmId,
+        sink: &mut dyn super::pool::FixSink, hb: &mut HeartbeatState, shared: &SharedState,
+    ) {
+        use crate::control::historical as h;
+        let machine_zone = crate::gateway::machine_time_zone();
+        let now = h::now_secs();
+        let (_, checked) = h::check_ticks_request(start_date_time, end_date_time, number_of_ticks, what_to_show,
+            ignore_size, sec_type, exchange, &machine_zone, now);
+        let checked = match checked {
+            Ok(c) => c,
+            Err((code, text)) => {
+                shared.reference.push_historical_error(req_id, code, text);
+                return;
+            }
+        };
+        if self.pending_ticks.iter().any(|(_, r, _)| *r == req_id) {
+            shared.reference.push_historical_error(req_id, 102, "Duplicate ticker id".to_string());
+            return;
+        }
+        let zone_ok = |t: &Option<h::RequestTime>| match t.as_ref().and_then(|t| t.zone.as_deref()) {
+            None => true,
+            Some(z) => z.eq_ignore_ascii_case("UTC") || z == machine_zone || zone.is_none_or(|c| c == z),
+        };
+        if !zone_ok(&checked.start) {
+            shared.reference.push_historical_error(req_id, 10314,
+                h::INVALID_END_DATE.replacen("End Date/Time", "Start Date/Time", 1));
+            return;
+        }
+        if !zone_ok(&checked.end) {
+            shared.reference.push_historical_error(req_id, 10314, h::INVALID_END_DATE.to_string());
+            return;
+        }
         let qid = self.next_hmds_query_id;
         self.next_hmds_query_id += 1;
-        let query_id = format!("tk_{}", qid);
-        let xml = crate::control::historical::build_tick_query_xml(
-            &query_id, con_id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth,
-        );
-        if let Some(conn) = hmds_conn.as_mut() {
-            let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
-                (fix::TAG_MSG_TYPE, "W"),
-                (fix::TAG_SENDING_TIME, &ts),
-                (6118, &xml),
-            ]);
-            hb.last_hmds_sent = Instant::now();
-            log::info!("Sent historical ticks request: req_id={} con_id={} what={}", req_id, con_id, what_to_show);
+        let query = h::TickQuery {
+            window_id: format!("tk_{}", qid),
+            symbol: symbol.to_string(),
+            con_id,
+            sec_type: sec_type.to_string(),
+            exchange: exchange.to_string(),
+            source: checked.source,
+            start: checked.start.as_ref().map(|t| t.secs),
+            end: checked.end.as_ref().map(|t| t.secs),
+            number_of_ticks,
+            use_rth,
+            ignore_size_filter: checked.ignore_size_filter,
+        };
+        let xml = h::build_tick_query_xml(&query, now);
+        let ts = chrono_free_timestamp();
+        if sink.send_plain(&[
+            (fix::TAG_MSG_TYPE, "W"),
+            (fix::TAG_SENDING_TIME, &ts),
+            (6118, &xml),
+        ]) {
+            if farm == super::pool::PRIMARY_HMDS {
+                hb.last_hmds_sent = Instant::now();
+            }
+            log::info!("Sent historical ticks request on farm {}: req_id={} con_id={} what={}", farm, req_id, con_id, what_to_show);
         }
-        self.pending_ticks.push((query_id, req_id, what_to_show.to_string()));
+        self.pending_ticks.push((query.window_id, req_id, checked.source.data().to_string()));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1862,7 +2004,7 @@ impl HmdsState {
                 "Error validating request.-'bS' : cause - What to show field is missing or incorrect.".to_string());
             return;
         }
-        if self.rtbar_subs.iter().any(|s| !s.keep_up_to_date && s.req_id == req_id) {
+        if self.rtbar_subs.iter().any(|s| s.req_id == req_id) {
             shared.reference.push_historical_error(req_id, 102, "Duplicate ticker id".to_string());
             return;
         }
@@ -1891,7 +2033,6 @@ impl HmdsState {
             req_id,
             ticker_id: None,
             min_tick: 0.01,
-            keep_up_to_date: false,
         });
     }
 
@@ -1970,6 +2111,7 @@ impl HmdsState {
                     timezone: String::new(),
                     is_complete: true,
                     bars: Vec::new(),
+                    ..Default::default()
                 },
             );
         }
@@ -2038,6 +2180,11 @@ fn rtbar_entries(body: &[u8]) -> Vec<(u32, u32, &[u8])> {
         pos = start + len;
     }
     entries
+}
+
+/// The cancel of a 5-second router: `ticker:{id}` (ibx#429).
+fn ticker_cancel_xml(ticker_id: u32) -> String {
+    crate::control::historical::query_cancel_xml(&format!("ticker:{}", ticker_id))
 }
 
 /// Window id of the `<id>` of a reply (ibx#428).
@@ -2154,7 +2301,7 @@ pub(crate) mod tests {
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
         hmds.send_historical_request_ex(req_id, 416904, "IND", "CBOE", "", "3600 S", "1 min", "BID_ASK",
-            true, false, "SPX", &mut conn, &mut hb, shared, false);
+            true, false, "SPX", &mut conn, &mut hb, shared, false, 1, None, super::super::pool::PRIMARY_HMDS);
         let legs: Vec<&(String, ReqId, Instant)> =
             hmds.pending_historical.iter().filter(|(_, r, _)| *r == req_id).collect();
         assert_eq!(legs.len(), 2, "BID_ASK must go out as two queries");
@@ -2271,13 +2418,15 @@ pub(crate) mod tests {
         assert_eq!(resp.timezone, "US/Eastern");
         let b: Vec<_> = resp.bars.iter()
             .map(|b| (b.time.as_str(), b.open, b.high, b.low, b.close)).collect();
+        // The times as the client gets them, in the zone of the reply
+        // (ibx#431).
         assert_eq!(b, vec![
             // Both legs: open and low from Bid, close and high from Ask.
-            ("20260227-20:30:00", 266.466, 266.70, 266.30, 266.520),
+            ("20260227 15:30:00 US/Eastern", 266.466, 266.70, 266.30, 266.520),
             // Bid only.
-            ("20260227-20:31:00", 266.154, 266.154, 266.00, 266.154),
+            ("20260227 15:31:00 US/Eastern", 266.154, 266.154, 266.00, 266.154),
             // Ask only.
-            ("20260227-20:32:00", 266.100, 266.20, 266.100, 266.100),
+            ("20260227 15:32:00 US/Eastern", 266.100, 266.20, 266.100, 266.100),
         ]);
     }
 
@@ -2305,9 +2454,12 @@ pub(crate) mod tests {
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
         send_bid_ask(&mut hmds, &shared, 9);
-        hmds.cancel_historical(9, &mut conn, &mut hb);
+        let cancels = hmds.cancel_bar_request(9, &shared);
+        assert_eq!(cancels.len(), 2, "each waiting leg is cancelled by its id: {cancels:?}");
+        assert!(cancels[0].1.contains("<CancelQuery><id>hist_1000</id></CancelQuery>"), "{:?}", cancels);
         assert!(hmds.pending_historical.is_empty());
         assert!(hmds.multi_leg.is_empty());
+        let _ = (&mut hb, &mut conn);
     }
 
     #[test]
@@ -2331,13 +2483,12 @@ pub(crate) mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        let sent = hmds.send_historical_request_via_ccp(12, 416904, "IND", "CBOE", "", "3600 S", "5 secs", "BID_ASK",
-            true, "SPX", &mut conn, &mut hb, &[], &std::sync::Mutex::new(Vec::new()), &shared, false);
-        assert!(!sent);
-        assert!(hmds.pending_historical.is_empty());
-        let errors = shared.reference.drain_historical_errors();
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].2.contains("keep_up_to_date"), "got: {}", errors[0].2);
+        hmds.send_historical_request_ex(12, 416904, "IND", "CBOE", "", "3600 S", "5 secs", "BID_ASK",
+            true, true, "SPX", &mut conn, &mut hb, &shared, false, 1, None, super::super::pool::PRIMARY_HMDS);
+        assert!(hmds.pending_historical.is_empty() && hmds.live_bars.is_empty());
+        // ibx#429: the reference's refusal.
+        assert_eq!(shared.reference.drain_historical_errors(), vec![(12, 321,
+            "Error validating request.-'bM' : cause - Source price not supported with live updates".to_string())]);
     }
 
     #[test]
@@ -2381,8 +2532,8 @@ pub(crate) mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.send_head_timestamp_request(1, 265598, "STK", "SMART", "TRADES", true, &mut conn, &mut hb, &shared);
-        hmds.send_head_timestamp_request(2, 756733, "STK", "SMART", "TRADES", true, &mut conn, &mut hb, &shared);
+        hmds.send_head_timestamp_request(1, 265598, "STK", "SMART", "TRADES", true, 1, &mut conn, &mut hb, &shared);
+        hmds.send_head_timestamp_request(2, 756733, "STK", "SMART", "TRADES", true, 1, &mut conn, &mut hb, &shared);
         let ids: Vec<&str> = hmds.pending_head_ts.iter().map(|(w, _, _)| w.as_str()).collect();
         assert_eq!(ids, vec!["TickHeadClient1", "TickHeadClient2"]);
 
@@ -2434,7 +2585,8 @@ pub(crate) mod tests {
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
         hmds.send_histogram_request(3, 265598, "STK", "SMART", true, "1 week", &mut conn, &mut hb, &shared);
-        hmds.send_historical_ticks_request(4, 265598, "STK", "SMART", "", "20260312-15:00:00", 100, "TRADES", true, &mut conn, &mut hb);
+        hmds.send_historical_ticks_request(4, 265598, "AAPL", "STK", "SMART", "", "20260312-15:00:00", 100, "TRADES", true,
+            false, None, super::super::pool::PRIMARY_HMDS, &mut conn, &mut hb, &shared);
         let hg = hmds.pending_histogram[0].window_id.clone();
         let tk = hmds.pending_ticks[0].0.clone();
         assert_eq!(hg, "histogramQuery0");
@@ -2458,7 +2610,7 @@ pub(crate) mod tests {
         hmds.pending_ticks.push(("tk_7".to_string(), 5, "TRADES".to_string()));
         hmds.pending_ticks.push(("tk_70".to_string(), 6, "TRADES".to_string()));
         let frame = |eoq: bool| make_w_msg(&format!(
-            "<ResultSetTick><id>tk_70</id><eoq>{}</eoq><Events><Tick><time>20260312-14:30:01</time>\
+            "<ResultSetTick><id>tk_70</id><eoq>{}</eoq><data>AllLast</data><Events><Tick><time>20260312-14:30:01</time>\
              <price>1.5</price><size>100</size></Tick></Events></ResultSetTick>", eoq));
         hmds.process_hmds_message(&frame(false), &mut conn, &shared, &None, &mut hb);
         assert_eq!(hmds.pending_ticks.len(), 2, "not done yet");
@@ -2645,7 +2797,7 @@ pub(crate) mod tests {
     }
 
     fn rt_sub(query_id: &str, req_id: ReqId, ticker_id: Option<u32>) -> RtBarSub {
-        RtBarSub { query_id: query_id.to_string(), req_id, ticker_id, min_tick: 0.01, keep_up_to_date: false }
+        RtBarSub { query_id: query_id.to_string(), req_id, ticker_id, min_tick: 0.01 }
     }
 
     #[test]
@@ -2766,7 +2918,7 @@ pub(crate) mod tests {
         let mut conn: Option<Connection> = None;
 
         hmds.send_historical_request_ex(9, 756733, "STK", "SMART", "", "2 d", "1 sec", "TRADES",
-            true, false, "SPY", &mut conn, &mut hb, &shared, false);
+            true, false, "SPY", &mut conn, &mut hb, &shared, false, 1, None, super::super::pool::PRIMARY_HMDS);
 
         assert!(hmds.pending_historical.is_empty(), "rejected request must not go pending");
         let errors = shared.reference.drain_historical_errors();
@@ -2786,16 +2938,16 @@ pub(crate) mod tests {
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
         hmds.send_historical_request_ex(1, 756733, "STK", "SMART", "", "3600", "1 Min", "trades",
-            true, false, "SPY", &mut conn, &mut hb, &shared, false);
+            true, false, "SPY", &mut conn, &mut hb, &shared, false, 1, None, super::super::pool::PRIMARY_HMDS);
         assert!(shared.reference.drain_historical_errors().is_empty());
         assert_eq!(hmds.pending_historical.len(), 1);
         hmds.send_historical_request_ex(2, 756733, "STK", "SMART", "", "1 M", "1 day", "SCHEDULE",
-            true, false, "SPY", &mut conn, &mut hb, &shared, false);
+            true, false, "SPY", &mut conn, &mut hb, &shared, false, 1, None, super::super::pool::PRIMARY_HMDS);
         assert_eq!(hmds.pending_historical.len(), 1, "a schedule is not a bar query");
         assert_eq!(hmds.pending_schedule.len(), 1);
         assert_eq!(hmds.pending_schedule[0].1, 2);
         hmds.send_historical_request_ex(3, 756733, "STK", "SMART", "", "1 M", "1 hour", "SCHEDULE",
-            true, false, "SPY", &mut conn, &mut hb, &shared, false);
+            true, false, "SPY", &mut conn, &mut hb, &shared, false, 1, None, super::super::pool::PRIMARY_HMDS);
         assert_eq!(hmds.pending_schedule.len(), 1);
         assert_eq!(shared.reference.drain_historical_errors()[0].1, 321);
     }
@@ -2806,7 +2958,7 @@ pub(crate) mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.send_head_timestamp_request(4, 265598, "STK", "SMART", "TRADE", true, &mut conn, &mut hb, &shared);
+        hmds.send_head_timestamp_request(4, 265598, "STK", "SMART", "TRADE", true, 1, &mut conn, &mut hb, &shared);
         assert!(hmds.pending_head_ts.is_empty());
         assert_eq!(shared.reference.drain_historical_errors(), vec![(
             4, 321, "Error validating request.-'bN' : cause - What to show value of TRADE rejected.".to_string(),
@@ -2868,4 +3020,231 @@ pub(crate) mod tests {
         assert!(shared.reference.drain_historical_errors().is_empty());
         assert!(shared.reference.drain_historical_data().is_empty());
     }
+
+    // ── Reference scenarios of 02/10/2026 (gateway 1040, AAPL pre-market) ──
+
+    /// Inbound messages of the historical farms of a recorded scenario,
+    /// decompressed, with their record number, in recorded order.
+    fn fixture_messages(scenario: &str, conns: &[&str]) -> Vec<(u64, Vec<u8>)> {
+        use base64::Engine as _;
+        let path = format!("{}/tests/fixtures/gw1040/scenarios/{}", env!("CARGO_MANIFEST_DIR"), scenario);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut out = Vec::new();
+        for line in text.lines().skip(1) {
+            let rec: serde_json::Value = serde_json::from_str(line).unwrap();
+            if rec["leg"] != "fix_in" || !conns.iter().any(|c| rec["conn"] == *c) { continue; }
+            let raw = base64::engine::general_purpose::STANDARD.decode(rec["raw_b64"].as_str().unwrap()).unwrap();
+            let seq = rec["seq"].as_u64().unwrap();
+            if raw.starts_with(b"8=FIXCOMP") {
+                out.extend(crate::protocol::fixcomp::fixcomp_decompress(&raw).unwrap().into_iter().map(|m| (seq, m)));
+            } else {
+                // 5-second bars come as binary frames.
+                out.push((seq, raw));
+            }
+        }
+        out
+    }
+
+    /// A live request as `send_historical_request_ex` leaves it, with the
+    /// window id of the recorded query.
+    fn recorded_live(hmds: &mut HmdsState, req_id: ReqId, window_id: &str, label: &str,
+                     bar_size: crate::control::historical::BarSize, trades: bool) {
+        hmds.pending_historical.push((window_id.to_string(), req_id, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+        hmds.keep_up_to_date_reqs.insert(req_id);
+        hmds.bar_requests.push(BarRequestInfo {
+            req_id, format_date: 1, intraday: bar_size.is_intraday(), zone: Some("US/Eastern".into()), start: 0, end: 0,
+        });
+        hmds.live_bars.push(LiveBars {
+            req_id, window_id: window_id.to_string(), query_id: format!("{window_id};;AAPL@SMART {label};;1;;true;;0;;I"),
+            farm: super::super::pool::PRIMARY_HMDS, ticker_id: None, min_tick: 0.01, bar_size, trades,
+            series: Vec::new(), sessions: Vec::new(), history_done: false, reply_zone: String::new(),
+        });
+    }
+
+    // ibx#429 (scenario b1_429_keep_up_to_date): four keepUpToDate
+    // requests, three of them on one 5-second router. Each 5-second bar
+    // gives each request the whole current bar of its size; the cancels
+    // give 162, and the router cancel goes when its last request left.
+    #[test]
+    fn keep_up_to_date_updates_and_cancels_as_recorded() {
+        use crate::control::historical::BarSize;
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        recorded_live(&mut hmds, 9530, "cf60", "Trades", BarSize::Hour1, true);
+        recorded_live(&mut hmds, 9531, "cf64", "Trades", BarSize::Min1, true);
+        recorded_live(&mut hmds, 9532, "cf68", "Midpoint", BarSize::Sec30, false);
+        recorded_live(&mut hmds, 9533, "cf72", "Trades", BarSize::Hour2, true);
+        // Up to the first cancel (record 4056).
+        for (seq, msg) in fixture_messages("20261002/b1_429_keep_up_to_date.jsonl", &["ushmds"]) {
+            if seq < 4056 {
+                hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+            }
+        }
+        assert!(shared.reference.drain_historical_errors().is_empty());
+        let data = shared.reference.drain_historical_data();
+        let bars = |req: ReqId| data.iter().filter(|(r, _)| *r == req).flat_map(|(_, d)| d.bars.clone()).collect::<Vec<_>>();
+        assert_eq!(bars(9530).iter().map(|b| (b.time.as_str(), b.volume, b.count)).collect::<Vec<_>>(),
+            [("20261002 04:00:00 US/Eastern", 49528, 522)]);
+        let minute = bars(9531);
+        assert_eq!((minute.len(), minute[0].time.as_str(), minute[60].time.as_str()),
+            (61, "20261001 19:56:00 US/Eastern", "20261002 04:56:00 US/Eastern"));
+        let mid = bars(9532);
+        assert_eq!((mid.len(), mid[0].volume, mid[0].wap, mid[0].count), (61, -1, -1.0, -1));
+        assert_eq!(bars(9533).len(), 9);
+
+        let updates = shared.reference.drain_historical_updates();
+        let of = |req: ReqId| updates.iter().filter(|(r, _)| *r == req)
+            .map(|(_, b)| (b.time.clone(), b.open, b.high, b.low, b.close, b.volume, b.wap, b.count)).collect::<Vec<_>>();
+        let hour = ("20261002 04:00:00 US/Eastern".to_string(), 331.05, 331.59, 330.55, 331.45, 49528, 331.285, 522);
+        assert_eq!(of(9530), vec![hour.clone(); 9]);
+        assert_eq!(of(9533), vec![hour; 9]);
+        let m = |t: &str| (format!("20261002 {t} US/Eastern"), 331.45, 331.45, 331.45, 331.45, 0, 331.45, 0);
+        assert_eq!(of(9531), [vec![m("04:56:00"); 5], vec![m("04:57:00"); 4]].concat());
+        let h = |t: &str| (format!("20261002 {t} US/Eastern"), 331.42, 331.42, 331.42, 331.42, -1, -1.0, -1);
+        assert_eq!(of(9532), [vec![h("04:56:30"); 5], vec![h("04:57:00"); 4]].concat());
+
+        // The cancels, in the recorded order.
+        assert!(hmds.cancel_bar_request(9530, &shared).is_empty(), "ticker 1 still used");
+        assert!(hmds.cancel_bar_request(9531, &shared).is_empty());
+        let c = hmds.cancel_bar_request(9532, &shared);
+        assert_eq!(c.len(), 1);
+        assert!(c[0].1.contains("<CancelQuery><id>ticker:2</id></CancelQuery>"), "{:?}", c);
+        let c = hmds.cancel_bar_request(9533, &shared);
+        assert!(c.len() == 1 && c[0].1.contains("<id>ticker:1</id>"), "{:?}", c);
+        assert!(hmds.cancel_bar_request(99, &shared).is_empty());
+        let cancelled = |r: ReqId| (r, 162, format!("Historical Market Data Service error message:API historical data query cancelled: {r}"));
+        assert_eq!(shared.reference.drain_historical_errors(), vec![
+            cancelled(9530), cancelled(9531), cancelled(9532), cancelled(9533),
+            (99, 366, "No historical data query found for ticker id:99".to_string()),
+        ]);
+        assert!(hmds.live_bars.is_empty() && hmds.pending_historical.is_empty() && !hmds.has_live_listener());
+        // No update after the cancel.
+        for (seq, msg) in fixture_messages("20261002/b1_429_keep_up_to_date.jsonl", &["ushmds"]) {
+            if seq >= 4056 {
+                hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+            }
+        }
+        assert!(shared.reference.drain_historical_updates().is_empty());
+    }
+
+    // ibx#432 (scenario b1_432_hist_ticks): every reply frame of a tick
+    // query goes to its request with done at the last one; the ticks in
+    // the order and number the server sent; the server's refusal is
+    // 10187.
+    #[test]
+    fn historical_ticks_as_recorded() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        let reqs = [("cf16", 9510, "AllLast"), ("cf20", 9511, "AllLast"), ("cf24", 9512, "BidAsk"), ("cf28", 9513, "BidAsk"),
+            ("cf32", 9514, "MidPoint"), ("cf36", 9515, "AllLast"), ("cf40", 9516, "AllLast"), ("cf44", 9517, "AllLast"),
+            ("cf48", 9518, "AllLast"), ("cf52", 9521, "AllLast"), ("cf56", 9522, "MidPoint")];
+        for (w, r, d) in reqs {
+            hmds.pending_ticks.push((w.to_string(), r, d.to_string()));
+        }
+        for (_, msg) in fixture_messages("20261002/b1_432_hist_ticks.jsonl", &["ushmds", "cashfarm"]) {
+            hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+        }
+        assert!(hmds.pending_ticks.is_empty());
+        assert_eq!(shared.reference.drain_historical_errors(), vec![(9518, 10187,
+            "Failed to request historical ticks:2 out of startTime/endTime/timeLength parameters have to be specified".to_string())]);
+        let got = shared.reference.drain_historical_ticks();
+        let counts: Vec<(ReqId, usize, bool)> = got.iter().map(|(r, d, _, done)| (*r, match d {
+            crate::types::HistoricalTickData::Last(v) => v.len(),
+            crate::types::HistoricalTickData::BidAsk(v) => v.len(),
+            crate::types::HistoricalTickData::Midpoint(v) => v.len(),
+        }, *done)).collect();
+        assert_eq!(counts, vec![(9510, 109, true), (9511, 1043, true), (9512, 108, true), (9513, 105, true), (9514, 105, true),
+            (9515, 106, true), (9516, 109, true), (9517, 1261, true), (9521, 13, true), (9522, 25, true)]);
+        let crate::types::HistoricalTickData::Last(t) = &got[5].1 else { panic!("trades") };
+        assert_eq!((t[0].time, t[0].price, t[0].size, t[0].special_conditions.as_str(), t[0].tick_attrib_last.unreported),
+            (1_790_881_192, 329.7621, 1.0, " 4 I", true));
+        assert_eq!((t[1].price, t[1].size, t[1].exchange.as_str(), t[1].tick_attrib_last.unreported), (329.805, 140.0, "FINRA", false));
+        let crate::types::HistoricalTickData::BidAsk(t) = &got[2].1 else { panic!("bid ask") };
+        assert_eq!((t[1].time, t[1].price_bid, t[1].price_ask, t[1].size_bid, t[1].size_ask), (1_790_881_200, 329.81, 329.84, 40.0, 240.0));
+        let crate::types::HistoricalTickData::Midpoint(t) = &got[9].1 else { panic!("currency pair midpoints") };
+        assert_eq!((t[0].time, t[0].price, t[0].size), (1_790_881_199, 1.12347, 0.0));
+    }
+
+    // ibx#431 (scenario b1_431_hist_format): bar dates by formatDate and
+    // the head timestamp by formatDate.
+    #[test]
+    fn bar_and_head_timestamp_dates_as_recorded() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        let end = crate::control::historical::parse_server_time("20261002-08:57:40").unwrap();
+        for (w, req, format_date, intraday) in [("cf76", 9540, 1, true), ("cf80", 9541, 2, true), ("cf84", 9542, 1, false), ("cf88", 9543, 2, false)] {
+            hmds.pending_historical.push((w.to_string(), req, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+            let duration = if intraday { "1 d" } else { "1 m" };
+            hmds.bar_requests.push(BarRequestInfo { req_id: req, format_date, intraday, zone: Some("US/Eastern".into()),
+                start: crate::control::historical::duration_start(end, duration, "Europe/Paris"), end });
+        }
+        hmds.pending_head_ts.push(("TickHeadClient1".to_string(), 9544, Instant::now() + HEAD_TIMESTAMP_TIMEOUT));
+        hmds.head_ts_format.insert(9544, 2);
+        for (_, msg) in fixture_messages("20261002/b1_431_hist_format.jsonl", &["ushmds"]) {
+            hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
+        }
+        let data = shared.reference.drain_historical_data();
+        let dates = |req: ReqId| data.iter().filter(|(r, _)| *r == req)
+            .flat_map(|(_, d)| d.bars.iter().map(|b| b.time.clone())).collect::<Vec<_>>();
+        assert_eq!(dates(9540)[..2], ["20261001 09:30:00 US/Eastern".to_string(), "20261001 10:00:00 US/Eastern".to_string()]);
+        assert_eq!(dates(9540).last().unwrap(), "20261001 15:00:00 US/Eastern");
+        assert_eq!(dates(9541)[..2], ["1790861400".to_string(), "1790863200".to_string()]);
+        for req in [9542, 9543] {
+            let d = dates(req);
+            assert_eq!((d.len(), d[0].as_str(), d[20].as_str()), (21, "20260902", "20261001"));
+        }
+        let ends: Vec<(ReqId, String, String)> = data.iter().filter(|(_, d)| d.is_complete)
+            .map(|(r, d)| (*r, d.start.clone(), d.end.clone())).collect();
+        assert_eq!(ends[0], (9540, "20261001 04:57:40 US/Eastern".into(), "20261002 04:57:40 US/Eastern".into()));
+        assert_eq!(ends[2], (9542, "20260902 04:57:40 US/Eastern".into(), "20261002 04:57:40 US/Eastern".into()));
+        assert!(hmds.bar_requests.is_empty(), "a one-shot request ends with its answer");
+        let heads = shared.reference.drain_head_timestamps();
+        assert_eq!(heads.iter().map(|(r, h)| (*r, h.head_timestamp.as_str())).collect::<Vec<_>>(), [(9544, "345479400")]);
+        // The answered requests are not running any more: 366.
+        assert!(hmds.cancel_bar_request(9540, &shared).is_empty());
+        assert_eq!(shared.reference.drain_historical_errors()[0].1, 366);
+    }
+
+    #[test]
+    fn a_waiting_one_shot_request_is_cancelled_by_its_query_id() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        hmds.send_historical_request_ex(5, 265598, "STK", "SMART", "", "1 D", "1 hour", "TRADES",
+            true, false, "AAPL", &mut conn, &mut hb, &shared, false, 1, None, super::super::pool::PRIMARY_HMDS);
+        let cancels = hmds.cancel_bar_request(5, &shared);
+        assert_eq!(cancels.len(), 1);
+        assert!(cancels[0].1.ends_with("<ListOfCancelQueries><CancelQuery><id>hist_1000</id></CancelQuery></ListOfCancelQueries>"), "{:?}", cancels);
+        assert_eq!(shared.reference.drain_historical_errors(), vec![(5, 162,
+            "Historical Market Data Service error message:API historical data query cancelled: 5".to_string())]);
+    }
+
+    #[test]
+    fn historical_ticks_duplicate_and_zone_refusals() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        let send = |hmds: &mut HmdsState, req: ReqId, start: &str, conn: &mut Option<Connection>, hb: &mut HeartbeatState| {
+            hmds.send_historical_ticks_request(req, 265598, "AAPL", "STK", "SMART", start, "", 100, "TRADES", true, false,
+                Some("US/Eastern"), super::super::pool::PRIMARY_HMDS, conn, hb, &shared);
+        };
+        send(&mut hmds, 1, "20261001 15:00:00 US/Eastern", &mut conn, &mut hb);
+        send(&mut hmds, 1, "20261001 15:00:00 US/Eastern", &mut conn, &mut hb);
+        send(&mut hmds, 2, "20261001 15:00:00 Asia/Tokyo", &mut conn, &mut hb);
+        let errors = shared.reference.drain_historical_errors();
+        assert_eq!((errors[0].0, errors[0].1, errors[0].2.as_str()), (1, 102, "Duplicate ticker id"));
+        assert_eq!((errors[1].0, errors[1].1), (2, 10314));
+        assert!(errors[1].2.starts_with("Start Date/Time:"));
+        assert_eq!(hmds.pending_ticks.len(), 1);
+        assert_eq!(hmds.pending_ticks[0].2, "AllLast");
+    }
+
 }

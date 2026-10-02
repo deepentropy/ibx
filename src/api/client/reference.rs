@@ -18,11 +18,11 @@ impl EClient {
         what_to_show: &str, use_rth: bool, format_date: i32, keep_up_to_date: bool,
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_historical_data", &[req_id, contract.con_id]) { return Ok(()); }
-        if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration, bar_size, what_to_show, format_date) {
+        if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration, bar_size, what_to_show,
+            format_date, keep_up_to_date, &contract.sec_type) {
             self.shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
         }
-        ClientCore::validate_historical_args(bar_size, what_to_show, keep_up_to_date)?;
         if what_to_show.eq_ignore_ascii_case("SCHEDULE") {
             return self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistoricalSchedule {
                 req_id,
@@ -47,6 +47,7 @@ impl EClient {
             use_rth,
             keep_up_to_date,
             include_expired: contract.include_expired,
+            format_date,
         }))
     }
 
@@ -58,7 +59,7 @@ impl EClient {
 
     /// Request head timestamp. Matches `reqHeadTimeStamp` in C++.
     pub fn req_head_time_stamp(
-        &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool, _format_date: i32,
+        &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool, format_date: i32,
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_head_time_stamp", &[req_id, contract.con_id]) { return Ok(()); }
         self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHeadTimestamp {
@@ -68,6 +69,7 @@ impl EClient {
             exchange: contract.exchange.clone(),
             what_to_show: what_to_show.into(),
             use_rth,
+            format_date,
         }))
     }
 
@@ -275,22 +277,37 @@ impl EClient {
     // ── Historical Ticks ──
 
     /// Request historical tick data. Matches `reqHistoricalTicks` in C++.
+    /// The reference's warnings (2174, 10299) and local refusals (10314,
+    /// 321) come first (ibx#432).
+    #[allow(clippy::too_many_arguments)]
     pub fn req_historical_ticks(
         &self, req_id: i64, contract: &Contract,
         start_date_time: &str, end_date_time: &str,
         number_of_ticks: i32, what_to_show: &str, use_rth: bool,
+        ignore_size: bool, _misc_options: &[TagValue],
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_historical_ticks", &[req_id, contract.con_id]) { return Ok(()); }
+        let (answers, go_on) = ClientCore::historical_ticks_checks(start_date_time, end_date_time, number_of_ticks,
+            what_to_show, ignore_size, &contract.sec_type, &contract.exchange);
+        for (code, text) in answers {
+            self.shared.reference.push_historical_error(req_id, code, text);
+        }
+        if !go_on {
+            return Ok(());
+        }
+        let symbol = if contract.local_symbol.is_empty() { &contract.symbol } else { &contract.local_symbol };
         self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHistoricalTicks {
             req_id,
             con_id: contract.con_id,
+            symbol: symbol.clone(),
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),
             start_date_time: start_date_time.into(),
             end_date_time: end_date_time.into(),
-            number_of_ticks: number_of_ticks as u32,
+            number_of_ticks,
             what_to_show: what_to_show.into(),
             use_rth,
+            ignore_size,
         }))
     }
 

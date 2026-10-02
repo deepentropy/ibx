@@ -218,12 +218,6 @@ pub(crate) struct CcpState {
     pub(crate) pending_matching_symbols: Vec<(u32, ReqId)>,
     /// Next own request id of a matching-symbols request (ibx#369).
     pub(crate) next_matching_symbols_id: u32,
-    /// keepUpToDate historical queries routed through CCP: (query_id, req_id)
-    pub(crate) pending_kut_historical: Vec<(String, ReqId)>,
-    /// tickerId → req_id mapping for keepUpToDate 35=G bar updates
-    pub(crate) kut_ticker_map: std::collections::HashMap<u32, ReqId>,
-    /// tickerId → minTick for bar decoding
-    pub(crate) kut_min_tick: std::collections::HashMap<u32, f64>,
     /// HMAC signing key for XML-carrying CCP messages (selective signing).
     pub(crate) ccp_sign_key: Vec<u8>,
     /// HMAC signing IV — advances only for signed messages, independent of unsigned ones.
@@ -284,25 +278,19 @@ pub(crate) const HIST_LOOKUP_FIRST_ID: u32 = 0xD000_0000;
 pub(crate) const HIST_LOOKUP_IDS: u32 = 0x1000_0000;
 
 /// `request` with its contract conId set (ibx#427).
-pub(crate) fn request_with_con_id(request: crate::types::ControlCommand, con_id: i64) -> crate::types::ControlCommand {
+pub(crate) fn request_with_con_id(mut request: crate::types::ControlCommand, con_id: i64) -> crate::types::ControlCommand {
     use crate::types::ControlCommand as C;
-    match request {
-        C::FetchHistorical { req_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired, .. } =>
-            C::FetchHistorical { req_id, con_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired },
-        C::FetchHeadTimestamp { req_id, sec_type, exchange, what_to_show, use_rth, .. } =>
-            C::FetchHeadTimestamp { req_id, con_id, sec_type, exchange, what_to_show, use_rth },
-        C::FetchHistogramData { req_id, sec_type, exchange, use_rth, period, .. } =>
-            C::FetchHistogramData { req_id, con_id, sec_type, exchange, use_rth, period },
-        C::FetchHistoricalTicks { req_id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth, .. } =>
-            C::FetchHistoricalTicks { req_id, con_id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth },
-        C::FetchHistoricalSchedule { req_id, sec_type, exchange, end_date_time, duration, use_rth, .. } =>
-            C::FetchHistoricalSchedule { req_id, con_id, sec_type, exchange, end_date_time, duration, use_rth },
-        C::FetchFundamentalData { req_id, report_type, .. } =>
-            C::FetchFundamentalData { req_id, con_id, report_type },
-        C::CalcOption { req_id, kind, under_price, .. } =>
-            C::CalcOption { req_id, con_id, kind, under_price },
-        other => other,
+    match &mut request {
+        C::FetchHistorical { con_id: c, .. }
+        | C::FetchHeadTimestamp { con_id: c, .. }
+        | C::FetchHistogramData { con_id: c, .. }
+        | C::FetchHistoricalTicks { con_id: c, .. }
+        | C::FetchHistoricalSchedule { con_id: c, .. }
+        | C::FetchFundamentalData { con_id: c, .. }
+        | C::CalcOption { con_id: c, .. } => *c = con_id,
+        _ => {}
     }
+    request
 }
 
 /// Scanner result parked for contract-detail fan-out.
@@ -525,9 +513,6 @@ impl CcpState {
             market_rule_by_exchange: std::collections::HashMap::new(),
             pending_matching_symbols: Vec::new(),
             next_matching_symbols_id: 1,
-            pending_kut_historical: Vec::new(),
-            kut_ticker_map: std::collections::HashMap::new(),
-            kut_min_tick: std::collections::HashMap::new(),
             ccp_sign_key: Vec::new(),
             ccp_sign_iv: std::sync::Mutex::new(Vec::new()),
             pending_schedule_pair: Vec::new(),
@@ -860,74 +845,6 @@ impl CcpState {
                         "102" => {}
                         "107" => self.handle_schedule_reply(msg, shared, event_tx),
                         _ => {}
-                    }
-                }
-            }
-            "W" => {
-                // keepUpToDate historical data responses routed through CCP
-                if let Some(xml_tag) = parsed.get(&6118) {
-                    if let Some(resp) = crate::control::historical::parse_bar_response(xml_tag) {
-                        if let Some(pos) = self.pending_kut_historical.iter().position(|(qid, _)| *qid == resp.query_id) {
-                            let (_, req_id) = self.pending_kut_historical[pos];
-                            shared.reference.push_historical_data(req_id, resp.clone());
-                            if resp.is_complete {
-                                // Initial batch done — keep entry for streaming
-                            }
-                        }
-                    }
-                    else if let Some(ticker_id_str) = crate::control::historical::parse_ticker_id(xml_tag) {
-                        let ticker_id: u32 = ticker_id_str.parse().unwrap_or(0);
-                        let min_tick = crate::control::historical::extract_xml_tag(xml_tag, "minTick")
-                            .and_then(|s| s.parse::<f64>().ok())
-                            .unwrap_or(0.01);
-                        // Match ticker to a pending keepUpToDate query
-                        for (qid, req_id) in &self.pending_kut_historical {
-                            if xml_tag.contains(qid) {
-                                self.kut_ticker_map.insert(ticker_id, *req_id);
-                                self.kut_min_tick.insert(ticker_id, min_tick);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            "G" => {
-                // keepUpToDate streaming bar updates (same binary format as rtbar)
-                let body = match super::find_body_after_tag(msg, b"35=G\x01") {
-                    Some(b) => b,
-                    None => return,
-                };
-                let sig_pos = body.windows(6).position(|w| w == b"\x018349=");
-                let body = if let Some(pos) = sig_pos { &body[..pos] } else { body };
-                if body.len() >= 11 {
-                    let ticker_id = u32::from_be_bytes([body[2], body[3], body[4], body[5]]);
-                    let timestamp = u32::from_be_bytes([body[6], body[7], body[8], body[9]]);
-                    let payload_len = body[10] as usize;
-                    if body.len() >= 11 + payload_len {
-                        if let Some(&req_id) = self.kut_ticker_map.get(&ticker_id) {
-                            let min_tick = self.kut_min_tick.get(&ticker_id).copied().unwrap_or(0.01);
-                            let payload = &body[11..11 + payload_len];
-                            if let Some(mut bar) = crate::control::historical::decode_bar_payload(payload, min_tick) {
-                                bar.timestamp = timestamp;
-                                let hist_bar = crate::control::historical::HistoricalBar {
-                                    time: format!("{}", timestamp),
-                                    open: bar.open,
-                                    high: bar.high,
-                                    low: bar.low,
-                                    close: bar.close,
-                                    volume: bar.volume as i64,
-                                    wap: bar.wap,
-                                    count: bar.count as u32,
-                                };
-                                let resp = crate::control::historical::HistoricalResponse {
-                                    query_id: String::new(),
-                                    timezone: String::new(),
-                                    bars: vec![hist_bar],
-                                    is_complete: true,
-                                };
-                                shared.reference.push_historical_data(req_id, resp);
-                            }
-                        }
                     }
                 }
             }
@@ -5652,7 +5569,7 @@ mod reconnect_tests {
             ControlCommand::FetchHistorical {
                 req_id, con_id: 0, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
                 end_date_time: String::new(), duration: "1 D".into(), bar_size: "1 hour".into(),
-                what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, include_expired: true,
+                what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, include_expired: true, format_date: 1,
             }
         }
 
@@ -5724,9 +5641,9 @@ mod reconnect_tests {
         #[test]
         fn every_historical_request_kind_gets_the_con_id() {
             let kinds = vec![
-                ControlCommand::FetchHeadTimestamp { req_id: 1, con_id: 0, sec_type: String::new(), exchange: String::new(), what_to_show: "TRADES".into(), use_rth: true },
+                ControlCommand::FetchHeadTimestamp { req_id: 1, con_id: 0, sec_type: String::new(), exchange: String::new(), what_to_show: "TRADES".into(), use_rth: true, format_date: 1 },
                 ControlCommand::FetchHistogramData { req_id: 2, con_id: 0, sec_type: String::new(), exchange: String::new(), use_rth: true, period: "1 week".into() },
-                ControlCommand::FetchHistoricalTicks { req_id: 3, con_id: 0, sec_type: String::new(), exchange: String::new(), start_date_time: String::new(), end_date_time: String::new(), number_of_ticks: 10, what_to_show: "TRADES".into(), use_rth: true },
+                ControlCommand::FetchHistoricalTicks { req_id: 3, con_id: 0, symbol: String::new(), sec_type: String::new(), exchange: String::new(), start_date_time: String::new(), end_date_time: String::new(), number_of_ticks: 10, what_to_show: "TRADES".into(), use_rth: true, ignore_size: false },
                 ControlCommand::FetchHistoricalSchedule { req_id: 4, con_id: 0, sec_type: String::new(), exchange: String::new(), end_date_time: String::new(), duration: "1 M".into(), use_rth: true },
                 ControlCommand::FetchFundamentalData { req_id: 5, con_id: 0, report_type: "ReportSnapshot".into() },
             ];

@@ -41,5 +41,6 @@ it always comes after the `fix_in` that caused it.
 | `20260928` | overnight | overnight_tif: OVERNIGHT, OVERNIGHT + DAY and includeOvernight orders |
 | `20260928` | pre-open | premarket_order_types: STP / TRAIL with outsideRth, IOC / FOK, TIF values, customerAccount refusal, OPG, delayed market data, modify of a filled order |
 | `20260928` | RTH | rth_order_types: TRAIL MIT / TRAIL LIT / PASSV REL / RPI / PEG BEST / PEG BENCH, overnight cases in RTH, SPY call spread (combo, refused 460) |
+| `20261002` | pre-open | b1_432_hist_ticks: historical ticks of AAPL and EUR.USD (start, end, both, no zone, refusals, AGGTRADES); b1_429_keep_up_to_date: four keepUpToDate requests, their updates, cancels and refusals; b1_431_hist_format: formatDate 1 and 2 bars, historicalDataEnd strings, head timestamps, cancel of an unknown request |
 
 The `6010` (orderRef) values in the order frames are labels chosen by the recording scripts.

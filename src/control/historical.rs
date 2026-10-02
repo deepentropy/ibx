@@ -85,6 +85,33 @@ impl BarDataType {
         }
     }
 
+    /// Label of the type in the chart name of a query id, as the reference
+    /// writes it: the API name with its first letter in capitals and the
+    /// rest in lower case (`Trades`, `Midpoint`, `Bid_ask`).
+    pub fn label(&self) -> String {
+        let api = match self {
+            Self::Trades => "TRADES",
+            Self::Midpoint => "MIDPOINT",
+            Self::Bid => "BID",
+            Self::Ask => "ASK",
+            Self::BidAsk => "BID_ASK",
+            Self::AdjustedLast => "ADJUSTED_LAST",
+            Self::HistoricalVolatility => "HISTORICAL_VOLATILITY",
+            Self::ImpliedVolatility => "OPTION_IMPLIED_VOLATILITY",
+            Self::IndicativeAuction => "INDICATIVE_AUCTION_PRICE_SIZE",
+            Self::NavLast => "NAV_LAST",
+            Self::YieldAsk => "YIELD_ASK",
+            Self::YieldBid => "YIELD_BID",
+            Self::YieldBidAsk => "YIELD_BID_ASK",
+            Self::YieldMark => "YIELD_MARK",
+            Self::YieldLast => "YIELD_LAST",
+            Self::FeeRate => "FEE_RATE",
+            Self::Schedule => "SCHEDULE",
+            Self::AggTrades => "AGGTRADES",
+        };
+        capitalized(api)
+    }
+
     /// Server queries one bar request needs: BID_ASK is answered from a Bid
     /// query and an Ask query, YIELD_BID_ASK from a bid yield query and an
     /// ask yield query; every other type is one query (ibx#408, ibx#430).
@@ -109,6 +136,17 @@ impl BarDataType {
             Self::Schedule => &[Self::Schedule],
             Self::AggTrades => &[Self::AggTrades],
         }
+    }
+}
+
+/// `TRADES` as `Trades`: the first letter in capitals, the rest in lower
+/// case.
+fn capitalized(api: &str) -> String {
+    let lower = api.to_ascii_lowercase();
+    let mut c = lower.chars();
+    match c.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + c.as_str(),
+        None => String::new(),
     }
 }
 
@@ -185,11 +223,36 @@ impl BarSize {
         })
     }
 
-    /// Bar sizes the keepUpToDate streaming path supports. The rest are
-    /// accepted on the batch path only; sending them with
-    /// keep_up_to_date=true previously downgraded to Min5 silently (ibx#232).
-    pub fn supports_keep_up_to_date(&self) -> bool {
-        matches!(self, Self::Sec1 | Self::Sec5 | Self::Min5 | Self::Hour1 | Self::Day1)
+    /// Bars shorter than one day: their time is written with the time of
+    /// day, by formatDate (ibx#431).
+    pub fn is_intraday(&self) -> bool {
+        self.seconds().is_some()
+    }
+
+    /// Length of a bar shorter than one day, in seconds; None for daily
+    /// and longer bars.
+    pub fn seconds(&self) -> Option<i64> {
+        Some(match self {
+            Self::Sec1 => 1,
+            Self::Sec5 => 5,
+            Self::Sec10 => 10,
+            Self::Sec15 => 15,
+            Self::Sec30 => 30,
+            Self::Min1 => 60,
+            Self::Min2 => 120,
+            Self::Min3 => 180,
+            Self::Min5 => 300,
+            Self::Min10 => 600,
+            Self::Min15 => 900,
+            Self::Min20 => 1200,
+            Self::Min30 => 1800,
+            Self::Hour1 => 3600,
+            Self::Hour2 => 7200,
+            Self::Hour3 => 10800,
+            Self::Hour4 => 14400,
+            Self::Hour8 => 28800,
+            _ => return None,
+        })
     }
 
     /// Bars longer than one day (ibx#430).
@@ -289,6 +352,148 @@ pub fn is_valid_end_date(s: &str) -> bool {
     }
 }
 
+/// Text of warning 2174, sent when a request date names no time zone.
+pub const IMPLIED_ZONE_WARNING: &str = "Warning: You submitted request with date-time attributes without explicit time zone. \
+Please switch to use yyyymmdd-hh:mm:ss in UTC or use instrument time zone, like US/Eastern. \
+Implied time zone functionality will be removed in the next API release";
+
+/// A request date as the reference reads it (ibx#431, ibx#432): the
+/// instant in Unix seconds, and the zone the text names. `zone` is None
+/// when the text names none: it is read in the machine zone, and the
+/// reference sends warning 2174.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestTime {
+    pub secs: i64,
+    pub zone: Option<String>,
+}
+
+/// The zone of a zone name: `UTC` and `GMT`, the legacy US names, and the
+/// zone database names.
+pub fn zone_named(name: &str) -> Option<jiff::tz::TimeZone> {
+    if name.eq_ignore_ascii_case("UTC") || name.eq_ignore_ascii_case("GMT") {
+        return Some(jiff::tz::TimeZone::UTC);
+    }
+    jiff::tz::TimeZone::get(crate::config::canonical_zone(name)).ok()
+}
+
+/// Read a request date (ibx#431, ibx#432), in the forms of
+/// [`is_valid_end_date`]: `yyyyMMdd-HH:mm:ss` is UTC; `[yyyyMMdd ]HH:mm:ss`
+/// is in the zone named after it, else in `machine_zone`; with no date,
+/// the day of `now` in that zone. Ok(None) for an empty text; Err for a
+/// text or a zone the reference cannot read (10314).
+pub fn parse_request_time(text: &str, machine_zone: &str, now: i64) -> Result<Option<RequestTime>, ()> {
+    let s = text.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    if !is_valid_end_date(s) {
+        return Err(());
+    }
+    let civil = |d: Option<&str>, t: &str, tz: &jiff::tz::TimeZone| -> Result<i64, ()> {
+        let n = |v: &str| v.parse::<i32>().map_err(|_| ());
+        let hms: Vec<&str> = t.split(':').collect();
+        let time = jiff::civil::Time::new(n(hms[0])? as i8, n(hms[1])? as i8, n(hms[2])? as i8, 0).map_err(|_| ())?;
+        let date = match d {
+            Some(d) => jiff::civil::Date::new(n(&d[0..4])? as i16, n(&d[4..6])? as i8, n(&d[6..8])? as i8).map_err(|_| ())?,
+            None => jiff::Timestamp::from_second(now).map_err(|_| ())?.to_zoned(tz.clone()).date(),
+        };
+        date.to_datetime(time).to_zoned(tz.clone()).map(|z| z.timestamp().as_second()).map_err(|_| ())
+    };
+    if !s.contains(' ') {
+        if let Some((d, t)) = s.split_once('-') {
+            let secs = civil(Some(d), t, &jiff::tz::TimeZone::UTC)?;
+            return Ok(Some(RequestTime { secs, zone: Some("UTC".to_string()) }));
+        }
+    }
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let numeric: Vec<&str> = words.iter().copied().filter(|w| w.starts_with(|c: char| c.is_ascii_digit())).collect();
+    let zone_words: Vec<&str> = words.iter().copied().filter(|w| !w.starts_with(|c: char| c.is_ascii_digit())).collect();
+    let zone = (!zone_words.is_empty()).then(|| zone_words.join(" "));
+    let tz = match &zone {
+        Some(z) => zone_named(z).ok_or(())?,
+        None => zone_named(machine_zone).unwrap_or_else(jiff::tz::TimeZone::system),
+    };
+    let secs = match numeric.as_slice() {
+        [d, t] => civil(Some(d), t, &tz)?,
+        [t] => civil(None, t, &tz)?,
+        _ => return Err(()),
+    };
+    Ok(Some(RequestTime { secs, zone }))
+}
+
+/// Unix seconds now.
+pub fn now_secs() -> i64 {
+    jiff::Timestamp::now().as_second()
+}
+
+/// A time as the server reads it: `yyyyMMdd-HH:mm:ss` in UTC.
+pub fn server_time(secs: i64) -> String {
+    jiff::Timestamp::from_second(secs)
+        .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y%m%d-%H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
+/// A time as the reference writes it in the instrument zone:
+/// `yyyyMMdd HH:mm:ss {zone}` (ibx#431).
+pub fn zoned_time(secs: i64, zone: &str) -> String {
+    let tz = zone_named(zone).unwrap_or(jiff::tz::TimeZone::UTC);
+    jiff::Timestamp::from_second(secs)
+        .map(|t| format!("{} {}", t.to_zoned(tz).strftime("%Y%m%d %H:%M:%S"), zone))
+        .unwrap_or_default()
+}
+
+/// The time of a bar as the reference writes it (ibx#431): a bar shorter
+/// than one day by formatDate (1 `yyyyMMdd HH:mm:ss {zone}` in the
+/// instrument zone, 2 Unix seconds, 3 the form of 1 without the year); a
+/// bar of one day or longer as its date `yyyyMMdd` in the zone of the
+/// reply, whatever formatDate.
+pub fn bar_time(secs: i64, format_date: i32, intraday: bool, zone: &str, reply_zone: &str) -> String {
+    if !intraday {
+        let tz = zone_named(reply_zone).unwrap_or(jiff::tz::TimeZone::UTC);
+        return jiff::Timestamp::from_second(secs)
+            .map(|t| t.to_zoned(tz).strftime("%Y%m%d").to_string())
+            .unwrap_or_default();
+    }
+    match format_date {
+        2 => secs.to_string(),
+        3 => zoned_time(secs, zone).get(4..).unwrap_or("").to_string(),
+        _ => zoned_time(secs, zone),
+    }
+}
+
+/// A head timestamp as the reference writes it (ibx#431): formatDate 1
+/// `yyyyMMdd-HH:mm:ss` and 3 `MMdd HH:mm:ss`, both in UTC; 2 Unix seconds.
+pub fn head_timestamp_text(secs: i64, format_date: i32) -> String {
+    match format_date {
+        2 => secs.to_string(),
+        3 => jiff::Timestamp::from_second(secs)
+            .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).strftime("%m%d %H:%M:%S").to_string())
+            .unwrap_or_default(),
+        _ => server_time(secs),
+    }
+}
+
+/// The start of a bar request (ibx#431): its end moved back by the
+/// duration (in the reference form, `{n} S|d|W|m|y`), on the calendar of
+/// the machine zone, as the reference computes it.
+pub fn duration_start(end: i64, duration: &str, machine_zone: &str) -> i64 {
+    let Some((n, unit)) = duration.split_once(' ') else { return end };
+    let Ok(n) = n.parse::<i64>() else { return end };
+    if unit == "S" {
+        return end - n;
+    }
+    let tz = zone_named(machine_zone).unwrap_or_else(jiff::tz::TimeZone::system);
+    let Ok(at) = jiff::Timestamp::from_second(end).map(|t| t.to_zoned(tz)) else { return end };
+    let span = match unit {
+        "d" => jiff::Span::new().try_days(n),
+        "W" => jiff::Span::new().try_weeks(n),
+        "m" => jiff::Span::new().try_months(n),
+        "y" => jiff::Span::new().try_years(n),
+        _ => return end,
+    };
+    span.ok().and_then(|sp| at.checked_sub(sp).ok()).map_or(end, |z| z.timestamp().as_second())
+}
+
 /// Duration of a bar request in the reference form (ibx#430): a plain
 /// number is seconds, and the unit letter takes the case the reference
 /// sends. Err is the refusal text.
@@ -337,18 +542,21 @@ pub struct CheckedBarRequest {
     pub duration: String,
 }
 
-/// The local checks of a bar request, in the reference order (ibx#430):
-/// the end date (10314), then the duration, ADJUSTED_LAST with an end
-/// date, the bar size, ADJUSTED_LAST with bars longer than a day,
-/// whatToShow, formatDate (when given), and SCHEDULE with bars other than
-/// one day (321). Err is (code, text). The maximum number of backfill
-/// years is not checked.
+/// The local checks of a bar request, in the reference order (ibx#430,
+/// ibx#429): the end date (10314), then the duration, ADJUSTED_LAST with
+/// an end date, the bar size, ADJUSTED_LAST with bars longer than a day,
+/// whatToShow, formatDate (when given), the keepUpToDate rules (no end
+/// date, no combo, only TRADES, MIDPOINT, BID or ASK), and SCHEDULE with
+/// bars other than one day (321). Err is (code, text). The maximum number
+/// of backfill years is not checked.
 pub fn check_bar_request(
     end_date_time: &str,
     duration: &str,
     bar_size: &str,
     what_to_show: &str,
     format_date: Option<i32>,
+    keep_up_to_date: bool,
+    sec_type: &str,
 ) -> Result<CheckedBarRequest, (i32, String)> {
     let refuse = |cause: &str| (321, bar_request_refusal(cause));
     if !is_valid_end_date(end_date_time) {
@@ -367,6 +575,17 @@ pub fn check_bar_request(
     if let Some(n) = format_date {
         if !(1..=3).contains(&n) {
             return Err(refuse(&format!("Date formatting selection of {} rejected.", n)));
+        }
+    }
+    if keep_up_to_date {
+        if !end_date_time.trim().is_empty() {
+            return Err(refuse("End date not supported with live updates"));
+        }
+        if matches!(sec_type.trim().to_ascii_uppercase().as_str(), "BAG" | "PDC") {
+            return Err(refuse("Live updates for combos are not supported"));
+        }
+        if !matches!(what_to_show.to_ascii_uppercase().as_str(), "TRADES" | "MIDPOINT" | "BID" | "ASK") {
+            return Err(refuse("Source price not supported with live updates"));
         }
     }
     if data_type == BarDataType::Schedule && bar_size != BarSize::Day1 {
@@ -427,9 +646,13 @@ fn query_use_native(sec_type: &str) -> bool {
     query_sec_type(sec_type) == "IND"
 }
 
-/// A single historical OHLCV bar parsed from XML.
+/// A single historical OHLCV bar parsed from XML. Volume, WAP and count
+/// are -1 when the reply has none (MIDPOINT, BID, ASK bars), as the
+/// reference sends them (ibx#429).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoricalBar {
+    /// The reply's bar time (`yyyyMMdd-HH:mm:ss` UTC); the API time, by
+    /// formatDate, once the engine has written it (ibx#431).
     pub time: String,
     pub open: f64,
     pub high: f64,
@@ -437,16 +660,30 @@ pub struct HistoricalBar {
     pub close: f64,
     pub volume: i64,
     pub wap: f64,
-    pub count: u32,
+    pub count: i32,
 }
 
 /// Parsed historical data response.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HistoricalResponse {
     pub query_id: String,
     pub timezone: String,
     pub bars: Vec<HistoricalBar>,
     pub is_complete: bool,
+    /// Start and end of the request for historicalDataEnd, as the
+    /// reference writes them (ibx#431); empty until the engine set them.
+    pub start: String,
+    pub end: String,
+}
+
+/// Chart name of a query id: `{symbol}@{API exchange} {label}`, an empty
+/// exchange being `SMART`.
+pub fn chart_name(symbol: &str, exchange: &str, label: &str) -> String {
+    let exchange = match exchange.trim() {
+        "" => "SMART",
+        e => e,
+    };
+    format!("{}@{} {}", symbol, exchange, label)
 }
 
 /// Build the XML query for a historical bar data request.
@@ -458,11 +695,10 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
     let expired = if req.include_expired { "yes" } else { "no" };
 
     let data_str = req.data_type.as_str();
-    // keepUpToDate uses structured ;;-delimited ID required by CCP gateway parser.
-    // One-shot uses simple ID (HMDS accepts it fine).
+    // A live query carries the chart name, as the reference writes it:
+    // symbol, API exchange and type label (ibx#429).
     let query_id = if req.keep_up_to_date {
-        let graph_name = format!("{}@{} {}", req.symbol, exchange, data_str);
-        format!("{};;{};;1;;true;;0;;I", req.query_id, graph_name)
+        format!("{};;{};;1;;true;;0;;I", req.query_id, chart_name(&req.symbol, &req.exchange, &req.data_type.label()))
     } else {
         req.query_id.clone()
     };
@@ -516,6 +752,20 @@ pub fn build_historical_request(req: &HistoricalRequest, seq: u32) -> Vec<u8> {
             (TAG_HISTORICAL_XML, &xml),
         ],
         seq,
+    )
+}
+
+/// The cancel of a query still waiting for its answer, by its whole id,
+/// as the reference writes it (ibx#431).
+pub fn query_cancel_xml(query_id: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ListOfCancelQueries>\
+         <CancelQuery>\
+         <id>{}</id>\
+         </CancelQuery>\
+         </ListOfCancelQueries>",
+        query_id,
     )
 }
 
@@ -603,13 +853,13 @@ pub fn parse_bar_response(xml: &str) -> Option<HistoricalResponse> {
                 .unwrap_or(0.0),
             volume: extract_xml_tag(bar_xml, "volume")
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(0),
+                .unwrap_or(-1),
             wap: extract_xml_tag(bar_xml, "weightedAvg")
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0),
+                .unwrap_or(-1.0),
             count: extract_xml_tag(bar_xml, "count")
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(0),
+                .unwrap_or(-1),
         };
         bars.push(bar);
         search_start = bar_end;
@@ -620,7 +870,136 @@ pub fn parse_bar_response(xml: &str) -> Option<HistoricalResponse> {
         timezone,
         bars,
         is_complete,
+        ..Default::default()
     })
+}
+
+/// A bar of a live bar series (ibx#429): start and end in Unix seconds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeriesBar {
+    pub start: i64,
+    pub end: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: i64,
+    pub wap: f64,
+    pub count: i32,
+}
+
+/// The bars of a bar reply frame with their start and end times, and the
+/// trading sessions (`<Open>` / `<Close>` times) of the frame (ibx#429).
+pub fn parse_series(xml: &str) -> (Vec<SeriesBar>, Vec<(i64, i64)>) {
+    let mut bars = Vec::new();
+    let mut opens: Vec<i64> = Vec::new();
+    let mut closes: Vec<i64> = Vec::new();
+    let mut pos = 0;
+    while let Some(rel) = xml[pos..].find('<') {
+        let at = pos + rel;
+        let rest = &xml[at..];
+        let (tag, close_tag) = if rest.starts_with("<Bar>") {
+            ("Bar", "</Bar>")
+        } else if rest.starts_with("<Open>") {
+            ("Open", "</Open>")
+        } else if rest.starts_with("<Close>") {
+            ("Close", "</Close>")
+        } else {
+            pos = at + 1;
+            continue;
+        };
+        let Some(e) = rest.find(close_tag) else { break };
+        let item = &rest[..e];
+        let time = extract_xml_tag(item, "time").and_then(parse_server_time);
+        match tag {
+            "Bar" => {
+                if let Some(start) = time {
+                    let num = |t: &str, unset: f64| extract_xml_tag(item, t).and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(unset);
+                    bars.push(SeriesBar {
+                        start,
+                        end: extract_xml_tag(item, "endTime").and_then(parse_server_time).unwrap_or(start),
+                        open: num("open", 0.0),
+                        high: num("high", 0.0),
+                        low: num("low", 0.0),
+                        close: num("close", 0.0),
+                        volume: num("volume", -1.0) as i64,
+                        wap: num("weightedAvg", -1.0),
+                        count: num("count", -1.0) as i32,
+                    });
+                }
+            }
+            "Open" => opens.extend(time),
+            _ => closes.extend(time),
+        }
+        pos = at + e + close_tag.len();
+    }
+    let sessions = opens.iter().zip(closes.iter()).map(|(o, c)| (*o, *c)).collect();
+    (bars, sessions)
+}
+
+/// Merge a 5-second bar starting at `time` into a live bar series, as the
+/// reference does (ibx#429), and give the index of the bar it changed.
+/// The bar it belongs to is the last bar when it starts before that bar
+/// ends; else the bar of its period: its time floored to the bar size,
+/// not before the open of its session. A bar not in the series is added
+/// from the 5-second bar. A 5-second bar already inside its bar changes
+/// nothing. Merging raises the high, lowers the low, sets the close, and
+/// for trades adds the volume and the count and weighs the WAP by the
+/// volume; other data keep volume, WAP and count unset (-1). Bars of a
+/// day or longer take the 5-second bars into their last bar.
+pub fn merge_five_seconds(
+    series: &mut Vec<SeriesBar>, sessions: &[(i64, i64)], bar_size: BarSize, trades: bool,
+    time: i64, bar: &crate::types::RealTimeBar,
+) -> Option<usize> {
+    let end = time + 5;
+    let in_last = series.last().is_some_and(|b| time >= b.start && time < b.end);
+    let index = if in_last {
+        Some(series.len() - 1)
+    } else {
+        match bar_size.seconds() {
+            Some(len) => {
+                let session = sessions.iter().find(|(o, c)| *o <= time && time < *c);
+                let start = (time - time.rem_euclid(len)).max(session.map_or(i64::MIN, |s| s.0));
+                match series.iter().position(|b| b.start == start) {
+                    Some(i) => Some(i),
+                    None => {
+                        let (volume, wap, count) = if trades {
+                            (bar.volume as i64, bar.wap, bar.count)
+                        } else {
+                            (-1, -1.0, -1)
+                        };
+                        let new = SeriesBar {
+                            start, end, open: bar.open, high: bar.high, low: bar.low, close: bar.close,
+                            volume, wap, count,
+                        };
+                        let at = series.iter().position(|b| b.start > start).unwrap_or(series.len());
+                        series.insert(at, new);
+                        return Some(at);
+                    }
+                }
+            }
+            None => series.iter().rposition(|b| time >= b.start),
+        }
+    };
+    let i = index?;
+    let b = &mut series[i];
+    if end <= b.end {
+        return Some(i);
+    }
+    b.high = b.high.max(bar.high);
+    b.low = b.low.min(bar.low);
+    b.close = bar.close;
+    b.end = end;
+    if trades {
+        let added = bar.volume as i64;
+        let total = b.volume.max(0) + added;
+        if total > 0 && added > 0 {
+            b.wap = (b.wap * b.volume.max(0) as f64 + bar.wap * added as f64) / total as f64;
+        }
+        b.volume = total;
+        b.count = b.count.max(0) + bar.count.max(0);
+    }
+    Some(i)
 }
 
 /// One bar of the Bid or the Ask query of a BID_ASK request: the fields the
@@ -666,7 +1045,7 @@ pub fn parse_leg_bars(xml: &str) -> Vec<LegBar> {
 /// A bar found in one leg only keeps that leg's values: Bid only, open,
 /// high and close are the Bid time average; Ask only, open, low and close
 /// are the Ask time average. The combined bars carry no volume, average
-/// price or trade count. Sorted by bar time.
+/// price or trade count (-1, as unset values are sent). Sorted by bar time.
 pub fn combine_bid_ask(frames: &[(BarDataType, Vec<LegBar>)]) -> Vec<HistoricalBar> {
     let mut series: std::collections::BTreeMap<String, HistoricalBar> = std::collections::BTreeMap::new();
     for (leg, bars) in frames {
@@ -696,9 +1075,9 @@ pub fn combine_bid_ask(frames: &[(BarDataType, Vec<LegBar>)]) -> Vec<HistoricalB
                     series.insert(b.time.clone(), HistoricalBar {
                         time: b.time.clone(),
                         open, high, low, close,
-                        volume: 0,
-                        wap: 0.0,
-                        count: 0,
+                        volume: -1,
+                        wap: -1.0,
+                        count: -1,
                     });
                 }
             }
@@ -769,41 +1148,167 @@ pub fn build_head_timestamp_xml(req: &HeadTimestampRequest) -> String {
     )
 }
 
-/// Map whatToShow to data type.
-fn tick_data_type(what_to_show: &str) -> &'static str {
-    match what_to_show.to_uppercase().as_str() {
-        "MIDPOINT" => "MidPoint",
-        "BID_ASK" => "BidAsk",
-        _ => "AllLast", // TRADES
+/// The data of a historical ticks query (ibx#432).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickSource {
+    Trades,
+    Midpoint,
+    BidAsk,
+}
+
+impl TickSource {
+    /// Server data name: trades are asked as all trades.
+    pub fn data(&self) -> &'static str {
+        match self {
+            Self::Trades => "AllLast",
+            Self::Midpoint => "MidPoint",
+            Self::BidAsk => "BidAsk",
+        }
+    }
+
+    /// Label in the chart name of the query id.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Trades => "Trades",
+            Self::Midpoint => "Midpoint",
+            Self::BidAsk => "Bid_ask",
+        }
     }
 }
 
-/// Build the XML query for a historical ticks request.
-///
-/// Uses `<type>TickData</type>`, `<step>ticks</step>`, `<timeLength>{N} t</timeLength>`.
+/// Text of the local refusals of a historical ticks request (321).
+pub fn ticks_refusal(cause: &str) -> String {
+    format!("Error validating request.-'bP' : cause - {}", cause)
+}
+
+/// A historical ticks request that passed the reference checks (ibx#432).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedTicks {
+    pub start: Option<RequestTime>,
+    pub end: Option<RequestTime>,
+    pub source: TickSource,
+    /// The query carries the filter that asks for no sizes.
+    pub ignore_size_filter: bool,
+}
+
+/// The local checks of a historical ticks request, in the reference order
+/// (ibx#432): the start date, then the end date (10314); warning 2174 for a
+/// date with no zone; then 321 for an empty exchange, a combo, a number of
+/// ticks below 1, an empty or unknown whatToShow (TRADES, MIDPOINT,
+/// BID_ASK and AGGTRADES are known); then warning 10299 for AGGTRADES
+/// outside crypto, which is asked as TRADES. TRADES on a currency pair is
+/// asked as midpoints. The query asks for no sizes for midpoints, for a
+/// whatToShow asked as another data, and for BID_ASK with ignoreSize.
+/// The warnings (code, text) go to the client before the refusal or the
+/// query.
 #[allow(clippy::too_many_arguments)]
-pub fn build_tick_query_xml(
-    query_id: &str, con_id: i64, sec_type: &str, exchange: &str,
-    start_date_time: &str, end_date_time: &str,
-    number_of_ticks: u32, what_to_show: &str, use_rth: bool,
-) -> String {
-    let query_exchange = query_exchange(exchange, sec_type);
+pub fn check_ticks_request(
+    start: &str, end: &str, number_of_ticks: i32, what_to_show: &str, ignore_size: bool,
+    sec_type: &str, exchange: &str, machine_zone: &str, now: i64,
+) -> (Vec<(i32, String)>, Result<CheckedTicks, (i32, String)>) {
+    let mut warnings = Vec::new();
+    let checked = check_ticks(start, end, number_of_ticks, what_to_show, ignore_size, sec_type, exchange,
+        machine_zone, now, &mut warnings);
+    (warnings, checked)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_ticks(
+    start: &str, end: &str, number_of_ticks: i32, what_to_show: &str, ignore_size: bool,
+    sec_type: &str, exchange: &str, machine_zone: &str, now: i64, warnings: &mut Vec<(i32, String)>,
+) -> Result<CheckedTicks, (i32, String)> {
+    let start = parse_request_time(start, machine_zone, now)
+        .map_err(|_| (10314, INVALID_END_DATE.replacen("End Date/Time", "Start Date/Time", 1)))?;
+    let end = parse_request_time(end, machine_zone, now)
+        .map_err(|_| (10314, INVALID_END_DATE.to_string()))?;
+    for t in [&start, &end].into_iter().flatten() {
+        if t.zone.is_none() {
+            warnings.push((2174, IMPLIED_ZONE_WARNING.to_string()));
+        }
+    }
+    let refuse = |cause: &str| Err((321, ticks_refusal(cause)));
     let sec_type = query_sec_type(sec_type);
-    let rth = if use_rth { "true" } else { "false" };
-    let data = tick_data_type(what_to_show);
-
-    // Use endTime if provided, otherwise startTime
-    let time_tag = if !end_date_time.is_empty() {
-        format!("<endTime>{}</endTime>", end_date_time)
-    } else {
-        format!("<endTime>{}</endTime>", start_date_time)
+    if exchange.trim().is_empty() {
+        return refuse("Exchange must not be empty");
+    }
+    if matches!(sec_type.as_str(), "BAG" | "PDC") {
+        return refuse("Combo types are not supported");
+    }
+    if number_of_ticks <= 0 {
+        return refuse("Number of ticks must be > 0");
+    }
+    if what_to_show.trim().is_empty() {
+        return refuse("Source price must not be empty");
+    }
+    let what = what_to_show.to_ascii_uppercase();
+    let midpoint_default = sec_type == "CASH";
+    let source = match what.as_str() {
+        "TRADES" | "AGGTRADES" if midpoint_default => TickSource::Midpoint,
+        "TRADES" | "AGGTRADES" => TickSource::Trades,
+        "MIDPOINT" => TickSource::Midpoint,
+        "BID_ASK" => TickSource::BidAsk,
+        _ => return refuse("Invalid source price"),
     };
+    if what == "AGGTRADES" && sec_type != "CRYPTO" {
+        warnings.push((10299, "Expected what to show is TRADES, please use that instead of AGGTRADES.".to_string()));
+    }
+    let asked_as_other = match source {
+        TickSource::Trades => what != "TRADES",
+        TickSource::Midpoint => true,
+        TickSource::BidAsk => ignore_size,
+    };
+    Ok(CheckedTicks { start, end, source, ignore_size_filter: asked_as_other })
+}
 
+/// A historical ticks query (ibx#432).
+#[derive(Debug, Clone)]
+pub struct TickQuery {
+    /// Window id; the query id adds the chart name.
+    pub window_id: String,
+    /// Symbol of the chart name (the local symbol when known).
+    pub symbol: String,
+    pub con_id: i64,
+    pub sec_type: String,
+    /// Exchange of the API contract.
+    pub exchange: String,
+    pub source: TickSource,
+    /// Unix seconds; a start makes a forward query from it, else an end a
+    /// backward query from it, else a forward query from 1970.
+    pub start: Option<i64>,
+    pub end: Option<i64>,
+    pub number_of_ticks: i32,
+    pub use_rth: bool,
+    pub ignore_size_filter: bool,
+}
+
+impl TickQuery {
+    /// The whole query id, as the reference writes it.
+    pub fn query_id(&self) -> String {
+        format!("{};;{};;0;;true;;0;;U", self.window_id, chart_name(&self.symbol, &self.exchange, self.source.label()))
+    }
+}
+
+/// Build the XML query of a historical ticks request, as the reference
+/// writes it (ibx#432): the start as `<startTime>`, else the end, capped
+/// at `now`, as `<endTime>`, else a start in 1970; times in UTC; no step;
+/// all days; the size filter when asked.
+pub fn build_tick_query_xml(q: &TickQuery, now: i64) -> String {
+    let time = match (q.start, q.end) {
+        (Some(s), _) => format!("<startTime>{}</startTime>", server_time(s)),
+        (None, Some(e)) => format!("<endTime>{}</endTime>", server_time(e.min(now))),
+        (None, None) => format!("<startTime>{}</startTime>", server_time(0)),
+    };
+    let filter = if q.ignore_size_filter {
+        "<Filter varName=\"filter\"><ignoreSize>true</ignoreSize></Filter>"
+    } else {
+        ""
+    };
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
          <ListOfQueries>\
          <Query>\
          <id>{id}</id>\
+         <approx>false</approx>\
          <useRTH>{rth}</useRTH>\
          <contractID>{con_id}</contractID>\
          <exchange>{exchange}</exchange>\
@@ -813,91 +1318,134 @@ pub fn build_tick_query_xml(
          <data>{data}</data>\
          {time}\
          <timeLength>{n} t</timeLength>\
-         <step>ticks</step>\
          <source>API</source>\
+         <needTotalValue>false</needTotalValue>\
          <wholeDays>true</wholeDays>\
          <delay>auto</delay>\
+         {filter}\
          </Query>\
          </ListOfQueries>",
-        id = query_id,
-        exchange = query_exchange,
-        n = number_of_ticks,
-        time = time_tag,
+        id = q.query_id(),
+        rth = if query_use_rth(&q.sec_type, q.use_rth) { "true" } else { "false" },
+        con_id = q.con_id,
+        exchange = query_exchange(&q.exchange, &q.sec_type),
+        sec_type = query_sec_type(&q.sec_type),
+        data = q.source.data(),
+        n = q.number_of_ticks,
     )
 }
 
-/// Parse a ResultSetTick XML response into historical tick data.
-pub fn parse_tick_response(xml: &str, what_to_show: &str) -> Option<(String, crate::types::HistoricalTickData, bool)> {
+/// One reply frame of a historical ticks query (ibx#432).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TickFrame {
+    pub query_id: String,
+    /// The ticks, by the data name of the reply; None for a data name the
+    /// reference does not send to the client.
+    pub data: Option<crate::types::HistoricalTickData>,
+    /// `<eoq>`: the last frame of the query.
+    pub done: bool,
+}
+
+/// A server time `yyyyMMdd-HH:mm:ss` (UTC) as Unix seconds; sub-seconds,
+/// when given, are dropped.
+pub fn parse_server_time(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let b = s.as_bytes();
+    if b.len() < 17 || b[8] != b'-' || b[11] != b':' || b[14] != b':' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i32>().ok();
+    let date = jiff::civil::Date::new(num(0..4)? as i16, num(4..6)? as i8, num(6..8)? as i8).ok()?;
+    let time = jiff::civil::Time::new(num(9..11)? as i8, num(12..14)? as i8, num(15..17)? as i8, 0).ok()?;
+    date.to_datetime(time).to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp().as_second())
+}
+
+/// Parse a ResultSetTick reply frame as the reference reads it (ibx#432):
+/// the kind of ticks comes from the reply's `<data>` (`AllLast` and `Last`
+/// are trades, `BidAsk`, `MidPoint`); each tick time is Unix seconds; each
+/// size is multiplied by the reply's `<sizeMinTick>`; `<exch>` is the
+/// exchange and `<cond>` the special conditions; the `<flags>` tokens, `;`
+/// separated, give past limit (`H`), unreported (`U`), ask past high (`AH`)
+/// and bid past low (`BH`). A price `nan` is the maximum double.
+pub fn parse_tick_response(xml: &str) -> Option<TickFrame> {
+    use crate::api::types::{TickAttribBidAsk, TickAttribLast};
+    use crate::types::{HistoricalTickBidAsk, HistoricalTickData, HistoricalTickLast, HistoricalTickMidpoint};
     if !xml.contains("<ResultSetTick>") {
         return None;
     }
-
     let query_id = extract_xml_tag(xml, "id").unwrap_or("").to_string();
-    let is_complete = extract_xml_tag(xml, "eoq").unwrap_or("false") == "true";
+    let done = extract_xml_tag(xml, "eoq").unwrap_or("false").trim() == "true";
+    let size_step: Option<f64> = extract_xml_tag(xml, "sizeMinTick").and_then(|s| s.trim().parse().ok());
+    // The reply's data name comes before its events.
+    let head = &xml[..xml.find("<Events>").unwrap_or(xml.len())];
+    let data_name = extract_xml_tag(head, "data").unwrap_or("").trim();
+    let data_name = data_name.strip_prefix("All").unwrap_or(data_name);
 
-    let upper = what_to_show.to_uppercase();
+    let mut ticks: Vec<&str> = Vec::new();
     let mut search_start = 0;
-
-    match upper.as_str() {
-        "BID_ASK" => {
-            let mut ticks = Vec::new();
-            while let Some(tick_pos) = xml[search_start..].find("<Tick>") {
-                let abs = search_start + tick_pos;
-                let end = match xml[abs..].find("</Tick>") {
-                    Some(e) => abs + e + 7,
-                    None => break,
-                };
-                let t = &xml[abs..end];
-                ticks.push(crate::types::HistoricalTickBidAsk {
-                    time: extract_xml_tag(t, "time").unwrap_or("").to_string(),
-                    bid_price: extract_xml_tag(t, "priceBid").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                    ask_price: extract_xml_tag(t, "priceAsk").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                    bid_size: extract_xml_tag(t, "sizeBid").and_then(|s| s.parse().ok()).unwrap_or(0),
-                    ask_size: extract_xml_tag(t, "sizeAsk").and_then(|s| s.parse().ok()).unwrap_or(0),
-                });
-                search_start = end;
-            }
-            Some((query_id, crate::types::HistoricalTickData::BidAsk(ticks), is_complete))
-        }
-        "MIDPOINT" => {
-            let mut ticks = Vec::new();
-            while let Some(tick_pos) = xml[search_start..].find("<Tick>") {
-                let abs = search_start + tick_pos;
-                let end = match xml[abs..].find("</Tick>") {
-                    Some(e) => abs + e + 7,
-                    None => break,
-                };
-                let t = &xml[abs..end];
-                ticks.push(crate::types::HistoricalTickMidpoint {
-                    time: extract_xml_tag(t, "time").unwrap_or("").to_string(),
-                    price: extract_xml_tag(t, "price").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                });
-                search_start = end;
-            }
-            Some((query_id, crate::types::HistoricalTickData::Midpoint(ticks), is_complete))
-        }
-        _ => {
-            // TRADES / AllLast
-            let mut ticks = Vec::new();
-            while let Some(tick_pos) = xml[search_start..].find("<Tick>") {
-                let abs = search_start + tick_pos;
-                let end = match xml[abs..].find("</Tick>") {
-                    Some(e) => abs + e + 7,
-                    None => break,
-                };
-                let t = &xml[abs..end];
-                ticks.push(crate::types::HistoricalTickLast {
-                    time: extract_xml_tag(t, "time").unwrap_or("").to_string(),
-                    price: extract_xml_tag(t, "price").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                    size: extract_xml_tag(t, "size").and_then(|s| s.parse().ok()).unwrap_or(0),
-                    exchange: extract_xml_tag(t, "exchange").unwrap_or("").to_string(),
-                    special_conditions: extract_xml_tag(t, "specialConditions").unwrap_or("").to_string(),
-                });
-                search_start = end;
-            }
-            Some((query_id, crate::types::HistoricalTickData::Last(ticks), is_complete))
-        }
+    while let Some(pos) = xml[search_start..].find("<Tick>") {
+        let abs = search_start + pos;
+        let Some(e) = xml[abs..].find("</Tick>") else { break };
+        ticks.push(&xml[abs..abs + e + 7]);
+        search_start = abs + e + 7;
     }
+    let text = |t: &str, tag: &str| extract_xml_tag(t, tag).unwrap_or("").to_string();
+    let price = |t: &str, tag: &str| match extract_xml_tag(t, tag).map(str::trim) {
+        Some("nan") | Some("NaN") => f64::MAX,
+        Some(v) => v.parse().unwrap_or(0.0),
+        None => 0.0,
+    };
+    let size = |t: &str, tag: &str| {
+        let v: f64 = extract_xml_tag(t, tag).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+        match size_step {
+            Some(step) => v * step,
+            None => v,
+        }
+    };
+    let time = |t: &str| extract_xml_tag(t, "time").and_then(parse_server_time).unwrap_or(0);
+    let flags = |t: &str| -> Vec<String> {
+        extract_xml_tag(t, "flags").unwrap_or("").split(';').map(|f| f.trim().to_string()).collect()
+    };
+    let data = match data_name {
+        "Last" => Some(HistoricalTickData::Last(ticks.iter().map(|t| {
+            let f = flags(t);
+            HistoricalTickLast {
+                time: time(t),
+                tick_attrib_last: TickAttribLast {
+                    past_limit: f.iter().any(|x| x == "H"),
+                    unreported: f.iter().any(|x| x == "U"),
+                },
+                price: price(t, "price"),
+                size: size(t, "size"),
+                exchange: text(t, "exch"),
+                special_conditions: text(t, "cond"),
+            }
+        }).collect())),
+        "BidAsk" => Some(HistoricalTickData::BidAsk(ticks.iter().map(|t| {
+            let f = flags(t);
+            HistoricalTickBidAsk {
+                time: time(t),
+                tick_attrib_bid_ask: TickAttribBidAsk {
+                    bid_past_low: f.iter().any(|x| x == "BH"),
+                    ask_past_high: f.iter().any(|x| x == "AH"),
+                },
+                price_bid: price(t, "bidPrice"),
+                price_ask: price(t, "askPrice"),
+                size_bid: size(t, "bidSize"),
+                size_ask: size(t, "askSize"),
+            }
+        }).collect())),
+        "MidPoint" => Some(HistoricalTickData::Midpoint(ticks.iter().map(|t| HistoricalTickMidpoint {
+            time: time(t),
+            price: price(t, "price"),
+            size: size(t, "size"),
+        }).collect())),
+        other => {
+            log::warn!("Unexpected source price in historical ticks reply: {:?}", other);
+            None
+        }
+    };
+    Some(TickFrame { query_id, data, done })
 }
 
 /// Server data name of a real-time bar whatToShow, with the reference
@@ -1262,28 +1810,44 @@ mod tests {
 
     #[test]
     fn check_bar_request_order_and_codes() {
-        let ok = check_bar_request("", "3600", "1 Min", "trades", Some(1)).unwrap();
+        let ok = check_bar_request("", "3600", "1 Min", "trades", Some(1), false, "").unwrap();
         assert_eq!(ok, CheckedBarRequest { data_type: BarDataType::Trades, bar_size: BarSize::Min1, duration: "3600 S".into() });
         let code = |r: Result<CheckedBarRequest, (i32, String)>| r.unwrap_err();
-        assert_eq!(code(check_bar_request("garbage", "1 D", "1 day", "TRADES", None)).0, 10314);
-        assert_eq!(code(check_bar_request("", "400 D", "1 day", "TRADES", None)),
+        assert_eq!(code(check_bar_request("garbage", "1 D", "1 day", "TRADES", None, false, "")).0, 10314);
+        assert_eq!(code(check_bar_request("", "400 D", "1 day", "TRADES", None, false, "")),
             (321, "Error validating request.-'bM' : cause - Historical data requests for durations longer than 365 days must be made in years.".to_string()));
-        assert_eq!(code(check_bar_request("20260102 10:00:00", "1 D", "1 hour", "ADJUSTED_LAST", None)).1,
+        assert_eq!(code(check_bar_request("20260102 10:00:00", "1 D", "1 hour", "ADJUSTED_LAST", None, false, "")).1,
             "Error validating request.-'bM' : cause - End date not supported with adjusted last");
-        assert_eq!(code(check_bar_request("", "1 Y", "1 week", "ADJUSTED_LAST", None)).1,
+        assert_eq!(code(check_bar_request("", "1 Y", "1 week", "ADJUSTED_LAST", None, false, "")).1,
             "Error validating request.-'bM' : cause - Multi day bar size not supported with adjusted last");
-        assert!(check_bar_request("", "1 Y", "1 day", "ADJUSTED_LAST", None).is_ok());
-        assert_eq!(code(check_bar_request("", "1 D", "1 sec", "TRADES", None)).0, 321);
-        assert_eq!(code(check_bar_request("", "1 D", "1 day", "YIELD", None)).1,
+        assert!(check_bar_request("", "1 Y", "1 day", "ADJUSTED_LAST", None, false, "").is_ok());
+        assert_eq!(code(check_bar_request("", "1 D", "1 sec", "TRADES", None, false, "")).0, 321);
+        assert_eq!(code(check_bar_request("", "1 D", "1 day", "YIELD", None, false, "")).1,
             "Error validating request.-'bM' : cause - What to show value of YIELD rejected.");
-        assert_eq!(code(check_bar_request("", "1 D", "1 day", "TRADES", Some(4))).1,
+        assert_eq!(code(check_bar_request("", "1 D", "1 day", "TRADES", Some(4), false, "")).1,
             "Error validating request.-'bM' : cause - Date formatting selection of 4 rejected.");
-        assert_eq!(code(check_bar_request("", "1 M", "1 hour", "SCHEDULE", None)).1,
+        assert_eq!(code(check_bar_request("", "1 M", "1 hour", "SCHEDULE", None, false, "")).1,
             "Error validating request.-'bM' : cause - Only daily resolution supported for Schedule requests");
-        assert!(check_bar_request("", "1 M", "1 day", "SCHEDULE", None).is_ok());
+        assert!(check_bar_request("", "1 M", "1 day", "SCHEDULE", None, false, "").is_ok());
         // The issue's checks: 1 year and 3 months bars over 5 Y.
-        assert!(check_bar_request("", "5 Y", "1 year", "TRADES", None).is_ok());
-        assert!(check_bar_request("", "5 Y", "3 months", "TRADES", None).is_ok());
+        assert!(check_bar_request("", "5 Y", "1 year", "TRADES", None, false, "").is_ok());
+        assert!(check_bar_request("", "5 Y", "3 months", "TRADES", None, false, "").is_ok());
+            // ibx#429: every bar size streams; the live update refusals, in
+        // the reference order and texts (capture b1_429_keep_up_to_date).
+        for size in ["1 secs", "1 min", "30 secs", "2 hours", "1 hour", "1 day"] {
+            assert!(check_bar_request("", "1 D", size, "TRADES", Some(1), true, "STK").is_ok(), "{}", size);
+        }
+        assert_eq!(code(check_bar_request("20261001 10:00:00 US/Eastern", "1 D", "1 hour", "TRADES", Some(1), true, "STK")),
+            (321, "Error validating request.-'bM' : cause - End date not supported with live updates".to_string()));
+        for what in ["BID_ASK", "ADJUSTED_LAST", "HISTORICAL_VOLATILITY"] {
+            assert_eq!(code(check_bar_request("", "1 D", "1 hour", what, Some(1), true, "STK")).1,
+                "Error validating request.-'bM' : cause - Source price not supported with live updates", "{}", what);
+        }
+        for what in ["TRADES", "MIDPOINT", "BID", "ASK"] {
+            assert!(check_bar_request("", "1 D", "1 hour", what, Some(1), true, "STK").is_ok(), "{}", what);
+        }
+        assert_eq!(code(check_bar_request("", "1 D", "1 hour", "TRADES", Some(1), true, "BAG")).1,
+            "Error validating request.-'bM' : cause - Live updates for combos are not supported");
     }
 
     // ibx#408: BID_ASK bars from the Bid leg and the Ask leg.
@@ -1301,9 +1865,9 @@ mod tests {
 
         let bid_first = ohlc(combine_bid_ask(&[(BarDataType::Bid, bid.clone()), (BarDataType::Ask, ask.clone())]));
         assert_eq!(bid_first, vec![
-            ("20260227-20:30:00".to_string(), 266.466, 266.70, 266.30, 266.520, 0, 0.0, 0),
-            ("20260227-20:31:00".to_string(), 266.154, 266.154, 266.00, 266.154, 0, 0.0, 0),
-            ("20260227-20:32:00".to_string(), 266.100, 266.20, 266.100, 266.100, 0, 0.0, 0),
+            ("20260227-20:30:00".to_string(), 266.466, 266.70, 266.30, 266.520, -1, -1.0, -1),
+            ("20260227-20:31:00".to_string(), 266.154, 266.154, 266.00, 266.154, -1, -1.0, -1),
+            ("20260227-20:32:00".to_string(), 266.100, 266.20, 266.100, 266.100, -1, -1.0, -1),
         ]);
         // Ask first: same bars, sorted by time.
         let ask_first = ohlc(combine_bid_ask(&[(BarDataType::Ask, ask), (BarDataType::Bid, bid)]));
@@ -1369,12 +1933,12 @@ mod tests {
     }
 
     #[test]
-    fn bar_size_keep_up_to_date_support() {
-        for s in ["1 secs", "5 secs", "5 mins", "1 hour", "1 day"] {
-            assert!(BarSize::from_api_str(s).unwrap().supports_keep_up_to_date(), "{}", s);
-        }
-        for s in ["10 secs", "1 min", "15 mins", "4 hours", "1 week"] {
-            assert!(!BarSize::from_api_str(s).unwrap().supports_keep_up_to_date(), "{}", s);
+    fn bar_size_lengths() {
+        assert_eq!(BarSize::Min1.seconds(), Some(60));
+        assert_eq!(BarSize::Hour2.seconds(), Some(7200));
+        assert!(BarSize::Sec30.is_intraday());
+        for bs in [BarSize::Day1, BarSize::Week1, BarSize::Month1] {
+            assert!(!bs.is_intraday());
         }
     }
 
@@ -1756,95 +2320,251 @@ mod tests {
         assert!(parse_schedule_response("not xml").is_none());
     }
 
+    // ── ibx#431, ibx#432: request dates and the dates the client gets ──
+
+    const ET_15H: i64 = 1_790_881_200; // 20261001 15:00:00 US/Eastern
+
     #[test]
-    fn build_tick_query_xml_structure() {
-        let xml = build_tick_query_xml("tk_1", 265598, "STK", "SMART", "", "20260312-15:00:00", 100, "TRADES", true);
-        assert!(xml.contains("<id>tk_1</id>"));
-        assert!(xml.contains("<type>TickData</type>"));
-        assert!(xml.contains("<data>AllLast</data>"));
-        assert!(xml.contains("<step>ticks</step>"));
-        assert!(xml.contains("<timeLength>100 t</timeLength>"));
-        assert!(xml.contains("<wholeDays>true</wholeDays>"));
-        assert!(xml.contains("<exchange>BEST</exchange><secType>STK</secType>"));
-        let xml = build_tick_query_xml("tk_3", 815824267, "FUT", "CME", "", "20260312-15:00:00", 100, "TRADES", false);
-        assert!(xml.contains("<exchange>CME</exchange><secType>FUT</secType>"), "{}", xml);
+    fn request_dates_as_the_reference_reads_them() {
+        let read = |s: &str| parse_request_time(s, "Europe/Paris", ET_15H);
+        assert_eq!(read("20261001 15:00:00 US/Eastern"), Ok(Some(RequestTime { secs: ET_15H, zone: Some("US/Eastern".into()) })));
+        assert_eq!(server_time(ET_15H), "20261001-19:00:00");
+        assert_eq!(read("20261001-19:00:00").unwrap().unwrap(), RequestTime { secs: ET_15H, zone: Some("UTC".into()) });
+        // No zone: the machine zone (captured: 15:00 in Central Europe went
+        // out as 13:00 UTC), and no zone named, for warning 2174.
+        let local = read("20261001 15:00:00").unwrap().unwrap();
+        assert_eq!((server_time(local.secs), local.zone), ("20261001-13:00:00".to_string(), None));
+        assert_eq!(read(""), Ok(None));
+        for bad in ["not a date", "20261001 15:00:00 Nowhere/Zone", "20261001"] {
+            assert_eq!(read(bad), Err(()), "{}", bad);
+        }
+        // A time alone is on the day of now, in its zone.
+        assert_eq!(read("15:00:00 US/Eastern").unwrap().unwrap().secs, ET_15H);
     }
 
     #[test]
-    fn build_tick_query_xml_bid_ask() {
-        let xml = build_tick_query_xml("tk_2", 265598, "STK", "SMART", "", "20260312-15:00:00", 50, "BID_ASK", false);
-        assert!(xml.contains("<data>BidAsk</data>"));
-        assert!(xml.contains("<useRTH>false</useRTH>"));
+    fn bar_dates_by_format_date() {
+        // Captured b1_431_hist_format: 1 hour bars and daily bars of AAPL.
+        let open = parse_server_time("20261001-13:30:00").unwrap();
+        assert_eq!(open, 1_790_861_400);
+        assert_eq!(bar_time(open, 1, true, "US/Eastern", "US/Eastern"), "20261001 09:30:00 US/Eastern");
+        assert_eq!(bar_time(open, 2, true, "US/Eastern", "US/Eastern"), "1790861400");
+        assert_eq!(bar_time(open, 3, true, "US/Eastern", "US/Eastern"), "1001 09:30:00 US/Eastern");
+        let day = parse_server_time("20260902-13:30:00").unwrap();
+        for format_date in [1, 2] {
+            assert_eq!(bar_time(day, format_date, false, "US/Eastern", "US/Eastern"), "20260902");
+        }
+        let head = parse_server_time("19801212-14:30:00").unwrap();
+        assert_eq!(head_timestamp_text(head, 1), "19801212-14:30:00");
+        assert_eq!(head_timestamp_text(head, 2), "345479400");
+        assert_eq!(head_timestamp_text(head, 3), "1212 14:30:00");
     }
 
     #[test]
-    fn parse_tick_response_trades() {
-        let xml = r#"<ResultSetTick>
-            <id>tk_1</id>
-            <eoq>true</eoq>
-            <tz>US/Eastern</tz>
-            <Events>
-                <Tick><time>20260312-14:30:01</time><price>150.25</price><size>100</size><exchange>NASDAQ</exchange><specialConditions></specialConditions></Tick>
-                <Tick><time>20260312-14:30:02</time><price>150.30</price><size>200</size><exchange>NYSE</exchange><specialConditions>I</specialConditions></Tick>
-            </Events>
-        </ResultSetTick>"#;
-        let (qid, data, done) = parse_tick_response(xml, "TRADES").unwrap();
-        assert_eq!(qid, "tk_1");
-        assert!(done);
-        match data {
-            crate::types::HistoricalTickData::Last(ticks) => {
-                assert_eq!(ticks.len(), 2);
-                assert_eq!(ticks[0].price, 150.25);
-                assert_eq!(ticks[0].size, 100);
-                assert_eq!(ticks[0].exchange, "NASDAQ");
-                assert_eq!(ticks[1].special_conditions, "I");
-            }
-            _ => panic!("Expected Last variant"),
+    fn historical_data_end_strings() {
+        // Captured: requests at 04:57:40 and 04:56:41 New York time, the
+        // machine in Central Europe.
+        let end = parse_server_time("20261002-08:57:40").unwrap();
+        let s = |d: &str| zoned_time(duration_start(end, d, "Europe/Paris"), "US/Eastern");
+        assert_eq!(zoned_time(end, "US/Eastern"), "20261002 04:57:40 US/Eastern");
+        assert_eq!(s("1 d"), "20261001 04:57:40 US/Eastern");
+        assert_eq!(s("1 m"), "20260902 04:57:40 US/Eastern");
+        assert_eq!(s("3600 S"), "20261002 03:57:40 US/Eastern");
+        assert_eq!(s("1800 S"), "20261002 04:27:40 US/Eastern");
+        assert_eq!(s("2 d"), "20260930 04:57:40 US/Eastern");
+        assert_eq!(s("1 W"), "20260925 04:57:40 US/Eastern");
+    }
+
+    // ── ibx#432: historical ticks ──
+
+    fn ticks(start: &str, end: &str, n: i32, what: &str, ignore: bool, sec_type: &str) -> (Vec<(i32, String)>, Result<CheckedTicks, (i32, String)>) {
+        check_ticks_request(start, end, n, what, ignore, sec_type, "SMART", "Europe/Paris", ET_15H)
+    }
+
+    #[test]
+    fn tick_request_checks_as_captured() {
+        let t15 = "20261001 15:00:00 US/Eastern";
+        let (w, ok) = ticks(t15, "", 100, "TRADES", false, "STK");
+        let ok = ok.unwrap();
+        assert!(w.is_empty());
+        assert_eq!((ok.source, ok.ignore_size_filter, ok.start.unwrap().secs), (TickSource::Trades, false, ET_15H));
+        let refusal = |n: i32, what: &str| ticks(t15, "", n, what, false, "STK").1.unwrap_err();
+        assert_eq!(refusal(0, "TRADES"), (321, "Error validating request.-'bP' : cause - Number of ticks must be > 0".into()));
+        assert_eq!(refusal(10, "FOO"), (321, "Error validating request.-'bP' : cause - Invalid source price".into()));
+        assert_eq!(refusal(10, ""), (321, "Error validating request.-'bP' : cause - Source price must not be empty".into()));
+        let (w, err) = ticks("not a date", "", 10, "TRADES", false, "STK");
+        assert!(w.is_empty());
+        let err = err.unwrap_err();
+        assert_eq!(err.0, 10314);
+        assert!(err.1.starts_with("Start Date/Time: The date, time, or time-zone entered is invalid.\nThe correct format"), "{}", err.1);
+        assert!(ticks("", "garbage", 10, "TRADES", false, "STK").1.unwrap_err().1.starts_with("End Date/Time:"));
+        // No zone: warning 2174, the request goes on.
+        let (w, ok) = ticks("20261001 15:00:00", "", 10, "TRADES", false, "STK");
+        assert_eq!(w, vec![(2174, IMPLIED_ZONE_WARNING.to_string())]);
+        assert!(ok.is_ok());
+        // AGGTRADES on a stock: warning 10299, asked as trades with no sizes.
+        let (w, ok) = ticks(t15, "", 10, "AGGTRADES", false, "STK");
+        assert_eq!(w, vec![(10299, "Expected what to show is TRADES, please use that instead of AGGTRADES.".to_string())]);
+        assert_eq!((ok.as_ref().unwrap().source, ok.unwrap().ignore_size_filter), (TickSource::Trades, true));
+        // TRADES on a currency pair: midpoints.
+        let ok = ticks(t15, "", 10, "TRADES", false, "CASH").1.unwrap();
+        assert_eq!((ok.source, ok.ignore_size_filter), (TickSource::Midpoint, true));
+        // The size filter: midpoints always, BID_ASK with ignoreSize.
+        assert!(ticks(t15, "", 100, "MIDPOINT", false, "STK").1.unwrap().ignore_size_filter);
+        assert!(!ticks(t15, "", 100, "BID_ASK", false, "STK").1.unwrap().ignore_size_filter);
+        assert!(ticks(t15, "", 100, "BID_ASK", true, "STK").1.unwrap().ignore_size_filter);
+        assert!(!ticks(t15, "", 100, "TRADES", true, "STK").1.unwrap().ignore_size_filter);
+        assert_eq!(check_ticks_request(t15, "", 10, "TRADES", false, "STK", "", "UTC", ET_15H).1.unwrap_err().1,
+            "Error validating request.-'bP' : cause - Exchange must not be empty");
+        assert_eq!(ticks(t15, "", 10, "TRADES", false, "BAG").1.unwrap_err().1,
+            "Error validating request.-'bP' : cause - Combo types are not supported");
+    }
+
+    fn tick_query(source: TickSource, start: Option<i64>, end: Option<i64>, filter: bool) -> TickQuery {
+        TickQuery {
+            window_id: "tk_1".into(), symbol: "AAPL".into(), con_id: 265598, sec_type: "STK".into(),
+            exchange: "SMART".into(), source, start, end, number_of_ticks: 100, use_rth: true,
+            ignore_size_filter: filter,
         }
     }
 
-    #[test]
-    fn parse_tick_response_bid_ask() {
-        let xml = r#"<ResultSetTick>
-            <id>tk_2</id>
-            <eoq>true</eoq>
-            <Events>
-                <Tick><time>20260312-14:30:01</time><priceBid>150.24</priceBid><priceAsk>150.26</priceAsk><sizeBid>500</sizeBid><sizeAsk>600</sizeAsk></Tick>
-            </Events>
-        </ResultSetTick>"#;
-        let (_, data, _) = parse_tick_response(xml, "BID_ASK").unwrap();
-        match data {
-            crate::types::HistoricalTickData::BidAsk(ticks) => {
-                assert_eq!(ticks.len(), 1);
-                assert_eq!(ticks[0].bid_price, 150.24);
-                assert_eq!(ticks[0].ask_price, 150.26);
-            }
-            _ => panic!("Expected BidAsk variant"),
-        }
+    /// The query of a capture with its whitespace removed.
+    fn captured(xml: &str) -> String {
+        xml.lines().map(str::trim).collect()
     }
 
     #[test]
-    fn parse_tick_response_midpoint() {
-        let xml = r#"<ResultSetTick>
-            <id>tk_3</id>
-            <eoq>true</eoq>
-            <Events>
-                <Tick><time>20260312-14:30:01</time><price>150.25</price></Tick>
-            </Events>
-        </ResultSetTick>"#;
-        let (_, data, _) = parse_tick_response(xml, "MIDPOINT").unwrap();
-        match data {
-            crate::types::HistoricalTickData::Midpoint(ticks) => {
-                assert_eq!(ticks.len(), 1);
-                assert_eq!(ticks[0].price, 150.25);
-            }
-            _ => panic!("Expected Midpoint variant"),
-        }
+    fn tick_queries_as_captured() {
+        // Capture b1_432_hist_ticks, request 9510 (cf16), id prefix aside.
+        let expected = captured("<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+            <ListOfQueries><Query>
+            <id>tk_1;;AAPL@SMART Trades;;0;;true;;0;;U</id>
+            <approx>false</approx>
+            <useRTH>true</useRTH>
+            <contractID>265598</contractID>
+            <exchange>BEST</exchange>
+            <secType>STK</secType>
+            <expired>no</expired>
+            <type>TickData</type>
+            <data>AllLast</data>
+            <startTime>20261001-19:00:00</startTime>
+            <timeLength>100 t</timeLength>
+            <source>API</source>
+            <needTotalValue>false</needTotalValue>
+            <wholeDays>true</wholeDays>
+            <delay>auto</delay>
+            </Query></ListOfQueries>");
+        let now = ET_15H + 86_400;
+        assert_eq!(build_tick_query_xml(&tick_query(TickSource::Trades, Some(ET_15H), None, false), now), expected);
+        // Start and end: the start wins (9516); end only: endTime (9515).
+        assert_eq!(build_tick_query_xml(&tick_query(TickSource::Trades, Some(ET_15H), Some(ET_15H + 3600), false), now), expected);
+        let xml = build_tick_query_xml(&tick_query(TickSource::Trades, None, Some(ET_15H), false), now);
+        assert!(xml.contains("<data>AllLast</data><endTime>20261001-19:00:00</endTime><timeLength>100 t</timeLength>"), "{}", xml);
+        // A future end is now; no dates: a start in 1970 (9518).
+        let xml = build_tick_query_xml(&tick_query(TickSource::Trades, None, Some(now + 999), false), now);
+        assert!(xml.contains(&format!("<endTime>{}</endTime>", server_time(now))), "{}", xml);
+        let xml = build_tick_query_xml(&tick_query(TickSource::Trades, None, None, false), now);
+        assert!(xml.contains("<startTime>19700101-00:00:00</startTime>"), "{}", xml);
+        // BID_ASK with ignoreSize (9513) and midpoints (9514).
+        let xml = build_tick_query_xml(&tick_query(TickSource::BidAsk, Some(ET_15H), None, true), now);
+        assert!(xml.contains("<id>tk_1;;AAPL@SMART Bid_ask;;0;;true;;0;;U</id>"), "{}", xml);
+        assert!(xml.ends_with("<delay>auto</delay><Filter varName=\"filter\"><ignoreSize>true</ignoreSize></Filter></Query></ListOfQueries>"), "{}", xml);
+        let xml = build_tick_query_xml(&tick_query(TickSource::Midpoint, Some(ET_15H), None, true), now);
+        assert!(xml.contains("Midpoint;;0;;true;;0;;U</id>") && xml.contains("<data>MidPoint</data>"), "{}", xml);
+        // EUR.USD (9522): its own exchange in the chart name, FXSUBPIP.
+        let q = TickQuery { symbol: "EUR.USD".into(), con_id: 12087792, sec_type: "CASH".into(), exchange: "IDEALPRO".into(),
+            number_of_ticks: 10, ..tick_query(TickSource::Midpoint, Some(ET_15H), None, true) };
+        let xml = build_tick_query_xml(&q, now);
+        assert!(xml.contains("<id>tk_1;;EUR.USD@IDEALPRO Midpoint;;0;;true;;0;;U</id>"), "{}", xml);
+        assert!(xml.contains("<exchange>FXSUBPIP</exchange><secType>CASH</secType>"), "{}", xml);
     }
 
     #[test]
-    fn parse_tick_response_rejects_other() {
-        assert!(parse_tick_response("<ResultSetBar>...</ResultSetBar>", "TRADES").is_none());
+    fn tick_replies_as_captured() {
+        // Frames of capture b1_432_hist_ticks, cut to their first ticks.
+        let last = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\t<ResultSetTick>\n\t\t<id>cf16;;AAPL@SMART Trades;;0;;true;;0;;U</id>\n\t\t<eoq>true</eoq>\n\t\t<tz>US/Eastern</tz>\n\t\t<data>AllLast</data>\n\t\t<minTick>0.0001</minTick>\n\t\t<sizeMinTick>1</sizeMinTick>\n\t\t<dataSource>UTDF</dataSource>\n\t\t<Events>\n\t\t\t<Open>\n\t\t\t\t<time>20261001-13:30:00</time>\n\t\t\t\t<refDate>20261001</refDate>\n\t\t\t</Open>\n\t\t\t<Tick>\n\t\t\t\t<time>20261001-19:00:00</time>\n\t\t\t\t<price>329.82</price>\n\t\t\t\t<size>1</size>\n\t\t\t\t<exch>FINRA</exch>\n\t\t\t\t<cond>   I</cond>\n\t\t\t\t<flags>U</flags>\n\t\t\t</Tick>\n\t\t\t<Tick>\n\t\t\t\t<time>20261001-19:00:00</time>\n\t\t\t\t<price>329.82</price>\n\t\t\t\t<size>41</size>\n\t\t\t\t<exch>FINRA</exch>\n\t\t\t</Tick>\n\t\t</Events>\n\t</ResultSetTick>\n";
+        let frame = parse_tick_response(last).unwrap();
+        assert_eq!((frame.query_id.as_str(), frame.done), ("cf16;;AAPL@SMART Trades;;0;;true;;0;;U", true));
+        let Some(crate::types::HistoricalTickData::Last(t)) = frame.data else { panic!("trades") };
+        assert_eq!(t[0], crate::types::HistoricalTickLast {
+            time: ET_15H,
+            tick_attrib_last: crate::api::types::TickAttribLast { past_limit: false, unreported: true },
+            price: 329.82, size: 1.0, exchange: "FINRA".into(), special_conditions: "   I".into(),
+        });
+        assert_eq!((t[1].tick_attrib_last.unreported, t[1].size, t[1].special_conditions.as_str()), (false, 41.0, ""));
+
+        let bid_ask = "<ResultSetTick><id>cf28;;AAPL@SMART Bid_ask;;0;;true;;0;;U</id><eoq>false</eoq><tz>US/Eastern</tz>\
+            <data>BidAsk</data><minTick>0.01</minTick><sizeMinTick>100</sizeMinTick><Events>\
+            <Tick><time>20261001-18:59:59</time><bidPrice>329.8</bidPrice><askPrice>329.84</askPrice><bidSize>2.8</bidSize><askSize>2.4</askSize><flags>AH;BH</flags></Tick>\
+            </Events></ResultSetTick>";
+        let frame = parse_tick_response(bid_ask).unwrap();
+        assert!(!frame.done);
+        let Some(crate::types::HistoricalTickData::BidAsk(t)) = frame.data else { panic!("bid ask") };
+        assert_eq!((t[0].time, t[0].price_bid, t[0].price_ask), (ET_15H - 1, 329.8, 329.84));
+        assert!((t[0].size_bid - 280.0).abs() < 1e-9 && (t[0].size_ask - 240.0).abs() < 1e-9, "sizes times sizeMinTick: {:?}", t[0]);
+        assert!(t[0].tick_attrib_bid_ask.bid_past_low && t[0].tick_attrib_bid_ask.ask_past_high);
+
+        // TRADES on EUR.USD is answered as midpoints, size 0 (9522).
+        let mid = "<ResultSetTick><id>cf56;;EUR.USD@IDEALPRO Midpoint;;0;;true;;0;;U</id><eoq>true</eoq><tz>US/Eastern</tz>\
+            <data>MidPoint</data><minTick>0.000005</minTick><sizeMinTick>1</sizeMinTick><Events>\
+            <Tick><time>20261001-18:59:59</time><price>1.12347</price></Tick></Events></ResultSetTick>";
+        let Some(crate::types::HistoricalTickData::Midpoint(t)) = parse_tick_response(mid).unwrap().data else { panic!("midpoint") };
+        assert_eq!(t, vec![crate::types::HistoricalTickMidpoint { time: ET_15H - 1, price: 1.12347, size: 0.0 }]);
+        assert!(parse_tick_response("<ResultSetBar>...</ResultSetBar>").is_none());
+    }
+
+    // ── ibx#429: 5-second bars merged into the live series ──
+
+    fn five(o: f64, h: f64, l: f64, c: f64, volume: f64, count: i32) -> crate::types::RealTimeBar {
+        crate::types::RealTimeBar { timestamp: 0, open: o, high: h, low: l, close: c, volume, wap: l, count }
+    }
+
+    #[test]
+    fn five_second_bars_merge_as_captured() {
+        // Capture b1_429_keep_up_to_date: the last 1 hour bar, its session,
+        // and empty 5-second bars at 331.45 from 08:56:35 UTC on.
+        let xml = "<ResultSetBar><id>cf60</id><eoq>true</eoq><tz>US/Eastern</tz><Events>\
+            <Open><time>20261002-08:00:00</time><refDate>20261002</refDate></Open>\
+            <Bar><time>20261002-08:00:00</time><endTime>20261002-08:56:35</endTime><open>331.05</open><close>331.45</close>\
+            <high>331.59</high><low>330.55</low><weightedAvg>331.285</weightedAvg><volume>49528</volume><count>522</count></Bar>\
+            <Close><time>20261003-00:00:00</time></Close></Events></ResultSetBar>";
+        let (mut series, sessions) = parse_series(xml);
+        assert_eq!(sessions, vec![(parse_server_time("20261002-08:00:00").unwrap(), parse_server_time("20261003-00:00:00").unwrap())]);
+        let t0 = parse_server_time("20261002-08:56:35").unwrap();
+        let empty = five(331.45, 331.45, 331.45, 331.45, 0.0, 0);
+        for k in 0..12 {
+            let i = merge_five_seconds(&mut series, &sessions, BarSize::Hour1, true, t0 + 5 * k, &empty).unwrap();
+            assert_eq!(i, 0);
+        }
+        let b = &series[0];
+        assert_eq!((b.open, b.high, b.low, b.close, b.volume, b.wap, b.count), (331.05, 331.59, 330.55, 331.45, 49528, 331.285, 522));
+
+        // 1 min: the minute bar, then a new bar at 04:57 New York time.
+        let mut minute = vec![SeriesBar { start: t0 - 35, end: t0, open: 331.45, high: 331.45, low: 331.45, close: 331.45,
+            volume: 0, wap: 331.45, count: 0 }];
+        assert_eq!(merge_five_seconds(&mut minute, &sessions, BarSize::Min1, true, t0, &empty), Some(0));
+        assert_eq!(merge_five_seconds(&mut minute, &sessions, BarSize::Min1, true, t0 + 25, &empty), Some(1));
+        assert_eq!(bar_time(minute[1].start, 1, true, "US/Eastern", "US/Eastern"), "20261002 04:57:00 US/Eastern");
+        assert_eq!((minute[1].volume, minute[1].count, minute[1].wap), (0, 0, 331.45));
+        // A trade adds its volume and count, and weighs the WAP.
+        let trade = crate::types::RealTimeBar { wap: 331.5, ..five(331.5, 331.6, 331.4, 331.6, 100.0, 2) };
+        assert_eq!(merge_five_seconds(&mut minute, &sessions, BarSize::Min1, true, t0 + 30, &trade), Some(1));
+        assert_eq!((minute[1].high, minute[1].low, minute[1].close, minute[1].volume, minute[1].count, minute[1].wap),
+            (331.6, 331.4, 331.6, 100, 2, 331.5));
+
+        // 30 secs MIDPOINT: volume, WAP and count stay unset.
+        let mut half = vec![SeriesBar { start: t0 - 5, end: t0, open: 331.42, high: 331.42, low: 331.42, close: 331.42,
+            volume: -1, wap: -1.0, count: -1 }];
+        let mid = five(331.42, 331.42, 331.42, 331.42, 5000.0, 1);
+        assert_eq!(merge_five_seconds(&mut half, &sessions, BarSize::Sec30, false, t0 + 25, &mid), Some(1));
+        assert_eq!((half[1].volume, half[1].wap, half[1].count), (-1, -1.0, -1));
+        assert_eq!(bar_time(half[1].start, 1, true, "US/Eastern", "US/Eastern"), "20261002 04:57:00 US/Eastern");
+        // A bar is not before the open of its session: 1 hour bars of a
+        // regular session start at 09:30.
+        let rth = vec![(parse_server_time("20261001-13:30:00").unwrap(), parse_server_time("20261001-20:00:00").unwrap())];
+        let mut series = Vec::new();
+        merge_five_seconds(&mut series, &rth, BarSize::Hour1, true, parse_server_time("20261001-13:30:05").unwrap(), &empty);
+        assert_eq!(server_time(series[0].start), "20261001-13:30:00");
     }
 
     #[test]

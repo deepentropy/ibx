@@ -842,7 +842,7 @@ fn api_gt_suite() {
     {
         print!("  req_historical_ticks (SPY TRADES)... ");
         wrapper.drain();
-        client.req_historical_ticks(440, &spy(), "20260320 09:30:00", "", 1000, "TRADES", true).unwrap();
+        client.req_historical_ticks(440, &spy(), "20260320 09:30:00 US/Eastern", "", 1000, "TRADES", true, false, &[]).unwrap();
         poll_until(&client, &mut wrapper,
             |cbs| cbs.iter().any(|c| matches!(c, Cb::HistoricalTicks { done: true, .. })),
             Duration::from_secs(15));

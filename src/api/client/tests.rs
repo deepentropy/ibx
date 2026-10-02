@@ -1829,7 +1829,7 @@ fn historical_requests_without_con_id_ask_for_the_contract_first() {
     client.req_historical_data(1, &aapl, "", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
     client.req_head_time_stamp(2, &aapl, "TRADES", true, 1).unwrap();
     client.req_histogram_data(3, &aapl, true, "1 week").unwrap();
-    client.req_historical_ticks(4, &aapl, "", "20260102 10:00:00", 10, "TRADES", true).unwrap();
+    client.req_historical_ticks(4, &aapl, "", "20260102 10:00:00", 10, "TRADES", true, false, &[]).unwrap();
     client.req_historical_schedule(5, &aapl, "", "1 M", true).unwrap();
     client.req_fundamental_data(6, &aapl, "ReportSnapshot").unwrap();
     for expected in 1..=6i64 {
@@ -1864,13 +1864,23 @@ fn req_historical_data_schedule_asks_for_the_trading_schedule() {
 }
 
 #[test]
-fn req_historical_data_rejects_unsupported_keep_up_to_date_size() {
-    let (client, rx, _shared) = test_client();
-    // "1 min" is valid on the batch path but not supported for streaming —
-    // it used to silently downgrade to 5-minute bars on this path only.
-    let err = client.req_historical_data(5, &spy(), "", "1 D", "1 min", "TRADES", true, 1, true).unwrap_err();
-    assert!(err.contains("keep_up_to_date"), "got: {}", err);
-    assert!(rx.try_recv().is_err());
+fn req_historical_data_streams_every_bar_size_and_refuses_as_the_reference() {
+    let (client, rx, shared) = test_client();
+    // ibx#429: every legal bar size streams, as the reference.
+    for size in ["1 min", "30 secs", "2 hours"] {
+        client.req_historical_data(5, &spy(), "", "1 D", size, "TRADES", true, 1, true).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), ControlCommand::FetchHistorical { keep_up_to_date: true, format_date: 1, .. }));
+    }
+    client.req_historical_data(6, &spy(), "20261001 10:00:00 US/Eastern", "1 D", "1 hour", "TRADES", false, 1, true).unwrap();
+    client.req_historical_data(7, &spy(), "", "1 D", "1 hour", "BID_ASK", false, 1, true).unwrap();
+    client.req_historical_data(8, &spy(), "", "1 D", "1 hour", "ADJUSTED_LAST", false, 1, true).unwrap();
+    assert!(rx.try_recv().is_err(), "no query");
+    let errors: Vec<(i64, i32, String)> = shared.reference.drain_historical_errors();
+    assert_eq!(errors, vec![
+        (6, 321, "Error validating request.-'bM' : cause - End date not supported with live updates".to_string()),
+        (7, 321, "Error validating request.-'bM' : cause - Source price not supported with live updates".to_string()),
+        (8, 321, "Error validating request.-'bM' : cause - Source price not supported with live updates".to_string()),
+    ]);
 }
 
 #[test]
@@ -1915,7 +1925,7 @@ fn historical_requests_carry_contract_sec_type_and_exchange() {
     };
     client.req_historical_data(1, &fut, "", "1 D", "1 hour", "TRADES", false, 1, false).unwrap();
     client.req_head_time_stamp(2, &fut, "TRADES", false, 1).unwrap();
-    client.req_historical_ticks(3, &fut, "", "20260928 20:00:00", 100, "TRADES", false).unwrap();
+    client.req_historical_ticks(3, &fut, "", "20260928 20:00:00", 100, "TRADES", false, false, &[]).unwrap();
     client.req_historical_schedule(4, &fut, "", "1 D", true).unwrap();
     client.req_histogram_data(5, &fut, false, "1 week").unwrap();
     client.req_real_time_bars(6, &fut, 5, "TRADES", false).unwrap();
@@ -2319,7 +2329,8 @@ fn cancel_histogram_data_sends_cancel() {
 #[test]
 fn req_historical_ticks_sends_fetch() {
     let (client, rx, _shared) = test_client();
-    client.req_historical_ticks(8, &spy(), "20260101 09:30:00", "", 1000, "TRADES", true).unwrap();
+    let spy = Contract { exchange: "SMART".into(), ..spy() };
+    client.req_historical_ticks(8, &spy, "20260101 09:30:00 US/Eastern", "", 1000, "TRADES", true, false, &[]).unwrap();
     let cmd = rx.try_recv().unwrap();
     match cmd {
         ControlCommand::FetchHistoricalTicks { req_id, con_id, number_of_ticks, what_to_show, .. } => {
@@ -2942,6 +2953,7 @@ fn process_msgs_dispatches_historical_data() {
             HistoricalBar { time: "20260102".into(), open: 103.0, high: 108.0, low: 102.0, close: 107.0, volume: 1200, wap: 105.0, count: 60 },
         ],
         is_complete: true,
+        ..Default::default()
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -2959,6 +2971,7 @@ fn process_msgs_historical_data_incomplete_no_end() {
             HistoricalBar { time: "20260101".into(), open: 100.0, high: 105.0, low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50 },
         ],
         is_complete: false,
+        ..Default::default()
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -3176,7 +3189,7 @@ fn process_msgs_dispatches_histogram_data() {
 fn process_msgs_dispatches_historical_ticks() {
     let (client, _rx, shared) = test_client();
     shared.reference.push_historical_ticks(8, HistoricalTickData::Midpoint(vec![
-        HistoricalTickMidpoint { time: "2026-01-15 09:30:00".into(), price: 150.5 },
+        HistoricalTickMidpoint { time: 1_790_881_200, price: 150.5, size: 0.0 },
     ]), "MIDPOINT".into(), true);
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -3190,14 +3203,14 @@ fn process_msgs_routes_historical_tick_variants() {
     let (client, _rx, shared) = test_client();
     shared.reference.push_historical_ticks(10, HistoricalTickData::Last(vec![
         HistoricalTickLast {
-            time: "2026-01-15 09:30:00".into(), price: 150.5, size: 100,
+            time: 1_790_881_200, tick_attrib_last: Default::default(), price: 150.5, size: 100.0,
             exchange: "ARCA".into(), special_conditions: "".into(),
         },
     ]), "TRADES".into(), true);
     shared.reference.push_historical_ticks(11, HistoricalTickData::BidAsk(vec![
         HistoricalTickBidAsk {
-            time: "2026-01-15 09:30:01".into(), bid_price: 150.4, ask_price: 150.6,
-            bid_size: 200, ask_size: 300,
+            time: 1_790_881_201, tick_attrib_bid_ask: Default::default(), price_bid: 150.4, price_ask: 150.6,
+            size_bid: 200.0, size_ask: 300.0,
         },
     ]), "BID_ASK".into(), true);
     let mut w = RecordingWrapper::default();

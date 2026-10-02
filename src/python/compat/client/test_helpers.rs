@@ -357,18 +357,75 @@ impl EClient {
         Ok(())
     }
 
-    /// Push historical data into SharedState.
+    /// Push historical data into SharedState, with the start and end of
+    /// the request for historicalDataEnd (ibx#431).
     #[doc(hidden)]
+    #[pyo3(signature = (req_id, bars, is_complete, start="".to_string(), end="".to_string()))]
     fn _test_push_historical_data(
         &self, req_id: ReqId, bars: Vec<(String, f64, f64, f64, f64, i64)>, is_complete: bool,
+        start: String, end: String,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
         let bar_list: Vec<HistoricalBar> = bars.into_iter().map(|(time, o, h, l, c, v)| {
             HistoricalBar { time, open: o, high: h, low: l, close: c, volume: v, wap: 0.0, count: 0 }
         }).collect();
         shared.reference.push_historical_data(req_id, HistoricalResponse {
-            query_id: String::new(), timezone: String::new(), bars: bar_list, is_complete,
+            query_id: String::new(), timezone: String::new(), bars: bar_list, is_complete, start, end,
         });
+        Ok(())
+    }
+
+    /// Push a keepUpToDate bar into SharedState (ibx#429).
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    fn _test_push_historical_update(
+        &self, req_id: ReqId, time: String, open: f64, high: f64, low: f64, close: f64, volume: i64, wap: f64, count: i32,
+    ) -> PyResult<()> {
+        self.shared_state()?.reference.push_historical_update(req_id, HistoricalBar {
+            time, open, high, low, close, volume, wap, count,
+        });
+        Ok(())
+    }
+
+    /// Push one frame of trade ticks into SharedState (ibx#432): (time,
+    /// past limit, unreported, price, size, exchange, conditions).
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    fn _test_push_historical_ticks_last(
+        &self, req_id: ReqId, ticks: Vec<(i64, bool, bool, f64, f64, String, String)>, done: bool,
+    ) -> PyResult<()> {
+        let ticks = ticks.into_iter().map(|(time, past_limit, unreported, price, size, exchange, special_conditions)| {
+            crate::types::HistoricalTickLast {
+                time, tick_attrib_last: crate::api::types::TickAttribLast { past_limit, unreported },
+                price, size, exchange, special_conditions,
+            }
+        }).collect();
+        self.shared_state()?.reference.push_historical_ticks(req_id, crate::types::HistoricalTickData::Last(ticks), "AllLast".into(), done);
+        Ok(())
+    }
+
+    /// Push one frame of bid/ask ticks into SharedState (ibx#432): (time,
+    /// bid past low, ask past high, bid, ask, bid size, ask size).
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    fn _test_push_historical_ticks_bid_ask(
+        &self, req_id: ReqId, ticks: Vec<(i64, bool, bool, f64, f64, f64, f64)>, done: bool,
+    ) -> PyResult<()> {
+        let ticks = ticks.into_iter().map(|(time, bid_past_low, ask_past_high, price_bid, price_ask, size_bid, size_ask)| {
+            crate::types::HistoricalTickBidAsk {
+                time, tick_attrib_bid_ask: crate::api::types::TickAttribBidAsk { bid_past_low, ask_past_high },
+                price_bid, price_ask, size_bid, size_ask,
+            }
+        }).collect();
+        self.shared_state()?.reference.push_historical_ticks(req_id, crate::types::HistoricalTickData::BidAsk(ticks), "BidAsk".into(), done);
+        Ok(())
+    }
+
+    /// Push one frame of midpoint ticks into SharedState (ibx#432).
+    #[doc(hidden)]
+    fn _test_push_historical_ticks_midpoint(&self, req_id: ReqId, ticks: Vec<(i64, f64)>, done: bool) -> PyResult<()> {
+        let ticks = ticks.into_iter().map(|(time, price)| crate::types::HistoricalTickMidpoint { time, price, size: 0.0 }).collect();
+        self.shared_state()?.reference.push_historical_ticks(req_id, crate::types::HistoricalTickData::Midpoint(ticks), "MidPoint".into(), done);
         Ok(())
     }
 
