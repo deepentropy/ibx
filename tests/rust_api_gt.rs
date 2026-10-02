@@ -1505,6 +1505,9 @@ impl Wrapper for SnapWrapper {
     }
     fn market_data_type(&mut self, req_id: i64, t: i32) { self.at(format!("mdt {req_id} {t}")); }
     fn tick_snapshot_end(&mut self, req_id: i64) { self.at(format!("end {req_id}")); }
+    fn tick_news(&mut self, req_id: i64, time: i64, provider: &str, article: &str, headline: &str, extra: &str) {
+        self.at(format!("news {req_id} {time} {provider} {article} {{{extra}}} {headline}"));
+    }
 }
 
 /// Snapshots of a stock, an ETF and a currency pair: each tick type at
@@ -1711,5 +1714,68 @@ fn api_stream_order_live() {
                 assert_eq!(next, Some(vec!["size", parts[1], size]), "req {req}: {e} without its size");
             }
         }
+    }
+}
+
+// ── News ticks (ibx#458), focused ──
+
+/// Contract news through the news tick: explicit codes on AAPL, every
+/// source on TSLA, a future (10094 derivative) and an unknown code on NVDA
+/// (10094 unchecked). The recent headlines come within seconds, with the
+/// time in milliseconds and the {...} part as extra data.
+/// Run with: cargo test --test rust_api_gt api_news_ticks_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_news_ticks_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = SnapWrapper::default();
+    let settle = Instant::now();
+    while settle.elapsed() < Duration::from_secs(3) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    w.events.clear();
+    w.start = Some(Instant::now());
+    let stock = |con_id: i64, symbol: &str| Contract { con_id, symbol: symbol.into(), sec_type: "STK".into(),
+        exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+    client.req_mkt_data(821, &stock(265598, "AAPL"), "mdoff,292:BRFG+DJNL", false, false).unwrap();
+    client.req_mkt_data(822, &stock(76792991, "TSLA"), "mdoff,292", false, false).unwrap();
+    let mnq = Contract { con_id: 815824267, symbol: "MNQ".into(), sec_type: "FUT".into(),
+        exchange: "CME".into(), currency: "USD".into(), ..Default::default() };
+    client.req_mkt_data(823, &mnq, "mdoff,292", false, false).unwrap();
+    client.req_mkt_data(824, &stock(4815747, "NVDA"), "mdoff,292:XYZ", false, false).unwrap();
+    let listen = Instant::now();
+    while listen.elapsed() < Duration::from_secs(20) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for req in [821, 822] {
+        client.cancel_mkt_data(req).unwrap();
+    }
+    client.disconnect();
+    for (ms, e) in &w.events {
+        println!("  {ms:>6} ms  {e}");
+    }
+    let has = |want: &str| w.events.iter().any(|(_, e)| e == want);
+    assert!(has("error 823 10094 API News error:Derivative contracts cannot be used to subscribe to news, please use         the underlying (Stocks, Cash, News Topics, and certain Indexes are supported)."));
+    assert!(has("error 824 10094 API News error:Source code unchecked in API news Settings: XYZ"));
+    let news: Vec<Vec<&str>> = w.events.iter().filter(|(_, e)| e.starts_with("news ")).map(|(_, e)| e.split(' ').collect()).collect();
+    assert!(!news.is_empty(), "no tickNews in 20 s");
+    for n in &news {
+        assert!(n[1] == "821" || n[1] == "822", "{n:?}");
+        assert!(n[2].parse::<i64>().unwrap() > 1_000_000_000_000, "time in milliseconds: {n:?}");
+        if n[1] == "821" {
+            assert!(n[3] == "BRFG" || n[3] == "DJNL", "{n:?}");
+        }
+        assert!(n[4].starts_with(&format!("{}$", n[3])), "{n:?}");
     }
 }
