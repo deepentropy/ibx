@@ -1654,3 +1654,62 @@ fn api_eurusd_prices_live() {
     let bid = pos(&|e: &str| e.starts_with("price 802 1 "));
     assert!(time.is_none() || time < bid, "snapshot: time {time:?} after the bid {bid:?}");
 }
+
+// ── Stream callback order (ibx#446), focused ──
+
+/// EUR.USD and SPY streams for 15 s: the market data type before the
+/// request parameters; every bid, ask and last price followed by its size;
+/// never the last exchange (84).
+/// Run with: cargo test --test rust_api_gt api_stream_order_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_stream_order_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = SnapWrapper::default();
+    let settle = Instant::now();
+    while settle.elapsed() < Duration::from_secs(3) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    w.events.clear();
+    w.start = Some(Instant::now());
+    let eurusd = Contract { con_id: 12087792, symbol: "EUR".into(), sec_type: "CASH".into(),
+        exchange: "IDEALPRO".into(), currency: "USD".into(), ..Default::default() };
+    client.req_mkt_data(811, &eurusd, "", false, false).unwrap();
+    client.req_mkt_data(812, &spy(), "", false, false).unwrap();
+    let streamed = Instant::now();
+    while streamed.elapsed() < Duration::from_secs(15) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    client.cancel_mkt_data(811).unwrap();
+    client.cancel_mkt_data(812).unwrap();
+    client.disconnect();
+    for (ms, e) in &w.events {
+        println!("  {ms:>6} ms  {e}");
+    }
+    for req in [811, 812] {
+        let pos = |want: &str| w.events.iter().position(|(_, e)| e.starts_with(want));
+        let (mdt, params) = (pos(&format!("mdt {req} ")), pos(&format!("params {req} ")));
+        assert!(mdt.is_some() && params.is_some() && mdt < params, "req {req}: type {mdt:?}, parameters {params:?}");
+        let mine: Vec<&String> = w.events.iter().map(|(_, e)| e).filter(|e| e.split(' ').nth(1) == Some(&req.to_string())).collect();
+        for (k, e) in mine.iter().enumerate() {
+            let parts: Vec<&str> = e.split(' ').collect();
+            assert!(!(parts[0] == "string" && parts[2] == "84"), "req {req}: {e}");
+            if parts[0] == "price" {
+                let size = match parts[2] { "1" => "0", "2" => "3", "4" => "5", _ => continue };
+                let next = mine.get(k + 1).map(|n| n.split(' ').take(3).collect::<Vec<_>>());
+                assert_eq!(next, Some(vec!["size", parts[1], size]), "req {req}: {e} without its size");
+            }
+        }
+    }
+}
