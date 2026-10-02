@@ -2064,3 +2064,57 @@ fn api_news_ticks_live() {
         assert!(n[4].starts_with(&format!("{}$", n[3])), "{n:?}");
     }
 }
+
+// ── Auth login without key exchange, logon values (ibx#423, ibx#421), focused ──
+
+/// One paper login: the auth connection is TLS with no key exchange and
+/// the farms keep theirs (historical bars come), the current time is the
+/// local clock plus the logon offset (within 5 s here), matching symbols
+/// are allowed (SECDEFTA on paper), no version cutoff warning, and the
+/// logon years limit (199 on paper) refuses 200 years with no query.
+/// Run with: cargo test --test rust_api_gt api_logon_values_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_logon_values_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut wrapper = RecWrapper::new();
+    poll(&client, &mut wrapper, Duration::from_secs(3));
+    let startup = wrapper.drain();
+    let errors = |cbs: &[Cb], id: i64| -> Vec<(i64, String)> {
+        cbs.iter().filter_map(|c| match c {
+            Cb::Error { req_id, code, msg } if *req_id == id => Some((*code, msg.clone())),
+            _ => None,
+        }).collect()
+    };
+    assert!(!errors(&startup, -1).iter().any(|(code, _)| *code == 2172), "no version cutoff warning");
+
+    client.req_current_time(&mut wrapper);
+    let local = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let time = wrapper.drain().iter().find_map(|c| if let Cb::CurrentTime { time } = c { Some(*time) } else { None });
+    println!("current time {:?}, local {}", time, local);
+    assert!(time.is_some_and(|t| (t - local).abs() <= 5), "current time {:?} vs local {}", time, local);
+
+    client.req_matching_symbols(110, "AAPL").unwrap();
+    poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::SymbolSamples { req_id: 110, .. })), Duration::from_secs(10));
+    let cbs = wrapper.drain();
+    assert!(errors(&cbs, 110).is_empty(), "{:?}", errors(&cbs, 110));
+    assert!(cbs.iter().any(|c| matches!(c, Cb::SymbolSamples { req_id: 110, .. })), "symbol samples");
+
+    client.req_historical_data(120, &spy(), "", "200 Y", "1 month", "TRADES", true, 1, false).unwrap();
+    client.req_historical_data(121, &spy(), "", "2 D", "1 hour", "TRADES", true, 1, false).unwrap();
+    poll_until(&client, &mut wrapper, |cbs| cbs.iter().any(|c| matches!(c, Cb::HistoricalDataEnd { req_id: 121 })), Duration::from_secs(20));
+    let cbs = wrapper.drain();
+    client.disconnect();
+    assert_eq!(errors(&cbs, 120), vec![(321,
+        "Error validating request.-'bM' : cause - Historical data request for 200 year(s) rejected. Max API Backfill Years=199".to_string())]);
+    assert!(cbs.iter().any(|c| matches!(c, Cb::HistoricalData { req_id: 121, .. })), "bars through the historical farm");
+}
