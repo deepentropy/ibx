@@ -16,15 +16,22 @@ impl EClient {
     /// gone. A snapshot with generic ticks, or beyond the per-second
     /// snapshot limit, is refused with error 321.
     ///
-    /// `generic_tick_list` is NOT transmitted to the gateway, with one
-    /// exception: the news tick, "292" (every subscribed news source) or
-    /// "292:CODE1+CODE2", subscribes the contract's headlines, delivered as
-    /// `tick_news` (ibx#458); a derivative contract or a code that is not a
-    /// subscribed source ends the request with error 10094. Other
-    /// generic tick types (RTVolume and friends) have no emission path, and
-    /// `tick_generic` fires only for a snapshot's halted state, 49
-    /// (ibx#234, ibx#446). Delayed data cannot be requested either — see
-    /// `req_market_data_type`.
+    /// `generic_tick_list` is checked as the reference checks it: a list
+    /// with an unknown tick, or one not legal for the security type, is
+    /// refused with error 321 (ibx#450). It is NOT transmitted to the
+    /// gateway, with one exception: the news tick, "292" (every subscribed
+    /// news source) or "292:CODE1+CODE2", subscribes the contract's
+    /// headlines, delivered as `tick_news` (ibx#458); a derivative contract
+    /// or a code that is not a subscribed source ends the request with
+    /// error 10094. Other generic tick types (RTVolume and friends) have no
+    /// emission path, and `tick_generic` fires only for a snapshot's halted
+    /// state, 49 (ibx#234, ibx#446). Delayed data cannot be requested
+    /// either — see `req_market_data_type`.
+    ///
+    /// Several request ids may ask for one contract, as with the
+    /// reference (ibx#444): they share its subscription, a request that
+    /// joins gets at once what the others have, and the subscription ends
+    /// with the cancel of the last one.
     pub fn req_mkt_data(
         &self, req_id: i64, contract: &Contract,
         generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool,
@@ -53,6 +60,12 @@ impl EClient {
         mode_9887: i32,
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_mkt_data_ex", &[req_id, contract.con_id]) { return Ok(()); }
+        // An invalid generic tick list of a request that is no snapshot:
+        // 321 (ibx#450).
+        if let Some((code, text)) = self.core.generic_tick_list_refusal(generic_tick_list, snapshot, &contract.sec_type) {
+            self.shared.orders.push_order_error(req_id, code, text);
+            return Ok(());
+        }
         // The snapshot checks come before the duplicate check, as the
         // reference's (ibx#446).
         if snapshot
@@ -154,9 +167,12 @@ impl EClient {
         if self.core.cancel_regulatory_snapshot(req_id, &self.control_tx) {
             return Ok(());
         }
-        if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
-            // Its news entry goes with it (ibx#458).
-            self.send(ControlCommand::Unsubscribe { instrument })?;
+        if let Some(cancel) = self.core.unregister_mkt_data(req_id) {
+            // The subscription ends with the last request of the contract;
+            // its news entries go with it (ibx#458, ibx#444).
+            if let Some(command) = cancel.command() {
+                self.send(command)?;
+            }
         } else {
             // An unknown request id: error 300, as the reference (ibx#444).
             self.shared.orders.push_order_error(req_id, 300, format!("Can't find EId with tickerId:{}", req_id));

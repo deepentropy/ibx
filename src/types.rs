@@ -1675,7 +1675,7 @@ pub struct FamilyCode {
 
 /// A news headline of a contract's news tick (ibx#458), as the reference
 /// gives it to tickNews.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TickNews {
     pub instrument: InstrumentId,
     pub provider_code: String,
@@ -1867,6 +1867,10 @@ pub enum ControlCommand {
         instrument: InstrumentId, con_id: i64, exchange: String, sec_type: String,
         providers: String, refusal: Option<String>,
     },
+    /// A request with the news tick left an instrument other requests
+    /// still use (ibx#444): its share of the news entry with this provider
+    /// key goes; the entry is cancelled when no request uses it.
+    UnsubscribeNews { instrument: InstrumentId, providers: String },
     /// Subscribe to whole-account P&L via CCP (6040=142).
     SubscribePnl { req_id: i64, account: String },
     /// Cancel P&L subscription.

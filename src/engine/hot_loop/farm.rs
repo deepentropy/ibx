@@ -215,6 +215,10 @@ pub(crate) struct NewsEntry {
     /// Article ids already given to the client: a repeat is not given
     /// again (captured 02/10/2026).
     pub(crate) seen: std::collections::HashSet<String>,
+    /// The requests that use it: requests on one contract with the same
+    /// provider key share one entry, as the reference shares its news
+    /// subscription per key (ibx#444).
+    pub(crate) refs: u32,
 }
 
 /// One entry of a depth request (#452): a book on an exchange, or one
@@ -323,8 +327,8 @@ pub(crate) struct FarmState {
     /// News entries of market data requests (ibx#458).
     pub(crate) news: Vec<NewsEntry>,
     /// News ticks given before their request's top of book went out
-    /// (ibx#458), with the provider key and the 10094 text of a refused
-    /// one: sent, or refused, when it goes.
+    /// (ibx#458), one per request, with the provider key and the 10094
+    /// text of a refused one: sent, or refused, when it goes.
     pub(crate) news_waiting: Vec<(InstrumentId, String, Option<String>)>,
 }
 
@@ -794,6 +798,12 @@ impl FarmState {
         }
     }
 
+    /// The top-of-book subscription of an instrument, sent or kept for the
+    /// next reconnect: whether it is a snapshot; None without one (ibx#444).
+    pub(crate) fn top_snapshot(&self, instrument: InstrumentId) -> Option<bool> {
+        self.md_resub_info.iter().find(|(id, ..)| *id == instrument).map(|info| info.9)
+    }
+
     /// A live market data subscription uses the instrument: sent, or kept
     /// for the next reconnect while the farm is down (ibx#291).
     pub(crate) fn has_md_subscription(&self, instrument: InstrumentId) -> bool {
@@ -806,16 +816,21 @@ impl FarmState {
     /// Start the news entry of a request on `farm` (ibx#458) and build its
     /// message, as the reference writes it: `207=NEWS`, the contract's
     /// security type, `264=292`, the provider key in `6472` when not empty,
-    /// the streaming-client mark and the API flag.
+    /// the streaming-client mark and the API flag. A request whose key the
+    /// contract already has shares that entry: nothing is sent (ibx#444).
     pub(crate) fn start_news(&mut self, instrument: InstrumentId, con_id: i64, sec_type: &str, providers: &str, farm: FarmId)
         -> Vec<(FarmId, Vec<(u32, String)>)>
     {
-        self.news.retain(|e| e.instrument != instrument);
+        if let Some(e) = self.news.iter_mut().find(|e| e.instrument == instrument && e.providers == providers) {
+            e.refs += 1;
+            log::info!("News entry {} shared by {} requests: con_id={} providers={}", e.farm_req, e.refs, con_id, providers);
+            return Vec::new();
+        }
         let farm_req = self.next_md_req_id;
         self.next_md_req_id += 1;
         let entry = NewsEntry {
             farm_req, instrument, farm, con_id: con_id.to_string(), sec_type: fix_sec_type(sec_type).to_string(),
-            providers: providers.to_string(), tag: None, live: true, seen: Default::default(),
+            providers: providers.to_string(), tag: None, live: true, seen: Default::default(), refs: 1,
         };
         let msg = news_message(&entry, true);
         log::info!("News entry {} on farm {}: con_id={} providers={}", farm_req, farm, con_id, providers);
@@ -823,18 +838,42 @@ impl FarmState {
         vec![(farm, msg)]
     }
 
-    /// Forget the news tick of an instrument and build its cancel, when it
-    /// is on the wire (ibx#458).
+    /// Forget the news ticks of an instrument and build the cancels of
+    /// those on the wire (ibx#458).
     pub(crate) fn stop_news(&mut self, instrument: InstrumentId) -> Vec<(FarmId, Vec<(u32, String)>)> {
         self.news_waiting.retain(|(id, ..)| *id != instrument);
-        let Some(pos) = self.news.iter().position(|e| e.instrument == instrument) else { return Vec::new() };
+        let mut out = Vec::new();
+        self.news.retain(|e| {
+            if e.instrument != instrument { return true; }
+            if e.live { out.push((e.farm, news_message(e, false))); }
+            false
+        });
+        out
+    }
+
+    /// One request with this provider key left an instrument that others
+    /// still use (ibx#444): its share of the news entry goes, and the entry
+    /// is cancelled when no request uses it.
+    pub(crate) fn release_news(&mut self, instrument: InstrumentId, providers: &str) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        if let Some(pos) = self.news_waiting.iter().position(|(id, p, _)| *id == instrument && p == providers) {
+            self.news_waiting.remove(pos);
+            return Vec::new();
+        }
+        let Some(pos) = self.news.iter().position(|e| e.instrument == instrument && e.providers == providers) else {
+            return Vec::new();
+        };
+        self.news[pos].refs = self.news[pos].refs.saturating_sub(1);
+        if self.news[pos].refs > 0 {
+            return Vec::new();
+        }
         let e = self.news.remove(pos);
         if e.live { vec![(e.farm, news_message(&e, false))] } else { Vec::new() }
     }
 
     /// Every news entry's cancel (shutdown).
     pub(crate) fn stop_all_news(&mut self) -> Vec<(FarmId, Vec<(u32, String)>)> {
-        let ids: Vec<InstrumentId> = self.news.iter().map(|e| e.instrument).collect();
+        let mut ids: Vec<InstrumentId> = self.news.iter().map(|e| e.instrument).collect();
+        ids.dedup();
         ids.into_iter().flat_map(|id| self.stop_news(id)).collect()
     }
 
@@ -1605,20 +1644,23 @@ impl FarmState {
             let payload = &rest[6..end];
             rest = &rest[end..];
             let farm = self.rx_farm;
-            let Some(entry) = self.news.iter_mut().find(|e| e.live && e.farm == farm && e.tag == Some(server_tag)) else {
+            let Some(pos) = self.news.iter().position(|e| e.live && e.farm == farm && e.tag == Some(server_tag)) else {
                 log::warn!("News tick for server tag {} of no known request: dropped", server_tag);
                 return;
             };
+            let instrument = self.news[pos].instrument;
             for item in decode_news(payload) {
                 // A removal (7 or more) gives no headline; an article the
-                // client already has is not given again.
-                if item.action >= 7 || !entry.seen.insert(item.article_id.clone()) {
+                // client already has, from this entry or another of the
+                // contract, is not given again.
+                let known = self.news.iter().any(|e| e.instrument == instrument && e.seen.contains(&item.article_id));
+                if item.action >= 7 || known || !self.news[pos].seen.insert(item.article_id.clone()) {
                     log::debug!("News {} {} not given (action {})", item.provider_code, item.article_id, item.action);
                     continue;
                 }
                 let (headline, extra_data) = split_headline(&item.raw_headline);
                 let news = crate::types::TickNews {
-                    instrument: entry.instrument,
+                    instrument,
                     provider_code: item.provider_code,
                     article_id: item.article_id,
                     headline,

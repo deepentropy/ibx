@@ -275,10 +275,12 @@ impl EClient {
     }
 
     /// Map a reqId to an InstrumentId (for testing without a live engine).
+    /// The request takes every tick of the instrument, its headlines too.
     #[doc(hidden)]
     pub fn map_req_instrument(&self, req_id: i64, instrument: InstrumentId) {
         self.core.req_to_instrument.lock().unwrap().insert(req_id, instrument);
-        self.core.instrument_to_req.lock().unwrap().insert(instrument, req_id);
+        self.core.instrument_to_req.lock().unwrap().entry(instrument).or_default().push(req_id);
+        self.core.md_news.lock().unwrap().insert(req_id, String::new());
     }
 
     /// Pre-populate the order tracker (for testing the dispatcher path

@@ -25,6 +25,12 @@ impl EClient {
         if !crate::client_core::ClientCore::ids_fit("req_mkt_data", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         let shared = self.shared_state()?;
+        // An invalid generic tick list of a request that is no snapshot:
+        // 321 (ibx#450).
+        if let Some((code, text)) = self.core.generic_tick_list_refusal(generic_tick_list, snapshot, &contract.sec_type) {
+            shared.orders.push_order_error(req_id, code, text);
+            return Ok(());
+        }
         // The snapshot checks come before the duplicate check, as the
         // reference's (ibx#446).
         if snapshot
@@ -101,10 +107,13 @@ impl EClient {
                 return Ok(());
             }
         }
-        if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
-            // Its news entry goes with it (ibx#458).
-            let tx = self.tx()?;
-            send_cmd(py, &tx, ControlCommand::Unsubscribe { instrument })?;
+        if let Some(cancel) = self.core.unregister_mkt_data(req_id) {
+            // The subscription ends with the last request of the contract;
+            // its news entries go with it (ibx#458, ibx#444).
+            if let Some(command) = cancel.command() {
+                let tx = self.tx()?;
+                send_cmd(py, &tx, command)?;
+            }
         } else {
             // An unknown request id: error 300, as the reference (ibx#444).
             self.shared_state()?.orders.push_order_error(req_id, 300, format!("Can't find EId with tickerId:{}", req_id));

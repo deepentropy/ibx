@@ -731,7 +731,61 @@ pub enum ModifyPlan {
     Refused { code: i64, message: String },
 }
 
-/// What a stream sent last, by instrument (ibx#446).
+/// A market data request joins a contract that runs on delayed data while
+/// this client has not enabled delayed data (ibx#444,
+/// `jextend.s.a(dy,ec,Set)@174`).
+pub const MD_DELAYED_NOT_ENABLED: (i64, &str) =
+    (10168, "Requested market data is not subscribed. Delayed market data is not enabled");
+
+/// The top of book of a request with the news tick was rejected; its news
+/// goes on (ibx#444, `jextend.ba.a(String,List,boolean,long)@234-292`):
+/// the ticks still observed, then "; ". Whatever the reference appends
+/// after that from the reject's text is not known.
+pub const MD_TOP_REJECTED: (i64, &str) = (2117,
+    "Requested top market data is not subscribed. Subscription-independent ticks are still active.292; ");
+
+/// Headlines kept per instrument for the requests that join it, and how
+/// many of the latest a joining request gets, as the reference replays
+/// them (ibx#444, `jextend.s.a(dy,generictick.b,ArString)@163-208`).
+const NEWS_KEPT: usize = 64;
+const NEWS_REPLAYED: usize = 5;
+
+/// A news provider key (codes, comma separated; empty for none named)
+/// has this provider.
+fn news_key_covers(key: &str, provider: &str) -> bool {
+    key.is_empty() || key.split(',').any(|code| code.eq_ignore_ascii_case(provider))
+}
+
+/// What the engine is told when a market data request ends (ibx#444).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdCancel {
+    /// The last request of the instrument: its subscription ends.
+    Instrument(InstrumentId),
+    /// Other requests still use the instrument: only this request's share
+    /// of its news entry goes, when it had the news tick.
+    Shared { instrument: InstrumentId, news: Option<String> },
+}
+
+impl MdCancel {
+    /// The command for the engine, if any.
+    pub fn command(self) -> Option<ControlCommand> {
+        match self {
+            MdCancel::Instrument(instrument) => Some(ControlCommand::Unsubscribe { instrument }),
+            MdCancel::Shared { instrument, news } => news.map(|providers| ControlCommand::UnsubscribeNews { instrument, providers }),
+        }
+    }
+}
+
+/// A callback for a market data request beside its ticks (ibx#444).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MdNotice {
+    MarketDataType { req_id: i64, market_data_type: i32 },
+    TickReqParams { req_id: i64, min_tick: f64, bbo_exchange: String, permissions: i64 },
+    Error { req_id: i64, code: i64, text: String },
+    News { req_id: i64, news: crate::types::TickNews },
+}
+
+/// What a stream sent last, by request (ibx#446).
 #[derive(Debug, Default, Clone)]
 pub struct StreamState {
     fields: [i64; 15],
@@ -840,13 +894,34 @@ impl StreamPass<'_> {
 /// Both Rust and Python EClient own a `ClientCore` and delegate state tracking
 /// and data preparation to it. Only the final callback invocation is language-specific.
 pub struct ClientCore {
-    // reqId <-> InstrumentId mapping
+    // reqId <-> InstrumentId mapping. Several requests may share one
+    // instrument, in the order they came, as the reference's API
+    // subscribers share a contract's record (ibx#444).
     pub req_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
-    pub instrument_to_req: Mutex<HashMap<InstrumentId, i64>>,
+    pub instrument_to_req: Mutex<HashMap<InstrumentId, Vec<i64>>>,
     // con_id → InstrumentId for find_or_register_instrument lookup
     pub con_id_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
-    // Change detection for quote polling
-    pub last_quotes: Mutex<HashMap<InstrumentId, StreamState>>,
+    // Change detection for quote polling, by request id
+    pub last_quotes: Mutex<HashMap<i64, StreamState>>,
+    /// The news provider key of each market data request with the news
+    /// tick (ibx#444, ibx#458).
+    pub md_news: Mutex<HashMap<i64, String>>,
+    /// The last request parameters of each instrument (minimum tick, BBO
+    /// exchange, snapshot permissions): a request that joins gets them at
+    /// once (ibx#444).
+    pub instrument_params: Mutex<HashMap<InstrumentId, (f64, String, i64)>>,
+    /// Headlines given for each instrument, oldest first, at most
+    /// `NEWS_KEPT`: a request that joins gets the last ones (ibx#444).
+    pub instrument_news: Mutex<HashMap<InstrumentId, Vec<crate::types::TickNews>>>,
+    /// Requests that joined a running subscription, and whether on delayed
+    /// data, to be answered at the next dispatch (ibx#444).
+    pub md_joins: Mutex<Vec<(i64, bool)>>,
+    /// The client's market data modes from reqMarketDataType (ibx#444).
+    pub md_modes: Mutex<crate::types::MarketDataModes>,
+    /// The "Legal ones" text of the generic tick list refusal: computed
+    /// once, for the first refused list, as the reference caches it; never
+    /// reset (ibx#450).
+    generic_legal: Mutex<Option<String>>,
     /// Running plain snapshots by request id (ibx#446), their count read
     /// without the lock, and the per-second snapshot limiter.
     snapshot_reqs: Mutex<HashMap<i64, crate::control::snapshot::PlainSnapshot>>,
@@ -1114,6 +1189,12 @@ impl ClientCore {
             instrument_to_req: Mutex::new(HashMap::new()),
             con_id_to_instrument: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
+            md_news: Mutex::new(HashMap::new()),
+            instrument_params: Mutex::new(HashMap::new()),
+            instrument_news: Mutex::new(HashMap::new()),
+            md_joins: Mutex::new(Vec::new()),
+            md_modes: Mutex::new(Default::default()),
+            generic_legal: Mutex::new(None),
             snapshot_reqs: Mutex::new(HashMap::new()),
             snapshot_count: std::sync::atomic::AtomicUsize::new(0),
             snapshot_rate: Mutex::new(Default::default()),
@@ -1158,6 +1239,11 @@ impl ClientCore {
         self.instrument_to_req.lock().unwrap().clear();
         self.con_id_to_instrument.lock().unwrap().clear();
         self.last_quotes.lock().unwrap().clear();
+        self.md_news.lock().unwrap().clear();
+        self.instrument_params.lock().unwrap().clear();
+        self.instrument_news.lock().unwrap().clear();
+        self.md_joins.lock().unwrap().clear();
+        *self.md_modes.lock().unwrap() = Default::default();
         self.snapshot_reqs.lock().unwrap().clear();
         self.snapshot_count.store(0, Ordering::Release);
         self.reg_snapshots.lock().unwrap().clear();
@@ -1268,6 +1354,10 @@ impl ClientCore {
     /// of `news_tick_refusal` for a contract with a conId.
     /// A contract without a conId is looked up by the engine first, as the
     /// reference does, with the currency and `filters` (ibx#278).
+    /// A contract another request of this client already subscribed is
+    /// shared, as the reference shares the contract's record among its API
+    /// subscribers (ibx#444): nothing new goes to the farm for its top of
+    /// book, and the request gets at once what the others have.
     pub fn register_mkt_data(
         &self,
         shared: &SharedState,
@@ -1297,6 +1387,7 @@ impl ClientCore {
             Ok(providers) => (providers.join(","), None),
             Err(text) => (String::new(), Some(text)),
         });
+        let news_key = news.as_ref().filter(|(_, refusal)| refusal.is_none()).map(|(providers, _)| providers.clone());
         let send_news = |instrument: InstrumentId| {
             if let Some((providers, refusal)) = &news {
                 let _ = control_tx.send(ControlCommand::SubscribeNews {
@@ -1305,25 +1396,25 @@ impl ClientCore {
                 });
             }
         };
+        let attach = |instrument: InstrumentId, had_data: bool| {
+            if self.attach_md_request(shared, req_id, instrument, snapshot, sec_type, exchange, news_key.clone(), had_data) {
+                send_news(instrument);
+            }
+            Ok(instrument)
+        };
 
         // A quote ibx subscribed to for the P&L becomes the caller's
         // subscription: no second subscription to the server.
         if let Some(instrument_id) = self.pnl_quotes.lock().unwrap().active.remove(&con_id) {
-            self.join_stream(instrument_id);
             self.con_id_to_instrument.lock().unwrap().insert(con_id, instrument_id);
-            self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
-            self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
-            if snapshot {
-                self.start_snapshot(req_id, sec_type);
-            }
-            self.note_auto_execution(req_id, sec_type, exchange);
-            send_news(instrument_id);
-            return Ok(instrument_id);
+            return attach(instrument_id, true);
         }
 
         // No conId: not an identity. The engine gives the request its own
         // slot and resolves the conId before it subscribes (ibx#278); the
-        // only duplicate check is the one on the request id.
+        // only duplicate check is the one on the request id. When the
+        // contract it finds is subscribed already, the request joins that
+        // subscription (`take_md_rejects`).
         if con_id == 0 {
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             control_tx.send(ControlCommand::SubscribeBySymbol {
@@ -1336,33 +1427,23 @@ impl ClientCore {
                 reply_tx: Some(reply_tx),
             }).map_err(|e| format!("Engine stopped: {}", e))?;
             let instrument_id = Self::recv_registration(reply_rx)?;
-            self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
-            self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
-            if snapshot {
-                self.start_snapshot(req_id, sec_type);
-            }
-            self.note_auto_execution(req_id, sec_type, exchange);
-            send_news(instrument_id);
-            return Ok(instrument_id);
+            return attach(instrument_id, false);
         }
 
-        // instrument_to_req maps ONE req_id per instrument: a second live
-        // subscription would clobber the first's reverse mapping and orphan
-        // it silently — no ticks, no error (ibx#233). Reject up front via
-        // the client-side conId cache, before anything reaches the engine.
-        {
-            let cache = self.con_id_to_instrument.lock().unwrap();
-            if let Some(&iid) = cache.get(&con_id) {
-                if let Some(&existing) = self.instrument_to_req.lock().unwrap().get(&iid) {
-                    if existing != req_id {
-                        return Err(format!(
-                            "contract (con_id {}) already has a live market-data \
-                             subscription under req_id {}: cancel it first or \
-                             reuse that req_id", con_id, existing,
-                        ));
-                    }
-                }
+        // A contract this client already streams: the request joins at
+        // once. A stream asked where only snapshots run goes to the engine,
+        // which adds the streaming entries; so does a request with a mode
+        // of `req_mkt_data_ex`, an extension the reference has not.
+        let running = self.con_id_to_instrument.lock().unwrap().get(&con_id).copied().filter(|iid| {
+            if mode_9887 != 0 {
+                return false;
             }
+            let observers = self.instrument_to_req.lock().unwrap();
+            let snaps = self.snapshot_reqs.lock().unwrap();
+            observers.get(iid).is_some_and(|reqs| !reqs.is_empty() && (snapshot || reqs.iter().any(|r| !snaps.contains_key(r))))
+        });
+        if let Some(instrument_id) = running {
+            return attach(instrument_id, false);
         }
 
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
@@ -1386,14 +1467,64 @@ impl ClientCore {
 
         let instrument_id = Self::recv_registration(reply_rx)?;
         self.con_id_to_instrument.lock().unwrap().insert(con_id, instrument_id);
-        self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
-        self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
+        attach(instrument_id, false)
+    }
+
+    /// Add a new market data request to the requests of an instrument
+    /// (ibx#444); false when refused (`join_md_observers`).
+    #[allow(clippy::too_many_arguments)]
+    fn attach_md_request(
+        &self, shared: &SharedState, req_id: i64, instrument: InstrumentId, snapshot: bool, sec_type: &str,
+        exchange: &str, news: Option<String>, had_data: bool,
+    ) -> bool {
+        if let Some(key) = news.clone() {
+            self.md_news.lock().unwrap().insert(req_id, key);
+        }
+        if !self.join_md_observers(shared, req_id, instrument, had_data) {
+            self.md_news.lock().unwrap().remove(&req_id);
+            return false;
+        }
         if snapshot {
             self.start_snapshot(req_id, sec_type);
         }
         self.note_auto_execution(req_id, sec_type, exchange);
-        send_news(instrument_id);
-        Ok(instrument_id)
+        true
+    }
+
+    /// Put a market data request among the requests of an instrument
+    /// (ibx#444). The first request of a fresh instrument starts its
+    /// stream; a request on an instrument other requests use joins it, as
+    /// the reference's subscriber joins the contract's record: when that
+    /// record runs on delayed data and this client has not enabled delayed
+    /// data, error 10168 and the request is not kept (false); else it gets
+    /// at once the market data type (3 on delayed data), the request
+    /// parameters, the latest headlines of its news key, and every field
+    /// the quote has (`take_md_joins`). `had_data`: the quote already has
+    /// data although no request uses it (the internal P&L quote).
+    fn join_md_observers(&self, shared: &SharedState, req_id: i64, instrument: InstrumentId, had_data: bool) -> bool {
+        let mut observers = self.instrument_to_req.lock().unwrap();
+        let reqs = observers.entry(instrument).or_default();
+        let joining = !reqs.is_empty();
+        let delayed = joining && {
+            let delayed_reqs = self.delayed_reqs.lock().unwrap();
+            reqs.iter().any(|r| delayed_reqs.contains(r))
+        };
+        if delayed && !self.md_modes.lock().unwrap().delayed {
+            drop(observers);
+            shared.orders.push_order_error(req_id, MD_DELAYED_NOT_ENABLED.0, MD_DELAYED_NOT_ENABLED.1.to_string());
+            return false;
+        }
+        reqs.push(req_id);
+        drop(observers);
+        self.req_to_instrument.lock().unwrap().insert(req_id, instrument);
+        if joining || had_data {
+            self.join_stream(req_id);
+            if delayed {
+                self.set_delayed(req_id);
+            }
+            self.md_joins.lock().unwrap().push((req_id, delayed));
+        }
+        true
     }
 
     /// Start a regulatory snapshot (ibx#446): one fetch per contract; the
@@ -1582,25 +1713,155 @@ impl ClientCore {
         }
     }
 
-    /// Unregister a market data subscription.
-    /// Returns `(instrument_id, needs_news_unsub)`.
-    pub fn unregister_mkt_data(&self, req_id: i64) -> Option<InstrumentId> {
-        if let Some(instrument) = self.req_to_instrument.lock().unwrap().remove(&req_id) {
-            self.instrument_to_req.lock().unwrap().remove(&instrument);
-            self.last_quotes.lock().unwrap().remove(&instrument);
-            self.mdt_sent.lock().unwrap().remove(&req_id);
-            self.delayed_reqs.lock().unwrap().remove(&req_id);
-            self.tick_req_params_sent.lock().unwrap().remove(&req_id);
-            self.farm_auto_reqs.lock().unwrap().remove(&req_id);
-            self.end_snapshot(req_id);
-            // The slot stays while tick-by-tick data uses it.
-            if !self.tbt_reqs.lock().unwrap().values().any(|(i, ..)| *i == instrument) {
-                self.forget_instrument(instrument);
+    /// Unregister a market data request (ibx#444): None for an unknown
+    /// request id. The instrument's subscription ends with its last
+    /// request; before that, only the request's share of the news entry
+    /// goes.
+    pub fn unregister_mkt_data(&self, req_id: i64) -> Option<MdCancel> {
+        let instrument = self.req_to_instrument.lock().unwrap().remove(&req_id)?;
+        let last = {
+            let mut observers = self.instrument_to_req.lock().unwrap();
+            match observers.get_mut(&instrument) {
+                Some(reqs) => {
+                    reqs.retain(|r| *r != req_id);
+                    let last = reqs.is_empty();
+                    if last {
+                        observers.remove(&instrument);
+                    }
+                    last
+                }
+                None => true,
             }
-            Some(instrument)
-        } else {
-            None
+        };
+        self.last_quotes.lock().unwrap().remove(&req_id);
+        self.mdt_sent.lock().unwrap().remove(&req_id);
+        self.delayed_reqs.lock().unwrap().remove(&req_id);
+        self.tick_req_params_sent.lock().unwrap().remove(&req_id);
+        self.farm_auto_reqs.lock().unwrap().remove(&req_id);
+        self.md_joins.lock().unwrap().retain(|(r, _)| *r != req_id);
+        let news = self.md_news.lock().unwrap().remove(&req_id);
+        self.end_snapshot(req_id);
+        if !last {
+            return Some(MdCancel::Shared { instrument, news });
         }
+        self.instrument_params.lock().unwrap().remove(&instrument);
+        self.instrument_news.lock().unwrap().remove(&instrument);
+        // The slot stays while tick-by-tick data uses it.
+        if !self.tbt_reqs.lock().unwrap().values().any(|(i, ..)| *i == instrument) {
+            self.forget_instrument(instrument);
+        }
+        Some(MdCancel::Instrument(instrument))
+    }
+
+    /// The market data requests of an instrument, in the order they came.
+    pub fn md_requests_of(&self, instrument: InstrumentId) -> Vec<i64> {
+        self.instrument_to_req.lock().unwrap().get(&instrument).cloned().unwrap_or_default()
+    }
+
+    /// What the server said about the subscriptions since the last
+    /// dispatch, for each request of their instrument (ibx#444, ibx#447),
+    /// with the commands for the engine. First the requests without a
+    /// conId whose contract another request had subscribed: they join that
+    /// subscription (or get 10168, as any join) and their own slot is
+    /// freed. Then the rejects: on delayed data, marketDataType 3 and
+    /// 10167; a request with the news tick keeps it, with 2117; the others
+    /// end with their error.
+    pub fn take_md_rejects(&self, shared: &SharedState) -> (Vec<MdNotice>, Vec<ControlCommand>) {
+        let mut notices = Vec::new();
+        let mut commands = Vec::new();
+        for (from, into) in shared.market.drain_md_merges() {
+            // None left: they were cancelled, which freed the slot.
+            let Some(reqs) = self.instrument_to_req.lock().unwrap().remove(&from) else { continue };
+            for req_id in reqs {
+                if !self.join_md_observers(shared, req_id, into, false) {
+                    // Refused (10168): the request is gone.
+                    self.req_to_instrument.lock().unwrap().insert(req_id, into);
+                    if let Some(command) = self.unregister_mkt_data(req_id).and_then(MdCancel::command) {
+                        commands.push(command);
+                    }
+                }
+            }
+            commands.push(ControlCommand::Unsubscribe { instrument: from });
+        }
+        for reject in shared.market.drain_md_rejects() {
+            let (code, text, gone) = Self::md_reject_error(&reject);
+            let keeps_news = matches!(reject, crate::bridge::MdReject::NotSubscribed { .. });
+            for req_id in self.md_requests_of(reject.instrument()) {
+                if !gone {
+                    self.set_delayed(req_id);
+                    notices.push(MdNotice::MarketDataType { req_id, market_data_type: 3 });
+                    notices.push(MdNotice::Error { req_id, code, text: text.to_string() });
+                } else if keeps_news && self.md_news.lock().unwrap().contains_key(&req_id) {
+                    notices.push(MdNotice::Error { req_id, code: MD_TOP_REJECTED.0, text: MD_TOP_REJECTED.1.to_string() });
+                } else {
+                    notices.push(MdNotice::Error { req_id, code, text: text.to_string() });
+                    if let Some(command) = self.unregister_mkt_data(req_id).and_then(MdCancel::command) {
+                        commands.push(command);
+                    }
+                }
+            }
+        }
+        (notices, commands)
+    }
+
+    /// What the requests that joined a running subscription get at once
+    /// (ibx#444, captured 02/10/2026): the market data type (3 on delayed
+    /// data), the request parameters the subscription has, then, when
+    /// another request of the contract has the same news key, its latest
+    /// headlines (at most 5, oldest first). The quote fields follow at the
+    /// next poll.
+    pub fn take_md_joins(&self) -> Vec<MdNotice> {
+        let joins = std::mem::take(&mut *self.md_joins.lock().unwrap());
+        let mut notices = Vec::new();
+        for (req_id, delayed) in joins {
+            let Some(instrument) = self.req_to_instrument.lock().unwrap().get(&req_id).copied() else { continue };
+            if delayed {
+                notices.push(MdNotice::MarketDataType { req_id, market_data_type: 3 });
+            }
+            let params = self.instrument_params.lock().unwrap().get(&instrument).cloned();
+            if let Some((min_tick, bbo_exchange, permissions)) = params
+                && self.tick_req_params_sent.lock().unwrap().insert(req_id)
+            {
+                if let Some(market_data_type) = self.check_mdt_needed(req_id, true) {
+                    notices.push(MdNotice::MarketDataType { req_id, market_data_type });
+                }
+                notices.push(MdNotice::TickReqParams { req_id, min_tick, bbo_exchange, permissions });
+            }
+            let news = self.md_news.lock().unwrap();
+            let Some(key) = news.get(&req_id) else { continue };
+            let shared_key = self.md_requests_of(instrument).iter().any(|r| *r != req_id && news.get(r) == Some(key));
+            if !shared_key {
+                continue;
+            }
+            let stored = self.instrument_news.lock().unwrap();
+            let mut latest: Vec<&crate::types::TickNews> = stored.get(&instrument).into_iter().flatten()
+                .filter(|n| news_key_covers(key, &n.provider_code)).collect();
+            // By time, the order they came for the same time.
+            latest.sort_by_key(|n| n.timestamp);
+            let skip = latest.len().saturating_sub(NEWS_REPLAYED);
+            for n in &latest[skip..] {
+                notices.push(MdNotice::News { req_id, news: (*n).clone() });
+            }
+        }
+        notices
+    }
+
+    /// The requests a headline of an instrument goes to (ibx#444): those
+    /// with the news tick whose key has its provider. The headline is kept
+    /// for the requests that join later.
+    pub fn route_tick_news(&self, news: &crate::types::TickNews) -> Vec<i64> {
+        {
+            let mut stored = self.instrument_news.lock().unwrap();
+            let kept = stored.entry(news.instrument).or_default();
+            if kept.len() >= NEWS_KEPT {
+                kept.remove(0);
+            }
+            kept.push(news.clone());
+        }
+        let keys = self.md_news.lock().unwrap();
+        self.md_requests_of(news.instrument).into_iter()
+            .filter(|r| keys.get(r).is_some_and(|key| news_key_covers(key, &news.provider_code)))
+            .collect()
     }
 
     /// Drop the client-side conId cache entries for an instrument id. The
@@ -1609,6 +1870,8 @@ impl ClientCore {
     /// contract inherits the id. A later request for that conId simply
     /// re-registers.
     pub fn forget_instrument(&self, instrument: InstrumentId) {
+        self.instrument_params.lock().unwrap().remove(&instrument);
+        self.instrument_news.lock().unwrap().remove(&instrument);
         let mut sent = self.currency_sent.lock().unwrap();
         self.con_id_to_instrument.lock().unwrap().retain(|con_id, iid| {
             let keep = *iid != instrument;
@@ -1765,10 +2028,10 @@ impl ClientCore {
             .map(|(r, _)| *r)
     }
 
-    /// Look up req_id for an instrument.
+    /// Look up the first req_id of an instrument; -1 for none.
     pub fn req_id_for_instrument(&self, instrument: InstrumentId) -> i64 {
         self.instrument_to_req.lock().unwrap()
-            .get(&instrument).copied().unwrap_or(-1)
+            .get(&instrument).and_then(|reqs| reqs.first()).copied().unwrap_or(-1)
     }
 
     // ── PnL subscription management ──
@@ -2026,6 +2289,7 @@ impl ClientCore {
             log::warn!("req_market_data_type({}): no frozen subscription is sent; the frozen mode is kept (ibx#447)", mdt);
         }
         self.market_data_type.store(mdt, Ordering::Relaxed);
+        self.md_modes.lock().unwrap().apply(mdt);
         let _ = control_tx.send(ControlCommand::SetMarketDataType { market_data_type: mdt });
         None
     }
@@ -2080,22 +2344,28 @@ impl ClientCore {
 
     /// The tickReqParams to report, (reqId, marketDataType, minTick,
     /// bboExchange, snapshotPermissions): once per request id, as the
-    /// reference (ibx#449); a later ack of the same request (a delayed
-    /// fallback) gives none. The market data type, when not sent yet, comes
-    /// before them: the reference sends it when the farm grants the
-    /// subscription, before the request parameters (ibx#446).
+    /// reference (ibx#449), for each request of the instrument; a later ack
+    /// of the same request (a delayed fallback) gives none. The market data
+    /// type, when not sent yet, comes before them: the reference sends it
+    /// when the farm grants the subscription, before the request
+    /// parameters (ibx#446). The parameters are kept for the requests that
+    /// join later (ibx#444).
     pub fn take_tick_req_params(&self, shared: &SharedState) -> Vec<(i64, Option<i32>, f64, String, i64)> {
         let params = shared.market.drain_tick_req_params();
         if params.is_empty() {
             return Vec::new();
         }
-        let mut sent = self.tick_req_params_sent.lock().unwrap();
-        params.into_iter().filter_map(|p| {
-            let req_id = self.req_id_for_instrument(p.instrument);
-            (req_id >= 0 && sent.insert(req_id)).then(|| (
-                req_id, self.check_mdt_needed(req_id, true), p.min_tick, p.bbo_exchange, p.snapshot_permissions as i64,
-            ))
-        }).collect()
+        let mut out = Vec::new();
+        for p in params {
+            let permissions = p.snapshot_permissions as i64;
+            self.instrument_params.lock().unwrap().insert(p.instrument, (p.min_tick, p.bbo_exchange.clone(), permissions));
+            for req_id in self.md_requests_of(p.instrument) {
+                if self.tick_req_params_sent.lock().unwrap().insert(req_id) {
+                    out.push((req_id, self.check_mdt_needed(req_id, true), p.min_tick, p.bbo_exchange.clone(), permissions));
+                }
+            }
+        }
+        out
     }
 
     /// The news tick check of a market data request whose contract is
@@ -2112,6 +2382,20 @@ impl ClientCore {
             NewsTick::None | NewsTick::Invalid => return None,
         };
         news_providers(sec_type, codes.as_deref(), &shared.reference.news_sources()).err().map(|text| (10094, text))
+    }
+
+    /// The 321 of an invalid generic tick list of a market data request
+    /// that is not a snapshot (ibx#450, `jextend.bQ.n()@220-388`): checked
+    /// first, before anything else of the request. Its "Legal ones" are
+    /// those of the security type of the first list refused, as the
+    /// reference computes them once.
+    pub fn generic_tick_list_refusal(&self, generic_tick_list: &str, snapshot: bool, sec_type: &str) -> Option<(i64, String)> {
+        use crate::control::generic_tick;
+        if snapshot || generic_tick_list.is_empty() || generic_tick::parse(generic_tick_list, sec_type).is_some() {
+            return None;
+        }
+        let legal = self.generic_legal.lock().unwrap().get_or_insert_with(|| generic_tick::legal_ones(sec_type)).clone();
+        Some((321, generic_tick::refusal(generic_tick_list, sec_type, &legal)))
     }
 
     /// A market data request whose id is already live: error 322, as the
@@ -2134,8 +2418,10 @@ impl ClientCore {
                 (10167, "Requested market data is not subscribed. Displaying delayed market data.", false),
             MdReject::NotSubscribed { needs_api_subscription: true, .. } =>
                 (10089, "Requested market data requires additional subscription for API. See link in 'Market Data Connections' dialog for more details.", true),
+            // The reference appends the text to the sentence after its
+            // period, without a space (`jextend.ac.a(String,String)`).
             MdReject::NotSubscribed { delayed_available: true, .. } =>
-                (354, "Requested market data is not subscribed. Delayed market data is available.", true),
+                (354, "Requested market data is not subscribed.Delayed market data is available.", true),
             MdReject::NotSubscribed { .. } => (354, "Requested market data is not subscribed.", true),
             MdReject::NoSecurityDefinition { .. } =>
                 (200, crate::engine::hot_loop::ccp::NO_SECURITY_DEFINITION, true),
@@ -2563,7 +2849,7 @@ impl ClientCore {
 
         // Single lock acquisition for both read and write of last_quotes.
         let mut map = self.last_quotes.lock().unwrap();
-        let st = map.entry(iid).or_default();
+        let st = map.entry(req_id).or_default();
         let mut todo = [false; 15];
         for (idx, pending) in todo.iter_mut().enumerate() {
             *pending = match idx {
@@ -2664,11 +2950,12 @@ impl ClientCore {
         QuotePollResult { ticks, delivered }
     }
 
-    /// A request joins a quote that already has data, the internal P&L
-    /// subscription's: its first poll sends all of it, as the reference
-    /// marks every known field when a request joins its record (ibx#446).
-    pub(crate) fn join_stream(&self, instrument: InstrumentId) {
-        self.last_quotes.lock().unwrap().insert(instrument, StreamState { joined: true, ..Default::default() });
+    /// A request joins a quote that already has data (another request's,
+    /// or the internal P&L subscription's): its first poll sends all of
+    /// it, as the reference marks every known field when a request joins
+    /// its record (ibx#446, ibx#444).
+    pub(crate) fn join_stream(&self, req_id: i64) {
+        self.last_quotes.lock().unwrap().insert(req_id, StreamState { joined: true, ..Default::default() });
     }
 
     /// Note a stream whose bid and ask auto-execution comes from the farm
@@ -2812,10 +3099,11 @@ impl ClientCore {
         Some((QuotePollResult { ticks, delivered }, ended))
     }
 
-    /// Snapshot the current instrument→req_id mapping.
+    /// Snapshot the current instrument→req_id mapping: each request of
+    /// each instrument, in the order they came.
     pub fn snapshot_instruments(&self) -> Vec<(InstrumentId, i64)> {
         let map = self.instrument_to_req.lock().unwrap();
-        map.iter().map(|(&iid, &req_id)| (iid, req_id)).collect()
+        map.iter().flat_map(|(&iid, reqs)| reqs.iter().map(move |&req_id| (iid, req_id))).collect()
     }
 
     /// Poll PnL and return update if values changed.
@@ -4446,7 +4734,7 @@ mod tests {
         close_dollars: f64,
     ) {
         core.con_id_to_instrument.lock().unwrap().insert(con_id, iid);
-        core.instrument_to_req.lock().unwrap().insert(iid, 1);
+        core.instrument_to_req.lock().unwrap().insert(iid, vec![1]);
         shared.portfolio.set_position_info(PositionInfo {
             con_id,
             position_fixed: position as i64 * crate::types::QTY_SCALE,

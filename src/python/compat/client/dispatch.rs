@@ -41,6 +41,25 @@ pub(crate) fn callback_raised(py: Python<'_>, method: &str, e: PyErr) -> PyResul
 }
 
 impl EClient {
+    /// The callbacks of market data requests beside their ticks (ibx#444).
+    fn md_notices(&self, py: Python<'_>, notices: Vec<crate::client_core::MdNotice>) -> PyResult<()> {
+        use crate::client_core::MdNotice;
+        for notice in notices {
+            match notice {
+                MdNotice::MarketDataType { req_id, market_data_type } =>
+                    call_wrapper!(self.wrapper, py, "market_data_type", (req_id, market_data_type)),
+                MdNotice::TickReqParams { req_id, min_tick, bbo_exchange, permissions } =>
+                    call_wrapper!(self.wrapper, py, "tick_req_params", (req_id, min_tick, bbo_exchange.as_str(), permissions)),
+                MdNotice::Error { req_id, code, text } =>
+                    call_wrapper!(self.wrapper, py, "error", (req_id, code, text.as_str(), "")),
+                MdNotice::News { req_id, news } =>
+                    call_wrapper!(self.wrapper, py, "tick_news", (req_id, news.timestamp, news.provider_code.as_str(),
+                        news.article_id.as_str(), news.headline.as_str(), news.extra_data.as_str())),
+            }
+        }
+        Ok(())
+    }
+
     /// Rows of the running multi-account requests (ibx#476).
     pub(crate) fn dispatch_multi(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
         let own = self.account();
@@ -363,21 +382,13 @@ impl EClient {
             }
         }
 
-        // Subscriptions the server rejected (ibx#444, ibx#447).
-        for reject in shared.market.drain_md_rejects() {
-            let instrument = reject.instrument();
-            let req_id = self.core.req_id_for_instrument(instrument);
-            if req_id < 0 { continue; }
-            let (code, text, gone) = crate::client_core::ClientCore::md_reject_error(&reject);
-            if !gone {
-                self.core.set_delayed(req_id);
-                call_wrapper!(self.wrapper, py, "market_data_type", (req_id, 3));
-            }
-            call_wrapper!(self.wrapper, py, "error", (req_id, code, text, ""));
-            if gone {
-                if let (Some(instrument), Ok(tx)) = (self.core.unregister_mkt_data(req_id), self.tx()) {
-                    let _ = send_cmd(py, &tx, ControlCommand::Unsubscribe { instrument });
-                }
+        // Requests that joined a subscription, and subscriptions the
+        // server rejected (ibx#444, ibx#447).
+        let (notices, commands) = self.core.take_md_rejects(shared);
+        self.md_notices(py, notices)?;
+        if let Ok(tx) = self.tx() {
+            for command in commands {
+                let _ = send_cmd(py, &tx, command);
             }
         }
 
@@ -405,6 +416,10 @@ impl EClient {
                 }
             }
         }
+
+        // What the requests that joined a running subscription get at once
+        // (ibx#444).
+        self.md_notices(py, self.core.take_md_joins())?;
 
         // Request parameters, once per request (ibx#449), after the market
         // data type (ibx#446).
@@ -500,12 +515,14 @@ impl EClient {
             }
         }
 
-        // Drain news -> tickNews
+        // Drain news -> tickNews, to each request of the contract whose
+        // news key has the provider (ibx#444)
         let news_items = shared.market.drain_tick_news();
         for news in news_items {
-            let req_id = self.core.req_id_for_instrument(news.instrument);
-            call_wrapper!(self.wrapper, py, "tick_news", (req_id, news.timestamp, news.provider_code.as_str(),
-                 news.article_id.as_str(), news.headline.as_str(), news.extra_data.as_str()));
+            for req_id in self.core.route_tick_news(&news) {
+                call_wrapper!(self.wrapper, py, "tick_news", (req_id, news.timestamp, news.provider_code.as_str(),
+                     news.article_id.as_str(), news.headline.as_str(), news.extra_data.as_str()));
+            }
         }
 
         // Drain news bulletins -> updateNewsBulletin

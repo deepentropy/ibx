@@ -434,7 +434,7 @@ def req_completed_orders(api_only=false))
 
 #### `req_mkt_data`
 
-Request market data for a contract.
+Request market data for a contract. A generic tick list with an unknown tick, or one not legal for the security type, is refused with error 321 (ibx#450). Several request ids may ask for one contract: they share its subscription, a request that joins gets at once what the others have, and the subscription ends with the cancel of the last one (ibx#444).
 
 ```python
 def req_mkt_data(req_id, contract, generic_tick_list="", snapshot=false, regulatory_snapshot=false, mkt_data_options=Vec::new()))

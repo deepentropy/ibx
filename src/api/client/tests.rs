@@ -220,7 +220,7 @@ fn symbol_only_requests_are_looked_up_not_keyed_on_con_id_0() {
     let (client, rx, _shared) = test_client();
     // A live request under conId 0, as the old keying left it.
     client.core.con_id_to_instrument.lock().unwrap().insert(0, 3);
-    client.core.instrument_to_req.lock().unwrap().insert(3, 1);
+    client.core.instrument_to_req.lock().unwrap().insert(3, vec![1]);
     for (req, symbol) in [(2, "QQQ"), (4, "SPY")] {
         let c = Contract { symbol: symbol.into(), sec_type: "STK".into(), exchange: "SMART".into(),
             currency: "USD".into(), primary_exchange: "NASDAQ".into(), ..Default::default() };
@@ -261,17 +261,20 @@ fn req_mkt_data_ex_propagates_mode_9887() {
     }
 }
 
-// ibx#233: a second live subscription on the same contract would clobber
-// the first's reverse mapping and orphan it silently. Reject at the call.
+// ibx#444: a second request id on a contract this client streams shares
+// its subscription, as the reference: nothing reaches the engine, and both
+// requests stay mapped (ibx#233 is kept: none is orphaned).
 #[test]
-fn req_mkt_data_duplicate_instrument_is_rejected() {
+fn req_mkt_data_second_request_on_a_contract_shares_it() {
     let (client, rx, _shared) = test_client();
     // Existing live subscription for SPY (instrument 0) under req_id 1.
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    client.core.req_to_instrument.lock().unwrap().insert(1, 0);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![1]);
 
-    let err = client.req_mkt_data(2, &spy(), "", false, false).unwrap_err();
-    assert!(err.contains("req_id 1"), "got: {}", err);
+    client.req_mkt_data(2, &spy(), "", false, false).unwrap();
     assert!(rx.try_recv().is_err(), "nothing may reach the engine");
+    assert_eq!(client.core.instrument_to_req.lock().unwrap().get(&0), Some(&vec![1, 2]));
+    assert_eq!(client.core.req_to_instrument.lock().unwrap().get(&2), Some(&0));
 }
 
 #[test]
@@ -279,7 +282,7 @@ fn cancel_mkt_data_sends_unsubscribe() {
     let (client, rx, _shared) = test_client();
     // Pre-register mapping
     client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![1]);
     client.cancel_mkt_data(1).unwrap();
     let cmd = rx.try_recv().unwrap();
     assert!(matches!(cmd, ControlCommand::Unsubscribe { instrument: 0 }));
@@ -367,7 +370,7 @@ fn req_tick_by_tick_data_types_and_local_refusals() {
 fn tick_by_tick_reports_by_request_type() {
     let (client, rx, shared) = test_client();
     client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![1]);
     client.core.tbt_reqs.lock().unwrap().insert(7, (0, 756733, TbtType::Last));
     client.core.tbt_reqs.lock().unwrap().insert(8, (2, 265598, TbtType::AllLast));
     client.core.tbt_reqs.lock().unwrap().insert(9, (2, 265598, TbtType::BidAsk));
@@ -887,7 +890,7 @@ fn fa_requests_on_a_non_fa_session_are_refused() {
 fn market_data_duplicate_id_and_unknown_cancel() {
     let (client, rx, _shared) = test_client();
     client.core.req_to_instrument.lock().unwrap().insert(7, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 7);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![7]);
     client.req_mkt_data(7, &spy(), "", false, false).unwrap();
     assert!(rx.try_recv().is_err(), "nothing sent");
     client.cancel_mkt_data(99).unwrap();
@@ -905,7 +908,7 @@ fn market_data_rejects_are_reported() {
     let (client, rx, shared) = test_client();
     for (req, inst) in [(5i64, 0u32), (6, 1)] {
         client.core.req_to_instrument.lock().unwrap().insert(req, inst);
-        client.core.instrument_to_req.lock().unwrap().insert(inst, req);
+        client.core.instrument_to_req.lock().unwrap().insert(inst, vec![req]);
     }
     shared.market.push_md_reject(crate::bridge::MdReject::Delayed { instrument: 0 });
     shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
@@ -932,7 +935,7 @@ fn market_data_rejects_are_reported() {
 fn tick_req_params_is_sent_once_per_request() {
     let (client, _rx, shared) = test_client();
     client.core.req_to_instrument.lock().unwrap().insert(5, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 5);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![5]);
     let params = |min_tick: f64, bbo: &str| crate::bridge::TickReqParams {
         instrument: 0, min_tick, bbo_exchange: bbo.into(), snapshot_permissions: 3,
     };
@@ -949,7 +952,7 @@ fn tick_req_params_is_sent_once_per_request() {
     // A new request on the id gets its own.
     let _ = client.cancel_mkt_data(5);
     client.core.req_to_instrument.lock().unwrap().insert(5, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 5);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![5]);
     shared.market.push_tick_req_params(params(0.01, "9c0001"));
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -2783,7 +2786,7 @@ fn process_msgs_dispatches_quotes_on_change() {
     shared.market.push_quote(0, &q);
 
     client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![1]);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -2818,7 +2821,7 @@ fn process_msgs_dispatches_all_quote_fields() {
     shared.market.push_quote(0, &q);
 
     client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![1]);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -2854,7 +2857,7 @@ fn api_sizes_are_wire_sizes_times_the_round_lot() {
     }
     shared.market.push_quote(id, ms.quote(id));
     client.core.req_to_instrument.lock().unwrap().insert(1, id);
-    client.core.instrument_to_req.lock().unwrap().insert(id, 1);
+    client.core.instrument_to_req.lock().unwrap().insert(id, vec![1]);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -2874,9 +2877,9 @@ fn process_msgs_multiple_instruments_independent() {
     shared.market.push_quote(1, &q1);
 
     client.core.req_to_instrument.lock().unwrap().insert(1, 0);
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![1]);
     client.core.req_to_instrument.lock().unwrap().insert(2, 1);
-    client.core.instrument_to_req.lock().unwrap().insert(1, 2);
+    client.core.instrument_to_req.lock().unwrap().insert(1, vec![2]);
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -2934,7 +2937,8 @@ fn process_msgs_tbt_unknown_instrument_uses_neg1() {
 #[test]
 fn process_msgs_dispatches_tick_news() {
     let (client, _rx, shared) = test_client();
-    client.core.instrument_to_req.lock().unwrap().insert(0, 1);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![1]);
+    client.core.md_news.lock().unwrap().insert(1, "BRFG,DJ-N".into());
     shared.market.push_tick_news(TickNews {
         instrument: 0,
         provider_code: "BRFG".into(), article_id: "BRFG$123".into(),
@@ -3412,7 +3416,7 @@ fn process_msgs_drains_on_first_call_empty_on_second() {
 #[test]
 fn process_msgs_live_fill_has_req_id_minus_one() {
     let (client, _rx, shared) = test_client();
-    client.core.instrument_to_req.lock().unwrap().insert(0, 42);
+    client.core.instrument_to_req.lock().unwrap().insert(0, vec![42]);
     shared.orders.push_fill(Fill {
         cum_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_price: 0,
         instrument: 0, order_id: 1, side: Side::Buy,
@@ -5055,7 +5059,7 @@ fn a_pnl_quote_becomes_the_callers_subscription() {
     client.req_mkt_data(5, &aapl, "", false, false).unwrap();
     let (subs, _) = answer_pnl_quotes(&rx, 7);
     assert!(subs.is_empty(), "no second subscription to the server");
-    assert_eq!(client.core.instrument_to_req.lock().unwrap().get(&7), Some(&5));
+    assert_eq!(client.core.instrument_to_req.lock().unwrap().get(&7), Some(&vec![5]));
 
     // The P&L ends: the caller's subscription stays.
     client.cancel_pnl(1);
@@ -5070,7 +5074,7 @@ fn no_internal_quote_when_the_caller_has_one() {
     let (client, rx, shared) = test_client();
     shared.portfolio.set_position_info(aapl_position(100, 336 * PRICE_SCALE));
     client.core.con_id_to_instrument.lock().unwrap().insert(265598, 3);
-    client.core.instrument_to_req.lock().unwrap().insert(3, 9);
+    client.core.instrument_to_req.lock().unwrap().insert(3, vec![9]);
     client.req_pnl(1, "DU123", "");
     client.process_msgs(&mut RecordingWrapper::default());
     let (subs, _) = answer_pnl_quotes(&rx, 3);
@@ -5622,7 +5626,7 @@ fn stock_stream_joining_a_quote_in_the_reference_order() {
     let aapl = Contract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
         ..Default::default() };
     client.req_mkt_data(1, &aapl, "", false, false).unwrap();
-    client.core.join_stream(5);
+    client.core.join_stream(1);
     let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100;
     let n = |shares: i64| shares * crate::types::QTY_SCALE;
     let (k, pq, q_, v) = (1, 2 | 4, 4, 8);
@@ -5890,7 +5894,7 @@ fn news_tick_follows_the_subscription() {
 fn news_refusal_after_the_lookup_is_reported() {
     let (client, rx, shared) = test_client();
     client.core.req_to_instrument.lock().unwrap().insert(9583, 6);
-    client.core.instrument_to_req.lock().unwrap().insert(6, 9583);
+    client.core.instrument_to_req.lock().unwrap().insert(6, vec![9583]);
     shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused {
         instrument: 6, text: "API News error:Source code unchecked in API news Settings: XYZ".into() });
     let mut w = RecordingWrapper::default();
@@ -5963,4 +5967,269 @@ fn version_cutoff_warning_reaches_the_client() {
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("error:-1:2172:The version of the application you are running, 1040.1,")), "{:?}", w.events);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Several requests on one contract (ibx#444)
+// ═══════════════════════════════════════════════════════════════════
+
+/// An engine that answers each subscription with instrument 5 and records
+/// the market data commands.
+fn sharing_engine(rx: crossbeam_channel::Receiver<ControlCommand>) -> std::thread::JoinHandle<Vec<String>> {
+    std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        while let Ok(cmd) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            match cmd {
+                ControlCommand::Subscribe { reply_tx: Some(tx), con_id, .. } => {
+                    let _ = tx.send(Ok(5));
+                    seen.push(format!("subscribe:{con_id}"));
+                }
+                ControlCommand::SubscribeBySymbol { reply_tx: Some(tx), symbol, .. } => {
+                    let _ = tx.send(Ok(if seen.iter().any(|s| s.starts_with("lookup")) { 6 } else { 5 }));
+                    seen.push(format!("lookup:{symbol}"));
+                }
+                ControlCommand::SubscribeNews { instrument, providers, .. } => seen.push(format!("news:{instrument}:{providers}")),
+                ControlCommand::UnsubscribeNews { instrument, providers } => seen.push(format!("release:{instrument}:{providers}")),
+                ControlCommand::Unsubscribe { instrument } => seen.push(format!("unsubscribe:{instrument}")),
+                _ => {}
+            }
+        }
+        seen
+    })
+}
+
+const ALL_NEWS: &str = "BRFG,BRFUPDN,DJ-N,DJ-RTA,DJ-RTE,DJ-RTG,DJ-RTPRO,DJNL";
+
+fn news_sources(shared: &SharedState) {
+    shared.reference.set_news_sources(ALL_NEWS.split(',').map(String::from).collect());
+}
+
+fn aapl_stk() -> Contract {
+    Contract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }
+}
+
+/// The four headlines the first AAPL request got (b1_458_news_dup,
+/// 02/10/2026), in the order they came.
+fn captured_aapl_news(shared: &SharedState, instrument: InstrumentId) {
+    let math = "The New Math of AI: Are Those Trillion-Dollar Numbers for Real? -- Barrons.com";
+    for (t, p, a, h, x) in [
+        (1790893800000, "DJ-RTPRO", "DJ-RTPRO$1f790db1", "VP Newstead Sells 2,399 Of Apple Inc >AAPL", "A:800015:L:en"),
+        (1790920800000, "DJ-N", "DJ-N$1f798bd2", math, "L:en:A:800015"),
+        (1790920800000, "DJ-RTG", "DJ-RTG$1f798bd2", math, "L:en:A:800015"),
+        (1790920800000, "DJ-RTPRO", "DJ-RTPRO$1f798bd2", math, "L:en:A:800015"),
+    ] {
+        shared.market.push_tick_news(TickNews {
+            instrument, timestamp: t, provider_code: p.into(), article_id: a.into(), headline: h.into(), extra_data: x.into(),
+        });
+    }
+}
+
+// ibx#444, captured 02/10/2026 (b1_458_news_dup): two reqMktData
+// "mdoff,292" on AAPL from one client, no error; the second sent nothing to
+// the farm and got at once marketDataType 1, tickReqParams and the four
+// headlines the first had. A cancel of one of them sends nothing to the
+// farm for the top of book; the last cancel ends the subscription.
+#[test]
+fn two_requests_on_one_contract_share_the_subscription() {
+    let (client, rx, shared) = test_client();
+    news_sources(&shared);
+    let engine = sharing_engine(rx);
+    client.req_mkt_data(9580, &aapl_stk(), "mdoff,292", false, false).unwrap();
+    shared.market.push_tick_req_params(crate::bridge::TickReqParams {
+        instrument: 5, min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+    });
+    captured_aapl_news(&shared, 5);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.iter().filter(|e| e.contains(":9580:")).count(), 6, "{:?}", w.events);
+
+    client.req_mkt_data(9581, &aapl_stk(), "mdoff,292", false, false).unwrap();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let math = "The New Math of AI: Are Those Trillion-Dollar Numbers for Real? -- Barrons.com";
+    assert_eq!(w.events, [
+        "market_data_type:9581:1".to_string(),
+        "tick_req_params:9581:0.01:9c0001:3".to_string(),
+        "tick_news:9581:1790893800000:DJ-RTPRO:DJ-RTPRO$1f790db1:VP Newstead Sells 2,399 Of Apple Inc >AAPL:A:800015:L:en".to_string(),
+        format!("tick_news:9581:1790920800000:DJ-N:DJ-N$1f798bd2:{math}:L:en:A:800015"),
+        format!("tick_news:9581:1790920800000:DJ-RTG:DJ-RTG$1f798bd2:{math}:L:en:A:800015"),
+        format!("tick_news:9581:1790920800000:DJ-RTPRO:DJ-RTPRO$1f798bd2:{math}:L:en:A:800015"),
+    ]);
+
+    // A new headline reaches both.
+    shared.market.push_tick_news(TickNews {
+        instrument: 5, timestamp: 1790931600000, provider_code: "DJ-N".into(), article_id: "DJ-N$1f79d3bf".into(),
+        headline: "x".into(), extra_data: String::new(),
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.iter().filter(|e| e.starts_with("tick_news:")).count(), 2, "{:?}", w.events);
+
+    client.cancel_mkt_data(9580).unwrap();
+    client.cancel_mkt_data(9581).unwrap();
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, [
+        "subscribe:265598".to_string(), format!("news:5:{ALL_NEWS}"),
+        format!("news:5:{ALL_NEWS}"), format!("release:5:{ALL_NEWS}"),
+        "unsubscribe:5".to_string(),
+    ]);
+}
+
+// ibx#444: a request that joins a quote with data gets all of it at its
+// first poll; both requests then get each change.
+#[test]
+fn a_joining_stream_gets_the_quote_at_once() {
+    let (client, rx, shared) = test_client();
+    let engine = sharing_engine(rx);
+    client.req_mkt_data(1, &aapl_stk(), "", false, false).unwrap();
+    let s = crate::types::PRICE_SCALE;
+    let q = crate::types::QTY_SCALE;
+    let mut quote = crate::types::Quote { bid: 100 * s, ask: 101 * s, bid_size: 2 * q, ask_size: 3 * q, ..Default::default() };
+    shared.market.push_quote(5, &quote);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "tick_price:1:1:100"), "{:?}", w.events);
+
+    client.req_mkt_data(2, &aapl_stk(), "", false, false).unwrap();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "tick_price:2:1:100") && w.events.iter().any(|e| e == "tick_price:2:2:101"), "{:?}", w.events);
+    assert!(!w.events.iter().any(|e| e.contains(":1:1:100")), "nothing new for the first: {:?}", w.events);
+
+    quote.bid = 99 * s;
+    shared.market.push_quote(5, &quote);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e == "tick_price:1:1:99") && w.events.iter().any(|e| e == "tick_price:2:1:99"), "{:?}", w.events);
+    client.cancel_mkt_data(2).unwrap();
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, ["subscribe:265598"], "the first request keeps the subscription");
+}
+
+// ibx#444, captured 02/10/2026: the second symbol-only AAPL request was
+// looked up (35=c) and then joined the first one's subscription. The engine
+// says so once the lookup found the contract; the request moves to the
+// running subscription, gets what it has, and its own slot is freed.
+#[test]
+fn a_symbol_only_request_joins_the_contract_it_finds() {
+    let (client, rx, shared) = test_client();
+    news_sources(&shared);
+    let engine = sharing_engine(rx);
+    let aapl = Contract { symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+    client.req_mkt_data(9580, &aapl, "mdoff,292", false, false).unwrap();
+    shared.market.push_tick_req_params(crate::bridge::TickReqParams {
+        instrument: 5, min_tick: 0.01, bbo_exchange: "9c0001".into(), snapshot_permissions: 3,
+    });
+    client.process_msgs(&mut RecordingWrapper::default());
+    client.req_mkt_data(9581, &aapl, "mdoff,292", false, false).unwrap();
+    shared.market.push_md_merge(6, 5);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["market_data_type:9581:1", "tick_req_params:9581:0.01:9c0001:3"]);
+    assert_eq!(client.core.instrument_to_req.lock().unwrap().get(&5), Some(&vec![9580, 9581]));
+    assert!(!client.core.instrument_to_req.lock().unwrap().contains_key(&6));
+    client.cancel_mkt_data(9581).unwrap();
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, [
+        "lookup:AAPL".to_string(), format!("news:5:{ALL_NEWS}"),
+        "lookup:AAPL".to_string(), format!("news:6:{ALL_NEWS}"),
+        "unsubscribe:6".to_string(), format!("release:5:{ALL_NEWS}"),
+    ]);
+}
+
+// ibx#444 (`jextend.s.a(dy,ec,Set)@116-188`): a request joining a contract
+// that runs on delayed data gets 10168 when the client has not enabled
+// delayed data, and is not kept; with delayed data enabled it joins on
+// delayed data (marketDataType 3).
+#[test]
+fn joining_a_delayed_subscription() {
+    let (client, rx, shared) = test_client();
+    let engine = sharing_engine(rx);
+    client.req_market_data_type(3);
+    client.req_mkt_data(1, &aapl_stk(), "", false, false).unwrap();
+    shared.market.push_md_reject(crate::bridge::MdReject::Delayed { instrument: 5 });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("error:1:10167:")), "{:?}", w.events);
+
+    client.req_market_data_type(1);
+    client.req_mkt_data(2, &aapl_stk(), "", false, false).unwrap();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["error:2:10168:Requested market data is not subscribed. Delayed market data is not enabled"]);
+    assert!(!client.core.req_to_instrument.lock().unwrap().contains_key(&2));
+
+    client.req_market_data_type(4);
+    client.req_mkt_data(3, &aapl_stk(), "", false, false).unwrap();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["market_data_type:3:3"]);
+    assert!(client.core.delayed_reqs.lock().unwrap().contains(&3));
+    drop(client);
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, ["subscribe:265598"]);
+}
+
+// ibx#444 (`jextend.s.b(boolean,boolean)`, `jextend.ba.a(...)@280`): when
+// the top of book is rejected, a request with the news tick keeps it, with
+// 2117; one without ends with 354, and the others' subscription stays.
+#[test]
+fn a_top_reject_keeps_the_news_of_a_request() {
+    let (client, rx, shared) = test_client();
+    news_sources(&shared);
+    let engine = sharing_engine(rx);
+    client.req_mkt_data(1, &aapl_stk(), "mdoff,292", false, false).unwrap();
+    client.req_mkt_data(2, &aapl_stk(), "", false, false).unwrap();
+    shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
+        instrument: 5, delayed_available: true, needs_api_subscription: false,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, [
+        "error:1:2117:Requested top market data is not subscribed. Subscription-independent ticks are still active.292; ",
+        "error:2:354:Requested market data is not subscribed.Delayed market data is available.",
+    ]);
+    assert_eq!(client.core.instrument_to_req.lock().unwrap().get(&5), Some(&vec![1]));
+    client.cancel_mkt_data(1).unwrap();
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, ["subscribe:265598".to_string(), format!("news:5:{ALL_NEWS}"), "unsubscribe:5".to_string()]);
+}
+
+// ibx#450, captured 02/10/2026 (GOOGL, "mdoff,292:"): an invalid generic
+// tick list of a stream is refused with 321 before anything else, with
+// the legal ticks of the first refused list's security type, for every
+// later refusal too, as the reference caches the text.
+#[test]
+fn an_invalid_generic_tick_list_is_refused() {
+    let (client, rx, _shared) = test_client();
+    let googl = Contract { symbol: "GOOGL".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() };
+    client.req_mkt_data(9570, &googl, "mdoff,292:", false, false).unwrap();
+    // A duplicate id is checked after the list.
+    client.core.req_to_instrument.lock().unwrap().insert(7, 0);
+    client.req_mkt_data(7, &eur_usd(), "999", false, false).unwrap();
+    client.req_mkt_data(8, &spy(), "mdoff", false, false).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let legal = crate::control::generic_tick::legal_ones("STK");
+    assert_eq!(w.events, [
+        format!("error:9570:321:Error validating request.-'bQ' : cause - Incorrect generic tick list of mdoff,292:.  Legal ones for (STK) are: {legal}"),
+        format!("error:7:321:Error validating request.-'bQ' : cause - Incorrect generic tick list of 999.  Legal ones for (CASH) are: {legal}"),
+        format!("error:8:321:Error validating request.-'bQ' : cause - Incorrect generic tick list of mdoff.  Legal ones for () are: {legal}"),
+    ]);
+}
+
+// ibx#450: a valid list goes on (its ticks other than the news are not
+// sent); a snapshot with an invalid list is not refused by this check.
+#[test]
+fn a_valid_generic_tick_list_goes_on() {
+    let (client, rx, _shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &spy_stk(), "233,236,mdoff", false, false).unwrap();
+    client.req_mkt_data(2, &eur_usd(), "999", true, false).unwrap();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().all(|e| !e.contains(":321:")), "{:?}", w.events);
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, ["subscribe:756733:false", "subscribe:12087792:true"]);
 }

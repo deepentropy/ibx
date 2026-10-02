@@ -471,15 +471,14 @@ impl HotLoop {
     /// request whose news tick is refused ends with 10094 instead, nothing
     /// sent, as the reference.
     fn route_md_subscribe(&mut self, sub: &farm::MdSubscribe) {
-        let news = self.farm.news_waiting.iter().position(|(id, ..)| *id == sub.instrument)
-            .map(|pos| self.farm.news_waiting.remove(pos));
-        if let Some((_, _, Some(text))) = &news {
-            self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument: sub.instrument, text: text.clone() });
+        let news = self.take_waiting_news(sub.instrument);
+        if let Some(text) = news.iter().find_map(|(_, refusal)| refusal.clone()) {
+            self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument: sub.instrument, text });
             return;
         }
         // A NEWS contract has no top of book.
         let news_contract = sub.sec_type.eq_ignore_ascii_case("NEWS");
-        if news_contract && news.is_none() {
+        if news_contract && news.is_empty() {
             log::info!("No top-of-book entry for the NEWS contract {}", sub.symbol);
             return;
         }
@@ -491,10 +490,22 @@ impl HotLoop {
             let Some(sink) = farm_sink!(self, id) else { return };
             self.farm.subscribe_top(sub, id, sink, &mut self.hb);
         }
-        if let Some((_, providers, None)) = news {
+        for (providers, _) in news {
             let msgs = self.farm.start_news(sub.instrument, sub.con_id, &sub.sec_type, &providers, id);
             self.send_farm_messages(msgs);
         }
+    }
+
+    /// The news ticks waiting for the top of book of an instrument, in the
+    /// order they came: (provider key, 10094 text of a refused one).
+    fn take_waiting_news(&mut self, instrument: InstrumentId) -> Vec<(String, Option<String>)> {
+        let mut out = Vec::new();
+        self.farm.news_waiting.retain(|(id, providers, refusal)| {
+            if *id != instrument { return true; }
+            out.push((providers.clone(), refusal.clone()));
+            false
+        });
+        out
     }
 
     /// The news tick of a request (ibx#458): with its top of book when that
@@ -506,7 +517,6 @@ impl HotLoop {
             .chain(self.context.md_lookups.iter().map(|(_, s, _)| s))
             .any(|s| s.instrument == instrument);
         if waits {
-            self.farm.news_waiting.retain(|(id, ..)| *id != instrument);
             self.farm.news_waiting.push((instrument, providers, refusal));
             return;
         }
@@ -781,14 +791,46 @@ impl HotLoop {
     }
 
     /// Send the subscriptions whose conId was resolved (ibx#278), through
-    /// the round-lot step as any other.
+    /// the round-lot step as any other. A contract another request already
+    /// has a top of book for is not asked again: the request joins that
+    /// subscription, as the reference attaches it to the contract's record
+    /// (ibx#444, captured 02/10/2026), and its own slot goes.
     fn send_md_resolved(&mut self) {
         if self.context.md_resolved.is_empty() { return; }
         for sub in std::mem::take(&mut self.context.md_resolved) {
+            let into = self.context.market.instrument_by_con_id(sub.con_id)
+                .filter(|&into| into != sub.instrument && sub.mode_9887 == 0 && self.joins_top(into, sub.snapshot));
+            if let Some(into) = into {
+                let news = self.take_waiting_news(sub.instrument);
+                if let Some(text) = news.iter().find_map(|(_, refusal)| refusal.clone()) {
+                    self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument: sub.instrument, text });
+                    continue;
+                }
+                log::info!("Market data for {} {}: conId {} joins the subscription of instrument {}",
+                    sub.symbol, sub.sec_type, sub.con_id, into);
+                for (providers, _) in news {
+                    self.subscribe_news(into, sub.con_id, sub.exchange.clone(), sub.sec_type.clone(), providers, None);
+                }
+                self.shared.market.push_md_merge(sub.instrument, into);
+                continue;
+            }
             if !self.park_for_round_lot(&sub) {
                 self.route_md_subscribe(&sub);
             }
         }
+    }
+
+    /// A new top-of-book request of an instrument shares the one already
+    /// running or waiting (ibx#444): a stream joins a stream, a snapshot
+    /// joins either; a stream asked where only a snapshot runs goes out.
+    fn joins_top(&self, instrument: InstrumentId, snapshot: bool) -> bool {
+        let running = self.farm.top_snapshot(instrument).or_else(|| {
+            self.context.lot_parked.iter().chain(&self.context.lot_ready).chain(&self.context.md_resolved)
+                .chain(self.context.md_lookups.iter().map(|(_, s, _)| s))
+                .find(|s| s.instrument == instrument)
+                .map(|s| s.snapshot)
+        });
+        running.is_some_and(|running_snapshot| !running_snapshot || snapshot)
     }
 
     /// Send the subscriptions whose round lot came in (ibx#287), and give
@@ -1090,6 +1132,11 @@ impl HotLoop {
                         };
                         if con_id == 0 {
                             self.lookup_md_contract(sub, String::new(), filters);
+                        } else if mode_9887 == 0 && self.joins_top(id, snapshot) {
+                            // Another request of the contract has its top of
+                            // book running: this one shares it, nothing is
+                            // sent (ibx#444).
+                            log::info!("Market data for con_id {} joins the subscription of instrument {}", con_id, id);
                         } else if !self.park_for_round_lot(&sub) {
                             self.route_md_subscribe(&sub);
                         }
@@ -1172,6 +1219,10 @@ impl HotLoop {
                 }
                 ControlCommand::SubscribeNews { instrument, con_id, exchange, sec_type, providers, refusal } => {
                     self.subscribe_news(instrument, con_id, exchange, sec_type, providers, refusal);
+                }
+                ControlCommand::UnsubscribeNews { instrument, providers } => {
+                    let msgs = self.farm.release_news(instrument, &providers);
+                    self.send_farm_messages(msgs);
                 }
                 ControlCommand::UpdateParam { key, value } => {
                     let _ = (key, value);
@@ -4377,7 +4428,7 @@ mod news_tests {
 
     const ALL: &str = "BRFG,BRFUPDN,DJ-N,DJ-RTA,DJ-RTE,DJ-RTG,DJ-RTPRO,DJNL";
 
-    fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+    pub(super) fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server, _) = listener.accept().unwrap();
@@ -4386,7 +4437,7 @@ mod news_tests {
 
     /// The compressed messages the engine wrote, without the header,
     /// sequence and time tags.
-    fn sent(server: &mut std::net::TcpStream) -> Vec<String> {
+    pub(super) fn sent(server: &mut std::net::TcpStream) -> Vec<String> {
         use std::io::Read;
         server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let mut buf = Vec::new();
@@ -4409,7 +4460,7 @@ mod news_tests {
         out
     }
 
-    fn engine() -> (HotLoop, Arc<SharedState>, std::net::TcpStream, Sender<ControlCommand>) {
+    pub(super) fn engine() -> (HotLoop, Arc<SharedState>, std::net::TcpStream, Sender<ControlCommand>) {
         let shared = Arc::new(SharedState::new());
         let mut engine = HotLoop::new(shared.clone(), None, None);
         let (c, server) = socket_pair();
@@ -4419,7 +4470,7 @@ mod news_tests {
         (engine, shared, server, tx)
     }
 
-    fn aapl(tx: &Sender<ControlCommand>, engine: &mut HotLoop, providers: &str) -> InstrumentId {
+    pub(super) fn aapl(tx: &Sender<ControlCommand>, engine: &mut HotLoop, providers: &str) -> InstrumentId {
         tx.send(ControlCommand::Subscribe {
             con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "STK".into(),
             last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
@@ -4600,6 +4651,110 @@ mod news_tests {
         let out = sent(&mut farm_side);
         assert!(out.iter().any(|m| m == "35=V|263=1|146=1|262=6|6008=265598|207=NEWS|167=CS|264=292|6472=BRFG|6088=Socket|9830=1|"), "{out:?}");
         assert!(shared.market.drain_tick_news().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sharing_tests {
+    use super::*;
+    use super::news_tests::{engine, sent, aapl, socket_pair};
+
+    const ALL: &str = "BRFG,BRFUPDN,DJ-N,DJ-RTA,DJ-RTE,DJ-RTG,DJ-RTPRO,DJNL";
+
+    // ibx#444, captured 02/10/2026 (b1_458_news_dup): a second request on
+    // a contract with the same news key sends nothing to the farm; the news
+    // entry is cancelled with its last request. Another key gets its own
+    // entry, as the reference's news tick keeps one per key.
+    #[test]
+    fn requests_on_one_contract_share_its_entries() {
+        let (mut engine, _shared, mut farm_side, tx) = engine();
+        let id = aapl(&tx, &mut engine, ALL);
+        assert_eq!(sent(&mut farm_side).len(), 2);
+        assert_eq!(aapl(&tx, &mut engine, ALL), id);
+        assert!(sent(&mut farm_side).is_empty(), "the second request shares the top of book and the news entry");
+        tx.send(ControlCommand::SubscribeNews {
+            instrument: id, con_id: 265598, exchange: "SMART".into(), sec_type: "STK".into(),
+            providers: "DJ-N".into(), refusal: None,
+        }).unwrap();
+        engine.poll_once();
+        let out = sent(&mut farm_side);
+        assert_eq!(out, ["35=V|263=1|146=1|262=4|6008=265598|207=NEWS|167=CS|264=292|6472=DJ-N|6088=Socket|9830=1|"]);
+
+        tx.send(ControlCommand::UnsubscribeNews { instrument: id, providers: ALL.into() }).unwrap();
+        engine.poll_once();
+        assert!(sent(&mut farm_side).is_empty(), "one request still uses the entry");
+        tx.send(ControlCommand::UnsubscribeNews { instrument: id, providers: "DJ-N".into() }).unwrap();
+        engine.poll_once();
+        assert_eq!(sent(&mut farm_side), ["35=V|263=2|146=1|262=4|6008=265598|207=NEWS|167=CS|264=292|6472=DJ-N|9830=1|"]);
+        tx.send(ControlCommand::Unsubscribe { instrument: id }).unwrap();
+        engine.poll_once();
+        let out = sent(&mut farm_side);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out[0].starts_with("35=V|263=2|146=2|") && out[1].contains("|262=3|"), "{out:?}");
+    }
+
+    // ibx#444: a snapshot joins a stream; a stream asked where a snapshot
+    // runs goes out.
+    #[test]
+    fn a_stream_is_sent_where_only_a_snapshot_runs() {
+        let (mut engine, _shared, mut farm_side, tx) = engine();
+        let subscribe = |snapshot: bool| ControlCommand::Subscribe {
+            con_id: 756733, symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            mode_9887: 0, snapshot, reply_tx: None,
+        };
+        tx.send(subscribe(true)).unwrap();
+        engine.poll_once();
+        assert!(sent(&mut farm_side)[0].starts_with("35=V|263=3|"));
+        tx.send(subscribe(true)).unwrap();
+        engine.poll_once();
+        assert!(sent(&mut farm_side).is_empty());
+        tx.send(subscribe(false)).unwrap();
+        engine.poll_once();
+        let out = sent(&mut farm_side);
+        assert!(out.len() == 1 && out[0].starts_with("35=V|263=1|"), "{out:?}");
+    }
+
+    // ibx#444, captured 02/10/2026: the second symbol-only AAPL request is
+    // looked up, then joins the first one's subscription: no second top of
+    // book or news entry; the client is told, and its news share moves.
+    #[test]
+    fn a_looked_up_contract_already_subscribed_is_joined() {
+        use crate::control::contracts::tests::pipe_msg;
+        let (mut engine, shared, mut farm_side, tx) = engine();
+        let (c2, _ccp_side) = socket_pair();
+        engine.ccp_conn = Some(Connection::new_raw(c2).unwrap());
+        let first = aapl(&tx, &mut engine, ALL);
+        let _ = sent(&mut farm_side);
+        let (reply, answer) = crossbeam_channel::bounded(1);
+        tx.send(ControlCommand::SubscribeBySymbol {
+            symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(),
+            filters: Default::default(), mode_9887: 0, snapshot: false, reply_tx: Some(reply),
+        }).unwrap();
+        engine.poll_once();
+        let second = answer.recv().unwrap().unwrap();
+        assert_ne!(second, first);
+        tx.send(ControlCommand::SubscribeNews {
+            instrument: second, con_id: 0, exchange: "SMART".into(), sec_type: "STK".into(),
+            providers: ALL.into(), refusal: None,
+        }).unwrap();
+        engine.poll_once();
+        let lookup = format!("{}", engine.context.md_lookups[0].0);
+        let mut context = std::mem::replace(&mut engine.context, Context::new());
+        let body = format!("35=d|43=N|320={lookup}|322=*|323=4|55=AAPL|167=STK|207=BEST|6008=265598|15=USD|");
+        assert!(farm::md_contract_reply(&mut context, &shared, &lookup, &pipe_msg(&body)));
+        engine.context = context;
+        engine.send_md_resolved();
+        assert!(sent(&mut farm_side).is_empty(), "nothing new on the farm");
+        assert_eq!(shared.market.drain_md_merges(), [(second, first)]);
+        assert_eq!(engine.farm.news.len(), 1);
+        assert_eq!(engine.farm.news[0].refs, 2);
+        // The client frees the slot it no longer uses.
+        tx.send(ControlCommand::Unsubscribe { instrument: second }).unwrap();
+        engine.poll_once();
+        assert!(sent(&mut farm_side).is_empty());
+        assert_eq!(engine.context.market.con_id(second), None, "the slot is freed");
+        assert_eq!(engine.context.market.instrument_by_con_id(265598), Some(first));
     }
 }
 
