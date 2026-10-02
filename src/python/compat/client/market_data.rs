@@ -9,12 +9,6 @@ use super::super::contract::Contract;
 
 #[pymethods]
 impl EClient {
-    /// Set news provider codes for per-contract news ticks (e.g. "BRFG*BRFUPDN").
-    #[pyo3(signature = (providers))]
-    fn set_news_providers(&self, providers: &str) {
-        self.core.set_news_providers(providers);
-    }
-
     /// Request market data for a contract.
     #[pyo3(signature = (req_id, contract, generic_tick_list="", snapshot=false, regulatory_snapshot=false, mkt_data_options=Vec::new()))]
     fn req_mkt_data(
@@ -51,6 +45,11 @@ impl EClient {
             )).map_err(PyRuntimeError::new_err);
         }
 
+        // The news tick of a known contract is checked first (ibx#458).
+        if let Some((code, text)) = self.core.news_tick_refusal(&shared, generic_tick_list, contract.con_id, &contract.sec_type) {
+            shared.orders.push_order_error(req_id, code, text);
+            return Ok(());
+        }
         let filters = SecDefFilters {
             primary_exchange: contract.primary_exchange.clone(),
             local_symbol: contract.local_symbol.clone(),
@@ -101,13 +100,10 @@ impl EClient {
                 return Ok(());
             }
         }
-        let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
-        if let Some(instrument) = instrument {
+        if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
+            // Its news entry goes with it (ibx#458).
             let tx = self.tx()?;
             send_cmd(py, &tx, ControlCommand::Unsubscribe { instrument })?;
-            if needs_news_unsub {
-                let _ = send_cmd(py, &tx, ControlCommand::UnsubscribeNews { instrument });
-            }
         } else {
             // An unknown request id: error 300, as the reference (ibx#444).
             self.shared_state()?.orders.push_order_error(req_id, 300, format!("Can't find EId with tickerId:{}", req_id));

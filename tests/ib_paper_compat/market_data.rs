@@ -297,12 +297,20 @@ pub(super) fn phase_news_ticks(conns: Conns) -> Conns {
     );
     let join = run_hot_loop(hot_loop);
 
+    // The news tick rides on the request's top of book (ibx#458).
+    let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+    control_tx
+        .send(ControlCommand::Subscribe {
+            con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            mode_9887: 0, snapshot: false, reply_tx: Some(reply_tx),
+        })
+        .unwrap();
+    let instrument = reply_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
     control_tx
         .send(ControlCommand::SubscribeNews {
-            con_id: 265598,
-            symbol: "AAPL".into(),
-            providers: "BZ+FLY".into(),
-            reply_tx: None,
+            instrument, con_id: 265598, exchange: "SMART".into(), sec_type: "STK".into(),
+            providers: "BRFG,DJ-N".into(), refusal: None,
         })
         .unwrap();
 
@@ -316,7 +324,7 @@ pub(super) fn phase_news_ticks(conns: Conns) -> Conns {
     }
 
     control_tx
-        .send(ControlCommand::UnsubscribeNews { instrument: 0 })
+        .send(ControlCommand::Unsubscribe { instrument })
         .unwrap();
     let drained_news = shared.market.drain_tick_news();
 

@@ -17,7 +17,10 @@ impl EClient {
     /// snapshot limit, is refused with error 321.
     ///
     /// `generic_tick_list` is NOT transmitted to the gateway, with one
-    /// exception: "292" additionally subscribes per-contract news. Other
+    /// exception: the news tick, "292" (every subscribed news source) or
+    /// "292:CODE1+CODE2", subscribes the contract's headlines, delivered as
+    /// `tick_news` (ibx#458); a derivative contract or a code that is not a
+    /// subscribed source ends the request with error 10094. Other
     /// generic tick types (RTVolume and friends) have no emission path, and
     /// `tick_generic` fires only for a snapshot's halted state, 49
     /// (ibx#234, ibx#446). Delayed data cannot be requested either — see
@@ -70,6 +73,11 @@ impl EClient {
                 &self.shared, &self.control_tx, req_id, contract.con_id,
                 &contract.symbol, &contract.exchange, &contract.sec_type,
             );
+        }
+        // The news tick of a known contract is checked first (ibx#458).
+        if let Some((code, text)) = self.core.news_tick_refusal(&self.shared, generic_tick_list, contract.con_id, &contract.sec_type) {
+            self.shared.orders.push_order_error(req_id, code, text);
+            return Ok(());
         }
         let filters = SecDefFilters {
             primary_exchange: contract.primary_exchange.clone(),
@@ -145,12 +153,9 @@ impl EClient {
         if self.core.cancel_regulatory_snapshot(req_id, &self.control_tx) {
             return Ok(());
         }
-        let (instrument, needs_news_unsub) = self.core.unregister_mkt_data(req_id);
-        if let Some(instrument) = instrument {
+        if let Some(instrument) = self.core.unregister_mkt_data(req_id) {
+            // Its news entry goes with it (ibx#458).
             self.send(ControlCommand::Unsubscribe { instrument })?;
-            if needs_news_unsub {
-                let _ = self.send(ControlCommand::UnsubscribeNews { instrument });
-            }
         } else {
             // An unknown request id: error 300, as the reference (ibx#444).
             self.shared.orders.push_order_error(req_id, 300, format!("Can't find EId with tickerId:{}", req_id));
@@ -277,11 +282,6 @@ impl EClient {
         if let Some((code, text)) = self.core.set_market_data_type(&self.control_tx, market_data_type) {
             self.shared.orders.push_order_error(-1, code, text);
         }
-    }
-
-    /// Set news provider codes for per-contract news ticks.
-    pub fn set_news_providers(&self, providers: &str) {
-        self.core.set_news_providers(providers);
     }
 
     // ── Escape Hatch ──

@@ -591,7 +591,7 @@ pub fn parse_algo_params(strategy: &str, params: &[TagValue]) -> Result<AlgoPara
 
 #### `req_mkt_data`
 
-Subscribe to market data. When `snapshot` is true, delivers the first available quote then calls `tick_snapshot_end` and auto-cancels the subscription. `generic_tick_list` is NOT transmitted to the gateway, with one exception: "292" additionally subscribes per-contract news. Other generic tick types (RTVolume and friends) have no emission path, and `tick_generic` fires only for a snapshot's halted state, 49 (ibx#234, ibx#446). Delayed data cannot be requested either — see `req_market_data_type`.
+Subscribe to market data. When `snapshot` is true, delivers the first available quote then calls `tick_snapshot_end` and auto-cancels the subscription. `generic_tick_list` is NOT transmitted to the gateway, with one exception: the news tick, "292" (every subscribed news source) or "292:CODE1+CODE2", subscribes the contract's headlines, delivered as `tick_news` (ibx#458); a derivative contract or a code that is not a subscribed source ends the request with error 10094. Other generic tick types (RTVolume and friends) have no emission path, and `tick_generic` fires only for a snapshot's halted state, 49 (ibx#234, ibx#446). Delayed data cannot be requested either — see `req_market_data_type`.
 
 ```rust
 pub fn req_mkt_data( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool, ) -> Result<(), String>
@@ -788,20 +788,6 @@ pub fn req_market_data_type(&self, market_data_type: i32)
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `market_data_type` | `i32` | 1=live, 2=frozen, 3=delayed, 4=delayed-frozen. |
-
----
-
-#### `set_news_providers`
-
-Set news provider codes for per-contract news ticks.
-
-```rust
-pub fn set_news_providers(&self, providers: &str)
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `providers` | `&str` | News provider list. |
 
 ---
 
@@ -1923,7 +1909,7 @@ Per-contract news tick.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `ticker_id` | `i64` | Ticker/request ID. |
-| `timestamp` | `i64` | Timestamp string. |
+| `timestamp` | `i64` | Time of the headline, epoch milliseconds. |
 | `provider_code` | `&str` | News provider code (e.g. `"BRFG"`). |
 | `article_id` | `&str` | News article identifier. |
 | `headline` | `&str` | News headline text. |

@@ -15,7 +15,6 @@ const TESTED_CONTROL_COMMANDS: &[&str] = &[
     "SubscribeTbt",
     "UnsubscribeTbt",
     "SubscribeNews",
-    "UnsubscribeNews",
     "UpdateParam",
     "Order",
     "RegisterInstrument",

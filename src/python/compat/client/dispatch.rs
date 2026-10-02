@@ -375,10 +375,8 @@ impl EClient {
             }
             call_wrapper!(self.wrapper, py, "error", (req_id, code, text, ""));
             if gone {
-                let (instrument, needs_news) = self.core.unregister_mkt_data(req_id);
-                if let (Some(instrument), Ok(tx)) = (instrument, self.tx()) {
+                if let (Some(instrument), Ok(tx)) = (self.core.unregister_mkt_data(req_id), self.tx()) {
                     let _ = send_cmd(py, &tx, ControlCommand::Unsubscribe { instrument });
-                    if needs_news { let _ = send_cmd(py, &tx, ControlCommand::UnsubscribeNews { instrument }); }
                 }
             }
         }
@@ -505,8 +503,8 @@ impl EClient {
         let news_items = shared.market.drain_tick_news();
         for news in news_items {
             let req_id = self.core.req_id_for_instrument(news.instrument);
-            call_wrapper!(self.wrapper, py, "tick_news", (req_id, news.timestamp as i64, news.provider_code.as_str(),
-                 news.article_id.as_str(), news.headline.as_str(), ""));
+            call_wrapper!(self.wrapper, py, "tick_news", (req_id, news.timestamp, news.provider_code.as_str(),
+                 news.article_id.as_str(), news.headline.as_str(), news.extra_data.as_str()));
         }
 
         // Drain news bulletins -> updateNewsBulletin

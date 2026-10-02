@@ -194,6 +194,26 @@ fn bid_ask_exchange<'a>(exchange: &'a str, sec_type: &str) -> &'a str {
     if sec_type == "CASH" && exchange == "IDEALPRO" { "FXSUBPIP" } else { exchange }
 }
 
+/// The news entry of a market data request (ibx#458): its own request id
+/// on the farm of the contract's route, with the provider key.
+#[derive(Debug, Clone)]
+pub(crate) struct NewsEntry {
+    pub(crate) farm_req: u32,
+    pub(crate) instrument: InstrumentId,
+    pub(crate) farm: FarmId,
+    pub(crate) con_id: String,
+    pub(crate) sec_type: String,
+    /// Provider codes, sorted, comma separated; may be empty.
+    pub(crate) providers: String,
+    /// The server tag of its ack.
+    pub(crate) tag: Option<u32>,
+    /// On the wire now (false while its farm is down).
+    pub(crate) live: bool,
+    /// Article ids already given to the client: a repeat is not given
+    /// again (captured 02/10/2026).
+    pub(crate) seen: std::collections::HashSet<String>,
+}
+
 /// One entry of a depth request (#452): a book on an exchange, or one
 /// half of a top-of-book pair for a SmartDepth component without a book.
 #[derive(Debug, Clone)]
@@ -247,6 +267,12 @@ pub(crate) struct FarmState {
     /// The farm the messages being handled came from (#445): server tags
     /// are numbered by each farm.
     pub(crate) rx_farm: FarmId,
+    /// News entries of market data requests (ibx#458).
+    pub(crate) news: Vec<NewsEntry>,
+    /// News ticks given before their request's top of book went out
+    /// (ibx#458), with the provider key and the 10094 text of a refused
+    /// one: sent, or refused, when it goes.
+    pub(crate) news_waiting: Vec<(InstrumentId, String, Option<String>)>,
 }
 
 impl FarmState {
@@ -268,6 +294,8 @@ impl FarmState {
             routing: None,
             md_entries: Vec::new(),
             rx_farm: PRIMARY_MD,
+            news: Vec::new(),
+            news_waiting: Vec::new(),
         }
     }
 
@@ -409,7 +437,7 @@ impl FarmState {
             b"UT" | b"UM" | b"RL" => super::ccp::handle_account_update(msg, context, shared),
             b"UP" => super::ccp::handle_portfolio_message(msg, context, shared, event_tx),
             b"Y" => self.handle_depth_35y(msg, shared),
-            b"G" => self.handle_tick_news(msg, context, shared, event_tx),
+            b"G" => self.handle_tick_news(msg, shared, event_tx),
             b"3" => self.handle_md_reject(msg, context, shared, farm_conn, hb),
             b"T" => {
                 // The routing table, when it came after the logon (#445).
@@ -530,6 +558,14 @@ impl FarmState {
         };
         let min_tick: f64 = parts[2].parse().unwrap_or(0.01);
 
+        // A news entry's ack (ibx#458): its tag carries the headlines.
+        let rx_farm = self.rx_farm;
+        if let Some(e) = self.news.iter_mut().find(|e| e.live && e.farm == rx_farm && e.farm_req == req_id) {
+            e.tag = Some(server_tag);
+            log::info!("News ack: server_tag {} -> instrument {} ({})", server_tag, e.instrument, e.providers);
+            return;
+        }
+
         // Depth ack: always map the server_tag if this req_id is a depth subscription,
         // even when depth_levels=0 (book empty now but updates may arrive later).
         let depth_levels: i32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -627,6 +663,65 @@ impl FarmState {
     pub(crate) fn has_md_subscription(&self, instrument: InstrumentId) -> bool {
         self.instrument_md_reqs.iter().any(|(id, _)| *id == instrument)
             || self.md_resub_info.iter().any(|(id, ..)| *id == instrument)
+            || self.news.iter().any(|e| e.instrument == instrument)
+            || self.news_waiting.iter().any(|(id, ..)| *id == instrument)
+    }
+
+    /// Start the news entry of a request on `farm` (ibx#458) and build its
+    /// message, as the reference writes it: `207=NEWS`, the contract's
+    /// security type, `264=292`, the provider key in `6472` when not empty,
+    /// the streaming-client mark and the API flag.
+    pub(crate) fn start_news(&mut self, instrument: InstrumentId, con_id: i64, sec_type: &str, providers: &str, farm: FarmId)
+        -> Vec<(FarmId, Vec<(u32, String)>)>
+    {
+        self.news.retain(|e| e.instrument != instrument);
+        let farm_req = self.next_md_req_id;
+        self.next_md_req_id += 1;
+        let entry = NewsEntry {
+            farm_req, instrument, farm, con_id: con_id.to_string(), sec_type: fix_sec_type(sec_type).to_string(),
+            providers: providers.to_string(), tag: None, live: true, seen: Default::default(),
+        };
+        let msg = news_message(&entry, true);
+        log::info!("News entry {} on farm {}: con_id={} providers={}", farm_req, farm, con_id, providers);
+        self.news.push(entry);
+        vec![(farm, msg)]
+    }
+
+    /// Forget the news tick of an instrument and build its cancel, when it
+    /// is on the wire (ibx#458).
+    pub(crate) fn stop_news(&mut self, instrument: InstrumentId) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        self.news_waiting.retain(|(id, ..)| *id != instrument);
+        let Some(pos) = self.news.iter().position(|e| e.instrument == instrument) else { return Vec::new() };
+        let e = self.news.remove(pos);
+        if e.live { vec![(e.farm, news_message(&e, false))] } else { Vec::new() }
+    }
+
+    /// Every news entry's cancel (shutdown).
+    pub(crate) fn stop_all_news(&mut self) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        let ids: Vec<InstrumentId> = self.news.iter().map(|e| e.instrument).collect();
+        ids.into_iter().flat_map(|id| self.stop_news(id)).collect()
+    }
+
+    /// A farm's connection was lost: its news entries are no longer on the
+    /// wire and go out again, with new ids, when it is back.
+    pub(crate) fn news_farm_lost(&mut self, farm: FarmId) {
+        for e in self.news.iter_mut().filter(|e| e.farm == farm) {
+            e.live = false;
+            e.tag = None;
+        }
+    }
+
+    /// Send again the news entries of a farm that came back.
+    pub(crate) fn resend_news(&mut self, farm: FarmId) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        let mut out = Vec::new();
+        for i in 0..self.news.len() {
+            if self.news[i].farm != farm || self.news[i].live { continue; }
+            self.news[i].farm_req = self.next_md_req_id;
+            self.next_md_req_id += 1;
+            self.news[i].live = true;
+            out.push((farm, news_message(&self.news[i], true)));
+        }
+        out
     }
 
     /// `subscribe_top` to the primary farm, from the fields of a
@@ -779,9 +874,9 @@ impl FarmState {
         self.md_req_to_instrument.retain(|(id, _)| !ids.contains(id));
     }
 
-    /// Whether a live top-of-book request uses `farm` (#445).
+    /// Whether a live top-of-book or news request uses `farm` (#445).
     pub(crate) fn uses_farm(&self, farm: FarmId) -> bool {
-        self.md_entries.iter().any(|e| e.farm == farm)
+        self.md_entries.iter().any(|e| e.farm == farm) || self.news.iter().any(|e| e.farm == farm)
     }
 
     /// The subscriptions that have no entry on the wire (their farm was
@@ -1397,6 +1492,7 @@ impl FarmState {
         self.farm_lost(PRIMARY_MD, context);
         // Its depth entries go out again when it is back (#452).
         self.depth_farm_lost(PRIMARY_MD);
+        self.news_farm_lost(PRIMARY_MD);
         // Don't emit Event::Disconnected — auto-reconnect handles farm drops transparently.
         // Python is only notified if reconnect exhausts retries.
     }
@@ -1425,78 +1521,157 @@ impl FarmState {
         log::info!("Farm reconnected");
     }
 
-    fn handle_tick_news(&mut self, msg: &[u8], context: &Context, shared: &SharedState, event_tx: &Option<Sender<Event>>) {
-        let body = match find_body_after_tag(msg, b"35=G\x01") {
-            Some(b) => b,
-            None => return,
-        };
-
-        if body.len() < 12 { return; }
-
-        let tick_type = u16::from_be_bytes([body[0], body[1]]);
-        if tick_type != 0x1E90 { return; }
-
-        let server_tag = u32::from_be_bytes([body[2], body[3], body[4], body[5]]);
-        // A tag of no known request is dropped, as the reference does: it
-        // is never given to another contract (#292).
-        let Some(instrument) = context.market.instrument_by_farm_tag(self.rx_farm, server_tag) else {
-            log::warn!("News tick for server tag {} of no known request: dropped", server_tag);
-            return;
-        };
-
-        let batch_count = u32::from_be_bytes([body[8], body[9], body[10], body[11]]) as usize;
-        let mut pos = 12;
-
-        for _ in 0..batch_count {
-            if pos + 4 > body.len() { break; }
-            let prov_len = u32::from_be_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]]) as usize;
-            pos += 4;
-            if pos + prov_len > body.len() { break; }
-            let provider = String::from_utf8_lossy(&body[pos..pos+prov_len]).to_string();
-            pos += prov_len;
-
-            if pos + 4 > body.len() { break; }
-            pos += 4;
-
-            if pos + 2 > body.len() { break; }
-            let aid_len = u16::from_be_bytes([body[pos], body[pos+1]]) as usize;
-            pos += 2;
-            if pos + aid_len > body.len() { break; }
-            let article_id = String::from_utf8_lossy(&body[pos..pos+aid_len]).to_string();
-            pos += aid_len;
-
-            if pos + 8 > body.len() { break; }
-            pos += 4;
-            let timestamp = u32::from_be_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]]) as u64;
-            pos += 4;
-
-            if pos + 4 > body.len() { break; }
-            let hl_len = u32::from_be_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]]) as usize;
-            pos += 4;
-            if pos + hl_len > body.len() { break; }
-            let raw_headline = String::from_utf8_lossy(&body[pos..pos+hl_len]).to_string();
-            pos += hl_len;
-
-            let headline = if raw_headline.starts_with('{') {
-                match raw_headline.find('}') {
-                    Some(i) => raw_headline[i+1..].to_string(),
-                    None => raw_headline,
+    /// News headlines (ibx#458): `35=G` holds a bit count, then blocks of
+    /// a 32-bit server tag, a 16-bit length and the payload, decoded as the
+    /// reference's news reader. A tag of no news entry is dropped (#292).
+    fn handle_tick_news(&mut self, msg: &[u8], shared: &SharedState, event_tx: &Option<Sender<Event>>) {
+        let Some(body) = find_body_after_tag(msg, b"35=G\x01") else { return };
+        if body.len() < 2 { return; }
+        let bits = u16::from_be_bytes([body[0], body[1]]) as usize;
+        let mut rest = &body[2..(2 + bits / 8).min(body.len())];
+        while rest.len() >= 6 {
+            let server_tag = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]);
+            let len = u16::from_be_bytes([rest[4], rest[5]]) as usize;
+            let end = (6 + len).min(rest.len());
+            let payload = &rest[6..end];
+            rest = &rest[end..];
+            let farm = self.rx_farm;
+            let Some(entry) = self.news.iter_mut().find(|e| e.live && e.farm == farm && e.tag == Some(server_tag)) else {
+                log::warn!("News tick for server tag {} of no known request: dropped", server_tag);
+                return;
+            };
+            for item in decode_news(payload) {
+                // A removal (7 or more) gives no headline; an article the
+                // client already has is not given again.
+                if item.action >= 7 || !entry.seen.insert(item.article_id.clone()) {
+                    log::debug!("News {} {} not given (action {})", item.provider_code, item.article_id, item.action);
+                    continue;
                 }
-            } else {
-                raw_headline
-            };
-
-            let news = crate::types::TickNews {
-                instrument,
-                provider_code: provider,
-                article_id,
-                headline,
-                timestamp,
-            };
-            shared.market.push_tick_news(news.clone());
-            emit(event_tx, Event::News(news));
+                let (headline, extra_data) = split_headline(&item.raw_headline);
+                let news = crate::types::TickNews {
+                    instrument: entry.instrument,
+                    provider_code: item.provider_code,
+                    article_id: item.article_id,
+                    headline,
+                    timestamp: item.time as i64 * 1000,
+                    extra_data,
+                };
+                shared.market.push_tick_news(news.clone());
+                emit(event_tx, Event::News(news));
+            }
         }
     }
+}
+
+/// One headline of a news payload, as the reference reads it (ibx#458).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NewsItem {
+    pub(crate) provider_code: String,
+    pub(crate) article_id: String,
+    /// The first number: 7 or more removes the article.
+    pub(crate) action: i32,
+    /// Epoch seconds.
+    pub(crate) time: i32,
+    pub(crate) raw_headline: String,
+}
+
+/// The entries of a news payload (ibx#458): an int32 count N, then one
+/// entry when N is 0, else N entries with 4 bytes (the conId) before every
+/// entry but the first. An entry is the provider code and the article id,
+/// then, when the article id is not empty, two int32 (the first is the
+/// action), the time in epoch seconds and the raw headline. A string is an
+/// int32 length, its bytes (each byte one character) and zero padding to a
+/// multiple of 4. An entry cut short ends the list, as the reference stops
+/// on the read error; an entry without article id has no headline.
+pub(crate) fn decode_news(payload: &[u8]) -> Vec<NewsItem> {
+    let mut out = Vec::new();
+    let mut r = NewsReader { buf: payload, pos: 0 };
+    let n = if payload.len() < 4 { 0 } else { r.int().unwrap_or(0) };
+    for i in 0..n.max(1) {
+        if i > 0 && r.skip(4).is_none() { break; }
+        let Some(item) = r.item() else { break };
+        if !item.article_id.is_empty() {
+            out.push(item);
+        }
+    }
+    out
+}
+
+struct NewsReader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl NewsReader<'_> {
+    fn skip(&mut self, n: usize) -> Option<()> {
+        if self.pos + n > self.buf.len() { return None; }
+        self.pos += n;
+        Some(())
+    }
+
+    fn int(&mut self) -> Option<i32> {
+        let b = self.buf.get(self.pos..self.pos + 4)?;
+        self.pos += 4;
+        Some(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn string(&mut self) -> Option<String> {
+        let len = self.int()?.max(0) as usize;
+        let b = self.buf.get(self.pos..self.pos + len)?;
+        self.pos = (self.pos + len + (4 - len % 4) % 4).min(self.buf.len());
+        Some(b.iter().map(|&c| c as char).collect())
+    }
+
+    fn item(&mut self) -> Option<NewsItem> {
+        let provider_code = self.string()?;
+        let article_id = self.string()?;
+        let (mut action, mut time, mut raw_headline) = (-1, 0, String::new());
+        if !article_id.is_empty() {
+            action = self.int()?;
+            self.int()?;
+            time = self.int()?;
+            raw_headline = self.string()?;
+        }
+        Some(NewsItem { provider_code, article_id, action, time, raw_headline })
+    }
+}
+
+/// The tickNews headline and extra data of a raw headline (ibx#458): the
+/// extra data is the text between the first `{` and the next `}`; the
+/// headline is the text after a leading `{...}` part.
+pub(crate) fn split_headline(raw: &str) -> (String, String) {
+    let extra = raw.find('{')
+        .and_then(|open| raw[open + 1..].find('}').map(|close| raw[open + 1..open + 1 + close].to_string()))
+        .unwrap_or_default();
+    let headline = match raw.strip_prefix('{').and_then(|r| r.find('}').map(|i| &r[i + 1..])) {
+        Some(text) => text.to_string(),
+        None => raw.to_string(),
+    };
+    (headline, extra)
+}
+
+/// The message of a news entry: the subscribe with the streaming-client
+/// mark, the cancel without it (ibx#458, captured 02/10/2026).
+fn news_message(e: &NewsEntry, subscribe: bool) -> Vec<(u32, String)> {
+    let mut msg: Vec<(u32, String)> = vec![
+        (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
+        (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
+        (263, if subscribe { "1" } else { "2" }.into()),
+        (146, "1".into()),
+        (262, e.farm_req.to_string()),
+        (6008, e.con_id.clone()),
+        (207, "NEWS".into()),
+        (167, e.sec_type.clone()),
+        (264, "292".into()),
+    ];
+    if !e.providers.is_empty() {
+        msg.push((6472, e.providers.clone()));
+    }
+    if subscribe {
+        msg.push((6088, "Socket".into()));
+    }
+    msg.push((9830, "1".into()));
+    msg
 }
 
 /// The reference's security type code (`SecType` value), appended in hex

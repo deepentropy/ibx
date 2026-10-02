@@ -2849,11 +2849,11 @@ fn process_msgs_dispatches_tick_news() {
     shared.market.push_tick_news(TickNews {
         instrument: 0,
         provider_code: "BRFG".into(), article_id: "BRFG$123".into(),
-        headline: "AAPL beats".into(), timestamp: 1700000000,
+        headline: "AAPL beats".into(), timestamp: 1700000000000, extra_data: "A:800015:L:en".into(),
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e == "tick_news:BRFG:BRFG$123:AAPL beats"));
+    assert!(w.events.iter().any(|e| e == "tick_news:1:1700000000000:BRFG:BRFG$123:AAPL beats:A:800015:L:en"), "{:?}", w.events);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -5582,4 +5582,117 @@ fn plain_snapshot_beyond_the_limit_is_refused() {
     assert!(refused >= 3, "{:?}", w.events);
     let asked = engine.join().unwrap().iter().filter(|e| e.starts_with("subscribe:")).count();
     assert_eq!(asked + refused, 5);
+}
+
+// ibx#458: the news tick of a generic tick list, as the reference's parser
+// reads it.
+#[test]
+fn news_tick_of_a_generic_tick_list() {
+    use crate::client_core::{news_tick, NewsTick};
+    assert_eq!(news_tick(""), NewsTick::None);
+    assert_eq!(news_tick("mdoff,233"), NewsTick::None);
+    assert_eq!(news_tick("mdoff,292"), NewsTick::Default);
+    assert_eq!(news_tick(" 233 , 292 "), NewsTick::Default);
+    assert_eq!(news_tick("mdoff,292:BRFG+DJNL"), NewsTick::Codes("BRFG+DJNL".into()));
+    assert_eq!(news_tick("mdoff,292:"), NewsTick::Invalid);
+    assert_eq!(news_tick("1292,2920"), NewsTick::None);
+}
+
+// ibx#458: the provider key and the 10094 texts (captured 02/10/2026).
+#[test]
+fn news_provider_key_and_refusals() {
+    use crate::client_core::news_providers;
+    let sources: Vec<String> = ["DJNL", "BRFG", "DJ-RTPRO", "DJ-N", "BRFUPDN", "DJ-RTA", "DJ-RTE", "DJ-RTG"]
+        .iter().map(|s| s.to_string()).collect();
+    assert_eq!(news_providers("STK", None, &sources).unwrap().join(","),
+        "BRFG,BRFUPDN,DJ-N,DJ-RTA,DJ-RTE,DJ-RTG,DJ-RTPRO,DJNL");
+    assert_eq!(news_providers("STK", Some("DJNL+BRFG"), &sources).unwrap().join(","), "BRFG,DJNL");
+    assert_eq!(news_providers("STK", Some("dj-n+DJ-N+"), &sources).unwrap().join(","), "DJ-N");
+    assert_eq!(news_providers("STK", Some("XYZ"), &sources).unwrap_err(),
+        "API News error:Source code unchecked in API news Settings: XYZ");
+    assert_eq!(news_providers("STK", Some("XYZ+BRFG+ABC"), &sources).unwrap_err(),
+        "API News error:Source code unchecked in API news Settings: XYZ,Source code unchecked in API news Settings: ABC");
+    for sec_type in ["FUT", "OPT", "FOP", "WAR", "IOPT", "CFD", "FWD", "SLB", "ICS"] {
+        assert_eq!(news_providers(sec_type, None, &sources).unwrap_err(),
+            "API News error:Derivative contracts cannot be used to subscribe to news, please use the underlying \
+             (Stocks, Cash, News Topics, and certain Indexes are supported).");
+    }
+    assert!(news_providers("IND", None, &sources).is_ok());
+    assert!(news_providers("CASH", Some("BRFG"), &sources).is_ok());
+}
+
+// ibx#458: a refused news tick of a contract with a conId ends the request
+// with 10094 at once, nothing sent (captured: MNQ future, "292:XYZ").
+#[test]
+fn news_tick_refusals_of_a_known_contract() {
+    let (client, rx, shared) = test_client();
+    shared.reference.set_news_sources(vec!["BRFG".into(), "DJ-N".into()]);
+    let mnq = Contract { con_id: 815824267, symbol: "MNQ".into(), sec_type: "FUT".into(), exchange: "CME".into(), ..Default::default() };
+    client.req_mkt_data(9572, &mnq, "mdoff,292", false, false).unwrap();
+    let nvda = Contract { con_id: 4815747, symbol: "NVDA".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() };
+    client.req_mkt_data(9583, &nvda, "mdoff,292:XYZ", false, false).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, [
+        "error:9572:10094:API News error:Derivative contracts cannot be used to subscribe to news, please use the underlying (Stocks, Cash, News Topics, and certain Indexes are supported).",
+        "error:9583:10094:API News error:Source code unchecked in API news Settings: XYZ",
+    ], "{:?}", w.events);
+    assert!(client.core.req_to_instrument.lock().unwrap().is_empty(), "the ids are free");
+}
+
+// ibx#458: an accepted news tick follows the request's subscription with
+// the provider key; a refusal of a contract without a conId waits for the
+// lookup in the engine; cancelMktData ends both.
+#[test]
+fn news_tick_follows_the_subscription() {
+    let (client, rx, shared) = test_client();
+    shared.reference.set_news_sources(vec!["DJNL".into(), "BRFG".into(), "DJ-N".into()]);
+    let engine = std::thread::spawn(move || {
+        let mut got = Vec::new();
+        while let Ok(cmd) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            match &cmd {
+                ControlCommand::Subscribe { reply_tx: Some(r), .. } => { let _ = r.send(Ok(5)); }
+                ControlCommand::SubscribeBySymbol { reply_tx: Some(r), .. } => { let _ = r.send(Ok(6)); }
+                _ => {}
+            }
+            got.push(cmd);
+        }
+        got
+    });
+    let aapl = Contract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() };
+    client.req_mkt_data(9560, &aapl, "mdoff,292:DJNL+BRFG", false, false).unwrap();
+    let nvda = Contract { symbol: "NVDA".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+    client.req_mkt_data(9583, &nvda, "mdoff,292:XYZ", false, false).unwrap();
+    client.cancel_mkt_data(9560).unwrap();
+    let got = engine.join().unwrap();
+    let news: Vec<(InstrumentId, i64, String, Option<String>)> = got.iter().filter_map(|c| match c {
+        ControlCommand::SubscribeNews { instrument, con_id, providers, refusal, .. } =>
+            Some((*instrument, *con_id, providers.clone(), refusal.clone())),
+        _ => None,
+    }).collect();
+    assert_eq!(news, [
+        (5, 265598, "BRFG,DJNL".to_string(), None),
+        (6, 0, String::new(), Some("API News error:Source code unchecked in API news Settings: XYZ".to_string())),
+    ]);
+    let subscribe = got.iter().position(|c| matches!(c, ControlCommand::Subscribe { .. })).unwrap();
+    let first_news = got.iter().position(|c| matches!(c, ControlCommand::SubscribeNews { .. })).unwrap();
+    assert!(subscribe < first_news, "{got:?}");
+    assert!(matches!(got.last(), Some(ControlCommand::Unsubscribe { instrument: 5 })), "{got:?}");
+}
+
+// ibx#458: a request refused once its contract was found reports 10094
+// and is gone.
+#[test]
+fn news_refusal_after_the_lookup_is_reported() {
+    let (client, rx, shared) = test_client();
+    client.core.req_to_instrument.lock().unwrap().insert(9583, 6);
+    client.core.instrument_to_req.lock().unwrap().insert(6, 9583);
+    shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused {
+        instrument: 6, text: "API News error:Source code unchecked in API news Settings: XYZ".into() });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.contains(&"error:9583:10094:API News error:Source code unchecked in API news Settings: XYZ".to_string()), "{:?}", w.events);
+    assert!(!client.core.req_to_instrument.lock().unwrap().contains_key(&9583));
+    assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Unsubscribe { instrument: 6 })));
 }
