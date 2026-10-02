@@ -1779,3 +1779,71 @@ fn api_news_ticks_live() {
         assert!(n[4].starts_with(&format!("{}$", n[3])), "{n:?}");
     }
 }
+
+// ── Several requests on one contract (ibx#444) and the generic tick list (ibx#450), focused ──
+
+/// Two request ids on AAPL with the same news tick, a third without, two
+/// symbol-only MSFT requests, then the cancel of one AAPL request while the
+/// others go on; and two invalid generic tick lists. Expected: no error for
+/// the shared requests; each gets its market data type and request
+/// parameters (the second AAPL request at once, with the latest headlines
+/// of the first); 321 for "999" and "mdoff,292:" with the legal ticks of
+/// STK. The log shows one top-of-book and one news entry for AAPL, and no
+/// farm cancel until the last AAPL request goes.
+/// Run with: cargo test --test rust_api_gt api_shared_requests_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_shared_requests_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = SnapWrapper::default();
+    let pump = |client: &EClient, w: &mut SnapWrapper, secs: u64| {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(secs) {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    pump(&client, &mut w, 3);
+    w.events.clear();
+    w.start = Some(Instant::now());
+    let stock = |con_id: i64, symbol: &str| Contract { con_id, symbol: symbol.into(), sec_type: "STK".into(),
+        exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+    client.req_mkt_data(831, &stock(265598, "AAPL"), "mdoff,292", false, false).unwrap();
+    pump(&client, &mut w, 5);
+    client.req_mkt_data(832, &stock(265598, "AAPL"), "mdoff,292", false, false).unwrap();
+    client.req_mkt_data(833, &stock(265598, "AAPL"), "", false, false).unwrap();
+    client.req_mkt_data(834, &stock(0, "MSFT"), "", false, false).unwrap();
+    pump(&client, &mut w, 3);
+    client.req_mkt_data(835, &stock(0, "MSFT"), "", false, false).unwrap();
+    client.req_mkt_data(836, &stock(265598, "AAPL"), "999", false, false).unwrap();
+    client.req_mkt_data(837, &stock(0, "GOOGL"), "mdoff,292:", false, false).unwrap();
+    pump(&client, &mut w, 5);
+    client.cancel_mkt_data(831).unwrap();
+    pump(&client, &mut w, 5);
+    for req in [832, 833, 834, 835] {
+        client.cancel_mkt_data(req).unwrap();
+    }
+    pump(&client, &mut w, 1);
+    client.disconnect();
+    for (ms, e) in &w.events {
+        println!("  {ms:>6} ms  {e}");
+    }
+    let has = |want: &str| w.events.iter().any(|(_, e)| e == want);
+    let errors_of = |req: i64| w.events.iter().filter(|(_, e)| e.starts_with(&format!("error {req} "))).count();
+    for req in [831, 832, 833, 834, 835] {
+        assert_eq!(errors_of(req), 0, "request {req}");
+        assert!(w.events.iter().any(|(_, e)| e.starts_with(&format!("params {req} "))), "params of {req}");
+    }
+    let legal = ibx::control::generic_tick::legal_ones("STK");
+    assert!(has(&format!("error 836 321 Error validating request.-'bQ' : cause - Incorrect generic tick list of 999.  Legal ones for (STK) are: {legal}")));
+    assert!(has(&format!("error 837 321 Error validating request.-'bQ' : cause - Incorrect generic tick list of mdoff,292:.  Legal ones for (STK) are: {legal}")));
+}
