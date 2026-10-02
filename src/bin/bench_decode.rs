@@ -97,14 +97,14 @@ fn main() {
     {
         let mut market = MarketState::new();
         let id = market.register(756733); // SPY
-        market.register_server_tag(1, id);
+        market.register_server_tag(1, id, 0.01);
         market.set_min_tick(id, 0.01);
 
         bench("decode + state update (5 ticks)", ITERATIONS, || {
             let ticks = tick_decoder::decode_ticks_35p(&payload_typical);
             for tick in &ticks {
-                if let Some(instrument) = market.instrument_by_server_tag(tick.server_tag) {
-                    market.apply_tick(instrument, tick);
+                if let Some(route) = market.route_server_tag(tick.server_tag) {
+                    market.apply_tick(route.instrument, route.price_tick, tick);
                 }
             }
         });
@@ -114,15 +114,15 @@ fn main() {
     {
         let mut market = MarketState::new();
         let id = market.register(756733);
-        market.register_server_tag(1, id);
+        market.register_server_tag(1, id, 0.01);
         market.set_min_tick(id, 0.01);
         let shared = Arc::new(SharedState::new());
 
         bench("decode + state + SeqLock push (5 ticks)", ITERATIONS, || {
             let ticks = tick_decoder::decode_ticks_35p(&payload_typical);
             for tick in &ticks {
-                if let Some(instrument) = market.instrument_by_server_tag(tick.server_tag) {
-                    market.apply_tick(instrument, tick);
+                if let Some(route) = market.route_server_tag(tick.server_tag) {
+                    market.apply_tick(route.instrument, route.price_tick, tick);
                 }
             }
             shared.market.push_quote(id, market.quote(id));
@@ -133,7 +133,7 @@ fn main() {
     {
         let mut market = MarketState::new();
         let id = market.register(756733);
-        market.register_server_tag(1, id);
+        market.register_server_tag(1, id, 0.01);
         market.set_min_tick(id, 0.01);
         let shared = Arc::new(SharedState::new());
         let (tx, rx) = bounded::<Event>(65536);
@@ -142,8 +142,8 @@ fn main() {
         bench("full path: decode+state+seqlock+channel (5 ticks)", ITERATIONS, || {
             let ticks = tick_decoder::decode_ticks_35p(&payload_typical);
             for tick in &ticks {
-                if let Some(instrument) = market.instrument_by_server_tag(tick.server_tag) {
-                    market.apply_tick(instrument, tick);
+                if let Some(route) = market.route_server_tag(tick.server_tag) {
+                    market.apply_tick(route.instrument, route.price_tick, tick);
                 }
             }
             shared.market.push_quote(id, market.quote(id));

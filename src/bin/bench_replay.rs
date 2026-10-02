@@ -170,14 +170,14 @@ fn main() {
     {
         let mut market = MarketState::new();
         let id = market.register(756733);
-        market.register_server_tag(1, id);
+        market.register_server_tag(1, id, 0.01);
         market.set_min_tick(id, 0.01);
 
         bench("decode + state update (5 ticks)", ITERATIONS, || {
             let ticks = tick_decoder::decode_ticks_35p(&tick_payload);
             for tick in &ticks {
-                if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                    market.apply_tick(inst, tick);
+                if let Some(route) = market.route_server_tag(tick.server_tag) {
+                    market.apply_tick(route.instrument, route.price_tick, tick);
                 }
             }
         });
@@ -186,16 +186,16 @@ fn main() {
         let mut market = MarketState::new();
         let id1 = market.register(756733);
         let id2 = market.register(265598);
-        market.register_server_tag(1, id1);
-        market.register_server_tag(2, id2);
+        market.register_server_tag(1, id1, 0.01);
+        market.register_server_tag(2, id2, 0.01);
         market.set_min_tick(id1, 0.01);
         market.set_min_tick(id2, 0.01);
 
         bench("decode + state update (10 ticks, 2 instruments)", ITERATIONS, || {
             let ticks = tick_decoder::decode_ticks_35p(&tick_payload_heavy);
             for tick in &ticks {
-                if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                    market.apply_tick(inst, tick);
+                if let Some(route) = market.route_server_tag(tick.server_tag) {
+                    market.apply_tick(route.instrument, route.price_tick, tick);
                 }
             }
         });
@@ -207,7 +207,7 @@ fn main() {
     {
         let mut market = MarketState::new();
         let id = market.register(756733);
-        market.register_server_tag(1, id);
+        market.register_server_tag(1, id, 0.01);
         market.set_min_tick(id, 0.01);
         let shared = Arc::new(SharedState::new());
         let (tx, rx) = bounded::<Event>(65536);
@@ -222,8 +222,8 @@ fn main() {
                 let ticks = tick_decoder::decode_ticks_35p(body);
                 // 4. State update
                 for tick in &ticks {
-                    if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                        market.apply_tick(inst, tick);
+                    if let Some(route) = market.route_server_tag(tick.server_tag) {
+                        market.apply_tick(route.instrument, route.price_tick, tick);
                     }
                 }
                 // 5. SeqLock + channel notify
@@ -241,7 +241,7 @@ fn main() {
         // Full pipeline with FIXCOMP decompression
         let mut market = MarketState::new();
         let id = market.register(756733);
-        market.register_server_tag(1, id);
+        market.register_server_tag(1, id, 0.01);
         market.set_min_tick(id, 0.01);
 
         bench("full with FIXCOMP: unsign → decompress → decode → state", ITERATIONS / 10, || {
@@ -254,8 +254,8 @@ fn main() {
                 if let Some(body) = find_body_after_tag(inner, b"35=P\x01") {
                     let ticks = tick_decoder::decode_ticks_35p(body);
                     for tick in &ticks {
-                        if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                            market.apply_tick(inst, tick);
+                        if let Some(route) = market.route_server_tag(tick.server_tag) {
+                            market.apply_tick(route.instrument, route.price_tick, tick);
                         }
                     }
                 }
@@ -377,7 +377,7 @@ fn main() {
 
         let mut market = MarketState::new();
         let id = market.register(756733);
-        market.register_server_tag(1, id);
+        market.register_server_tag(1, id, 0.01);
         market.set_min_tick(id, 0.01);
 
         let mut idx = 0usize;
@@ -387,8 +387,8 @@ fn main() {
             if let Some(body) = find_body_after_tag(msg, b"35=P\x01") {
                 let ticks = tick_decoder::decode_ticks_35p(body);
                 for tick in &ticks {
-                    if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                        market.apply_tick(inst, tick);
+                    if let Some(route) = market.route_server_tag(tick.server_tag) {
+                        market.apply_tick(route.instrument, route.price_tick, tick);
                     }
                 }
             }
@@ -409,7 +409,7 @@ fn main() {
 
     let mut market = MarketState::new();
     let id = market.register(756733);
-    market.register_server_tag(1, id);
+    market.register_server_tag(1, id, 0.01);
     market.set_min_tick(id, 0.01);
 
     for (label, data, stage) in &stages {
@@ -439,8 +439,8 @@ fn measure_stage(stage: Stage, data: &[u8], market: &mut MarketState, _id: u32) 
             Stage::StateUpdate => {
                 let ticks = tick_decoder::decode_ticks_35p(data);
                 for tick in &ticks {
-                    if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                        market.apply_tick(inst, tick);
+                    if let Some(route) = market.route_server_tag(tick.server_tag) {
+                        market.apply_tick(route.instrument, route.price_tick, tick);
                     }
                 }
             }
@@ -454,8 +454,8 @@ fn measure_stage(stage: Stage, data: &[u8], market: &mut MarketState, _id: u32) 
             Stage::StateUpdate => {
                 let ticks = tick_decoder::decode_ticks_35p(data);
                 for tick in &ticks {
-                    if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                        market.apply_tick(inst, tick);
+                    if let Some(route) = market.route_server_tag(tick.server_tag) {
+                        market.apply_tick(route.instrument, route.price_tick, tick);
                     }
                 }
             }
@@ -481,8 +481,8 @@ fn run_full_pipeline(signed: &[u8], market: &mut MarketState, _id: u32) {
     if let Some(body) = find_body_after_tag(&unsigned, b"35=P\x01") {
         let ticks = tick_decoder::decode_ticks_35p(body);
         for tick in &ticks {
-            if let Some(inst) = market.instrument_by_server_tag(tick.server_tag) {
-                market.apply_tick(inst, tick);
+            if let Some(route) = market.route_server_tag(tick.server_tag) {
+                market.apply_tick(route.instrument, route.price_tick, tick);
             }
         }
     }

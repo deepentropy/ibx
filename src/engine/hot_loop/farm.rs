@@ -460,12 +460,12 @@ impl FarmState {
 
         // Phase 1: Apply all ticks to internal quotes before publishing.
         for tick in &ticks {
-            let instrument = match context.market.instrument_by_farm_tag(self.rx_farm, tick.server_tag) {
-                Some(id) => id,
+            let (instrument, price_tick) = match context.market.route_farm_tag(self.rx_farm, tick.server_tag) {
+                Some(r) => (r.instrument, r.price_tick),
                 None => continue,
             };
 
-            context.market.apply_tick(instrument, tick);
+            context.market.apply_tick(instrument, price_tick, tick);
 
             notified[(instrument >> 6) as usize] |= 1u64 << (instrument & 63);
         }
@@ -537,8 +537,15 @@ impl FarmState {
             }
         };
 
-        context.market.register_farm_tag(self.rx_farm, server_tag, instrument);
-        context.market.set_min_tick(instrument, min_tick);
+        // The tick scales the prices of this server tag only; the bid/ask
+        // entry's valid tick is also the contract's, as in the reference.
+        context.market.register_farm_tag(self.rx_farm, server_tag, instrument, min_tick);
+        let bid_ask = self.instrument_md_reqs.iter().find(|(id, _)| *id == instrument)
+            .and_then(|(_, reqs)| reqs.iter().position(|r| *r == req_id))
+            .is_some_and(|p| p % 2 == 0);
+        if bid_ask && min_tick.is_finite() && min_tick > 0.0 {
+            context.market.set_min_tick(instrument, min_tick);
+        }
         // A regulatory snapshot (ibx#446): its permission and BBO exchange
         // go to its fetcher, never as tickReqParams.
         if self.snapshot_reqs.iter().any(|(id, _)| *id == req_id) {
@@ -558,9 +565,6 @@ impl FarmState {
 
         // The bid/ask entry of the pair (the first of each pair of ids)
         // gives the request parameters (ibx#449).
-        let bid_ask = self.instrument_md_reqs.iter().find(|(id, _)| *id == instrument)
-            .and_then(|(_, reqs)| reqs.iter().position(|r| *r == req_id))
-            .is_some_and(|p| p % 2 == 0);
         if bid_ask {
             let sec_type = context.market.order_routing(instrument).0;
             if let Some(params) = tick_req_params(instrument, min_tick, &parts, &sec_type) {
@@ -583,9 +587,9 @@ impl FarmState {
         let server_tag: u32 = match parts[2].parse() { Ok(v) => v, Err(_) => return };
 
         if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
-            // A trade stream tag, kept apart from the quote tags (#292).
-            context.market.register_trade_tag(self.rx_farm, server_tag, instrument);
-            context.market.set_min_tick(instrument, min_tick);
+            // A trade stream tag, kept apart from the quote tags (#292),
+            // with the tick its trades are scaled by.
+            context.market.register_trade_tag(self.rx_farm, server_tag, instrument, min_tick);
             // The size increment, when present (ibx#287).
             if let Some(size_min_tick) = parts.get(4).and_then(|v| v.parse::<f64>().ok()) {
                 context.market.set_size_min_tick(instrument, size_min_tick);
@@ -1557,7 +1561,7 @@ mod tests {
         let mut context = Context::new();
         let id = context.market.register(265598);
         context.market.set_min_tick(id, 0.01);
-        context.market.register_server_tag(128_516, id);
+        context.market.register_server_tag(128_516, id, 0.01);
         let msg = tick_message(&[
             (true, 128_516, &[(3, 25_512), (6, 3), (8, 25_730), (10, 1466), (20, 20_260_922), (22, 25_401)]),
             (false, 128_516, &[(2, 25_501), (20, 1_790_159_184), (21, 2)]),
@@ -1572,6 +1576,81 @@ mod tests {
         assert_eq!(q.last, 25_501 * PRICE_SCALE / 100);
         assert_eq!(q.low, 0);
         assert_eq!(q.timestamp_ns, 1_790_159_186 * 1_000_000_000);
+    }
+
+    /// Subscribe EUR.USD, ack its two entries in the given order (bid/ask
+    /// on tag 24 with the high-precision tick, last on tag 25), then its
+    /// trade setup (tag 26), as captured 28/09/2026; then one tick message.
+    fn eur_usd_quotes(bid_ask_first: bool) -> (crate::types::Quote, f64, Vec<crate::bridge::TickReqParams>) {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let id = context.market.register(12087792);
+        context.market.set_routing(id, "CASH", "IDEALPRO");
+        farm.send_mktdata_subscribe(12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", id, 0, &mut None, &mut hb);
+        let bid_ask = farm.next_md_req_id - 2;
+        let mut acks = [
+            format!("8=O\x0135=Q\x0124,{bid_ask},1e-05,0,3,ffffffff,,1,1"),
+            format!("8=O\x0135=Q\x0125,{},5e-05,0,1,ffffffff,,1,1", bid_ask + 1),
+        ];
+        if !bid_ask_first {
+            acks.reverse();
+        }
+        for ack in &acks {
+            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+        }
+        farm.handle_ticker_setup(b"8=O\x0135=L\x0112087792,5e-05,26,,1", &mut context);
+        let msg = tick_message(&[
+            (false, 24, &[(0, 113_634), (1, 113_635)]),
+            (false, 26, &[(2, 22_727)]),
+            (true, 26, &[(3, 22_782), (8, 22_782), (9, 22_713)]),
+        ]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+        (shared.market.quote(id), context.market.min_tick(id), shared.market.drain_tick_req_params())
+    }
+
+    // Each server tag scales its prices by its own tick: bid/ask by the
+    // bid/ask entry's 0.00001, trades and daily stats by the trade setup's
+    // 0.00005, in either ack order. The contract's tick and the request
+    // parameters are the bid/ask entry's.
+    #[test]
+    fn eur_usd_prices_use_the_tick_of_their_server_tag() {
+        let px = |raw: i64, step: i64| raw * step;
+        for bid_ask_first in [true, false] {
+            let (q, contract_tick, params) = eur_usd_quotes(bid_ask_first);
+            assert_eq!((q.bid, q.ask), (px(113_634, 1_000), px(113_635, 1_000)), "order {bid_ask_first}");
+            assert_eq!(q.last, px(22_727, 5_000));
+            assert_eq!((q.close, q.high, q.low), (px(22_782, 5_000), px(22_782, 5_000), px(22_713, 5_000)));
+            assert_eq!(q.bid, 113_634 * PRICE_SCALE / 100_000, "1.13634, not 5.6817");
+            assert_eq!(contract_tick, 0.00001);
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0].min_tick, 0.00001);
+        }
+    }
+
+    // A stock acks both entries with one tag and one tick: every price is
+    // on it.
+    #[test]
+    fn a_stock_with_one_tick() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let id = context.market.register(265598);
+        context.market.set_routing(id, "STK", "SMART");
+        farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "", id, 0, &mut None, &mut hb);
+        let bid_ask = farm.next_md_req_id - 2;
+        for r in [bid_ask, bid_ask + 1] {
+            let ack = format!("8=O\x0135=Q\x011101,{r},0.01,0,3,9c,,1,1");
+            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+        }
+        farm.handle_ticker_setup(b"8=O\x0135=L\x01265598,0.01,1098,,1", &mut context);
+        let msg = tick_message(&[(false, 1101, &[(0, 25_500), (1, 25_502)]), (false, 1098, &[(2, 25_501)])]);
+        farm.handle_tick_data(&msg, &mut context, &shared, &None);
+        let q = shared.market.quote(id);
+        assert_eq!((q.bid, q.ask, q.last), (255 * PRICE_SCALE, 25_502 * PRICE_SCALE / 100, 25_501 * PRICE_SCALE / 100));
+        assert_eq!(context.market.min_tick(id), 0.01);
     }
 
     struct RecordingSink(Vec<Vec<(u32, String)>>);

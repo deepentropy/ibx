@@ -4248,7 +4248,7 @@ mod tag_cleaner_tests {
         let a = m.register(265598);
         let b = m.try_register_unresolved().unwrap();
         m.resolve_con_id(b, 265598);
-        m.register_trade_tag(0, 1098, a);
+        m.register_trade_tag(0, 1098, a, 0.01);
         m.unregister(a);
         assert_eq!(m.instrument_by_server_tag(1098), Some(b));
         m.unregister(b);
@@ -4277,7 +4277,7 @@ mod tag_cleaner_tests {
         assert!(shared.market.drain_tick_news().is_empty());
         // The same tick once the tag is known is delivered.
         let id = engine.context.market.instrument_by_con_id(265598).unwrap();
-        engine.context.market.register_trade_tag(0, 12345, id);
+        engine.context.market.register_trade_tag(0, 12345, id, 0.01);
         engine.inject_farm_message(&msg);
         assert_eq!(shared.market.drain_tick_news().len(), 1);
     }
