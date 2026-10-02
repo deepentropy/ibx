@@ -1024,8 +1024,13 @@ impl CcpState {
             response.init_margin_before as f64 / PRICE_SCALE as f64,
             response.init_margin_after as f64 / PRICE_SCALE as f64,
             response.commission as f64 / PRICE_SCALE as f64);
+        // The engine event is the preview's answer: the data reply only.
+        // An order-message reply before it goes to the API's open_order
+        // alone (phase 72 took it for the answer, paper 02/10/2026).
         shared.orders.push_what_if(response.clone());
-        emit(event_tx, Event::WhatIf(response));
+        if response.final_reply {
+            emit(event_tx, Event::WhatIf(response));
+        }
     }
 
     fn handle_exec_report(
@@ -3469,16 +3474,24 @@ mod tests {
     #[test]
     fn what_if_order_message_reply_keeps_the_preview() {
         let (mut ccp, mut context, shared) = what_if_test_state();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let event_tx = Some(event_tx);
         let text = "Warning: your order will not be placed at the exchange until 2026-10-02 09:30:00 US/Eastern";
-        ccp.handle_exec_report(&what_if_frame(&[(39, "A"), (6360, "TIME"), (6361, text)]), &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&what_if_frame(&[(39, "A"), (6360, "TIME"), (6361, text), (6378, "0")]),
+            &mut context, &shared, &event_tx, "");
+        assert!(event_rx.try_recv().is_err(), "the order-message reply is not the preview's answer");
         let responses = shared.orders.drain_what_if_responses();
         assert_eq!(responses.len(), 1);
         assert!(!responses[0].final_reply);
         assert_eq!((responses[0].state.warning_text.as_str(), responses[0].state.init_margin_after), (text, None));
         assert!(context.what_ifs.contains_key(WHAT_IF_CLORD), "the preview still waits");
-        ccp.handle_exec_report(&what_if_frame(&ZERO_CLOSE_FIELDS), &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&what_if_frame(&ZERO_CLOSE_FIELDS), &mut context, &shared, &event_tx, "");
         let responses = shared.orders.drain_what_if_responses();
         assert!(responses[0].final_reply && responses[0].state.warning_text.is_empty());
+        match event_rx.try_recv() {
+            Ok(Event::WhatIf(answer)) => assert_eq!(answer.state.equity_with_loan_after, Some(945923.47)),
+            other => panic!("the data reply is the answer: {other:?}"),
+        }
         assert!(context.what_ifs.is_empty());
     }
 

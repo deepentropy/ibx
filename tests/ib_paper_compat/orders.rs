@@ -1231,7 +1231,9 @@ pub(super) fn phase_what_if_order(conns: Conns) -> Conns {
 
         // A what-if is answered with open_order only, as the reference
         // (ibx#462): the margin fields are numbers, and no order_status.
-        let open_event = w.events.iter().find(|e| e.starts_with(&format!("open_order:{}:", order_id)));
+        // An order-message reply may come first with its own open_order
+        // and no margins; the answer is the last one.
+        let open_event = w.events.iter().rfind(|e| e.starts_with(&format!("open_order:{}:", order_id)));
         let margins_ok = open_event.is_some_and(|e| {
             let values: Vec<&str> = e.split(':').filter_map(|f| f.split_once('=').map(|(_, v)| v)).collect();
             values.len() == 10 && values.iter().all(|v| v.parse::<f64>().is_ok())

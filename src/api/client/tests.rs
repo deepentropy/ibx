@@ -1503,6 +1503,30 @@ fn what_if_on_an_unanswered_order_id_is_a_duplicate() {
     assert!(client.core.what_if_orders.lock().unwrap().is_empty());
 }
 
+// ibx#462 (`trader.order.bQ.a(gi, e3, fq)@263-321`; paper 02/10/2026 phase
+// 72): an order-message reply comes before the data reply. Each gives an
+// open_order, the first with no margins; the preview is kept until the
+// data reply, which carries the margins.
+#[test]
+fn what_if_order_message_reply_then_data_reply() {
+    let (client, _rx, shared) = test_client();
+    client.core.track_what_if(72, spy(), Order { what_if: true, ..Default::default() });
+    let mut message = what_if_reply(72, [0.0; 3], [0.0; 3], 0.0);
+    message.state = WhatIfState { status: "PreSubmitted".into(), commission: Some(0.0), warning_text: "Warning".into(), ..Default::default() };
+    message.final_reply = false;
+    shared.orders.push_what_if(message);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events.iter().filter(|e| e.starts_with("open_order:72:PreSubmitted:initB=:")).count(), 1, "{:?}", w.events);
+    assert!(client.core.peek_what_if(72).is_some(), "the preview still waits");
+
+    shared.orders.push_what_if(what_if_reply(72, [4943.4, 4125.35, 954397.0], [12855.55, 11566.05, 954397.0], 1.0003));
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("open_order:72:PreSubmitted:initB=4943.4:initC=7912.15:")), "{:?}", w.events);
+    assert!(client.core.peek_what_if(72).is_none());
+}
+
 // ibx#462, captured 02/10/2026: a what-if with transmit off is refused with
 // the reference's 321 and nothing is sent.
 #[test]
