@@ -159,9 +159,14 @@ pub const O_CLOSE_PRICE: u64 = 3;
 pub const O_BID_SIZE: u64 = 4;
 pub const O_ASK_SIZE: u64 = 5;
 pub const O_LAST_SIZE: u64 = 6;
+/// The bid and ask auto-execution bits of a quote.
+pub const O_AUTO_EXEC: u64 = 7;
 pub const O_HIGH_PRICE: u64 = 8;
 pub const O_LOW_PRICE: u64 = 9;
 pub const O_VOLUME: u64 = 10;
+/// On a quote, attribute bits with the auto-execution bits; on a trade,
+/// its trading status.
+pub const O_ATTRIBUTES: u64 = 13;
 pub const O_BID_EXCH: u64 = 16;
 pub const O_ASK_EXCH: u64 = 17;
 pub const O_HALTED: u64 = 18;

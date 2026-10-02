@@ -734,6 +734,7 @@ impl HotLoop {
             // Zero the shared-side quote so a reused slot cannot serve the
             // previous contract's prices before its first tick.
             self.shared.market.push_quote(instrument, &crate::types::Quote::default());
+            self.shared.market.push_marks(instrument, crate::types::QuoteMarks::default());
             log::info!("Reclaimed instrument slot {}", instrument);
         }
     }

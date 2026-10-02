@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::protocol::tick_decoder::{self as td, RawTick};
-use crate::types::{InstrumentId, Price, Qty, Quote, PRICE_SCALE, QTY_SCALE, MAX_INSTRUMENTS};
+use crate::types::{InstrumentId, Price, Qty, Quote, QuoteMarks, PRICE_SCALE, QTY_SCALE, MAX_INSTRUMENTS};
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 
@@ -41,10 +41,12 @@ impl std::hash::Hasher for TagHasher {
 /// of that tag times PRICE_SCALE. The reference keeps the tick per server
 /// tag, not per contract: the two entries of one contract can tick in
 /// different steps (a currency pair's bid/ask book and its last price).
+/// `trade` is set for a trade stream tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TagRoute {
     pub instrument: InstrumentId,
     pub price_tick: i64,
+    pub trade: bool,
 }
 
 /// Server tags are numbered by each farm (#445): the key is the farm and
@@ -74,6 +76,8 @@ const FREE_SLOT: i64 = i64::MIN;
 /// All quotes live in a contiguous array for cache efficiency.
 pub struct MarketState {
     quotes: [Quote; MAX_INSTRUMENTS],
+    /// What the farm told about each quote beside its fields (ibx#446).
+    marks: [QuoteMarks; MAX_INSTRUMENTS],
     /// High-water mark: slots ever allocated (iteration bound). Freed slots
     /// below this mark are reused via `free_ids` before new ones are taken,
     /// so the MAX_INSTRUMENTS cap bounds CONCURRENT instruments, not the
@@ -126,6 +130,7 @@ impl MarketState {
     pub fn new() -> Self {
         Self {
             quotes: [Quote::default(); MAX_INSTRUMENTS],
+            marks: [QuoteMarks::default(); MAX_INSTRUMENTS],
             active_count: 0,
             free_ids: Vec::new(),
             con_id_to_instrument: HashMap::new(),
@@ -229,6 +234,7 @@ impl MarketState {
         }
         self.instrument_to_con_id[instrument as usize] = FREE_SLOT;
         self.quotes[instrument as usize] = Quote::default();
+        self.marks[instrument as usize] = QuoteMarks::default();
         self.symbols[instrument as usize] = None;
         self.currencies[instrument as usize] = None;
         self.sec_types[instrument as usize] = None;
@@ -268,14 +274,14 @@ impl MarketState {
     pub fn register_farm_tag(&mut self, farm: u8, server_tag: u32, instrument: InstrumentId, min_tick: f64) {
         self.server_tags.entry(tag_key(farm, server_tag))
             .and_modify(|r| r.instrument = instrument)
-            .or_insert(TagRoute { instrument, price_tick: scale_tick(min_tick) });
+            .or_insert(TagRoute { instrument, price_tick: scale_tick(min_tick), trade: false });
     }
 
     /// Map a trade stream tag of a farm to an instrument (#292), with the
     /// minimum tick of the trade setup. A later setup of the same tag
     /// replaces it, as in the reference.
     pub fn register_trade_tag(&mut self, farm: u8, server_tag: u32, instrument: InstrumentId, min_tick: f64) {
-        self.trade_tags.insert(tag_key(farm, server_tag), TagRoute { instrument, price_tick: scale_tick(min_tick) });
+        self.trade_tags.insert(tag_key(farm, server_tag), TagRoute { instrument, price_tick: scale_tick(min_tick), trade: true });
     }
 
     /// Free the quote tags of an instrument whose market data record is no
@@ -471,8 +477,12 @@ impl MarketState {
     /// its base, or the base plus a delta, in epoch seconds, kept in ns.
     /// A value whose scaling overflows is not stored: the field keeps its
     /// last value rather than a wrapped number (ibx#272).
+    /// `trade` is set for a tick of a trade stream tag: there the attribute
+    /// type is the trade's status; on a quote it carries, as the
+    /// auto-execution type does, whether the bid and the ask can execute
+    /// automatically (ibx#446).
     #[inline]
-    pub fn apply_tick(&mut self, id: InstrumentId, price_tick: i64, tick: &RawTick) {
+    pub fn apply_tick(&mut self, id: InstrumentId, price_tick: i64, trade: bool, tick: &RawTick) {
         #[inline(always)]
         fn set(field: &mut i64, value: Option<i64>) {
             if let Some(v) = value { *field = v; }
@@ -497,6 +507,10 @@ impl MarketState {
             td::O_BID_EXCH => q.bid_exch_mask = m,
             td::O_ASK_EXCH => q.ask_exch_mask = m,
             td::O_LAST_EXCH => q.last_exch_mask = m,
+            td::O_AUTO_EXEC if !trade && !tick.stats_block => self.marks[i].set_auto_bits(m),
+            td::O_ATTRIBUTES if !tick.stats_block => {
+                if trade { self.marks[i].set_halted(m) } else { self.marks[i].set_auto_bits(m) }
+            }
             // On a daily-stats block this type is the close date, not a time.
             td::O_TIMESTAMP_BASE if !tick.stats_block && m > 0 => {
                 if let Some(ns) = (m as u64).checked_mul(NS_PER_SEC) {
@@ -516,6 +530,19 @@ impl MarketState {
     #[inline(always)]
     pub fn quote(&self, id: InstrumentId) -> &Quote {
         &self.quotes[id as usize]
+    }
+
+    /// What the farm told about the quote beside its fields (ibx#446).
+    #[inline(always)]
+    pub fn marks(&self, id: InstrumentId) -> QuoteMarks {
+        self.marks[id as usize]
+    }
+
+    /// Whether, in this message, the instrument's daily figures came before
+    /// its trade: given at the first trade stream tick of a message.
+    #[inline(always)]
+    pub fn set_daily_first(&mut self, id: InstrumentId, first: bool) {
+        self.marks[id as usize].set_daily_first(first);
     }
 
     #[inline(always)]
@@ -1062,10 +1089,10 @@ mod tests {
         let id = ms.register(265598);
         ms.register_server_tag(1101, id, 0.01);
         ms.register_server_tag(1101, id, 0.05);
-        assert_eq!(ms.route_server_tag(1101), Some(TagRoute { instrument: id, price_tick: CENT }));
+        assert_eq!(ms.route_server_tag(1101), Some(TagRoute { instrument: id, price_tick: CENT, trade: false }));
         ms.register_trade_tag(0, 1098, id, 0.05);
         ms.register_trade_tag(0, 1098, id, 0.01);
-        assert_eq!(ms.route_server_tag(1098), Some(TagRoute { instrument: id, price_tick: CENT }));
+        assert_eq!(ms.route_server_tag(1098), Some(TagRoute { instrument: id, price_tick: CENT, trade: true }));
     }
 
     // A trade tag moved to the contract's other slot keeps its tick.
@@ -1077,7 +1104,7 @@ mod tests {
         ms.resolve_con_id(b, 12087792);
         ms.register_trade_tag(0, 26, a, 0.00005);
         ms.unregister(a);
-        assert_eq!(ms.route_server_tag(26), Some(TagRoute { instrument: b, price_tick: 5_000 }));
+        assert_eq!(ms.route_server_tag(26), Some(TagRoute { instrument: b, price_tick: 5_000, trade: true }));
     }
 
     // ── ibx#448: wire tick types land in the right quote fields ──
@@ -1095,7 +1122,7 @@ mod tests {
         ms.set_min_tick(id, 0.01);
         // One stats block: close, last size, high, volume, open.
         for t in [raw(3, 25_512), raw(6, 3), raw(8, 25_730), raw(10, 1466), raw(22, 25_401)] {
-            ms.apply_tick(id, CENT, &RawTick { stats_block: true, ..t });
+            ms.apply_tick(id, CENT, false, &RawTick { stats_block: true, ..t });
         }
         let q = ms.quote(id);
         assert_eq!(q.close, 25_512 * PRICE_SCALE / 100);
@@ -1116,11 +1143,11 @@ mod tests {
         let mut ms = MarketState::new();
         let id = ms.register(265598);
         ms.set_min_tick(id, 0.01);
-        ms.apply_tick(id, CENT, &raw(0, 25_500));
-        ms.apply_tick(id, CENT, &raw(4, 57));
-        ms.apply_tick(id, CENT, &raw(20, 1_790_159_184));
+        ms.apply_tick(id, CENT, false, &raw(0, 25_500));
+        ms.apply_tick(id, CENT, false, &raw(4, 57));
+        ms.apply_tick(id, CENT, false, &raw(20, 1_790_159_184));
         for t in [raw(0, i64::MAX), raw(4, i64::MAX), raw(10, i64::MIN), raw(20, i64::MAX), raw(21, i64::MAX)] {
-            ms.apply_tick(id, CENT, &t);
+            ms.apply_tick(id, CENT, false, &t);
         }
         let q = ms.quote(id);
         assert_eq!(q.bid, 25_500 * PRICE_SCALE / 100);
@@ -1136,7 +1163,7 @@ mod tests {
         ms.set_min_tick(id, 0.01);
         for t in [raw(0, 25_500), raw(1, 25_502), raw(2, 25_501), raw(4, 57), raw(5, 12), raw(9, 25_300),
                   raw(16, 512), raw(17, 64), raw(27, 8)] {
-            ms.apply_tick(id, CENT, &t);
+            ms.apply_tick(id, CENT, false, &t);
         }
         let q = ms.quote(id);
         assert_eq!(q.bid, 25_500 * PRICE_SCALE / 100);
@@ -1148,7 +1175,7 @@ mod tests {
         // Attribute bits and the unknown int change no field.
         let before = (q.bid, q.ask, q.last, q.bid_size, q.volume, q.timestamp_ns);
         for t in [raw(7, 12), raw(11, 1), raw(12, 99), raw(13, 3)] {
-            ms.apply_tick(id, CENT, &t);
+            ms.apply_tick(id, CENT, false, &t);
         }
         let q = ms.quote(id);
         assert_eq!((q.bid, q.ask, q.last, q.bid_size, q.volume, q.timestamp_ns), before);
@@ -1161,7 +1188,7 @@ mod tests {
         let mut ms = MarketState::new();
         let id = ms.register(551601503); // MNQ: sizes as on the wire
         for t in [raw(4, 1), raw(5, 7), raw(6, 2), raw(10, 163)] {
-            ms.apply_tick(id, CENT, &t);
+            ms.apply_tick(id, CENT, false, &t);
         }
         let q = ms.quote(id);
         assert_eq!(q.bid_size, QTY_SCALE, "a size of 1 is 1.0, not 0.0001");
@@ -1177,7 +1204,7 @@ mod tests {
         ms.set_size_min_tick(id, 1.0);
         ms.set_round_lot(id, 40);
         for t in [raw(4, 57), raw(5, 3), raw(6, 2), raw(10, 1466)] {
-            ms.apply_tick(id, CENT, &t);
+            ms.apply_tick(id, CENT, false, &t);
         }
         let q = ms.quote(id);
         assert_eq!(q.bid_size, 2280 * QTY_SCALE);
@@ -1192,15 +1219,15 @@ mod tests {
         let id = ms.register(1);
         ms.set_size_min_tick(id, 0.01);
         ms.set_round_lot(id, 100);
-        ms.apply_tick(id, CENT, &raw(4, 5));
-        ms.apply_tick(id, CENT, &raw(10, 250));
+        ms.apply_tick(id, CENT, false, &raw(4, 5));
+        ms.apply_tick(id, CENT, false, &raw(10, 250));
         assert_eq!(ms.quote(id).bid_size, 5 * QTY_SCALE); // 5 x 0.01 x 100
         assert_eq!(ms.quote(id).volume, 25 * QTY_SCALE / 10); // 250 x 0.01
         // An invalid increment falls back to 1.
         ms.set_size_min_tick(id, 0.0);
         ms.set_round_lot(id, 0);
         assert_eq!(ms.round_lot(id), 1);
-        ms.apply_tick(id, CENT, &raw(4, 5));
+        ms.apply_tick(id, CENT, false, &raw(4, 5));
         assert_eq!(ms.quote(id).bid_size, 5 * QTY_SCALE);
     }
 
@@ -1214,7 +1241,7 @@ mod tests {
         let reused = ms.register(999);
         assert_eq!(reused, id);
         assert_eq!(ms.round_lot(reused), 1);
-        ms.apply_tick(reused, CENT, &raw(4, 3));
+        ms.apply_tick(reused, CENT, false, &raw(4, 3));
         assert_eq!(ms.quote(reused).bid_size, 3 * QTY_SCALE);
     }
 
@@ -1222,18 +1249,18 @@ mod tests {
     fn apply_tick_last_trade_time_is_base_plus_delta() {
         let mut ms = MarketState::new();
         let id = ms.register(265598);
-        ms.apply_tick(id, CENT, &raw(20, 1_790_159_184));
+        ms.apply_tick(id, CENT, false, &raw(20, 1_790_159_184));
         assert_eq!(ms.quote(id).timestamp_ns, 1_790_159_184 * NS_PER_SEC);
-        ms.apply_tick(id, CENT, &raw(21, 3));
+        ms.apply_tick(id, CENT, false, &raw(21, 3));
         assert_eq!(ms.quote(id).timestamp_ns, 1_790_159_187 * NS_PER_SEC);
         // A later delta is from the same base, not from the last time.
-        ms.apply_tick(id, CENT, &raw(21, 5));
+        ms.apply_tick(id, CENT, false, &raw(21, 5));
         assert_eq!(ms.quote(id).timestamp_ns, 1_790_159_189 * NS_PER_SEC);
         // The close date on a stats block is not a time.
-        ms.apply_tick(id, CENT, &RawTick { stats_block: true, ..raw(20, 20_260_922) });
+        ms.apply_tick(id, CENT, false, &RawTick { stats_block: true, ..raw(20, 20_260_922) });
         assert_eq!(ms.quote(id).timestamp_ns, 1_790_159_189 * NS_PER_SEC);
         // A new base resets the time to it.
-        ms.apply_tick(id, CENT, &raw(20, 1_790_159_300));
+        ms.apply_tick(id, CENT, false, &raw(20, 1_790_159_300));
         assert_eq!(ms.quote(id).timestamp_ns, 1_790_159_300 * NS_PER_SEC);
     }
 

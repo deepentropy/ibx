@@ -146,6 +146,73 @@ impl Default for Quote {
     }
 }
 
+/// What the farm told about a quote beside its prices and sizes (ibx#446),
+/// packed in one word: whether the bid and the ask can execute
+/// automatically, the trading status the last trade came with, and
+/// whether, in the last message with trade fields, the daily figures came
+/// before the trade. The reference sends the trade and daily ticks of a
+/// message in that message's order, then the quote ticks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QuoteMarks(pub u64);
+
+impl QuoteMarks {
+    const BID_AUTO: u32 = 0;
+    const ASK_AUTO: u32 = 2;
+    const HALTED_KNOWN: u64 = 1 << 4;
+    const HALTED_SHIFT: u32 = 5;
+    const DAILY_FIRST: u64 = 1 << 7;
+
+    fn flag(self, shift: u32) -> Option<bool> {
+        match (self.0 >> shift) & 3 {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
+
+    fn set_flag(&mut self, shift: u32, on: bool) {
+        self.0 = (self.0 & !(3 << shift)) | ((if on { 2 } else { 1 }) << shift);
+    }
+
+    /// Whether the bid can execute automatically; `None` before the farm said.
+    pub fn bid_auto(self) -> Option<bool> { self.flag(Self::BID_AUTO) }
+    /// Whether the ask can execute automatically; `None` before the farm said.
+    pub fn ask_auto(self) -> Option<bool> { self.flag(Self::ASK_AUTO) }
+    pub fn set_bid_auto(&mut self, on: bool) { self.set_flag(Self::BID_AUTO, on) }
+    pub fn set_ask_auto(&mut self, on: bool) { self.set_flag(Self::ASK_AUTO, on) }
+
+    /// Both flags from the farm's bits: 4 the bid, 8 the ask.
+    pub fn set_auto_bits(&mut self, bits: i64) {
+        self.set_bid_auto(bits & 4 != 0);
+        self.set_ask_auto(bits & 8 != 0);
+    }
+
+    /// The trading status of the last trade, as its two low bits (1 halted,
+    /// 2 volatility halted); `None` before a trade gave one.
+    pub fn halted(self) -> Option<i64> {
+        (self.0 & Self::HALTED_KNOWN != 0).then_some(((self.0 >> Self::HALTED_SHIFT) & 3) as i64)
+    }
+
+    /// A trade's status; -1 is no status.
+    pub fn set_halted(&mut self, status: i64) {
+        if status == -1 {
+            return;
+        }
+        self.0 = (self.0 & !(3 << Self::HALTED_SHIFT)) | Self::HALTED_KNOWN | (((status & 3) as u64) << Self::HALTED_SHIFT);
+    }
+
+    /// The API value of the halted tick for a status: 1 halted, else 2
+    /// volatility halted, else 0.
+    pub fn halted_tick_value(status: i64) -> f64 {
+        if status & 1 != 0 { 1.0 } else if status & 2 != 0 { 2.0 } else { 0.0 }
+    }
+
+    pub fn daily_first(self) -> bool { self.0 & Self::DAILY_FIRST != 0 }
+    pub fn set_daily_first(&mut self, first: bool) {
+        if first { self.0 |= Self::DAILY_FIRST } else { self.0 &= !Self::DAILY_FIRST }
+    }
+}
+
 /// Execution fill report.
 #[derive(Debug, Clone, Copy)]
 pub struct Fill {

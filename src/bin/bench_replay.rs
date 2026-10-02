@@ -177,7 +177,7 @@ fn main() {
             let ticks = tick_decoder::decode_ticks_35p(&tick_payload);
             for tick in &ticks {
                 if let Some(route) = market.route_server_tag(tick.server_tag) {
-                    market.apply_tick(route.instrument, route.price_tick, tick);
+                    market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
                 }
             }
         });
@@ -195,7 +195,7 @@ fn main() {
             let ticks = tick_decoder::decode_ticks_35p(&tick_payload_heavy);
             for tick in &ticks {
                 if let Some(route) = market.route_server_tag(tick.server_tag) {
-                    market.apply_tick(route.instrument, route.price_tick, tick);
+                    market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
                 }
             }
         });
@@ -223,7 +223,7 @@ fn main() {
                 // 4. State update
                 for tick in &ticks {
                     if let Some(route) = market.route_server_tag(tick.server_tag) {
-                        market.apply_tick(route.instrument, route.price_tick, tick);
+                        market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
                     }
                 }
                 // 5. SeqLock + channel notify
@@ -255,7 +255,7 @@ fn main() {
                     let ticks = tick_decoder::decode_ticks_35p(body);
                     for tick in &ticks {
                         if let Some(route) = market.route_server_tag(tick.server_tag) {
-                            market.apply_tick(route.instrument, route.price_tick, tick);
+                            market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
                         }
                     }
                 }
@@ -388,7 +388,7 @@ fn main() {
                 let ticks = tick_decoder::decode_ticks_35p(body);
                 for tick in &ticks {
                     if let Some(route) = market.route_server_tag(tick.server_tag) {
-                        market.apply_tick(route.instrument, route.price_tick, tick);
+                        market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
                     }
                 }
             }
@@ -440,7 +440,7 @@ fn measure_stage(stage: Stage, data: &[u8], market: &mut MarketState, _id: u32) 
                 let ticks = tick_decoder::decode_ticks_35p(data);
                 for tick in &ticks {
                     if let Some(route) = market.route_server_tag(tick.server_tag) {
-                        market.apply_tick(route.instrument, route.price_tick, tick);
+                        market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
                     }
                 }
             }
@@ -455,7 +455,7 @@ fn measure_stage(stage: Stage, data: &[u8], market: &mut MarketState, _id: u32) 
                 let ticks = tick_decoder::decode_ticks_35p(data);
                 for tick in &ticks {
                     if let Some(route) = market.route_server_tag(tick.server_tag) {
-                        market.apply_tick(route.instrument, route.price_tick, tick);
+                        market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
                     }
                 }
             }
@@ -482,7 +482,7 @@ fn run_full_pipeline(signed: &[u8], market: &mut MarketState, _id: u32) {
         let ticks = tick_decoder::decode_ticks_35p(body);
         for tick in &ticks {
             if let Some(route) = market.route_server_tag(tick.server_tag) {
-                market.apply_tick(route.instrument, route.price_tick, tick);
+                market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
             }
         }
     }

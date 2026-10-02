@@ -457,17 +457,27 @@ impl FarmState {
             log::warn!("Farm tick message: malformed block dropped, {} ticks of earlier blocks kept", ticks.len());
         }
         let mut notified = [0u64; crate::types::MAX_INSTRUMENTS / 64];
+        // Instruments whose trade stream ticked in this message: the first
+        // such tick tells whether the daily figures came before the trade
+        // (ibx#446).
+        let mut traded = [0u64; crate::types::MAX_INSTRUMENTS / 64];
 
         // Phase 1: Apply all ticks to internal quotes before publishing.
         for tick in &ticks {
-            let (instrument, price_tick) = match context.market.route_farm_tag(self.rx_farm, tick.server_tag) {
-                Some(r) => (r.instrument, r.price_tick),
+            let route = match context.market.route_farm_tag(self.rx_farm, tick.server_tag) {
+                Some(r) => r,
                 None => continue,
             };
+            let instrument = route.instrument;
+            let (word, bit) = ((instrument >> 6) as usize, 1u64 << (instrument & 63));
+            if route.trade && traded[word] & bit == 0 {
+                traded[word] |= bit;
+                context.market.set_daily_first(instrument, tick.stats_block);
+            }
 
-            context.market.apply_tick(instrument, price_tick, tick);
+            context.market.apply_tick(instrument, route.price_tick, route.trade, tick);
 
-            notified[(instrument >> 6) as usize] |= 1u64 << (instrument & 63);
+            notified[word] |= bit;
         }
 
         // Phase 2: Publish complete quotes after all ticks in the batch are applied.
@@ -477,6 +487,7 @@ impl FarmState {
                 let instrument = (word_idx as u32) * 64 + remaining.trailing_zeros();
                 remaining &= remaining - 1;
                 shared.market.push_quote(instrument, context.quote(instrument));
+                shared.market.push_marks(instrument, context.market.marks(instrument));
                 emit(event_tx, Event::Tick(instrument));
             }
         }
@@ -1627,6 +1638,77 @@ mod tests {
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].min_tick, 0.00001);
         }
+    }
+
+    /// EUR.USD acked and set up as captured 02/10/2026, then the given
+    /// tick messages; the marks the client sees.
+    fn eur_usd_marks(messages: &[Vec<u8>]) -> crate::types::QuoteMarks {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let id = context.market.register(12087792);
+        context.market.set_routing(id, "CASH", "IDEALPRO");
+        farm.send_mktdata_subscribe(12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", id, 0, &mut None, &mut hb);
+        let bid_ask = farm.next_md_req_id - 2;
+        for ack in [
+            format!("8=O35=Q8,{bid_ask},1e-05,0,3,ffffffff,,1,1"),
+            format!("8=O35=Q6,{},5e-05,0,1,ffffffff,,1,1", bid_ask + 1),
+        ] {
+            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+        }
+        farm.handle_ticker_setup(b"8=O35=L12087792,5e-05,7,,1", &mut context);
+        for msg in messages {
+            farm.handle_tick_data(msg, &mut context, &shared, &None);
+        }
+        shared.market.marks(id)
+    }
+
+    const EUR_USD_QUOTE: Block<'static> = (false, 8, &[(0, 112_547), (4, 4_000_000), (1, 112_549), (5, 12_000_000), (11, 0)]);
+    const EUR_USD_TRADE: Block<'static> = (false, 7, &[(2, 22_510), (6, 0), (13, 0), (20, 1_790_921_652), (21, 126)]);
+    const EUR_USD_DAILY: Block<'static> = (true, 7, &[(3, 22_486), (20, 20_261_001), (8, 22_517), (9, 22_464), (10, 0), (12, 0)]);
+
+    // ibx#446: the captured first EUR.USD message (quote, trade, daily
+    // figures): the trade came with status 0, before the daily figures; no
+    // auto-execution flag.
+    #[test]
+    fn eur_usd_snapshot_message_gives_status_and_block_order() {
+        let marks = eur_usd_marks(&[tick_message(&[EUR_USD_QUOTE, EUR_USD_TRADE, EUR_USD_DAILY])]);
+        assert_eq!(marks.halted(), Some(0));
+        assert!(!marks.daily_first());
+        assert_eq!((marks.bid_auto(), marks.ask_auto()), (None, None));
+        // The daily figures first in another message.
+        let marks = eur_usd_marks(&[
+            tick_message(&[EUR_USD_QUOTE, EUR_USD_TRADE, EUR_USD_DAILY]),
+            tick_message(&[EUR_USD_DAILY, EUR_USD_TRADE]),
+        ]);
+        assert!(marks.daily_first());
+        // A trade with no status keeps the last one.
+        let marks = eur_usd_marks(&[
+            tick_message(&[EUR_USD_TRADE]),
+            tick_message(&[(false, 7, &[(2, 22_511)])]),
+        ]);
+        assert_eq!(marks.halted(), Some(0));
+        let marks = eur_usd_marks(&[tick_message(&[(false, 7, &[(2, 22_511), (13, 3)])])]);
+        assert_eq!(marks.halted(), Some(3));
+    }
+
+    // ibx#446: the auto-execution bits of a quote (both set on the
+    // captured SPY quote of 02/10/2026), from either attribute type; a
+    // trade's attribute is its status, not these bits.
+    #[test]
+    fn quote_auto_execution_bits() {
+        let marks = eur_usd_marks(&[tick_message(&[(false, 8, &[(0, 112_547), (7, 12)])])]);
+        assert_eq!((marks.bid_auto(), marks.ask_auto()), (Some(true), Some(true)));
+        let marks = eur_usd_marks(&[tick_message(&[(false, 8, &[(0, 112_547), (13, 4)])])]);
+        assert_eq!((marks.bid_auto(), marks.ask_auto()), (Some(true), Some(false)));
+        let marks = eur_usd_marks(&[
+            tick_message(&[(false, 8, &[(7, 12)])]),
+            tick_message(&[(false, 8, &[(7, 0)])]),
+        ]);
+        assert_eq!((marks.bid_auto(), marks.ask_auto()), (Some(false), Some(false)));
+        let marks = eur_usd_marks(&[tick_message(&[(false, 7, &[(2, 22_511), (13, 12)])])]);
+        assert_eq!((marks.bid_auto(), marks.ask_auto(), marks.halted()), (None, None, Some(0)));
     }
 
     // A stock acks both entries with one tag and one tick: every price is

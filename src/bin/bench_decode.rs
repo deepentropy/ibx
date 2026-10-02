@@ -104,7 +104,7 @@ fn main() {
             let ticks = tick_decoder::decode_ticks_35p(&payload_typical);
             for tick in &ticks {
                 if let Some(route) = market.route_server_tag(tick.server_tag) {
-                    market.apply_tick(route.instrument, route.price_tick, tick);
+                    market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
                 }
             }
         });
@@ -122,7 +122,7 @@ fn main() {
             let ticks = tick_decoder::decode_ticks_35p(&payload_typical);
             for tick in &ticks {
                 if let Some(route) = market.route_server_tag(tick.server_tag) {
-                    market.apply_tick(route.instrument, route.price_tick, tick);
+                    market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
                 }
             }
             shared.market.push_quote(id, market.quote(id));
@@ -143,7 +143,7 @@ fn main() {
             let ticks = tick_decoder::decode_ticks_35p(&payload_typical);
             for tick in &ticks {
                 if let Some(route) = market.route_server_tag(tick.server_tag) {
-                    market.apply_tick(route.instrument, route.price_tick, tick);
+                    market.apply_tick(route.instrument, route.price_tick, route.trade, tick);
                 }
             }
             shared.market.push_quote(id, market.quote(id));

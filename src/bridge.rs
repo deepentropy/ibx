@@ -205,6 +205,9 @@ struct BulletinStore {
 /// Lock-free quotes, TBT streams, real-time bars, depth updates, and news ticks.
 pub struct MarketDataState {
     quotes: Box<[SeqQuote; MAX_INSTRUMENTS]>,
+    /// What the farm told about each quote beside its fields, as
+    /// `QuoteMarks` words (ibx#446). Written only when they change.
+    marks: Box<[AtomicU64; MAX_INSTRUMENTS]>,
     /// InstrumentId counter — set by hot loop on RegisterInstrument.
     instrument_count: AtomicU64,
     tbt_trades: Mutex<Vec<TbtTrade>>,
@@ -266,6 +269,7 @@ impl MarketDataState {
     fn new() -> Self {
         Self {
             quotes: Box::new(std::array::from_fn(|_| SeqQuote::new())),
+            marks: Box::new(std::array::from_fn(|_| AtomicU64::new(0))),
             instrument_count: AtomicU64::new(0),
             tbt_trades: Mutex::new(Vec::with_capacity(256)),
             tbt_quotes: Mutex::new(Vec::with_capacity(256)),
@@ -377,6 +381,23 @@ impl MarketDataState {
     #[doc(hidden)]
     pub fn push_quote(&self, id: InstrumentId, quote: &Quote) {
         self.quotes[id as usize].write(quote);
+    }
+
+    /// Publish the marks of a quote (hot loop side); a store only when
+    /// they changed.
+    #[inline]
+    pub fn push_marks(&self, id: InstrumentId, marks: crate::types::QuoteMarks) {
+        let slot = &self.marks[id as usize];
+        if slot.load(Ordering::Relaxed) != marks.0 {
+            slot.store(marks.0, Ordering::Release);
+        }
+    }
+
+    /// The marks of a quote (ibx#446). Unchecked: `id` must be below
+    /// MAX_INSTRUMENTS.
+    #[inline]
+    pub fn marks(&self, id: InstrumentId) -> crate::types::QuoteMarks {
+        crate::types::QuoteMarks(self.marks[id as usize].load(Ordering::Acquire))
     }
 
     #[doc(hidden)] pub fn push_tbt_trade(&self, trade: TbtTrade) {
