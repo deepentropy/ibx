@@ -1494,9 +1494,12 @@ impl SnapWrapper {
 
 impl Wrapper for SnapWrapper {
     fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) { self.at(format!("error {req_id} {code} {text}")); }
-    fn tick_price(&mut self, req_id: i64, tt: i32, p: f64, _: &TickAttrib) { self.at(format!("price {req_id} {tt} {p}")); }
+    fn tick_price(&mut self, req_id: i64, tt: i32, p: f64, a: &TickAttrib) {
+        self.at(format!("price {req_id} {tt} {p} {}", if a.can_auto_execute { "auto" } else { "-" }));
+    }
     fn tick_size(&mut self, req_id: i64, tt: i32, s: f64) { self.at(format!("size {req_id} {tt} {s}")); }
     fn tick_string(&mut self, req_id: i64, tt: i32, v: &str) { self.at(format!("string {req_id} {tt} {v}")); }
+    fn tick_generic(&mut self, req_id: i64, tt: i32, v: f64) { self.at(format!("generic {req_id} {tt} {v}")); }
     fn tick_req_params(&mut self, req_id: i64, min_tick: f64, bbo: &str, perms: i64) {
         self.at(format!("params {req_id} {min_tick} {bbo} {perms}"));
     }
@@ -1561,7 +1564,7 @@ fn api_snapshot_live() {
         let mut seen = std::collections::HashSet::new();
         for (_, e) in &w.events {
             let parts: Vec<&str> = e.split(' ').collect();
-            if matches!(parts[0], "price" | "size" | "string") && parts[1] == req.to_string() {
+            if matches!(parts[0], "price" | "size" | "string" | "generic") && parts[1] == req.to_string() {
                 assert!(seen.insert((parts[0].to_string(), parts[2].to_string())), "req {req}: {e} twice");
             }
         }
@@ -1629,4 +1632,25 @@ fn api_eurusd_prices_live() {
         assert!(kinds.contains("1") && kinds.contains("2"), "req {req}: no bid or ask: {kinds:?}");
     }
     assert!(w.events.iter().any(|(_, e)| e.starts_with("params 801 0.00001 ")), "no request parameters with the bid/ask tick");
+    // As the reference (ibx#446): the market data type before the request
+    // parameters; a stream's bid and ask execute automatically, a currency
+    // pair snapshot's do not; the snapshot sends the trade's time before
+    // the quotes.
+    let pos = |pred: &dyn Fn(&str) -> bool| w.events.iter().position(|(_, e)| pred(e));
+    for req in [801, 802] {
+        let mdt = pos(&|e: &str| e == format!("mdt {req} 1"));
+        let params = pos(&|e: &str| e.starts_with(&format!("params {req} ")));
+        assert!(mdt.is_some() && params.is_some() && mdt < params, "req {req}: type {mdt:?}, parameters {params:?}");
+    }
+    for (req, auto) in [(801, "auto"), (802, "-")] {
+        for (_, e) in &w.events {
+            let parts: Vec<&str> = e.split(' ').collect();
+            if parts[0] == "price" && parts[1] == req.to_string() && matches!(parts[2], "1" | "2") {
+                assert_eq!(parts[4], auto, "req {req}: {e}");
+            }
+        }
+    }
+    let time = pos(&|e: &str| e.starts_with("string 802 45 "));
+    let bid = pos(&|e: &str| e.starts_with("price 802 1 "));
+    assert!(time.is_none() || time < bid, "snapshot: time {time:?} after the bid {bid:?}");
 }
