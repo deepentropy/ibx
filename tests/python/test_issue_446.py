@@ -137,19 +137,26 @@ def test_currency_pair_snapshot_in_the_reference_order():
     ]
 
 
-def test_currency_pair_stream_bid_ask_execute_automatically():
+def test_currency_pair_stream_in_the_reference_order():
+    """Captured 02/10/2026 (EUR.USD stream 9470): the trade's time, its
+    price with its size, its size again (a first 0 is sent), the volume
+    (0), high, low, close, then the book with both sizes again; the bid
+    and the ask execute automatically; no halted tick for status 0."""
     w = OrderRecorder()
     c = EClient(w)
     c._test_connect("TEST123")
     c._test_set_instrument_count(1)
     c._test_serve_commands_after(0)
     c.req_mkt_data(1, currency_pair(), "", False, False)
-    push_captured_eur_usd(c)
+    c._test_push_quote(0, bid=1.12546, ask=1.12547, last=1.1255, bid_size=2_000_000, ask_size=7_000_000,
+                       high=1.12585, low=1.1232, close=1.1243, timestamp=1790921787)
+    c._test_push_marks(0, halted=0, steps="quote,trade,time,daily", sizes_seen=True)
+    c._test_push_tick_req_params(0, 0.00001, "", 0)
     c._test_dispatch_once()
-    assert w.events[:2] == [("mdt", 1), ("params", 0.00001)]
-    prices = [e for e in w.events if e[0] == "price"]
-    assert prices == [
-        ("price", 1, 1.12547, True), ("price", 2, 1.12549, True), ("price", 4, 1.1255, False),
-        ("price", 6, 1.12585, False), ("price", 7, 1.1232, False), ("price", 9, 1.1243, False),
+    assert w.events == [
+        ("mdt", 1), ("params", 0.00001),
+        ("string", 45, "1790921787"), ("price", 4, 1.1255, False), ("size", 5, 0.0), ("size", 5, 0.0),
+        ("size", 8, 0.0), ("price", 6, 1.12585, False), ("price", 7, 1.1232, False), ("price", 9, 1.1243, False),
+        ("price", 1, 1.12546, True), ("size", 0, 2_000_000.0), ("price", 2, 1.12547, True), ("size", 3, 7_000_000.0),
+        ("size", 0, 2_000_000.0), ("size", 3, 7_000_000.0),
     ]
-    assert not [e for e in w.events if e[0] == "generic"]

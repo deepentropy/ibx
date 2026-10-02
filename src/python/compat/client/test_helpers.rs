@@ -73,12 +73,12 @@ impl EClient {
         let shared = self.shared_state()?;
         let ps = PRICE_SCALE as f64;
         let q = Quote {
-            bid: (bid * ps) as i64, ask: (ask * ps) as i64, last: (last * ps) as i64,
+            bid: (bid * ps).round() as i64, ask: (ask * ps).round() as i64, last: (last * ps).round() as i64,
             bid_size: bid_size * QTY_SCALE, ask_size: ask_size * QTY_SCALE,
             last_size: last_size * QTY_SCALE,
             volume: volume * QTY_SCALE,
-            open: (open * ps) as i64, high: (high * ps) as i64,
-            low: (low * ps) as i64, close: (close * ps) as i64,
+            open: (open * ps).round() as i64, high: (high * ps).round() as i64,
+            low: (low * ps).round() as i64, close: (close * ps).round() as i64,
             bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0,
             timestamp_ns: timestamp.map_or(1, |s| s * 1_000_000_000),
         };
@@ -88,14 +88,37 @@ impl EClient {
 
     /// Push the marks of a quote (test-only, ibx#446): the trade status,
     /// the bid and ask auto-execution bits, and whether the daily figures
-    /// came before the trade.
+    /// came before the trade. `steps` gives the updates of one message, in
+    /// its order: "quote", "daily", "trade", "time", "exchange";
+    /// `sizes_seen` marks every size and the volume as given by the farm.
     #[doc(hidden)]
-    #[pyo3(signature = (instrument, halted=None, auto_bits=None, daily_first=false))]
-    fn _test_push_marks(&self, instrument: u32, halted: Option<i64>, auto_bits: Option<i64>, daily_first: bool) -> PyResult<()> {
+    #[pyo3(signature = (instrument, halted=None, auto_bits=None, daily_first=false, steps=None, sizes_seen=false))]
+    fn _test_push_marks(
+        &self, instrument: u32, halted: Option<i64>, auto_bits: Option<i64>, daily_first: bool,
+        steps: Option<String>, sizes_seen: bool,
+    ) -> PyResult<()> {
         let mut marks = QuoteMarks::default();
         if let Some(status) = halted { marks.set_halted(status); }
         if let Some(bits) = auto_bits { marks.set_auto_bits(bits); }
         marks.set_daily_first(daily_first);
+        if let Some(steps) = steps {
+            marks.begin_message();
+            for step in steps.split(',').map(str::trim) {
+                match step {
+                    "quote" => marks.note_quote_update(),
+                    "daily" => marks.begin_daily(),
+                    "trade" => marks.begin_trade(),
+                    "time" => marks.trade_gives(false),
+                    "exchange" => marks.trade_gives(true),
+                    _ => return Err(PyRuntimeError::new_err(format!("unknown step {step}"))),
+                }
+            }
+        }
+        if sizes_seen {
+            for kind in [SizeKind::Bid, SizeKind::Ask, SizeKind::Last, SizeKind::Volume] {
+                marks.set_seen(kind);
+            }
+        }
         self.shared_state()?.market.push_marks(instrument, marks);
         Ok(())
     }

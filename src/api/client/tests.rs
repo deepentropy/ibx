@@ -5333,24 +5333,169 @@ fn snapshot_daily_figures_first_when_they_came_first() {
 }
 
 // ibx#446, captured 02/10/2026 (EUR.USD stream 9470): the market data
-// type before the request parameters; the bid and the ask execute
-// automatically, the last and the daily figures do not; no halted tick
-// for status 0.
+// type before the request parameters; then, for the first message, the
+// trade's time, its price with its size, its size again (a first size of
+// 0 is sent), the daily volume (0), high, low and close, then the book:
+// bid and ask with their sizes, then both sizes again; the bid and the ask
+// execute automatically; no halted tick for status 0. Then each book
+// update sends only what changed.
 #[test]
-fn eur_usd_stream_bid_ask_execute_automatically() {
+fn eur_usd_stream_in_the_reference_order() {
+    use crate::types::{QuoteMarks, SizeKind};
     let (client, rx, shared) = test_client();
     let engine = top_engine(rx);
     client.req_mkt_data(1, &eur_usd(), "", false, false).unwrap();
-    captured_eur_usd(&shared);
+    let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100_000;
+    let m = |n: i64| n * 1_000_000 * crate::types::QTY_SCALE;
+    let mut q = crate::types::Quote {
+        bid: p(112_546), ask: p(112_547), bid_size: m(2), ask_size: m(7), last: p(112_550),
+        close: p(112_430), high: p(112_585), low: p(112_320), timestamp_ns: 1_790_921_787 * 1_000_000_000,
+        ..Default::default()
+    };
+    let mut marks = QuoteMarks::default();
+    marks.begin_message();
+    marks.note_quote_update();
+    marks.begin_trade();
+    marks.trade_gives(false);
+    marks.begin_daily();
+    marks.set_halted(0);
+    for kind in [SizeKind::Bid, SizeKind::Ask, SizeKind::Last, SizeKind::Volume] {
+        marks.set_seen(kind);
+    }
+    shared.market.push_quote(5, &q);
+    shared.market.push_marks(5, marks);
+    shared.market.push_tick_req_params(crate::bridge::TickReqParams {
+        instrument: 5, min_tick: 0.00001, bbo_exchange: String::new(), snapshot_permissions: 0,
+    });
     let mut w = SeqRec::default();
     client.process_msgs(&mut w);
-    assert_eq!(&w.events[..2], ["mdt:1:1", "params:1:0.00001::0"]);
-    let prices: Vec<&String> = w.events.iter().filter(|e| e.starts_with("price:")).collect();
-    assert_eq!(prices, [
-        "price:1:1:1.12547:auto", "price:1:2:1.12549:auto", "price:1:4:1.1255:-",
-        "price:1:6:1.12585:-", "price:1:7:1.1232:-", "price:1:9:1.1243:-",
+    assert_eq!(w.events, vec![
+        "mdt:1:1", "params:1:0.00001::0",
+        "string:1:45:1790921787", "price:1:4:1.1255:-", "size:1:5:0", "size:1:5:0",
+        "size:1:8:0", "price:1:6:1.12585:-", "price:1:7:1.1232:-", "price:1:9:1.1243:-",
+        "price:1:1:1.12546:auto", "size:1:0:2000000", "price:1:2:1.12547:auto", "size:1:3:7000000",
+        "size:1:0:2000000", "size:1:3:7000000",
     ]);
-    assert!(!w.events.iter().any(|e| e.starts_with("generic:")), "{:?}", w.events);
+    // The next book updates, as captured.
+    let updates: [(i64, i64, i64, i64, &[&str]); 5] = [
+        (112_546, 2, 112_547, 6, &["size:1:3:6000000"]),
+        (112_546, 3, 112_547, 3, &["size:1:0:3000000", "size:1:3:3000000"]),
+        (112_546, 2, 112_547, 4, &["size:1:0:2000000", "size:1:3:4000000"]),
+        (112_546, 2, 112_547, 6, &["size:1:3:6000000"]),
+        (112_547, 1, 112_549, 19, &[
+            "price:1:1:1.12547:auto", "size:1:0:1000000", "price:1:2:1.12549:auto", "size:1:3:19000000",
+            "size:1:0:1000000", "size:1:3:19000000",
+        ]),
+    ];
+    for (bid, bid_size, ask, ask_size, want) in updates {
+        q.bid = p(bid);
+        q.bid_size = m(bid_size);
+        q.ask = p(ask);
+        q.ask_size = m(ask_size);
+        marks.begin_message();
+        marks.note_quote_update();
+        shared.market.push_quote(5, &q);
+        shared.market.push_marks(5, marks);
+        let mut w = SeqRec::default();
+        client.process_msgs(&mut w);
+        assert_eq!(w.events, want);
+    }
+    drop(engine);
+}
+
+// ibx#446, captured 28/09/2026 (AAPL stream 9440, a request on a quote
+// that already had data): the first poll sends all the quote in one step,
+// with the halted state; the halted state then goes out again in each
+// step (daily figures, trade time, trade exchange, trade price) until the
+// next book update; each message's steps follow its order.
+#[test]
+fn stock_stream_joining_a_quote_in_the_reference_order() {
+    use crate::types::{QuoteMarks, SizeKind};
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    shared.reference.set_smart_components(["K", "P", "Q", "V"].iter().enumerate().map(|(bit, letter)| {
+        crate::types::SmartComponent { bit_number: bit as i32, exchange: letter.to_string(), exchange_letter: letter.to_string() }
+    }).collect());
+    let aapl = Contract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+        ..Default::default() };
+    client.req_mkt_data(1, &aapl, "", false, false).unwrap();
+    client.core.join_stream(5);
+    let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100;
+    let n = |shares: i64| shares * crate::types::QTY_SCALE;
+    let (k, pq, q_, v) = (1, 2 | 4, 4, 8);
+    let mut q = crate::types::Quote {
+        bid: p(34_233), ask: p(34_237), last: p(34_235), bid_size: n(200), ask_size: n(200), last_size: n(40),
+        volume: n(140_671), high: p(34_299), low: p(34_017), close: p(34_107), open: p(34_022),
+        timestamp_ns: 1_790_604_766 * 1_000_000_000, bid_exch_mask: k | q_, ask_exch_mask: pq, last_exch_mask: 0,
+    };
+    let mut marks = QuoteMarks::default();
+    marks.begin_message();
+    marks.set_halted(0);
+    for kind in [SizeKind::Bid, SizeKind::Ask, SizeKind::Last, SizeKind::Volume] {
+        marks.set_seen(kind);
+    }
+    shared.market.push_quote(5, &q);
+    shared.market.push_marks(5, marks);
+    let mut w = SeqRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec![
+        "mdt:1:1",
+        "price:1:1:342.33:auto", "size:1:0:200", "price:1:2:342.37:auto", "size:1:3:200",
+        "price:1:4:342.35:-", "size:1:5:40", "size:1:0:200", "size:1:3:200", "size:1:5:40", "size:1:8:140671",
+        "price:1:6:342.99:-", "price:1:7:340.17:-", "price:1:9:341.07:-", "price:1:14:340.22:-",
+        "string:1:32:KQ", "string:1:33:PQ", "string:1:45:1790604766", "generic:1:49:0",
+    ]);
+    // One message: its updates in order, with the quote changes.
+    let mut message = |q: &crate::types::Quote, quote: bool, steps: &[&str]| {
+        marks.begin_message();
+        if quote { marks.note_quote_update(); }
+        for step in steps {
+            match *step {
+                "daily" => marks.begin_daily(),
+                "trade" => marks.begin_trade(),
+                "time" => marks.trade_gives(false),
+                _ => marks.trade_gives(true),
+            }
+        }
+        shared.market.push_quote(5, q);
+        shared.market.push_marks(5, marks);
+        let mut w = SeqRec::default();
+        client.process_msgs(&mut w);
+        w.events
+    };
+    // 16:12:47.239: volume, then a trade with only its time.
+    q.volume = n(140_672);
+    q.timestamp_ns = 1_790_604_767 * 1_000_000_000;
+    assert_eq!(message(&q, false, &["daily", "trade", "time"]), vec![
+        "size:1:8:140672", "generic:1:49:0", "string:1:45:1790604767", "generic:1:49:0", "generic:1:49:0",
+    ]);
+    // 16:12:47.488: volume, then a trade with only its exchange.
+    q.volume = n(140_676);
+    assert_eq!(message(&q, false, &["daily", "trade", "exchange"]), vec![
+        "size:1:8:140676", "generic:1:49:0", "generic:1:49:0", "generic:1:49:0",
+    ]);
+    // 16:12:47.738: the book, volume, a trade with time, exchange and size.
+    q.bid_size = n(240);
+    q.ask_size = n(240);
+    q.bid_exch_mask = k | q_ | v;
+    q.volume = n(140_678);
+    q.last_size = n(80);
+    q.timestamp_ns = 1_790_604_768 * 1_000_000_000;
+    assert_eq!(message(&q, true, &["daily", "trade", "time", "exchange"]), vec![
+        "size:1:8:140678", "generic:1:49:0", "string:1:45:1790604768", "generic:1:49:0", "generic:1:49:0",
+        "size:1:5:80", "generic:1:49:0", "size:1:0:240", "size:1:3:240", "string:1:32:KQV", "generic:1:49:0",
+    ]);
+    // 16:12:47.991: after the book update, no halted state any more.
+    q.bid = p(34_234);
+    q.bid_size = n(160);
+    q.bid_exch_mask = k;
+    q.volume = n(140_687);
+    q.last = p(34_236);
+    q.last_size = n(320);
+    assert_eq!(message(&q, true, &["daily", "trade", "exchange"]), vec![
+        "size:1:8:140687", "price:1:4:342.36:-", "size:1:5:320", "size:1:5:320",
+        "price:1:1:342.34:auto", "size:1:0:160", "size:1:0:160", "string:1:32:K",
+    ]);
     drop(engine);
 }
 
@@ -5367,14 +5512,14 @@ fn option_stream_auto_execution_comes_from_the_farm() {
     shared.market.push_quote(5, &crate::types::Quote { bid: s, ask: 2 * s, ..Default::default() });
     let mut w = SeqRec::default();
     client.process_msgs(&mut w);
-    assert_eq!(w.events, vec!["mdt:1:1", "price:1:1:1:-", "price:1:2:2:-"]);
+    assert_eq!(w.events, vec!["mdt:1:1", "price:1:1:1:-", "size:1:0:0", "price:1:2:2:-", "size:1:3:0"]);
     let mut marks = crate::types::QuoteMarks::default();
     marks.set_auto_bits(4);
     shared.market.push_marks(5, marks);
     shared.market.push_quote(5, &crate::types::Quote { bid: 3 * s, ask: 4 * s, ..Default::default() });
     let mut w = SeqRec::default();
     client.process_msgs(&mut w);
-    assert_eq!(w.events, vec!["price:1:1:3:auto", "price:1:2:4:-"]);
+    assert_eq!(w.events, vec!["price:1:1:3:auto", "size:1:0:0", "price:1:2:4:-", "size:1:3:0"]);
     drop(engine);
 }
 

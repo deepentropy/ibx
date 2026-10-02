@@ -617,6 +617,107 @@ pub enum ModifyPlan {
     Refused { code: i64, message: String },
 }
 
+/// What a stream sent last, by instrument (ibx#446).
+#[derive(Debug, Default, Clone)]
+pub struct StreamState {
+    fields: [i64; 15],
+    /// The sizes and volume sent once (`SizeKind` bits).
+    sizes_sent: u8,
+    /// The farm message count of the quote at the last poll.
+    seq: u8,
+    /// The halted and volatility-halted bits of the last trade status.
+    halted_bits: u8,
+    /// The halted state goes out in each step until the next book update.
+    halted_pending: bool,
+    /// The stream joined a quote that already had data.
+    joined: bool,
+}
+
+/// The fields of a stream step, in the order the reference sends them
+/// (indexes of the polled quote fields).
+const STEP_ALL: [usize; 14] = [0, 1, 2, 3, 4, 5, 8, 6, 7, 9, 10, 12, 13, 11];
+/// The delayed data sender's order: the volume after the low.
+const STEP_ALL_DELAYED: [usize; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 11];
+const STEP_DAILY: [usize; 5] = [8, 6, 7, 9, 10];
+const STEP_DAILY_DELAYED: [usize; 5] = [6, 7, 8, 9, 10];
+const STEP_TIME: [usize; 1] = [11];
+const STEP_NONE: [usize; 0] = [];
+const STEP_LAST: [usize; 2] = [2, 5];
+const STEP_QUOTE: [usize; 6] = [0, 1, 3, 4, 12, 13];
+
+/// The size kind of a polled size field.
+fn stream_size_kind(idx: usize) -> crate::types::SizeKind {
+    use crate::types::SizeKind;
+    match idx { 3 => SizeKind::Bid, 4 => SizeKind::Ask, 5 => SizeKind::Last, _ => SizeKind::Volume }
+}
+
+/// The callbacks of a stream poll being built: each field still to send
+/// goes out once, in the step that takes it.
+struct StreamPass<'a> {
+    ticks: Vec<MdTick>,
+    todo: [bool; 15],
+    fields: &'a [i64; 15],
+    delayed: bool,
+    shared: &'a SharedState,
+    bid_auto: bool,
+    ask_auto: bool,
+}
+
+impl StreamPass<'_> {
+    fn api(&self, tick_type: i32) -> i32 {
+        if self.delayed { delayed_tick_type(tick_type) } else { tick_type }
+    }
+
+    fn price(&mut self, tick_type: i32, idx: usize, can_auto_execute: bool) {
+        let tick_type = self.api(tick_type);
+        self.ticks.push(MdTick::Price { tick_type, value: self.fields[idx] as f64 / PRICE_SCALE_F, can_auto_execute });
+    }
+
+    fn size(&mut self, tick_type: i32, idx: usize) {
+        let tick_type = self.api(tick_type);
+        self.ticks.push(MdTick::Size { tick_type, value: self.fields[idx] as f64 / QTY_SCALE as f64 });
+    }
+
+    /// Send the fields of a step still to send; whether one was.
+    fn take(&mut self, step: &[usize]) -> bool {
+        let before = self.ticks.len();
+        for &idx in step {
+            if !std::mem::take(&mut self.todo[idx]) {
+                continue;
+            }
+            match idx {
+                // A price comes with its size.
+                0 => { self.price(TICK_BID, 0, self.bid_auto); self.size(TICK_BID_SIZE, 3); }
+                1 => { self.price(TICK_ASK, 1, self.ask_auto); self.size(TICK_ASK_SIZE, 4); }
+                2 => { self.price(TICK_LAST, 2, false); self.size(TICK_LAST_SIZE, 5); }
+                3 => self.size(TICK_BID_SIZE, 3),
+                4 => self.size(TICK_ASK_SIZE, 4),
+                5 => self.size(TICK_LAST_SIZE, 5),
+                8 => self.size(TICK_VOLUME, 8),
+                6 => self.price(TICK_HIGH, 6, false),
+                7 => self.price(TICK_LOW, 7, false),
+                9 => self.price(TICK_CLOSE, 9, false),
+                10 => self.price(TICK_OPEN, 10, false),
+                11 => self.ticks.push(MdTick::Text {
+                    tick_type: TICK_LAST_TIMESTAMP, value: (self.fields[11] / 1_000_000_000).to_string(),
+                }),
+                12 | 13 => {
+                    let tick_type = if idx == 12 { TICK_BID_EXCHANGE } else { TICK_ASK_EXCHANGE };
+                    self.ticks.push(MdTick::Text { tick_type, value: render_exchange_mask(self.fields[idx], self.shared) });
+                }
+                _ => {}
+            }
+        }
+        self.ticks.len() > before
+    }
+
+    fn halted(&mut self, value: Option<f64>) {
+        if let Some(value) = value {
+            self.ticks.push(MdTick::Generic { tick_type: TICK_HALTED, value });
+        }
+    }
+}
+
 // ── ClientCore ──
 
 /// Shared subscription tracking and dispatch preparation logic.
@@ -630,7 +731,7 @@ pub struct ClientCore {
     // con_id → InstrumentId for find_or_register_instrument lookup
     pub con_id_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
     // Change detection for quote polling
-    pub last_quotes: Mutex<HashMap<InstrumentId, [i64; 15]>>,
+    pub last_quotes: Mutex<HashMap<InstrumentId, StreamState>>,
     /// Running plain snapshots by request id (ibx#446), their count read
     /// without the lock, and the per-second snapshot limiter.
     snapshot_reqs: Mutex<HashMap<i64, crate::control::snapshot::PlainSnapshot>>,
@@ -1020,6 +1121,7 @@ impl ClientCore {
         // A quote ibx subscribed to for the P&L becomes the caller's
         // subscription: no second subscription to the server.
         if let Some(instrument_id) = self.pnl_quotes.lock().unwrap().active.remove(&con_id) {
+            self.join_stream(instrument_id);
             self.con_id_to_instrument.lock().unwrap().insert(con_id, instrument_id);
             self.req_to_instrument.lock().unwrap().insert(req_id, instrument_id);
             self.instrument_to_req.lock().unwrap().insert(instrument_id, req_id);
@@ -2187,10 +2289,22 @@ impl ClientCore {
 
     // ── Dispatch preparation methods ──
 
-    /// Poll quotes for a single instrument and return tick events.
-    /// Updates last_quotes internally. A real-time bid or ask can execute
-    /// automatically, as the reference sets it for every contract but an
-    /// option on the exchanges that say it per quote (ibx#446).
+    /// Poll quotes for a single instrument and return its stream callbacks,
+    /// as the reference sends them (ibx#446). The reference sends, for each
+    /// update of a farm message, what changed since it last sent it: the
+    /// trade and daily updates in the message's order as it reads them (a
+    /// trade in up to three steps: its time, its exchange, its price and
+    /// size), then the bid/ask book. Inside one step the order is fixed:
+    /// bid, ask, last (each with its size), bid size, ask size, last size,
+    /// volume, high, low, close, open, bid and ask exchanges, last time,
+    /// halted. A first size or volume is sent even when it is 0. The halted
+    /// state is sent when its halted or volatility-halted bit changes, then
+    /// again in each step until the next book update. A stream never sends
+    /// the last exchange. When several messages came since the last poll,
+    /// their steps are merged in the order of the last one.
+    /// A real-time bid or ask can execute automatically, as the reference
+    /// sets it for every contract but an option on the exchanges that say
+    /// it per quote.
     pub fn poll_instrument_ticks(
         &self,
         shared: &SharedState,
@@ -2198,6 +2312,7 @@ impl ClientCore {
         req_id: i64,
     ) -> QuotePollResult {
         let q = shared.market.quote(iid);
+        let marks = shared.market.marks(iid);
         let fields = [
             q.bid, q.ask, q.last, q.bid_size, q.ask_size, q.last_size,
             q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
@@ -2206,83 +2321,112 @@ impl ClientCore {
 
         // Single lock acquisition for both read and write of last_quotes.
         let mut map = self.last_quotes.lock().unwrap();
-        let last = map.get(&iid).copied().unwrap_or([0i64; 15]);
-
-        let mut ticks = Vec::new();
-        let mut delivered = false;
-
-        // Price ticks: (field_index, tick_type)
-        const PRICE_TICKS: &[(usize, i32)] = &[
-            (0, TICK_BID), (1, TICK_ASK), (2, TICK_LAST),
-            (6, TICK_HIGH), (7, TICK_LOW), (9, TICK_CLOSE), (10, TICK_OPEN),
-        ];
-        let mut quote_side = false;
-        for &(idx, tt) in PRICE_TICKS {
-            if fields[idx] != last[idx] {
-                quote_side |= idx < 2;
-                ticks.push(MdTick::Price {
-                    tick_type: tt, value: fields[idx] as f64 / PRICE_SCALE_F, can_auto_execute: false,
-                });
-                delivered = true;
+        let st = map.entry(iid).or_default();
+        let mut todo = [false; 15];
+        for (idx, pending) in todo.iter_mut().enumerate() {
+            *pending = match idx {
+                3 | 4 | 5 | 8 => {
+                    let kind = stream_size_kind(idx);
+                    (marks.seen(kind) || fields[idx] != 0)
+                        && (st.sizes_sent & (1 << kind as u8) == 0 || fields[idx] != st.fields[idx])
+                }
+                12 | 13 => fields[idx] != st.fields[idx],
+                14 => false,
+                _ => fields[idx] != 0 && fields[idx] != st.fields[idx],
+            };
+        }
+        if let Some(status) = marks.halted() {
+            let bits = (status & 3) as u8;
+            if bits != st.halted_bits {
+                st.halted_bits = bits;
+                st.halted_pending = true;
             }
         }
+        let delayed = self.delayed_reqs.lock().unwrap().contains(&req_id);
+        let (bid_auto, ask_auto) = if delayed {
+            (false, false)
+        } else if self.farm_auto_reqs.lock().unwrap().contains(&req_id) {
+            (marks.bid_auto() == Some(true), marks.ask_auto() == Some(true))
+        } else {
+            (true, true)
+        };
+        let halted = if delayed { None } else { marks.halted().map(crate::types::QuoteMarks::halted_tick_value) };
+        let mut pending = st.halted_pending;
 
-        // Size ticks: (field_index, tick_type)
-        const SIZE_TICKS: &[(usize, i32)] = &[
-            (3, TICK_BID_SIZE), (4, TICK_ASK_SIZE), (5, TICK_LAST_SIZE), (8, TICK_VOLUME),
-        ];
-        for &(idx, tt) in SIZE_TICKS {
-            if fields[idx] != last[idx] {
-                ticks.push(MdTick::Size { tick_type: tt, value: fields[idx] as f64 / QTY_SCALE as f64 });
-                delivered = true;
+        let mut out = StreamPass { ticks: Vec::new(), todo, fields: &fields, delayed, shared, bid_auto, ask_auto };
+        let new_messages = marks.message_seq().wrapping_sub(st.seq) & 7;
+        st.seq = marks.message_seq();
+        if std::mem::take(&mut st.joined) {
+            // A stream on a quote that already had data: its first step
+            // sends all of it (the reference marks every known field when
+            // the request joins the record).
+            out.take(if delayed { &STEP_ALL_DELAYED } else { &STEP_ALL });
+            pending = halted.is_some();
+            if pending { out.halted(halted); }
+        } else {
+            let mut steps: [Option<&[usize]>; 50] = [None; 50];
+            let mut n = 0;
+            let mut push = |step: &'static [usize]| if n < steps.len() { steps[n] = Some(step); n += 1; };
+            let exact = new_messages == 1;
+            if exact {
+                for pass in marks.passes() {
+                    match pass {
+                        crate::types::Pass::Daily => push(if delayed { &STEP_DAILY_DELAYED } else { &STEP_DAILY }),
+                        crate::types::Pass::Trade { time, exchange } => {
+                            if time { push(&STEP_TIME); }
+                            if exchange { push(&STEP_NONE); }
+                            push(&STEP_LAST);
+                        }
+                    }
+                }
+                if marks.quote_update() {
+                    push(&STEP_QUOTE);
+                }
+            } else {
+                let daily: &'static [usize] = if delayed { &STEP_DAILY_DELAYED } else { &STEP_DAILY };
+                if marks.daily_first() { push(daily); }
+                push(&STEP_TIME);
+                push(&STEP_LAST);
+                if !marks.daily_first() { push(daily); }
+                push(&STEP_QUOTE);
+            }
+            for step in steps[..n].iter().flatten() {
+                let sent = out.take(step);
+                // Without the message's steps, a step with nothing sent did
+                // not happen.
+                if exact || sent {
+                    if pending { out.halted(halted); }
+                    if std::ptr::eq(*step, &STEP_QUOTE[..]) {
+                        pending = false;
+                    }
+                }
+            }
+            // Fields no step of the message took.
+            if out.take(if delayed { &STEP_ALL_DELAYED } else { &STEP_ALL }) && pending {
+                out.halted(halted);
             }
         }
-        let priced = ticks.len();
+        st.halted_pending = pending;
 
-        // Exchange-code string ticks, when the bitmask changes.
-        const EXCH_TICKS: &[(usize, i32)] = &[
-            (12, TICK_BID_EXCHANGE), (13, TICK_ASK_EXCHANGE), (14, TICK_LAST_EXCHANGE),
-        ];
-        for &(idx, tt) in EXCH_TICKS {
-            if fields[idx] != last[idx] {
-                ticks.push(MdTick::Text { tick_type: tt, value: render_exchange_mask(fields[idx], shared) });
-                delivered = true;
+        st.fields = fields;
+        for idx in [3, 4, 5, 8] {
+            let kind = stream_size_kind(idx);
+            if marks.seen(kind) || fields[idx] != 0 {
+                st.sizes_sent |= 1 << kind as u8;
             }
         }
-
-        // The last trade time, in epoch seconds.
-        if fields[11] != last[11] && fields[11] != 0 {
-            ticks.push(MdTick::Text { tick_type: TICK_LAST_TIMESTAMP, value: (fields[11] / 1_000_000_000).to_string() });
-        }
-
-        map.insert(iid, fields);
         drop(map);
 
-        if priced > 0 {
-            // Delayed data comes with the delayed tick types, as the reference
-            // (captured 28/09/2026: 66-68, 72-76) (ibx#447).
-            if self.delayed_reqs.lock().unwrap().contains(&req_id) {
-                for tick in &mut ticks[..priced] {
-                    if let MdTick::Price { tick_type, .. } | MdTick::Size { tick_type, .. } = tick {
-                        *tick_type = delayed_tick_type(*tick_type);
-                    }
-                }
-            } else if quote_side {
-                let (bid, ask) = if self.farm_auto_reqs.lock().unwrap().contains(&req_id) {
-                    let marks = shared.market.marks(iid);
-                    (marks.bid_auto() == Some(true), marks.ask_auto() == Some(true))
-                } else {
-                    (true, true)
-                };
-                for tick in &mut ticks[..priced] {
-                    if let MdTick::Price { tick_type, can_auto_execute, .. } = tick {
-                        *can_auto_execute = match *tick_type { TICK_BID => bid, TICK_ASK => ask, _ => false };
-                    }
-                }
-            }
-        }
-
+        let ticks = out.ticks;
+        let delivered = !ticks.is_empty();
         QuotePollResult { ticks, delivered }
+    }
+
+    /// A request joins a quote that already has data, the internal P&L
+    /// subscription's: its first poll sends all of it, as the reference
+    /// marks every known field when a request joins its record (ibx#446).
+    pub(crate) fn join_stream(&self, instrument: InstrumentId) {
+        self.last_quotes.lock().unwrap().insert(instrument, StreamState { joined: true, ..Default::default() });
     }
 
     /// Note a stream whose bid and ask auto-execution comes from the farm
@@ -2342,8 +2486,8 @@ impl ClientCore {
 
     /// The ticks of a plain snapshot not sent yet, in the reference's
     /// order (ibx#446). The reference sends what each update of a message
-    /// changed as it applies it: the trade (its time, its exchange, then
-    /// its price with its size and the halted state) and the daily figures
+    /// changed as it applies it: the trade (its time, then its price with
+    /// its size and the halted state; never its exchange) and the daily figures
     /// (volume, high, low, close, open; for delayed data high, low, volume,
     /// close, open) in the message's order, then the quotes (bid and ask,
     /// each with its size, then their exchanges). A snapshot's bid or ask
@@ -2371,9 +2515,6 @@ impl ClientCore {
                 ticks.push(MdTick::Text {
                     tick_type: TICK_LAST_TIMESTAMP, value: (q.timestamp_ns / 1_000_000_000).to_string(),
                 });
-            }
-            if q.last_exch_mask != 0 && snap.take(TICK_LAST_EXCHANGE) {
-                ticks.push(MdTick::Text { tick_type: TICK_LAST_EXCHANGE, value: render_exchange_mask(q.last_exch_mask, shared) });
             }
             if q.last != 0 && snap.take(api(4)) {
                 ticks.push(price(api(4), q.last, false));
