@@ -208,6 +208,25 @@ pub(crate) struct DepthEntry {
     pub(crate) live: bool,
 }
 
+/// The reference's own subscription of generic tick 626, the exchange map
+/// of a BBO exchange (ibx#441): sent at the first acknowledgement that
+/// names the BBO exchange, cancelled once the map came.
+#[derive(Debug, Clone)]
+pub(crate) struct ExchangeMapSub {
+    pub(crate) req_id: u32,
+    pub(crate) farm: FarmId,
+    pub(crate) code: String,
+    pub(crate) sec_type_id: u8,
+    pub(crate) con_id: String,
+    pub(crate) exchange: String,
+    pub(crate) sec_type: String,
+    /// From its acknowledgement.
+    pub(crate) server_tag: Option<u32>,
+}
+
+/// The generic tick of the exchange map ("EXCH MAP").
+const EXCHANGE_MAP_TICK: &str = "626";
+
 /// A depth request of the client (#452).
 #[derive(Debug, Clone)]
 pub(crate) struct DepthReq {
@@ -247,6 +266,8 @@ pub(crate) struct FarmState {
     /// The farm the messages being handled came from (#445): server tags
     /// are numbered by each farm.
     pub(crate) rx_farm: FarmId,
+    /// Exchange map subscriptions on the wire (ibx#441).
+    pub(crate) exchange_map_subs: Vec<ExchangeMapSub>,
 }
 
 impl FarmState {
@@ -268,6 +289,7 @@ impl FarmState {
             routing: None,
             md_entries: Vec::new(),
             rx_farm: PRIMARY_MD,
+            exchange_map_subs: Vec::new(),
         }
     }
 
@@ -387,7 +409,7 @@ impl FarmState {
             b"P" => self.handle_tick_data(msg, context, shared, event_tx),
             b"Q" => {
                 log::info!("Farm 35=Q subscription ack received");
-                self.handle_subscription_ack(msg, context, shared);
+                self.handle_subscription_ack(msg, farm_conn, context, shared, hb);
             }
             b"0" => {}
             b"1" => {
@@ -409,7 +431,9 @@ impl FarmState {
             b"UT" | b"UM" | b"RL" => super::ccp::handle_account_update(msg, context, shared),
             b"UP" => super::ccp::handle_portfolio_message(msg, context, shared, event_tx),
             b"Y" => self.handle_depth_35y(msg, shared),
-            b"G" => self.handle_tick_news(msg, context, shared, event_tx),
+            b"G" => if !self.handle_exchange_map(msg, farm_conn, shared, hb) {
+                self.handle_tick_news(msg, context, shared, event_tx)
+            },
             b"3" => self.handle_md_reject(msg, context, shared, farm_conn, hb),
             b"T" => {
                 // The routing table, when it came after the logon (#445).
@@ -507,7 +531,14 @@ impl FarmState {
         self.tick_buf = ticks;
     }
 
-    fn handle_subscription_ack(&mut self, msg: &[u8], context: &mut Context, shared: &SharedState) {
+    fn handle_subscription_ack(
+        &mut self,
+        msg: &[u8],
+        sink: &mut dyn FixSink,
+        context: &mut Context,
+        shared: &SharedState,
+        hb: &mut HeartbeatState,
+    ) {
         let body = match find_body_after_tag(msg, b"35=Q\x01") {
             Some(b) => b,
             None => return,
@@ -529,6 +560,14 @@ impl FarmState {
             }
         };
         let min_tick: f64 = parts[2].parse().unwrap_or(0.01);
+
+        // The acknowledgement of an exchange map subscription (ibx#441).
+        let rx_farm = self.rx_farm;
+        if let Some(sub) = self.exchange_map_subs.iter_mut().find(|s| s.req_id == req_id && s.farm == rx_farm) {
+            log::info!("Exchange map {}:{} subscribed: server_tag {}", sub.code, sub.sec_type_id, server_tag);
+            sub.server_tag = Some(server_tag);
+            return;
+        }
 
         // Depth ack: always map the server_tag if this req_id is a depth subscription,
         // even when depth_levels=0 (book empty now but updates may arrive later).
@@ -572,6 +611,7 @@ impl FarmState {
         }
         // A regulatory snapshot (ibx#446): its permission and BBO exchange
         // go to its fetcher, never as tickReqParams.
+        self.observe_exchange_map(instrument, parts.get(5).copied(), sink, context, shared, hb);
         if self.snapshot_reqs.iter().any(|(id, _)| *id == req_id) {
             let permissions = parts.get(4).and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0);
             let bbo = parts.get(5).map(|s| s.trim().to_string()).unwrap_or_default();
@@ -595,6 +635,96 @@ impl FarmState {
                 shared.market.push_tick_req_params(params);
             }
         }
+    }
+
+    /// The BBO exchange code of a market data acknowledgement (ibx#441), as
+    /// the reference keeps it: the "no exchange" value is ignored; the
+    /// contract's key (code, security type) becomes known, and the first
+    /// time a key with a code is seen the exchange map is asked with the
+    /// gateway's own generic tick 626 on the farm of the acknowledgement.
+    fn observe_exchange_map(
+        &mut self,
+        instrument: InstrumentId,
+        code: Option<&str>,
+        sink: &mut dyn FixSink,
+        context: &Context,
+        shared: &SharedState,
+        hb: &mut HeartbeatState,
+    ) {
+        let Some(code) = code.map(str::trim) else { return };
+        if code == "ffffffff" {
+            return;
+        }
+        let (sec_type, exchange) = context.market.order_routing(instrument);
+        let Some(sec_type_id) = crate::types::sec_type_id(&sec_type) else { return };
+        shared.reference.observe_exchange_map(instrument, code, sec_type_id);
+        // Asked once per key; again only when the farm that was asked it
+        // was lost before the map came.
+        let waiting = matches!(shared.reference.exchange_map(code, Some(sec_type_id)), crate::bridge::ExchangeMapState::Waiting);
+        if code.is_empty() || !waiting
+            || self.exchange_map_subs.iter().any(|s| s.code == code && s.sec_type_id == sec_type_id)
+        {
+            return;
+        }
+        let Some(con_id) = context.market.con_id(instrument) else { return };
+        let sub = ExchangeMapSub {
+            req_id: self.next_md_req_id,
+            farm: self.rx_farm,
+            code: code.to_string(),
+            sec_type_id,
+            con_id: con_id.to_string(),
+            exchange,
+            sec_type: fix_sec_type(&sec_type).to_string(),
+            server_tag: None,
+        };
+        self.next_md_req_id += 1;
+        log::info!("Starting to observe the exchange map {}:{} (instrument {}, id {})", code, sec_type, instrument, sub.req_id);
+        if self.send_exchange_map_request(&sub, "1", sink, hb) {
+            self.exchange_map_subs.push(sub);
+        }
+    }
+
+    /// Subscribe ("1") or cancel ("2") an exchange map, as the reference
+    /// writes it (captured 02/10/2026):
+    /// `35=V|263=1|146=1|262=3|6008=265598|207=BEST|167=CS|264=626|6088=Socket`.
+    fn send_exchange_map_request(&self, sub: &ExchangeMapSub, action: &str, sink: &mut dyn FixSink, hb: &mut HeartbeatState) -> bool {
+        let id = sub.req_id.to_string();
+        let ts = chrono_free_timestamp();
+        let sent = sink.send_comp(&[
+            (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
+            (fix::TAG_SENDING_TIME, &ts),
+            (263, action),
+            (146, "1"),
+            (262, &id),
+            (6008, &sub.con_id),
+            (207, &sub.exchange),
+            (167, &sub.sec_type),
+            (264, EXCHANGE_MAP_TICK),
+            (6088, "Socket"),
+        ]);
+        if sent && sub.farm == PRIMARY_MD {
+            hb.last_farm_sent = Instant::now();
+        }
+        sent
+    }
+
+    /// A 35=G generic tick frame that carries an exchange map (ibx#441):
+    /// the map is kept for its key and the subscription cancelled. False
+    /// when the frame is not for an exchange map subscription.
+    fn handle_exchange_map(&mut self, msg: &[u8], sink: &mut dyn FixSink, shared: &SharedState, hb: &mut HeartbeatState) -> bool {
+        let Some(body) = find_body_after_tag(msg, b"35=G\x01") else { return false };
+        let Some(tag) = body.get(2..6).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])) else { return false };
+        let rx_farm = self.rx_farm;
+        let Some(pos) = self.exchange_map_subs.iter().position(|s| s.farm == rx_farm && s.server_tag == Some(tag)) else {
+            return false;
+        };
+        let sub = self.exchange_map_subs.remove(pos);
+        let text = body.get(6).and_then(|&len| body.get(7..7 + len as usize)).map(exchange_map_text).unwrap_or_default();
+        let map = parse_exchange_map(&text);
+        log::info!("Exchange map {}:{}: {} exchanges", sub.code, sub.sec_type_id, map.len());
+        shared.reference.set_exchange_map(&sub.code, sub.sec_type_id, map);
+        self.send_exchange_map_request(&sub, "2", sink, hb);
+        true
     }
 
     fn handle_ticker_setup(&mut self, msg: &[u8], context: &mut Context) {
@@ -803,6 +933,9 @@ impl FarmState {
     /// tags are gone; the subscriptions stay, to be sent again. Quotes of
     /// the contracts it served are zeroed.
     pub(crate) fn farm_lost(&mut self, farm: FarmId, context: &mut Context) {
+        // An exchange map not received yet is asked again at the next
+        // acknowledgement of its code (ibx#441).
+        self.exchange_map_subs.retain(|s| s.farm != farm);
         let lost: Vec<MdEntry> = self.md_entries.iter().filter(|e| e.farm == farm).cloned().collect();
         self.md_entries.retain(|e| e.farm != farm);
         for e in &lost {
@@ -1499,16 +1632,44 @@ impl FarmState {
     }
 }
 
+/// The text of an exchange map tick (ibx#441): a 4-byte length, then that
+/// many one-byte characters.
+fn exchange_map_text(data: &[u8]) -> String {
+    let Some(len) = data.get(..4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize) else { return String::new() };
+    data[4..].iter().take(len).map(|&b| b as char).collect()
+}
+
+/// An exchange map as the reference reads it (ibx#441): `;`-separated
+/// `{bit}/{letter}/{exchange}` items; an item without three parts or with
+/// a bit that is not a number is skipped, a later bit replaces an earlier
+/// one. The components come sorted by bit.
+pub(crate) fn parse_exchange_map(text: &str) -> Vec<crate::types::SmartComponent> {
+    let mut map: std::collections::BTreeMap<i32, crate::types::SmartComponent> = std::collections::BTreeMap::new();
+    if text.is_empty() {
+        log::warn!("Incorrect or empty exchange mapping: {:?}", text);
+    }
+    for item in text.split(';').filter(|i| !i.is_empty()) {
+        let parts: Vec<&str> = item.split('/').collect();
+        let [bit, letter, exchange] = parts.as_slice() else {
+            log::warn!("Incorrect exchange info in the mapping: {}", item);
+            continue;
+        };
+        match bit.parse::<i32>() {
+            Ok(bit) => {
+                map.insert(bit, crate::types::SmartComponent {
+                    bit_number: bit, exchange: exchange.to_string(), exchange_letter: letter.to_string(),
+                });
+            }
+            Err(_) => log::error!("Incorrect bit in exchange info: {}", item),
+        }
+    }
+    map.into_values().collect()
+}
+
 /// The reference's security type code (`SecType` value), appended in hex
 /// to a short BBO exchange code (ibx#449).
 fn sec_type_code(sec_type: &str) -> Option<u8> {
-    Some(match sec_type {
-        "STK" => 1, "CFD" => 2, "OPT" => 3, "FOP" => 4, "WAR" => 5, "FUT" => 6, "FWD" => 7,
-        "BAG" => 8, "CASH" => 10, "IND" => 11, "BOND" => 12, "BILL" => 13, "FIXED" => 14,
-        "FUND" => 15, "SLB" => 16, "NEWS" => 17, "CMDTY" => 18, "BSK" => 19, "IOPT" => 20,
-        "ICU" => 21, "ICS" => 22, "PHYSS" => 23, "CRYPTO" => 24,
-        _ => return None,
-    })
+    crate::types::sec_type_id(sec_type)
 }
 
 /// tickReqParams from the fields of a bid/ask ack, as the reference builds
@@ -1622,7 +1783,7 @@ mod tests {
             acks.reverse();
         }
         for ack in &acks {
-            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+            farm.handle_subscription_ack(ack.as_bytes(), &mut None::<Connection>, &mut context, &shared, &mut HeartbeatState::new());
         }
         farm.handle_ticker_setup(b"8=O\x0135=L\x0112087792,5e-05,26,,1", &mut context);
         let msg = tick_message(&[
@@ -1668,7 +1829,7 @@ mod tests {
             format!("8=O35=Q8,{bid_ask},1e-05,0,3,ffffffff,,1,1"),
             format!("8=O35=Q6,{},5e-05,0,1,ffffffff,,1,1", bid_ask + 1),
         ] {
-            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+            farm.handle_subscription_ack(ack.as_bytes(), &mut None::<Connection>, &mut context, &shared, &mut HeartbeatState::new());
         }
         farm.handle_ticker_setup(b"8=O35=L12087792,5e-05,7,,1", &mut context);
         for msg in messages {
@@ -1769,7 +1930,7 @@ mod tests {
         let bid_ask = farm.next_md_req_id - 2;
         for r in [bid_ask, bid_ask + 1] {
             let ack = format!("8=O\x0135=Q\x011101,{r},0.01,0,3,9c,,1,1");
-            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+            farm.handle_subscription_ack(ack.as_bytes(), &mut None::<Connection>, &mut context, &shared, &mut HeartbeatState::new());
         }
         farm.handle_ticker_setup(b"8=O\x0135=L\x01265598,0.01,1098,,1", &mut context);
         let msg = tick_message(&[(false, 1101, &[(0, 25_500), (1, 25_502)]), (false, 1098, &[(2, 25_501)])]);
@@ -1786,6 +1947,100 @@ mod tests {
             self.0.push(fields.iter().map(|(t, v)| (*t, v.to_string())).collect());
             true
         }
+    }
+
+    /// The exchange map of BBO exchange 9c (AAPL), captured 02/10/2026
+    /// (b1_441_smart_components, usfarm 35=G on server tag 12708).
+    const EXCH_MAP_9C: &str = "0/A/AMEX;15/N/NYSE;4/I/ISE;7/M/CHX;8/P/ARCA;9/Q/NASDAQ;6/K/DRCTEDGE;1/B/BEX;\
+        14/Z/BATS;5/J/EDGEA;13/Y/BYX;10/V/IEX;3/D/FINRA;18/H/PEARL;2/C/NYSENAT;16/L/LTSE;17/U/MEMX;12/X/PSX;\
+        11/G/T24X;19/F/TXSE";
+
+    fn exchange_map_frame(server_tag: u32, text: &str) -> Vec<u8> {
+        let mut data = (text.len() as u32).to_be_bytes().to_vec();
+        data.extend_from_slice(text.as_bytes());
+        data.push(0);
+        let mut body = ((4 + 1 + data.len()) as u16 * 8).to_be_bytes().to_vec();
+        body.extend_from_slice(&server_tag.to_be_bytes());
+        body.push(data.len() as u8);
+        body.extend_from_slice(&data);
+        let mut msg = b"8=O\x019=0227\x0135=G\x01".to_vec();
+        msg.extend_from_slice(&body);
+        msg.extend_from_slice(b"\x018349=70306FA0\x01");
+        msg
+    }
+
+    // ibx#441, captured 02/10/2026: the first ack with BBO exchange 9c
+    // makes the gateway subscribe its own generic tick 626 for the
+    // contract; the map arrives as a 35=G on the tag of that subscription,
+    // then the subscription is cancelled. A second ack asks nothing.
+    #[test]
+    fn exchange_map_asked_at_the_first_ack_then_kept() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let mut sink = RecordingSink(Vec::new());
+        let id = context.market.register(265598);
+        context.market.set_routing(id, "STK", "SMART");
+        farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "", id, 0, &mut None, &mut hb);
+        let bid_ask = farm.next_md_req_id - 2;
+        for r in [bid_ask, bid_ask + 1] {
+            let ack = format!("8=O\x0135=Q\x01178,{r},0.01,0,3,9c,,1,1");
+            farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
+        }
+        let wire = |m: &Vec<(u32, String)>| m.iter().filter(|(t, _)| *t != fix::TAG_SENDING_TIME)
+            .map(|(t, v)| format!("{t}={v}|")).collect::<String>();
+        let map_id = bid_ask + 2;
+        assert_eq!(sink.0.iter().map(wire).collect::<Vec<_>>(), [format!(
+            "35=V|263=1|146=1|262={map_id}|6008=265598|207=BEST|167=CS|264=626|6088=Socket|")]);
+        assert_eq!(shared.reference.exchange_map("9c", Some(1)), crate::bridge::ExchangeMapState::Waiting);
+        // Its ack, then the map.
+        let ack = format!("8=O\x0135=Q\x0112708,{map_id},0.01,0,0,9c,,0,1");
+        farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
+        assert!(farm.handle_exchange_map(&exchange_map_frame(12708, EXCH_MAP_9C), &mut sink, &shared, &mut hb));
+        assert_eq!(wire(&sink.0[1]), format!(
+            "35=V|263=2|146=1|262={map_id}|6008=265598|207=BEST|167=CS|264=626|6088=Socket|"));
+        let map = shared.reference.instrument_exchange_map(id).unwrap();
+        assert_eq!(map.len(), 20);
+        let entry = |bit: i32| map.iter().find(|c| c.bit_number == bit)
+            .map(|c| (c.exchange.as_str(), c.exchange_letter.as_str()));
+        assert_eq!((entry(0), entry(9), entry(19)), (Some(("AMEX", "A")), Some(("NASDAQ", "Q")), Some(("TXSE", "F"))));
+        assert!(map.windows(2).all(|w| w[0].bit_number < w[1].bit_number), "sorted by bit");
+        assert!(farm.exchange_map_subs.is_empty());
+        // Another tag's 35=G is not a map.
+        assert!(!farm.handle_exchange_map(&exchange_map_frame(12708, EXCH_MAP_9C), &mut sink, &shared, &mut hb));
+        // A new subscription of the contract asks nothing more.
+        farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "", id, 0, &mut None, &mut hb);
+        let ack = format!("8=O\x0135=Q\x01178,{},0.01,0,3,9c,,1,1", farm.next_md_req_id - 2);
+        farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
+        assert_eq!(sink.0.len(), 2);
+    }
+
+    // ibx#441: the "no exchange" code of a currency pair is ignored: no key,
+    // no map asked.
+    #[test]
+    fn no_exchange_map_for_the_no_exchange_code() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let mut sink = RecordingSink(Vec::new());
+        let id = context.market.register(12087792);
+        context.market.set_routing(id, "CASH", "IDEALPRO");
+        farm.send_mktdata_subscribe(12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", id, 0, &mut None, &mut hb);
+        let ack = format!("8=O\x0135=Q\x013,{},1e-05,0,3,ffffffff,,1,1", farm.next_md_req_id - 2);
+        farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
+        assert!(sink.0.is_empty());
+        assert_eq!(shared.reference.exchange_map("ffffffff", None), crate::bridge::ExchangeMapState::Unknown);
+    }
+
+    // ibx#441: the map items as the reference reads them.
+    #[test]
+    fn exchange_map_items_as_the_reference() {
+        let map = parse_exchange_map("3/N/NYSE;x/Q/NASDAQ;0/A;1/B/BEX;3/T/NASDAQ;");
+        assert_eq!(map.iter().map(|c| (c.bit_number, c.exchange_letter.as_str(), c.exchange.as_str())).collect::<Vec<_>>(),
+            [(1, "B", "BEX"), (3, "T", "NASDAQ")]);
+        assert!(parse_exchange_map("").is_empty());
     }
 
     // ibx#446: the regulatory snapshot asks one entry with action SNAPSHOT
@@ -1813,7 +2068,7 @@ mod tests {
             ("3".into(), "1".into(), "BEST".into(), "CS".into(), "624".into(), "1".into()));
         let req: u32 = value(262).parse().unwrap();
         let ack = format!("8=O35=Q1101,{req},0.01,0,2,9c,,1,1");
-        farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+        farm.handle_subscription_ack(ack.as_bytes(), &mut None::<Connection>, &mut context, &shared, &mut HeartbeatState::new());
         assert!(shared.market.drain_tick_req_params().is_empty());
         let acks = shared.market.drain_snapshot_acks();
         assert_eq!(acks.len(), 1);
@@ -1833,7 +2088,7 @@ mod tests {
         let mut context = Context::new();
         let id = context.market.register(265598);
         farm.md_req_to_instrument.push((5, id));
-        farm.handle_subscription_ack(b"8=O\x0135=Q\x011101,5,0.01,0,3,9c,,1,1", &mut context, &shared);
+        farm.handle_subscription_ack(b"8=O\x0135=Q\x011101,5,0.01,0,3,9c,,1,1", &mut None::<Connection>, &mut context, &shared, &mut HeartbeatState::new());
         farm.handle_ticker_setup(b"8=O\x0135=L\x01265598,0.01,1098,,1", &mut context);
         context.market.set_round_lot(id, 40);
         let msg = tick_message(&[
@@ -1887,7 +2142,7 @@ mod tests {
             "35=V|263=3|146=2|262={a}|6008=265598|207=BEST|167=CS|264=442|9830=1|262={b}|6008=265598|207=BEST|167=CS|264=443|9830=1|"));
         for r in [a, b] {
             let ack = format!("8=O\x0135=Q\x0154,{r},0.01,0,3,9c,,1,1");
-            farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+            farm.handle_subscription_ack(ack.as_bytes(), &mut None::<Connection>, &mut context, &shared, &mut HeartbeatState::new());
         }
         assert!(shared.market.drain_snapshot_acks().is_empty());
         let params = shared.market.drain_tick_req_params();
@@ -1921,7 +2176,7 @@ mod tests {
         for ((_, bid_ask), (tag, tick, bbo)) in first_ids.iter().zip(acks) {
             for r in [bid_ask, &(bid_ask + 1)] {
                 let ack = format!("8=O\x0135=Q\x01{tag},{r},{tick},0,3,{bbo},,1,1");
-                farm.handle_subscription_ack(ack.as_bytes(), &mut context, &shared);
+                farm.handle_subscription_ack(ack.as_bytes(), &mut None::<Connection>, &mut context, &shared, &mut HeartbeatState::new());
             }
         }
         let got = shared.market.drain_tick_req_params();
@@ -1950,7 +2205,7 @@ mod tests {
         let other = context.market.register(4391);
         assert_eq!(other, id);
         let ack = format!("8=O\x0135=Q\x011101,{},0.25,0,3,5,,1,1", ids[0]);
-        farm.handle_subscription_ack(ack.as_bytes(), &mut context, &SharedState::new());
+        farm.handle_subscription_ack(ack.as_bytes(), &mut None::<Connection>, &mut context, &SharedState::new(), &mut HeartbeatState::new());
         assert_eq!(context.market.instrument_by_server_tag(1101), None);
         assert_eq!(context.market.min_tick(other), 0.0);
     }

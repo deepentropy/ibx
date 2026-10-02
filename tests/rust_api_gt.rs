@@ -1348,16 +1348,19 @@ fn api_gt_suite() {
 
     // ── 27. Gateway-local: req_smart_components ──
     {
+        // A code no market data gave is refused, as the reference (ibx#441);
+        // the answer for a real code is in api_smart_components_live.
         print!("  req_smart_components... ");
         wrapper.drain();
-        client.req_smart_components(900, "SMART", &mut wrapper);
+        client.req_smart_components(900, "XYZ", &mut wrapper);
         let cbs = wrapper.drain();
-        let sc: Vec<_> = cbs.iter().filter_map(|c| if let Cb::SmartComponents { count, .. } = c { Some(*count) } else { None }).collect();
-        if sc.is_empty() || sc[0] == 0 {
-            println!("FAIL (no smart components)");
+        let refused = cbs.iter().any(|c| matches!(c, Cb::Error { req_id: 900, code: 321, msg }
+            if msg == "Error validating request.-'V' : cause - Invalid BBO exchange/security type code"));
+        if !refused {
+            println!("FAIL (no 321 for an unknown code: {:?})", cbs.len());
             fail_count += 1;
         } else {
-            println!("PASS ({} exchanges)", sc[0]);
+            println!("PASS (321)");
             pass_count += 1;
         }
     }
@@ -1711,5 +1714,79 @@ fn api_stream_order_live() {
                 assert_eq!(next, Some(vec!["size", parts[1], size]), "req {req}: {e} without its size");
             }
         }
+    }
+}
+
+// ── Smart components (ibx#441), focused ──
+
+#[derive(Default)]
+struct SmartWrapper {
+    events: Vec<String>,
+    params: Vec<(i64, String)>,
+    components: Vec<(i64, Vec<(i32, String, String)>)>,
+}
+
+impl Wrapper for SmartWrapper {
+    fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) { self.events.push(format!("error {req_id} {code} {text}")); }
+    fn tick_req_params(&mut self, req_id: i64, _min_tick: f64, bbo: &str, _perms: i64) { self.params.push((req_id, bbo.to_string())); }
+    fn smart_components(&mut self, req_id: i64, components: &[ibx::types::SmartComponent]) {
+        self.components.push((req_id, components.iter()
+            .map(|c| (c.bit_number, c.exchange.clone(), c.exchange_letter.clone())).collect()));
+    }
+}
+
+/// As captured on the reference 02/10/2026: an unknown code gives 321; the
+/// bboExchange of the AAPL request parameters, asked at once, is answered
+/// within 2 s with the exchange map of that code (about 20 exchanges,
+/// sorted by bit, NASDAQ among them), and again at once 3 s later.
+/// Run with: cargo test --test rust_api_gt api_smart_components_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_smart_components_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = SmartWrapper::default();
+    let pump = |client: &EClient, w: &mut SmartWrapper, d: Duration| {
+        let start = Instant::now();
+        while start.elapsed() < d {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    pump(&client, &mut w, Duration::from_secs(3));
+    client.req_smart_components(9490, "XYZ", &mut w);
+    client.req_mkt_data(9491, &aapl(), "", false, false).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while w.params.is_empty() && Instant::now() < deadline {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let bbo = w.params.first().map(|p| p.1.clone()).unwrap_or_default();
+    client.req_smart_components(9492, &bbo, &mut w);
+    pump(&client, &mut w, Duration::from_secs(3));
+    client.req_smart_components(9493, &bbo, &mut w);
+    client.cancel_mkt_data(9491).unwrap();
+    pump(&client, &mut w, Duration::from_millis(500));
+    client.disconnect();
+    println!("  bboExchange {bbo:?}
+  events {:?}", w.events);
+    for (req, comps) in &w.components {
+        println!("  smart components {req}: {comps:?}");
+    }
+    assert!(w.events.iter().any(|e| e == "error 9490 321 Error validating request.-'V' : cause - Invalid BBO exchange/security type code"));
+    assert!(bbo.ends_with("0001"), "AAPL bboExchange {bbo:?}");
+    for req in [9492, 9493] {
+        let comps = w.components.iter().find(|(r, _)| *r == req).map(|(_, c)| c.clone()).unwrap_or_default();
+        assert!(comps.len() >= 15, "req {req}: {} components", comps.len());
+        assert!(comps.windows(2).all(|p| p[0].0 < p[1].0), "req {req}: not sorted by bit");
+        assert!(comps.iter().any(|c| c.1 == "NASDAQ"), "req {req}: no NASDAQ");
     }
 }

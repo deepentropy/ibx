@@ -383,6 +383,14 @@ impl EClient {
             wrapper.head_timestamp(req_id, &response.head_timestamp);
         }
 
+        // Smart components that waited for their exchange map (ibx#441).
+        for (req_id, answer) in self.core.take_smart_components(&self.shared) {
+            match answer {
+                Ok(components) => wrapper.smart_components(req_id, &components),
+                Err((code, msg)) => wrapper.error(req_id, code, &msg, ""),
+            }
+        }
+
         // Contract details → contract_details + contract_details_end
         for (req_id, def) in self.shared.reference.drain_contract_details() {
             let details = ContractDetails::from_definition(&def);

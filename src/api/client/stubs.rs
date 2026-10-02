@@ -10,11 +10,17 @@ impl EClient {
     // ── Smart Components ──
 
     /// Request smart routing components for a BBO exchange. Matches `reqSmartComponents` in C++.
-    /// Gateway-local — returns component exchanges from init data.
-    pub fn req_smart_components(&self, req_id: i64, _bbo_exchange: &str, wrapper: &mut impl Wrapper) {
+    /// Gateway-local, as the reference (ibx#441): the exchange map of the
+    /// BBO exchange that market data made known (the `bboExchange` of
+    /// `tick_req_params`); an unknown one gives error 321. When the map has
+    /// not come yet, the answer comes from `process_msgs`, within 2 s.
+    pub fn req_smart_components(&self, req_id: i64, bbo_exchange: &str, wrapper: &mut impl Wrapper) {
         if !crate::client_core::ClientCore::ids_fit("req_smart_components", &[req_id]) { return; }
-        let components = self.shared.reference.smart_components();
-        wrapper.smart_components(req_id, &components);
+        match self.core.req_smart_components(req_id, bbo_exchange, &self.shared) {
+            Some(Ok(components)) => wrapper.smart_components(req_id, &components),
+            Some(Err((code, msg))) => wrapper.error(req_id, code, &msg, ""),
+            None => {}
+        }
     }
 
     // ── News Providers ──

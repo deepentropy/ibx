@@ -5078,11 +5078,17 @@ fn snapshot_engine(rx: crossbeam_channel::Receiver<ControlCommand>) -> std::thre
     })
 }
 
+/// The exchange map of an instrument's BBO exchange (ibx#441).
+fn set_exchange_map(shared: &SharedState, instrument: u32, map: Vec<crate::types::SmartComponent>) {
+    shared.reference.observe_exchange_map(instrument, "9c", 1);
+    shared.reference.set_exchange_map("9c", 1, map);
+}
+
 #[test]
 fn regulatory_snapshot_delivers_one_batch_then_the_end() {
     let (client, rx, shared) = test_client();
     let engine = snapshot_engine(rx);
-    shared.reference.set_smart_components(vec![crate::types::SmartComponent {
+    set_exchange_map(&shared, 5, vec![crate::types::SmartComponent {
         bit_number: 0, exchange: "NYSE".into(), exchange_letter: "N".into(),
     }]);
     client.req_mkt_data(1, &spy(), "", false, true).unwrap();
@@ -5174,7 +5180,7 @@ fn spy_stk() -> Contract {
 fn plain_snapshot_sends_each_tick_type_once_then_the_end() {
     let (client, rx, shared) = test_client();
     let engine = top_engine(rx);
-    shared.reference.set_smart_components(vec![crate::types::SmartComponent {
+    set_exchange_map(&shared, 5, vec![crate::types::SmartComponent {
         bit_number: 0, exchange: "NYSE".into(), exchange_letter: "N".into(),
     }]);
     client.req_mkt_data(1, &spy_stk(), "", true, false).unwrap();
@@ -5413,7 +5419,7 @@ fn stock_stream_joining_a_quote_in_the_reference_order() {
     use crate::types::{QuoteMarks, SizeKind};
     let (client, rx, shared) = test_client();
     let engine = top_engine(rx);
-    shared.reference.set_smart_components(["K", "P", "Q", "V"].iter().enumerate().map(|(bit, letter)| {
+    set_exchange_map(&shared, 5, ["K", "P", "Q", "V"].iter().enumerate().map(|(bit, letter)| {
         crate::types::SmartComponent { bit_number: bit as i32, exchange: letter.to_string(), exchange_letter: letter.to_string() }
     }).collect());
     let aapl = Contract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),

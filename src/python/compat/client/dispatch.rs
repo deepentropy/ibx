@@ -571,6 +571,11 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "error", (req_id, code as i64, msg.as_str(), ""));
         }
 
+        // Smart components that waited for their exchange map (ibx#441).
+        for (req_id, answer) in self.core.take_smart_components(shared) {
+            self.deliver_smart_components(py, req_id, answer)?;
+        }
+
         // Drain historical data -> historicalData + historicalDataEnd / historicalDataUpdate
         let hist_data = shared.reference.drain_historical_data();
         for (req_id, response) in hist_data {

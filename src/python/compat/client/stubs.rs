@@ -6,6 +6,33 @@ use super::EClient;
 use super::super::contract::{Contract, NewsProviderPy, SmartComponentPy, SoftDollarTierPy};
 
 impl EClient {
+    /// The smart_components callback, or the error of the request.
+    pub(crate) fn deliver_smart_components(
+        &self,
+        py: Python<'_>,
+        req_id: i64,
+        answer: crate::client_core::SmartComponentsAnswer,
+    ) -> PyResult<()> {
+        let sc = match answer {
+            Ok(sc) => sc,
+            Err((code, msg)) => {
+                self.wrapper.call_method1(py, "error", (req_id, code, msg.as_str(), ""))?;
+                return Ok(());
+            }
+        };
+        let map = pyo3::types::PyDict::new(py);
+        for c in sc.iter() {
+            let obj = SmartComponentPy {
+                bit_number: c.bit_number,
+                exchange: c.exchange.clone(),
+                exchange_letter: c.exchange_letter.clone(),
+            };
+            map.set_item(c.bit_number, Py::new(py, obj)?)?;
+        }
+        self.wrapper.call_method1(py, "smart_components", (req_id, map.as_any()))?;
+        Ok(())
+    }
+
     fn calculate_option(
         &self, py: Python<'_>, req_id: i64, contract: &Contract,
         kind: crate::control::optcalc::CalcKind, under_price: f64,
@@ -177,23 +204,17 @@ impl EClient {
 
     // ── Smart Components ──
 
+    /// As the reference (ibx#441): the exchange map of the BBO exchange that
+    /// market data made known; an unknown one gives error 321; a map not
+    /// come yet is answered by the message loop, within 2 s.
     fn req_smart_components(&self, py: Python<'_>, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_smart_components", &[req_id]) { return Ok(()); }
-        let _ = bbo_exchange;
         let shared = self.shared_state()?;
-        let sc = shared.reference.smart_components();
-        let map = pyo3::types::PyDict::new(py);
-        for c in sc.iter() {
-            let obj = SmartComponentPy {
-                bit_number: c.bit_number,
-                exchange: c.exchange.clone(),
-                exchange_letter: c.exchange_letter.clone(),
-            };
-            map.set_item(c.bit_number, Py::new(py, obj)?)?;
+        match self.core.req_smart_components(req_id, bbo_exchange, &shared) {
+            Some(answer) => self.deliver_smart_components(py, req_id, answer),
+            None => Ok(()),
         }
-        self.wrapper.call_method1(py, "smart_components", (req_id, map.as_any()))?;
-        Ok(())
     }
 
     // ── News Providers ──
