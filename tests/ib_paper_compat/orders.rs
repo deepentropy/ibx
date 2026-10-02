@@ -1033,14 +1033,13 @@ pub(super) fn phase_price_condition_order(conns: Conns) -> Conns {
 
 pub(super) fn phase_time_condition_order(conns: Conns) -> Conns {
     let oid = next_order_id();
-    // A time one day ahead, the order to work after it. The server refuses
-    // a time of 2099 as an invalid value and a condition already met,
-    // before a time to come ("Invalid conditional order") (paper,
-    // 01/10/2026, ibx#416, ibx#493). The reference has no local
-    // check of either and sends the time as it is given (ib-agent
-    // ORDER-SUBMIT.md 4.4), so it gets the same rejects.
+    // A time three days ahead in the UTC form, the order to work after
+    // it. The server refuses a time of 2099 ("Invalid value in field #
+    // 6223") for the reference too; it accepts times 3, 60 and 400 days
+    // ahead and one hour back, sent the same way (gateway capture of
+    // 02/10/2026, ibx#416). The reference sends a UTC-form time as given.
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    let time = format_utc_timestamp(now + 86_400);
+    let time = format_utc_timestamp(now + 3 * 86_400);
     run_submit_cancel_phase(conns, "Phase 58: Time Condition Order (SPY)",
         OrderRequest::SubmitLimitEx { order_id: oid, instrument: 0, side: Side::Buy, qty: 1, price: 1_00_000_000, tif: b'1',
             attrs: OrderAttrs { outside_rth: true, conditions: vec![OrderCondition::Time { time, is_more: true }], ..OrderAttrs::default() } },
