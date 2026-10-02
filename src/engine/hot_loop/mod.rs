@@ -178,6 +178,12 @@ impl HotLoop {
         self.depth_limit = limit;
     }
 
+    /// The logon turns the user book on (`6247=demo`, as on paper): depth
+    /// books are given as an index diff of the book shown (#451).
+    pub fn set_user_book(&mut self, on: bool) {
+        self.farm.user_book = on;
+    }
+
     /// Most real-time bar requests at once, from the logon (ibx#454).
     pub fn set_max_real_time_requests(&mut self, max: u32) {
         self.hmds.max_real_time_requests = max;
@@ -552,6 +558,16 @@ impl HotLoop {
         Some(self.md_farm_of(&route))
     }
 
+    /// The routing table has the market-maker depth service (Deep2) for
+    /// the exchange (#451).
+    fn has_deep2(&mut self, con_id: i64, exchange: &str, sec_type: &str) -> bool {
+        use crate::engine::routing::DataType;
+        let group = self.agg_group_for(con_id, exchange);
+        let listing = self.context.listing_exchanges.get(&con_id).cloned();
+        self.farm.routing.as_ref()
+            .is_some_and(|t| t.lookup(exchange, group, sec_type, DataType::Deep2, listing.as_deref().unwrap_or("*")).is_some())
+    }
+
     /// A depth request (#452), as the reference handles it: the local
     /// refusals (321 for no exchange, a combo or no rows, 322 for a live
     /// request id of the same kind, 309 past the logon's limit of
@@ -591,6 +607,10 @@ impl HotLoop {
                 return;
             }
         }
+        // Its sizes count in its round lot when the session does, as its
+        // top of book (#451).
+        let lot = if self.context.scale_us_lots { self.context.round_lots.get(&con_id).copied().unwrap_or(1) } else { 1 };
+        let mut l2 = false;
         let mut entries: Vec<(pool::FarmId, String, bool)> = Vec::new();
         if self.farm.routing.is_none() {
             // No routing table: the book of the exchange on the primary farm.
@@ -609,12 +629,16 @@ impl HotLoop {
                     }
                 }
             } else if let Some(farm_id) = self.depth_route(con_id, &exchange, &st) {
-                entries.push((farm_id, farm::routing_exchange(&exchange, &st).to_string(), true));
+                let book_exchange = farm::routing_exchange(&exchange, &st).to_string();
+                // A book with the market-maker service is written with
+                // updateMktDepthL2, as the reference (#451).
+                l2 = self.has_deep2(con_id, &book_exchange, &st);
+                entries.push((farm_id, book_exchange, true));
             } else {
                 return refuse(&self.shared, 10092, "Deep market data is not supported for this combination of security type/exchange".into());
             }
         }
-        let msgs = self.farm.start_depth(req_id, con_id, &st, is_smart_depth, num_rows, entries);
+        let msgs = self.farm.start_depth(req_id, con_id, &st, is_smart_depth, num_rows, lot, l2, entries);
         self.send_farm_messages(msgs);
     }
 
@@ -648,6 +672,11 @@ impl HotLoop {
         self.send_md_resolved();
         farm::sweep_round_lot_lookups(&mut self.context);
         self.send_lot_ready();
+        // Depth books asked again after a reset (#451).
+        let msgs = self.farm.sweep_depth(&self.shared);
+        if !msgs.is_empty() {
+            self.send_farm_messages(msgs);
+        }
         self.hmds.sweep_pending_historical(&self.shared);
     }
 
@@ -4701,6 +4730,283 @@ mod depth_tests {
         assert!(!m.contains("ZZZ"), "{m}");
         let first: u32 = m.split("|262=").nth(1).unwrap().split('|').next().unwrap().parse().unwrap();
         engine.inject_farm_message(format!("8=O\x0135=Q\x01777,{first},0.01,0,0").as_bytes());
-        assert!(engine.farm.depth_tag_to_req.iter().any(|(t, r, smart, _, f)| *t == 777 && *r == 11 && *smart && *f == pool::PRIMARY_MD));
+        let req = engine.farm.depth_reqs.iter().find(|r| r.req_id == 11).unwrap();
+        assert!(req.smart && req.entries.iter().any(|e| e.server_tag == Some(777) && e.farm_req == first && e.farm == pool::PRIMARY_MD));
+    }
+
+    /// A depth message of one group: `entries` as raw bytes after the tag.
+    fn depth_msg(tag: u32, entries: &[u8]) -> Vec<u8> {
+        let bits = (4 + entries.len()) * 8;
+        let mut m = b"8=O\x0135=Y\x01".to_vec();
+        m.extend_from_slice(&[(bits >> 8) as u8, bits as u8]);
+        m.extend_from_slice(&tag.to_be_bytes());
+        m.extend_from_slice(entries);
+        m.push(0x01);
+        m
+    }
+
+    // #451: an update of a row the book does not have resets it, as the
+    // reference: 317, the entry cancelled, asked again after the delay with
+    // a new id, and the next data gives the whole book.
+    #[test]
+    fn refused_entry_resets_the_book() {
+        let (mut engine, shared, mut side, tx) = engine();
+        tx.send(depth(12, 265598, "IEX", "STK", 5, false)).unwrap();
+        engine.poll_once();
+        assert_eq!(sent(&mut side).len(), 1);
+        let id = engine.farm.next_md_req_id - 1;
+        engine.inject_farm_message(format!("8=O\x0135=Q\x01500,{id},0.01,0,0").as_bytes());
+        // Update at 0, bid size 1: no such row.
+        engine.inject_farm_message(&depth_msg(500, &[0x10, 0x00, 0x80, 0x01]));
+        assert_eq!(errors(&shared), [format!("12:317:{}", crate::engine::depth_book::RESET_TEXT)]);
+        let msgs = sent(&mut side);
+        assert!(msgs.len() == 1 && msgs[0].contains(&format!("|263=2|146=1|262={id}|6008=265598|207=IEX|167=CS|264=0|9830=1|")), "{msgs:?}");
+        assert!(engine.farm.sweep_depth(&shared).is_empty(), "asked again before the delay");
+        for e in engine.farm.depth_reqs.iter_mut().flat_map(|r| r.entries.iter_mut()) {
+            e.resubscribe_at = Some(Instant::now() - Duration::from_millis(1));
+        }
+        let again = engine.farm.sweep_depth(&shared);
+        engine.send_farm_messages(again);
+        let msgs = sent(&mut side);
+        let id2 = engine.farm.next_md_req_id - 1;
+        assert!(id2 != id && msgs.len() == 1 && msgs[0].contains(&format!("|263=1|146=1|262={id2}|6008=265598|207=IEX|")), "{msgs:?}");
+        engine.inject_farm_message(format!("8=O\x0135=Q\x01501,{id2},0.01,0,0").as_bytes());
+        // Insert at 0: bid price 10.00 (2 bytes), bid size 3.
+        engine.inject_farm_message(&depth_msg(501, &[0x00, 0x00, 0x05, 0x03, 0xE8, 0x80, 0x03]));
+        let rows = shared.market.drain_depth_updates();
+        assert_eq!(rows.len(), 1);
+        let u = &rows[0];
+        assert_eq!((u.req_id, u.position, u.operation, u.side, u.price, u.size, u.l2), (12, 0, 0, 1, 10.0, 3.0, false));
+    }
+
+    // #451: a book with market makers (the Deep2 service of the routing
+    // table) is written with updateMktDepthL2 and its market makers; a
+    // 35=P message gives no depth row.
+    #[test]
+    fn market_maker_book_is_level_two() {
+        let (mut engine, shared, mut side, tx) = engine();
+        tx.send(depth(13, 265598, "NASDAQ", "STK", 5, false)).unwrap();
+        engine.poll_once();
+        sent(&mut side);
+        let id = engine.farm.next_md_req_id - 1;
+        engine.inject_farm_message(format!("8=O\x0135=Q\x01600,{id},0.01,0,0").as_bytes());
+        // Insert at 0 with market maker NSDQ: ask price 1.00, ask size 2.
+        let mut entry = vec![0x04];
+        entry.extend_from_slice(b"NSDQ");
+        entry.extend_from_slice(&[0x00, 0x25, 0x00, 0x64, 0xA0, 0x02]);
+        engine.inject_farm_message(&depth_msg(600, &entry));
+        let rows = shared.market.drain_depth_updates();
+        assert_eq!(rows.len(), 1);
+        let u = &rows[0];
+        assert_eq!((u.position, u.operation, u.side, u.price, u.size, u.market_maker.as_str(), u.l2, u.is_smart_depth),
+            (0, 0, 0, 1.0, 2.0, "NSDQ", true, false));
+        // A tick message on the book's tag (bid price 5) is not depth.
+        let mut tick = b"8=O\x0135=P\x01".to_vec();
+        tick.extend_from_slice(&[0x00, 0x30, 0x00, 0x00, 0x02, 0x58, 0x00, 0x05, 0x01]);
+        engine.inject_farm_message(&tick);
+        assert!(shared.market.drain_depth_updates().is_empty());
+    }
+
+    /// Fields of a protobuf message: (field number, varint, bytes).
+    fn proto_fields(b: &[u8]) -> Vec<(u64, u64, Vec<u8>)> {
+        fn varint(b: &[u8], i: &mut usize) -> u64 {
+            let (mut v, mut shift) = (0u64, 0);
+            loop {
+                let x = b[*i];
+                *i += 1;
+                v |= u64::from(x & 0x7f) << shift;
+                shift += 7;
+                if x & 0x80 == 0 { return v; }
+            }
+        }
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            let key = varint(b, &mut i);
+            match key & 7 {
+                0 => { let v = varint(b, &mut i); out.push((key >> 3, v, Vec::new())); }
+                1 => { out.push((key >> 3, 0, b[i..i + 8].to_vec())); i += 8; }
+                2 => {
+                    let n = varint(b, &mut i) as usize;
+                    out.push((key >> 3, 0, b[i..i + n].to_vec()));
+                    i += n;
+                }
+                5 => { out.push((key >> 3, 0, b[i..i + 4].to_vec())); i += 4; }
+                w => panic!("wire type {w}"),
+            }
+        }
+        out
+    }
+
+    /// One depth callback, as compared: request, position, operation,
+    /// side, price, size, market maker, SmartDepth, level two.
+    type Callback = (i64, i32, i32, i32, f64, f64, String, bool, bool);
+
+    /// #451: replay a recorded reference scenario through the engine: the
+    /// depth requests with the entries the reference sent, the farm's
+    /// acknowledgements, refusals, 35=Y and 35=P frames as recorded (the
+    /// farm ids mapped to the engine's), and the callbacks the engine gives,
+    /// next to the callbacks the reference gave the API client.
+    fn replay_depth(path: &str) -> (Vec<Callback>, Vec<Callback>) {
+        use base64::Engine as _;
+        let b64 = |v: &serde_json::Value| base64::engine::general_purpose::STANDARD.decode(v.as_str().unwrap()).unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        let recs: Vec<serde_json::Value> = text.lines().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect();
+        let farm_of = |conn: &str| -> pool::FarmId { if conn == "usfarm" { pool::PRIMARY_MD } else { 1 } };
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        // A paper session: the user book is on (6247=demo).
+        engine.set_user_book(true);
+        let mut lots: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+        let mut ours: Vec<Callback> = Vec::new();
+        let mut theirs: Vec<Callback> = Vec::new();
+        // Recorded (conn, farm id) -> (exchange, request type).
+        let mut sent: std::collections::HashMap<(String, String), (String, String)> = std::collections::HashMap::new();
+        let drain = |shared: &SharedState, ours: &mut Vec<Callback>| {
+            for u in shared.market.drain_depth_updates() {
+                ours.push((u.req_id, u.position, u.operation, u.side, u.price, u.size, u.market_maker, u.is_smart_depth, u.l2));
+            }
+        };
+        // The round lots, from the definitions the reference read (the
+        // engine asks for them before it subscribes).
+        for r in recs.iter().filter(|r| r["leg"] == "fix_in" && r["msg_type"] == "d") {
+            let raw = b64(&r["raw_b64"]);
+            if let Some(con_id) = fix::fix_parse(&raw).get(&6008).and_then(|v| v.parse::<i64>().ok()) {
+                lots.entry(con_id).or_insert(crate::control::contracts::round_lot_from_secdef(&raw));
+            }
+        }
+        for (k, r) in recs.iter().enumerate() {
+            let (leg, conn) = (r["leg"].as_str().unwrap(), r["conn"].as_str().unwrap_or(""));
+            let name = r["msg_name"].as_str().unwrap_or("");
+            let mt = r["msg_type"].as_str().unwrap_or("");
+            if leg == "api_out" && name == "REQ_MKT_DEPTH" {
+                let f = proto_fields(&b64(&r["body_b64"]));
+                let req_id = f.iter().find(|x| x.0 == 1).unwrap().1 as ReqId;
+                let num_rows = f.iter().find(|x| x.0 == 3).map_or(100, |x| x.1 as i32);
+                let smart = f.iter().any(|x| x.0 == 4 && x.1 == 1);
+                // The entries the reference sent for this request, up to its cancel.
+                let mut entries: Vec<(pool::FarmId, String, bool)> = Vec::new();
+                let mut con_id = 0;
+                for later in &recs[k + 1..] {
+                    if later["msg_name"] == "CANCEL_MKT_DEPTH" { break; }
+                    if later["leg"] != "fix_out" || later["msg_type"] != "V" { continue; }
+                    let fields: Vec<(String, String)> = later["fields"].as_array().unwrap().iter()
+                        .map(|p| (p[0].as_str().unwrap().to_string(), p[1].as_str().unwrap().to_string())).collect();
+                    if !fields.iter().any(|(t, v)| t == "263" && v == "1") { continue; }
+                    let lconn = later["conn"].as_str().unwrap();
+                    let (mut id, mut exch) = (String::new(), String::new());
+                    for (t, v) in &fields {
+                        match t.as_str() {
+                            "262" => id = v.clone(),
+                            "6008" => con_id = v.parse().unwrap(),
+                            "207" => exch = v.clone(),
+                            "264" => {
+                                sent.insert((lconn.to_string(), id.clone()), (exch.clone(), v.clone()));
+                                let farm = farm_of(lconn);
+                                match v.as_str() {
+                                    "0" => entries.push((farm, exch.clone(), true)),
+                                    "442" => entries.push((farm, exch.clone(), false)),
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let lot = lots.get(&con_id).copied().unwrap_or(1);
+                engine.farm.start_depth(req_id, con_id, "STK", smart, num_rows, lot, false, entries);
+            } else if leg == "api_out" && name == "CANCEL_MKT_DEPTH" {
+                let f = proto_fields(&b64(&r["body_b64"]));
+                engine.farm.stop_depth(f.iter().find(|x| x.0 == 1).unwrap().1 as ReqId);
+            } else if leg == "fix_in" && (conn == "usfarm" || conn == "usfarm.nj") {
+                engine.farm.rx_farm = farm_of(conn);
+                let raw = b64(&r["raw_b64"]);
+                // The engine's farm id of a recorded one.
+                let ours_id = |engine: &HotLoop, id: &str| -> Option<String> {
+                    let (exch, kind) = sent.get(&(conn.to_string(), id.to_string()))?;
+                    engine.farm.depth_reqs.iter().flat_map(|q| q.entries.iter())
+                        .find(|e| e.live && &e.exchange == exch && e.req_type == kind.as_str())
+                        .map(|e| e.farm_req.to_string())
+                };
+                match mt {
+                    "Q" => {
+                        let text = String::from_utf8_lossy(&raw).to_string();
+                        let body = text.split("35=Q\x01").nth(1).unwrap().split("\x018349=").next().unwrap().to_string();
+                        let mut parts: Vec<String> = body.split(',').map(String::from).collect();
+                        if let Some(id) = ours_id(&engine, &parts[1]) {
+                            parts[1] = id;
+                            engine.inject_farm_message(format!("8=O\x0135=Q\x01{}\x01", parts.join(",")).as_bytes());
+                        }
+                    }
+                    "3" => {
+                        let tags = fix::fix_parse(&raw);
+                        if let Some(id) = tags.get(&262).and_then(|id| ours_id(&engine, id)) {
+                            let text = tags.get(&58).cloned().unwrap_or_default();
+                            engine.inject_farm_message(&fix::fix_build(&[(35, "3"), (262, &id), (58, &text)], 1));
+                        }
+                    }
+                    "Y" | "P" => engine.inject_farm_message(&raw),
+                    _ => {}
+                }
+                drain(&shared, &mut ours);
+            } else if leg == "api_in" && name.starts_with("MARKET_DEPTH") {
+                let f = proto_fields(&b64(&r["body_b64"]));
+                let req_id = f.iter().find(|x| x.0 == 1).unwrap().1 as i64;
+                let d = proto_fields(&f.iter().find(|x| x.0 == 2).unwrap().2);
+                let int = |n: u64| d.iter().find(|x| x.0 == n).map_or(0, |x| x.1 as i32);
+                let dbl = |n: u64| d.iter().find(|x| x.0 == n).map_or(0.0, |x| f64::from_le_bytes(x.2[..8].try_into().unwrap()));
+                let txt = |n: u64| d.iter().find(|x| x.0 == n).map_or(String::new(), |x| String::from_utf8(x.2.clone()).unwrap());
+                theirs.push(if name == "MARKET_DEPTH_L2" {
+                    (req_id, int(1), int(2), int(3), dbl(4), txt(5).parse().unwrap(), txt(6), int(7) == 1, true)
+                } else {
+                    (req_id, int(1), int(2), int(3), dbl(4), txt(5).parse().unwrap(), String::new(), false, false)
+                });
+            }
+        }
+        (ours, theirs)
+    }
+
+    fn assert_same_callbacks(ours: &[Callback], theirs: &[Callback]) {
+        for (k, (a, b)) in ours.iter().zip(theirs).enumerate() {
+            assert_eq!(a, b, "callback {k} differs; reference before it: {:?}", &theirs[k.saturating_sub(3)..k]);
+        }
+        assert_eq!(ours.len(), theirs.len(), "number of callbacks");
+    }
+
+    // #451: AAPL on IEX alone, 5 rows, paper (user book on): the whole book
+    // at the first data, then the index diff of the shown book inside the
+    // rows, as updateMktDepth (IEX has no market makers). Recorded from
+    // the reference on 28/09/2026.
+    #[test]
+    fn replay_single_book_as_the_reference() {
+        let path = format!("{}/tests/fixtures/gw1040/scenarios/20260928/depth_single_iex.jsonl", env!("CARGO_MANIFEST_DIR"));
+        let (ours, theirs) = replay_depth(&path);
+        assert_eq!(theirs.len(), 610);
+        assert_same_callbacks(&ours, &theirs);
+    }
+
+    // #451: AAPL SmartDepth, 50 rows (the IEX book with the top of book of
+    // the other components), then AXTI SmartDepth, 10 rows: merged rows,
+    // tail inserts and deletes, updates in place, as updateMktDepthL2 with
+    // the venue as market maker. Recorded from the reference on 28/09/2026.
+    #[test]
+    fn replay_smart_depth_as_the_reference() {
+        let path = format!("{}/tests/fixtures/gw1040/scenarios/20260928/depth_smart.jsonl", env!("CARGO_MANIFEST_DIR"));
+        let (ours, theirs) = replay_depth(&path);
+        assert_eq!(theirs.len(), 1177);
+        assert!(theirs.iter().any(|c| c.2 == 2), "the slice has deletes");
+        assert_same_callbacks(&ours, &theirs);
+    }
+
+    // #451: the same replay on whole recorded scenarios, given in
+    // IBX_DEPTH_SCENARIOS (paths separated by ';'); nothing without it.
+    #[test]
+    fn replay_whole_scenarios_from_env() {
+        let Ok(paths) = std::env::var("IBX_DEPTH_SCENARIOS") else { return };
+        for path in paths.split(';').filter(|p| !p.is_empty()) {
+            let (ours, theirs) = replay_depth(path);
+            eprintln!("{path}: {} callbacks of the reference, {} of the engine", theirs.len(), ours.len());
+            assert_same_callbacks(&ours, &theirs);
+        }
     }
 }

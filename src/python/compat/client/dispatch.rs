@@ -490,10 +490,11 @@ impl EClient {
                  quote.bid_size as f64, quote.ask_size as f64, &attrib_obj));
         }
 
-        // Drain depth updates -> updateMktDepth / updateMktDepthL2
+        // Drain depth updates -> updateMktDepth / updateMktDepthL2, as the
+        // book says (#451)
         let depth_updates = shared.market.drain_depth_updates();
         for du in depth_updates {
-            if du.market_maker.is_empty() {
+            if !du.l2 {
                 call_wrapper!(self.wrapper, py, "update_mkt_depth", (du.req_id, du.position, du.operation, du.side, du.price, du.size));
             } else {
                 call_wrapper!(self.wrapper, py, "update_mkt_depth_l2", (du.req_id, du.position, du.market_maker.as_str(),

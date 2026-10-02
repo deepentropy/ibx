@@ -32,7 +32,7 @@ it always comes after the `fix_in` that caused it.
 - Check before adding a file: no match for `\b(DU|DF|U|F)[0-9]{6,8}\b` (outside `8349` signatures), no MAC address,
   no username.
 
-## Files (28/09/2026)
+## Files (28/09/2026; depth slices 02/10/2026)
 
 | Folder | Session | Scenarios |
 |---|---|---|
@@ -41,5 +41,7 @@ it always comes after the `fix_in` that caused it.
 | `20260928` | overnight | overnight_tif: OVERNIGHT, OVERNIGHT + DAY and includeOvernight orders |
 | `20260928` | pre-open | premarket_order_types: STP / TRAIL with outsideRth, IOC / FOK, TIF values, customerAccount refusal, OPG, delayed market data, modify of a filled order |
 | `20260928` | RTH | rth_order_types: TRAIL MIT / TRAIL LIT / PASSV REL / RPI / PEG BEST / PEG BENCH, overnight cases in RTH, SPY call spread (combo, refused 460) |
+| `20260928` | RTH | depth_single_iex: AAPL depth on IEX alone, 5 rows (slice: the request, its farm entries, acknowledgements, definitions, depth frames and the first 610 depth callbacks) |
+| `20260928` | RTH | depth_smart: AAPL SmartDepth, 50 rows (slice: first 862 callbacks, with tail deletes), then AXTI SmartDepth, 10 rows (whole) |
 
 The `6010` (orderRef) values in the order frames are labels chosen by the recording scripts.

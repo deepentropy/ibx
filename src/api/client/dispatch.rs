@@ -321,9 +321,10 @@ impl EClient {
             );
         }
 
-        // Depth updates → update_mkt_depth / update_mkt_depth_l2
+        // Depth updates → update_mkt_depth / update_mkt_depth_l2, as the
+        // book says (#451)
         for du in self.shared.market.drain_depth_updates() {
-            if du.market_maker.is_empty() {
+            if !du.l2 {
                 wrapper.update_mkt_depth(du.req_id, du.position, du.operation, du.side, du.price, du.size);
             } else {
                 wrapper.update_mkt_depth_l2(du.req_id, du.position, &du.market_maker, du.operation, du.side, du.price, du.size, du.is_smart_depth);

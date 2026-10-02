@@ -7,7 +7,10 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::types::{InstrumentId, ReqId};
+use crate::engine::depth_book::{Change, DeepBook, Scale, SingleView, SmartMerge, TopQuote, RESET_TEXT};
+use crate::protocol::depth_decoder;
+use crate::types::{DepthUpdate, InstrumentId, ReqId};
+use std::sync::Arc;
 use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, fast_extract_msg_type, find_body_after_tag};
@@ -206,6 +209,25 @@ pub(crate) struct DepthEntry {
     pub(crate) req_type: &'static str,
     /// On the wire now (false while its farm is down).
     pub(crate) live: bool,
+    /// The farm's tag for it, from its acknowledgement (#451).
+    pub(crate) server_tag: Option<u32>,
+    /// Price tick and size unit, from its acknowledgement (#451).
+    scale: Option<Scale>,
+    /// The book of a book entry (#451).
+    book: Option<DeepBook>,
+    /// The bid and ask of a top-of-book entry (#451).
+    top: TopQuote,
+    /// The exchange, as SmartDepth rows name it.
+    name: Arc<str>,
+    /// After a reset, the entry goes out again at this time (#451).
+    pub(crate) resubscribe_at: Option<Instant>,
+}
+
+/// How a depth request's callbacks are made (#451).
+#[derive(Debug, Clone)]
+enum DepthView {
+    Single(SingleView),
+    Smart(SmartMerge),
 }
 
 /// A depth request of the client (#452).
@@ -214,9 +236,15 @@ pub(crate) struct DepthReq {
     pub(crate) req_id: ReqId,
     pub(crate) con_id: i64,
     pub(crate) smart: bool,
-    pub(crate) num_rows: i32,
     pub(crate) entries: Vec<DepthEntry>,
+    /// Round lot of the contract's sizes (#451).
+    lot: i64,
+    view: DepthView,
 }
+
+/// How long a reset book waits before it is asked again, as the
+/// reference (#451).
+pub(crate) const DEPTH_RESUBSCRIBE_DELAY: std::time::Duration = std::time::Duration::from_millis(3000);
 
 pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
@@ -226,14 +254,18 @@ pub(crate) struct FarmState {
     pub(crate) instrument_md_reqs: Vec<(InstrumentId, Vec<u32>)>,
     /// The client's market data modes from reqMarketDataType (ibx#447).
     pub(crate) md_modes: crate::types::MarketDataModes,
-    /// Active depth subscriptions: (req_id, is_smart_depth).
-    pub(crate) depth_subs: Vec<(u32, bool)>,
-    /// Maps (server_tag, farm) → (depth_req_id, is_smart_depth, min_tick) for active depth subscriptions.
-    pub(crate) depth_tag_to_req: Vec<(u32, ReqId, bool, f64, FarmId)>,
-    /// SmartDepth fan-out: maps internal sub_req → user's original req_id.
-    depth_fanout_map: Vec<(u32, ReqId)>,
     /// Depth requests of the client and their entries (#452).
     pub(crate) depth_reqs: Vec<DepthReq>,
+    /// The session's logon turns the user book on (`6247=demo`, as on
+    /// paper): depth books are diffed by index (#451).
+    pub(crate) user_book: bool,
+    /// Depth callbacks and changes being built (#451).
+    depth_out: Vec<DepthUpdate>,
+    depth_changes: Vec<Change>,
+    /// Depth callbacks and reset errors made away from a farm message (a
+    /// farm lost), given out at the next sweep (#451).
+    depth_pending: Vec<DepthUpdate>,
+    depth_pending_resets: Vec<ReqId>,
     /// Option resub info: (instrument, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, snapshot).
     md_resub_info: Vec<(InstrumentId, String, String, String, String, f64, String, String, i32, bool)>,
     pub(crate) disconnected: bool,
@@ -257,10 +289,12 @@ impl FarmState {
             snapshot_reqs: Vec::new(),
             instrument_md_reqs: Vec::new(),
             md_modes: crate::types::MarketDataModes::default(),
-            depth_subs: Vec::new(),
-            depth_tag_to_req: Vec::new(),
-            depth_fanout_map: Vec::new(),
             depth_reqs: Vec::new(),
+            user_book: false,
+            depth_out: Vec::new(),
+            depth_changes: Vec::new(),
+            depth_pending: Vec::new(),
+            depth_pending_resets: Vec::new(),
             md_resub_info: Vec::new(),
             disconnected: false,
             tick_buf: Vec::with_capacity(16),
@@ -408,7 +442,7 @@ impl FarmState {
             b"L" => self.handle_ticker_setup(msg, context),
             b"UT" | b"UM" | b"RL" => super::ccp::handle_account_update(msg, context, shared),
             b"UP" => super::ccp::handle_portfolio_message(msg, context, shared, event_tx),
-            b"Y" => self.handle_depth_35y(msg, shared),
+            b"Y" | b"Z" => self.handle_depth(msg, farm_conn, shared),
             b"G" => self.handle_tick_news(msg, context, shared, event_tx),
             b"3" => self.handle_md_reject(msg, context, shared, farm_conn, hb),
             b"T" => {
@@ -431,30 +465,15 @@ impl FarmState {
             None => return,
         };
 
-        // Depth 35=P entries may be interleaved with L1 tick entries in the same body.
-        if !self.depth_tag_to_req.is_empty() {
-            let mut has_depth = false;
-            let mut off = 0;
-            while off + 3 < body.len() {
-                if body[off] == 0x00 {
-                    let stag = ((body[off+1] as u32) << 16) | ((body[off+2] as u32) << 8) | (body[off+3] as u32);
-                    if self.depth_tag_to_req.iter().any(|(s, .., f)| *s == stag && *f == self.rx_farm) {
-                        has_depth = true;
-                        break;
-                    }
-                }
-                off += 1;
-            }
-            if has_depth {
-                self.handle_depth_35p(body, shared);
-                // Don't return — also process L1 ticks from same body below
-            }
-        }
-
         let mut ticks = std::mem::take(&mut self.tick_buf);
         if tick_decoder::decode_ticks_35p_into(body, &mut ticks) {
             // The session goes on, as the reference's (ibx#272).
             log::warn!("Farm tick message: malformed block dropped, {} ticks of earlier blocks kept", ticks.len());
+        }
+        // A 35=P message carries no depth rows: only the top of book of
+        // SmartDepth components without a book (#451).
+        if !self.depth_reqs.is_empty() {
+            self.depth_tops(&ticks, shared);
         }
         let mut notified = [0u64; crate::types::MAX_INSTRUMENTS / 64];
         // Instruments whose trade stream ticked in this message: the first
@@ -530,19 +549,8 @@ impl FarmState {
         };
         let min_tick: f64 = parts[2].parse().unwrap_or(0.01);
 
-        // Depth ack: always map the server_tag if this req_id is a depth subscription,
-        // even when depth_levels=0 (book empty now but updates may arrive later).
-        let depth_levels: i32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-        if let Some((_, is_smart)) = self.depth_subs.iter().find(|(id, _)| *id == req_id) {
-            let is_smart = *is_smart;
-            // For SmartDepth fan-out, map back to the user's original req_id
-            let user_req = self.depth_fanout_map.iter()
-                .find(|(sub, _)| *sub == req_id)
-                .map(|(_, user)| *user)
-                .unwrap_or(ReqId::from(req_id));
-            self.depth_tag_to_req.push((server_tag, user_req, is_smart, min_tick, self.rx_farm));
-            log::info!("Depth ack: server_tag {} -> req_id {} (levels={}, smart={}, min_tick={})",
-                server_tag, user_req, depth_levels, is_smart, min_tick);
+        // A depth entry: its tag, price tick and size increment (#451).
+        if self.depth_ack(req_id, server_tag, min_tick, parts.get(8).and_then(|v| v.parse::<f64>().ok())) {
             return;
         }
 
@@ -962,7 +970,10 @@ impl FarmState {
     /// Start a depth request (#452) with its entries, each on the farm of
     /// its route: a book entry for each `deep` exchange, a top-of-book
     /// pair for each `top` exchange (SmartDepth components with no book).
-    /// The caller made the local checks and picked the farms.
+    /// The caller made the local checks and picked the farms. `lot` is the
+    /// round lot of the contract's sizes; `l2` says a single book has
+    /// market makers (updateMktDepthL2) (#451).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start_depth(
         &mut self,
         req_id: ReqId,
@@ -970,18 +981,28 @@ impl FarmState {
         sec_type: &str,
         smart: bool,
         num_rows: i32,
+        lot: i64,
+        l2: bool,
         entries: Vec<(FarmId, String, bool)>,
     ) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        let view = if smart {
+            DepthView::Smart(SmartMerge::new(req_id, num_rows))
+        } else {
+            DepthView::Single(SingleView::new(req_id, num_rows, l2))
+        };
         let mut req = DepthReq {
-            req_id, con_id, smart, num_rows, entries: Vec::new(),
+            req_id, con_id, smart, entries: Vec::new(), lot: lot.max(1), view,
         };
         let fix_type = fix_sec_type(sec_type).to_string();
         for (farm, exchange, book) in entries {
             let kinds: &[&'static str] = if book { &["0"] } else { &["442", "443"] };
+            let name: Arc<str> = Arc::from(exchange.as_str());
             for kind in kinds {
                 req.entries.push(DepthEntry {
                     farm_req: 0, farm, con_id: con_id.to_string(), exchange: exchange.clone(),
                     sec_type: fix_type.clone(), req_type: kind, live: false,
+                    server_tag: None, scale: None, book: None, top: TopQuote::default(), name: name.clone(),
+                    resubscribe_at: None,
                 });
             }
         }
@@ -992,12 +1013,14 @@ impl FarmState {
 
     /// Send the entries of a depth request that are not on the wire (all of
     /// them, or those of one farm after it came back), with new farm ids;
-    /// one message per farm, for the caller to send.
+    /// one message per farm, for the caller to send. An entry waiting
+    /// after a reset waits on.
     fn depth_messages(&mut self, idx: usize, only_farm: Option<FarmId>) -> Vec<(FarmId, Vec<(u32, String)>)> {
         let mut out = Vec::new();
-        let (user_req, smart) = (self.depth_reqs[idx].req_id, self.depth_reqs[idx].smart);
+        let user_req = self.depth_reqs[idx].req_id;
+        let ready = |e: &DepthEntry| !e.live && e.resubscribe_at.is_none() && only_farm.is_none_or(|f| f == e.farm);
         let mut farms: Vec<FarmId> = self.depth_reqs[idx].entries.iter()
-            .filter(|e| !e.live && only_farm.is_none_or(|f| f == e.farm))
+            .filter(|e| ready(e))
             .map(|e| e.farm).collect();
         farms.sort_unstable();
         farms.dedup();
@@ -1009,14 +1032,13 @@ impl FarmState {
             ];
             let mut body: Vec<(u32, String)> = Vec::new();
             let mut count = 0;
-            for e in self.depth_reqs[idx].entries.iter_mut().filter(|e| !e.live && e.farm == farm) {
+            for e in self.depth_reqs[idx].entries.iter_mut().filter(|e| ready(e) && e.farm == farm) {
                 let id = self.next_md_req_id;
                 self.next_md_req_id += 1;
                 e.farm_req = id;
                 e.live = true;
+                e.server_tag = None;
                 count += 1;
-                self.depth_subs.push((id, smart));
-                self.depth_fanout_map.push((id, user_req));
                 body.push((262, id.to_string()));
                 body.push((6008, e.con_id.clone()));
                 body.push((207, e.exchange.clone()));
@@ -1030,6 +1052,34 @@ impl FarmState {
             msg.push((146, count.to_string()));
             msg.extend(body);
             log::info!("Depth req {}: {} entries for farm {}", user_req, count, farm);
+            out.push((farm, msg));
+        }
+        out
+    }
+
+    /// The cancel of some entries of a depth request, one message per
+    /// farm, with the entries as they were sent (#452).
+    fn depth_cancels(entries: &[&DepthEntry]) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        let mut farms: Vec<FarmId> = entries.iter().map(|e| e.farm).collect();
+        farms.sort_unstable();
+        farms.dedup();
+        let mut out = Vec::new();
+        for farm in farms {
+            let mine: Vec<&&DepthEntry> = entries.iter().filter(|e| e.farm == farm).collect();
+            let mut msg: Vec<(u32, String)> = vec![
+                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
+                (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
+                (263, "2".into()),
+                (146, mine.len().to_string()),
+            ];
+            for e in mine {
+                msg.push((262, e.farm_req.to_string()));
+                msg.push((6008, e.con_id.clone()));
+                msg.push((207, e.exchange.clone()));
+                msg.push((167, e.sec_type.clone()));
+                msg.push((264, e.req_type.to_string()));
+                msg.push((9830, "1".into()));
+            }
             out.push((farm, msg));
         }
         out
@@ -1059,53 +1109,111 @@ impl FarmState {
     pub(crate) fn stop_depth(&mut self, req_id: ReqId) -> Option<Vec<(FarmId, Vec<(u32, String)>)>> {
         let pos = self.depth_reqs.iter().position(|r| r.req_id == req_id)?;
         let req = self.depth_reqs.remove(pos);
-        let ids: Vec<u32> = req.entries.iter().filter(|e| e.live).map(|e| e.farm_req).collect();
-        self.depth_subs.retain(|(id, _)| !ids.contains(id));
-        self.depth_fanout_map.retain(|(_, user)| *user != req_id);
-        self.depth_tag_to_req.retain(|(_, rid, ..)| *rid != req_id);
-        let mut farms: Vec<FarmId> = req.entries.iter().filter(|e| e.live).map(|e| e.farm).collect();
-        farms.sort_unstable();
-        farms.dedup();
-        let mut out = Vec::new();
-        for farm in farms {
-            let mine: Vec<&DepthEntry> = req.entries.iter().filter(|e| e.live && e.farm == farm).collect();
-            let mut msg: Vec<(u32, String)> = vec![
-                (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
-                (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
-                (263, "2".into()),
-                (146, mine.len().to_string()),
-            ];
-            for e in mine {
-                msg.push((262, e.farm_req.to_string()));
-                msg.push((6008, e.con_id.clone()));
-                msg.push((207, e.exchange.clone()));
-                msg.push((167, e.sec_type.clone()));
-                msg.push((264, e.req_type.to_string()));
-                msg.push((9830, "1".into()));
-            }
-            out.push((farm, msg));
-        }
-        Some(out)
+        let live: Vec<&DepthEntry> = req.entries.iter().filter(|e| e.live).collect();
+        Some(Self::depth_cancels(&live))
     }
 
     /// A farm's connection was lost: its depth entries are no longer on the
-    /// wire and go out again when it is back (`resend_depth`).
+    /// wire and go out again when it is back (`resend_depth`). Their books
+    /// and tops are emptied, as the reference does on a farm change: a
+    /// single book gets 317 and its whole book again with the next data,
+    /// SmartDepth drops their rows (#451).
     pub(crate) fn depth_farm_lost(&mut self, farm: FarmId) {
-        let mut gone = Vec::new();
+        let mut out = std::mem::take(&mut self.depth_pending);
         for r in &mut self.depth_reqs {
+            let mut hit = false;
             for e in r.entries.iter_mut().filter(|e| e.farm == farm && e.live) {
                 e.live = false;
-                gone.push(e.farm_req);
+                e.server_tag = None;
+                hit = true;
+                if let Some(book) = e.book.as_mut() {
+                    book.clear();
+                    if let DepthView::Smart(m) = &mut r.view {
+                        m.set_book(&e.name, book, &mut out);
+                    }
+                }
+                if e.req_type == "442" {
+                    e.top = TopQuote::default();
+                    if let (DepthView::Smart(m), Some(scale)) = (&mut r.view, e.scale.as_ref()) {
+                        m.set_top(&e.name, &e.top, scale, &mut out);
+                    }
+                }
+            }
+            if let (true, DepthView::Single(v)) = (hit, &mut r.view) {
+                v.reset();
+                self.depth_pending_resets.push(r.req_id);
             }
         }
-        self.depth_subs.retain(|(id, _)| !gone.contains(id));
-        self.depth_fanout_map.retain(|(id, _)| !gone.contains(id));
-        self.depth_tag_to_req.retain(|(.., f)| *f != farm);
+        self.depth_pending = out;
     }
 
     /// Send again the depth entries of a farm that came back.
     pub(crate) fn resend_depth(&mut self, farm: FarmId) -> Vec<(FarmId, Vec<(u32, String)>)> {
         (0..self.depth_reqs.len()).flat_map(|idx| self.depth_messages(idx, Some(farm))).collect()
+    }
+
+    /// Depth work due now (#451): the callbacks and reset errors made
+    /// when a farm was lost, and the entries a reset took off the wire,
+    /// asked again after the reference's delay. The messages to send.
+    pub(crate) fn sweep_depth(&mut self, shared: &SharedState) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        if self.depth_reqs.is_empty() && self.depth_pending.is_empty() && self.depth_pending_resets.is_empty() {
+            return Vec::new();
+        }
+        for req_id in self.depth_pending_resets.drain(..) {
+            shared.orders.push_order_error(req_id, 317, RESET_TEXT.to_string());
+        }
+        for u in self.depth_pending.drain(..) {
+            shared.market.push_depth_update(u);
+        }
+        let mut out = Vec::new();
+        if self.depth_reqs.iter().all(|r| r.entries.iter().all(|e| e.resubscribe_at.is_none())) {
+            return out;
+        }
+        let now = Instant::now();
+        for idx in 0..self.depth_reqs.len() {
+            let mut due = false;
+            for e in &mut self.depth_reqs[idx].entries {
+                if e.resubscribe_at.is_some_and(|t| t <= now) {
+                    e.resubscribe_at = None;
+                    due = true;
+                }
+            }
+            if due {
+                out.extend(self.depth_messages(idx, None));
+            }
+        }
+        out
+    }
+
+    /// The acknowledgement of a depth entry (#451): its tag, price tick
+    /// and size increment; a book entry gets its book. False when the
+    /// request id is not a depth entry's.
+    fn depth_ack(&mut self, farm_req: u32, server_tag: u32, min_tick: f64, size_increment: Option<f64>) -> bool {
+        let user_book = self.user_book;
+        for r in &mut self.depth_reqs {
+            let lot = r.lot;
+            let Some(e) = r.entries.iter_mut().find(|e| e.live && e.farm_req == farm_req) else { continue };
+            let unit = size_increment.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(1.0) * lot as f64;
+            let scale = Scale::new(min_tick, unit);
+            e.server_tag = Some(server_tag);
+            e.scale = Some(scale);
+            if e.req_type == "0" {
+                e.book = Some(DeepBook::new(user_book, scale));
+            }
+            log::info!("Depth ack: server_tag {} -> req_id {} {} {} (min_tick={})",
+                server_tag, r.req_id, e.exchange, e.req_type, min_tick);
+            return true;
+        }
+        false
+    }
+
+    /// The request and entry of a depth tag of the farm being read.
+    #[inline]
+    fn depth_entry_of(&self, server_tag: u32) -> Option<(usize, usize)> {
+        let farm = self.rx_farm;
+        self.depth_reqs.iter().enumerate().find_map(|(ri, r)| {
+            r.entries.iter().position(|e| e.live && e.farm == farm && e.server_tag == Some(server_tag)).map(|ei| (ri, ei))
+        })
     }
 
     /// A depth entry the farm refused (#452): a single-exchange request ends
@@ -1118,16 +1226,10 @@ impl FarmState {
         let req = &mut self.depth_reqs[pos];
         if req.smart {
             req.entries.retain(|e| e.farm_req != farm_req);
-            self.depth_subs.retain(|(id, _)| *id != farm_req);
-            self.depth_fanout_map.retain(|(id, _)| *id != farm_req);
             log::warn!("SmartDepth req {}: a component was refused", req.req_id);
             return true;
         }
         let req = self.depth_reqs.remove(pos);
-        let ids: Vec<u32> = req.entries.iter().map(|e| e.farm_req).collect();
-        self.depth_subs.retain(|(id, _)| !ids.contains(id));
-        self.depth_fanout_map.retain(|(_, user)| *user != req.req_id);
-        self.depth_tag_to_req.retain(|(_, rid, ..)| *rid != req.req_id);
         let (code, text) = if needs_api_subscription {
             (10089, "Requested market data requires additional subscription for API. See link in 'Market Data Connections' dialog for more details.")
         } else {
@@ -1137,258 +1239,94 @@ impl FarmState {
         true
     }
 
-    /// Parse 35=P depth entries (byte-aligned: [00][3B stag][field tags...][58 terminator]).
-    /// SmartDepth entries may contain multiple price+size pairs (bid then ask).
-    /// Field tag encoding: bit 5(0x20)=size, bit 3(0x08)=ask, bit 2(0x04)=snapshot, bit 0(0x01)=2-byte.
-    fn handle_depth_35p(&self, body: &[u8], shared: &SharedState) {
-        use crate::types::DepthUpdate;
-        let mut pos = 0;
-        let mut bid_position: i32 = 0;
-        let mut ask_position: i32 = 0;
-
-        while pos < body.len() {
-            if body[pos] != 0x00 { pos += 1; continue; }
-            pos += 1;
-            if pos + 3 > body.len() { break; }
-
-            let stag = ((body[pos] as u32) << 16) | ((body[pos+1] as u32) << 8) | (body[pos+2] as u32);
-            pos += 3;
-
-            let (req_id, is_smart, min_tick) = match self.depth_tag_to_req.iter()
-                .find(|(s, .., f)| *s == stag && *f == self.rx_farm)
-                .map(|(_, r, sm, mt, _)| (*r, *sm, *mt))
-            {
-                Some(v) => v,
-                None => { continue; }
-            };
-
-            // Parse field tags, pushing a depth update each time we complete a price+size pair.
-            let mut price: f64 = 0.0;
-            let mut size: f64 = 0.0;
-            let mut side: i32 = 1;
-            let mut is_snapshot = false;
-            let mut has_price = false;
-            let mut has_size = false;
-
-            while pos < body.len() && body[pos] != 0x58 && body[pos] != 0x00 {
-                let tag = body[pos];
-                // Only recognize tags with known bits (0x20, 0x08, 0x04, 0x01).
-                // Bit 7 (0x80) or bit 6 (0x40) set → unknown encoding, stop.
-                if tag & 0xC0 != 0 { break; }
-                pos += 1;
-
-                let is_size_field = tag & 0x20 != 0;
-                let is_ask = tag & 0x08 != 0;
-                let snapshot = tag & 0x04 != 0;
-                let two_byte = tag & 0x01 != 0;
-
-                let new_side = if is_ask { 0 } else { 1 };
-                if snapshot { is_snapshot = true; }
-
-                // If side changes and we have a pending pair, flush it first
-                if has_price && has_size && new_side != side {
-                    let position = if side == 0 { let p = ask_position; ask_position += 1; p }
-                                  else { let p = bid_position; bid_position += 1; p };
-                    let operation = if is_snapshot { 0 } else { 1 };
-                    shared.market.push_depth_update(DepthUpdate {
-                        req_id, position, market_maker: String::new(),
-                        operation, side, price, size, is_smart_depth: is_smart,
-                    });
-                    has_price = false;
-                    has_size = false;
-                }
-                side = new_side;
-
-                if two_byte {
-                    if pos + 2 > body.len() { break; }
-                    let val = ((body[pos] as u16) << 8) | (body[pos+1] as u16);
-                    pos += 2;
-                    if is_size_field { size = val as f64; has_size = true; }
-                    else { price = val as f64 * min_tick; has_price = true; }
-                } else {
-                    if pos >= body.len() { break; }
-                    let val = body[pos];
-                    pos += 1;
-                    if is_size_field { size = val as f64 * 100.0; has_size = true; }
-                    else { price = val as f64 * min_tick; has_price = true; }
-                }
-
-                // Flush complete pair immediately
-                if has_price && has_size {
-                    let position = if side == 0 { let p = ask_position; ask_position += 1; p }
-                                  else { let p = bid_position; bid_position += 1; p };
-                    let operation = if is_snapshot { 0 } else { 1 };
-                    shared.market.push_depth_update(DepthUpdate {
-                        req_id, position, market_maker: String::new(),
-                        operation, side, price, size, is_smart_depth: is_smart,
-                    });
-                    has_price = false;
-                    has_size = false;
-                }
-            }
-
-            if pos < body.len() && body[pos] == 0x58 { pos += 1; }
-        }
-    }
-
-    /// Parse 35=Y depth entries (NASDAQ TotalView market-maker level).
-    /// Wire format (from wire capture):
-    ///   Header: [2B misc][2B stag_uint16_be]
-    ///   Stag switch sentinel: [80 00][2B stag_uint16_be]
-    ///   Snapshot entry: [C4|44][4B market_maker][1B position][field_tags...]
-    ///   Compact entry:  [80|00][1B position][field_tags...]
-    ///     C4/80 = continuation, 44/00 = terminal (last entry for this stag section).
-    /// Field tag encoding: bit 7=size, bit 5=ask, bit 2=snapshot, bits 0-1=value_len (00=1B,01=2B,10=3B).
-    fn handle_depth_35y(&self, msg: &[u8], shared: &SharedState) {
-        use crate::types::DepthUpdate;
-        let body = match find_body_after_tag(msg, b"35=Y\x01") {
-            Some(b) => b,
-            None => return,
-        };
-
-        // Header: 2 bytes misc. The stag is set by the first 80 00 [2B stag] sentinel.
-        if body.len() < 4 { return; }
-
-        // Try header stag at body[2..4] (common case).
-        let mut req_id: ReqId = 0;
-        let mut is_smart = false;
-        let mut min_tick: f64 = 0.01;
-        let mut pos = 2;
-
-        let hdr_stag = ((body[2] as u32) << 8) | (body[3] as u32);
-        if let Some((r, sm, mt)) = self.lookup_depth_stag(hdr_stag) {
-            req_id = r;
-            is_smart = sm;
-            min_tick = mt;
-            pos = 4;
-        }
-        // If header stag didn't match, start scanning from pos=2;
-        // the first stag switch sentinel will set req_id.
-
-        while pos < body.len() {
-            let b = body[pos];
-
-            // Stag switch sentinel: 80 00 [2B stag] — bid_size=0 repurposed.
-            // Also detect 00 00 [2B stag] (3-byte stag with high byte 0x00, at message boundaries).
-            if (b == 0x80 || b == 0x00) && pos + 4 <= body.len() && body[pos + 1] == 0x00 {
-                let candidate = ((body[pos + 2] as u32) << 8) | (body[pos + 3] as u32);
-                if let Some((r, sm, mt)) = self.lookup_depth_stag(candidate) {
-                    req_id = r;
-                    is_smart = sm;
-                    min_tick = mt;
-                    pos += 4;
-                    continue;
-                }
-            }
-
-            // Snapshot entry: [C4|44][4B market_maker][1B position][field_tags...]
-            if b == 0xC4 || b == 0x44 {
-                pos += 1;
-                if pos + 5 > body.len() { break; }
-                let mm = String::from_utf8_lossy(&body[pos..pos + 4]).trim().to_string();
-                pos += 4;
-                let book_position = body[pos] as i32;
-                pos += 1;
-
-                if let Some((price, size, side, is_snapshot)) = self.parse_depth_fields(body, &mut pos, min_tick) {
-                    shared.market.push_depth_update(DepthUpdate {
-                        req_id, position: book_position, market_maker: mm,
-                        operation: if is_snapshot { 0 } else { 1 },
-                        side, price, size, is_smart_depth: is_smart,
-                    });
-                }
+    /// A depth message (35=Y, or 35=Z with extended fields) (#451): each
+    /// group goes to the book of its tag, as one change; the request's
+    /// callbacks follow. A group the book refuses resets it: the book is
+    /// emptied, a single book gets 317, its entry is cancelled and asked
+    /// again after the reference's delay, and its next data sends the
+    /// whole book.
+    fn handle_depth(&mut self, msg: &[u8], farm_conn: &mut Option<Connection>, shared: &SharedState) {
+        let Some((body, extended)) = depth_decoder::depth_body(msg) else { return };
+        let groups = depth_decoder::decode_depth(body, extended);
+        let mut out = std::mem::take(&mut self.depth_out);
+        let mut changes = std::mem::take(&mut self.depth_changes);
+        let mut cancels: Vec<DepthEntry> = Vec::new();
+        for group in &groups {
+            let Some((ri, ei)) = self.depth_entry_of(group.server_tag) else {
+                log::debug!("Depth group for server tag {}: no book", group.server_tag);
                 continue;
-            }
-
-            // Compact entry: [80|00][1B position][field_tags...]  (no market maker)
-            // 80 = continuation, 00 = terminal for this stag section.
-            // Guard: stag switch sentinel already checked above.
-            // Validate: position must be 0-29 and next byte must be a valid field tag.
-            if (b == 0x80 || b == 0x00) && pos + 2 < body.len() {
-                let candidate_pos = body[pos + 1];
-                let candidate_tag = body[pos + 2];
-                // Valid field tags: only bits 7,5,2,1,0 set (mask 0xAF). Reject bits 6,4,3.
-                if candidate_pos < 30 && candidate_tag & 0x50 == 0 && candidate_tag & 0x08 == 0 {
-                    pos += 1;
-                    let book_position = body[pos] as i32;
-                    pos += 1;
-
-                    if let Some((price, size, side, is_snapshot)) = self.parse_depth_fields(body, &mut pos, min_tick) {
-                        shared.market.push_depth_update(DepthUpdate {
-                            req_id, position: book_position, market_maker: String::new(),
-                            operation: if is_snapshot { 0 } else { 1 },
-                            side, price, size, is_smart_depth: is_smart,
-                        });
-                    }
-                    continue;
-                }
-            }
-
-            // Unknown byte — skip
-            pos += 1;
-        }
-    }
-
-    /// Look up a depth server_tag → (req_id, is_smart, min_tick).
-    fn lookup_depth_stag(&self, stag: u32) -> Option<(ReqId, bool, f64)> {
-        self.depth_tag_to_req.iter()
-            .find(|(s, .., f)| *s == stag && *f == self.rx_farm)
-            .map(|(_, r, sm, mt, _)| (*r, *sm, *mt))
-    }
-
-    /// Parse one price + one size field tag pair. Returns (price, size, side, is_snapshot).
-    /// Advances `pos` past consumed bytes.
-    fn parse_depth_fields(&self, body: &[u8], pos: &mut usize, min_tick: f64) -> Option<(f64, f64, i32, bool)> {
-        let mut price: f64 = 0.0;
-        let mut size: f64 = 0.0;
-        let mut side: i32 = 1; // default bid
-        let mut is_snapshot = false;
-        let mut has_price = false;
-        let mut has_size = false;
-
-        // Parse up to 2 field tags (one price + one size).
-        for _ in 0..2 {
-            if *pos >= body.len() { break; }
-            let tag = body[*pos];
-            // Valid field tags use bits 7,5,2,1,0. Reject if bit 6 or bit 4 set.
-            if tag & 0x50 != 0 { break; }
-            // Reject entry/stag prefixes that would start a new entry.
-            if tag == 0xC4 || tag == 0x44 { break; }
-            *pos += 1;
-
-            let is_size_field = tag & 0x80 != 0;
-            let is_ask = tag & 0x20 != 0;
-            if tag & 0x04 != 0 { is_snapshot = true; }
-            if is_ask { side = 0; } else { side = 1; }
-
-            let val_len = tag & 0x03;
-            let val: u32 = match val_len {
-                0 => {
-                    if *pos >= body.len() { break; }
-                    let v = body[*pos] as u32; *pos += 1; v
-                }
-                1 => {
-                    if *pos + 2 > body.len() { break; }
-                    let v = ((body[*pos] as u32) << 8) | (body[*pos + 1] as u32);
-                    *pos += 2; v
-                }
-                _ => {
-                    if *pos + 3 > body.len() { break; }
-                    let v = ((body[*pos] as u32) << 16) | ((body[*pos + 1] as u32) << 8) | (body[*pos + 2] as u32);
-                    *pos += 3; v
-                }
             };
-
-            if is_size_field {
-                size = val as f64;
-                has_size = true;
-            } else {
-                price = val as f64 * min_tick;
-                has_price = true;
+            let req = &mut self.depth_reqs[ri];
+            let entry = &mut req.entries[ei];
+            let Some(book) = entry.book.as_mut() else { continue };
+            match book.apply(&group.entries, &mut changes) {
+                Ok(()) => match &mut req.view {
+                    DepthView::Single(v) => v.on_change(book, &changes, &mut out),
+                    DepthView::Smart(m) => m.set_book(&entry.name, book, &mut out),
+                },
+                Err(_) => {
+                    log::warn!("Depth req {} {}: the farm sent an entry the book cannot take: reset", req.req_id, entry.exchange);
+                    book.clear();
+                    match &mut req.view {
+                        DepthView::Single(v) => {
+                            v.reset();
+                            shared.orders.push_order_error(req.req_id, 317, RESET_TEXT.to_string());
+                        }
+                        DepthView::Smart(m) => m.set_book(&entry.name, book, &mut out),
+                    }
+                    cancels.push(entry.clone());
+                    entry.live = false;
+                    entry.server_tag = None;
+                    entry.resubscribe_at = Some(Instant::now() + DEPTH_RESUBSCRIBE_DELAY);
+                }
             }
         }
+        for u in out.drain(..) {
+            shared.market.push_depth_update(u);
+        }
+        self.depth_out = out;
+        self.depth_changes = changes;
+        if !cancels.is_empty() {
+            let refs: Vec<&DepthEntry> = cancels.iter().collect();
+            for (_, msg) in Self::depth_cancels(&refs) {
+                let fields: Vec<(u32, &str)> = msg.iter().map(|(t, v)| (*t, v.as_str())).collect();
+                farm_conn.send_comp(&fields);
+            }
+        }
+    }
 
-        if has_price || has_size { Some((price, size, side, is_snapshot)) } else { None }
+    /// The ticks of a 35=P message for the top-of-book entries of
+    /// SmartDepth requests (#451): each block of such a tag sets the
+    /// exchange's bid and ask, then its SmartDepth rows.
+    fn depth_tops(&mut self, ticks: &[tick_decoder::RawTick], shared: &SharedState) {
+        let mut out = std::mem::take(&mut self.depth_out);
+        let mut i = 0;
+        while i < ticks.len() {
+            // One block: its first tick, then the ticks that follow it.
+            let end = ticks[i + 1..].iter().position(|t| t.first).map_or(ticks.len(), |p| i + 1 + p);
+            let tag = ticks[i].server_tag;
+            if let Some((ri, ei)) = self.depth_entry_of(tag) {
+                let req = &mut self.depth_reqs[ri];
+                let entry = &mut req.entries[ei];
+                if let (true, Some(scale), DepthView::Smart(m)) = (entry.req_type == "442", entry.scale, &mut req.view) {
+                    for t in &ticks[i..end] {
+                        match t.tick_type {
+                            tick_decoder::O_BID_PRICE => entry.top.bid = Some(t.magnitude),
+                            tick_decoder::O_ASK_PRICE => entry.top.ask = Some(t.magnitude),
+                            tick_decoder::O_BID_SIZE => entry.top.bid_size = Some(t.magnitude),
+                            tick_decoder::O_ASK_SIZE => entry.top.ask_size = Some(t.magnitude),
+                            _ => {}
+                        }
+                    }
+                    m.set_top(&entry.name, &entry.top, &scale, &mut out);
+                }
+            }
+            i = end;
+        }
+        for u in out.drain(..) {
+            shared.market.push_depth_update(u);
+        }
+        self.depth_out = out;
     }
 
     pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {

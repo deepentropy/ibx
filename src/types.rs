@@ -1580,6 +1580,9 @@ pub struct DepthUpdate {
     pub price: f64,
     pub size: f64,
     pub is_smart_depth: bool,
+    /// Sent as updateMktDepthL2 (SmartDepth, or a book with market
+    /// makers), else as updateMktDepth (#451).
+    pub l2: bool,
 }
 
 /// Exchange metadata for market depth availability.
