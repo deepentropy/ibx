@@ -700,6 +700,17 @@ pub struct ReferenceState {
     ccp_session_id: Mutex<String>,
     /// Logical-name → host URL map pushed by the gateway during logon.
     misc_urls: Mutex<HashMap<String, String>>,
+    /// Offset of the local clock to the server clock, from the logon
+    /// replies and later server messages (ibx#421).
+    clock: crate::control::logon::ClockOffset,
+    /// The logon feature list allows matching symbols requests
+    /// (SECDEFTA, ibx#421); true until a logon says otherwise.
+    matching_symbols_allowed: AtomicBool,
+    /// Most years of a historical data request, from the logon (6774);
+    /// 0 until known (ibx#421).
+    max_backfill_years: AtomicU32,
+    /// The logon feature list has NIGHTLY: no years limit (ibx#421).
+    nightly: AtomicBool,
 }
 
 impl ReferenceState {
@@ -745,6 +756,10 @@ impl ReferenceState {
             account_config: Mutex::new(None),
             ccp_session_id: Mutex::new(String::new()),
             misc_urls: Mutex::new(HashMap::new()),
+            clock: Default::default(),
+            matching_symbols_allowed: AtomicBool::new(true),
+            max_backfill_years: AtomicU32::new(0),
+            nightly: AtomicBool::new(false),
         }
     }
 
@@ -1131,6 +1146,41 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_fa_session(&self, fa: bool) {
         self.fa_session.store(fa, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The server clock offset of the session (ibx#421).
+    pub fn clock(&self) -> &crate::control::logon::ClockOffset {
+        &self.clock
+    }
+
+    /// Current server time in seconds, as the reference answers the
+    /// current time request: the local clock plus the offset of the logon
+    /// (ibx#421).
+    pub fn server_time_secs(&self) -> i64 {
+        self.clock.now_ms().div_euclid(1000)
+    }
+
+    /// Whether the logon feature list allows matching symbols requests
+    /// (SECDEFTA, ibx#421).
+    pub fn matching_symbols_allowed(&self) -> bool {
+        self.matching_symbols_allowed.load(Ordering::Relaxed)
+    }
+
+    /// The feature tokens of a logon that gate API requests (ibx#421).
+    #[doc(hidden)] pub fn set_api_features(&self, features: crate::control::logon::ApiFeatures) {
+        self.matching_symbols_allowed.store(features.matching_symbols, Ordering::Relaxed);
+        self.nightly.store(features.nightly, Ordering::Relaxed);
+    }
+
+    #[doc(hidden)] pub fn set_max_backfill_years(&self, years: i32) {
+        self.max_backfill_years.store(years.max(0) as u32, Ordering::Relaxed);
+    }
+
+    /// Most years of a historical data request; None when not checked:
+    /// before the logon, or with the NIGHTLY feature (ibx#421).
+    pub fn backfill_years_limit(&self) -> Option<i32> {
+        let years = self.max_backfill_years.load(Ordering::Relaxed);
+        (years > 0 && !self.nightly.load(Ordering::Relaxed)).then_some(years as i32)
     }
 
     /// The logon's super user and omnibus flags (ibx#417).

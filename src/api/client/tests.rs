@@ -5899,3 +5899,68 @@ fn news_refusal_after_the_lookup_is_reported() {
     assert!(!client.core.req_to_instrument.lock().unwrap().contains_key(&9583));
     assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Unsubscribe { instrument: 6 })));
 }
+
+// ── ibx#421: values of the logon reply ──
+
+// The current time is the local clock plus the offset of the logon.
+#[test]
+fn req_current_time_adds_the_logon_clock_offset() {
+    #[derive(Default)]
+    struct Time(Vec<i64>);
+    impl Wrapper for Time {
+        fn current_time(&mut self, time: i64) { self.0.push(time); }
+    }
+    let (client, _rx, shared) = test_client();
+    shared.reference.clock().set(60_000);
+    let mut w = Time::default();
+    client.req_current_time(&mut w);
+    let local = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    assert_eq!(w.0.len(), 1);
+    assert!((w.0[0] - local - 60).abs() <= 1, "{} vs local {}", w.0[0], local);
+}
+
+// Without SECDEFTA in the logon feature list, a matching symbols request
+// is refused with 321 before the pattern checks, and nothing is sent.
+#[test]
+fn req_matching_symbols_refused_without_the_feature() {
+    let (client, rx, shared) = test_client();
+    shared.reference.set_api_features(crate::control::logon::ApiFeatures::parse("APIELOG"));
+    client.req_matching_symbols(8, "AAPL").unwrap();
+    client.req_matching_symbols(9, "").unwrap();
+    assert!(rx.try_recv().is_err(), "nothing is sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let errors: Vec<String> = w.events.iter().filter(|e| e.starts_with("error:")).cloned().collect();
+    let refused = "Error validating request.-'ce' : cause - Failed to request matching symbols";
+    assert_eq!(errors, [format!("error:8:321:{refused}"), format!("error:9:321:{refused}")]);
+
+    shared.reference.set_api_features(crate::control::logon::ApiFeatures::parse("APIELOG,SECDEFTA"));
+    client.req_matching_symbols(10, "AAPL").unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::FetchMatchingSymbols { req_id: 10, .. }));
+}
+
+// A duration in years above the logon limit is refused; NIGHTLY lifts it.
+#[test]
+fn req_historical_data_years_above_the_logon_limit() {
+    let (client, rx, shared) = test_client();
+    shared.reference.set_max_backfill_years(1);
+    client.req_historical_data(5, &spy(), "", "2 Y", "1 day", "TRADES", true, 1, false).unwrap();
+    assert!(rx.try_recv().is_err());
+    assert_eq!(shared.reference.drain_historical_errors(), vec![(5, 321,
+        "Error validating request.-'bM' : cause - Historical data request for 2 year(s) rejected. Max API Backfill Years=1".to_string())]);
+    client.req_historical_data(6, &spy(), "", "1 Y", "1 day", "TRADES", true, 1, false).unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::FetchHistorical { req_id: 6, .. }));
+    shared.reference.set_api_features(crate::control::logon::ApiFeatures::parse("NIGHTLY"));
+    client.req_historical_data(7, &spy(), "", "2 Y", "1 day", "TRADES", true, 1, false).unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::FetchHistorical { req_id: 7, .. }));
+}
+
+// The version cutoff warning reaches the client as error 2172, id -1.
+#[test]
+fn version_cutoff_warning_reaches_the_client() {
+    let (client, _rx, shared) = test_client();
+    crate::gateway::apply_first_logon(&Default::default(), Some("10411"), Some("20261201"), 199, &shared);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("error:-1:2172:The version of the application you are running, 1040.1,")), "{:?}", w.events);
+}

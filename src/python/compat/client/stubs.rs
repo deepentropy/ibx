@@ -137,10 +137,9 @@ impl EClient {
 
     fn req_current_time(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        // The local clock plus the offset to the server clock of the
+        // logon, as the reference (ibx#421).
+        let now = self.shared_state()?.reference.server_time_secs();
         self.wrapper.call_method1(py, "current_time", (now,))?;
         Ok(())
     }

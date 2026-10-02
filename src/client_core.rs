@@ -296,8 +296,15 @@ pub fn connection_time(at: &jiff::Zoned, zone: &str) -> String {
 /// sends it (ibx#439): an empty or blank pattern, or one with a character
 /// that is neither a printable ASCII character nor a space, gives 321; the
 /// pattern sent is trimmed, with runs of spaces made one space.
-pub fn matching_symbols_pattern(pattern: &str) -> Result<String, (i64, String)> {
+///
+/// A session whose logon feature list has no SECDEFTA (`allowed` false)
+/// is refused first, with the reference's cause (ibx#421).
+pub fn matching_symbols_pattern(pattern: &str, allowed: bool) -> Result<String, (i64, String)> {
     let refuse = |cause: String| Err((321, format!("Error validating request.-'ce' : cause - {}", cause)));
+    if !allowed {
+        log::info!("Not allowed (SECDEFTA feature not set).");
+        return refuse("Failed to request matching symbols".into());
+    }
     if pattern.trim_matches(|c: char| c <= ' ').is_empty() {
         return refuse("Pattern must not be empty".into());
     }
@@ -3504,6 +3511,8 @@ impl ClientCore {
     /// The reference's local refusal of a reqHistoricalData (ibx#430,
     /// ibx#429): (code, text) to report as an error, 321 or 10314, with no
     /// end. Every legal bar size streams with keepUpToDate.
+    /// `max_backfill_years` is the logon limit of the session, None when
+    /// it is not checked (ibx#421).
     pub fn historical_refusal(
         end_date_time: &str,
         duration: &str,
@@ -3512,9 +3521,11 @@ impl ClientCore {
         format_date: i32,
         keep_up_to_date: bool,
         sec_type: &str,
+        max_backfill_years: Option<i32>,
     ) -> Option<(i32, String)> {
         crate::control::historical::check_bar_request(
             end_date_time, duration, bar_size, what_to_show, Some(format_date), keep_up_to_date, sec_type,
+            max_backfill_years,
         ).err()
     }
 

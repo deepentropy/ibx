@@ -577,4 +577,21 @@ impl EClient {
         self.shared_state()?.push_connection_notice(code, message.to_string());
         Ok(())
     }
+
+    /// Apply the values of a first logon reply, as the connect does
+    /// (ibx#421, test-only).
+    #[doc(hidden)]
+    #[pyo3(signature = (clock_offset_ms, features, max_backfill_years, version_cutoff=None, version_cutoff_date=None))]
+    fn _test_apply_logon(
+        &self,
+        clock_offset_ms: Option<i64>,
+        features: &str,
+        max_backfill_years: i32,
+        version_cutoff: Option<&str>,
+        version_cutoff_date: Option<&str>,
+    ) -> PyResult<()> {
+        let logon = crate::gateway::LogonValues { clock_offset_ms, features: Some(features.to_string()), data_permissions: None };
+        crate::gateway::apply_first_logon(&logon, version_cutoff, version_cutoff_date, max_backfill_years, &*self.shared_state()?);
+        Ok(())
+    }
 }

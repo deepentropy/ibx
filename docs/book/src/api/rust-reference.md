@@ -1226,7 +1226,7 @@ pub fn req_news_providers(&self, wrapper: &mut impl Wrapper)
 
 #### `req_current_time`
 
-Request current server time. Returns local system time (no server round-trip).
+Request current server time. Answered locally, as the reference: the local clock plus the offset to the server clock of the logon (no server round-trip).
 
 ```rust
 pub fn req_current_time(&self, wrapper: &mut impl Wrapper)

@@ -4,6 +4,7 @@ pub mod contracts;
 pub mod fundamental;
 pub mod histogram;
 pub mod historical;
+pub mod logon;
 pub mod news;
 pub mod optcalc;
 pub mod regsnapshot;

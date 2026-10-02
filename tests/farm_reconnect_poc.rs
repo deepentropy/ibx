@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ibx::bridge::SharedState;
-use ibx::gateway::{connect_farm, reconnect_ccp, Gateway, GatewayConfig, ReconnectAuth};
+use ibx::gateway::{connect_farm, reconnect_ccp, reconnect_ccp_session, Gateway, GatewayConfig, ReconnectAuth};
 
 fn config() -> GatewayConfig {
     GatewayConfig {
@@ -192,4 +192,48 @@ fn ccp_reconnect_with_cached_credentials() {
             // This is an expected outcome — don't fail the test, just report
         }
     }
+}
+
+/// ibx#423: the auth login and a reconnect of the auth connection run over
+/// TLS with no key exchange, as the reference; the farm logon keeps its key
+/// exchange. Both logon replies give a clock offset (ibx#421).
+/// Run with: cargo test --test farm_reconnect_poc auth_login_and_reconnect_without_key_exchange_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn auth_login_and_reconnect_without_key_exchange_live() {
+    let _ = env_logger::try_init();
+    let cfg = config();
+    let (gw, _farm_conn, ccp_conn, _hmds) = Gateway::connect(&cfg).expect("Initial connect failed");
+    assert!(gw.account_id.starts_with("DU"), "refusing to run: the logged-in account is not a paper account (its id does not start with DU)");
+    assert!(!gw.ns_secure_refused, "the server refused the encryption");
+    println!("login: clock offset {:?} ms, backfill years {}", gw.logon.clock_offset_ms, gw.max_backfill_years);
+    assert!(gw.logon.clock_offset_ms.is_some(), "the logon reply gives the server time");
+
+    let auth = ReconnectAuth {
+        host: cfg.host.clone(),
+        username: cfg.username.clone(),
+        password: cfg.password.clone(),
+        paper: cfg.paper,
+        session_key: gw.session_token.clone(),
+        session_token: gw.session_token.clone(),
+        server_session_id: gw.server_session_id.clone(),
+        hw_info: gw.hw_info.clone(),
+        encoded: gw.encoded.clone(),
+        hmds_host: gw.hmds_host.clone(),
+        hmds_farm: gw.hmds_farm.clone(),
+        farm_host: gw.farm_host.clone(),
+        farm_name: gw.farm_name.clone(),
+        session_epoch: gw.session_epoch.clone(),
+        ns_secure_refused: gw.ns_secure_refused,
+    };
+    drop(ccp_conn);
+    let reconnect = reconnect_ccp_session(&auth).expect("auth reconnect without key exchange");
+    assert!(!reconnect.ns_secure_refused);
+    println!("reconnect: clock offset {:?} ms, epoch {:?}", reconnect.logon.clock_offset_ms, reconnect.session_epoch);
+
+    let farm = connect_farm(
+        &cfg.host, "usfarm", &cfg.username, &cfg.password, cfg.paper,
+        &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 18,
+    ).expect("farm logon with its key exchange");
+    assert!(farm.seq > 0);
 }

@@ -168,7 +168,8 @@ impl SecureChannel {
         result
     }
 
-    /// Verify MAC then decrypt.
+    /// Verify MAC then decrypt. A channel with no key exchange has no
+    /// decryptor: an error, as in the reference (ibx#423).
     pub fn decrypt(&mut self, data: &[u8]) -> Result<Vec<u8>, &'static str> {
         if data.len() < 20 {
             return Err("data too short for MAC");
@@ -176,8 +177,9 @@ impl SecureChannel {
         let ciphertext = &data[..data.len() - 20];
         let received_mac = &data[data.len() - 20..];
 
-        let iv = self.read_iv.as_ref().unwrap();
-        let mac_key = self.read_mac_key.as_ref().unwrap();
+        let (Some(iv), Some(mac_key), Some(aes_key)) = (self.read_iv.as_ref(), self.read_mac_key.as_ref(), self.read_aes_key.as_ref()) else {
+            return Err("Decryptor is not valid");
+        };
 
         let mut mac_input = Vec::with_capacity(iv.len() + ciphertext.len());
         mac_input.extend_from_slice(iv);
@@ -188,7 +190,6 @@ impl SecureChannel {
             return Err("HMAC verification failed");
         }
 
-        let aes_key = self.read_aes_key.as_ref().unwrap();
         let plaintext = aes_cbc_decrypt(aes_key, iv, ciphertext)?;
 
         // CBC chaining: next message's IV = last 16 bytes of THIS ciphertext.
@@ -332,6 +333,13 @@ mod tests {
         let ct2 = ch.encrypt(b"second");
         // Different ciphertexts due to IV chaining
         assert_ne!(ct1, ct2);
+    }
+
+    // ibx#423: the auth connection has no key exchange, so no decryptor.
+    #[test]
+    fn decrypt_without_key_exchange_is_an_error() {
+        let mut ch = SecureChannel::new();
+        assert_eq!(ch.decrypt(&[0u8; 52]), Err("Decryptor is not valid"));
     }
 
     #[test]

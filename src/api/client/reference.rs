@@ -19,7 +19,7 @@ impl EClient {
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_historical_data", &[req_id, contract.con_id]) { return Ok(()); }
         if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration, bar_size, what_to_show,
-            format_date, keep_up_to_date, &contract.sec_type) {
+            format_date, keep_up_to_date, &contract.sec_type, self.shared.reference.backfill_years_limit()) {
             self.shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
         }
@@ -111,7 +111,7 @@ impl EClient {
     /// pattern is sent trimmed (ibx#439).
     pub fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_matching_symbols", &[req_id]) { return Ok(()); }
-        let pattern = match crate::client_core::matching_symbols_pattern(pattern) {
+        let pattern = match crate::client_core::matching_symbols_pattern(pattern, self.shared.reference.matching_symbols_allowed()) {
             Ok(pattern) => pattern,
             Err((code, message)) => {
                 self.shared.orders.push_order_error(req_id, code, message);
