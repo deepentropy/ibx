@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::protocol::tick_decoder::{self as td, RawTick};
-use crate::types::{InstrumentId, Price, Qty, Quote, QuoteMarks, PRICE_SCALE, QTY_SCALE, MAX_INSTRUMENTS};
+use crate::types::{InstrumentId, Price, Qty, Quote, QuoteMarks, SizeKind, PRICE_SCALE, QTY_SCALE, MAX_INSTRUMENTS};
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 
@@ -500,25 +500,48 @@ impl MarketState {
             td::O_HIGH_PRICE => set(&mut q.high, m.checked_mul(mts)),
             td::O_LOW_PRICE => set(&mut q.low, m.checked_mul(mts)),
             td::O_OPEN_PRICE => set(&mut q.open, m.checked_mul(mts)),
-            td::O_BID_SIZE => set(&mut q.bid_size, m.checked_mul(sizes)),
-            td::O_ASK_SIZE => set(&mut q.ask_size, m.checked_mul(sizes)),
-            td::O_LAST_SIZE => set(&mut q.last_size, m.checked_mul(sizes)),
-            td::O_VOLUME => set(&mut q.volume, m.checked_mul(self.size_min_tick_scaled[i])),
+            td::O_BID_SIZE => {
+                set(&mut q.bid_size, m.checked_mul(sizes));
+                self.marks[i].set_seen(SizeKind::Bid);
+            }
+            td::O_ASK_SIZE => {
+                set(&mut q.ask_size, m.checked_mul(sizes));
+                self.marks[i].set_seen(SizeKind::Ask);
+            }
+            td::O_LAST_SIZE => {
+                set(&mut q.last_size, m.checked_mul(sizes));
+                self.marks[i].set_seen(SizeKind::Last);
+            }
+            td::O_VOLUME => {
+                set(&mut q.volume, m.checked_mul(self.size_min_tick_scaled[i]));
+                self.marks[i].set_seen(SizeKind::Volume);
+            }
             td::O_BID_EXCH => q.bid_exch_mask = m,
             td::O_ASK_EXCH => q.ask_exch_mask = m,
-            td::O_LAST_EXCH => q.last_exch_mask = m,
+            td::O_LAST_EXCH => {
+                q.last_exch_mask = m;
+                if trade && !tick.stats_block && m >= 0 {
+                    self.marks[i].trade_gives(true);
+                }
+            }
             td::O_AUTO_EXEC if !trade && !tick.stats_block => self.marks[i].set_auto_bits(m),
             td::O_ATTRIBUTES if !tick.stats_block => {
                 if trade { self.marks[i].set_halted(m) } else { self.marks[i].set_auto_bits(m) }
             }
             // On a daily-stats block this type is the close date, not a time.
             td::O_TIMESTAMP_BASE if !tick.stats_block && m > 0 => {
+                if trade {
+                    self.marks[i].trade_gives(false);
+                }
                 if let Some(ns) = (m as u64).checked_mul(NS_PER_SEC) {
                     self.last_ts_base[i] = m;
                     q.timestamp_ns = ns;
                 }
             }
             td::O_TIMESTAMP_DELTA if m > 0 => {
+                if trade && !tick.stats_block {
+                    self.marks[i].trade_gives(false);
+                }
                 if let Some(ns) = self.last_ts_base[i].checked_add(m).and_then(|s| (s as u64).checked_mul(NS_PER_SEC)) {
                     q.timestamp_ns = ns;
                 }
@@ -543,6 +566,12 @@ impl MarketState {
     #[inline(always)]
     pub fn set_daily_first(&mut self, id: InstrumentId, first: bool) {
         self.marks[id as usize].set_daily_first(first);
+    }
+
+    /// The marks, to note the updates of a message (ibx#446).
+    #[inline(always)]
+    pub fn marks_mut(&mut self, id: InstrumentId) -> &mut QuoteMarks {
+        &mut self.marks[id as usize]
     }
 
     #[inline(always)]
@@ -1112,7 +1141,7 @@ mod tests {
     const CENT: i64 = PRICE_SCALE / 100;
 
     fn raw(tick_type: u64, magnitude: i64) -> RawTick {
-        RawTick { server_tag: 7, tick_type, magnitude, stats_block: false }
+        RawTick { server_tag: 7, tick_type, magnitude, stats_block: false, first: true }
     }
 
     #[test]

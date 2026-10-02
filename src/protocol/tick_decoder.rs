@@ -188,6 +188,8 @@ pub struct RawTick {
     pub magnitude: i64,
     /// The tick comes from a daily-stats block.
     pub stats_block: bool,
+    /// The tick is the first of its block.
+    pub first: bool,
 }
 
 /// Decode all ticks from a 35=P binary payload.
@@ -299,6 +301,7 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) -> bool {
                 tick_type,
                 magnitude,
                 stats_block,
+                first: ticks.len() == block_start,
             });
         }
     }

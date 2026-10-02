@@ -470,9 +470,22 @@ impl FarmState {
             };
             let instrument = route.instrument;
             let (word, bit) = ((instrument >> 6) as usize, 1u64 << (instrument & 63));
+            // The updates of the message, in its order (ibx#446).
+            if notified[word] & bit == 0 {
+                context.market.marks_mut(instrument).begin_message();
+            }
             if route.trade && traded[word] & bit == 0 {
                 traded[word] |= bit;
                 context.market.set_daily_first(instrument, tick.stats_block);
+            }
+            if tick.first {
+                let marks = context.market.marks_mut(instrument);
+                match (route.trade, tick.stats_block) {
+                    (true, true) => marks.begin_daily(),
+                    (true, false) => marks.begin_trade(),
+                    (false, false) => marks.note_quote_update(),
+                    (false, true) => {}
+                }
             }
 
             context.market.apply_tick(instrument, route.price_tick, route.trade, tick);
@@ -1691,6 +1704,37 @@ mod tests {
         assert_eq!(marks.halted(), Some(0));
         let marks = eur_usd_marks(&[tick_message(&[(false, 7, &[(2, 22_511), (13, 3)])])]);
         assert_eq!(marks.halted(), Some(3));
+    }
+
+    // ibx#446: the updates of a message, in its order, for the stream: the
+    // captured first EUR.USD message (book, trade with its time, daily
+    // figures), then a book-only message; each message counts.
+    #[test]
+    fn message_updates_in_their_order() {
+        use crate::types::{Pass, SizeKind};
+        let marks = eur_usd_marks(&[tick_message(&[EUR_USD_QUOTE, EUR_USD_TRADE, EUR_USD_DAILY])]);
+        assert_eq!(marks.passes().collect::<Vec<_>>(), [Pass::Trade { time: true, exchange: false }, Pass::Daily]);
+        assert!(marks.quote_update());
+        assert_eq!(marks.message_seq(), 1);
+        for kind in [SizeKind::Bid, SizeKind::Ask, SizeKind::Last, SizeKind::Volume] {
+            assert!(marks.seen(kind), "{kind:?}");
+        }
+        let marks = eur_usd_marks(&[
+            tick_message(&[EUR_USD_QUOTE, EUR_USD_TRADE, EUR_USD_DAILY]),
+            tick_message(&[(false, 8, &[(5, 6_000_000)])]),
+        ]);
+        assert_eq!(marks.passes().count(), 0);
+        assert!(marks.quote_update());
+        assert_eq!(marks.message_seq(), 2);
+        // Daily figures first, then a trade with its exchange only, then
+        // one with its time (a delta) and its exchange; no book update.
+        let marks = eur_usd_marks(&[tick_message(&[
+            (true, 7, &[(10, 5)]), (false, 7, &[(27, 8)]), (false, 7, &[(6, 2), (21, 92), (27, 1024)]),
+        ])]);
+        assert_eq!(marks.passes().collect::<Vec<_>>(), [
+            Pass::Daily, Pass::Trade { time: false, exchange: true }, Pass::Trade { time: true, exchange: true },
+        ]);
+        assert!(!marks.quote_update());
     }
 
     // ibx#446: the auto-execution bits of a quote (both set on the
