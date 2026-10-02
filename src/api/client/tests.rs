@@ -3003,6 +3003,22 @@ fn process_msgs_dispatches_contract_details() {
     assert!(w.events.iter().any(|e| e == "contract_details_end:7"));
 }
 
+// ibx#438: a bond row is a bond contract details message, as the
+// reference sends it (captured 02/10/2026: 41 bondContractDetails rows for
+// an issuer lookup, then the end).
+#[test]
+fn process_msgs_dispatches_bond_rows_as_bond_contract_details() {
+    let (client, _rx, shared) = test_client();
+    shared.reference.push_contract_details(9488, ContractDefinition {
+        con_id: 29105555, symbol: "IBM".into(), sec_type: SecurityType::Bond, exchange: "SMART".into(),
+        ..Default::default()
+    });
+    shared.reference.push_contract_details_end(9488);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["bond_contract_details:9488:29105555", "contract_details_end:9488"]);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  process_msgs — matching symbols
 // ═══════════════════════════════════════════════════════════════════

@@ -1790,3 +1790,99 @@ fn api_smart_components_live() {
         assert!(comps.iter().any(|c| c.1 == "NASDAQ"), "req {req}: no NASDAQ");
     }
 }
+
+// ── Contract lookups CONTFUT, by conId with an exchange, bond issuer (ibx#438), focused ──
+
+#[derive(Default)]
+struct LookupWrapper {
+    events: Vec<String>,
+    rows: Vec<(i64, String, i64, String, String)>,
+    ends: Vec<i64>,
+    issuers: Vec<String>,
+}
+
+impl Wrapper for LookupWrapper {
+    fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) { self.events.push(format!("error {req_id} {code} {text}")); }
+    fn contract_details(&mut self, req_id: i64, d: &ContractDetails) {
+        self.rows.push((req_id, "row".into(), d.contract.con_id, d.contract.sec_type.clone(), d.contract.exchange.clone()));
+    }
+    fn bond_contract_details(&mut self, req_id: i64, d: &ContractDetails) {
+        self.rows.push((req_id, "bond".into(), d.contract.con_id, d.contract.sec_type.clone(), d.contract.exchange.clone()));
+    }
+    fn contract_details_end(&mut self, req_id: i64) { self.ends.push(req_id); }
+    fn symbol_samples(&mut self, _req_id: i64, descriptions: &[ContractDescription]) {
+        self.issuers.extend(descriptions.iter().filter(|d| !d.issuer_id.is_empty()).map(|d| d.issuer_id.clone()));
+    }
+}
+
+/// As captured on the reference 02/10/2026: CONTFUT ES CME gives one row,
+/// secType CONTFUT; FUT+CONTFUT gives the CONTFUT row first, then the
+/// futures; conId 265598 on ISLAND gives one row; a bond issuer from the
+/// IBM matching symbols gives bond rows (with and without secType BOND).
+/// Run with: cargo test --test rust_api_gt api_contract_lookups_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_contract_lookups_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = LookupWrapper::default();
+    let wait_end = |client: &EClient, w: &mut LookupWrapper, req: i64| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !w.ends.contains(&req) && Instant::now() < deadline {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let es = |sec_type: &str| Contract { symbol: "ES".into(), sec_type: sec_type.into(), exchange: "CME".into(),
+        currency: "USD".into(), ..Default::default() };
+    std::thread::sleep(Duration::from_secs(3));
+    client.req_contract_details(9480, &es("CONTFUT")).unwrap();
+    wait_end(&client, &mut w, 9480);
+    client.req_contract_details(9481, &es("FUT+CONTFUT")).unwrap();
+    wait_end(&client, &mut w, 9481);
+    let by_con_id = Contract { con_id: 265598, exchange: "ISLAND".into(), ..Default::default() };
+    client.req_contract_details(9483, &by_con_id).unwrap();
+    wait_end(&client, &mut w, 9483);
+    client.req_matching_symbols(9487, "IBM").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while w.issuers.is_empty() && Instant::now() < deadline {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let issuer = w.issuers.first().cloned().unwrap_or_else(|| "e1400789".into());
+    let bond = Contract { sec_type: "BOND".into(), issuer_id: issuer.clone(), currency: "USD".into(), ..Default::default() };
+    client.req_contract_details(9488, &bond).unwrap();
+    wait_end(&client, &mut w, 9488);
+    let any = Contract { issuer_id: issuer.clone(), ..Default::default() };
+    client.req_contract_details(9489, &any).unwrap();
+    wait_end(&client, &mut w, 9489);
+    client.disconnect();
+    let of = |req: i64| w.rows.iter().filter(|r| r.0 == req).cloned().collect::<Vec<_>>();
+    for req in [9480, 9481, 9483, 9488, 9489] {
+        let rows = of(req);
+        println!("  {req}: {} rows, first {:?}, end {}", rows.len(), rows.first(), w.ends.contains(&req));
+    }
+    println!("  issuer {issuer}, events {:?}", w.events);
+    let contfut = of(9480);
+    assert_eq!(contfut.len(), 1);
+    assert_eq!(contfut[0].3, "CONTFUT");
+    let both = of(9481);
+    assert!(both.len() > 2 && both[0].3 == "CONTFUT" && both[1..].iter().all(|r| r.3 == "FUT"), "{both:?}");
+    assert!(both[1..].iter().any(|r| r.2 == contfut[0].2), "the front month again as FUT");
+    let island = of(9483);
+    assert_eq!(island.len(), 1);
+    assert_eq!(island[0].2, 265598);
+    for req in [9488, 9489] {
+        let rows = of(req);
+        assert!(!rows.is_empty() && rows.iter().all(|r| r.1 == "bond" && r.3 == "BOND"), "req {req}: {rows:?}");
+        assert!(w.ends.contains(&req));
+    }
+}

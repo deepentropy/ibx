@@ -77,6 +77,8 @@ pub trait Wrapper {
 
     fn contract_details(&mut self, req_id: i64, details: &ContractDetails) {}
     fn contract_details_end(&mut self, req_id: i64) {}
+    /// A bond row of a contract details request (`bondContractDetails`).
+    fn bond_contract_details(&mut self, req_id: i64, details: &ContractDetails) {}
     fn symbol_samples(&mut self, req_id: i64, descriptions: &[ContractDescription]) {}
 
     // ── Tick-by-Tick ──
@@ -295,6 +297,9 @@ pub mod tests {
         }
         fn contract_details(&mut self, req_id: i64, details: &ContractDetails) {
             self.events.push(format!("contract_details:{req_id}:{}", details.contract.symbol));
+        }
+        fn bond_contract_details(&mut self, req_id: i64, details: &ContractDetails) {
+            self.events.push(format!("bond_contract_details:{req_id}:{}", details.contract.con_id));
         }
         fn contract_details_end(&mut self, req_id: i64) {
             self.events.push(format!("contract_details_end:{req_id}"));

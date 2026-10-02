@@ -394,7 +394,12 @@ impl EClient {
         // Contract details → contract_details + contract_details_end
         for (req_id, def) in self.shared.reference.drain_contract_details() {
             let details = ContractDetails::from_definition(&def);
-            wrapper.contract_details(req_id, &details);
+            // A bond row is a bond contract details message (ibx#438).
+            if def.sec_type == crate::control::contracts::SecurityType::Bond {
+                wrapper.bond_contract_details(req_id, &details);
+            } else {
+                wrapper.contract_details(req_id, &details);
+            }
         }
         for req_id in self.shared.reference.drain_contract_details_end() {
             wrapper.contract_details_end(req_id);

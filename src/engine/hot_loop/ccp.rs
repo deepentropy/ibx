@@ -214,6 +214,8 @@ pub(crate) struct CcpState {
     /// By-symbol lookups in flight: the request multiplier and the strike
     /// retry (ibx#410, ibx#435).
     pub(crate) pending_lookups: Vec<PendingLookup>,
+    /// CONTFUT and FUT+CONTFUT requests in flight (ibx#438).
+    pub(crate) pending_continuous: Vec<ContinuousLookup>,
     /// Known market rule per (conId, exchange), from the records of every
     /// definition reply; a fan-out asks only for the unknown ones (ibx#435).
     pub(crate) market_rule_by_exchange: std::collections::HashMap<(i64, String), u32>,
@@ -374,6 +376,37 @@ pub(crate) struct SymbolLookup {
     pub exchange: String,
     pub currency: String,
     pub filters: crate::types::SecDefFilters,
+    /// The continuous future lookup of a CONTFUT request (ibx#438).
+    pub continuous: bool,
+}
+
+/// A CONTFUT or FUT+CONTFUT request (ibx#438): the continuous future
+/// lookup goes first and its records are kept; with FUT+CONTFUT the
+/// futures lookup follows, and its rows come after the kept ones.
+pub(crate) struct ContinuousLookup {
+    pub req_id: ReqId,
+    pub with_futures: bool,
+    /// The records of the continuous future reply, once it came.
+    pub kept: Option<Vec<crate::control::contracts::ContractDefinition>>,
+}
+
+/// The value of the lead-futures-only tag of a continuous future lookup,
+/// the current lead future (captured 02/10/2026: `6857=2`).
+const CURRENT_LEAD_FUTURE: &str = "2";
+
+/// How an API security type reads for a contract lookup, as the reference
+/// decodes it (ibx#438): the security type to ask, whether a continuous
+/// future lookup is made, and whether the futures lookup is made too. A
+/// bond issuer id makes the lookup one for fixed income.
+fn lookup_sec_type<'a>(sec_type: &'a str, filters: &crate::types::SecDefFilters) -> (&'a str, bool, bool) {
+    if !filters.issuer_id.trim().is_empty() {
+        return ("FIXED", false, false);
+    }
+    match sec_type {
+        "CONTFUT" => ("FUT", true, false),
+        "FUT+CONTFUT" | "CONTFUT+FUT" => ("FUT", true, true),
+        other => (other, false, false),
+    }
 }
 
 impl SymbolLookup {
@@ -411,7 +444,9 @@ fn secdef_by_symbol_fields(req_id: ReqId, lookup: &SymbolLookup, strike: &str) -
     fields.push((fix::TAG_MSG_TYPE, "c".into()));
     fields.push((320, format!("{}{}", name, req_id)));
     fields.push((321, "2".into()));
-    if strike.is_empty() {
+    // The continuous future lookup is a copy of the request without its
+    // source and without expired contracts, as the reference (ibx#438).
+    if strike.is_empty() && !lookup.continuous {
         fields.push((TAG_IB_SOURCE, "Socket".into()));
         if f.include_expired && !identifier {
             fields.push((6320, "1".into()));
@@ -423,6 +458,29 @@ fn secdef_by_symbol_fields(req_id: ReqId, lookup: &SymbolLookup, strike: &str) -
         // (ib-agent#174).
         fields.push((22, lookup.sec_id_source().into()));
         fields.push((48, f.sec_id.clone()));
+    } else if lookup.continuous {
+        // Continuous future (ibx#438): the symbol and trading class, then
+        // the futures fields with the current lead future.
+        let symbol = lookup_symbol(&lookup.symbol);
+        if !symbol.is_empty() {
+            fields.push((TAG_SYMBOL, symbol.into_owned()));
+        }
+        if !f.trading_class.is_empty() {
+            fields.push((8362, f.trading_class.clone()));
+        }
+        fields.push((167, "FUT".into()));
+        let expiry = &f.last_trade_date_or_contract_month;
+        if expiry.eq_ignore_ascii_case("NOEXP") {
+            fields.push((541, "NOEXP".into()));
+        } else if expiry.len() == 6 {
+            fields.push((200, expiry.clone()));
+        } else if expiry.len() > 6 {
+            fields.push((541, expiry.clone()));
+        }
+        fields.push((6857, CURRENT_LEAD_FUTURE.into()));
+        if !f.multiplier.is_empty() {
+            fields.push((231, f.multiplier.clone()));
+        }
     } else {
         let symbol = lookup_symbol(&lookup.symbol);
         let has_class = !f.trading_class.is_empty();
@@ -462,13 +520,22 @@ fn secdef_by_symbol_fields(req_id: ReqId, lookup: &SymbolLookup, strike: &str) -
             fields.push((231, f.multiplier.clone()));
         }
     }
-    // Exchange and primary exchange are two fields (ibx#229).
+    // Exchange and primary exchange are two fields (ibx#229); an empty
+    // field is not written, as the reference (ibx#438).
     let exchange = if lookup.exchange == "SMART" { "BEST" } else { lookup.exchange.as_str() };
-    fields.push((100, exchange.into()));
+    if !exchange.is_empty() {
+        fields.push((100, exchange.into()));
+    }
     if !identifier && !f.primary_exchange.is_empty() {
         fields.push((207, f.primary_exchange.clone()));
     }
-    fields.push((15, lookup.currency.clone()));
+    if !lookup.currency.is_empty() {
+        fields.push((15, lookup.currency.clone()));
+    }
+    // The bond issuer, last (ibx#438).
+    if !identifier && !f.issuer_id.is_empty() {
+        fields.push((6454, f.issuer_id.clone()));
+    }
     fields
 }
 
@@ -540,6 +607,7 @@ impl CcpState {
             pending_secdef: Vec::new(),
             optcalc: super::optcalc::OptCalc::default(),
             pending_lookups: Vec::new(),
+            pending_continuous: Vec::new(),
             market_rule_by_exchange: std::collections::HashMap::new(),
             pending_matching_symbols: Vec::new(),
             next_matching_symbols_id: 1,
@@ -1894,6 +1962,7 @@ impl CcpState {
             }
         }
         self.pending_lookups.retain(|l| !expired.contains(&l.req_id));
+        self.pending_continuous.retain(|c| !expired.contains(&c.req_id));
         for fanout in late {
             log::warn!(
                 "Contract-details fan-out timeout: api_req_id={} answered {} of {}",
@@ -2125,14 +2194,71 @@ impl CcpState {
         self.pending_secdef.push((req_id, true, Instant::now() + SECDEF_TIMEOUT));
     }
 
+    /// The API lookup by conId (ibx#438), in the reference's by-conId
+    /// forms: with an exchange (`SMART` written `BEST`)
+    /// `320=socket-reqContractDetailsReqByConid{id}|321=2|6088=Socket|6320=1|146=1|6008={conId}|6004={exchange}`,
+    /// without one the preferred contract of the conId
+    /// `320=PreferredReqByConid{id}|321=2|146=1|6008={conId}|6004=ANYEXCH`
+    /// (captured 02/10/2026). The reference answers from its contract cache
+    /// when it can; ibx always asks.
+    pub(crate) fn send_contract_details_by_con_id(
+        &mut self,
+        req_id: ReqId,
+        con_id: i64,
+        exchange: &str,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        use crate::control::contracts::{SECDEF_BY_CONID_NAME, SECDEF_PREFERRED_NAME};
+        let con_id_str = con_id.to_string();
+        let ts = chrono_free_timestamp();
+        let mut fields: Vec<(u32, String)> = vec![
+            (fix::TAG_MSG_TYPE, "c".into()),
+            (fix::TAG_SENDING_TIME, ts.to_string()),
+        ];
+        if exchange.is_empty() {
+            fields.push((320, format!("{}{}", SECDEF_PREFERRED_NAME, req_id)));
+            fields.push((321, "2".into()));
+        } else {
+            fields.push((320, format!("{}{}", SECDEF_BY_CONID_NAME, req_id)));
+            fields.push((321, "2".into()));
+            fields.push((crate::control::contracts::TAG_IB_SOURCE, "Socket".into()));
+            fields.push((6320, "1".into()));
+        }
+        fields.push((146, "1".into()));
+        fields.push((6008, con_id_str));
+        let exchange = match exchange {
+            "" => "ANYEXCH",
+            "SMART" => "BEST",
+            other => other,
+        };
+        fields.push((6004, exchange.to_string()));
+        if let Some(conn) = ccp_conn.as_mut().filter(|_| !self.disconnected) {
+            let refs: Vec<(u32, &str)> = fields.iter().map(|(t, v)| (*t, v.as_str())).collect();
+            let _ = conn.send_fix(&refs);
+            log::info!("Sent secdef request by conId: req_id={} con_id={} exchange={}", req_id, con_id, exchange);
+            hb.last_ccp_sent = Instant::now();
+        } else {
+            log::warn!("secdef request req_id={} queued with no CCP socket", req_id);
+        }
+        self.pending_secdef.push((req_id, true, Instant::now() + SECDEF_TIMEOUT));
+    }
+
     pub(crate) fn send_secdef_request_by_symbol(&mut self, req_id: ReqId, symbol: &str, sec_type: &str, exchange: &str, currency: &str, filters: &crate::types::SecDefFilters, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let strike = if filters.strike > 0.0 { format!("{}", filters.strike) } else { String::new() };
+        let (sec_type, continuous, with_futures) = lookup_sec_type(sec_type, filters);
+        if continuous {
+            log::info!("Requested continuous futures contract details: req_id={}", req_id);
+            self.pending_continuous.retain(|c| c.req_id != req_id);
+            self.pending_continuous.push(ContinuousLookup { req_id, with_futures, kept: None });
+        }
         let lookup = SymbolLookup {
             symbol: symbol.to_string(),
             sec_type: sec_type.to_string(),
             exchange: exchange.to_string(),
             currency: currency.to_string(),
             filters: filters.clone(),
+            continuous,
         };
         // A lookup with a strike that finds nothing is asked once more with
         // the strike divided by 100, as the reference (ibx#410).
@@ -2259,22 +2385,56 @@ impl CcpState {
         let Some(req_id) = contracts::secdef_request_number(&rid) else { return };
         let Some(idx) = self.pending_secdef.iter().position(|(pid, _, _)| *pid == req_id) else { return };
         let (_, single_shot, _) = self.pending_secdef.remove(idx);
-        if records.is_empty() {
+        let mut records = records;
+        // A CONTFUT request (ibx#438): the continuous future records are
+        // kept; with FUT+CONTFUT the futures lookup follows and its rows
+        // come after them.
+        let mut continuous: Vec<crate::control::contracts::ContractDefinition> = Vec::new();
+        if let Some(i) = self.pending_continuous.iter().position(|c| c.req_id == req_id) {
+            match self.pending_continuous[i].kept.take() {
+                None => {
+                    for def in &mut records {
+                        def.continuous = true;
+                    }
+                    if self.pending_continuous[i].with_futures {
+                        self.pending_continuous[i].kept = Some(records);
+                        let lookup = self.pending_lookups.iter().find(|l| l.req_id == req_id).map(|l| l.lookup.clone());
+                        if let Some(lookup) = lookup {
+                            let futures = SymbolLookup { continuous: false, ..lookup };
+                            if let Some(l) = self.pending_lookups.iter_mut().find(|l| l.req_id == req_id) {
+                                l.lookup = futures.clone();
+                            }
+                            self.send_symbol_lookup(req_id, &futures, "", ccp_conn, hb);
+                        }
+                        return;
+                    }
+                    self.pending_continuous.swap_remove(i);
+                }
+                Some(kept) => {
+                    self.pending_continuous.swap_remove(i);
+                    continuous = kept;
+                }
+            }
+        }
+        if records.is_empty() && continuous.is_empty() {
             // No record: never a conId 0 row (ibx#400).
             self.no_security_definition(req_id, shared, ccp_conn, hb);
             return;
         }
         let multiplier = self.take_lookup(req_id)
             .and_then(|l| l.filters.multiplier.parse::<f64>().ok());
-        let mut records = records;
         // With several records, a requested multiplier keeps only the
         // records that have it, as the reference.
         if let (true, Some(m)) = (records.len() > 1, multiplier) {
             records.retain(|d| d.multiplier == m);
-            if records.is_empty() {
+            if records.is_empty() && continuous.is_empty() {
                 push_not_found(req_id, shared);
                 return;
             }
+        }
+        if !continuous.is_empty() {
+            continuous.append(&mut records);
+            records = continuous;
         }
         for def in records.iter().filter(|d| d.con_id != 0) {
             if let Some(rule) = def.market_rule_id {
@@ -2358,6 +2518,7 @@ impl CcpState {
             exchange: lookup.exchange,
             currency: lookup.currency,
             filters: lookup.filters,
+            continuous: false,
         };
         let strike = if symbol_lookup.filters.strike > 0.0 {
             format!("{}", symbol_lookup.filters.strike)
@@ -4187,7 +4348,7 @@ mod tests {
     fn symbol_lookup(symbol: &str, sec_type: &str, exchange: &str, filters: crate::types::SecDefFilters) -> SymbolLookup {
         SymbolLookup {
             symbol: symbol.into(), sec_type: sec_type.into(), exchange: exchange.into(),
-            currency: "USD".into(), filters,
+            currency: "USD".into(), filters, continuous: false,
         }
     }
 
@@ -4596,6 +4757,130 @@ mod tests {
         assert_eq!(rows[0].1.market_rule_ids, "4563", "the rules known so far");
         assert_eq!(shared.reference.drain_contract_details_end(), vec![51]);
         assert!(shared.reference.drain_historical_errors().is_empty());
+    }
+
+    // ── ibx#438: CONTFUT, by conId with an exchange, bond issuer ──
+
+    /// A future record of a definition reply, without a schedule key.
+    fn future_listing(con_id: &str, local: &str, month: &str) -> String {
+        format!("55=ES|167=FUT|207=CME|6008={con_id}|6031=67|15=USD|58=ES|6035={local}|6058=ES|200={month}|231=50|")
+    }
+
+    fn future_reply(req: &str, listings: &[String]) -> Vec<u8> {
+        let mut text = format!("35=d|43=N|320={req}|322=*|323=4|");
+        for l in listings {
+            text.push_str(l);
+        }
+        text.push_str("146=1|6038=Y|6019=1|6031=67|6026=1|6023=0|6027=0.25|6030=1|6344=1|");
+        pipe_msg(&text)
+    }
+
+    // Captured 02/10/2026 (b1_438_lookups): CONTFUT ES CME goes out as the
+    // continuous future lookup, without the source; the one row is the
+    // front month with secType CONTFUT.
+    #[test]
+    fn contfut_lookup_as_the_reference() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        ccp.market_rule_by_exchange.insert((515416632, "CME".into()), 67);
+        ccp.send_secdef_request_by_symbol(9480, "ES", "CONTFUT", "CME", "USD", &Default::default(), &mut conn, &mut hb);
+        assert_eq!(ccp_messages_sent(&mut server), ["35=c|320=FixSecDefReqBySymbol9480|321=2|55=ES|167=FUT|6857=2|100=CME|15=USD"]);
+        let reply = future_reply("FixSecDefReqBySymbol9480", &[future_listing("515416632", "ESZ6", "202612")]);
+        ccp.process_ccp_message(&reply, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let rows = shared.reference.drain_contract_details();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].0, rows[0].1.con_id, rows[0].1.continuous), (9480, 515416632, true));
+        assert_eq!(crate::api::types::ContractDetails::from_definition(&rows[0].1).contract.sec_type, "CONTFUT");
+        assert_eq!(shared.reference.drain_contract_details_end(), [9480]);
+        assert!(ccp.pending_continuous.is_empty() && ccp.pending_secdef.is_empty());
+    }
+
+    // Captured 02/10/2026: FUT+CONTFUT sends the continuous lookup, then,
+    // once it is answered, the futures lookup; the CONTFUT row comes first,
+    // then every future (the front month again, as FUT).
+    #[test]
+    fn fut_and_contfut_lookup_as_the_reference() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        for con_id in [515416632, 586139767] {
+            ccp.market_rule_by_exchange.insert((con_id, "CME".into()), 67);
+        }
+        ccp.send_secdef_request_by_symbol(9481, "ES", "FUT+CONTFUT", "CME", "USD", &Default::default(), &mut conn, &mut hb);
+        assert_eq!(ccp_messages_sent(&mut server), ["35=c|320=FixSecDefReqBySymbol9481|321=2|55=ES|167=FUT|6857=2|100=CME|15=USD"]);
+        let front = future_listing("515416632", "ESZ6", "202612");
+        ccp.process_ccp_message(&future_reply("FixSecDefReqBySymbol9481", &[front.clone()]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(shared.reference.drain_contract_details().is_empty(), "the rows wait for the futures lookup");
+        assert_eq!(ccp_messages_sent(&mut server), ["35=c|320=FixSecDefReqBySymbol9481|321=2|6088=Socket|55=ES|167=FUT|100=CME|15=USD"]);
+        let futures = future_reply("FixSecDefReqBySymbol9481", &[front, future_listing("586139767", "ESZ7", "202712")]);
+        ccp.process_ccp_message(&futures, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let rows: Vec<(i64, String)> = shared.reference.drain_contract_details().iter()
+            .map(|(_, d)| (d.con_id, crate::api::types::ContractDetails::from_definition(d).contract.sec_type)).collect();
+        assert_eq!(rows, [(515416632, "CONTFUT".to_string()), (515416632, "FUT".to_string()), (586139767, "FUT".to_string())]);
+        assert_eq!(shared.reference.drain_contract_details_end(), [9481]);
+        assert!(ccp.pending_continuous.is_empty());
+    }
+
+    // The reference's decoding of the security type: CONTFUT+FUT too; the
+    // text is matched exactly.
+    #[test]
+    fn contfut_decoding() {
+        let f = crate::types::SecDefFilters::default();
+        assert_eq!(lookup_sec_type("CONTFUT", &f), ("FUT", true, false));
+        assert_eq!(lookup_sec_type("FUT+CONTFUT", &f), ("FUT", true, true));
+        assert_eq!(lookup_sec_type("CONTFUT+FUT", &f), ("FUT", true, true));
+        assert_eq!(lookup_sec_type("contfut", &f), ("contfut", false, false));
+        let bond = crate::types::SecDefFilters { issuer_id: "e1400789".into(), ..Default::default() };
+        assert_eq!(lookup_sec_type("BOND", &bond), ("FIXED", false, false));
+        assert_eq!(lookup_sec_type("CONTFUT", &bond), ("FIXED", false, false));
+    }
+
+    // Captured 02/10/2026: a bond issuer lookup is a fixed income lookup
+    // with the issuer last; no symbol, no empty currency.
+    #[test]
+    fn bond_issuer_lookup_as_the_reference() {
+        let (mut ccp, _context, _shared) = u186_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        let f = crate::types::SecDefFilters { issuer_id: "e1400789".into(), ..Default::default() };
+        ccp.send_secdef_request_by_symbol(9488, "", "BOND", "", "USD", &f, &mut conn, &mut hb);
+        ccp.send_secdef_request_by_symbol(9489, "", "", "", "", &f, &mut conn, &mut hb);
+        assert_eq!(ccp_messages_sent(&mut server), [
+            "35=c|320=FixSecDefReqBySymbol9488|321=2|6088=Socket|167=FIXED|15=USD|6454=e1400789",
+            "35=c|320=FixSecDefReqBySymbol9489|321=2|6088=Socket|167=FIXED|6454=e1400789",
+        ]);
+    }
+
+    // Captured 02/10/2026: a conId with an exchange is asked by conId on
+    // that exchange; without an exchange, the preferred contract of the
+    // conId; the reply gives the row and the end.
+    #[test]
+    fn lookup_by_con_id_as_the_reference() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        ccp.send_contract_details_by_con_id(9483, 265598, "ISLAND", &mut conn, &mut hb);
+        ccp.send_contract_details_by_con_id(9484, 265598, "", &mut conn, &mut hb);
+        ccp.send_contract_details_by_con_id(9485, 265598, "SMART", &mut conn, &mut hb);
+        assert_eq!(ccp_messages_sent(&mut server), [
+            "35=c|320=socket-reqContractDetailsReqByConid9483|321=2|6088=Socket|6320=1|146=1|6008=265598|6004=ISLAND",
+            "35=c|320=PreferredReqByConid9484|321=2|146=1|6008=265598|6004=ANYEXCH",
+            "35=c|320=socket-reqContractDetailsReqByConid9485|321=2|6088=Socket|6320=1|146=1|6008=265598|6004=BEST",
+        ]);
+        let reply = pipe_msg(&format!(
+            "35=d|43=N|320=socket-reqContractDetailsReqByConid9483|322=*|323=4|\
+             55=AAPL|167=STK|207=NASDAQ|6008=265598|6031=4563|15=USD|58=NMS|6035=AAPL|6058=NMS|\
+             146=1|6038=Y|6019=1|6031=4563|6026=1|6023=0|6027=0.01|6030=1|6344=1|"));
+        ccp.process_ccp_message(&reply, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let rows = shared.reference.drain_contract_details();
+        assert_eq!(rows.iter().map(|(r, d)| (*r, d.con_id, d.exchange.clone())).collect::<Vec<_>>(),
+            [(9483, 265598, "NASDAQ".to_string())]);
+        assert_eq!(shared.reference.drain_contract_details_end(), [9483]);
     }
 
     // ── ibx#228: matching-symbols attribution ──

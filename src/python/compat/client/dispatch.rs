@@ -611,8 +611,13 @@ impl EClient {
         for (req_id, def) in contract_defs {
             let details = ContractDetails::from_definition(py, &def);
             let details_py = Py::new(py, details)?.into_any();
-            call_wrapper!(self.wrapper, py, "contract_details",
-                (req_id, &details_py));
+            // A bond row is a bond contract details message (ibx#438).
+            let callback = if def.sec_type == crate::control::contracts::SecurityType::Bond {
+                "bond_contract_details"
+            } else {
+                "contract_details"
+            };
+            call_wrapper!(self.wrapper, py, callback, (req_id, &details_py));
         }
         let contract_ends = shared.reference.drain_contract_details_end();
         for req_id in contract_ends {

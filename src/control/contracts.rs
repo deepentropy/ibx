@@ -176,6 +176,9 @@ pub struct ContractDefinition {
     pub under_sec_type: String,
     /// Security type as the wire names it (`CS`, `OPT`, `FOP`, ...).
     pub wire_sec_type: String,
+    /// A record of a continuous futures lookup: the API security type is
+    /// `CONTFUT` (ibx#438).
+    pub continuous: bool,
 }
 
 impl Default for ContractDefinition {
@@ -214,6 +217,7 @@ impl Default for ContractDefinition {
             last_trade_time: String::new(),
             under_sec_type: String::new(),
             wire_sec_type: String::new(),
+            continuous: false,
         }
     }
 }
@@ -501,12 +505,19 @@ fn apply_secdef_fields<'a>(def: &mut ContractDefinition, keys: &mut RecordKeys<'
 /// as the reference names them; the request number follows (ibx#229).
 pub const SECDEF_BY_SYMBOL_NAME: &str = "FixSecDefReqBySymbol";
 pub const SECDEF_BY_IDENTIFIER_NAME: &str = "FixSecDefReqByIdTypeValue";
+/// Name of the API lookup by conId on an exchange (ibx#438).
+pub const SECDEF_BY_CONID_NAME: &str = "socket-reqContractDetailsReqByConid";
+/// Name of the lookup of the preferred contract of a conId, the API lookup
+/// by conId without an exchange (ibx#438).
+pub const SECDEF_PREFERRED_NAME: &str = "PreferredReqByConid";
 
 /// The request number of a definition reply's request id: the id without
 /// the name of its lookup (a bare number is taken as is).
 pub fn secdef_request_number(req_id: &str) -> Option<crate::types::ReqId> {
     req_id.strip_prefix(SECDEF_BY_IDENTIFIER_NAME)
         .or_else(|| req_id.strip_prefix(SECDEF_BY_SYMBOL_NAME))
+        .or_else(|| req_id.strip_prefix(SECDEF_BY_CONID_NAME))
+        .or_else(|| req_id.strip_prefix(SECDEF_PREFERRED_NAME))
         .unwrap_or(req_id)
         .parse()
         .ok()

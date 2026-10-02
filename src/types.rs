@@ -1745,6 +1745,9 @@ pub struct SecDefFilters {
     pub sec_id_type: String,
     /// Expired contracts are included (ibx#229).
     pub include_expired: bool,
+    /// Bond issuer id (ibx#438): when set, the lookup is for the issuer's
+    /// bonds.
+    pub issuer_id: String,
 }
 
 /// A contract as the API gave it, for a lookup by symbol (ibx#427).

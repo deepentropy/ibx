@@ -82,6 +82,7 @@ impl EClient {
             sec_id: contract.sec_id.clone(),
             sec_id_type: contract.sec_id_type.clone(),
             include_expired: contract.include_expired,
+            issuer_id: String::new(),
         };
         self.core.register_mkt_data(
             &self.shared, &self.control_tx, req_id,
