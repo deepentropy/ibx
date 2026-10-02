@@ -1,0 +1,49 @@
+<AlgoExchange>
+	<name>IBALGO</name>
+	<description>IB Algorithmic Trading</description>
+	<FixNoStrategyParameters>5957</FixNoStrategyParameters>
+	<FixStrategyParameterName>5958</FixStrategyParameterName>
+	<FixStrategyParameterValue>5960</FixStrategyParameterValue>
+	<AlgoAttributeContentHolderMap varName="commonAlgoAttributeContent">
+		<AlgoAttributeContentHolder>
+			<name>IBALGO_COMMON</name>
+			<Array varName="algoAttribContents" type="jattrib.algo.AlgoAttributeContent">
+				<AlgoAttributeContent>
+					<shortName>strategy</shortName>
+					<required>true</required>
+					<isStrategySelector>true</isStrategySelector>
+					<fixTag>847</fixTag>
+					<description>Strategy</description>
+					<valueClassName>String</valueClassName>
+					<editable>false</editable>
+				</AlgoAttributeContent>
+			</Array>
+		</AlgoAttributeContentHolder>
+	</AlgoAttributeContentHolderMap>
+	<AlgoLegalStringsMap varName="algoLegalStringsMap">
+		<AlgoLegalStrings>
+			<name>AdaptivePriority</name>
+			<ArString varName="arString">
+				<String>ALL:Urgent</String>
+				<String>ALL:Normal</String>
+				<String>ALL:Patient</String>
+			</ArString>
+		</AlgoLegalStrings>
+		<AlgoLegalStrings>
+			<name>RiskAversion</name>
+			<ArString varName="arString">
+				<String>ALL:GetDone</String>
+				<String>ALL:Aggressive</String>
+				<String>ALL:Neutral</String>
+				<String>ALL:Passive</String>
+			</ArString>
+		</AlgoLegalStrings>
+		<AlgoLegalStrings>
+			<name>RouteOrderType</name>
+			<ArString varName="arString">
+				<String>ALL:MKT</String>
+				<String requireIBType="REL">ALL:REL</String>
+			</ArString>
+		</AlgoLegalStrings>
+	</AlgoLegalStringsMap>
+</AlgoExchange>

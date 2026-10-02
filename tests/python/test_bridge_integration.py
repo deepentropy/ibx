@@ -5,6 +5,7 @@ They use _test_* helpers to inject data into SharedState and verify
 callbacks fire with correctly converted types across the PyO3 boundary.
 """
 
+import sys
 import pytest
 import threading
 from ibx import (
@@ -693,19 +694,21 @@ class TestWhatIfDispatch:
         oid, _contract, _order, state = open_events[0][1], open_events[0][2], open_events[0][3], open_events[0][4]
         assert oid == 7
         assert state["status"] == "PreSubmitted"
-        assert state["init_margin_before"] == "100.00"
-        assert state["init_margin_after"] == "400.00"
-        assert state["init_margin_change"] == "300.00"   # 400 - 100
-        assert state["maint_margin_before"] == "200.00"
-        assert state["maint_margin_after"] == "500.00"
-        assert state["maint_margin_change"] == "300.00"  # 500 - 200
-        assert state["equity_with_loan_before"] == "300.00"
-        assert state["equity_with_loan_after"] == "600.00"
-        assert state["equity_with_loan_change"] == "300.00"  # 600 - 300
+        # The double's shortest text, as the reference (ibx#462).
+        assert state["init_margin_before"] == "100.0"
+        assert state["init_margin_after"] == "400.0"
+        assert state["init_margin_change"] == "300.0"   # 400 - 100
+        assert state["maint_margin_before"] == "200.0"
+        assert state["maint_margin_after"] == "500.0"
+        assert state["maint_margin_change"] == "300.0"  # 500 - 200
+        assert state["equity_with_loan_before"] == "300.0"
+        assert state["equity_with_loan_after"] == "600.0"
+        assert state["equity_with_loan_change"] == "300.0"  # 600 - 300
         assert abs(state["commission_and_fees"] - 7.0) < 1e-6
-        # ibapi-iso fields default to empty/zero when wire data doesn't carry them
+        # Values the server did not send: empty texts; the outside-hours
+        # values unset (the maximum double), as the reference (ibx#462).
         assert state["margin_currency"] == ""
-        assert state["init_margin_after_outside_rth"] == 0.0
+        assert state["init_margin_after_outside_rth"] == sys.float_info.max
         assert state["suggested_size"] == ""
         assert state["reject_reason"] == ""
         assert state["order_allocations"] == []

@@ -1052,10 +1052,9 @@ impl ReferenceState {
     }
 
     /// The refusal of an algo order by the algo definitions the server
-    /// sent (ibx#263); None when it passes or its algorithm is not
-    /// defined (yet).
-    pub fn algo_refusal(&self, algorithm: &str, values: &[(&str, &str)]) -> Option<(i64, String)> {
-        crate::control::algo::refusal(&self.algo_definitions.lock().unwrap(), algorithm, values)
+    /// sent (ibx#263); None when it passes or no definition came yet.
+    pub fn algo_refusal(&self, algorithm: &str, values: &[(&str, &str)], overnight: bool) -> Option<(i64, String)> {
+        crate::control::algo::refusal(&self.algo_definitions.lock().unwrap(), algorithm, values, overnight)
     }
 
     /// Keep one algo definition answer (ibx#263).

@@ -878,6 +878,79 @@ If no time-zone is specified, local time-zone is assumed(deprecated).\n\
 You can also provide yyyymmddd-hh:mm:ss time is in UTC.\n\
 Note that there is a dash between the date and time in UTC notation.";
 
+/// The reference's warning 2174: a date and time given with no zone, read
+/// in the zone of the machine (ibx#416, captured 02/10/2026).
+pub const IMPLIED_TIME_ZONE: &str = "Warning: You submitted request with date-time attributes without explicit time zone. \
+Please switch to use yyyymmdd-hh:mm:ss in UTC or use instrument time zone, like US/Eastern. \
+Implied time zone functionality will be removed in the next API release";
+
+/// The time of a time condition as the reference reads it (ibx#416).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConditionTime {
+    /// The time the condition carries: the API text unchanged for the UTC
+    /// form, else the instant in UTC as `yyyyMMdd-HH:mm:ss`.
+    pub wire: String,
+    /// The zone id the time was read in: UTC for the UTC form, the zone
+    /// as written, or the machine's zone when none is written.
+    pub zone: String,
+    /// No zone was written: the reference warns with 2174.
+    pub implied_zone: bool,
+}
+
+/// The API's UTC form `yyyyMMdd-HH:mm:ss`, as the reference's strict
+/// parse takes it (`jextend.dX.a(String)`): the text unchanged, no space.
+fn is_utc_dash_form(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 17 || b[8] != b'-' || b[11] != b':' || b[14] != b':' {
+        return false;
+    }
+    let num = |from: usize, to: usize| -> Option<u32> {
+        b[from..to].iter().all(u8::is_ascii_digit).then(|| s[from..to].parse().unwrap_or(u32::MAX))
+    };
+    match (num(0, 4), num(4, 6), num(6, 8), num(9, 11), num(12, 14), num(15, 17)) {
+        (Some(_), Some(mo), Some(d), Some(h), Some(mi), Some(se)) =>
+            (1..=12).contains(&mo) && (1..=31).contains(&d) && h <= 23 && mi <= 59 && se <= 59,
+        _ => false,
+    }
+}
+
+/// A time condition's time as the reference reads it (ibx#416,
+/// `jextend.dX.b(String)`): the UTC form `yyyyMMdd-HH:mm:ss` is kept as
+/// given; `[yyyyMMdd ]HH:mm:ss[ zone]` is read in its zone (the machine's
+/// when none is written, today's date when none is given) and sent as the
+/// instant in UTC. A day past the end of its month runs into the next
+/// month, as the reference's calendar does. None when the reference
+/// cannot read it (error 10314).
+pub fn parse_condition_time(s: &str, machine_zone: &str) -> Option<ConditionTime> {
+    if is_utc_dash_form(s) {
+        return Some(ConditionTime { wire: s.to_string(), zone: "UTC".into(), implied_zone: false });
+    }
+    if s.trim().is_empty() || !crate::control::historical::is_valid_end_date(s) {
+        return None;
+    }
+    let words: Vec<&str> = s.split(' ').filter(|w| !w.is_empty()).collect();
+    let (date, time, zone_words) = if words.first()?.contains(':') {
+        (None, words[0], &words[1..])
+    } else {
+        (Some(words[0]), *words.get(1)?, &words[2..])
+    };
+    let implied_zone = zone_words.is_empty();
+    let zone = if implied_zone { machine_zone.to_string() } else { zone_words.join(" ") };
+    let tz = jiff::tz::TimeZone::get(crate::config::canonical_zone(&zone)).ok()?;
+    let day = match date {
+        Some(d) => {
+            let (y, m, day): (i16, i8, i64) = (d[0..4].parse().ok()?, d[4..6].parse().ok()?, d[6..8].parse().ok()?);
+            jiff::civil::Date::new(y, m, 1).ok()?.checked_add(jiff::Span::new().days(day - 1)).ok()?
+        }
+        None => jiff::Zoned::now().with_time_zone(tz.clone()).date(),
+    };
+    let hms: Vec<i8> = time.split(':').map(|p| p.parse().ok()).collect::<Option<_>>()?;
+    let at = day.to_datetime(jiff::civil::Time::new(hms[0], hms[1], *hms.get(2).unwrap_or(&0), 0).ok()?);
+    let instant = at.to_zoned(tz).ok()?.timestamp();
+    let wire = instant.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y%m%d-%H:%M:%S").to_string();
+    Some(ConditionTime { wire, zone, implied_zone })
+}
+
 /// The API's overnight time-in-force values (ibx#467).
 const TIF_OVERNIGHT: &str = "OVERNIGHT";
 const TIF_OVERNIGHT_DAY: &str = "OVERNIGHT + DAY";
@@ -2173,10 +2246,17 @@ impl ClientCore {
     /// tracked that is filled or cancelled: error 104 and nothing sent
     /// (ibx#463). A new order with that id would be a second real order.
     /// A pending cancel is checked by the engine, which holds the current
-    /// status. A what-if is not a modify and is not checked.
+    /// status. A what-if is not a modify: it is refused only when its id
+    /// is an order of this client the server has not answered yet, with
+    /// error 103 and nothing sent (ibx#462, captured 02/10/2026: a
+    /// what-if sent right after a live order with the same id; the
+    /// reference's new-order id check `jextend.bH.W()@222` does not find
+    /// that order in its book yet).
     pub fn refusal_for_order_id(&self, order_id: OrderId, order: &ApiOrder) -> Option<(i64, String)> {
         if order.what_if {
-            return None;
+            let pending = self.open_orders.lock().unwrap().get(&order_id)
+                .is_some_and(|t| t.status == "PendingSubmit");
+            return pending.then(|| (103, "Duplicate order id".to_string()));
         }
         if self.finished_orders.lock().unwrap().contains(&order_id) {
             let (code, message) = MODIFY_OF_FINISHED_ORDER;
@@ -2974,7 +3054,9 @@ impl ClientCore {
         // staging concept. Accepting it would send a "staged" bracket
         // parent live on its own, so reject loudly at the call instead.
         // See: https://github.com/deepentropy/ibx/issues/226
-        if !order.transmit {
+        // A what-if with transmit off gets the reference's refusal 321
+        // instead (ibx#462).
+        if !order.transmit && !order.what_if {
             return Err(
                 "transmit=false is not supported: orders are transmitted \
                  immediately on place_order; there is no staging concept, so \
@@ -3008,11 +3090,9 @@ impl ClientCore {
             ));
         }
 
-        if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
-            return Ok(());
-        }
+        // An algorithm name is checked against the server's definitions
+        // (439, ibx#263); one ibx cannot send fails when the order is built.
         if !order.algo_strategy.is_empty() {
-            crate::api::client::parse_algo_params(&order.algo_strategy, &order.algo_params)?;
             return Ok(());
         }
         // A what-if is checked as the order it previews (ibx#462).
@@ -3360,7 +3440,74 @@ impl ClientCore {
         if set(order.trailing_percent) && set(order.aux_price) {
             last = read_error("Cannot specify Trailing Amount and Trailing Percent at the same time");
         }
+        // The conditions are read last: a time it cannot read is 10314
+        // with the label "Time" (ibx#416, captured 02/10/2026).
+        let machine = crate::gateway::machine_time_zone();
+        if Self::condition_times(order).any(|t| !t.is_empty() && parse_condition_time(t, &machine).is_none()) {
+            last = Some((10314, INVALID_DATE_TIME.replace("%s", "Time")));
+        }
         last
+    }
+
+    /// The times of the order's time conditions, in order.
+    fn condition_times(order: &ApiOrder) -> impl Iterator<Item = &str> {
+        order.conditions.iter().filter_map(|c| match c {
+            OrderCondition::Time { time, .. } => Some(time.as_str()),
+            _ => None,
+        })
+    }
+
+    /// One warning 2174 per time condition whose time names no zone, as
+    /// the reference sends them while it reads the order, before any
+    /// refusal (ibx#416, captured 02/10/2026: "20991231 23:59:59").
+    pub fn implied_zone_warnings(order: &ApiOrder) -> Vec<(i64, String)> {
+        let machine = crate::gateway::machine_time_zone();
+        Self::condition_times(order)
+            .filter(|t| parse_condition_time(t, &machine).is_some_and(|c| c.implied_zone))
+            .map(|_| (2174, IMPLIED_TIME_ZONE.to_string()))
+            .collect()
+    }
+
+    /// The zone rule of the time conditions (ibx#416, `trader.order.ay`,
+    /// `feature.date.ad.c`): when one time is in a zone other than UTC and
+    /// the machine's, the order waits for the contract's trading hours and
+    /// every condition time must then be in exactly the contract's zone
+    /// (`contract_zone`), else error 10314 and nothing is sent (captured
+    /// 02/10/2026: Asia/Tokyo on SPY). Until the contract's zone is known
+    /// any zone that resolves is taken.
+    pub fn condition_time_zone_refusal(order: &ApiOrder, contract_zone: Option<&str>) -> Option<(i64, String)> {
+        let machine = crate::gateway::machine_time_zone();
+        let zones: Vec<String> = Self::condition_times(order)
+            .filter_map(|t| parse_condition_time(t, &machine)).map(|c| c.zone).collect();
+        if zones.iter().all(|z| z == "UTC" || *z == machine) {
+            return None;
+        }
+        let contract = contract_zone?;
+        if zones.iter().all(|z| z == contract) {
+            None
+        } else {
+            Some((10314, INVALID_DATE_TIME.replace("%s", "Time")))
+        }
+    }
+
+    /// The order with each condition time as the reference sends it: the
+    /// UTC form unchanged, any other form as its instant in UTC (ibx#416,
+    /// captured 02/10/2026: "20991231 23:59:59 US/Eastern" goes out as
+    /// 21000101-04:59:59). Call it after the refusals.
+    pub fn with_condition_times(order: &ApiOrder) -> std::borrow::Cow<'_, ApiOrder> {
+        if Self::condition_times(order).next().is_none() {
+            return std::borrow::Cow::Borrowed(order);
+        }
+        let machine = crate::gateway::machine_time_zone();
+        let mut sent = order.clone();
+        for c in &mut sent.conditions {
+            if let OrderCondition::Time { time, .. } = c
+                && let Some(t) = parse_condition_time(time, &machine)
+            {
+                *time = t.wire;
+            }
+        }
+        std::borrow::Cow::Owned(sent)
     }
 
     /// A goodTillDate the reference refuses before sending, with error 343
@@ -3402,6 +3549,11 @@ impl ClientCore {
         if order.total_quantity < 0.0 || order.total_quantity > 999_999_999.0 {
             return refuse("Order size does not conform to market rule.");
         }
+        // A what-if with transmit off (ibx#462, `jextend.bH.S()@4692`;
+        // captured 02/10/2026, with this check's own 'v' in the text).
+        if order.what_if && !order.transmit {
+            return Some((321, "Error validating request.-'v' : cause - What-If order should have transmit flag set to TRUE.".into()));
+        }
         // Midprice outside regular hours: refused whatever the time of day
         // (the flag alone, reference refusal 10210).
         if matches!(order_type.as_str(), "MIDPRICE" | "MIDPX") && order.outside_rth {
@@ -3434,19 +3586,33 @@ impl ClientCore {
     }
 
     /// Algo parameters the reference refuses before sending, checked
-    /// against the algo definitions the server sent (ibx#263): 443 for a
-    /// parameter the algorithm does not have, 145 for a value not in the
-    /// parameter's legal values, 441 for a number out of its bounds. ibx
-    /// used to turn bad values into defaults and to check constant
-    /// bounds. An algorithm the definitions do not have (yet) is not
-    /// checked here.
-    pub fn algo_definition_refusal(order: &ApiOrder, reference: &crate::bridge::ReferenceState) -> Option<(i64, String)> {
+    /// against the algo definitions the server sent (ibx#263): 439 for an
+    /// algorithm they do not have, 442 for one not allowed overnight on an
+    /// overnight order, 443 for a parameter the algorithm does not have,
+    /// 441 for a number it cannot read, 145 for a value not in the
+    /// parameter's legal values, 441 for a number out of its bounds or a
+    /// required parameter with no value (`crate::control::algo::refusal`).
+    /// Nothing is checked before the first definitions came.
+    pub fn algo_definition_refusal(order: &ApiOrder, exchange: &str, reference: &crate::bridge::ReferenceState) -> Option<(i64, String)> {
         if order.algo_strategy.is_empty() {
             return None;
         }
         let values: Vec<(&str, &str)> = order.algo_params.iter()
             .map(|tv| (tv.tag.as_str(), tv.value.as_str())).collect();
-        reference.algo_refusal(&order.algo_strategy, &values)
+        // An overnight order: the overnight exchanges, or includeOvernight
+        // (`jfix.R.C`, `jattrib.Attributes.bl`).
+        let overnight = matches!(exchange, "OVERNIGHT" | "IBEOS") || order.include_overnight;
+        reference.algo_refusal(&order.algo_strategy, &values, overnight)
+    }
+
+    /// A limit price that is not a number is off the contract's price
+    /// grid: error 110 and nothing sent, as the reference
+    /// (`trader.common.b9.a(OrderCreator, o)`; ibx#263, captured
+    /// 02/10/2026 on a LMT and an Adaptive LMT). ibx used to send it as
+    /// a price of 0.
+    pub fn price_refusal(order: &ApiOrder) -> Option<(i64, String)> {
+        order.lmt_price.is_nan()
+            .then(|| (110, "The price does not conform to the minimum price variation for this contract.".to_string()))
     }
 
     /// Status to report with a fill that leaves part of the order open.
@@ -3478,6 +3644,56 @@ impl ClientCore {
         let first = queue.pop_front();
         if queue.is_empty() { previews.remove(&order_id); }
         first
+    }
+
+    /// The contract and order of the oldest what-if preview of `order_id`
+    /// in flight, kept: the reply was not the last one (ibx#462).
+    pub fn peek_what_if(&self, order_id: OrderId) -> Option<(ApiContract, ApiOrder)> {
+        self.what_if_orders.lock().unwrap().get(&order_id).and_then(|q| q.front().cloned())
+    }
+
+    /// The order state of a what-if reply as the reference reports it
+    /// (ibx#462, captured 02/10/2026): each margin value as the double's
+    /// shortest text (`954397.0`, `7440.699999999999`, `1093814945.9`),
+    /// each change as after minus before in doubles, empty when the server
+    /// sent none; a commission it did not send, the minimum and maximum
+    /// commissions and the outside-hours values unset (the maximum
+    /// double).
+    pub fn what_if_order_state(s: &WhatIfState) -> ApiOrderState {
+        let text = |v: Option<f64>| v.map(|v| format!("{:?}", v)).unwrap_or_default();
+        let change = |before: Option<f64>, after: Option<f64>| match (before, after) {
+            (Some(b), Some(a)) => format!("{:?}", a - b),
+            _ => String::new(),
+        };
+        ApiOrderState {
+            status: s.status.clone(),
+            init_margin_before: text(s.init_margin_before),
+            maint_margin_before: text(s.maint_margin_before),
+            equity_with_loan_before: text(s.equity_with_loan_before),
+            init_margin_change: change(s.init_margin_before, s.init_margin_after),
+            maint_margin_change: change(s.maint_margin_before, s.maint_margin_after),
+            equity_with_loan_change: change(s.equity_with_loan_before, s.equity_with_loan_after),
+            init_margin_after: text(s.init_margin_after),
+            maint_margin_after: text(s.maint_margin_after),
+            equity_with_loan_after: text(s.equity_with_loan_after),
+            commission_and_fees: s.commission.unwrap_or(f64::MAX),
+            min_commission_and_fees: f64::MAX,
+            max_commission_and_fees: f64::MAX,
+            commission_and_fees_currency: s.commission_currency.clone(),
+            warning_text: s.warning_text.clone(),
+            margin_currency: s.margin_currency.clone(),
+            init_margin_before_outside_rth: f64::MAX,
+            maint_margin_before_outside_rth: f64::MAX,
+            equity_with_loan_before_outside_rth: f64::MAX,
+            init_margin_change_outside_rth: f64::MAX,
+            maint_margin_change_outside_rth: f64::MAX,
+            equity_with_loan_change_outside_rth: f64::MAX,
+            init_margin_after_outside_rth: f64::MAX,
+            maint_margin_after_outside_rth: f64::MAX,
+            equity_with_loan_after_outside_rth: f64::MAX,
+            suggested_size: s.suggested_size.clone(),
+            ..Default::default()
+        }
     }
 
     /// A tracked order as the caller placed it (the order a modify is
@@ -4432,6 +4648,116 @@ mod tests {
         let sent: Vec<ControlCommand> = rx.try_iter().collect();
         assert_eq!(sent.len(), 1);
         assert!(matches!(&sent[0], ControlCommand::SetInstrumentCurrency { con_id: 1, currency } if currency == "EUR"));
+    }
+
+    // ibx#416, captured 02/10/2026 (gateway machine in Europe/Paris): the
+    // UTC form goes out unchanged, a zone is converted to UTC, no zone is
+    // the machine's zone; text it cannot read is None (10314).
+    #[test]
+    fn condition_time_forms_as_the_reference_reads_them() {
+        let read = |s: &str| parse_condition_time(s, "Europe/Paris");
+        assert_eq!(read("20991231-23:59:59"),
+            Some(ConditionTime { wire: "20991231-23:59:59".into(), zone: "UTC".into(), implied_zone: false }));
+        assert_eq!(read("20991231 23:59:59 US/Eastern"),
+            Some(ConditionTime { wire: "21000101-04:59:59".into(), zone: "US/Eastern".into(), implied_zone: false }));
+        assert_eq!(read("20991231 23:59:59"),
+            Some(ConditionTime { wire: "20991231-22:59:59".into(), zone: "Europe/Paris".into(), implied_zone: true }));
+        assert_eq!(read("20991231 23:59:59 Asia/Tokyo").map(|t| t.wire), Some("20991231-14:59:59".into()));
+        assert_eq!(read("20261005 09:05:41 UTC").map(|t| (t.wire, t.zone)), Some(("20261005-09:05:41".into(), "UTC".into())));
+        // A day past the end of its month runs into the next month.
+        assert_eq!(read("20260231 12:00:00 UTC").map(|t| t.wire), Some("20260303-12:00:00".into()));
+        // A time alone is today.
+        assert!(read("10:00:00").is_some_and(|t| t.implied_zone && t.wire.len() == 17));
+        for bad in ["tomorrow", "20991231 23:59:59 Nowhere/Zone", "20991231-24:00:00", "20991231 23:59", "2099-12-31 23:59:59", " 20991231-23:59:59x"] {
+            assert_eq!(read(bad), None, "{bad}");
+        }
+    }
+
+    // ibx#416, captured 02/10/2026: the reference's local answers on a
+    // time condition: 2174 for a time with no zone (the order is sent),
+    // 10314 for text it cannot read or a zone other than UTC, the
+    // machine's and the contract's (nothing is sent).
+    #[test]
+    fn time_condition_warnings_and_refusals() {
+        let with_time = |t: &str| ApiOrder {
+            conditions: vec![OrderCondition::Time { time: t.into(), is_more: true }], tif: "GTC".into(), ..lmt(1.0)
+        };
+        let invalid = INVALID_DATE_TIME.replace("%s", "Time");
+        assert!(invalid.starts_with("Time: The date, time, or time-zone entered is invalid.\nThe correct format"));
+        assert_eq!(ClientCore::implied_zone_warnings(&with_time("20991231 23:59:59")),
+            [(2174, IMPLIED_TIME_ZONE.to_string())]);
+        assert!(ClientCore::implied_zone_warnings(&with_time("20991231-23:59:59")).is_empty());
+        assert!(ClientCore::implied_zone_warnings(&with_time("20991231 23:59:59 US/Eastern")).is_empty());
+        assert!(ClientCore::implied_zone_warnings(&with_time("tomorrow")).is_empty());
+        assert_eq!(ClientCore::refusal_before_sending(&with_time("tomorrow")), Some((10314, invalid.clone())));
+        assert_eq!(ClientCore::refusal_before_sending(&with_time("20991231-23:59:59")), None);
+
+        let zone = |t: &str, contract: Option<&str>| ClientCore::condition_time_zone_refusal(&with_time(t), contract);
+        let machine = crate::gateway::machine_time_zone();
+        let other = if machine == "Asia/Tokyo" { "Asia/Seoul" } else { "Asia/Tokyo" };
+        assert_eq!(zone(&format!("20991231 23:59:59 {other}"), Some("US/Eastern")), Some((10314, invalid)));
+        assert_eq!(zone(&format!("20991231 23:59:59 {other}"), None), None, "the contract's zone is not known");
+        assert_eq!(zone("20991231 23:59:59 US/Eastern", Some("US/Eastern")), None);
+        assert_eq!(zone("20991231 23:59:59 UTC", Some("US/Eastern")), None);
+        assert_eq!(zone(&format!("20991231 23:59:59 {machine}"), Some("US/Eastern")), None);
+        assert_eq!(zone("20991231 23:59:59", Some("US/Eastern")), None);
+        assert_eq!(zone("20991231-23:59:59", Some("US/Eastern")), None);
+    }
+
+    // ibx#416: the condition goes out with the time in UTC; the order is
+    // otherwise unchanged.
+    #[test]
+    fn condition_times_are_sent_in_utc() {
+        let order = ApiOrder {
+            conditions: vec![
+                OrderCondition::Time { time: "20991231 23:59:59 US/Eastern".into(), is_more: true },
+                OrderCondition::Time { time: "20991231-23:59:59".into(), is_more: false },
+                OrderCondition::Margin { percent: 10, is_more: true },
+            ],
+            ..lmt(1.0)
+        };
+        let sent = ClientCore::with_condition_times(&order);
+        let times: Vec<(String, bool)> = sent.conditions.iter().filter_map(|c| match c {
+            OrderCondition::Time { time, is_more } => Some((time.clone(), *is_more)),
+            _ => None,
+        }).collect();
+        assert_eq!(times, [("21000101-04:59:59".to_string(), true), ("20991231-23:59:59".to_string(), false)]);
+        assert!(matches!(sent.conditions[2], OrderCondition::Margin { percent: 10, is_more: true }));
+        assert!(matches!(ClientCore::with_condition_times(&lmt(1.0)), std::borrow::Cow::Borrowed(_)));
+    }
+
+    // ibx#263, captured 02/10/2026: a NaN limit price is refused with 110.
+    #[test]
+    fn nan_limit_price_is_110() {
+        assert_eq!(ClientCore::price_refusal(&lmt(f64::NAN)),
+            Some((110, "The price does not conform to the minimum price variation for this contract.".into())));
+        assert_eq!(ClientCore::price_refusal(&lmt(100.0)), None);
+    }
+
+    // ibx#462, captured 02/10/2026 (b1_462_whatif): the order state of a
+    // what-if, with the reference's number texts and unset values.
+    #[test]
+    fn what_if_order_state_as_the_reference() {
+        let s = WhatIfState {
+            status: "PreSubmitted".into(),
+            init_margin_before: Some(4943.4), maint_margin_before: Some(4125.35), equity_with_loan_before: Some(954397.0),
+            init_margin_after: Some(12855.55), maint_margin_after: Some(11566.05), equity_with_loan_after: Some(954397.0),
+            commission: Some(1.0003), commission_currency: "USD".into(), margin_currency: "USD".into(),
+            ..Default::default()
+        };
+        let st = ClientCore::what_if_order_state(&s);
+        assert_eq!((st.init_margin_before.as_str(), st.maint_margin_before.as_str(), st.equity_with_loan_before.as_str()),
+            ("4943.4", "4125.35", "954397.0"));
+        assert_eq!((st.init_margin_change.as_str(), st.maint_margin_change.as_str(), st.equity_with_loan_change.as_str()),
+            ("7912.15", "7440.699999999999", "0.0"));
+        assert_eq!((st.init_margin_after.as_str(), st.maint_margin_after.as_str(), st.equity_with_loan_after.as_str()),
+            ("12855.55", "11566.05", "954397.0"));
+        assert_eq!((st.commission_and_fees, st.min_commission_and_fees, st.max_commission_and_fees), (1.0003, f64::MAX, f64::MAX));
+        assert_eq!((st.commission_and_fees_currency.as_str(), st.margin_currency.as_str()), ("USD", "USD"));
+        assert_eq!(st.init_margin_after_outside_rth, f64::MAX);
+        // Nothing came: empty texts, unset commission.
+        let none = ClientCore::what_if_order_state(&WhatIfState { status: "PreSubmitted".into(), warning_text: "Warning".into(), ..Default::default() });
+        assert_eq!((none.init_margin_change.as_str(), none.commission_and_fees, none.warning_text.as_str()), ("", f64::MAX, "Warning"));
     }
 
     // ibx#335: the zone of a goodTillDate is the machine's zone, UTC or

@@ -519,24 +519,46 @@ impl EClient {
         }
 
         // Drain what-if responses -> open_order(contract, order, OrderState)
-        // only, as the reference answers a preview (ibx#462).
+        // only, as the reference answers a preview; a refused one then gets
+        // error 201 (ibx#462).
         let what_ifs = shared.orders.drain_what_if_responses();
         for wi in what_ifs {
-            let fmt = |p: Price| format!("{:.2}", p as f64 / PRICE_SCALE_F);
-            let mut state = OrderState::default();
-            state.status = "PreSubmitted".into();
-            state.init_margin_before = fmt(wi.init_margin_before);
-            state.maint_margin_before = fmt(wi.maint_margin_before);
-            state.equity_with_loan_before = fmt(wi.equity_with_loan_before);
-            state.init_margin_change = fmt(wi.init_margin_after - wi.init_margin_before);
-            state.maint_margin_change = fmt(wi.maint_margin_after - wi.maint_margin_before);
-            state.equity_with_loan_change = fmt(wi.equity_with_loan_after - wi.equity_with_loan_before);
-            state.init_margin_after = fmt(wi.init_margin_after);
-            state.maint_margin_after = fmt(wi.maint_margin_after);
-            state.equity_with_loan_after = fmt(wi.equity_with_loan_after);
-            state.commission_and_fees = wi.commission as f64 / PRICE_SCALE_F;
+            let s = crate::client_core::ClientCore::what_if_order_state(&wi.state);
+            let state = OrderState {
+                status: s.status,
+                init_margin_before: s.init_margin_before,
+                maint_margin_before: s.maint_margin_before,
+                equity_with_loan_before: s.equity_with_loan_before,
+                init_margin_change: s.init_margin_change,
+                maint_margin_change: s.maint_margin_change,
+                equity_with_loan_change: s.equity_with_loan_change,
+                init_margin_after: s.init_margin_after,
+                maint_margin_after: s.maint_margin_after,
+                equity_with_loan_after: s.equity_with_loan_after,
+                commission_and_fees: s.commission_and_fees,
+                min_commission_and_fees: s.min_commission_and_fees,
+                max_commission_and_fees: s.max_commission_and_fees,
+                commission_and_fees_currency: s.commission_and_fees_currency,
+                warning_text: s.warning_text,
+                margin_currency: s.margin_currency,
+                init_margin_before_outside_rth: s.init_margin_before_outside_rth,
+                maint_margin_before_outside_rth: s.maint_margin_before_outside_rth,
+                equity_with_loan_before_outside_rth: s.equity_with_loan_before_outside_rth,
+                init_margin_change_outside_rth: s.init_margin_change_outside_rth,
+                maint_margin_change_outside_rth: s.maint_margin_change_outside_rth,
+                equity_with_loan_change_outside_rth: s.equity_with_loan_change_outside_rth,
+                init_margin_after_outside_rth: s.init_margin_after_outside_rth,
+                maint_margin_after_outside_rth: s.maint_margin_after_outside_rth,
+                equity_with_loan_after_outside_rth: s.equity_with_loan_after_outside_rth,
+                suggested_size: s.suggested_size,
+                ..Default::default()
+            };
 
-            let tracked = self.core.take_what_if(wi.order_id);
+            let tracked = if wi.final_reply {
+                self.core.take_what_if(wi.order_id)
+            } else {
+                self.core.peek_what_if(wi.order_id)
+            };
             let (contract_py, order_py) = if let Some((contract, order)) = tracked {
                 let c = Contract {
                     con_id: contract.con_id,
@@ -563,6 +585,10 @@ impl EClient {
             let state_py = Py::new(py, state)?.into_any();
             call_wrapper!(self.wrapper, py, "open_order",
                 (wi.order_id, &contract_py, &order_py, &state_py));
+            if !wi.state.reject_reason.is_empty() {
+                let text = format!("Order rejected - reason:{}", wi.state.reject_reason);
+                call_wrapper!(self.wrapper, py, "error", (wi.order_id, 201i64, text.as_str(), ""));
+            }
         }
 
         // Drain HMDS query errors -> error (ibx#186). Surface gateway-side validation

@@ -1483,6 +1483,62 @@ fn place_order_what_if() {
     assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitWhatIf { .. })));
 }
 
+// ibx#462, captured 02/10/2026 (b1_462_whatif): a what-if sent with the id
+// of a live order the server has not answered yet is refused with 103 and
+// nothing is sent; the live order goes on.
+#[test]
+fn what_if_on_an_unanswered_order_id_is_a_duplicate() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let live = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 165.16, ..Default::default()
+    };
+    client.place_order(79, &spy(), &live).unwrap();
+    while rx.try_recv().is_ok() {}
+    client.place_order(79, &spy(), &Order { lmt_price: 168.46, what_if: true, ..live.clone() }).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing is sent");
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!(errors.iter().map(|e| (e.0, e.1, e.2.as_str())).collect::<Vec<_>>(), [(79, 103, "Duplicate order id")]);
+    assert_eq!(client.core.tracked_order(79).map(|o| o.what_if), Some(false));
+    assert!(client.core.what_if_orders.lock().unwrap().is_empty());
+}
+
+// ibx#462, captured 02/10/2026: a what-if with transmit off is refused with
+// the reference's 321 and nothing is sent.
+#[test]
+fn what_if_with_transmit_off_is_refused() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let preview = Order {
+        action: "BUY".into(), total_quantity: 100.0, order_type: "LMT".into(), lmt_price: 297.29,
+        what_if: true, transmit: false, ..Default::default()
+    };
+    client.place_order(76, &spy(), &preview).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing is sent");
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!(errors.iter().map(|e| (e.0, e.1, e.2.as_str())).collect::<Vec<_>>(),
+        [(76, 321, "Error validating request.-'v' : cause - What-If order should have transmit flag set to TRUE.")]);
+}
+
+// ibx#462, captured 02/10/2026: a refused what-if (a data reply with a
+// reason) gives open_order with its values, then error 201.
+#[test]
+fn refused_what_if_gives_open_order_then_201() {
+    let (client, _rx, shared) = test_client();
+    let mut reply = what_if_reply(77, [4943.27, 4125.25, 954395.81], [1093819889.17, 994381596.62, 823189.11], 0.0);
+    reply.state.commission = None;
+    reply.state.reject_reason = "YOUR ORDER IS NOT ACCEPTED.".into();
+    shared.orders.push_what_if(reply);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let open = w.events.iter().position(|e| e.starts_with("open_order:77:PreSubmitted")).expect("open_order");
+    assert!(w.events[open].contains("initC=1093814945.9:"), "{}", w.events[open]);
+    assert!(w.events[open].contains("eqlC=-131206.70000000007:"), "{}", w.events[open]);
+    assert!(w.events[open].ends_with(&format!("comm={}", f64::MAX)), "{}", w.events[open]);
+    let error = w.events.iter().position(|e| e.starts_with("error:77:201")).expect("error 201");
+    assert!(open < error);
+}
+
 // ibx#462: a what-if with the id of a working order is a preview, never a
 // modify; the working order stays tracked as placed. The preview is kept
 // apart and answered with open_order only.
@@ -1495,6 +1551,8 @@ fn what_if_on_a_working_order_id_is_a_preview_not_a_modify() {
     };
     client.place_order(73, &spy(), &working).unwrap();
     while rx.try_recv().is_ok() {}
+    // The server answered the working order.
+    client.core.update_order_status(73, "PreSubmitted", 0.0, 100.0);
 
     let preview = Order { lmt_price: 149.0, what_if: true, ..working.clone() };
     client.place_order(73, &spy(), &preview).unwrap();
@@ -1503,11 +1561,7 @@ fn what_if_on_a_working_order_id_is_a_preview_not_a_modify() {
     assert!(!cmds.iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::Modify { .. }))));
     assert_eq!(client.core.tracked_order(73).map(|o| (o.lmt_price, o.what_if)), Some((150.0, false)));
 
-    shared.orders.push_what_if(WhatIfResponse {
-        order_id: 73, instrument: 0,
-        init_margin_before: 0, maint_margin_before: 0, equity_with_loan_before: 0,
-        init_margin_after: 0, maint_margin_after: 0, equity_with_loan_after: 0, commission: 0,
-    });
+    shared.orders.push_what_if(what_if_reply(73, [0.0; 3], [0.0; 3], 0.0));
     let mut w = crate::api::wrapper::tests::RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("open_order:73:PreSubmitted")), "{:?}", w.events);
@@ -2873,6 +2927,27 @@ fn process_msgs_dispatches_news_bulletin() {
     assert!(w.events.iter().any(|e| e == "news_bulletin:1:1:Exchange notice:NYSE"));
 }
 
+/// A what-if data reply with these margins (init, maint, equity with
+/// loan) before and after, and this commission.
+fn what_if_reply(order_id: i64, before: [f64; 3], after: [f64; 3], commission: f64) -> WhatIfResponse {
+    WhatIfResponse {
+        order_id,
+        state: WhatIfState {
+            status: "PreSubmitted".into(),
+            init_margin_before: Some(before[0]),
+            maint_margin_before: Some(before[1]),
+            equity_with_loan_before: Some(before[2]),
+            init_margin_after: Some(after[0]),
+            maint_margin_after: Some(after[1]),
+            equity_with_loan_after: Some(after[2]),
+            commission: Some(commission),
+            ..Default::default()
+        },
+        final_reply: true,
+        ..Default::default()
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  process_msgs — what-if
 // ═══════════════════════════════════════════════════════════════════
@@ -2880,15 +2955,7 @@ fn process_msgs_dispatches_news_bulletin() {
 #[test]
 fn process_msgs_dispatches_what_if() {
     let (client, _rx, shared) = test_client();
-    shared.orders.push_what_if(WhatIfResponse {
-        order_id: 42, instrument: 0,
-        init_margin_before: 0, maint_margin_before: 0,
-        equity_with_loan_before: 0,
-        init_margin_after: 5000 * PRICE_SCALE,
-        maint_margin_after: 3000 * PRICE_SCALE,
-        equity_with_loan_after: 0,
-        commission: PRICE_SCALE,
-    });
+    shared.orders.push_what_if(what_if_reply(42, [0.0; 3], [5000.0, 3000.0, 0.0], 1.0));
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     // open_order only, as the reference answers a preview (ibx#462).
@@ -2902,16 +2969,7 @@ fn process_msgs_dispatches_what_if() {
 fn process_msgs_what_if_emits_full_order_state() {
     let (client, _rx, shared) = test_client();
     // Distinct values per field so any swap/typo is detectable.
-    shared.orders.push_what_if(WhatIfResponse {
-        order_id: 7, instrument: 0,
-        init_margin_before:    100 * PRICE_SCALE,
-        maint_margin_before:   200 * PRICE_SCALE,
-        equity_with_loan_before: 300 * PRICE_SCALE,
-        init_margin_after:     400 * PRICE_SCALE,
-        maint_margin_after:    500 * PRICE_SCALE,
-        equity_with_loan_after: 600 * PRICE_SCALE,
-        commission:            7 * PRICE_SCALE,
-    });
+    shared.orders.push_what_if(what_if_reply(7, [100.0, 200.0, 300.0], [400.0, 500.0, 600.0], 7.0));
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
 
@@ -2922,9 +2980,10 @@ fn process_msgs_what_if_emits_full_order_state() {
     let evt = &w.events[open_idx];
     // status, all 9 margin fields (before/change/after × init/maint/eql), commission.
     assert!(evt.contains(":PreSubmitted:"), "status field missing: {evt}");
-    assert!(evt.contains("initB=100.00:initC=300.00:initA=400.00"), "init margin wrong: {evt}");
-    assert!(evt.contains("maintB=200.00:maintC=300.00:maintA=500.00"), "maint margin wrong: {evt}");
-    assert!(evt.contains("eqlB=300.00:eqlC=300.00:eqlA=600.00"), "equity-with-loan wrong: {evt}");
+    // The double's shortest text, as the reference (ibx#462).
+    assert!(evt.contains("initB=100.0:initC=300.0:initA=400.0"), "init margin wrong: {evt}");
+    assert!(evt.contains("maintB=200.0:maintC=300.0:maintA=500.0"), "maint margin wrong: {evt}");
+    assert!(evt.contains("eqlB=300.0:eqlC=300.0:eqlA=600.0"), "equity-with-loan wrong: {evt}");
     assert!(evt.contains("comm=7"), "commission wrong: {evt}");
 }
 
@@ -3755,6 +3814,91 @@ fn bad_algo_parameter_values_are_refused_before_sending() {
         let want = format!("error:{}:{}", id, expected);
         assert!(w.events.iter().any(|e| *e == want), "{} {}={}: {:?}", strategy, tag, value, w.events);
     }
+}
+
+// ibx#263, captured 02/10/2026 (b1_263_algo_refusals): the refusals of the
+// open points come back through place_order with their codes and texts and
+// nothing is sent, the definitions of that day loaded.
+#[test]
+fn algo_refusals_of_20261002_through_place_order() {
+    type Case = (&'static str, Vec<(&'static str, &'static str)>, f64, &'static str);
+    let cases: [Case; 5] = [
+        ("Foo", vec![], 165.16, "439:Order processing failed. Algorithm definition not found"),
+        ("PctVol", vec![], 165.16,
+            "441:Algo attributes validation failed:\n'Target Percentage' is invalid: value is required.\n"),
+        ("Vwap", vec![("maxPctVol", "abc")], 165.16, "441:Algo attributes validation failed:maxPctVol=abc"),
+        ("Twap", vec![("strategyType", "abc")], 165.16, "443:Order processing failed. Unknown algo attribute:strategyType"),
+        ("Adaptive", vec![("adaptivePriority", "Normal")], f64::NAN,
+            "110:The price does not conform to the minimum price variation for this contract."),
+    ];
+    for (i, (strategy, params, price, expected)) in cases.into_iter().enumerate() {
+        let (client, rx, shared) = test_client();
+        shared.market.set_instrument_count(1);
+        shared.reference.add_algo_definitions(include_str!("../../../tests/fixtures/algo/IBALGO-AE-20261002.xml"));
+        shared.reference.add_algo_definitions(include_str!("../../../tests/fixtures/algo/IBALGO-AL-STK-20261002.xml"));
+        let id = 80 + i as i64;
+        let order = Order {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: price,
+            algo_strategy: strategy.into(),
+            algo_params: params.iter().map(|(t, v)| TagValue { tag: t.to_string(), value: v.to_string() }).collect(),
+            ..Default::default()
+        };
+        client.place_order(id, &spy(), &order).unwrap();
+        assert!(rx.try_recv().is_err(), "{strategy}: nothing may be sent");
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+        let want = format!("error:{}:{}", id, expected);
+        assert!(w.events.contains(&want), "{strategy}: {:?}", w.events);
+    }
+    // A plain LMT with a NaN price too.
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: f64::NAN, ..Default::default() };
+    client.place_order(85, &spy(), &order).unwrap();
+    assert!(rx.try_recv().is_err());
+    assert_eq!(shared.orders.drain_order_errors().iter().map(|e| e.1).collect::<Vec<_>>(), [110]);
+}
+
+// ibx#416, captured 02/10/2026 (b1_416_time_condition): a time condition
+// with a zone goes out in UTC; with no zone it is read in the machine's
+// zone after warning 2174; text the reference cannot read is 10314 and
+// nothing is sent.
+#[test]
+fn time_condition_through_place_order() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let with_time = |t: &str| Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 1.0, tif: "GTC".into(),
+        outside_rth: true,
+        conditions: vec![OrderCondition::Time { time: t.into(), is_more: true }],
+        ..Default::default()
+    };
+    let sent_time = |cmd: ControlCommand| match cmd {
+        ControlCommand::Order(OrderRequest::SubmitEx { attrs, .. })
+        | ControlCommand::Order(OrderRequest::SubmitLimitEx { attrs, .. }) => match attrs.conditions.first() {
+            Some(OrderCondition::Time { time, .. }) => time.clone(),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    client.place_order(71, &spy(), &with_time("20991231 23:59:59 US/Eastern")).unwrap();
+    assert_eq!(sent_time(rx.try_recv().unwrap()), "21000101-04:59:59");
+    assert_eq!(client.core.tracked_order(71).map(|o| matches!(&o.conditions[0],
+        OrderCondition::Time { time, .. } if time == "20991231 23:59:59 US/Eastern")), Some(true), "tracked as placed");
+    while rx.try_recv().is_ok() {}
+
+    client.place_order(72, &spy(), &with_time("20991231 23:59:59")).unwrap();
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(72, 2174)]);
+    assert_eq!(errors[0].2, crate::client_core::IMPLIED_TIME_ZONE);
+    let machine = crate::gateway::machine_time_zone();
+    let want = crate::client_core::parse_condition_time("20991231 23:59:59", &machine).unwrap().wire;
+    assert_eq!(sent_time(rx.try_recv().unwrap()), want);
+    while rx.try_recv().is_ok() {}
+
+    client.place_order(74, &spy(), &with_time("tomorrow")).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing is sent");
+    assert_eq!(shared.orders.drain_order_errors().iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(74, 10314)]);
 }
 
 // Values the reference accepted in the same capture still go out.

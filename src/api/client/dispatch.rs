@@ -2,10 +2,10 @@
 
 use crate::api::types::{
     BarData, ContractDetails, ContractDescription, Execution,
-    Order as ApiOrder, OrderState, TickAttribLast, TickAttribBidAsk, PRICE_SCALE_F, QTY_SCALE_F,
+    Order as ApiOrder, TickAttribLast, TickAttribBidAsk, PRICE_SCALE_F, QTY_SCALE_F,
 };
 use crate::api::wrapper::Wrapper;
-use crate::client_core::{order_status_str, MdTick};
+use crate::client_core::{order_status_str, ClientCore, MdTick};
 use crate::types::*;
 
 use super::{Contract, EClient};
@@ -179,26 +179,20 @@ impl EClient {
         self.shared.orders.drain_cancel_rejects();
 
         // What-if → open_order(contract, order, OrderState) only, as the
-        // reference answers a preview (ibx#462).
+        // reference answers a preview; a refused one then gets error 201
+        // (ibx#462).
         for wi in self.shared.orders.drain_what_if_responses() {
-            let fmt = |p: Price| format!("{:.2}", p as f64 / PRICE_SCALE_F);
-            let state = OrderState {
-                status: "PreSubmitted".into(),
-                init_margin_before: fmt(wi.init_margin_before),
-                maint_margin_before: fmt(wi.maint_margin_before),
-                equity_with_loan_before: fmt(wi.equity_with_loan_before),
-                init_margin_change: fmt(wi.init_margin_after - wi.init_margin_before),
-                maint_margin_change: fmt(wi.maint_margin_after - wi.maint_margin_before),
-                equity_with_loan_change: fmt(wi.equity_with_loan_after - wi.equity_with_loan_before),
-                init_margin_after: fmt(wi.init_margin_after),
-                maint_margin_after: fmt(wi.maint_margin_after),
-                equity_with_loan_after: fmt(wi.equity_with_loan_after),
-                commission_and_fees: wi.commission as f64 / PRICE_SCALE_F,
-                ..Default::default()
+            let state = ClientCore::what_if_order_state(&wi.state);
+            let tracked = if wi.final_reply {
+                self.core.take_what_if(wi.order_id)
+            } else {
+                self.core.peek_what_if(wi.order_id)
             };
-            let (contract, order) = self.core.take_what_if(wi.order_id)
-                .unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
+            let (contract, order) = tracked.unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
             wrapper.open_order(wi.order_id, &contract, &order, &state);
+            if !wi.state.reject_reason.is_empty() {
+                wrapper.error(wi.order_id, 201, &format!("Order rejected - reason:{}", wi.state.reject_reason), "");
+            }
         }
 
         for _ in released {

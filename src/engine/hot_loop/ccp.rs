@@ -973,15 +973,39 @@ impl CcpState {
             return;
         }
         const MARGIN_TAGS: [u32; 6] = [6826, 6827, 6828, 6092, 6093, 6094];
-        let is_data_frame = MARGIN_TAGS.iter().any(|tag| {
-            parsed.get(tag)
-                .and_then(|s| s.parse::<f64>().ok())
-                .is_some_and(|f| f.is_finite())
-        });
-        if !is_data_frame {
+        let number = |tag: u32| parsed.get(&tag)
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|f| f.is_finite());
+        let is_data_frame = MARGIN_TAGS.iter().any(|tag| number(*tag).is_some());
+        // A frame with an order message gives an open order with that
+        // message as its warning text, and the preview waits for its data
+        // frame (ibx#462, `trader.order.bQ.a(gi, e3, fq)@263-321`).
+        let warning_text = parsed.get(&6361).cloned().unwrap_or_default();
+        if !is_data_frame && warning_text.is_empty() {
             return;
         }
-        context.what_ifs.remove(clord.as_str());
+        let final_reply = warning_text.is_empty();
+        if final_reply {
+            context.what_ifs.remove(clord.as_str());
+        }
+        let text = |tag: u32| parsed.get(&tag).cloned().unwrap_or_default();
+        let state = crate::types::WhatIfState {
+            status: what_if_status(parsed).to_string(),
+            init_margin_before: number(6826),
+            maint_margin_before: number(6827),
+            equity_with_loan_before: number(6828),
+            init_margin_after: number(6092),
+            maint_margin_after: number(6093),
+            equity_with_loan_after: number(6094),
+            commission: number(6378),
+            commission_currency: text(6381),
+            margin_currency: text(8130),
+            suggested_size: text(6552),
+            warning_text,
+            // A data frame with a reason: the open order, then error 201
+            // (captured 02/10/2026: a what-if of 10,000,000 shares).
+            reject_reason: if final_reply { text(58) } else { String::new() },
+        };
         let response = crate::types::WhatIfResponse {
             order_id,
             instrument,
@@ -992,13 +1016,15 @@ impl CcpState {
             maint_margin_after: parse_price_tag(parsed.get(&6093)),
             equity_with_loan_after: parse_price_tag(parsed.get(&6094)),
             commission: parse_price_tag(parsed.get(&6378)),
+            state,
+            final_reply,
         };
         log::info!("WhatIf response: clord={} order={} initMargin={:.2}->{:.2} commission={:.2}",
             clord, order_id,
             response.init_margin_before as f64 / PRICE_SCALE as f64,
             response.init_margin_after as f64 / PRICE_SCALE as f64,
             response.commission as f64 / PRICE_SCALE as f64);
-        shared.orders.push_what_if(response);
+        shared.orders.push_what_if(response.clone());
         emit(event_tx, Event::WhatIf(response));
     }
 
@@ -2687,6 +2713,20 @@ impl CcpState {
 /// The status request for one order, after the server refused its cancel
 /// or modify (ibx#252): the order's ClOrdID, any symbol and side, and the
 /// account, as the reference writes it.
+/// The API status of a what-if reply, from its order status (ibx#462):
+/// 39=A is PreSubmitted (captured 02/10/2026), New and Replaced follow the
+/// routing rule of an order's reports, a reject is Inactive.
+fn what_if_status(parsed: &std::collections::HashMap<u32, String>) -> &'static str {
+    let routed = parsed.get(&100).is_some_and(|s| !s.is_empty())
+        || parsed.get(&198).is_some_and(|s| s != "NONE" && !s.is_empty());
+    match parsed.get(&39).map(String::as_str) {
+        Some("0" | "5") if routed => "Submitted",
+        Some("8") => "Inactive",
+        Some("4" | "C") => "Cancelled",
+        _ => "PreSubmitted",
+    }
+}
+
 pub(crate) fn order_status_request<'a>(clord: &'a str, account_id: &'a str, now: &'a str) -> [(u32, &'a str); 7] {
     [(fix::TAG_MSG_TYPE, "H"), (fix::TAG_SENDING_TIME, now), (11, clord), (55, "*"), (54, "*"), (6471, "1"), (1, account_id)]
 }
@@ -3398,6 +3438,48 @@ mod tests {
             stop_price: 0,
         });
         (CcpState::new(), context, SharedState::new())
+    }
+
+    // ibx#462, captured 02/10/2026 (b1_462_whatif, a what-if of 10,000,000
+    // shares): the data reply keeps every value as sent, its status from
+    // 39=A, its reason for the 201 after the open order; no commission.
+    #[test]
+    fn what_if_reply_values_status_and_reason() {
+        let (mut ccp, mut context, shared) = what_if_test_state();
+        let frame = what_if_frame(&[
+            (39, "A"), (58, "YOUR ORDER IS NOT ACCEPTED."), (6094, "823189.11"), (6092, "1093819889.17"),
+            (6093, "994381596.62"), (6828, "954395.81"), (6826, "4943.27"), (6827, "4125.25"),
+            (8130, "USD"), (6552, "8600"),
+        ]);
+        ccp.handle_exec_report(&frame, &mut context, &shared, &None, "");
+        let responses = shared.orders.drain_what_if_responses();
+        assert_eq!(responses.len(), 1);
+        let s = &responses[0].state;
+        assert!(responses[0].final_reply);
+        assert_eq!(s.status, "PreSubmitted");
+        assert_eq!((s.init_margin_before, s.init_margin_after), (Some(4943.27), Some(1093819889.17)));
+        assert_eq!((s.commission, s.margin_currency.as_str(), s.suggested_size.as_str()), (None, "USD", "8600"));
+        assert_eq!(s.reject_reason, "YOUR ORDER IS NOT ACCEPTED.");
+        assert!(context.what_ifs.is_empty());
+    }
+
+    // ibx#462 (`trader.order.bQ.a(gi, e3, fq)@263-321`): a reply with an
+    // order message gives an open order with that warning text, and the
+    // preview waits for its data reply.
+    #[test]
+    fn what_if_order_message_reply_keeps_the_preview() {
+        let (mut ccp, mut context, shared) = what_if_test_state();
+        let text = "Warning: your order will not be placed at the exchange until 2026-10-02 09:30:00 US/Eastern";
+        ccp.handle_exec_report(&what_if_frame(&[(39, "A"), (6360, "TIME"), (6361, text)]), &mut context, &shared, &None, "");
+        let responses = shared.orders.drain_what_if_responses();
+        assert_eq!(responses.len(), 1);
+        assert!(!responses[0].final_reply);
+        assert_eq!((responses[0].state.warning_text.as_str(), responses[0].state.init_margin_after), (text, None));
+        assert!(context.what_ifs.contains_key(WHAT_IF_CLORD), "the preview still waits");
+        ccp.handle_exec_report(&what_if_frame(&ZERO_CLOSE_FIELDS), &mut context, &shared, &None, "");
+        let responses = shared.orders.drain_what_if_responses();
+        assert!(responses[0].final_reply && responses[0].state.warning_text.is_empty());
+        assert!(context.what_ifs.is_empty());
     }
 
     // ibx#205: a margin-reducing preview (close, cash-account sell) resolves to a

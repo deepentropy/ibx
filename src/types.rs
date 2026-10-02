@@ -386,7 +386,7 @@ pub fn ord_type_fix_str(t: u8) -> &'static str {
 
 /// What-If margin/commission preview response (execution report with tag 6091=1).
 /// Returned when a what-if order is submitted — the order is NOT placed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 pub struct WhatIfResponse {
     pub order_id: OrderId,
     pub instrument: InstrumentId,
@@ -397,6 +397,35 @@ pub struct WhatIfResponse {
     pub maint_margin_after: Price,
     pub equity_with_loan_after: Price,
     pub commission: Price,
+    /// The reply as the reference reports it to the API (ibx#462).
+    pub state: WhatIfState,
+    /// The reply that ends the preview: false for the frame that carries
+    /// only an order message, after which the preview still waits.
+    pub final_reply: bool,
+}
+
+/// One what-if reply as the server sent it (ibx#462): the values that
+/// came, unset when absent or not a number.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WhatIfState {
+    /// The API status of the reply's order status (39=A is PreSubmitted).
+    pub status: String,
+    pub init_margin_before: Option<f64>,
+    pub maint_margin_before: Option<f64>,
+    pub equity_with_loan_before: Option<f64>,
+    pub init_margin_after: Option<f64>,
+    pub maint_margin_after: Option<f64>,
+    pub equity_with_loan_after: Option<f64>,
+    pub commission: Option<f64>,
+    pub commission_currency: String,
+    pub margin_currency: String,
+    /// The suggested size, empty when the server sent none.
+    pub suggested_size: String,
+    /// The order message of the reply (warning text).
+    pub warning_text: String,
+    /// The server's reason when it refuses the order (error 201 after the
+    /// open order).
+    pub reject_reason: String,
 }
 
 /// Adjusted order type for adjustable stops (FIX tag 6261).
@@ -2617,7 +2646,7 @@ mod tests {
     // --- WhatIfResponse ---
 
     #[test]
-    fn what_if_response_is_copy() {
+    fn what_if_response_is_clone() {
         let r = WhatIfResponse {
             order_id: 1,
             instrument: 0,
@@ -2628,8 +2657,9 @@ mod tests {
             maint_margin_after: 8143_51 * (PRICE_SCALE / 100),
             equity_with_loan_after: 754_255_14 * (PRICE_SCALE / 100),
             commission: 1 * PRICE_SCALE,
+            ..Default::default()
         };
-        let r2 = r; // Copy
+        let r2 = r.clone();
         assert_eq!(r.init_margin_after, r2.init_margin_after);
         assert_eq!(r.commission, r2.commission);
     }

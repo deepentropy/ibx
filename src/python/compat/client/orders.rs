@@ -45,20 +45,29 @@ impl EClient {
             self.next_order_id.fetch_add(1, Ordering::Relaxed)
         };
 
-        // Refused before sending, like the reference: error() only.
+        // Warnings the reference sends while it reads the order (ibx#416).
         let shared = self.shared_state()?;
+        for (code, message) in ClientCore::implied_zone_warnings(&api_order) {
+            shared.orders.push_order_error(oid, code, message);
+        }
+        // Refused before sending, like the reference: error() only.
         let session_account = self.account_id.lock().unwrap().clone().unwrap_or_default();
+        let contract_zone = shared.reference.time_zone_id(contract.con_id);
         if let Some((code, message)) = ClientCore::refusal_before_sending(&api_order)
-            .or_else(|| ClientCore::algo_definition_refusal(&api_order, &shared.reference))
+            .or_else(|| ClientCore::algo_definition_refusal(&api_order, &contract.exchange, &shared.reference))
             .or_else(|| ClientCore::account_config_refusal(
                 &api_order, shared.reference.account_features().as_deref(), &session_account))
-            .or_else(|| ClientCore::good_till_date_refusal(
-                &api_order, shared.reference.time_zone_id(contract.con_id).as_deref()))
+            .or_else(|| ClientCore::good_till_date_refusal(&api_order, contract_zone.as_deref()))
+            .or_else(|| ClientCore::condition_time_zone_refusal(&api_order, contract_zone.as_deref()))
+            .or_else(|| ClientCore::price_refusal(&api_order))
             .or_else(|| self.core.refusal_for_order_id(oid, &api_order))
         {
             shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }
+        // The condition times as the reference sends them (ibx#416); the
+        // order is tracked as the caller placed it.
+        let sent = ClientCore::with_condition_times(&api_order);
 
         let instrument = self.find_or_register_instrument(py, contract)?;
         // A send only for a new currency, then with the interpreter lock
@@ -72,7 +81,7 @@ impl EClient {
         // it previews a new order (ibx#462).
         let working = if api_order.what_if { None } else { self.core.tracked_order(oid) };
         let cmd = if let Some(working) = working {
-            match ClientCore::build_modify_request(&api_order, oid, &working)
+            match ClientCore::build_modify_request(&sent, oid, &working)
                 .map_err(|e| PyRuntimeError::new_err(e))?
             {
                 ModifyPlan::Send(cmd) => cmd,
@@ -84,7 +93,7 @@ impl EClient {
                 }
             }
         } else {
-            ClientCore::build_order_request(&api_order, oid, instrument)
+            ClientCore::build_order_request(&sent, oid, instrument)
                 .map_err(|e| PyRuntimeError::new_err(e))?
         };
         send_cmd(py, &tx, cmd)?;

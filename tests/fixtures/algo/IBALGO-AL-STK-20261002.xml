@@ -1,0 +1,895 @@
+<AlgorithmsMap>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>ArrivalPx</shortName>
+		<description>Arrival Price</description>
+		<shortDescription>ArrPx</shortDescription>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>maxPctVol</shortName>
+				<required>true</required>
+				<fixTag>849</fixTag>
+				<description>Max Percentage</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>2</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>riskAversion</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Urgency/Risk aversion</description>
+				<Object varName="defaultValue" type="java.lang.String">Neutral</Object>
+				<valueClassName>String</valueClassName>
+				<legalStringsName>RiskAversion</legalStringsName>
+				<guiRank>3</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>startTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Start Time</description>
+				<descriptionEnhancement>defaults to start of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>4</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>endTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>End Time</description>
+				<descriptionEnhancement>defaults to end of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>5</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>allowPastEndTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Allow trading past end time</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>6</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>forceCompletion</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt completion by EOD</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>7</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>monetaryValue</shortName>
+				<required>false</required>
+				<fixTag>152</fixTag>
+				<description>Monetary Value</description>
+				<valueClassName>Double</valueClassName>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>ClosePx</shortName>
+		<description>Close Price</description>
+		<shortDescription>ClsPx</shortDescription>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>maxPctVol</shortName>
+				<required>true</required>
+				<fixTag>849</fixTag>
+				<description>Max Percentage</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>2</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>riskAversion</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Risk aversion</description>
+				<Object varName="defaultValue" type="java.lang.String">Neutral</Object>
+				<valueClassName>String</valueClassName>
+				<legalStringsName>RiskAversion</legalStringsName>
+				<guiRank>3</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>startTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Start Time</description>
+				<descriptionEnhancement>defaults to start of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>4</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>forceCompletion</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt completion by EOD</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>5</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>monetaryValue</shortName>
+				<required>false</required>
+				<fixTag>152</fixTag>
+				<description>Monetary Value</description>
+				<valueClassName>Double</valueClassName>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>Adaptive</shortName>
+		<description>Adaptive</description>
+		<shortDescription>Adaptive</shortDescription>
+		<allowGTC>yes</allowGTC>
+		<allowOvernight>yes</allowOvernight>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<autoAddAsFavorite>true</autoAddAsFavorite>
+		<noAutoExpand>true</noAutoExpand>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>monetaryValue</shortName>
+				<required>false</required>
+				<fixTag>152</fixTag>
+				<description>Monetary Value</description>
+				<valueClassName>Double</valueClassName>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>adaptivePriority</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Adaptive order priority/urgency</description>
+				<Object varName="defaultValue" type="java.lang.String">Normal</Object>
+				<valueClassName>String</valueClassName>
+				<legalStringsName>AdaptivePriority</legalStringsName>
+				<guiRank>1</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>PctVol</shortName>
+		<description>Percentage of Volume</description>
+		<shortDescription>% Vol</shortDescription>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>pctVol</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Target Percentage</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>1</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>startTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Start Time</description>
+				<descriptionEnhancement>defaults to start of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>2</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>endTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>End Time</description>
+				<descriptionEnhancement>defaults to end of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>3</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>noTakeLiq</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt to never take liquidity</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>4</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>monetaryValue</shortName>
+				<required>false</required>
+				<fixTag>152</fixTag>
+				<description>Monetary Value</description>
+				<valueClassName>Double</valueClassName>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>includeBlockTrades</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt to match block trading volume</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>6</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>conditionalPrice</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Trade when price is more aggressive than:</description>
+				<descriptionEnhancement>evaluates with bid for buy order and ask for sell order</descriptionEnhancement>
+				<priceMarketRule>true</priceMarketRule>
+				<valueClassName>Double</valueClassName>
+				<guiRank>7</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>PctVolTm</shortName>
+		<description>Time Variant Percentage of Volume</description>
+		<shortDescription>% VolTm</shortDescription>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>startPctVol</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Target Percentage at Start Time</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>1</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>endPctVol</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Target Percentage at End Time</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>2</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>startTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Start Time</description>
+				<descriptionEnhancement>defaults to start of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>3</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>endTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>End Time</description>
+				<descriptionEnhancement>defaults to end of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>4</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>noTakeLiq</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt to never take liquidity</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>5</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>includeBlockTrades</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt to match block trading volume</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>6</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>conditionalPrice</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Trade when price is more aggressive than:</description>
+				<descriptionEnhancement>evaluates with bid for buy order and ask for sell order</descriptionEnhancement>
+				<priceMarketRule>true</priceMarketRule>
+				<valueClassName>Double</valueClassName>
+				<guiRank>7</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>monetaryValue</shortName>
+				<required>false</required>
+				<fixTag>152</fixTag>
+				<description>Monetary Value</description>
+				<valueClassName>Double</valueClassName>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>PctVolPx</shortName>
+		<description>Price Variant Percentage of Volume</description>
+		<shortDescription>% VolPx</shortDescription>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>pctVol</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Target Percentage</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>1</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>deltaPctVol</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Target Percentage Change Rate</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>2</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>minPctVol4Px</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Minimum Target Percentage</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>3</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>maxPctVol4Px</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Maximum Target Percentage</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>4</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>startTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Start Time</description>
+				<descriptionEnhancement>defaults to start of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>5</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>endTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>End Time</description>
+				<descriptionEnhancement>defaults to end of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>6</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>noTakeLiq</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt to never take liquidity</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>7</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>includeBlockTrades</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt to match block trading volume</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>8</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>conditionalPrice</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Trade when price is more aggressive than:</description>
+				<descriptionEnhancement>evaluates with bid for buy order and ask for sell order</descriptionEnhancement>
+				<priceMarketRule>true</priceMarketRule>
+				<valueClassName>Double</valueClassName>
+				<guiRank>9</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>monetaryValue</shortName>
+				<required>false</required>
+				<fixTag>152</fixTag>
+				<description>Monetary Value</description>
+				<valueClassName>Double</valueClassName>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>PctVolSz</shortName>
+		<description>Size Variant Percentage of Volume</description>
+		<shortDescription>% VolSz</shortDescription>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>startPctVol</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Initial Target Percentage</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>1</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>endPctVol</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Terminal Target Percentage</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>2</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>startTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Start Time</description>
+				<descriptionEnhancement>defaults to start of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>3</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>endTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>End Time</description>
+				<descriptionEnhancement>defaults to end of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>4</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>noTakeLiq</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt to never take liquidity</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>5</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>includeBlockTrades</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt to match block trading volume</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>6</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>conditionalPrice</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Trade when price is more aggressive than:</description>
+				<descriptionEnhancement>evaluates with bid for buy order and ask for sell order</descriptionEnhancement>
+				<priceMarketRule>true</priceMarketRule>
+				<valueClassName>Double</valueClassName>
+				<guiRank>7</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>monetaryValue</shortName>
+				<required>false</required>
+				<fixTag>152</fixTag>
+				<description>Monetary Value</description>
+				<valueClassName>Double</valueClassName>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>Vwap</shortName>
+		<description>VWAP</description>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>maxPctVol</shortName>
+				<fixTag>849</fixTag>
+				<description>Max Percentage</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">50.0</Object>
+				<divisor>2</divisor>
+				<guiRank>1</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>startTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Start Time</description>
+				<descriptionEnhancement>defaults to start of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>2</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>endTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>End Time</description>
+				<descriptionEnhancement>defaults to end of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>3</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>allowPastEndTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Allow trading past end time</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>4</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>noTakeLiq</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Attempt to never take liquidity</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>5</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>speedUp</shortName>
+				<fixTag>2147483647</fixTag>
+				<enabledConditions>MKT:speedUp:=:no</enabledConditions>
+				<description>Speed up when market approaches limit price</description>
+				<descriptionEnhancement>Compensate for decreased fill rate due to presence of limit price.</descriptionEnhancement>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>8</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>monetaryValue</shortName>
+				<required>false</required>
+				<fixTag>152</fixTag>
+				<description>Monetary Value</description>
+				<valueClassName>Double</valueClassName>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>optoutOpeningAuction</shortName>
+				<fixTag>2147483647</fixTag>
+				<requireIBTypePrimExch>ALGOOPG</requireIBTypePrimExch>
+				<description>Opt-out opening auction</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>11</guiRank>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>optoutClosingAuction</shortName>
+				<fixTag>2147483647</fixTag>
+				<requireIBTypePrimExch>ALGOCLS</requireIBTypePrimExch>
+				<description>Opt-out closing auction</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>12</guiRank>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>conditionalPrice</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Trade when price is more aggressive than:</description>
+				<descriptionEnhancement>evaluates with bid for buy order and ask for sell order</descriptionEnhancement>
+				<priceMarketRule>true</priceMarketRule>
+				<valueClassName>Double</valueClassName>
+				<guiRank>13</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>Twap</shortName>
+		<description>TWAP</description>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>startTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Start Time</description>
+				<descriptionEnhancement>defaults to start of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>1</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>endTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>End Time</description>
+				<descriptionEnhancement>defaults to end of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>2</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>allowPastEndTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Allow trading past end time</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>3</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>catchUp</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Catch Up</description>
+				<descriptionEnhancement>If set, the algorithm will calculate quantity that was missed/not placed while non-marketable.</descriptionEnhancement>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>4</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>conditionalPrice</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Trade when price is more aggressive than:</description>
+				<descriptionEnhancement>evaluates with bid for buy order and ask for sell order</descriptionEnhancement>
+				<priceMarketRule>true</priceMarketRule>
+				<valueClassName>Double</valueClassName>
+				<guiRank>5</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>monetaryValue</shortName>
+				<required>false</required>
+				<fixTag>152</fixTag>
+				<description>Monetary Value</description>
+				<valueClassName>Double</valueClassName>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>DarkIce</shortName>
+		<description>DarkIce</description>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>displaySize</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Display Size</description>
+				<descriptionEnhancement>average display size</descriptionEnhancement>
+				<valueClassName>Integer</valueClassName>
+				<guiRank>1</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>startTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Start Time</description>
+				<descriptionEnhancement>defaults to start of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>2</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>endTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>End Time</description>
+				<descriptionEnhancement>defaults to end of market trading</descriptionEnhancement>
+				<valueClassName>Time</valueClassName>
+				<guiRank>3</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>allowPastEndTime</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Allow trading past end time</description>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>4</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>monetaryValue</shortName>
+				<required>false</required>
+				<fixTag>152</fixTag>
+				<description>Monetary Value</description>
+				<valueClassName>Double</valueClassName>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+	<Algorithm>
+		<algoExchange>IBALGO</algoExchange>
+		<shortName>AccuDistr</shortName>
+		<description>AccuDistr</description>
+		<allowOutsideRTH>yes</allowOutsideRTH>
+		<allowGAT>yes</allowGAT>
+		<allowGTC>yes</allowGTC>
+		<allowGTT>yes</allowGTT>
+		<commonAttributeSets>IBALGO_COMMON</commonAttributeSets>
+		<Array varName="attribContents" type="jattrib.algo.AlgoAttributeContent">
+			<AlgoAttributeContent>
+				<shortName>componentSize</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Component Size</description>
+				<descriptionEnhancement>Number of shares or contracts to be traded per slice</descriptionEnhancement>
+				<valueClassName>Integer</valueClassName>
+				<Object varName="minValue" type="java.lang.Integer">1</Object>
+				<guiRank>1</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>randomizeSize55</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Randomize Size by +/- 55%</description>
+				<descriptionEnhancement>If set, component size will be randomized by random number in the range [-55%, 55%]</descriptionEnhancement>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>2</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>timeBetweenOrders</shortName>
+				<required>true</required>
+				<fixTag>2147483647</fixTag>
+				<description>Time Between Orders</description>
+				<descriptionEnhancement>Time between the orders in seconds</descriptionEnhancement>
+				<valueClassName>Integer</valueClassName>
+				<Object varName="minValue" type="java.lang.Integer">5</Object>
+				<guiRank>3</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>randomizeTime20</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Randomize Time by +/- 20%</description>
+				<descriptionEnhancement>If set, time between orders will be randomized by random number in the range [-20%, 20%]</descriptionEnhancement>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>4</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>waitForFill</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Wait For Fill</description>
+				<descriptionEnhancement>If set, the algorithm will wait for the previous component to be filled before placing new component.</descriptionEnhancement>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>5</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>catchUp</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Catch Up</description>
+				<descriptionEnhancement>If set, the algorithm will calculate quantity that was missed/not placed while waiting for the previous order to fill, and allow that quantity to be placed without extra wait after the previous order fills.</descriptionEnhancement>
+				<Object varName="defaultValue" type="java.lang.Boolean">false</Object>
+				<valueClassName>Boolean</valueClassName>
+				<guiRank>6</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>routeOrderType</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Route Order Type</description>
+				<descriptionEnhancement>Controls order type to be used when routing</descriptionEnhancement>
+				<valueClassName>String</valueClassName>
+				<legalStringsName>RouteOrderType</legalStringsName>
+				<guiRank>7</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>routeOffset</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Route Offset</description>
+				<priceMarketRule>true</priceMarketRule>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0</Object>
+				<guiRank>8</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>routePercentOffset</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Route Percent Offset</description>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0.01</Object>
+				<Object varName="maxValue" type="java.lang.Double">0.98</Object>
+				<divisor>2</divisor>
+				<guiRank>9</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>displaySize</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Display Size</description>
+				<valueClassName>Integer</valueClassName>
+				<Object varName="minValue" type="java.lang.Integer">0</Object>
+				<guiRank>10</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>activeTimeStart</shortName>
+				<fixTag>6670</fixTag>
+				<description>Active Time Start</description>
+				<descriptionEnhancement>defaults to start of market trading</descriptionEnhancement>
+				<valueClassName>DayTime</valueClassName>
+				<guiRank>11</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>activeTimeEnd</shortName>
+				<fixTag>6671</fixTag>
+				<description>Active Time End</description>
+				<descriptionEnhancement>defaults to end of market trading</descriptionEnhancement>
+				<valueClassName>DayTime</valueClassName>
+				<guiRank>12</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>activeTimeTz</shortName>
+				<fixTag>6734</fixTag>
+				<description>Active Time TZ</description>
+				<valueClassName>String</valueClassName>
+				<guiRank>13</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>minPrice</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Min Price</description>
+				<priceMarketRule>true</priceMarketRule>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0</Object>
+				<guiRank>15</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+			<AlgoAttributeContent>
+				<shortName>maxPrice</shortName>
+				<fixTag>2147483647</fixTag>
+				<description>Max Price</description>
+				<priceMarketRule>true</priceMarketRule>
+				<valueClassName>Double</valueClassName>
+				<Object varName="minValue" type="java.lang.Double">0</Object>
+				<guiRank>16</guiRank>
+				<editable>true</editable>
+			</AlgoAttributeContent>
+		</Array>
+	</Algorithm>
+</AlgorithmsMap>

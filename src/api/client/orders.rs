@@ -27,18 +27,27 @@ impl EClient {
             self.next_order_id.fetch_add(1, Ordering::Relaxed)
         };
 
+        // Warnings the reference sends while it reads the order (ibx#416).
+        for (code, message) in ClientCore::implied_zone_warnings(order) {
+            self.shared.orders.push_order_error(oid, code, message);
+        }
         // Refused before sending, like the reference: error() only.
+        let contract_zone = self.shared.reference.time_zone_id(contract.con_id);
         if let Some((code, message)) = ClientCore::refusal_before_sending(order)
-            .or_else(|| ClientCore::algo_definition_refusal(order, &self.shared.reference))
+            .or_else(|| ClientCore::algo_definition_refusal(order, &contract.exchange, &self.shared.reference))
             .or_else(|| ClientCore::account_config_refusal(
                 order, self.shared.reference.account_features().as_deref(), &self.account_id))
-            .or_else(|| ClientCore::good_till_date_refusal(
-                order, self.shared.reference.time_zone_id(contract.con_id).as_deref()))
+            .or_else(|| ClientCore::good_till_date_refusal(order, contract_zone.as_deref()))
+            .or_else(|| ClientCore::condition_time_zone_refusal(order, contract_zone.as_deref()))
+            .or_else(|| ClientCore::price_refusal(order))
             .or_else(|| self.core.refusal_for_order_id(oid, order))
         {
             self.shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }
+        // The condition times as the reference sends them (ibx#416); the
+        // order is tracked as the caller placed it.
+        let sent = ClientCore::with_condition_times(order);
 
         let instrument = self.core.find_or_register_instrument(
             &self.control_tx,
@@ -51,7 +60,7 @@ impl EClient {
         // it previews a new order (ibx#462).
         let working = if order.what_if { None } else { self.core.tracked_order(oid) };
         let cmd = if let Some(working) = working {
-            match ClientCore::build_modify_request(order, oid, &working)? {
+            match ClientCore::build_modify_request(&sent, oid, &working)? {
                 ModifyPlan::Send(cmd) => cmd,
                 ModifyPlan::Refused { code, message } => {
                     // Refused before sending, like the reference: the caller
@@ -61,7 +70,7 @@ impl EClient {
                 }
             }
         } else {
-            ClientCore::build_order_request(order, oid, instrument)?
+            ClientCore::build_order_request(&sent, oid, instrument)?
         };
         self.send(cmd)?;
         self.core.cache_contract(contract.con_id, contract.clone());

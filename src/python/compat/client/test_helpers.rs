@@ -314,6 +314,18 @@ impl EClient {
             maint_margin_after: (maint_margin_after * ps) as i64,
             equity_with_loan_after: (equity_with_loan_after * ps) as i64,
             commission: (commission * ps) as i64,
+            state: crate::types::WhatIfState {
+                status: "PreSubmitted".into(),
+                init_margin_before: Some(init_margin_before),
+                maint_margin_before: Some(maint_margin_before),
+                equity_with_loan_before: Some(equity_with_loan_before),
+                init_margin_after: Some(init_margin_after),
+                maint_margin_after: Some(maint_margin_after),
+                equity_with_loan_after: Some(equity_with_loan_after),
+                commission: Some(commission),
+                ..Default::default()
+            },
+            final_reply: true,
         });
         Ok(())
     }

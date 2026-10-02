@@ -225,6 +225,8 @@ fn order_lifecycle_what_if_preview() {
         maint_margin_after: 10000 * PRICE_SCALE,
         equity_with_loan_after: 85000 * PRICE_SCALE,
         commission: 2 * PRICE_SCALE,
+        final_reply: true,
+        ..Default::default()
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);

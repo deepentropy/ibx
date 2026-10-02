@@ -25,6 +25,15 @@ pub struct AlgoParamDef {
     /// Its bounds, as the definition writes them.
     pub min: Option<String>,
     pub max: Option<String>,
+    /// Its value type (`Double`, `Integer`, `Boolean`, `String`, `Time`...).
+    pub value_class: String,
+    /// It must have a value: given, or its default.
+    pub required: bool,
+    /// Its default value, when it has one.
+    pub default_value: Option<String>,
+    /// It is the strategy selector (the algorithm's name), not a parameter
+    /// the caller gives.
+    pub strategy_selector: bool,
 }
 
 /// What the server defined so far.
@@ -36,6 +45,8 @@ pub struct AlgoDefinitions {
     pub common: HashMap<String, Vec<AlgoParamDef>>,
     /// The algorithms by name: their parameters and their common sets.
     pub algorithms: HashMap<String, (Vec<AlgoParamDef>, Vec<String>)>,
+    /// The algorithms that may run overnight (`allowOvernight` yes).
+    pub overnight: std::collections::HashSet<String>,
 }
 
 impl AlgoDefinitions {
@@ -58,6 +69,9 @@ impl AlgoDefinitions {
             let Some(name) = text(head, "shortName") else { continue };
             let sets = text(head, "commonAttributeSets").unwrap_or("")
                 .split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
+            if text(head, "allowOvernight").is_some_and(|v| v.eq_ignore_ascii_case("yes")) {
+                self.overnight.insert(name.to_string());
+            }
             self.algorithms.insert(name.to_string(), (params(block), sets));
         }
     }
@@ -129,21 +143,60 @@ fn params(xml: &str) -> Vec<AlgoParamDef> {
             legal_strings: text(p, "legalStringsName").map(String::from),
             min: object(p, "minValue"),
             max: object(p, "maxValue"),
+            value_class: text(p, "valueClassName").unwrap_or("").to_string(),
+            required: text(p, "required") == Some("true"),
+            default_value: object(p, "defaultValue"),
+            strategy_selector: text(p, "isStrategySelector") == Some("true"),
         })
     }).collect()
 }
 
+/// Text of error 439: an algorithm the definitions do not have.
+pub const NO_ALGO_DEFINITION: &str = "Order processing failed. Algorithm definition not found";
+
+/// Text of error 442: an algorithm that may not run overnight on an
+/// overnight order.
+pub const ALGO_NOT_ALLOWED: &str = "Specified algorithm is not allowed for this order.";
+
 /// The reference's checks of an algo order against the definitions
-/// (ibx#263), in its order: every parameter name must be one of the
-/// algorithm's (443), then each value with a legal value list must be in
-/// it (145), then each number must be within the bounds (441). None when
-/// the order passes, or when the algorithm is not defined.
-pub fn refusal(definitions: &AlgoDefinitions, algorithm: &str, values: &[(&str, &str)]) -> Option<(i64, String)> {
-    let params = definitions.parameters(algorithm)?;
+/// (ibx#263), in its order (`jextend.algo.a`):
+/// - the algorithm must be defined and have its strategy selector (439);
+/// - an overnight order (`overnight`: the OVERNIGHT or IBEOS exchange, or
+///   includeOvernight) needs an algorithm allowed overnight (442);
+/// - then each parameter in the caller's order: a name the algorithm does
+///   not have (443), a number the reference cannot read (441
+///   `name=value`);
+/// - then each value with a legal value list must be in it (145), each
+///   number within its bounds (441);
+/// - last, each required parameter with no value and no default (441,
+///   one line per parameter).
+///
+/// None when the order passes, or when no definition came yet.
+pub fn refusal(definitions: &AlgoDefinitions, algorithm: &str, values: &[(&str, &str)], overnight: bool) -> Option<(i64, String)> {
+    if definitions.algorithms.is_empty() {
+        return None;
+    }
+    let Some(params) = definitions.parameters(algorithm) else {
+        return Some((439, NO_ALGO_DEFINITION.to_string()));
+    };
+    if !params.iter().any(|p| p.strategy_selector) {
+        return Some((439, NO_ALGO_DEFINITION.to_string()));
+    }
+    if overnight && !definitions.overnight.contains(algorithm) {
+        return Some((442, ALGO_NOT_ALLOWED.to_string()));
+    }
     let find = |name: &str| params.iter().find(|p| p.name == name).copied();
-    for (name, _) in values {
-        if find(name).is_none() {
+    for (name, value) in values {
+        let Some(param) = find(name) else {
             return Some((443, format!("Order processing failed. Unknown algo attribute:{}", name)));
+        };
+        let readable = match param.value_class.as_str() {
+            "Double" => java_double(value).is_some(),
+            "Integer" => value.trim().parse::<i32>().is_ok(),
+            _ => true,
+        };
+        if !value.trim().is_empty() && !readable {
+            return Some((441, format!("Algo attributes validation failed:{}={}", name, value)));
         }
     }
     for (name, value) in values {
@@ -172,18 +225,35 @@ pub fn refusal(definitions: &AlgoDefinitions, algorithm: &str, values: &[(&str, 
             }
         }
     }
+    // Captured 02/10/2026 (PctVol with no pctVol): "Algo attributes
+    // validation failed:\n'Target Percentage' is invalid: value is
+    // required.\n" (`jattrib.algo.p.a(AlgoAttribute, Object,
+    // StringBuffer)`, one line per parameter).
+    let missing: String = params.iter()
+        .filter(|p| p.required && !p.strategy_selector && p.default_value.is_none())
+        .filter(|p| !values.iter().any(|(name, value)| *name == p.name && !value.trim().is_empty()))
+        .map(|p| format!("'{}' is invalid: value is required.\n", p.description))
+        .collect();
+    if !missing.is_empty() {
+        return Some((441, format!("Algo attributes validation failed:\n{}", missing)));
+    }
     None
 }
 
-/// A number as the reference reads it: the infinities and NaN only in
-/// their Java spelling. A value it cannot read is not checked here.
+/// A number as the reference reads it (`Double.parseDouble`): spaces
+/// around it, an optional `d`/`f` suffix, the infinities and NaN only in
+/// their Java spelling. None for a value it cannot read.
 fn java_double(value: &str) -> Option<f64> {
     let v = value.trim();
     let word = v.trim_start_matches(['+', '-']);
-    if word.chars().any(|c| c.is_ascii_alphabetic()) && !matches!(word, "Infinity" | "NaN") {
+    if matches!(word, "Infinity" | "NaN") {
+        return v.parse::<f64>().ok();
+    }
+    let body = v.strip_suffix(['d', 'D', 'f', 'F']).unwrap_or(v);
+    if body.chars().any(|c| c.is_ascii_alphabetic() && !matches!(c, 'e' | 'E')) {
         return None;
     }
-    v.parse::<f64>().ok()
+    body.parse::<f64>().ok()
 }
 
 /// The definitions of the captured answers (ib-agent capture of
@@ -342,26 +412,79 @@ mod tests {
     #[test]
     fn refusals_follow_the_definitions() {
         let d = captured_definitions();
-        assert_eq!(refusal(&d, "Twap", &[("strategyType", "Marketable"), ("allowPastEndTime", "1")]),
+        assert_eq!(refusal(&d, "Twap", &[("strategyType", "Marketable"), ("allowPastEndTime", "1")], false),
             Some((443, "Order processing failed. Unknown algo attribute:strategyType".into())));
-        assert_eq!(refusal(&d, "Adaptive", &[("adaptivePriority", "Bogus")]),
+        assert_eq!(refusal(&d, "Adaptive", &[("adaptivePriority", "Bogus")], false),
             Some((145, "Error in validating entry fields -Bogus".into())));
-        assert_eq!(refusal(&d, "ArrivalPx", &[("riskAversion", "neutral")]),
+        assert_eq!(refusal(&d, "ArrivalPx", &[("riskAversion", "neutral")], false),
             Some((145, "Error in validating entry fields -neutral".into())), "the legal values are exact");
-        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "NaN")]).unwrap().1,
+        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "NaN")], false).unwrap().1,
             "Algo attributes validation failed: 'Max Percentage' is invalid: Value is greater than maximum value 50.0.. ");
-        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "-0.1")]).unwrap().1,
+        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "-0.1")], false).unwrap().1,
             "Algo attributes validation failed: 'Max Percentage' is invalid: Value is less than minimum value 0.01.. ");
-        assert_eq!(refusal(&d, "PctVol", &[("pctVol", "-Infinity")]).unwrap().1,
+        assert_eq!(refusal(&d, "PctVol", &[("pctVol", "-Infinity")], false).unwrap().1,
             "Algo attributes validation failed: 'Target Percentage' is invalid: Value is less than minimum value 0.01.. ");
-        assert_eq!(refusal(&d, "PctVol", &[("pctVol", "Infinity")]).unwrap().0, 441);
-        assert_eq!(refusal(&d, "PctVol", &[("pctVol", "inf")]), None, "not a number the reference reads");
+        assert_eq!(refusal(&d, "PctVol", &[("pctVol", "Infinity")], false).unwrap().0, 441);
+        assert_eq!(refusal(&d, "PctVol", &[("pctVol", "inf")], false), None, "not a number the reference reads");
         // The unknown name is reported before a bad value.
-        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "99"), ("bogus", "1")]).unwrap().0, 443);
+        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "99"), ("bogus", "1")], false).unwrap().0, 443);
         // Accepted values.
-        assert_eq!(refusal(&d, "ArrivalPx", &[("maxPctVol", "0.1"), ("riskAversion", "Neutral"), ("startTime", "")]), None);
-        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "50")]), None);
-        // An algorithm the definitions do not have is not checked.
-        assert_eq!(refusal(&d, "DarkIce", &[("anything", "1")]), None);
+        assert_eq!(refusal(&d, "ArrivalPx", &[("maxPctVol", "0.1"), ("riskAversion", "Neutral"), ("startTime", "")], false), None);
+        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "50")], false), None);
+        // An algorithm the definitions do not have is refused (ibx#263,
+        // captured 02/10/2026), but nothing is checked before the first
+        // definitions came.
+        assert_eq!(refusal(&d, "DarkIce", &[("anything", "1")], false),
+            Some((439, "Order processing failed. Algorithm definition not found".into())));
+        assert_eq!(refusal(&AlgoDefinitions::default(), "Foo", &[], false), None);
+    }
+
+    /// The definitions the server sent on 02/10/2026 (paper, stock
+    /// algorithms of the provider IBALGO).
+    fn definitions_of_20261002() -> AlgoDefinitions {
+        let mut d = AlgoDefinitions::default();
+        d.add(include_str!("../../tests/fixtures/algo/IBALGO-AE-20261002.xml"));
+        d.add(include_str!("../../tests/fixtures/algo/IBALGO-AL-STK-20261002.xml"));
+        d
+    }
+
+    // ibx#263, captured 02/10/2026 (b1_263_algo_refusals): the refusals
+    // the reference gives before sending, with their texts.
+    #[test]
+    fn captured_refusals_of_20261002() {
+        let d = definitions_of_20261002();
+        assert_eq!(refusal(&d, "Foo", &[], false),
+            Some((439, "Order processing failed. Algorithm definition not found".into())));
+        assert_eq!(refusal(&d, "PctVol", &[], false),
+            Some((441, "Algo attributes validation failed:\n'Target Percentage' is invalid: value is required.\n".into())));
+        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "abc")], false),
+            Some((441, "Algo attributes validation failed:maxPctVol=abc".into())));
+        assert_eq!(refusal(&d, "Twap", &[("strategyType", "abc")], false),
+            Some((443, "Order processing failed. Unknown algo attribute:strategyType".into())));
+        // Adaptive on a STP order is accepted; its priority has a default.
+        assert_eq!(refusal(&d, "Adaptive", &[("adaptivePriority", "Normal")], false), None);
+        assert_eq!(refusal(&d, "Adaptive", &[], false), None, "the required priority has a default");
+    }
+
+    // ibx#263 (`jextend.algo.a`): an overnight order needs an algorithm
+    // allowed overnight (442); the first parameter in the caller's order
+    // that fails gives the refusal; a number the reference cannot read is
+    // refused, and an empty value is not read.
+    #[test]
+    fn overnight_and_number_rules() {
+        let d = definitions_of_20261002();
+        assert!(d.overnight.contains("Adaptive"));
+        assert_eq!(refusal(&d, "Vwap", &[], true),
+            Some((442, "Specified algorithm is not allowed for this order.".into())));
+        assert_eq!(refusal(&d, "Adaptive", &[("adaptivePriority", "Normal")], true), None);
+        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "abc"), ("bogus", "1")], false).unwrap().1,
+            "Algo attributes validation failed:maxPctVol=abc");
+        assert_eq!(refusal(&d, "Vwap", &[("bogus", "1"), ("maxPctVol", "abc")], false).unwrap().0, 443);
+        assert_eq!(refusal(&d, "PctVol", &[("pctVol", "inf")], false).unwrap().1,
+            "Algo attributes validation failed:pctVol=inf");
+        assert_eq!(refusal(&d, "PctVol", &[("pctVol", " 10d ")], false), None, "read as Java reads a double");
+        assert_eq!(refusal(&d, "PctVol", &[("pctVol", "1e1")], false), None);
+        assert_eq!(refusal(&d, "PctVol", &[("pctVol", "")], false).unwrap().1,
+            "Algo attributes validation failed:\n'Target Percentage' is invalid: value is required.\n");
     }
 }
