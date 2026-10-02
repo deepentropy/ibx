@@ -46,17 +46,15 @@ pub const TICK_HALTED: i32 = 49;
 
 
 
-/// Render an exchange-code bitmask to a letter string using the smart components
-/// table. Each set bit at position N picks `smart_components[N].exchange_letter`.
-///
-/// Wire encoding pending live confirmation (deepentropy/ib-agent#120). Bit
-/// ordering and width are inferred from TWS-API parity expectations; the
-/// dispatch path tolerates an empty result if the mask layout differs.
-pub fn render_exchange_mask(mask: i64, shared: &SharedState) -> String {
+/// Render an exchange bitmask of a contract to its letters, as the
+/// reference: each set bit picks the letter of that bit in the exchange
+/// map of the contract's BBO exchange (ibx#441); no map yet gives an empty
+/// text.
+pub fn render_exchange_mask(mask: i64, instrument: InstrumentId, shared: &SharedState) -> String {
     if mask == 0 {
         return String::new();
     }
-    let components = shared.reference.smart_components();
+    let Some(components) = shared.reference.instrument_exchange_map(instrument) else { return String::new() };
     let mut out = String::with_capacity(8);
     let mut bits = mask as u64;
     while bits != 0 {
@@ -67,6 +65,42 @@ pub fn render_exchange_mask(mask: i64, shared: &SharedState) -> String {
         }
     }
     out
+}
+
+/// How long a reqSmartComponents waits for the exchange map of a known BBO
+/// exchange, as the reference (ibx#441).
+pub const SMART_COMPONENTS_WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// A reqSmartComponents waiting for its exchange map: (reqId, code,
+/// security type id, deadline).
+type SmartComponentsWait = (i64, String, Option<u8>, std::time::Instant);
+
+/// The answer to a reqSmartComponents: its components, or an error.
+pub type SmartComponentsAnswer = Result<Vec<SmartComponent>, (i64, String)>;
+
+/// The BBO exchange text of reqSmartComponents split as the reference
+/// splits it (ibx#441): with 4 to 8 characters, the last 4 are the
+/// security type id in hex (`9c0001` = code `9c`, STK); a text whose id is
+/// no known security type, or of another length, is the code itself.
+pub fn split_bbo_exchange(bbo: &str) -> (String, Option<u8>) {
+    let chars: Vec<char> = bbo.chars().collect();
+    if !(4..=8).contains(&chars.len()) {
+        return (bbo.to_string(), None);
+    }
+    let code: String = chars[..chars.len() - 4].iter().collect();
+    let id: String = chars[chars.len() - 4..].iter().collect();
+    // The id is read as an int and kept as a byte, as the reference.
+    match i32::from_str_radix(&id, 16).ok().map(|v| v as u8).filter(|v| sec_type_by_id(*v).is_some()) {
+        Some(sec_type_id) => (code, Some(sec_type_id)),
+        None => (bbo.to_string(), None),
+    }
+}
+
+/// Error text of a reqSmartComponents whose exchange map did not come in
+/// time (ibx#441).
+fn smart_components_timeout(code: &str, sec_type_id: Option<u8>) -> (i64, String) {
+    let sec_type = sec_type_id.and_then(sec_type_by_id).unwrap_or("null");
+    (2147483647, format!("Unable to retrieve smart components for BBO exchange {} and security type {}", code, sec_type))
 }
 
 // ── Intermediate dispatch structs ──
@@ -659,6 +693,7 @@ struct StreamPass<'a> {
     fields: &'a [i64; 15],
     delayed: bool,
     shared: &'a SharedState,
+    instrument: InstrumentId,
     bid_auto: bool,
     ask_auto: bool,
 }
@@ -703,7 +738,7 @@ impl StreamPass<'_> {
                 }),
                 12 | 13 => {
                     let tick_type = if idx == 12 { TICK_BID_EXCHANGE } else { TICK_ASK_EXCHANGE };
-                    self.ticks.push(MdTick::Text { tick_type, value: render_exchange_mask(self.fields[idx], self.shared) });
+                    self.ticks.push(MdTick::Text { tick_type, value: render_exchange_mask(self.fields[idx], self.instrument, self.shared) });
                 }
                 _ => {}
             }
@@ -741,6 +776,9 @@ pub struct ClientCore {
     /// their instruments (permission, BBO exchange code).
     pub reg_snapshots: Mutex<Vec<crate::control::regsnapshot::Fetch>>,
     pub reg_snapshot_acks: Mutex<HashMap<InstrumentId, (i32, String)>>,
+    /// reqSmartComponents waiting for the exchange map of their BBO
+    /// exchange (ibx#441): (reqId, code, security type id, deadline).
+    smart_components_waiting: Mutex<Vec<SmartComponentsWait>>,
 
     // PnL subscription state
     /// Running req_pnl requests, with the last values sent (ibx#478).
@@ -1008,6 +1046,7 @@ impl ClientCore {
             snapshot_rate: Mutex::new(Default::default()),
             reg_snapshots: Mutex::new(Vec::new()),
             reg_snapshot_acks: Mutex::new(HashMap::new()),
+            smart_components_waiting: Mutex::new(Vec::new()),
             pnl_reqs: Mutex::new(HashMap::new()),
             pnl_quotes: Mutex::new(PnlQuotes::default()),
             currency_sent: Mutex::new(HashMap::new()),
@@ -1053,6 +1092,7 @@ impl ClientCore {
         self.snapshot_count.store(0, Ordering::Release);
         self.reg_snapshots.lock().unwrap().clear();
         self.reg_snapshot_acks.lock().unwrap().clear();
+        self.smart_components_waiting.lock().unwrap().clear();
         self.pnl_reqs.lock().unwrap().clear();
         *self.pnl_quotes.lock().unwrap() = PnlQuotes::default();
         self.currency_sent.lock().unwrap().clear();
@@ -1348,14 +1388,14 @@ impl ClientCore {
             return Vec::new();
         }
         let now = std::time::Instant::now();
-        let exchange_map = !shared.reference.smart_components().is_empty();
         let acks = self.reg_snapshot_acks.lock().unwrap().clone();
         let mut out = Vec::new();
         fetches.retain_mut(|f| {
             let q = shared.market.quote(f.instrument);
             let price = |v: Price| (v != 0).then(|| v as f64 / PRICE_SCALE_F);
             let size = |v: Qty| (v != 0).then(|| v as f64 / QTY_SCALE_F);
-            let exch = |m: i64| (m != 0).then(|| render_exchange_mask(m, shared));
+            let exch = |m: i64| (m != 0).then(|| render_exchange_mask(m, f.instrument, shared));
+            let exchange_map = shared.reference.instrument_exchange_map(f.instrument).is_some();
             let fields = SnapshotFields {
                 bid: price(q.bid), ask: price(q.ask), last: price(q.last),
                 bid_size: size(q.bid_size), ask_size: size(q.ask_size), last_size: size(q.last_size),
@@ -1933,6 +1973,46 @@ impl ClientCore {
         self.delayed_reqs.lock().unwrap().insert(req_id);
     }
 
+    /// reqSmartComponents (ibx#441), answered from the exchange maps the
+    /// market data acknowledgements made known, as the reference: an
+    /// unknown BBO exchange is refused with 321; a known one whose map has
+    /// not come yet waits for it up to 2 s (None: the answer comes from
+    /// `take_smart_components`).
+    pub fn req_smart_components(&self, req_id: i64, bbo_exchange: &str, shared: &SharedState) -> Option<SmartComponentsAnswer> {
+        use crate::bridge::ExchangeMapState;
+        let (code, sec_type_id) = split_bbo_exchange(bbo_exchange);
+        match shared.reference.exchange_map(&code, sec_type_id) {
+            ExchangeMapState::Unknown => Some(Err((321,
+                "Error validating request.-'V' : cause - Invalid BBO exchange/security type code".to_string()))),
+            ExchangeMapState::Ready(map) => Some(Ok(map)),
+            ExchangeMapState::Waiting => {
+                self.smart_components_waiting.lock().unwrap()
+                    .push((req_id, code, sec_type_id, std::time::Instant::now() + SMART_COMPONENTS_WAIT));
+                None
+            }
+        }
+    }
+
+    /// The waiting reqSmartComponents whose exchange map came, or whose
+    /// wait is over (ibx#441).
+    pub fn take_smart_components(&self, shared: &SharedState) -> Vec<(i64, SmartComponentsAnswer)> {
+        let mut waiting = self.smart_components_waiting.lock().unwrap();
+        if waiting.is_empty() {
+            return Vec::new();
+        }
+        let now = std::time::Instant::now();
+        let mut out = Vec::new();
+        waiting.retain(|(req_id, code, sec_type_id, deadline)| {
+            match shared.reference.exchange_map(code, *sec_type_id) {
+                crate::bridge::ExchangeMapState::Ready(map) => out.push((*req_id, Ok(map))),
+                _ if now >= *deadline => out.push((*req_id, Err(smart_components_timeout(code, *sec_type_id)))),
+                _ => return true,
+            }
+            false
+        });
+        out
+    }
+
     /// The tickReqParams to report, (reqId, marketDataType, minTick,
     /// bboExchange, snapshotPermissions): once per request id, as the
     /// reference (ibx#449); a later ack of the same request (a delayed
@@ -2433,7 +2513,7 @@ impl ClientCore {
         let halted = if delayed { None } else { marks.halted().map(crate::types::QuoteMarks::halted_tick_value) };
         let mut pending = st.halted_pending;
 
-        let mut out = StreamPass { ticks: Vec::new(), todo, fields: &fields, delayed, shared, bid_auto, ask_auto };
+        let mut out = StreamPass { ticks: Vec::new(), todo, fields: &fields, delayed, shared, instrument: iid, bid_auto, ask_auto };
         let new_messages = marks.message_seq().wrapping_sub(st.seq) & 7;
         st.seq = marks.message_seq();
         if std::mem::take(&mut st.joined) {
@@ -2638,7 +2718,7 @@ impl ClientCore {
         }
         for (mask, tt) in [(q.bid_exch_mask, TICK_BID_EXCHANGE), (q.ask_exch_mask, TICK_ASK_EXCHANGE)] {
             if mask != 0 && snap.take(tt) {
-                ticks.push(MdTick::Text { tick_type: tt, value: render_exchange_mask(mask, shared) });
+                ticks.push(MdTick::Text { tick_type: tt, value: render_exchange_mask(mask, iid, shared) });
             }
         }
         let delivered = !ticks.is_empty();
@@ -3339,6 +3419,7 @@ impl ClientCore {
                     sec_id: contract.sec_id.clone(),
                     sec_id_type: contract.sec_id_type.clone(),
                     include_expired: contract.include_expired,
+                    issuer_id: String::new(),
                 },
             },
             request: Box::new(request),
@@ -4158,9 +4239,11 @@ mod tests {
     }
     use crate::types::SmartComponent;
 
-    fn shared_with_components(comps: Vec<(i32, &str)>) -> SharedState {
+    /// Shared state where instrument 0 has an exchange map.
+    pub(crate) fn shared_with_components(comps: Vec<(i32, &str)>) -> SharedState {
         let s = SharedState::new();
-        s.reference.set_smart_components(
+        s.reference.observe_exchange_map(0, "9c", 1);
+        s.reference.set_exchange_map("9c", 1,
             comps.into_iter().map(|(bit, letter)| SmartComponent {
                 bit_number: bit,
                 exchange: format!("EX{bit}"),
@@ -4170,17 +4253,65 @@ mod tests {
         s
     }
 
+    // ibx#441: the BBO exchange text is split as the reference splits it.
+    #[test]
+    fn bbo_exchange_split_as_the_reference() {
+        assert_eq!(split_bbo_exchange("9c0001"), ("9c".to_string(), Some(1)));
+        assert_eq!(split_bbo_exchange("a60001"), ("a6".to_string(), Some(1)));
+        assert_eq!(split_bbo_exchange("XYZ"), ("XYZ".to_string(), None));
+        assert_eq!(split_bbo_exchange(""), (String::new(), None));
+        assert_eq!(split_bbo_exchange("abcd"), ("abcd".to_string(), None), "no security type 0xabcd");
+        assert_eq!(split_bbo_exchange("5000a"), ("5".to_string(), Some(10)));
+        assert_eq!(split_bbo_exchange("123456789"), ("123456789".to_string(), None), "longer than 8");
+    }
+
+    // ibx#441, captured 02/10/2026 (b1_441_smart_components): XYZ before
+    // and after an L1 subscription gives 321; the AAPL code right after
+    // tickReqParams waits for the map, 3 s later it is answered at once.
+    #[test]
+    fn smart_components_as_the_reference() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        let invalid = Err((321, "Error validating request.-'V' : cause - Invalid BBO exchange/security type code".to_string()));
+        assert_eq!(core.req_smart_components(9490, "XYZ", &shared), Some(invalid.clone()));
+        shared.reference.observe_exchange_map(1, "9c", 1);
+        assert_eq!(core.req_smart_components(9492, "9c0001", &shared), None, "waits for the map");
+        assert_eq!(core.req_smart_components(9500, "XYZ", &shared), Some(invalid));
+        assert!(core.take_smart_components(&shared).is_empty());
+        let map = crate::engine::hot_loop::farm::parse_exchange_map("0/A/AMEX;9/Q/NASDAQ");
+        shared.reference.set_exchange_map("9c", 1, map.clone());
+        assert_eq!(core.take_smart_components(&shared), vec![(9492, Ok(map.clone()))]);
+        assert_eq!(core.req_smart_components(9493, "9c0001", &shared), Some(Ok(map.clone())));
+        // The code alone finds the first map of that code.
+        assert_eq!(core.req_smart_components(9494, "9c", &shared), Some(Ok(map)));
+        // Another security type for the same code is not known.
+        assert!(matches!(core.req_smart_components(9495, "9c0006", &shared), Some(Err((321, _)))));
+    }
+
+    // ibx#441: no map within 2 s gives the reference's error.
+    #[test]
+    fn smart_components_wait_ends_with_an_error() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        shared.reference.observe_exchange_map(1, "a6", 1);
+        assert_eq!(core.req_smart_components(7, "a60001", &shared), None);
+        core.smart_components_waiting.lock().unwrap()[0].3 = std::time::Instant::now();
+        assert_eq!(core.take_smart_components(&shared), vec![(7, Err((2147483647,
+            "Unable to retrieve smart components for BBO exchange a6 and security type STK".to_string())))]);
+        assert!(core.take_smart_components(&shared).is_empty());
+    }
+
     #[test]
     fn render_exchange_mask_zero_is_empty() {
         let s = shared_with_components(vec![(0, "Q"), (1, "N")]);
-        assert_eq!(render_exchange_mask(0, &s), "");
+        assert_eq!(render_exchange_mask(0, 0, &s), "");
     }
 
     #[test]
     fn render_exchange_mask_single_bit() {
         let s = shared_with_components(vec![(0, "Q"), (1, "N"), (2, "P")]);
-        assert_eq!(render_exchange_mask(0b001, &s), "Q");
-        assert_eq!(render_exchange_mask(0b100, &s), "P");
+        assert_eq!(render_exchange_mask(0b001, 0, &s), "Q");
+        assert_eq!(render_exchange_mask(0b100, 0, &s), "P");
     }
 
     #[test]
@@ -4189,14 +4320,24 @@ mod tests {
             (0, "Q"), (1, "N"), (2, "P"), (3, "Z"),
         ]);
         // bits 0, 2, 3 set → letters in bit-order: Q, P, Z
-        assert_eq!(render_exchange_mask(0b1101, &s), "QPZ");
+        assert_eq!(render_exchange_mask(0b1101, 0, &s), "QPZ");
     }
 
     #[test]
     fn render_exchange_mask_unknown_bit_skipped() {
         let s = shared_with_components(vec![(0, "Q")]);
         // bit 5 set, no component at bit 5 — skipped
-        assert_eq!(render_exchange_mask(0b100000, &s), "");
+        assert_eq!(render_exchange_mask(0b100000, 0, &s), "");
+    }
+
+    // ibx#441: no map for the contract (another contract has one, or the
+    // map has not come yet): an empty text, as the reference.
+    #[test]
+    fn render_exchange_mask_without_the_contract_map_is_empty() {
+        let s = shared_with_components(vec![(0, "Q")]);
+        assert_eq!(render_exchange_mask(1, 1, &s), "");
+        s.reference.observe_exchange_map(2, "a6", 1);
+        assert_eq!(render_exchange_mask(1, 2, &s), "");
     }
 
     // ── poll_pnl regression tests (#166) ──

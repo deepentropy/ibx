@@ -394,6 +394,21 @@ impl EClient {
         Ok(())
     }
 
+    /// Push a contract details row and its end into SharedState (ibx#438).
+    #[doc(hidden)]
+    #[pyo3(signature = (req_id, con_id, sec_type, continuous=false))]
+    fn _test_push_contract_row(&self, req_id: ReqId, con_id: i64, sec_type: &str, continuous: bool) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        shared.reference.push_contract_details(req_id, crate::control::contracts::ContractDefinition {
+            con_id,
+            sec_type: crate::control::contracts::SecurityType::from_fix(sec_type),
+            continuous,
+            ..Default::default()
+        });
+        shared.reference.push_contract_details_end(req_id);
+        Ok(())
+    }
+
     /// Push account state into SharedState.
     #[doc(hidden)]
     #[pyo3(signature = (net_liquidation=0.0, buying_power=0.0, daily_pnl=0.0, unrealized_pnl=0.0, realized_pnl=0.0))]

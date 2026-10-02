@@ -134,6 +134,7 @@ impl EClient {
                 sec_id: contract.sec_id.clone(),
                 sec_id_type: contract.sec_id_type.clone(),
                 include_expired: contract.include_expired,
+                issuer_id: contract.issuer_id.clone(),
             },
         })?;
         Ok(())

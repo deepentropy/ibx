@@ -131,7 +131,7 @@ def test_req_market_rule_signature():
 
 
 # ═══════════════════════════════════════════════════════════
-# Smart Components (fires empty callback)
+# Smart Components (gateway-local, from the exchange maps market data gave)
 # ═══════════════════════════════════════════════════════════
 
 class SmartComponentsCapture(EWrapper):
@@ -139,19 +139,24 @@ class SmartComponentsCapture(EWrapper):
         super().__init__()
         self.req_id = None
         self.components = None
+        self.errors = []
 
     def smart_components(self, req_id, smart_component_map):
         self.req_id = req_id
         self.components = smart_component_map
 
+    def error(self, req_id, error_code, error_string, advanced_order_reject_json=""):
+        self.errors.append((req_id, error_code, error_string))
 
-def test_req_smart_components_fires_callback():
+
+def test_req_smart_components_unknown_code_is_refused():
+    # No market data gave this code: 321, as the reference (ibx#441).
     w = SmartComponentsCapture()
     c = EClient(w)
     c._test_connect()
     c.req_smart_components(1, "a]AMEX")
-    assert w.req_id == 1
-    assert len(w.components) == 0  # Empty map (gateway-local data not available)
+    assert w.req_id is None
+    assert w.errors == [(1, 321, "Error validating request.-'V' : cause - Invalid BBO exchange/security type code")]
 
 
 def test_req_smart_components_signature():

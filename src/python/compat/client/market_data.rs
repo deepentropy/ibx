@@ -62,6 +62,7 @@ impl EClient {
             sec_id: contract.sec_id.clone(),
             sec_id_type: contract.sec_id_type.clone(),
             include_expired: contract.include_expired,
+            issuer_id: String::new(),
         };
         // The registration waits for the engine: interpreter lock released
         // (ibx#271).

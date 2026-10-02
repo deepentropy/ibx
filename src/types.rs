@@ -1621,8 +1621,27 @@ pub struct DepthMktDataDescription {
     pub agg_group: i32,
 }
 
+/// The reference's security type ids (`SecType` values), by API
+/// security type (ibx#449, ibx#441).
+const SEC_TYPE_IDS: [(&str, u8); 23] = [
+    ("STK", 1), ("CFD", 2), ("OPT", 3), ("FOP", 4), ("WAR", 5), ("FUT", 6), ("FWD", 7),
+    ("BAG", 8), ("CASH", 10), ("IND", 11), ("BOND", 12), ("BILL", 13), ("FIXED", 14),
+    ("FUND", 15), ("SLB", 16), ("NEWS", 17), ("CMDTY", 18), ("BSK", 19), ("IOPT", 20),
+    ("ICU", 21), ("ICS", 22), ("PHYSS", 23), ("CRYPTO", 24),
+];
+
+/// The reference's security type id of an API security type.
+pub fn sec_type_id(sec_type: &str) -> Option<u8> {
+    SEC_TYPE_IDS.iter().find(|(name, _)| *name == sec_type).map(|(_, id)| *id)
+}
+
+/// The API security type of a security type id.
+pub fn sec_type_by_id(id: u8) -> Option<&'static str> {
+    SEC_TYPE_IDS.iter().find(|(_, i)| *i == id).map(|(name, _)| *name)
+}
+
 /// A component exchange in a SMART routing map.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SmartComponent {
     pub bit_number: i32,
     pub exchange: String,
@@ -1755,6 +1774,9 @@ pub struct SecDefFilters {
     pub sec_id_type: String,
     /// Expired contracts are included (ibx#229).
     pub include_expired: bool,
+    /// Bond issuer id (ibx#438): when set, the lookup is for the issuer's
+    /// bonds.
+    pub issuer_id: String,
 }
 
 /// A contract as the API gave it, for a lookup by symbol (ibx#427).

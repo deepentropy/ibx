@@ -792,7 +792,8 @@ impl ContractDetails {
         let c = Contract {
             con_id: def.con_id,
             symbol: def.symbol.clone(),
-            sec_type: def.sec_type.to_api_str().to_string(),
+            // A continuous futures record is CONTFUT, as the reference (ibx#438).
+            sec_type: if def.continuous { "CONTFUT".to_string() } else { def.sec_type.to_api_str().to_string() },
             exchange: def.exchange.clone(),
             primary_exchange: def.primary_exchange.clone(),
             currency: def.currency.clone(),

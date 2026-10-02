@@ -2109,7 +2109,7 @@ impl ContractDetails {
         c.con_id = def.con_id;
         // Official API string ("STK"), not the Debug derive ("Stock"): the
         // returned Contract must round-trip into another request (ibx#230).
-        c.sec_type = def.sec_type.to_api_str().to_string();
+        c.sec_type = if def.continuous { "CONTFUT".to_string() } else { def.sec_type.to_api_str().to_string() };
         c.symbol = def.symbol.clone();
         c.exchange = def.exchange.clone();
         c.primary_exchange = def.primary_exchange.clone();

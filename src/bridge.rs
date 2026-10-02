@@ -612,6 +612,19 @@ impl OrderState {
     }
 }
 
+/// BBO exchange code and security type id of an exchange map (ibx#441).
+pub type ExchangeMapKey = (String, u8);
+
+/// What is known of the exchange map of a BBO exchange (ibx#441).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExchangeMapState {
+    /// No market data acknowledgement gave this code.
+    Unknown,
+    /// The code is known, its map is asked.
+    Waiting,
+    Ready(Vec<crate::types::SmartComponent>),
+}
+
 /// Historical data, contract definitions, scanners, news archives, market rules, contract cache.
 pub struct ReferenceState {
     historical_data: Mutex<Vec<(ReqId, HistoricalResponse)>>,
@@ -640,8 +653,13 @@ pub struct ReferenceState {
     market_names: Mutex<HashMap<i64, String>>,
     /// Zone of the trading hours from contract details, by conId (ibx#335).
     time_zone_ids: Mutex<HashMap<i64, String>>,
+    /// Exchange maps of the BBO exchanges (ibx#441), by BBO exchange code
+    /// and security type id, in the order they were first seen: `None`
+    /// while the map is asked.
+    exchange_maps: Mutex<Vec<(ExchangeMapKey, Option<Vec<crate::types::SmartComponent>>)>>,
+    /// The exchange map key of each contract with market data (ibx#441).
+    instrument_exchange_maps: Mutex<HashMap<InstrumentId, ExchangeMapKey>>,
     /// Gateway-local init data (populated during connection, read-only after).
-    smart_components: Mutex<Vec<crate::types::SmartComponent>>,
     news_providers: Mutex<Vec<crate::types::NewsProvider>>,
     /// Subscribed API news source codes of the logon, in logon order
     /// (ibx#460): the provider check and the all-subscribed form of the
@@ -701,7 +719,8 @@ impl ReferenceState {
             contract_cache: Mutex::new(HashMap::new()),
             market_names: Mutex::new(HashMap::new()),
             time_zone_ids: Mutex::new(HashMap::new()),
-            smart_components: Mutex::new(Vec::new()),
+            exchange_maps: Mutex::new(Vec::new()),
+            instrument_exchange_maps: Mutex::new(HashMap::new()),
             news_providers: Mutex::new(Vec::new()),
             news_sources: Mutex::new(Vec::new()),
             soft_dollar_tiers: Mutex::new(Vec::new()),
@@ -936,8 +955,27 @@ impl ReferenceState {
 
     // ── Gateway-local init data ──
 
-    pub fn smart_components(&self) -> Vec<crate::types::SmartComponent> {
-        self.smart_components.lock().unwrap().clone()
+    /// The exchange map of a BBO exchange code (ibx#441), as the reference
+    /// finds it: by code and security type id, or with no security type
+    /// the first map of that code.
+    pub fn exchange_map(&self, code: &str, sec_type_id: Option<u8>) -> ExchangeMapState {
+        let maps = self.exchange_maps.lock().unwrap();
+        let found = maps.iter().find(|((c, t), _)| c == code && sec_type_id.is_none_or(|id| id == *t));
+        match found {
+            None => ExchangeMapState::Unknown,
+            Some((_, None)) => ExchangeMapState::Waiting,
+            Some((_, Some(map))) => ExchangeMapState::Ready(map.clone()),
+        }
+    }
+
+    /// The exchange map of a contract's BBO exchange, once received
+    /// (ibx#441).
+    pub fn instrument_exchange_map(&self, instrument: InstrumentId) -> Option<Vec<crate::types::SmartComponent>> {
+        let key = self.instrument_exchange_maps.lock().unwrap().get(&instrument).cloned()?;
+        match self.exchange_map(&key.0, Some(key.1)) {
+            ExchangeMapState::Ready(map) => Some(map),
+            _ => None,
+        }
     }
 
     pub fn news_providers(&self) -> Vec<crate::types::NewsProvider> {
@@ -984,8 +1022,35 @@ impl ReferenceState {
         self.misc_urls.lock().unwrap().get(key).cloned()
     }
 
-    #[doc(hidden)] pub fn set_smart_components(&self, components: Vec<crate::types::SmartComponent>) {
-        *self.smart_components.lock().unwrap() = components;
+    /// A contract's BBO exchange came (ibx#441): its key is kept for the
+    /// contract, and the key is known from now on. True when the key is
+    /// new (its map is then to be asked).
+    #[doc(hidden)] pub fn observe_exchange_map(&self, instrument: InstrumentId, code: &str, sec_type_id: u8) -> bool {
+        let key: ExchangeMapKey = (code.to_string(), sec_type_id);
+        self.instrument_exchange_maps.lock().unwrap().insert(instrument, key.clone());
+        let mut maps = self.exchange_maps.lock().unwrap();
+        if maps.iter().any(|(k, _)| *k == key) {
+            return false;
+        }
+        maps.push((key, None));
+        true
+    }
+
+    /// The exchange map of a BBO exchange arrived (ibx#441).
+    #[doc(hidden)] pub fn set_exchange_map(&self, code: &str, sec_type_id: u8, map: Vec<crate::types::SmartComponent>) {
+        let key: ExchangeMapKey = (code.to_string(), sec_type_id);
+        let mut maps = self.exchange_maps.lock().unwrap();
+        match maps.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, slot)) => *slot = Some(map),
+            None => maps.push((key, Some(map))),
+        }
+    }
+
+    /// Forget a key whose map was asked and never came (its farm was
+    /// lost), so the next acknowledgement asks it again.
+    #[doc(hidden)] pub fn forget_waiting_exchange_map(&self, code: &str, sec_type_id: u8) {
+        let key: ExchangeMapKey = (code.to_string(), sec_type_id);
+        self.exchange_maps.lock().unwrap().retain(|(k, map)| *k != key || map.is_some());
     }
 
     #[doc(hidden)] pub fn set_news_providers(&self, providers: Vec<crate::types::NewsProvider>) {

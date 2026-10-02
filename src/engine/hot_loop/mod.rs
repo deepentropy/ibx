@@ -643,6 +643,7 @@ impl HotLoop {
         self.ccp.sweep_contract_details(&self.shared, &self.event_tx, &mut self.ccp_conn, &mut self.hb);
         self.ccp.sweep_contract_resolves(&self.shared);
         self.ccp.optcalc.progress(&mut self.ccp_conn, &mut self.hb, &self.shared);
+        self.ccp.pump_matching_symbols(Instant::now(), &mut self.ccp_conn, &mut self.hb, &self.shared);
         order_builder::sweep_rth_lookups(&mut self.context);
         farm::sweep_md_lookups(&mut self.context, &self.shared);
         self.send_md_resolved();
@@ -666,6 +667,7 @@ impl HotLoop {
             exchange: sub.exchange.clone(),
             currency,
             filters,
+            continuous: false,
         };
         let strike = if lookup.filters.strike > 0.0 { format!("{}", lookup.filters.strike) } else { String::new() };
         match self.ccp_conn.as_mut().filter(|_| !self.ccp.disconnected) {
@@ -1178,7 +1180,7 @@ impl HotLoop {
                 }
                 ControlCommand::FetchContractDetails { req_id, con_id, symbol, sec_type, exchange, currency, filters } => {
                     if con_id > 0 {
-                        self.ccp.send_secdef_request(req_id, con_id, &mut self.ccp_conn, &mut self.hb);
+                        self.ccp.send_contract_details_by_con_id(req_id, con_id, &exchange, &mut self.ccp_conn, &mut self.hb);
                     } else {
                         self.ccp.send_secdef_request_by_symbol(req_id, &symbol, &sec_type, &exchange, &currency, &filters, &mut self.ccp_conn, &mut self.hb);
                     }

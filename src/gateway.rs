@@ -2047,22 +2047,10 @@ impl Gateway {
 
     /// Populate shared state with gateway-local init data parsed from CCP logon.
     pub fn populate_init_data(&self, shared: &SharedState) {
-        use crate::types::{SmartComponent, FamilyCode};
+        use crate::types::FamilyCode;
 
-        // Smart components: hardcoded US equity SMART routing exchanges.
-        // Server doesn't send these in a parseable init message; they're
-        // embedded in the Gateway binary. Hardcoded list matches Gateway 10.30+.
-        let smart_components: Vec<SmartComponent> = [
-            ("NASDAQ", "Q"), ("NYSE", "N"), ("ARCA", "P"), ("BATS", "Z"),
-            ("IEX", "V"), ("BEX", "B"), ("BYX", "Y"), ("NYSENAT", "C"),
-            ("DRCTEDGE", "J"), ("MEMX", "U"), ("PEARL", "H"), ("AMEX", "A"),
-            ("CHX", "M"), ("LTSE", "L"), ("PSX", "X"), ("ISE", "I"), ("EDGEA", "K"),
-        ].iter().enumerate().map(|(i, (exch, letter))| SmartComponent {
-            bit_number: i as i32,
-            exchange: exch.to_string(),
-            exchange_letter: letter.to_string(),
-        }).collect();
-        shared.reference.set_smart_components(smart_components);
+        // Smart components are not logon data: the exchange map of each BBO
+        // exchange comes with market data (ibx#441).
 
         // News providers: the API source list of the logon (ibx#460).
         let sources = if self.deny_news {
