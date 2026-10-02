@@ -846,10 +846,6 @@ pub struct ClientCore {
     /// from the market data maps, so both can run on one contract (ibx#455).
     pub tbt_reqs: Mutex<HashMap<i64, (InstrumentId, i64, TbtType)>>,
 
-    // Historical data keepUpToDate: req_ids that have completed initial batch.
-    // Subsequent bars for these req_ids dispatch as historical_data_update.
-    pub hist_initial_complete: Mutex<HashSet<ReqId>>,
-
     // News subscription state
     pub news_providers: Mutex<String>,
     pub news_instruments: Mutex<HashSet<InstrumentId>>,
@@ -1075,7 +1071,6 @@ impl ClientCore {
             tick_req_params_sent: Mutex::new(HashSet::new()),
             farm_auto_reqs: Mutex::new(HashSet::new()),
             tbt_reqs: Mutex::new(HashMap::new()),
-            hist_initial_complete: Mutex::new(HashSet::new()),
             news_providers: Mutex::new("BRFG*BRFUPDN".into()),
             news_instruments: Mutex::new(HashSet::new()),
             contract_cache: Mutex::new(HashMap::new()),
@@ -1119,7 +1114,6 @@ impl ClientCore {
         self.tick_req_params_sent.lock().unwrap().clear();
         self.farm_auto_reqs.lock().unwrap().clear();
         self.tbt_reqs.lock().unwrap().clear();
-        self.hist_initial_complete.lock().unwrap().clear();
         *self.news_providers.lock().unwrap() = "BRFG*BRFUPDN".into();
         self.news_instruments.lock().unwrap().clear();
         self.contract_cache.lock().unwrap().clear();
@@ -3426,36 +3420,43 @@ impl ClientCore {
         }
     }
 
-    /// The reference's local refusal of a reqHistoricalData (ibx#430):
-    /// (code, text) to report as an error, 321 or 10314, with no end.
+    /// The reference's local refusal of a reqHistoricalData (ibx#430,
+    /// ibx#429): (code, text) to report as an error, 321 or 10314, with no
+    /// end. Every legal bar size streams with keepUpToDate.
     pub fn historical_refusal(
         end_date_time: &str,
         duration: &str,
         bar_size: &str,
         what_to_show: &str,
         format_date: i32,
+        keep_up_to_date: bool,
+        sec_type: &str,
     ) -> Option<(i32, String)> {
         crate::control::historical::check_bar_request(
-            end_date_time, duration, bar_size, what_to_show, Some(format_date),
+            end_date_time, duration, bar_size, what_to_show, Some(format_date), keep_up_to_date, sec_type,
         ).err()
     }
 
-    /// keepUpToDate bar sizes ibx streams (ibx#232). The reference checks
-    /// are in [`Self::historical_refusal`]; a size it refuses is left to it.
-    pub fn validate_historical_args(
-        bar_size: &str,
-        _what_to_show: &str,
-        keep_up_to_date: bool,
-    ) -> Result<(), String> {
-        let Ok(bs) = crate::control::historical::BarSize::from_api_str(bar_size) else { return Ok(()) };
-        if keep_up_to_date && !bs.supports_keep_up_to_date() {
-            return Err(format!(
-                "bar_size '{}' is not supported with keep_up_to_date=true: \
-                 supported sizes are 1 secs, 5 secs, 5 mins, 1 hour, 1 day",
-                bar_size,
-            ));
-        }
-        Ok(())
+    /// The reference's local answers to a reqHistoricalTicks before its
+    /// query (ibx#432): the warnings (2174, 10299) and the refusal (10314,
+    /// 321), in the order the client gets them. True when the request
+    /// goes on.
+    pub fn historical_ticks_checks(
+        start: &str, end: &str, number_of_ticks: i32, what_to_show: &str, ignore_size: bool,
+        sec_type: &str, exchange: &str,
+    ) -> (Vec<(i32, String)>, bool) {
+        let (mut out, checked) = crate::control::historical::check_ticks_request(
+            start, end, number_of_ticks, what_to_show, ignore_size, sec_type, exchange,
+            &crate::gateway::machine_time_zone(), crate::control::historical::now_secs(),
+        );
+        let ok = match checked {
+            Ok(_) => true,
+            Err(e) => {
+                out.push(e);
+                false
+            }
+        };
+        (out, ok)
     }
 
     /// Reject orders whose contract is not a common stock.

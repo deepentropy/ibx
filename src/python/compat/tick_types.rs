@@ -93,6 +93,85 @@ impl TickAttribBidAsk {
     }
 }
 
+/// ibapi-compatible HistoricalTick (a midpoint) for historicalTicks
+/// (ibx#432): time in Unix seconds.
+#[pyclass(from_py_object)]
+#[derive(Clone, Default)]
+pub struct HistoricalTick {
+    #[pyo3(get, set)]
+    pub time: i64,
+    #[pyo3(get, set)]
+    pub price: f64,
+    #[pyo3(get, set)]
+    pub size: f64,
+}
+
+#[pymethods]
+impl HistoricalTick {
+    #[new]
+    #[pyo3(signature = (time=0, price=0.0, size=0.0))]
+    fn new(time: i64, price: f64, size: f64) -> Self {
+        Self { time, price, size }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("HistoricalTick(time={}, price={}, size={})", self.time, self.price, self.size)
+    }
+}
+
+/// ibapi-compatible HistoricalTickLast for historicalTicksLast (ibx#432).
+#[pyclass]
+pub struct HistoricalTickLast {
+    #[pyo3(get, set)]
+    pub time: i64,
+    #[pyo3(get, set)]
+    pub tick_attrib_last: Py<TickAttribLast>,
+    #[pyo3(get, set)]
+    pub price: f64,
+    #[pyo3(get, set)]
+    pub size: f64,
+    #[pyo3(get, set)]
+    pub exchange: String,
+    #[pyo3(get, set)]
+    pub special_conditions: String,
+}
+
+#[pymethods]
+impl HistoricalTickLast {
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let a = self.tick_attrib_last.borrow(py);
+        format!("HistoricalTickLast(time={}, pastLimit={}, unreported={}, price={}, size={}, exchange={}, specialConditions={:?})",
+            self.time, a.past_limit, a.unreported, self.price, self.size, self.exchange, self.special_conditions)
+    }
+}
+
+/// ibapi-compatible HistoricalTickBidAsk for historicalTicksBidAsk
+/// (ibx#432).
+#[pyclass]
+pub struct HistoricalTickBidAsk {
+    #[pyo3(get, set)]
+    pub time: i64,
+    #[pyo3(get, set)]
+    pub tick_attrib_bid_ask: Py<TickAttribBidAsk>,
+    #[pyo3(get, set)]
+    pub price_bid: f64,
+    #[pyo3(get, set)]
+    pub price_ask: f64,
+    #[pyo3(get, set)]
+    pub size_bid: f64,
+    #[pyo3(get, set)]
+    pub size_ask: f64,
+}
+
+#[pymethods]
+impl HistoricalTickBidAsk {
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let a = self.tick_attrib_bid_ask.borrow(py);
+        format!("HistoricalTickBidAsk(time={}, bidPastLow={}, askPastHigh={}, priceBid={}, priceAsk={}, sizeBid={}, sizeAsk={})",
+            self.time, a.bid_past_low, a.ask_past_high, self.price_bid, self.price_ask, self.size_bid, self.size_ask)
+    }
+}
+
 /// Module-level TickTypeEnum class for accessing tick type constants.
 #[pyclass]
 pub struct TickTypeEnum;
@@ -139,6 +218,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TickAttrib>()?;
     m.add_class::<TickAttribLast>()?;
     m.add_class::<TickAttribBidAsk>()?;
+    m.add_class::<HistoricalTick>()?;
+    m.add_class::<HistoricalTickLast>()?;
+    m.add_class::<HistoricalTickBidAsk>()?;
     Ok(())
 }
 

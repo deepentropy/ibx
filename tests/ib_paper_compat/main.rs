@@ -1348,7 +1348,7 @@ fn timeout_sweeps_phase_live() {
         sec_type: "STK".into(), exchange: "SMART".into(),
         req_id: 6003, con_id: 756733, symbol: "SPY".into(),
         end_date_time: String::new(), duration: "5 D".into(), bar_size: "1 day".into(),
-        what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, include_expired: false,
+        what_to_show: "TRADES".into(), use_rth: true, keep_up_to_date: false, include_expired: false, format_date: 1,
     }).expect("send historical failed");
     let deadline = Instant::now() + Duration::from_secs(45);
     let (mut bars, mut complete, mut hist_err) = (0usize, false, None::<String>);

@@ -1680,35 +1680,42 @@ pub struct TickNews {
     pub timestamp: u64,
 }
 
-/// A historical tick (midpoint).
-#[derive(Debug, Clone)]
+/// A historical tick (midpoint), as the official `HistoricalTick` (ibx#432):
+/// time in Unix seconds, and a size (0 for a midpoint).
+#[derive(Debug, Clone, PartialEq)]
 pub struct HistoricalTickMidpoint {
-    pub time: String,
+    pub time: i64,
     pub price: f64,
+    pub size: f64,
 }
 
-/// A historical tick (last trade).
-#[derive(Debug, Clone)]
+/// A historical tick (last trade), as the official `HistoricalTickLast`
+/// (ibx#432): time in Unix seconds, the past limit and unreported flags.
+#[derive(Debug, Clone, PartialEq)]
 pub struct HistoricalTickLast {
-    pub time: String,
+    pub time: i64,
+    pub tick_attrib_last: crate::api::types::TickAttribLast,
     pub price: f64,
-    pub size: i64,
+    pub size: f64,
     pub exchange: String,
     pub special_conditions: String,
 }
 
-/// A historical tick (bid/ask).
-#[derive(Debug, Clone)]
+/// A historical tick (bid/ask), as the official `HistoricalTickBidAsk`
+/// (ibx#432): time in Unix seconds, the bid past low and ask past high
+/// flags.
+#[derive(Debug, Clone, PartialEq)]
 pub struct HistoricalTickBidAsk {
-    pub time: String,
-    pub bid_price: f64,
-    pub ask_price: f64,
-    pub bid_size: i64,
-    pub ask_size: i64,
+    pub time: i64,
+    pub tick_attrib_bid_ask: crate::api::types::TickAttribBidAsk,
+    pub price_bid: f64,
+    pub price_ask: f64,
+    pub size_bid: f64,
+    pub size_ask: f64,
 }
 
 /// Historical tick data (one of three types based on whatToShow).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum HistoricalTickData {
     Midpoint(Vec<HistoricalTickMidpoint>),
     Last(Vec<HistoricalTickLast>),
@@ -1881,6 +1888,8 @@ pub enum ControlCommand {
         keep_up_to_date: bool,
         /// The contract includes expired contracts (ibx#427).
         include_expired: bool,
+        /// How bar times are written: 1, 2 or 3 (ibx#431).
+        format_date: i32,
     },
     /// Measure auth-connection round-trip time (ibx#158): sends a
     /// test request immediately; the sample lands in
@@ -1898,6 +1907,8 @@ pub enum ControlCommand {
         exchange: String,
         what_to_show: String,
         use_rth: bool,
+        /// How the time is written: 1, 2 or 3 (ibx#431).
+        format_date: i32,
     },
     /// Request contract details via auth connection.
     FetchContractDetails {
@@ -1984,15 +1995,20 @@ pub enum ControlCommand {
     FetchHistoricalTicks {
         req_id: ReqId,
         con_id: i64,
+        /// Symbol of the chart name of the query: the local symbol when
+        /// given, else the symbol (ibx#432).
+        symbol: String,
         /// Security type of the API contract (ibx#305). Empty is a stock.
         sec_type: String,
         /// Exchange of the API contract (ibx#305). Empty is `SMART`.
         exchange: String,
         start_date_time: String,
         end_date_time: String,
-        number_of_ticks: u32,
+        number_of_ticks: i32,
         what_to_show: String,
         use_rth: bool,
+        /// BID_ASK without sizes (ibx#432).
+        ignore_size: bool,
     },
     /// Subscribe to real-time 5-second bars via historical data connection.
     SubscribeRealTimeBar {

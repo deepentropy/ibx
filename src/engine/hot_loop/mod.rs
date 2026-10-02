@@ -421,6 +421,15 @@ impl HotLoop {
         true
     }
 
+    /// Symbol of the chart name of a historical query: the contract's
+    /// local symbol when known (`EUR.USD`), else the given one.
+    fn chart_symbol(&self, con_id: i64, symbol: &str) -> String {
+        match self.shared.reference.get_contract(con_id) {
+            Some(c) if !c.local_symbol.is_empty() => c.local_symbol,
+            _ => symbol.to_string(),
+        }
+    }
+
     /// Name of the primary historical farm.
     fn primary_hmds_name(&self) -> String {
         self.hmds_farm_name().to_string()
@@ -1119,23 +1128,15 @@ impl HotLoop {
                     // back through `resolved_requests` with its conId.
                     self.ccp.start_contract_resolve(req_id, lookup, *request, &mut self.ccp_conn, &mut self.hb);
                 }
-                ControlCommand::FetchHistorical { req_id, con_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired } => {
-                    // keepUpToDate sends via CCP but bars/end arrive on HMDS — both
-                    // paths require an authed HMDS socket to deliver a completion.
-                    if keep_up_to_date {
-                        if self.hmds_conn.is_none() {
-                            self.emit_hmds_unavailable(req_id, true);
-                        } else if self.hmds.send_historical_request_via_ccp(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, &symbol, &mut self.ccp_conn, &mut self.hb, &self.ccp.ccp_sign_key, &self.ccp.ccp_sign_iv, &self.shared, include_expired) {
-                            self.hmds.keep_up_to_date_reqs.insert(req_id);
-                        }
-                        continue;
-                    }
+                ControlCommand::FetchHistorical { req_id, con_id, symbol, sec_type, exchange, end_date_time, duration, bar_size, what_to_show, use_rth, keep_up_to_date, include_expired, format_date } => {
                     // A SMART route needs the contract's aggregate group
-                    // (#445): the request waits for the definition.
+                    // (#445): the request waits for the definition. A
+                    // keepUpToDate request goes the same way, to the farm of
+                    // its route, as the reference (ibx#429).
                     let again = ControlCommand::FetchHistorical {
                         req_id, con_id, symbol: symbol.clone(), sec_type: sec_type.clone(), exchange: exchange.clone(),
                         end_date_time: end_date_time.clone(), duration: duration.clone(), bar_size: bar_size.clone(),
-                        what_to_show: what_to_show.clone(), use_rth, keep_up_to_date, include_expired,
+                        what_to_show: what_to_show.clone(), use_rth, keep_up_to_date, include_expired, format_date,
                     };
                     if self.park_for_hmds_definition(con_id, &exchange, &sec_type, again) {
                         continue;
@@ -1150,8 +1151,10 @@ impl HotLoop {
                             data_type.name(), route_exchange, st)),
                         Some(PRIMARY_HMDS) if self.hmds_conn.is_none() => self.emit_hmds_unavailable(req_id, true),
                         Some(farm_id) => {
+                            let zone = self.shared.reference.time_zone_id(con_id);
+                            let chart_symbol = self.chart_symbol(con_id, &symbol);
                             if let Some(sink) = farm_sink!(self, farm_id) {
-                                self.hmds.send_historical_request_ex(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, false, &symbol, sink, &mut self.hb, &self.shared, include_expired);
+                                self.hmds.send_historical_request_ex(req_id, con_id, &sec_type, &exchange, &end_date_time, &duration, &bar_size, &what_to_show, use_rth, keep_up_to_date, &chart_symbol, sink, &mut self.hb, &self.shared, include_expired, format_date, zone, farm_id);
                             }
                             if farm_id != PRIMARY_HMDS {
                                 let sent: Vec<String> = self.hmds.pending_historical.iter()
@@ -1164,18 +1167,18 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::CancelHistorical { req_id } => {
-                    for query_id in self.hmds.take_historical_cancels(req_id) {
-                        let farm_id = self.hmds.query_farms.remove(&query_id).unwrap_or(PRIMARY_HMDS);
+                    // 162 or 366 to the client, then the cancels (ibx#431, ibx#429).
+                    for (farm_id, xml) in self.hmds.cancel_bar_request(req_id, &self.shared) {
                         if let Some(sink) = farm_sink!(self, farm_id) {
-                            self.hmds.send_historical_cancel(&query_id, sink, &mut self.hb);
+                            hmds::HmdsState::send_cancel_xml(&xml, sink, &mut self.hb);
                         }
                     }
                 }
-                ControlCommand::FetchHeadTimestamp { req_id, con_id, sec_type, exchange, what_to_show, use_rth } => {
+                ControlCommand::FetchHeadTimestamp { req_id, con_id, sec_type, exchange, what_to_show, use_rth, format_date } => {
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_head_timestamp_request(req_id, con_id, &sec_type, &exchange, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb, &self.shared);
+                        self.hmds.send_head_timestamp_request(req_id, con_id, &sec_type, &exchange, &what_to_show, use_rth, format_date, &mut self.hmds_conn, &mut self.hb, &self.shared);
                     }
                 }
                 ControlCommand::FetchContractDetails { req_id, con_id, symbol, sec_type, exchange, currency, filters } => {
@@ -1271,11 +1274,34 @@ impl HotLoop {
                         self.hmds.pending_histogram.remove(pos);
                     }
                 }
-                ControlCommand::FetchHistoricalTicks { req_id, con_id, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth } => {
-                    if self.hmds_conn.is_none() {
-                        self.emit_hmds_unavailable(req_id, false);
-                    } else {
-                        self.hmds.send_historical_ticks_request(req_id, con_id, &sec_type, &exchange, &start_date_time, &end_date_time, number_of_ticks, &what_to_show, use_rth, &mut self.hmds_conn, &mut self.hb);
+                ControlCommand::FetchHistoricalTicks { req_id, con_id, symbol, sec_type, exchange, start_date_time, end_date_time, number_of_ticks, what_to_show, use_rth, ignore_size } => {
+                    // To the farm of the route, as bars (ibx#432).
+                    let again = ControlCommand::FetchHistoricalTicks {
+                        req_id, con_id, symbol: symbol.clone(), sec_type: sec_type.clone(), exchange: exchange.clone(),
+                        start_date_time: start_date_time.clone(), end_date_time: end_date_time.clone(), number_of_ticks,
+                        what_to_show: what_to_show.clone(), use_rth, ignore_size,
+                    };
+                    if self.park_for_hmds_definition(con_id, &exchange, &sec_type, again) {
+                        continue;
+                    }
+                    let st = if sec_type.is_empty() { "STK" } else { sec_type.as_str() };
+                    let route_exchange = farm::routing_exchange(&exchange, st).to_string();
+                    let agg_group = self.agg_group_for(con_id, &route_exchange);
+                    let data_type = crate::engine::routing::DataType::DayChart;
+                    match self.hmds_target(&route_exchange, agg_group, st, data_type) {
+                        None => self.shared.reference.push_historical_error(req_id, 10187, format!(
+                            "Failed to request historical ticks:No data of type {} is available for the exchange '{}' and the security type '{}'",
+                            data_type.name(), route_exchange, st)),
+                        Some(PRIMARY_HMDS) if self.hmds_conn.is_none() => self.emit_hmds_unavailable(req_id, false),
+                        Some(farm_id) => {
+                            let zone = self.shared.reference.time_zone_id(con_id);
+                            let chart_symbol = self.chart_symbol(con_id, &symbol);
+                            if let Some(sink) = farm_sink!(self, farm_id) {
+                                self.hmds.send_historical_ticks_request(req_id, con_id, &chart_symbol, &sec_type, &exchange,
+                                    &start_date_time, &end_date_time, number_of_ticks, &what_to_show, use_rth, ignore_size,
+                                    zone.as_deref(), farm_id, sink, &mut self.hb, &self.shared);
+                            }
+                        }
                     }
                 }
                 ControlCommand::SubscribeRealTimeBar { req_id, con_id, symbol, sec_type, exchange, what_to_show, use_rth } => {
@@ -1286,7 +1312,7 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::CancelRealTimeBar { req_id } => {
-                    if let Some(pos) = self.hmds.rtbar_subs.iter().position(|s| !s.keep_up_to_date && s.req_id == req_id) {
+                    if let Some(pos) = self.hmds.rtbar_subs.iter().position(|s| s.req_id == req_id) {
                         let sub = self.hmds.rtbar_subs.remove(pos);
                         let cancel_id = sub.ticker_id.map(|t| t.to_string()).unwrap_or(sub.query_id);
                         self.hmds.send_historical_cancel(&cancel_id, &mut self.hmds_conn, &mut self.hb);
@@ -2321,6 +2347,7 @@ pub(crate) fn push_hmds_error(shared: &SharedState, req_id: ReqId, message: Stri
                 timezone: String::new(),
                 is_complete: true,
                 bars: Vec::new(),
+                ..Default::default()
             },
         );
     }
@@ -2712,7 +2739,7 @@ mod tests {
         engine.running = true;
         let request = ControlCommand::FetchHeadTimestamp {
             req_id: 3, con_id: 0, sec_type: "STK".into(), exchange: "SMART".into(),
-            what_to_show: "TRADES".into(), use_rth: true,
+            what_to_show: "TRADES".into(), use_rth: true, format_date: 1,
         };
         tx.send(ControlCommand::ResolveContract {
             req_id: 3,
@@ -4519,7 +4546,7 @@ mod bars_routing_tests {
         ControlCommand::FetchHistorical {
             req_id, con_id, symbol: "X".into(), sec_type: sec_type.into(), exchange: exchange.into(),
             end_date_time: String::new(), duration: "1 D".into(), bar_size: bar_size.into(),
-            what_to_show: "MIDPOINT".into(), use_rth: true, keep_up_to_date: false, include_expired: false,
+            what_to_show: "MIDPOINT".into(), use_rth: true, keep_up_to_date: false, include_expired: false, format_date: 1,
         }
     }
 

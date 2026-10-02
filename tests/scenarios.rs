@@ -559,6 +559,7 @@ fn historical_data_multi_bar_complete() {
             HistoricalBar { time: "20260102".into(), open: 103.0, high: 108.0, low: 102.0, close: 107.0, volume: 1200, wap: 105.0, count: 60 },
         ],
         is_complete: false,
+        ..Default::default()
     });
 
     let mut w = RecordingWrapper::default();
@@ -573,6 +574,7 @@ fn historical_data_multi_bar_complete() {
             HistoricalBar { time: "20260103".into(), open: 107.0, high: 110.0, low: 106.0, close: 109.0, volume: 800, wap: 108.0, count: 40 },
         ],
         is_complete: true,
+        ..Default::default()
     });
 
     w.events.clear();
@@ -622,6 +624,7 @@ fn historical_head_timestamp_then_bars() {
             HistoricalBar { time: "20050101".into(), open: 50.0, high: 55.0, low: 49.0, close: 53.0, volume: 5000, wap: 52.0, count: 100 },
         ],
         is_complete: true,
+        ..Default::default()
     });
     w.events.clear();
     client.process_msgs(&mut w);
@@ -913,6 +916,7 @@ fn mixed_all_data_types_single_process() {
             low: 99.0, close: 103.0, volume: 1000, wap: 102.0, count: 50,
         }],
         is_complete: true,
+        ..Default::default()
     });
 
     // News

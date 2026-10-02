@@ -362,14 +362,30 @@ impl EClient {
                     close: bar.close,
                     volume: bar.volume,
                     wap: bar.wap,
-                    bar_count: bar.count as i32,
+                    bar_count: bar.count,
                     timezone: response.timezone.clone(),
                 };
                 wrapper.historical_data(req_id, &bd);
             }
             if response.is_complete {
-                wrapper.historical_data_end(req_id, "", "");
+                wrapper.historical_data_end(req_id, &response.start, &response.end);
             }
+        }
+
+        // keepUpToDate: the whole current bar each time (ibx#429).
+        for (req_id, bar) in self.shared.reference.drain_historical_updates() {
+            let bd = BarData {
+                date: bar.time,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                volume: bar.volume,
+                wap: bar.wap,
+                bar_count: bar.count,
+                timezone: String::new(),
+            };
+            wrapper.historical_data_update(req_id, &bd);
         }
 
         // Head timestamps → head_timestamp

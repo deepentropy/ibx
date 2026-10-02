@@ -1,6 +1,5 @@
 //! Reference data: contract details, historical data, scanners, news, fundamentals.
 
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::types::*;
@@ -32,12 +31,11 @@ impl EClient {
         let _ = chart_options;
         // A request the reference refuses locally gets its error (321 or
         // 10314) and no query (ibx#430).
-        if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration_str, bar_size_setting, what_to_show, format_date) {
+        if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration_str, bar_size_setting,
+            what_to_show, format_date, keep_up_to_date, &contract.sec_type) {
             self.shared_state()?.reference.push_historical_error(req_id, code, text);
             return Ok(());
         }
-        ClientCore::validate_historical_args(bar_size_setting, what_to_show, keep_up_to_date)
-            .map_err(|e| PyRuntimeError::new_err(e))?;
         if what_to_show.eq_ignore_ascii_case("SCHEDULE") {
             send_cmd(py, &tx, ClientCore::resolve_first(req_id, &contract.to_api(), ControlCommand::FetchHistoricalSchedule {
                 req_id,
@@ -62,6 +60,7 @@ impl EClient {
                 use_rth: use_rth != 0,
                 keep_up_to_date,
                 include_expired: contract.include_expired,
+                format_date,
             }))?;
         }
         Ok(())
@@ -97,8 +96,8 @@ impl EClient {
             exchange: contract.exchange.clone(),
             what_to_show: what_to_show.to_string(),
             use_rth: use_rth != 0,
+            format_date,
         }))?;
-        let _ = format_date;
         Ok(())
     }
 
@@ -372,17 +371,30 @@ impl EClient {
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_historical_ticks", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
-        let _ = (ignore_size, misc_options);
+        let _ = misc_options;
+        // The reference's warnings and local refusals first (ibx#432).
+        let (answers, go_on) = ClientCore::historical_ticks_checks(start_date_time, end_date_time, number_of_ticks,
+            what_to_show, ignore_size, &contract.sec_type, &contract.exchange);
+        let shared = self.shared_state()?;
+        for (code, text) in answers {
+            shared.reference.push_historical_error(req_id, code, text);
+        }
+        if !go_on {
+            return Ok(());
+        }
+        let symbol = if contract.local_symbol.is_empty() { &contract.symbol } else { &contract.local_symbol };
         send_cmd(py, &tx, ClientCore::resolve_first(req_id, &contract.to_api(), ControlCommand::FetchHistoricalTicks {
             req_id,
             con_id: contract.con_id,
+            symbol: symbol.clone(),
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),
             start_date_time: start_date_time.to_string(),
             end_date_time: end_date_time.to_string(),
-            number_of_ticks: number_of_ticks as u32,
+            number_of_ticks,
             what_to_show: what_to_show.to_string(),
             use_rth: use_rth != 0,
+            ignore_size,
         }))?;
         Ok(())
     }

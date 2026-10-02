@@ -14,7 +14,7 @@ use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use std::collections::HashMap;
-use crate::control::historical::{HistoricalResponse, HeadTimestampResponse};
+use crate::control::historical::{HistoricalBar, HistoricalResponse, HeadTimestampResponse};
 use crate::control::contracts::{ContractDefinition, SymbolMatch};
 use crate::control::scanner::ScannerResult;
 use crate::control::news::NewsHeadline;
@@ -628,6 +628,9 @@ pub enum ExchangeMapState {
 /// Historical data, contract definitions, scanners, news archives, market rules, contract cache.
 pub struct ReferenceState {
     historical_data: Mutex<Vec<(ReqId, HistoricalResponse)>>,
+    /// Bars of keepUpToDate requests, the whole current bar each time
+    /// (ibx#429), for historicalDataUpdate.
+    historical_updates: Mutex<Vec<(ReqId, HistoricalBar)>>,
     head_timestamps: Mutex<Vec<(ReqId, HeadTimestampResponse)>>,
     contract_details: Mutex<Vec<(ReqId, ContractDefinition)>>,
     contract_details_end: Mutex<Vec<ReqId>>,
@@ -699,6 +702,7 @@ impl ReferenceState {
     fn new() -> Self {
         Self {
             historical_data: Mutex::new(Vec::with_capacity(16)),
+            historical_updates: Mutex::new(Vec::with_capacity(16)),
             head_timestamps: Mutex::new(Vec::with_capacity(8)),
             contract_details: Mutex::new(Vec::with_capacity(16)),
             contract_details_end: Mutex::new(Vec::with_capacity(8)),
@@ -742,6 +746,10 @@ impl ReferenceState {
 
     pub fn drain_historical_data(&self) -> Vec<(ReqId, HistoricalResponse)> {
         self.historical_data.lock().unwrap().drain(..).collect()
+    }
+
+    pub fn drain_historical_updates(&self) -> Vec<(ReqId, HistoricalBar)> {
+        self.historical_updates.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_head_timestamps(&self) -> Vec<(ReqId, HeadTimestampResponse)> {
@@ -844,6 +852,16 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn push_historical_data(&self, req_id: ReqId, response: HistoricalResponse) {
         self.historical_data.lock().unwrap().push((req_id, response));
+    }
+
+    #[doc(hidden)] pub fn push_historical_update(&self, req_id: ReqId, bar: HistoricalBar) {
+        self.historical_updates.lock().unwrap().push((req_id, bar));
+    }
+
+    /// Drop the updates of a request not delivered yet: none goes out
+    /// after its cancel (ibx#429).
+    #[doc(hidden)] pub fn purge_historical_updates(&self, req_id: ReqId) {
+        self.historical_updates.lock().unwrap().retain(|(r, _)| *r != req_id);
     }
 
     #[doc(hidden)] pub fn push_head_timestamp(&self, req_id: ReqId, response: HeadTimestampResponse) {

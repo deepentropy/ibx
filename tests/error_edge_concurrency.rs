@@ -329,6 +329,7 @@ fn empty_historical_data_response() {
         query_id: String::new(), timezone: String::new(),
         bars: vec![], // empty
         is_complete: true,
+        ..Default::default()
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);

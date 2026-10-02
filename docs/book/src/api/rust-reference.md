@@ -1169,7 +1169,7 @@ pub fn cancel_histogram_data(&self, req_id: i64) -> Result<(), String>
 Request historical tick data.
 
 ```rust
-pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date_time: &str, end_date_time: &str, number_of_ticks: i32, what_to_show: &str, use_rth: bool, ) -> Result<(), String>
+pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date_time: &str, end_date_time: &str, number_of_ticks: i32, what_to_show: &str, use_rth: bool, ignore_size: bool, _misc_options: &[TagValue], ) -> Result<(), String>
 ```
 
 | Parameter | Type | Description |
