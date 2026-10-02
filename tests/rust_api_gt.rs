@@ -1713,3 +1713,109 @@ fn api_stream_order_live() {
         }
     }
 }
+
+// ── Historical ticks, keepUpToDate and date strings (ibx#432, ibx#429, ibx#431), focused ──
+
+#[derive(Default)]
+struct HistWrapper {
+    events: Vec<String>,
+}
+
+impl Wrapper for HistWrapper {
+    fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) {
+        self.events.push(format!("error {req_id} {code} {}", text.lines().next().unwrap_or("")));
+    }
+    fn historical_ticks(&mut self, req_id: i64, ticks: &ibx::types::HistoricalTickData, done: bool) {
+        if let ibx::types::HistoricalTickData::Midpoint(t) = ticks {
+            self.events.push(format!("mid {req_id} {} {:?} {done}", t.len(), t.first().map(|x| (x.time, x.price, x.size))));
+        }
+    }
+    fn historical_ticks_last(&mut self, req_id: i64, ticks: &ibx::types::HistoricalTickData, done: bool) {
+        if let ibx::types::HistoricalTickData::Last(t) = ticks {
+            self.events.push(format!("last {req_id} {} {:?} {done}", t.len(),
+                t.first().map(|x| (x.time, x.tick_attrib_last.unreported, x.price, x.size, x.exchange.clone()))));
+        }
+    }
+    fn historical_ticks_bid_ask(&mut self, req_id: i64, ticks: &ibx::types::HistoricalTickData, done: bool) {
+        if let ibx::types::HistoricalTickData::BidAsk(t) = ticks {
+            self.events.push(format!("bidask {req_id} {} {:?} {done}", t.len(), t.first().map(|x| (x.time, x.price_bid, x.size_bid))));
+        }
+    }
+    fn historical_data(&mut self, req_id: i64, bar: &BarData) {
+        self.events.push(format!("bar {req_id} {}", bar.date));
+    }
+    fn historical_data_end(&mut self, req_id: i64, start: &str, end: &str) {
+        self.events.push(format!("end {req_id} {start} | {end}"));
+    }
+    fn historical_data_update(&mut self, req_id: i64, bar: &BarData) {
+        self.events.push(format!("update {req_id} {} {} {} {}", bar.date, bar.close, bar.volume, bar.bar_count));
+    }
+    fn head_timestamp(&mut self, req_id: i64, head_timestamp: &str) {
+        self.events.push(format!("head {req_id} {head_timestamp}"));
+    }
+}
+
+/// Historical ticks (TRADES, BID_ASK, EUR.USD TRADES, 0 ticks), a
+/// keepUpToDate 1 min request for 20 s then its cancel, formatDate 2 bars,
+/// head timestamp formatDate 2 and the cancel of an unknown request, as
+/// captured from the reference on 02/10/2026.
+/// Run with: cargo test --test rust_api_gt api_historical_b1_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_historical_b1_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = HistWrapper::default();
+    let run = |client: &EClient, w: &mut HistWrapper, secs: u64| {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(secs) {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    run(&client, &mut w, 3);
+    w.events.clear();
+    let t15 = "20261001 15:00:00 US/Eastern";
+    let eurusd = Contract { con_id: 12087792, symbol: "EUR".into(), sec_type: "CASH".into(),
+        exchange: "IDEALPRO".into(), currency: "USD".into(), ..Default::default() };
+    client.req_historical_ticks(9510, &aapl(), t15, "", 100, "TRADES", true, false, &[]).unwrap();
+    client.req_historical_ticks(9512, &aapl(), t15, "", 100, "BID_ASK", true, false, &[]).unwrap();
+    client.req_historical_ticks(9519, &aapl(), t15, "", 0, "TRADES", true, false, &[]).unwrap();
+    client.req_historical_ticks(9522, &eurusd, t15, "", 10, "TRADES", true, false, &[]).unwrap();
+    run(&client, &mut w, 15);
+    client.req_historical_data(9531, &aapl(), "", "3600 S", "1 min", "TRADES", false, 1, true).unwrap();
+    client.req_historical_data(9541, &aapl(), "", "1 D", "1 hour", "TRADES", true, 2, false).unwrap();
+    client.req_head_time_stamp(9545, &aapl(), "TRADES", true, 2).unwrap();
+    run(&client, &mut w, 20);
+    client.cancel_historical_data(9531).unwrap();
+    client.cancel_historical_data(99).unwrap();
+    run(&client, &mut w, 3);
+    let after_cancel = w.events.len();
+    run(&client, &mut w, 10);
+    client.disconnect();
+    for e in &w.events {
+        println!("  {e}");
+    }
+    let has = |p: &str| w.events.iter().any(|e| e.starts_with(p));
+    assert!(has("last 9510 ") && w.events.iter().any(|e| e.starts_with("last 9510 ") && e.ends_with(" true")), "trade ticks with the end");
+    assert!(has("bidask 9512 "), "bid/ask ticks");
+    assert!(has("error 9519 321 Error validating request.-'bP' : cause - Number of ticks must be > 0"));
+    assert!(has("mid 9522 "), "EUR.USD trades come as midpoints");
+    assert!(w.events.iter().any(|e| e.starts_with("end 9531 ") && e.ends_with(" US/Eastern")), "end strings");
+    let updates = w.events.iter().filter(|e| e.starts_with("update 9531 ")).count();
+    assert!(updates >= 2, "one update per 5 s: {updates}");
+    assert!(w.events.iter().filter(|e| e.starts_with("update 9531 ")).all(|e| e.contains(" US/Eastern ")));
+    assert!(has("error 9531 162 Historical Market Data Service error message:API historical data query cancelled: 9531"));
+    assert!(!w.events[after_cancel..].iter().any(|e| e.starts_with("update 9531 ")), "no update after the cancel");
+    assert!(w.events.iter().filter(|e| e.starts_with("bar 9541 ")).all(|e| e[9..].chars().all(|c| c.is_ascii_digit())), "formatDate 2");
+    assert!(has("head 9545 345479400"), "head timestamp in seconds");
+    assert!(has("error 99 366 No historical data query found for ticker id:99"));
+}
