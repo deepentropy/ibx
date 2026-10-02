@@ -2118,3 +2118,105 @@ fn api_logon_values_live() {
         "Error validating request.-'bM' : cause - Historical data request for 200 year(s) rejected. Max API Backfill Years=199".to_string())]);
     assert!(cbs.iter().any(|c| matches!(c, Cb::HistoricalData { req_id: 121, .. })), "bars through the historical farm");
 }
+
+// ── Depth books (ibx#451), focused ──
+
+/// (req, position, operation, side, price, size, market maker, SmartDepth, level two)
+type DepthRow = (i64, i32, i32, i32, f64, f64, String, bool, bool);
+
+#[derive(Default)]
+struct DepthWrapper {
+    rows: Vec<DepthRow>,
+    errors: Vec<(i64, i64, String)>,
+}
+
+impl Wrapper for DepthWrapper {
+    fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) { self.errors.push((req_id, code, text.to_string())); }
+    fn update_mkt_depth(&mut self, req_id: i64, position: i32, operation: i32, side: i32, price: f64, size: f64) {
+        self.rows.push((req_id, position, operation, side, price, size, String::new(), false, false));
+    }
+    fn update_mkt_depth_l2(&mut self, req_id: i64, position: i32, mm: &str, operation: i32, side: i32, price: f64, size: f64, smart: bool) {
+        self.rows.push((req_id, position, operation, side, price, size, mm.to_string(), smart, true));
+    }
+}
+
+/// AAPL on IEX alone (5 rows) and AAPL SmartDepth (20 rows) for 60 s, as
+/// the reference gives them on paper: IEX as updateMktDepth, its whole
+/// book first (bids then asks, inserts), then only rows inside the 5;
+/// SmartDepth as updateMktDepthL2 with isSmartDepth and a venue name,
+/// inserts and deletes only at the tail of a side, so its book rebuilds
+/// from the callbacks; no book is reset.
+/// Run with: cargo test --test rust_api_gt api_depth_books_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_depth_books_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = DepthWrapper::default();
+    let settle = Instant::now();
+    while settle.elapsed() < Duration::from_secs(3) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    w.errors.clear();
+    let iex = Contract { exchange: "IEX".into(), ..aapl() };
+    client.req_mkt_depth(821, &iex, 5, false).unwrap();
+    client.req_mkt_depth(822, &aapl(), 20, true).unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(60) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    client.cancel_mkt_depth(821).unwrap();
+    client.cancel_mkt_depth(822).unwrap();
+    client.disconnect();
+    for e in &w.errors {
+        println!("  error {e:?}");
+    }
+    for (req, rows, smart) in [(821i64, 5i32, false), (822, 20, true)] {
+        let mine: Vec<_> = w.rows.iter().filter(|r| r.0 == req).collect();
+        let ops = |op: i32| mine.iter().filter(|r| r.2 == op).count();
+        println!("req {req}: {} callbacks, {} inserts, {} updates, {} deletes", mine.len(), ops(0), ops(1), ops(2));
+        assert!(!mine.is_empty(), "req {req}: no depth callback");
+        assert!(mine.iter().all(|r| r.7 == smart && r.8 == smart), "req {req}: callback kind");
+        assert!(mine.iter().all(|r| r.1 >= 0 && r.1 < rows), "req {req}: a position outside the rows");
+        // SmartDepth changes only the tail and rows in place, so its book
+        // rebuilds exactly.
+        let mut book: [Vec<(f64, f64)>; 2] = [Vec::new(), Vec::new()];
+        for r in mine.iter().filter(|_| smart) {
+            let side = &mut book[r.3 as usize];
+            let pos = r.1 as usize;
+            match r.2 {
+                0 => {
+                    assert_eq!(pos, side.len(), "req {req}: insert not at the tail: {r:?}");
+                    side.push((r.4, r.5));
+                }
+                1 => {
+                    assert!(pos < side.len(), "req {req}: update of a missing row: {r:?}");
+                    side[pos] = (r.4, r.5);
+                }
+                _ => {
+                    assert_eq!(pos + 1, side.len(), "req {req}: delete not at the tail: {r:?}");
+                    side.pop();
+                }
+            }
+        }
+        if !smart {
+            // The whole book first: bid inserts, then ask inserts, from 0.
+            let first: Vec<_> = mine.iter().take_while(|r| r.2 == 0).collect();
+            let bids = first.iter().take_while(|r| r.3 == 1).count();
+            assert!(first[..bids].iter().enumerate().all(|(k, r)| r.1 == k as i32), "req {req}: bid snapshot");
+            assert!(first[bids..].iter().enumerate().all(|(k, r)| r.3 == 0 && r.1 == k as i32), "req {req}: ask snapshot");
+        }
+        assert!(book.iter().all(|s| s.len() <= rows as usize), "req {req}: more rows than asked");
+    }
+    assert!(w.errors.iter().all(|e| e.1 != 317), "a book was reset: {:?}", w.errors);
+}

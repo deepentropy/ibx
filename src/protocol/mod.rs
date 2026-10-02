@@ -1,4 +1,5 @@
 pub mod connection;
+pub mod depth_decoder;
 pub mod fix;
 pub mod fixcomp;
 pub mod ns;

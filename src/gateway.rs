@@ -595,6 +595,9 @@ pub struct Gateway {
     pub tick_by_tick_limit: usize,
     /// Most contracts with API depth at once, from the logon (#452).
     pub depth_limit: usize,
+    /// The logon's 6247 is `demo` (any case), as on paper: the reference
+    /// turns its user book on, and gives depth as an index diff (#451).
+    pub user_book: bool,
     /// The logon feature list turns tick-by-tick data off (ibx#455).
     pub tick_by_tick_off: bool,
     /// The logon feature list allows the price management flag (ibx#492).
@@ -1559,6 +1562,7 @@ impl Gateway {
         let mut super_user = false;
         let mut omnibus = false;
         let mut scale_us_lots = false;
+        let mut user_book = false;
         // Tick-by-tick limit fields, first value seen (ibx#455).
         let mut tbt_limit_fields: [Option<String>; 4] = Default::default();
         // Logon values of the depth limit (#452).
@@ -1715,6 +1719,7 @@ impl Gateway {
             }
             // Super user and omnibus, read the same way (ibx#417).
             super_user |= fields.get(&6130).is_some_and(|v| v == "1");
+            user_book |= fields.get(&6247).is_some_and(|v| v.eq_ignore_ascii_case("demo"));
             omnibus |= fields.get(&9826).is_some_and(|v| v == "1");
             if let Some(v) = fields.get(&6542) {
                 scale_us_lots |= features_scale_us_lots(v);
@@ -2100,6 +2105,7 @@ impl Gateway {
             scale_us_lots,
             tick_by_tick_limit: tick_by_tick_limit(&tbt_limit_fields),
             depth_limit: depth_limit(&depth_limit_fields),
+            user_book,
             tick_by_tick_off,
             price_mgmt,
             price_mgmt_exclusions,
@@ -2247,6 +2253,7 @@ impl Gateway {
         hot_loop.set_price_mgmt(self.price_mgmt, self.price_mgmt_exclusions.as_deref());
         hot_loop.set_max_real_time_requests(self.max_real_time_requests);
         hot_loop.set_depth_limit(self.depth_limit);
+        hot_loop.set_user_book(self.user_book);
         hot_loop.set_farm_name(self.farm_name.clone());
         hot_loop.ccp.data_permissions = self.logon.data_permissions.clone();
         hot_loop.set_reconnect_auth(reconnect_auth);
