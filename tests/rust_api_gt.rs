@@ -2051,7 +2051,7 @@ fn api_news_ticks_live() {
         println!("  {ms:>6} ms  {e}");
     }
     let has = |want: &str| w.events.iter().any(|(_, e)| e == want);
-    assert!(has("error 823 10094 API News error:Derivative contracts cannot be used to subscribe to news, please use         the underlying (Stocks, Cash, News Topics, and certain Indexes are supported)."));
+    assert!(has("error 823 10094 API News error:Derivative contracts cannot be used to subscribe to news, please use the underlying (Stocks, Cash, News Topics, and certain Indexes are supported)."));
     assert!(has("error 824 10094 API News error:Source code unchecked in API news Settings: XYZ"));
     let news: Vec<Vec<&str>> = w.events.iter().filter(|(_, e)| e.starts_with("news ")).map(|(_, e)| e.split(' ').collect()).collect();
     assert!(!news.is_empty(), "no tickNews in 20 s");
