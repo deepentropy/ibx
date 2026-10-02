@@ -5,7 +5,7 @@ use crate::api::types::{
     Order as ApiOrder, OrderState, TickAttribLast, TickAttribBidAsk, PRICE_SCALE_F, QTY_SCALE_F,
 };
 use crate::api::wrapper::Wrapper;
-use crate::client_core::order_status_str;
+use crate::client_core::{order_status_str, MdTick};
 use crate::types::*;
 
 use super::{Contract, EClient};
@@ -248,14 +248,17 @@ impl EClient {
             }
         }
 
-        // Request parameters, once per request (ibx#449).
-        for (req_id, min_tick, bbo_exchange, permissions) in self.core.take_tick_req_params(&self.shared) {
+        // Request parameters, once per request (ibx#449), after the market
+        // data type (ibx#446).
+        for (req_id, mdt, min_tick, bbo_exchange, permissions) in self.core.take_tick_req_params(&self.shared) {
+            if let Some(mdt) = mdt {
+                wrapper.market_data_type(req_id, mdt);
+            }
             wrapper.tick_req_params(req_id, min_tick, &bbo_exchange, permissions);
         }
 
-        // Quote polling → tick_price / tick_size (via ClientCore)
+        // Quote polling → tick callbacks in their order (via ClientCore)
         let instruments = self.core.snapshot_instruments();
-        let attrib = crate::api::types::TickAttrib::default();
         let mut snapshot_done: Vec<i64> = Vec::new();
         for (iid, req_id) in instruments {
             let (result, snapshot_end) = self.core.poll_market_ticks(&self.shared, iid, req_id);
@@ -264,18 +267,15 @@ impl EClient {
                 wrapper.market_data_type(req_id, mdt);
             }
             for tick in &result.ticks {
-                if tick.is_price {
-                    wrapper.tick_price(tick.req_id, tick.tick_type, tick.value, &attrib);
-                } else {
-                    wrapper.tick_size(tick.req_id, tick.tick_type, tick.value);
+                match tick {
+                    MdTick::Price { tick_type, value, can_auto_execute } => {
+                        let attrib = crate::api::types::TickAttrib { can_auto_execute: *can_auto_execute, ..Default::default() };
+                        wrapper.tick_price(req_id, *tick_type, *value, &attrib);
+                    }
+                    MdTick::Size { tick_type, value } => wrapper.tick_size(req_id, *tick_type, *value),
+                    MdTick::Text { tick_type, value } => wrapper.tick_string(req_id, *tick_type, value),
+                    MdTick::Generic { tick_type, value } => wrapper.tick_generic(req_id, *tick_type, *value),
                 }
-            }
-            for st in &result.string_ticks {
-                wrapper.tick_string(st.req_id, st.tick_type, &st.value);
-            }
-            if let Some(ts) = &result.timestamp {
-                let ts_secs = ts.timestamp_ns / 1_000_000_000;
-                wrapper.tick_string(ts.req_id, 45, &ts_secs.to_string());
             }
             if snapshot_end {
                 wrapper.tick_snapshot_end(req_id);

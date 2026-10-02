@@ -5210,6 +5210,174 @@ fn plain_snapshot_sends_each_tick_type_once_then_the_end() {
     assert_eq!(engine.join().unwrap(), vec!["subscribe:756733:true", "unsubscribe:5"]);
 }
 
+/// Records the market data callbacks with the price attribute and the
+/// generic ticks (ibx#446).
+#[derive(Default)]
+struct SeqRec { events: Vec<String> }
+impl Wrapper for SeqRec {
+    fn tick_price(&mut self, req_id: i64, tt: i32, p: f64, a: &crate::api::types::TickAttrib) {
+        self.events.push(format!("price:{req_id}:{tt}:{p}:{}", if a.can_auto_execute { "auto" } else { "-" }));
+    }
+    fn tick_size(&mut self, req_id: i64, tt: i32, s: f64) { self.events.push(format!("size:{req_id}:{tt}:{s}")); }
+    fn tick_string(&mut self, req_id: i64, tt: i32, v: &str) { self.events.push(format!("string:{req_id}:{tt}:{v}")); }
+    fn tick_generic(&mut self, req_id: i64, tt: i32, v: f64) { self.events.push(format!("generic:{req_id}:{tt}:{v}")); }
+    fn tick_snapshot_end(&mut self, req_id: i64) { self.events.push(format!("end:{req_id}")); }
+    fn tick_req_params(&mut self, req_id: i64, min_tick: f64, bbo: &str, perms: i64) {
+        self.events.push(format!("params:{req_id}:{min_tick}:{bbo}:{perms}"));
+    }
+    fn market_data_type(&mut self, req_id: i64, t: i32) { self.events.push(format!("mdt:{req_id}:{t}")); }
+}
+
+fn eur_usd() -> Contract {
+    Contract { con_id: 12087792, symbol: "EUR".into(), sec_type: "CASH".into(), exchange: "IDEALPRO".into(),
+        currency: "USD".into(), ..Default::default() }
+}
+
+/// The EUR.USD quote of the captured first message (02/10/2026 08:16
+/// Paris): bid/ask book, last trade with status 0, daily figures after
+/// the trade; the farm gave no auto-execution flag.
+fn captured_eur_usd(shared: &SharedState) {
+    let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100_000;
+    let q = crate::types::QTY_SCALE;
+    shared.market.push_quote(5, &crate::types::Quote {
+        bid: p(112_547), ask: p(112_549), bid_size: 4_000_000 * q, ask_size: 12_000_000 * q,
+        last: p(112_550), last_size: 0, volume: 0, close: p(112_430), high: p(112_585), low: p(112_320),
+        timestamp_ns: 1_790_921_778 * 1_000_000_000, ..Default::default()
+    });
+    let mut marks = crate::types::QuoteMarks::default();
+    marks.set_halted(0);
+    shared.market.push_marks(5, marks);
+    shared.market.push_tick_req_params(crate::bridge::TickReqParams {
+        instrument: 5, min_tick: 0.00001, bbo_exchange: String::new(), snapshot_permissions: 0,
+    });
+}
+
+// ibx#446, captured 02/10/2026 (EUR.USD snapshots 9460-9462): the market
+// data type, then the request parameters; the trade's time and halted
+// state, the daily high, low and close, then the bid and the ask with
+// their sizes, never executing automatically; no last price for a
+// currency pair; the end.
+#[test]
+fn eur_usd_snapshot_in_the_reference_order() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &eur_usd(), "", true, false).unwrap();
+    captured_eur_usd(&shared);
+    let mut w = SeqRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec![
+        "mdt:1:1", "params:1:0.00001::0",
+        "string:1:45:1790921778", "generic:1:49:0",
+        "price:1:6:1.12585:-", "price:1:7:1.1232:-", "price:1:9:1.1243:-",
+        "price:1:1:1.12547:-", "size:1:0:4000000", "price:1:2:1.12549:-", "size:1:3:12000000",
+        "end:1",
+    ]);
+    drop(engine);
+}
+
+// ibx#446, captured 02/10/2026 (SPY snapshot 9463): the trade's time,
+// its price with its size, its halted state, the close, the open (an
+// update of its own), then the bid and ask, which execute automatically
+// as the farm said. The captured volume is left out: the reference sent
+// none for it, for a reason not read yet.
+#[test]
+fn spy_snapshot_in_the_reference_order() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &spy_stk(), "", true, false).unwrap();
+    let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100;
+    let q = crate::types::QTY_SCALE;
+    shared.market.push_quote(5, &crate::types::Quote {
+        bid: p(76_624), ask: p(76_634), bid_size: 800 * q, ask_size: 1000 * q, last: p(76_659), last_size: 80 * q,
+        close: p(76_399), open: p(76_442), timestamp_ns: 1_790_921_446 * 1_000_000_000, ..Default::default()
+    });
+    let mut marks = crate::types::QuoteMarks::default();
+    marks.set_halted(0);
+    marks.set_auto_bits(12);
+    shared.market.push_marks(5, marks);
+    shared.market.push_tick_req_params(crate::bridge::TickReqParams {
+        instrument: 5, min_tick: 0.01, bbo_exchange: "a60001".into(), snapshot_permissions: 3,
+    });
+    let mut w = SeqRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec![
+        "mdt:1:1", "params:1:0.01:a60001:3",
+        "string:1:45:1790921446", "price:1:4:766.59:-", "size:1:5:80", "generic:1:49:0",
+        "price:1:9:763.99:-", "price:1:14:764.42:-",
+        "price:1:1:766.24:auto", "size:1:0:800", "price:1:2:766.34:auto", "size:1:3:1000",
+        "end:1",
+    ]);
+    drop(engine);
+}
+
+// ibx#446: when the daily figures came before the trade in the message,
+// they are sent first; a trade with no status gives no halted tick.
+#[test]
+fn snapshot_daily_figures_first_when_they_came_first() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &eur_usd(), "", true, false).unwrap();
+    captured_eur_usd(&shared);
+    let mut marks = crate::types::QuoteMarks::default();
+    marks.set_daily_first(true);
+    shared.market.push_marks(5, marks);
+    let mut w = SeqRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec![
+        "mdt:1:1", "params:1:0.00001::0",
+        "price:1:6:1.12585:-", "price:1:7:1.1232:-", "price:1:9:1.1243:-", "string:1:45:1790921778",
+        "price:1:1:1.12547:-", "size:1:0:4000000", "price:1:2:1.12549:-", "size:1:3:12000000",
+        "end:1",
+    ]);
+    drop(engine);
+}
+
+// ibx#446, captured 02/10/2026 (EUR.USD stream 9470): the market data
+// type before the request parameters; the bid and the ask execute
+// automatically, the last and the daily figures do not; no halted tick
+// for status 0.
+#[test]
+fn eur_usd_stream_bid_ask_execute_automatically() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &eur_usd(), "", false, false).unwrap();
+    captured_eur_usd(&shared);
+    let mut w = SeqRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(&w.events[..2], ["mdt:1:1", "params:1:0.00001::0"]);
+    let prices: Vec<&String> = w.events.iter().filter(|e| e.starts_with("price:")).collect();
+    assert_eq!(prices, [
+        "price:1:1:1.12547:auto", "price:1:2:1.12549:auto", "price:1:4:1.1255:-",
+        "price:1:6:1.12585:-", "price:1:7:1.1232:-", "price:1:9:1.1243:-",
+    ]);
+    assert!(!w.events.iter().any(|e| e.starts_with("generic:")), "{:?}", w.events);
+    drop(engine);
+}
+
+// ibx#446: an option on an exchange that says it per quote executes
+// automatically only as the farm said.
+#[test]
+fn option_stream_auto_execution_comes_from_the_farm() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    let option = Contract { con_id: 900_000_001, symbol: "SPY".into(), sec_type: "OPT".into(),
+        exchange: "SMART".into(), ..Default::default() };
+    client.req_mkt_data(1, &option, "", false, false).unwrap();
+    let s = crate::types::PRICE_SCALE;
+    shared.market.push_quote(5, &crate::types::Quote { bid: s, ask: 2 * s, ..Default::default() });
+    let mut w = SeqRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec!["mdt:1:1", "price:1:1:1:-", "price:1:2:2:-"]);
+    let mut marks = crate::types::QuoteMarks::default();
+    marks.set_auto_bits(4);
+    shared.market.push_marks(5, marks);
+    shared.market.push_quote(5, &crate::types::Quote { bid: 3 * s, ask: 4 * s, ..Default::default() });
+    let mut w = SeqRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec!["price:1:1:3:auto", "price:1:2:4:-"]);
+    drop(engine);
+}
+
 // A snapshot that never completes ends 11 s after its start; a stream
 // never ends.
 #[test]

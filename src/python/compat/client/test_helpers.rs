@@ -59,13 +59,16 @@ impl EClient {
     }
 
     /// Push a quote into SharedState for a given instrument.
+    /// `timestamp` is the last trade time in epoch seconds; without it the
+    /// time is 1 ns.
     #[doc(hidden)]
-    #[pyo3(signature = (instrument, bid=0.0, ask=0.0, last=0.0, bid_size=0, ask_size=0, last_size=0, volume=0, open=0.0, high=0.0, low=0.0, close=0.0))]
+    #[pyo3(signature = (instrument, bid=0.0, ask=0.0, last=0.0, bid_size=0, ask_size=0, last_size=0, volume=0, open=0.0, high=0.0, low=0.0, close=0.0, timestamp=None))]
+    #[allow(clippy::too_many_arguments)]
     fn _test_push_quote(
         &self, instrument: u32,
         bid: f64, ask: f64, last: f64,
         bid_size: i64, ask_size: i64, last_size: i64,
-        volume: i64, open: f64, high: f64, low: f64, close: f64,
+        volume: i64, open: f64, high: f64, low: f64, close: f64, timestamp: Option<u64>,
     ) -> PyResult<()> {
         let shared = self.shared_state()?;
         let ps = PRICE_SCALE as f64;
@@ -77,9 +80,32 @@ impl EClient {
             open: (open * ps) as i64, high: (high * ps) as i64,
             low: (low * ps) as i64, close: (close * ps) as i64,
             bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0,
-            timestamp_ns: 1,
+            timestamp_ns: timestamp.map_or(1, |s| s * 1_000_000_000),
         };
         shared.market.push_quote(instrument, &q);
+        Ok(())
+    }
+
+    /// Push the marks of a quote (test-only, ibx#446): the trade status,
+    /// the bid and ask auto-execution bits, and whether the daily figures
+    /// came before the trade.
+    #[doc(hidden)]
+    #[pyo3(signature = (instrument, halted=None, auto_bits=None, daily_first=false))]
+    fn _test_push_marks(&self, instrument: u32, halted: Option<i64>, auto_bits: Option<i64>, daily_first: bool) -> PyResult<()> {
+        let mut marks = QuoteMarks::default();
+        if let Some(status) = halted { marks.set_halted(status); }
+        if let Some(bits) = auto_bits { marks.set_auto_bits(bits); }
+        marks.set_daily_first(daily_first);
+        self.shared_state()?.market.push_marks(instrument, marks);
+        Ok(())
+    }
+
+    /// Queue the request parameters of an acked subscription (test-only).
+    #[doc(hidden)]
+    fn _test_push_tick_req_params(&self, instrument: u32, min_tick: f64, bbo_exchange: &str, snapshot_permissions: i32) -> PyResult<()> {
+        self.shared_state()?.market.push_tick_req_params(crate::bridge::TickReqParams {
+            instrument, min_tick, bbo_exchange: bbo_exchange.to_string(), snapshot_permissions,
+        });
         Ok(())
     }
 

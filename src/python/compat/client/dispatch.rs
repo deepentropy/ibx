@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use pyo3::prelude::*;
 
 use crate::bridge::{Event, SharedState};
-use crate::client_core::order_status_str;
+use crate::client_core::{order_status_str, MdTick};
 use crate::types::*;
 
 use crate::api::types::{
@@ -408,8 +408,12 @@ impl EClient {
             }
         }
 
-        // Request parameters, once per request (ibx#449).
-        for (req_id, min_tick, bbo_exchange, permissions) in self.core.take_tick_req_params(shared) {
+        // Request parameters, once per request (ibx#449), after the market
+        // data type (ibx#446).
+        for (req_id, mdt, min_tick, bbo_exchange, permissions) in self.core.take_tick_req_params(shared) {
+            if let Some(mdt) = mdt {
+                call_wrapper!(self.wrapper, py, "market_data_type", (req_id, mdt));
+            }
             call_wrapper!(self.wrapper, py, "tick_req_params", (req_id, min_tick, bbo_exchange.as_str(), permissions));
         }
 
@@ -425,21 +429,20 @@ impl EClient {
                 call_wrapper!(self.wrapper, py, "market_data_type", (req_id, mdt));
             }
 
-            let attrib = TickAttrib::default();
-            let attrib_obj = Py::new(py, attrib)?.into_any();
             for tick in &result.ticks {
-                if tick.is_price {
-                    call_wrapper!(self.wrapper, py, "tick_price", (tick.req_id, tick.tick_type, tick.value, &attrib_obj));
-                } else {
-                    call_wrapper!(self.wrapper, py, "tick_size", (tick.req_id, tick.tick_type, tick.value));
+                match tick {
+                    MdTick::Price { tick_type, value, can_auto_execute } => {
+                        let attrib = TickAttrib { can_auto_execute: *can_auto_execute, past_limit: false, pre_open: false };
+                        let attrib_obj = Py::new(py, attrib)?.into_any();
+                        call_wrapper!(self.wrapper, py, "tick_price", (req_id, *tick_type, *value, &attrib_obj));
+                    }
+                    MdTick::Size { tick_type, value } =>
+                        call_wrapper!(self.wrapper, py, "tick_size", (req_id, *tick_type, *value)),
+                    MdTick::Text { tick_type, value } =>
+                        call_wrapper!(self.wrapper, py, "tick_string", (req_id, *tick_type, value.as_str())),
+                    MdTick::Generic { tick_type, value } =>
+                        call_wrapper!(self.wrapper, py, "tick_generic", (req_id, *tick_type, *value)),
                 }
-            }
-            for st in &result.string_ticks {
-                call_wrapper!(self.wrapper, py, "tick_string", (st.req_id, st.tick_type, st.value.as_str()));
-            }
-            if let Some(ts) = &result.timestamp {
-                let ts_secs = ts.timestamp_ns / 1_000_000_000;
-                call_wrapper!(self.wrapper, py, "tick_string", (ts.req_id, TICK_LAST_TIMESTAMP, ts_secs.to_string().as_str()));
             }
             if snapshot_end {
                 call_wrapper!(self.wrapper, py, "tick_snapshot_end", (req_id,));
