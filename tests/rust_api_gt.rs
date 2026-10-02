@@ -1719,11 +1719,14 @@ fn api_stream_order_live() {
 
 // ── Smart components (ibx#441), focused ──
 
+/// Smart components of a request: (bit, exchange, letter).
+type SmartRows = Vec<(i32, String, String)>;
+
 #[derive(Default)]
 struct SmartWrapper {
     events: Vec<String>,
     params: Vec<(i64, String)>,
-    components: Vec<(i64, Vec<(i32, String, String)>)>,
+    components: Vec<(i64, SmartRows)>,
 }
 
 impl Wrapper for SmartWrapper {
@@ -1793,10 +1796,13 @@ fn api_smart_components_live() {
 
 // ── Contract lookups CONTFUT, by conId with an exchange, bond issuer (ibx#438), focused ──
 
+/// A row: (reqId, "row" or "bond", conId, secType, exchange).
+type LookupRow = (i64, String, i64, String, String);
+
 #[derive(Default)]
 struct LookupWrapper {
     events: Vec<String>,
-    rows: Vec<(i64, String, i64, String, String)>,
+    rows: Vec<LookupRow>,
     ends: Vec<i64>,
     issuers: Vec<String>,
 }

@@ -71,6 +71,10 @@ pub fn render_exchange_mask(mask: i64, instrument: InstrumentId, shared: &Shared
 /// exchange, as the reference (ibx#441).
 pub const SMART_COMPONENTS_WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
 
+/// A reqSmartComponents waiting for its exchange map: (reqId, code,
+/// security type id, deadline).
+type SmartComponentsWait = (i64, String, Option<u8>, std::time::Instant);
+
 /// The answer to a reqSmartComponents: its components, or an error.
 pub type SmartComponentsAnswer = Result<Vec<SmartComponent>, (i64, String)>;
 
@@ -774,7 +778,7 @@ pub struct ClientCore {
     pub reg_snapshot_acks: Mutex<HashMap<InstrumentId, (i32, String)>>,
     /// reqSmartComponents waiting for the exchange map of their BBO
     /// exchange (ibx#441): (reqId, code, security type id, deadline).
-    smart_components_waiting: Mutex<Vec<(i64, String, Option<u8>, std::time::Instant)>>,
+    smart_components_waiting: Mutex<Vec<SmartComponentsWait>>,
 
     // PnL subscription state
     /// Running req_pnl requests, with the last values sent (ibx#478).

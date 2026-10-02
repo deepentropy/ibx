@@ -4812,7 +4812,7 @@ mod tests {
         ccp.send_secdef_request_by_symbol(9481, "ES", "FUT+CONTFUT", "CME", "USD", &Default::default(), &mut conn, &mut hb);
         assert_eq!(ccp_messages_sent(&mut server), ["35=c|320=FixSecDefReqBySymbol9481|321=2|55=ES|167=FUT|6857=2|100=CME|15=USD"]);
         let front = future_listing("515416632", "ESZ6", "202612");
-        ccp.process_ccp_message(&future_reply("FixSecDefReqBySymbol9481", &[front.clone()]), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        ccp.process_ccp_message(&future_reply("FixSecDefReqBySymbol9481", std::slice::from_ref(&front)), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
         assert!(shared.reference.drain_contract_details().is_empty(), "the rows wait for the futures lookup");
         assert_eq!(ccp_messages_sent(&mut server), ["35=c|320=FixSecDefReqBySymbol9481|321=2|6088=Socket|55=ES|167=FUT|100=CME|15=USD"]);
         let futures = future_reply("FixSecDefReqBySymbol9481", &[front, future_listing("586139767", "ESZ7", "202712")]);
@@ -4872,10 +4872,10 @@ mod tests {
             "35=c|320=PreferredReqByConid9484|321=2|146=1|6008=265598|6004=ANYEXCH",
             "35=c|320=socket-reqContractDetailsReqByConid9485|321=2|6088=Socket|6320=1|146=1|6008=265598|6004=BEST",
         ]);
-        let reply = pipe_msg(&format!(
+        let reply = pipe_msg(
             "35=d|43=N|320=socket-reqContractDetailsReqByConid9483|322=*|323=4|\
              55=AAPL|167=STK|207=NASDAQ|6008=265598|6031=4563|15=USD|58=NMS|6035=AAPL|6058=NMS|\
-             146=1|6038=Y|6019=1|6031=4563|6026=1|6023=0|6027=0.01|6030=1|6344=1|"));
+             146=1|6038=Y|6019=1|6031=4563|6026=1|6023=0|6027=0.01|6030=1|6344=1|");
         ccp.process_ccp_message(&reply, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
         let rows = shared.reference.drain_contract_details();
         assert_eq!(rows.iter().map(|(r, d)| (*r, d.con_id, d.exchange.clone())).collect::<Vec<_>>(),
