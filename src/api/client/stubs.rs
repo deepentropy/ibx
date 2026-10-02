@@ -35,13 +35,10 @@ impl EClient {
     // ── Server Time ──
 
     /// Request current server time. Matches `reqCurrentTime` in C++.
-    /// Returns local system time (no server round-trip).
+    /// Answered locally, as the reference: the local clock plus the
+    /// offset to the server clock of the logon (ibx#421).
     pub fn req_current_time(&self, wrapper: &mut impl Wrapper) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        wrapper.current_time(now);
+        wrapper.current_time(self.shared.reference.server_time_secs());
     }
 
     // ── FA (Financial Advisor) ──

@@ -31,9 +31,10 @@ impl EClient {
         let _ = chart_options;
         // A request the reference refuses locally gets its error (321 or
         // 10314) and no query (ibx#430).
+        let shared = self.shared_state()?;
         if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration_str, bar_size_setting,
-            what_to_show, format_date, keep_up_to_date, &contract.sec_type) {
-            self.shared_state()?.reference.push_historical_error(req_id, code, text);
+            what_to_show, format_date, keep_up_to_date, &contract.sec_type, shared.reference.backfill_years_limit()) {
+            shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
         }
         if what_to_show.eq_ignore_ascii_case("SCHEDULE") {
@@ -153,7 +154,8 @@ impl EClient {
         if !crate::client_core::ClientCore::ids_fit("req_matching_symbols", &[req_id]) { return Ok(()); }
         // An empty or invalid pattern gives 321 and nothing is sent; the
         // pattern is sent trimmed (ibx#439).
-        let pattern = match crate::client_core::matching_symbols_pattern(pattern) {
+        let allowed = self.shared_state()?.reference.matching_symbols_allowed();
+        let pattern = match crate::client_core::matching_symbols_pattern(pattern, allowed) {
             Ok(pattern) => pattern,
             Err((code, message)) => {
                 self.shared_state()?.orders.push_order_error(req_id, code, message);

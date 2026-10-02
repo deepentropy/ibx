@@ -237,6 +237,11 @@ pub(crate) struct CcpState {
     pub(crate) matching_next_send: Option<Instant>,
     /// Requests whose pending mark came (their permit was given back).
     pub(crate) matching_acked: Vec<u32>,
+    /// Data permission stamp of the last logon reply or logon update
+    /// (6764, ibx#421).
+    pub(crate) data_permissions: Option<String>,
+    /// The feature list of the last logon update has DENYAPI (ibx#421).
+    pub(crate) deny_api: bool,
     /// HMAC signing key for XML-carrying CCP messages (selective signing).
     pub(crate) ccp_sign_key: Vec<u8>,
     /// HMAC signing IV — advances only for signed messages, independent of unsigned ones.
@@ -601,6 +606,8 @@ impl CcpState {
             matching_permits: 1,
             matching_next_send: None,
             matching_acked: Vec::new(),
+            data_permissions: None,
+            deny_api: false,
             ccp_sign_key: Vec::new(),
             ccp_sign_iv: std::sync::Mutex::new(Vec::new()),
             pending_schedule_pair: Vec::new(),
@@ -834,7 +841,21 @@ impl CcpState {
             Some(t) => t.as_str(),
             None => return,
         };
+        // The server time of a test request or of an eligible 35=U message
+        // refreshes the clock offset, at most every 30 s (ibx#421).
+        if crate::control::logon::message_sets_clock(msg_type, parsed.get(&6040).map(String::as_str), parsed.contains_key(&1)) {
+            match parsed.get(&fix::TAG_SENDING_TIME).and_then(|v| crate::control::logon::server_time_ms(v)) {
+                Some(server_ms) => {
+                    let zone = jiff::tz::TimeZone::system();
+                    if let Some(offset) = shared.reference.clock().apply_message(server_ms, crate::control::logon::local_now_ms(), &zone) {
+                        log::debug!("Setting time offset to {} ms (35={})", offset, msg_type);
+                    }
+                }
+                None => log::error!("No time in the message seqNum:{:?}", parsed.get(&34)),
+            }
+        }
         match msg_type {
+            fix::MSG_LOGON => self.handle_logon_update(&parsed, shared, event_tx),
             fix::MSG_EXEC_REPORT => self.handle_exec_report(&parsed, context, shared, event_tx, account_id),
             fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed, ccp_conn, context, shared, event_tx, hb, account_id),
             fix::MSG_NEWS => self.handle_news_bulletin(&parsed, shared),
@@ -906,6 +927,56 @@ impl CcpState {
                 log::debug!("CCP unhandled 35={}: {} bytes", other, msg.len());
             }
         }
+    }
+
+    /// A logon message on the logged-on auth connection (ibx#421). With a
+    /// session epoch (6059) it is a solicited logon, which the reference
+    /// ignores with a warning. Without one it is a logon update
+    /// (`jclient.gi.j(jfix.dk)`): a feature list (6542) that turns DENYAPI
+    /// on stops the API, as the reference stops its API connections
+    /// (`jfix.s.c(jfix.dk)@587-620`, `jclient.gi.dT()`); a changed data
+    /// permission stamp (6764) is kept and logged. The reference then
+    /// resubscribes its market data; what that sends was not read and no
+    /// update is captured, so ibx does not resubscribe.
+    pub(crate) fn handle_logon_update(
+        &mut self,
+        parsed: &std::collections::HashMap<u32, String>,
+        shared: &SharedState,
+        event_tx: &Option<Sender<Event>>,
+    ) {
+        if parsed.get(&6059).is_some_and(|v| !v.is_empty()) {
+            log::warn!("Solicited logon while logged on: ignored");
+            return;
+        }
+        log::info!("Handling logon update");
+        if let Some(features) = parsed.get(&6542) {
+            let deny_api = crate::control::logon::ApiFeatures::parse(features).deny_api;
+            log::info!("Updated Enabled features: {}", features);
+            if deny_api != self.deny_api {
+                self.deny_api = deny_api;
+                if deny_api {
+                    log::warn!("we have running API but got disabled in allowed feature - stopping API");
+                    shared.set_connection_lost();
+                    emit(event_tx, Event::Disconnected);
+                }
+            }
+        }
+        if let Some(stamp) = parsed.get(&crate::gateway::TAG_DATA_PERMISSIONS).filter(|v| !v.is_empty()) {
+            self.data_permissions_seen(stamp);
+        }
+    }
+
+    /// A data permission stamp of a logon reply or update: kept and
+    /// logged when it changed, as the reference (ibx#421). True when it
+    /// changed.
+    pub(crate) fn data_permissions_seen(&mut self, stamp: &str) -> bool {
+        if self.data_permissions.as_deref() == Some(stamp) {
+            log::info!("Data permissions are not changed");
+            return false;
+        }
+        self.data_permissions = Some(stamp.to_string());
+        log::info!("Data permissions are changed. Market data is to be resubscribed");
+        true
     }
 
     /// A reply to a what-if preview (ibx#462). The gateway may first send a
@@ -6140,5 +6211,74 @@ mod reconnect_tests {
                 assert!(got.contains("con_id: 265598"), "{}", got);
             }
         }
+    }
+
+}
+
+#[cfg(test)]
+mod logon_update_tests {
+    use super::*;
+    use crate::engine::hot_loop::HeartbeatState;
+
+    fn ord_status_test_state() -> (CcpState, Context, SharedState) {
+        (CcpState::new(), Context::new(), SharedState::new())
+    }
+
+    fn pipe_frame(text: &str) -> Vec<u8> {
+        text.replace('|', "\x01").into_bytes()
+    }
+
+    // ibx#421: a logon update without a session epoch that turns DENYAPI
+    // on stops the API; with an epoch it is ignored.
+    #[test]
+    fn logon_update_with_denyapi_stops_the_api() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let mut hb = HeartbeatState::new();
+        ccp.process_ccp_message(&pipe_frame("35=A|52=20261002-06:20:00|6059=1790914646|6542=DENYAPI|"),
+            &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(!shared.take_connection_lost(), "a solicited logon is ignored");
+        ccp.process_ccp_message(&pipe_frame("35=A|52=20261002-06:20:00|6542=APIELOG,SECDEFTA|"),
+            &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(!shared.take_connection_lost());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        ccp.process_ccp_message(&pipe_frame("35=A|52=20261002-06:20:00|6542=APIELOG,DENYAPI|"),
+            &mut None, &mut context, &shared, &Some(tx.clone()), &mut hb, "DU1");
+        assert!(shared.take_connection_lost());
+        assert!(matches!(rx.try_recv(), Ok(Event::Disconnected)));
+        // The same list again is no change.
+        ccp.process_ccp_message(&pipe_frame("35=A|52=20261002-06:20:00|6542=DENYAPI|"),
+            &mut None, &mut context, &shared, &Some(tx), &mut hb, "DU1");
+        assert!(!shared.take_connection_lost());
+    }
+
+    // ibx#421: the data permission stamp of a logon update is kept when it
+    // changed.
+    #[test]
+    fn logon_update_data_permission_stamp() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        ccp.data_permissions = Some("1788356313".into());
+        ccp.process_ccp_message(&pipe_frame("35=A|6764=1788356313|"),
+            &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
+        assert_eq!(ccp.data_permissions.as_deref(), Some("1788356313"));
+        assert!(ccp.data_permissions_seen("1788999999"));
+        assert!(!ccp.data_permissions_seen("1788999999"));
+    }
+
+    // ibx#421: a test request refreshes the clock offset from its server
+    // time; a 35=U carrying an account does not.
+    #[test]
+    fn test_request_refreshes_the_clock_offset() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let mut hb = HeartbeatState::new();
+        let mut ahead = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(3600);
+        ahead = ahead.round(jiff::Unit::Second).unwrap();
+        let t52 = ahead.strftime("%Y%m%d-%H:%M:%S").to_string();
+        ccp.process_ccp_message(&pipe_frame(&format!("35=U|52={t52}|6040=75|1=DU1|")),
+            &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert_eq!(shared.reference.clock().offset_ms(), 0);
+        ccp.process_ccp_message(&pipe_frame(&format!("35=1|52={t52}|112=x|")),
+            &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        let offset = shared.reference.clock().offset_ms();
+        assert!((offset - 3_600_000).abs() < 2_000, "{offset}");
     }
 }

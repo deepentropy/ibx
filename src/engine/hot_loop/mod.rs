@@ -1957,8 +1957,15 @@ impl HotLoop {
             None => return,
         };
         match rx.try_recv() {
-            Ok(Ok(CcpReconnect { conn, session_epoch, ns_secure_refused })) => {
+            Ok(Ok(CcpReconnect { conn, session_epoch, ns_secure_refused, logon })) => {
                 log::info!("CCP auto-reconnect succeeded (attempt {})", self.ccp_reconnect_attempt);
+                // Every logon reply sets the clock offset and the feature
+                // tokens; a changed data permission stamp is logged
+                // (ibx#421).
+                crate::gateway::apply_logon_values(&logon, &self.shared);
+                if let Some(stamp) = &logon.data_permissions {
+                    self.ccp.data_permissions_seen(stamp);
+                }
                 // The next reconnect resumes this server session (ibx#422).
                 if let (Some(epoch), Some(auth)) = (session_epoch, self.reconnect_auth.as_mut()) {
                     auth.session_epoch = epoch;

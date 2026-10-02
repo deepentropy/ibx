@@ -1172,6 +1172,7 @@ impl HmdsState {
         // engine-side backstop for raw control-channel callers.
         let checked = match crate::control::historical::check_bar_request(
             end_date_time, duration, bar_size, what_to_show, None, keep_up_to_date, sec_type,
+            shared.reference.backfill_years_limit(),
         ) {
             Ok(c) => c,
             Err((code, text)) => {
