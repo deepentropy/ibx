@@ -1568,3 +1568,65 @@ fn api_snapshot_live() {
     }
     assert!(w.events.iter().any(|(_, e)| e.starts_with("error 701 300 ")), "cancel after the end: no 300");
 }
+
+// ── Currency pair prices on the tick of their server tag, focused ──
+
+/// EUR.USD streaming and snapshot: bid, ask and last near 1.1, not five
+/// times higher (the bid/ask book and the last price tick in different
+/// steps), and the request parameters carry the bid/ask entry's tick.
+/// Run with: cargo test --test rust_api_gt api_eurusd_prices_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_eurusd_prices_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = SnapWrapper::default();
+    let settle = Instant::now();
+    while settle.elapsed() < Duration::from_secs(3) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    w.events.clear();
+    w.start = Some(Instant::now());
+    let eurusd = Contract { con_id: 12087792, symbol: "EUR".into(), sec_type: "CASH".into(),
+        exchange: "IDEALPRO".into(), currency: "USD".into(), ..Default::default() };
+    client.req_mkt_data(801, &eurusd, "", false, false).unwrap();
+    let streamed = Instant::now();
+    while streamed.elapsed() < Duration::from_secs(10) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.cancel_mkt_data(801).unwrap();
+    client.req_mkt_data(802, &eurusd, "", true, false).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && !w.events.iter().any(|(_, e)| e == "end 802") {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.disconnect();
+    for (ms, e) in &w.events {
+        println!("  {ms:>6} ms  {e}");
+    }
+
+    for req in [801, 802] {
+        let mut kinds = std::collections::HashSet::new();
+        for (_, e) in &w.events {
+            let parts: Vec<&str> = e.split(' ').collect();
+            if parts[0] == "price" && parts[1] == req.to_string() && matches!(parts[2], "1" | "2" | "4") {
+                let p: f64 = parts[3].parse().unwrap();
+                assert!(p > 0.8 && p < 1.6, "req {req}: {e}");
+                kinds.insert(parts[2].to_string());
+            }
+        }
+        assert!(kinds.contains("1") && kinds.contains("2"), "req {req}: no bid or ask: {kinds:?}");
+    }
+    assert!(w.events.iter().any(|(_, e)| e.starts_with("params 801 0.00001 ")), "no request parameters with the bid/ask tick");
+}
