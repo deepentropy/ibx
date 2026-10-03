@@ -67,6 +67,8 @@ pub enum Event {
     TbtTrade(TbtTrade),
     /// Tick-by-tick bid/ask quote.
     TbtQuote(TbtQuote),
+    /// Tick-by-tick midpoint.
+    TbtMidPoint(TbtMidPoint),
     /// What-if order response (margin/commission preview).
     WhatIf(WhatIfResponse),
     /// Real-time news headline.
@@ -212,6 +214,7 @@ pub struct MarketDataState {
     instrument_count: AtomicU64,
     tbt_trades: Mutex<Vec<TbtTrade>>,
     tbt_quotes: Mutex<Vec<TbtQuote>>,
+    tbt_mid_points: Mutex<Vec<TbtMidPoint>>,
     real_time_bars: Mutex<Vec<(ReqId, RealTimeBar)>>,
     depth_updates: Mutex<Vec<DepthUpdate>>,
     tick_news: Mutex<Vec<TickNews>>,
@@ -224,8 +227,9 @@ pub struct MarketDataState {
     /// The request parameters of acked subscriptions (ibx#449).
     tick_req_params: Mutex<Vec<TickReqParams>>,
     snapshot_acks: Mutex<Vec<TickReqParams>>,
-    /// Tick-by-tick requests the server refused, with its text (ibx#455).
-    tbt_errors: Mutex<Vec<(InstrumentId, TbtType, String)>>,
+    /// Tick-by-tick requests that ended with an error: the request, the
+    /// code and the whole text (ibx#455).
+    tbt_errors: Mutex<Vec<(ReqId, i32, String)>>,
 }
 
 /// What a client reports as tickReqParams for a subscription, from its
@@ -280,6 +284,7 @@ impl MarketDataState {
             instrument_count: AtomicU64::new(0),
             tbt_trades: Mutex::new(Vec::with_capacity(256)),
             tbt_quotes: Mutex::new(Vec::with_capacity(256)),
+            tbt_mid_points: Mutex::new(Vec::with_capacity(64)),
             real_time_bars: Mutex::new(Vec::with_capacity(64)),
             depth_updates: Mutex::new(Vec::with_capacity(64)),
             tick_news: Mutex::new(Vec::with_capacity(32)),
@@ -292,11 +297,11 @@ impl MarketDataState {
         }
     }
 
-    #[doc(hidden)] pub fn push_tbt_error(&self, instrument: InstrumentId, tbt_type: TbtType, text: String) {
-        self.tbt_errors.lock().unwrap().push((instrument, tbt_type, text));
+    #[doc(hidden)] pub fn push_tbt_error(&self, req_id: ReqId, code: i32, text: String) {
+        self.tbt_errors.lock().unwrap().push((req_id, code, text));
     }
 
-    pub fn drain_tbt_errors(&self) -> Vec<(InstrumentId, TbtType, String)> {
+    pub fn drain_tbt_errors(&self) -> Vec<(ReqId, i32, String)> {
         self.tbt_errors.lock().unwrap().drain(..).collect()
     }
 
@@ -372,6 +377,10 @@ impl MarketDataState {
         self.tbt_quotes.lock().unwrap().drain(..).collect()
     }
 
+    pub fn drain_tbt_mid_points(&self) -> Vec<TbtMidPoint> {
+        self.tbt_mid_points.lock().unwrap().drain(..).collect()
+    }
+
     pub fn drain_real_time_bars(&self) -> Vec<(ReqId, RealTimeBar)> {
         self.real_time_bars.lock().unwrap().drain(..).collect()
     }
@@ -426,6 +435,10 @@ impl MarketDataState {
 
     #[doc(hidden)] pub fn push_tbt_quote(&self, quote: TbtQuote) {
         self.tbt_quotes.lock().unwrap().push(quote);
+    }
+
+    #[doc(hidden)] pub fn push_tbt_mid_point(&self, mid: TbtMidPoint) {
+        self.tbt_mid_points.lock().unwrap().push(mid);
     }
 
 

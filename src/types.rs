@@ -1571,25 +1571,47 @@ impl TbtType {
     }
 }
 
-/// A single tick-by-tick trade (AllLast) from 35=E.
+/// A single tick-by-tick trade (Last or AllLast) from 35=E, for one
+/// request of the stream (ibx#455).
 #[derive(Debug, Clone)]
 pub struct TbtTrade {
     pub instrument: InstrumentId,
+    pub req_id: ReqId,
+    /// Last or AllLast: the tickType the request reports.
+    pub tbt_type: TbtType,
     pub price: Price,
     pub size: i64,
     pub timestamp: u64,
     pub exchange: String,
     pub conditions: String,
+    /// Attribute bits 0 and 1 of the entry (ibx#404).
+    pub past_limit: bool,
+    pub unreported: bool,
 }
 
-/// A single tick-by-tick bid/ask quote from 35=E.
+/// A single tick-by-tick bid/ask quote from 35=E, for one request of the
+/// stream (ibx#455).
 #[derive(Debug, Clone, Copy)]
 pub struct TbtQuote {
     pub instrument: InstrumentId,
+    pub req_id: ReqId,
     pub bid: Price,
     pub ask: Price,
     pub bid_size: i64,
     pub ask_size: i64,
+    pub timestamp: u64,
+    /// Attribute bits 0 and 1 of the entry (ibx#404).
+    pub bid_past_low: bool,
+    pub ask_past_high: bool,
+}
+
+/// A single tick-by-tick midpoint from 35=E, for one request of the
+/// stream (ibx#404).
+#[derive(Debug, Clone, Copy)]
+pub struct TbtMidPoint {
+    pub instrument: InstrumentId,
+    pub req_id: ReqId,
+    pub mid_point: Price,
     pub timestamp: u64,
 }
 
@@ -1858,15 +1880,19 @@ pub enum ControlCommand {
     /// rejects switches to delayed data (ibx#447).
     SetMarketDataType { market_data_type: i32 },
     /// Subscribe to tick-by-tick data via historical data connection.
-    /// `number_of_ticks` above 0 asks for that many past ticks first;
-    /// `ignore_size` reaches the engine but is not sent yet (ibx#455).
+    /// `number_of_ticks` above 0 asks for that many past ticks first,
+    /// given to `req_id` as historical ticks; `ignore_size` sends the size
+    /// filter. A request for a stream that exists (same contract, type and
+    /// size filter) joins it, with no new query (ibx#455).
     SubscribeTbt {
+        req_id: ReqId,
         con_id: i64, symbol: String, exchange: String, sec_type: String,
         tbt_type: TbtType, number_of_ticks: i32, ignore_size: bool,
         reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>>,
     },
-    /// Unsubscribe from tick-by-tick data.
-    UnsubscribeTbt { instrument: InstrumentId },
+    /// End the tick-by-tick request `req_id`: its stream is cancelled once
+    /// no request is left on it.
+    UnsubscribeTbt { req_id: ReqId },
     /// The news tick of a market data request (generic tick 292, ibx#458),
     /// given after its `Subscribe` / `SubscribeBySymbol`: the news entry
     /// goes to the farm of the contract's route with the request's top of

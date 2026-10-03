@@ -312,15 +312,20 @@ pub mod tests {
         }
         fn tick_by_tick_all_last(
             &mut self, req_id: i64, tick_type: i32, time: i64, price: f64,
-            size: f64, _: &TickAttribLast, exchange: &str, _: &str,
+            size: f64, attrib: &TickAttribLast, exchange: &str, _: &str,
         ) {
-            self.events.push(format!("tbt_last:{req_id}:{tick_type}:{time}:{price}:{size}:{exchange}"));
+            let mask = attrib.past_limit as i32 | (attrib.unreported as i32) << 1;
+            self.events.push(format!("tbt_last:{req_id}:{tick_type}:{time}:{price}:{size}:{exchange}:{mask}"));
         }
         fn tick_by_tick_bid_ask(
             &mut self, req_id: i64, time: i64, bid_price: f64, ask_price: f64,
-            bid_size: f64, ask_size: f64, _: &TickAttribBidAsk,
+            bid_size: f64, ask_size: f64, attrib: &TickAttribBidAsk,
         ) {
-            self.events.push(format!("tbt_bidask:{req_id}:{time}:{bid_price}:{ask_price}:{bid_size}:{ask_size}"));
+            let mask = attrib.bid_past_low as i32 | (attrib.ask_past_high as i32) << 1;
+            self.events.push(format!("tbt_bidask:{req_id}:{time}:{bid_price}:{ask_price}:{bid_size}:{ask_size}:{mask}"));
+        }
+        fn tick_by_tick_mid_point(&mut self, req_id: i64, time: i64, mid_point: f64) {
+            self.events.push(format!("tbt_mid:{req_id}:{time}:{mid_point}"));
         }
         fn tick_req_params(&mut self, ticker_id: i64, min_tick: f64, bbo_exchange: &str, snapshot_permissions: i64) {
             self.events.push(format!("tick_req_params:{ticker_id}:{min_tick}:{bbo_exchange}:{snapshot_permissions}"));

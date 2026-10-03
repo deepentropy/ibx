@@ -1923,22 +1923,21 @@ impl ClientCore {
         })
     }
 
-    /// The local checks of a tick-by-tick request, in the reference's order
-    /// (ibx#455): 321 for a combo security type or a tick type that is not
-    /// exactly one of the four names, 10189 when the logon turns
-    /// tick-by-tick data off, 10190 when a new contract would pass the
-    /// limit (contracts are counted once, whatever their types). The type
-    /// when the request may go.
     /// The reference's local refusal of a fundamental data request
     /// (#434): only a stock may be asked, else 321.
     pub fn fundamental_refusal(sec_type: &str) -> Option<(i32, String)> {
         (sec_type != "STK").then(|| (321, "Error validating request.-'bL' : cause - Please enter a valid security type".to_string()))
     }
 
+    /// The local checks of a tick-by-tick request, in the reference's order
+    /// (ibx#455): 321 for a combo security type or a tick type that is not
+    /// exactly one of the four names, 10189 when the logon turns
+    /// tick-by-tick data off. The route and the limit (10190) are checked by
+    /// the engine, which knows the streams. The type when the request may
+    /// go.
     pub fn tbt_refusal(
         &self,
         shared: &SharedState,
-        con_id: i64,
         sec_type: &str,
         tick_type: &str,
         local_symbol: &str,
@@ -1952,17 +1951,11 @@ impl ClientCore {
         let Some(tbt_type) = TbtType::from_api(tick_type) else {
             return Err((321, "Error validating request.-'bT' : cause - Tick-by-tick data type is incorrect/not set".to_string()));
         };
-        let (limit, off) = shared.reference.tick_by_tick_limits();
+        let (_, off) = shared.reference.tick_by_tick_limits();
         if off {
             return Err((10189, format!(
                 "Failed to request tick-by-tick data.{} tick-by-tick requests are not supported for {}",
                 tbt_type.as_str(), local_symbol)));
-        }
-        if let Some(limit) = limit {
-            let contracts: HashSet<i64> = self.tbt_reqs.lock().unwrap().values().map(|(_, c, _)| *c).collect();
-            if contracts.len() >= limit && !contracts.contains(&con_id) {
-                return Err((10190, "Max number of tick-by-tick requests has been reached".to_string()));
-            }
         }
         Ok(tbt_type)
     }
@@ -1983,6 +1976,7 @@ impl ClientCore {
     ) -> Result<InstrumentId, String> {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         control_tx.send(ControlCommand::SubscribeTbt {
+            req_id,
             con_id,
             symbol: symbol.to_string(),
             exchange: exchange.to_string(),
@@ -2009,23 +2003,6 @@ impl ClientCore {
             self.forget_instrument(instrument);
         }
         Some(instrument)
-    }
-
-    /// The tick-by-tick request of an instrument for trades (`trades`) or
-    /// for quotes: (reqId, type).
-    pub fn tbt_req_for(&self, instrument: InstrumentId, trades: bool) -> Option<(i64, TbtType)> {
-        self.tbt_reqs.lock().unwrap().iter()
-            .find(|(_, (i, _, t))| *i == instrument
-                && matches!(t, TbtType::Last | TbtType::AllLast) == trades
-                && *t != TbtType::MidPoint)
-            .map(|(r, (_, _, t))| (*r, *t))
-    }
-
-    /// The tick-by-tick request of an instrument of the given type.
-    pub fn tbt_req_of_type(&self, instrument: InstrumentId, tbt_type: TbtType) -> Option<i64> {
-        self.tbt_reqs.lock().unwrap().iter()
-            .find(|(_, (i, _, t))| *i == instrument && *t == tbt_type)
-            .map(|(r, _)| *r)
     }
 
     /// Look up the first req_id of an instrument; -1 for none.

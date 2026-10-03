@@ -183,15 +183,17 @@ impl EClient {
     /// Subscribe to tick-by-tick data. Matches `reqTickByTickData` in C++.
     /// `tick_type` is "Last", "AllLast", "BidAsk" or "MidPoint", each asked
     /// under its own name; anything else gives error 321, as the reference.
-    /// `number_of_ticks` above 0 asks for that many past ticks first;
-    /// `ignore_size` reaches the engine but is not sent yet (ibx#455).
+    /// `number_of_ticks` above 0 asks for that many past ticks first, given
+    /// as historical ticks; `ignore_size` asks for the size filter. A
+    /// request for a contract, type and size filter already streaming
+    /// joins that stream (ibx#455).
     pub fn req_tick_by_tick_data(
         &self, req_id: i64, contract: &Contract, tick_type: &str,
         number_of_ticks: i32, ignore_size: bool,
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_tick_by_tick_data", &[req_id, contract.con_id]) { return Ok(()); }
         let local_symbol = if contract.local_symbol.is_empty() { &contract.symbol } else { &contract.local_symbol };
-        let tbt_type = match self.core.tbt_refusal(&self.shared, contract.con_id, &contract.sec_type, tick_type, local_symbol) {
+        let tbt_type = match self.core.tbt_refusal(&self.shared, &contract.sec_type, tick_type, local_symbol) {
             Ok(t) => t,
             Err((code, text)) => {
                 self.shared.orders.push_order_error(req_id, code, text);
@@ -209,8 +211,8 @@ impl EClient {
     /// Cancel tick-by-tick data. Matches `cancelTickByTickData` in C++.
     pub fn cancel_tick_by_tick_data(&self, req_id: i64) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("cancel_tick_by_tick_data", &[req_id]) { return Ok(()); }
-        if let Some(instrument) = self.core.unregister_tbt(req_id) {
-            self.send(ControlCommand::UnsubscribeTbt { instrument })?;
+        if self.core.unregister_tbt(req_id).is_some() {
+            self.send(ControlCommand::UnsubscribeTbt { req_id })?;
         }
         Ok(())
     }

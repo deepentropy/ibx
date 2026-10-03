@@ -140,7 +140,7 @@ impl EClient {
         // the logon turns it off, 10190 past the contract limit (ibx#455).
         let shared = self.shared_state()?;
         let local_symbol = if contract.local_symbol.is_empty() { &contract.symbol } else { &contract.local_symbol };
-        let tbt_type = match self.core.tbt_refusal(&shared, contract.con_id, &contract.sec_type, tick_type, local_symbol) {
+        let tbt_type = match self.core.tbt_refusal(&shared, &contract.sec_type, tick_type, local_symbol) {
             Ok(t) => t,
             Err((code, text)) => {
                 shared.orders.push_order_error(req_id, code, text);
@@ -168,9 +168,9 @@ impl EClient {
     fn cancel_tick_by_tick_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("cancel_tick_by_tick_data", &[req_id]) { return Ok(()); }
-        if let Some(instrument) = self.core.unregister_tbt(req_id) {
+        if self.core.unregister_tbt(req_id).is_some() {
             let tx = self.tx()?;
-            send_cmd(py, &tx, ControlCommand::UnsubscribeTbt { instrument })?;
+            send_cmd(py, &tx, ControlCommand::UnsubscribeTbt { req_id })?;
         }
         Ok(())
     }

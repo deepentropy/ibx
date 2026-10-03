@@ -466,41 +466,39 @@ impl EClient {
             self.cancel_mkt_data(py, req_id)?;
         }
 
-        // Tick-by-tick requests the server refused: 10189 with its text,
-        // and the request ends (ibx#455).
-        for (instrument, tbt_type, text) in shared.market.drain_tbt_errors() {
-            if let Some(req_id) = self.core.tbt_req_of_type(instrument, tbt_type) {
-                let msg = format!("Failed to request tick-by-tick data.{}", text);
-                call_wrapper!(self.wrapper, py, "error", (req_id, 10189i64, msg.as_str(), ""));
-                if let (Some(instrument), Ok(tx)) = (self.core.unregister_tbt(req_id), self.tx()) {
-                    let _ = send_cmd(py, &tx, ControlCommand::UnsubscribeTbt { instrument });
-                }
-            }
+        // Tick-by-tick requests that ended with an error (10189, 10190):
+        // the engine already let them go (ibx#455).
+        for (req_id, code, text) in shared.market.drain_tbt_errors() {
+            call_wrapper!(self.wrapper, py, "error", (req_id, code as i64, text.as_str(), ""));
+            self.core.unregister_tbt(req_id);
         }
 
         // Drain TBT trades -> tickByTickAllLast, tickType 1 for Last and 2
-        // for AllLast (ibx#455)
+        // for AllLast, with the entry's attributes (ibx#404, ibx#455)
         let tbt_trades = shared.market.drain_tbt_trades();
         for trade in tbt_trades {
-            let (req_id, tick_type) = self.core.tbt_req_for(trade.instrument, true)
-                .map_or((-1, 1), |(r, t)| (r, t.api_tick_type()));
             let price = trade.price as f64 / PRICE_SCALE_F;
             let size = trade.size as f64;
-            let attrib = super::super::tick_types::TickAttribLast::default();
+            let attrib = super::super::tick_types::TickAttribLast { past_limit: trade.past_limit, unreported: trade.unreported };
             let attrib_obj = Py::new(py, attrib)?.into_any();
-            call_wrapper!(self.wrapper, py, "tick_by_tick_all_last", (req_id, tick_type, trade.timestamp as i64, price, size,
+            call_wrapper!(self.wrapper, py, "tick_by_tick_all_last", (trade.req_id, trade.tbt_type.api_tick_type(), trade.timestamp as i64, price, size,
                  &attrib_obj, trade.exchange.as_str(), trade.conditions.as_str()));
         }
 
         // Drain TBT quotes -> tickByTickBidAsk
         let tbt_quotes = shared.market.drain_tbt_quotes();
         for quote in tbt_quotes {
-            let req_id = self.core.tbt_req_for(quote.instrument, false).map_or(-1, |(r, _)| r);
-            let attrib = super::super::tick_types::TickAttribBidAsk::default();
+            let attrib = super::super::tick_types::TickAttribBidAsk { bid_past_low: quote.bid_past_low, ask_past_high: quote.ask_past_high };
             let attrib_obj = Py::new(py, attrib)?.into_any();
-            call_wrapper!(self.wrapper, py, "tick_by_tick_bid_ask", (req_id, quote.timestamp as i64,
+            call_wrapper!(self.wrapper, py, "tick_by_tick_bid_ask", (quote.req_id, quote.timestamp as i64,
                  quote.bid as f64 / PRICE_SCALE_F, quote.ask as f64 / PRICE_SCALE_F,
                  quote.bid_size as f64, quote.ask_size as f64, &attrib_obj));
+        }
+
+        // Drain TBT midpoints -> tickByTickMidPoint (ibx#404)
+        for mid in shared.market.drain_tbt_mid_points() {
+            call_wrapper!(self.wrapper, py, "tick_by_tick_mid_point", (mid.req_id, mid.timestamp as i64,
+                 mid.mid_point as f64 / PRICE_SCALE_F));
         }
 
         // Drain depth updates -> updateMktDepth / updateMktDepthL2, as the

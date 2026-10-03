@@ -129,9 +129,10 @@ impl BenchSession {
             .unwrap();
     }
 
-    pub fn subscribe_tbt(&self, con_id: i64, symbol: &str, tbt_type: TbtType) {
+    pub fn subscribe_tbt(&self, req_id: i64, con_id: i64, symbol: &str, tbt_type: TbtType) {
         self.control_tx
             .send(ControlCommand::SubscribeTbt {
+                req_id,
                 con_id,
                 symbol: symbol.to_string(),
                 exchange: "SMART".into(),
@@ -150,10 +151,10 @@ impl BenchSession {
             .send(ControlCommand::Unsubscribe { instrument });
     }
 
-    pub fn unsubscribe_tbt(&self, instrument: InstrumentId) {
+    pub fn unsubscribe_tbt(&self, req_id: i64) {
         let _ = self
             .control_tx
-            .send(ControlCommand::UnsubscribeTbt { instrument });
+            .send(ControlCommand::UnsubscribeTbt { req_id });
     }
 
     pub fn send_order(&self, req: OrderRequest) {

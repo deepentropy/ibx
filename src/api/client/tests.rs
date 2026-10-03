@@ -313,17 +313,17 @@ fn req_tick_by_tick_data_sends_subscribe_tbt() {
 }
 
 // ibx#455: each of the four types is asked under its own name, with the
-// tick count and the size flag; another name, a combo, a session with
-// tick-by-tick off, or one contract too many is refused before anything
-// is sent, with the reference's codes and texts.
+// tick count, the size flag and the request id; another name, a combo or
+// a session with tick-by-tick off is refused before anything is sent,
+// with the reference's codes and texts. The limit is the engine's.
 #[test]
 fn req_tick_by_tick_data_types_and_local_refusals() {
     let (client, rx, shared) = test_client();
     for (req, name) in [(10, "Last"), (11, "AllLast"), (12, "BidAsk"), (13, "MidPoint")] {
         let _ = client.req_tick_by_tick_data(req, &spy(), name, 5, true);
         match rx.try_recv().unwrap() {
-            ControlCommand::SubscribeTbt { tbt_type, number_of_ticks, ignore_size, .. } => {
-                assert_eq!((tbt_type.as_str(), number_of_ticks, ignore_size), (name, 5, true));
+            ControlCommand::SubscribeTbt { req_id, tbt_type, number_of_ticks, ignore_size, .. } => {
+                assert_eq!((req_id, tbt_type.as_str(), number_of_ticks, ignore_size), (req, name, 5, true));
             }
             other => panic!("expected SubscribeTbt, got {other:?}"),
         }
@@ -335,37 +335,28 @@ fn req_tick_by_tick_data_types_and_local_refusals() {
     let _ = client.req_tick_by_tick_data(22, &spy(), "AllLast", 0, false);
     assert!(rx.try_recv().is_err(), "nothing sent for a refused request");
 
-    // Limit 3: three contracts live (types share a contract's slot), a
-    // fourth contract is refused, the first one again is not.
-    shared.reference.set_tick_by_tick_limits(3, false);
-    {
-        let mut tbt = client.core.tbt_reqs.lock().unwrap();
-        tbt.clear();
-        tbt.insert(30, (0, 756733, TbtType::Last));
-        tbt.insert(31, (0, 756733, TbtType::BidAsk));
-        tbt.insert(32, (1, 265598, TbtType::Last));
-        tbt.insert(33, (2, 272093, TbtType::Last));
-    }
-    let _ = client.req_tick_by_tick_data(23, &Contract { con_id: 4391, ..spy() }, "Last", 0, false);
-    assert!(rx.try_recv().is_err());
-    let _ = client.req_tick_by_tick_data(24, &spy(), "MidPoint", 0, false);
-    assert!(matches!(rx.try_recv(), Ok(ControlCommand::SubscribeTbt { tbt_type: TbtType::MidPoint, .. })));
-
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     for e in [
         "error:20:321:Error validating request.-'bT' : cause - Tick-by-tick data type is incorrect/not set",
         "error:21:321:Error validating request.-'bT' : cause - 'BAG' security type is not supported in ReqTickByTick(97) request",
         "error:22:10189:Failed to request tick-by-tick data.AllLast tick-by-tick requests are not supported for SPY",
-        "error:23:10190:Max number of tick-by-tick requests has been reached",
     ] {
         assert!(w.events.contains(&e.to_string()), "{e}: {:?}", w.events);
     }
 }
 
-// ibx#455: trades report tickType 1 for a Last request and 2 for AllLast;
-// tick-by-tick and market data on one contract keep their own request
-// ids; a server refusal gives 10189 with its text and ends the request.
+fn tbt_trade(req_id: i64, tbt_type: TbtType, past_limit: bool, unreported: bool) -> TbtTrade {
+    TbtTrade {
+        instrument: 0, req_id, tbt_type, price: 100 * PRICE_SCALE, size: 3, timestamp: 1,
+        exchange: "ARCA".into(), conditions: String::new(), past_limit, unreported,
+    }
+}
+
+// ibx#404, ibx#455: each tick goes to the request the engine names, with
+// tickType 1 for a Last request and 2 for AllLast and the entry's
+// attribute mask; midpoints go to tickByTickMidPoint; an error the engine
+// gives ends the request with its code and text.
 #[test]
 fn tick_by_tick_reports_by_request_type() {
     let (client, rx, shared) = test_client();
@@ -374,23 +365,32 @@ fn tick_by_tick_reports_by_request_type() {
     client.core.tbt_reqs.lock().unwrap().insert(7, (0, 756733, TbtType::Last));
     client.core.tbt_reqs.lock().unwrap().insert(8, (2, 265598, TbtType::AllLast));
     client.core.tbt_reqs.lock().unwrap().insert(9, (2, 265598, TbtType::BidAsk));
-    let trade = |instrument| TbtTrade {
-        instrument, price: 100 * PRICE_SCALE, size: 3, timestamp: 1, exchange: "ARCA".into(), conditions: String::new(),
-    };
-    shared.market.push_tbt_trade(trade(0));
-    shared.market.push_tbt_trade(trade(2));
-    shared.market.push_tbt_error(2, TbtType::BidAsk, "No historical market data for X".into());
+    client.core.tbt_reqs.lock().unwrap().insert(10, (2, 265598, TbtType::MidPoint));
+    shared.market.push_tbt_trade(tbt_trade(7, TbtType::Last, true, false));
+    shared.market.push_tbt_trade(tbt_trade(8, TbtType::AllLast, false, true));
+    shared.market.push_tbt_quote(TbtQuote {
+        instrument: 2, req_id: 9, bid: 99 * PRICE_SCALE, ask: 101 * PRICE_SCALE, bid_size: 4, ask_size: 5, timestamp: 2,
+        bid_past_low: false, ask_past_high: true,
+    });
+    shared.market.push_tbt_mid_point(TbtMidPoint { instrument: 2, req_id: 10, mid_point: 100 * PRICE_SCALE + PRICE_SCALE / 2, timestamp: 3 });
+    shared.market.push_tbt_error(9, 10189, "Failed to request tick-by-tick data.No historical market data for X".into());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.contains(&"tbt_last:7:1:1:100:3:ARCA".to_string()), "{:?}", w.events);
-    assert!(w.events.contains(&"tbt_last:8:2:1:100:3:ARCA".to_string()), "{:?}", w.events);
-    assert!(w.events.contains(&"error:9:10189:Failed to request tick-by-tick data.No historical market data for X".to_string()), "{:?}", w.events);
+    for e in [
+        "tbt_last:7:1:1:100:3:ARCA:1",
+        "tbt_last:8:2:1:100:3:ARCA:2",
+        "tbt_bidask:9:2:99:101:4:5:2",
+        "tbt_mid:10:3:100.5",
+        "error:9:10189:Failed to request tick-by-tick data.No historical market data for X",
+    ] {
+        assert!(w.events.contains(&e.to_string()), "{e}: {:?}", w.events);
+    }
     assert!(!client.core.tbt_reqs.lock().unwrap().contains_key(&9));
-    assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::UnsubscribeTbt { instrument: 2 })));
+    assert!(rx.try_recv().is_err(), "the engine already let the refused request go");
 
     // Cancelling the tick-by-tick request leaves the market data mapping.
     client.cancel_tick_by_tick_data(7).unwrap();
-    assert!(matches!(rx.try_recv(), Ok(ControlCommand::UnsubscribeTbt { instrument: 0 })));
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::UnsubscribeTbt { req_id: 7 })));
     assert_eq!(client.core.req_id_for_instrument(0), 1);
     assert_eq!(client.core.con_id_to_instrument.lock().unwrap().get(&756733), Some(&0));
 }
@@ -401,7 +401,7 @@ fn cancel_tick_by_tick_data_sends_unsubscribe_tbt() {
     client.core.tbt_reqs.lock().unwrap().insert(10, (3, 1, TbtType::Last));
     client.cancel_tick_by_tick_data(10).unwrap();
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::UnsubscribeTbt { instrument: 3 }));
+    assert!(matches!(cmd, ControlCommand::UnsubscribeTbt { req_id: 10 }));
 }
 
 #[test]
@@ -2945,8 +2945,8 @@ fn process_msgs_dispatches_tbt_trade() {
     let (client, _rx, shared) = test_client();
     client.core.tbt_reqs.lock().unwrap().insert(10, (0, 756733, TbtType::Last));
     shared.market.push_tbt_trade(TbtTrade {
-        instrument: 0, price: 150 * PRICE_SCALE, size: 100,
-        timestamp: 1700000000, exchange: "ARCA".into(), conditions: "".into(),
+        instrument: 0, req_id: 10, tbt_type: TbtType::Last, price: 150 * PRICE_SCALE, size: 100,
+        timestamp: 1700000000, exchange: "ARCA".into(), conditions: "".into(), past_limit: false, unreported: false,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -2958,8 +2958,8 @@ fn process_msgs_dispatches_tbt_quote() {
     let (client, _rx, shared) = test_client();
     client.core.tbt_reqs.lock().unwrap().insert(10, (0, 756733, TbtType::BidAsk));
     shared.market.push_tbt_quote(TbtQuote {
-        instrument: 0, bid: 150 * PRICE_SCALE, ask: 151 * PRICE_SCALE,
-        bid_size: 1000, ask_size: 2000, timestamp: 1700000000,
+        instrument: 0, req_id: 10, bid: 150 * PRICE_SCALE, ask: 151 * PRICE_SCALE,
+        bid_size: 1000, ask_size: 2000, timestamp: 1700000000, bid_past_low: false, ask_past_high: false,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -2967,16 +2967,16 @@ fn process_msgs_dispatches_tbt_quote() {
 }
 
 #[test]
-fn process_msgs_tbt_unknown_instrument_uses_neg1() {
+fn process_msgs_tbt_goes_to_the_request_the_engine_names() {
     let (client, _rx, shared) = test_client();
-    // No mapping for instrument 5
+    // No market data mapping: the tick names its request.
     shared.market.push_tbt_trade(TbtTrade {
-        instrument: 5, price: 150 * PRICE_SCALE, size: 100,
-        timestamp: 0, exchange: "".into(), conditions: "".into(),
+        instrument: 5, req_id: 42, tbt_type: TbtType::AllLast, price: 150 * PRICE_SCALE, size: 100,
+        timestamp: 0, exchange: "".into(), conditions: "".into(), past_limit: false, unreported: false,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with("tbt_last:-1:")));
+    assert!(w.events.iter().any(|e| e.starts_with("tbt_last:42:2:")), "{:?}", w.events);
 }
 
 // ═══════════════════════════════════════════════════════════════════

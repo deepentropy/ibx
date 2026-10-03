@@ -511,10 +511,39 @@ pub struct TbtRawEntry {
 pub enum TbtStop {
     /// Every entry was read.
     Done,
-    /// An entry of a stream with no known layout: the rest is skipped.
-    UnknownStream(u64),
     /// A number or text ran past the data (ibx#272).
     Malformed,
+}
+
+/// How the entries of a stream id are read (ibx#404).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TbtEntryKind {
+    /// A live stream: its fields by its layout.
+    Read(TbtLayout),
+    /// A stream that is gone: this many fields are skipped (its type's
+    /// field count, 0 when not known), as the reference does.
+    Skip(usize),
+    /// A stream id with no stream yet: the field count is guessed, as the
+    /// reference does, and the entry skipped.
+    Guess,
+}
+
+/// A decoded tick-by-tick frame: the entries of live streams, the ids of
+/// the entries skipped, and why the read ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TbtFrame {
+    pub entries: Vec<TbtRawEntry>,
+    pub skipped: Vec<u64>,
+    pub stop: TbtStop,
+}
+
+/// The reference's field count of a stream type, used to skip the entry
+/// of a stream that is gone: 5 for trades and bid/ask, 2 for midpoints.
+pub fn tbt_field_count(layout: TbtLayout) -> usize {
+    match layout {
+        TbtLayout::Trade { .. } | TbtLayout::BidAsk { .. } => 5,
+        TbtLayout::MidPoint { .. } => 2,
+    }
 }
 
 /// A signed number and its width, or None past the data.
@@ -599,15 +628,71 @@ fn read_fields(data: &[u8], pos: &mut usize, end: usize, layout: TbtLayout) -> O
     })
 }
 
+/// Skip `n` fields: each runs to its byte with bit 7 set; the data may
+/// end first.
+fn skip_fields(data: &[u8], pos: &mut usize, n: usize) {
+    for _ in 0..n {
+        while *pos < data.len() {
+            let b = data[*pos];
+            *pos += 1;
+            if b & 0x80 != 0 {
+                break;
+            }
+        }
+    }
+}
+
+/// A number as the reference's guess reads it: a 32-bit value that wraps,
+/// None past the data.
+fn guess_number(data: &[u8], pos: &mut usize) -> Option<i32> {
+    let mut v: i32 = 0;
+    loop {
+        let b = *data.get(*pos)?;
+        *pos += 1;
+        v = v.wrapping_shl(7).wrapping_add((b & 0x7F) as i32);
+        if b & 0x80 != 0 {
+            return Some(v);
+        }
+    }
+}
+
+/// The reference's field count guess for an entry of a stream id with no
+/// stream (`GuessRawTickSize`): 2 when the 4th number after the time looks
+/// like a time (the next entry's, after a midpoint), else 5 when the 7th
+/// does (after a trade), else 0. A time looks right in `window` (Unix
+/// seconds, start included).
+fn guess_field_count(data: &[u8], pos: usize, window: (i64, i64)) -> usize {
+    let looks_like_time = |v: i32| v != 0 && v != i32::MAX && v != i32::MIN
+        && (v as i64) >= window.0 && (v as i64) < window.1;
+    let mut p = pos;
+    let mut nth = |n: usize| -> Option<i32> {
+        let mut v = 0;
+        for _ in 0..n {
+            v = guess_number(data, &mut p)?;
+        }
+        Some(v)
+    };
+    let Some(fourth) = nth(4) else { return 0 };
+    if looks_like_time(fourth) {
+        return 2;
+    }
+    match nth(3) {
+        Some(seventh) if looks_like_time(seventh) => 5,
+        _ => 0,
+    }
+}
+
 /// Decode a tick-by-tick frame (ibx#404), as the reference reads it: each
 /// entry names its stream, and its fields are laid out by the stream's
-/// type, which `layout_of` gives for a stream id. Reading stops at the
-/// declared size, at a number past the data, or at a stream with no layout
-/// (its entry size is not known).
-pub fn decode_tbt_frame(body: &[u8], mut layout_of: impl FnMut(u64) -> Option<TbtLayout>) -> (Vec<TbtRawEntry>, TbtStop) {
-    let mut out = Vec::new();
+/// type, which `kind_of` gives for a stream id. The entry of a stream that
+/// is gone or not there yet is skipped by a field count and the read goes
+/// on, as the reference does; `window` is the time range of its guess.
+/// Reading stops at the declared size or at a number past the data.
+pub fn decode_tbt_frame(body: &[u8], mut kind_of: impl FnMut(u64) -> TbtEntryKind, window: (i64, i64)) -> TbtFrame {
+    let mut out = TbtFrame { entries: Vec::new(), skipped: Vec::new(), stop: TbtStop::Done };
     if body.len() < 2 {
-        return (out, TbtStop::Malformed);
+        out.stop = TbtStop::Malformed;
+        return out;
     }
     let data = &body[2..];
     // The declared size wraps on a long frame.
@@ -618,13 +703,26 @@ pub fn decode_tbt_frame(body: &[u8], mut layout_of: impl FnMut(u64) -> Option<Tb
     let end = bits.div_ceil(8).min(data.len());
     let mut pos = 0;
     while pos < end {
-        let Some(rt_ticker_id) = read_uvlq(&data[..end], &mut pos) else { return (out, TbtStop::Malformed) };
-        let Some(time) = read_uvlq(&data[..end], &mut pos) else { return (out, TbtStop::Malformed) };
-        let Some(layout) = layout_of(rt_ticker_id) else { return (out, TbtStop::UnknownStream(rt_ticker_id)) };
-        let Some(fields) = read_fields(data, &mut pos, end, layout) else { return (out, TbtStop::Malformed) };
-        out.push(TbtRawEntry { rt_ticker_id, time, fields });
+        let (Some(rt_ticker_id), Some(time)) = (read_uvlq(&data[..end], &mut pos), read_uvlq(&data[..end], &mut pos)) else {
+            out.stop = TbtStop::Malformed;
+            return out;
+        };
+        let skip = match kind_of(rt_ticker_id) {
+            TbtEntryKind::Read(layout) => {
+                let Some(fields) = read_fields(data, &mut pos, end, layout) else {
+                    out.stop = TbtStop::Malformed;
+                    return out;
+                };
+                out.entries.push(TbtRawEntry { rt_ticker_id, time, fields });
+                continue;
+            }
+            TbtEntryKind::Skip(n) => n,
+            TbtEntryKind::Guess => guess_field_count(&data[..end], pos, window),
+        };
+        skip_fields(&data[..end], &mut pos, skip);
+        out.skipped.push(rt_ticker_id);
     }
-    (out, TbtStop::Done)
+    out
 }
 
 #[cfg(test)]
@@ -1350,6 +1448,15 @@ mod tests {
         f
     }
 
+    /// The time window of the guess in these tests.
+    const WINDOW: (i64, i64) = (1_781_000_000, 1_781_000_000 + 259_200);
+
+    /// Decode with a layout per stream id (None: no stream yet).
+    fn decode(body: &[u8], layout_of: impl Fn(u64) -> Option<TbtLayout>) -> (Vec<TbtRawEntry>, TbtStop) {
+        let f = decode_tbt_frame(body, |id| layout_of(id).map_or(TbtEntryKind::Guess, TbtEntryKind::Read), WINDOW);
+        (f.entries, f.stop)
+    }
+
     // The captured entry (18/06/2026, seq 11117): stream 5, time
     // 1781772222, price 61900 ticks, attributes 12, size 100, ARCA, T; then
     // the next entry of stream 1.
@@ -1363,7 +1470,7 @@ mod tests {
         e.extend(encode_vlq(5));
         e.extend(encode_hibit_str("NYSE"));
         e.extend(encode_hibit_str(""));
-        let (got, stop) = decode_tbt_frame(&frame(&e), |_| Some(TbtLayout::Trade { sized: true }));
+        let (got, stop) = decode(&frame(&e), |_| Some(TbtLayout::Trade { sized: true }));
         assert_eq!(stop, TbtStop::Done);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0], TbtRawEntry {
@@ -1399,15 +1506,57 @@ mod tests {
             2 => Some(TbtLayout::Trade { sized: true }),
             _ => None,
         };
-        let (got, stop) = decode_tbt_frame(&frame(&e), layout);
+        let (got, stop) = decode(&frame(&e), layout);
         assert_eq!(stop, TbtStop::Done);
         assert_eq!(got[0].fields, TbtFields::BidAsk { bid_delta: 10, ask_delta: 12, attribs: 4, bid_size: 7 | (1 << 32), ask_size: 3 });
         assert!(matches!(&got[1].fields, TbtFields::Trade { exchange, .. } if exchange == "ISLAND"));
 
-        // A stream with no layout stops the decode there.
-        let (got, stop) = decode_tbt_frame(&frame(&e), |id| (id == 2).then_some(TbtLayout::Trade { sized: true }));
-        assert!(got.is_empty());
-        assert_eq!(stop, TbtStop::UnknownStream(1));
+        // A stream that is gone is skipped by its type's field count (5
+        // for bid/ask: the wide bid size makes it one short) and the read
+        // goes on, as the reference does.
+        let f = decode_tbt_frame(&frame(&e), |id| match id {
+            1 => TbtEntryKind::Skip(tbt_field_count(TbtLayout::BidAsk { sized: true })),
+            _ => TbtEntryKind::Read(TbtLayout::Trade { sized: true }),
+        }, WINDOW);
+        assert_eq!(f.skipped, [1]);
+        assert_eq!(f.entries.len(), 1);
+        assert_eq!(f.entries[0].rt_ticker_id, 3, "the 6th field of the skipped entry is read as a stream id");
+    }
+
+    // ibx#404: an entry of a stream id with no stream yet is skipped by the
+    // reference's guess: 2 fields when the 4th number after the time looks
+    // like a time (a midpoint before the next entry), 5 when the 7th does
+    // (a trade or a bid/ask), else none; the frame goes on after it.
+    #[test]
+    fn unknown_stream_entries_are_skipped_by_the_guess() {
+        let t = WINDOW.0 as u64 + 10;
+        let trade = |id: u64| {
+            let mut e = Vec::new();
+            e.extend(encode_vlq(id)); e.extend(encode_vlq(t)); e.extend(encode_vlq(61900)); e.extend(encode_vlq(12));
+            e.extend(encode_vlq(100)); e.extend(encode_hibit_str("ARCA")); e.extend(encode_hibit_str("T"));
+            e
+        };
+        let mid = |id: u64| [encode_vlq(id), encode_vlq(t), encode_vlq(5), encode_vlq(0)].concat();
+        let live = |id| (id == 1).then_some(TbtLayout::Trade { sized: true });
+
+        // Unknown trade entry (stream 9), then a live one.
+        let e = [trade(9), trade(1)].concat();
+        let f = decode_tbt_frame(&frame(&e), |id| live(id).map_or(TbtEntryKind::Guess, TbtEntryKind::Read), WINDOW);
+        assert_eq!((f.skipped.as_slice(), f.entries.len(), f.stop), (&[9][..], 1, TbtStop::Done));
+        assert_eq!(f.entries[0].rt_ticker_id, 1);
+
+        // Unknown unsized midpoint (2 fields), then a live trade.
+        let e = [mid(9), trade(1)].concat();
+        let f = decode_tbt_frame(&frame(&e), |id| live(id).map_or(TbtEntryKind::Guess, TbtEntryKind::Read), WINDOW);
+        assert_eq!((f.skipped.as_slice(), f.entries.len()), (&[9][..], 1));
+
+        // A time out of the window: nothing skipped, the next numbers are
+        // read as an entry.
+        let mut e = trade(9);
+        e.extend(trade(1));
+        let f = decode_tbt_frame(&frame(&e), |id| live(id).map_or(TbtEntryKind::Guess, TbtEntryKind::Read), (0, 1));
+        assert_eq!(f.skipped.first(), Some(&9));
+        assert!(f.skipped.len() > 1, "the fields are read as more entries: {f:?}");
     }
 
     // Without a size increment the fields come in another order; the
@@ -1433,7 +1582,7 @@ mod tests {
             4 => Some(TbtLayout::MidPoint { sized: true }),
             _ => None,
         };
-        let (got, stop) = decode_tbt_frame(&frame(&e), layout);
+        let (got, stop) = decode(&frame(&e), layout);
         assert_eq!(stop, TbtStop::Done);
         assert_eq!(got[0].fields, TbtFields::BidAsk { bid_delta: 9, ask_delta: 11, attribs: 1, bid_size: 200, ask_size: 300 });
         assert_eq!(got[1].fields, TbtFields::MidPoint { delta: 20 });
@@ -1447,11 +1596,11 @@ mod tests {
         e.extend(encode_vlq(1));
         e.extend(encode_vlq(1000));
         e.push(0x05); // unterminated price
-        let (got, stop) = decode_tbt_frame(&frame(&e), |_| Some(TbtLayout::Trade { sized: true }));
+        let (got, stop) = decode(&frame(&e), |_| Some(TbtLayout::Trade { sized: true }));
         assert!(got.is_empty());
         assert_eq!(stop, TbtStop::Malformed);
-        assert_eq!(decode_tbt_frame(&[], |_| None).1, TbtStop::Malformed);
-        let (got, stop) = decode_tbt_frame(&[0, 0, 0x81, 0x82], |_| None);
+        assert_eq!(decode(&[], |_| None).1, TbtStop::Malformed);
+        let (got, stop) = decode(&[0, 0, 0x81, 0x82], |_| None);
         assert!(got.is_empty() && stop == TbtStop::Done, "a zero bit count holds no entry");
     }
 }
