@@ -1,0 +1,1589 @@
+kind,id,description,test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 0,How to read this code,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 1,reqAccountSummary / cancelAccountSummary,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 1.1,Entry path,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 1.2,Local refusals,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 1.3,$LEDGER items,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 1.4,The request 35=U|6040=55,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 1.5,Answer and API messages,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 1.6,Cancel,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 2,reqPositions / reqPositionsMulti / cancels,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 2.1,Where positions come from,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 2.2,reqPositions (API 61),no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 2.3,reqPositionsMulti (API 74),no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 2.4,"Snapshot, filters, API rows",no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 2.5,Updates after a fill,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 2.6,Cancel,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 3,reqPnL / reqPnLSingle / cancels,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 3.1,Entry and refusals,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 3.2,"Wire: 35=U|6040=142, 6040=143, 6040=152",no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 3.3,How the values are computed,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 3.4,API messages and update rule,no test
+rule,ACCOUNT-SUMMARY-POSITIONS-PNL 3.5,"Cancel, disconnect, reconnect",no test
+rule,ACCOUNT-UPDATES 0,How to read this code,no test
+rule,ACCOUNT-UPDATES 1,Entry path and local refusals,no test
+rule,ACCOUNT-UPDATES 1.1,Dispatch,no test
+rule,ACCOUNT-UPDATES 1.2,reqAccountUpdates: decode,no test
+rule,ACCOUNT-UPDATES 1.3,reqAccountUpdates: validation,no test
+rule,ACCOUNT-UPDATES 1.4,reqAccountUpdates: processing,no test
+rule,ACCOUNT-UPDATES 1.5,Replay of the cached image (subscribe to the current account),no test
+rule,ACCOUNT-UPDATES 1.6,reqManagedAccts,no test
+rule,ACCOUNT-UPDATES 2,The account stream (CCP) and what the API client receives,no test
+rule,ACCOUNT-UPDATES 2.1,The account subscription 35=U|6040=6,no test
+rule,ACCOUNT-UPDATES 2.2,Inbound routing,no test
+rule,ACCOUNT-UPDATES 2.3,35=UT / 35=UM rows → updateAccountValue,no test
+rule,ACCOUNT-UPDATES 2.4,35=RL ledger → per-currency updateAccountValue,no test
+rule,ACCOUNT-UPDATES 2.5,35=UP → updatePortfolio,no test
+rule,ACCOUNT-UPDATES 2.6,35=EB → accountDownloadEnd,no test
+rule,ACCOUNT-UPDATES 2.7,Periodic batches: who drives them,no test
+rule,ACCOUNT-UPDATES 3,reqAccountUpdatesMulti and cancelAccountUpdatesMulti,no test
+rule,ACCOUNT-UPDATES 3.1,Decode,no test
+rule,ACCOUNT-UPDATES 3.2,Validation and,no test
+rule,ACCOUNT-UPDATES 3.3,Processing ( → ),no test
+rule,ACCOUNT-UPDATES 3.4,Live Multi stream,no test
+rule,ACCOUNT-UPDATES 3.5,Cancel,no test
+rule,API-SESSION 1,Listener and handshake,no test
+rule,API-SESSION 1.1,Listener,no test
+rule,API-SESSION 1.2,The zero-byte probe deadlock,no test
+rule,API-SESSION 1.3,Handshake bytes (client version 100 and above),no test
+rule,API-SESSION 1.4,Message framing after the handshake,no test
+rule,API-SESSION 2,Session,no test
+rule,API-SESSION 2.1,Connection sequence in,no test
+rule,API-SESSION 2.2,Pending timer,no test
+rule,API-SESSION 2.3,Request gate before StartApi,no test
+rule,API-SESSION 2.4,"StartApi (, id 71)",no test
+rule,API-SESSION 2.5,Duplicate client id (326),no test
+rule,API-SESSION 2.6,Read-only API,no test
+rule,API-SESSION 2.7,Master API client id,no test
+rule,API-SESSION 2.8,Bad fields and slow readers,no test
+rule,API-SESSION 2.9,Write path to the API client (ibx#254),no test
+rule,API-SESSION 3,Message dispatcher,no test
+rule,API-SESSION 3.1,Version rules that change the wire,no test
+rule,API-SESSION 3.2,Incoming (client to gateway),no test
+rule,API-SESSION 3.3,Outgoing (gateway to client),no test
+rule,API-SESSION 4,"Rate limit, nextValidId, managedAccounts, reqCurrentTime, setServerLogLevel",no test
+rule,API-SESSION 4.1,Message rate: two different read loops,no test
+rule,API-SESSION 4.2,nextValidId,no test
+rule,API-SESSION 4.3,managedAccounts and the rest of the connect burst,no test
+rule,API-SESSION 4.4,reqCurrentTime (49) and reqCurrentTimeInMillis (105),no test
+rule,API-SESSION 4.5,setServerLogLevel (14),no test
+rule,API-SESSION 5,Server side effects and cleanup,no test
+rule,API-SESSION 5.1,35=U|6040=113 (API client connection status),no test
+rule,API-SESSION 5.2,Cleanup on API disconnect,no test
+rule,API-SESSION 5.3,verifyRequest (65) and verifyMessage (66),no test
+rule,API-SESSION 6,API settings,no test
+rule,CONN-AUTH 1,Login state machine,no test
+rule,CONN-AUTH 1.1,Classes,no test
+rule,CONN-AUTH 1.2,Dispatcher modes,no test
+rule,CONN-AUTH 1.3,Step table (CCP),no test
+rule,CONN-AUTH 1.5,AUTH_START (520) fields,no test
+rule,CONN-AUTH 1.6,"Decision (, )",no test
+rule,CONN-AUTH 1.7,SRP 777,no test
+rule,CONN-AUTH 1.8,CONNECT_RESPONSE (523),no test
+rule,CONN-AUTH 1.9,NEWCOMMPORTTYPE (526),no test
+rule,CONN-AUTH 1.10,Farm login,no test
+rule,CONN-AUTH 1.11,Disconnect reasons and reconnect,no test
+rule,CONN-AUTH 2,"Paper vs live, second factor",no test
+rule,CONN-AUTH 2.1,Differences seen,no test
+rule,CONN-AUTH 2.2,"Second-factor types (w constants, )",no test
+rule,CONN-AUTH 2.3,"mobile key (775, M)",no test
+rule,CONN-AUTH 2.4,"Other factors, typed codes",no test
+rule,CONN-AUTH 3,Keys and crypto,no test
+rule,CONN-AUTH 3.1,NS key exchange (532 / 533),no test
+rule,CONN-AUTH 3.2,Per-channel ciphers,no test
+rule,CONN-AUTH 3.3,8349 sign and verify,no test
+rule,CONN-AUTH 3.4,Tokens and session ids,no test
+rule,CONN-AUTH 3.5,What the gateway does not check,no test
+rule,CONN-AUTH 4,NS framing parse rules,no test
+rule,CONN-AUTH 4.1,Header and length,no test
+rule,CONN-AUTH 4.2,Text decoding and the MISC prefix,no test
+rule,CONN-AUTH 4.3,After the handshake,no test
+rule,CONN-AUTH 4.4,Keepalive in the auth phase,no test
+rule,CONN-AUTH 4.5,XYZ decoding,no test
+rule,CONN-AUTH 4.6,"NS messages 519, 527, 532-535",no test
+rule,CONN-AUTH 519,NS_ERROR_RESPONSE,no test
+rule,CONN-AUTH 527,NS_BACKUP_HOST,no test
+rule,CONN-AUTH 533,NS_SECURE_CONNECTION_START,no test
+rule,CONN-AUTH 534,NS_SECURE_MESSAGE,no test
+rule,CONN-AUTH 535,NS_SECURE_ERROR,no test
+rule,CONN-FARMS 1,Connection model and lifecycle,no test
+rule,CONN-FARMS 1.1,Connection types,no test
+rule,CONN-FARMS 1.2,Primary farm endpoints come from the CCP logon ack,no test
+rule,CONN-FARMS 1.3,Opening,no test
+rule,CONN-FARMS 1.4,Closing while the session is up,no test
+rule,CONN-FARMS 2,Routing table and farm choice,no test
+rule,CONN-FARMS 2.1,Request,no test
+rule,CONN-FARMS 2.2,Response,no test
+rule,CONN-FARMS 2.3,When it is requested again,no test
+rule,CONN-FARMS 2.4,Which farm a request uses,no test
+rule,CONN-FARMS 3,Farm logon and CCP startup burst,no test
+rule,CONN-FARMS 3.1,Farm logon 35=A,no test
+rule,CONN-FARMS 3.2,CCP logon,no test
+rule,CONN-FARMS 3.3,CCP startup burst,no test
+rule,CONN-FARMS 4,Heartbeats and liveness,no test
+rule,CONN-FARMS 4.1,CCP: (CCP only),no test
+rule,CONN-FARMS 4.2,"Farms: ServicePing, watchdog, server test requests",no test
+rule,CONN-FARMS 4.3,Numbers,no test
+rule,CONN-FARMS 5,"Loss, reconnect, what is restored, API notifications",no test
+rule,CONN-FARMS 5.1,CCP loss,no test
+rule,CONN-FARMS 5.2,CCP relogin: what is sent again,no test
+rule,CONN-FARMS 5.3,Farm loss and reconnect,no test
+rule,CONN-FARMS 5.4,What is restored after a farm reconnect,no test
+rule,CONN-FARMS 5.5,API notifications,no test
+rule,CONN-FARMS 6,Shutdown,no test
+rule,CONN-FARMS 6a,Send path and write timeouts,no test
+rule,CONN-LOSS-ORDERS 1,At the CCP drop,no test
+rule,CONN-LOSS-ORDERS 2,At the relogin: which of 1101 / 1102,no test
+rule,CONN-LOSS-ORDERS 3,At the replay end marker,no test
+rule,CONN-LOSS-ORDERS 4,reqOpenOrders and reqAllOpenOrders during the outage,no test
+rule,CONN-LOSS-ORDERS 5,What is not traced,no test
+rule,CONTRACT-DETAILS 0,How to read this code,no test
+rule,CONTRACT-DETAILS 1,Entry path and local refusals,no test
+rule,CONTRACT-DETAILS 1.1,Dispatch,no test
+rule,CONTRACT-DETAILS 1.2,"Decode (text, )",no test
+rule,CONTRACT-DETAILS 1.3,Validation → (+ for BAG),no test
+rule,CONTRACT-DETAILS 1.4,Processing,no test
+rule,CONTRACT-DETAILS 2,The 35=c request,no test
+rule,CONTRACT-DETAILS 2.1,Which request,no test
+rule,CONTRACT-DETAILS 2.2,Strike retry (options),no test
+rule,CONTRACT-DETAILS 2.3,By symbol: (FixSecDefReqBySymbol),no test
+rule,CONTRACT-DETAILS 2.4,By security id: (FixSecDefReqByIdTypeValue),no test
+rule,CONTRACT-DETAILS 2.5,By conId (API conId > 0),no test
+rule,CONTRACT-DETAILS 2.6,Continuous futures (CONTFUT),no test
+rule,CONTRACT-DETAILS 3,The reply,no test
+rule,CONTRACT-DETAILS 3.1,35=d parse,no test
+rule,CONTRACT-DETAILS 3.2,Reject frames,no test
+rule,CONTRACT-DETAILS 3.3,"From records to API messages (, ESecDefContractProcessor)",no test
+rule,CONTRACT-DETAILS 3.4,"CONTRACT_DATA (message 10), text writer",no test
+rule,CONTRACT-DETAILS 3.5,minTick,no test
+rule,CONTRACT-DETAILS 3.6,BOND_CONTRACT_DATA (message 18),no test
+rule,CONTRACT-DETAILS 4,Caches,no test
+rule,CONTRACT-DETAILS 6b,35=d tags: complete list (added 25/09/2026),no test
+rule,CONTRACT-SEARCH 0,How to read this code,no test
+rule,CONTRACT-SEARCH 1,reqMatchingSymbols,no test
+rule,CONTRACT-SEARCH 1.1,Entry path,no test
+rule,CONTRACT-SEARCH 1.2,Local refusals and errors,no test
+rule,CONTRACT-SEARCH 1.3,The request 35=U|6040=185,no test
+rule,CONTRACT-SEARCH 1.3.1,"Queue, pacing and correlation (, e)",no test
+rule,CONTRACT-SEARCH 1.4,The answer 35=U|6040=186,no test
+rule,CONTRACT-SEARCH 1.5,API message SYMBOL_SAMPLES (id 79),no test
+rule,CONTRACT-SEARCH 2,reqSecDefOptParams,no test
+rule,CONTRACT-SEARCH 2.1,Entry path and local refusals,no test
+rule,CONTRACT-SEARCH 2.2,"Wire requests (all on CCP, one after the other)",no test
+rule,CONTRACT-SEARCH 2.3,"The answer 6040=139 (, rows )",no test
+rule,CONTRACT-SEARCH 2.4,Cache and duplicates,no test
+rule,CONTRACT-SEARCH 2.5,API messages (ids 75 and 76),no test
+rule,CONTRACT-SEARCH 2.6,Errors after validation and timing,no test
+rule,CONTRACT-SEARCH 3,reqMarketRule,no test
+rule,CONTRACT-SEARCH 3.1,Entry path and answer source,no test
+rule,CONTRACT-SEARCH 3.2,Errors,no test
+rule,CONTRACT-SEARCH 3.3,Rule table → API MARKET_RULE (id 93),no test
+rule,CONTRACT-SEARCH 4,reqSmartComponents,no test
+rule,CONTRACT-SEARCH 4.1,Entry path,no test
+rule,CONTRACT-SEARCH 4.2,Errors,no test
+rule,CONTRACT-SEARCH 4.3,"Map format and API message SMART_COMPONENTS (BBO_EXCHANGE_MAPPING, id 82)",no test
+rule,CONTRACT-SEARCH 5,reqFamilyCodes,no test
+rule,CONTRACT-SEARCH 5.1,Entry path,no test
+rule,CONTRACT-SEARCH 5.2,List rules,no test
+rule,CONTRACT-SEARCH 5.3,API message FAMILY_CODES (id 78),no test
+rule,DISPLAY-GROUPS 0,Summary,no test
+rule,DISPLAY-GROUPS 1,Common part,no test
+rule,DISPLAY-GROUPS 1.1,Dispatch,no test
+rule,DISPLAY-GROUPS 1.2,Decode and base checks,no test
+rule,DISPLAY-GROUPS 1.3,How refusals reach the client,no test
+rule,DISPLAY-GROUPS 1.4,Answer messages,no test
+rule,DISPLAY-GROUPS 2,queryDisplayGroups (67),no test
+rule,DISPLAY-GROUPS 3,subscribeToGroupEvents (68),no test
+rule,DISPLAY-GROUPS 3.1,Decode,no test
+rule,DISPLAY-GROUPS 3.2,"Local refusals (, all 321)",no test
+rule,DISPLAY-GROUPS 3.3,Process,no test
+rule,DISPLAY-GROUPS 3.4,Later events,no test
+rule,DISPLAY-GROUPS 4,updateDisplayGroup (69),no test
+rule,DISPLAY-GROUPS 4.1,Decode,no test
+rule,DISPLAY-GROUPS 4.2,"Action choice (, )",no test
+rule,DISPLAY-GROUPS 4.3,"Local refusals for ChangeGroupEc (the normal case, all 321)",no test
+rule,DISPLAY-GROUPS 4.4,Process,no test
+rule,DISPLAY-GROUPS 4.5,OpenTS action,no test
+rule,DISPLAY-GROUPS 5,unsubscribeFromGroupEvents (70),no test
+rule,DISPLAY-GROUPS 6,Group state in the gateway,no test
+rule,DISPLAY-GROUPS 6.1,Where a group gets its contract,no test
+rule,DISPLAY-GROUPS 6.2,Restore at login,no test
+rule,DISPLAY-GROUPS 6.3,Does the gateway have groups?,no test
+rule,EXECUTIONS 0,Objects and names,no test
+rule,EXECUTIONS 1,Fill path: 35=8 -> execution -> execDetails and commissionReport,no test
+rule,EXECUTIONS 1.1,Entry,no test
+rule,EXECUTIONS 1.2,Who receives the live execDetails,no test
+rule,EXECUTIONS 1.3,execDetails fields,no test
+rule,EXECUTIONS 1.4,commissionReport,no test
+rule,EXECUTIONS 2,"Which clients receive execDetails, orderId for other sessions",no test
+rule,EXECUTIONS 3,reqExecutions (API msg 7),no test
+rule,EXECUTIONS 4,Session-start execution restore and dedup,no test
+rule,EXECUTIONS 4.1,What the gateway sends at logon,no test
+rule,EXECUTIONS 4.2,The replay marker frame,no test
+rule,EXECUTIONS 4.3,What reaches the API during replay,no test
+rule,EXECUTIONS 4.4,Execution store dedup (ExecReportMgr),no test
+rule,EXECUTIONS 4.5,Corrections and busts,no test
+rule,EXECUTIONS 5,reqCompletedOrders(apiOnly) (API msg 99),no test
+rule,FA 1,FA session: how the gateway knows the account is FA,no test
+rule,FA 2,"requestFA (API 18, protobuf 218)",no test
+rule,FA 2.1,Decode,no test
+rule,FA 2.2,"Local refusals , in this order",no test
+rule,FA 2.3,Processing,no test
+rule,FA 2.4,Answer RECEIVE_FA (16 / protobuf 216),no test
+rule,FA 3,"replaceFA (API 19, protobuf 219)",no test
+rule,FA 3.1,Decode,no test
+rule,FA 3.2,"Local refusals, validation step , delivered as 321",no test
+rule,FA 3.3,"Processing , errors delivered as the code itself with the request id",no test
+rule,FA 3.4,"Import checks (inside ), errors sent through the consumer to the client",no test
+rule,FA 3.5,Save to the server and answer,no test
+rule,FA 4,"FA data on the wire: FixFAConfigXml (35=U|6040=116 out, 6040=117 in)",no test
+rule,FA 4.1,Request 35=U|6040=116feature.partitions.storage.q.a(StringBuilder)),no test
+rule,FA 4.2,Commands (6905),no test
+rule,FA 4.3,Answer 35=U|6040=117feature.partitions.storage.d),no test
+rule,FA 4.4,Logon download,no test
+rule,FA 4.5,Models (6906=Models),no test
+rule,FA 5,XML formats,no test
+rule,FA 5.1,"Classic group (, list )",no test
+rule,FA 5.2,"Unified group (, list ), requestFA type 1 in unified mode",no test
+rule,FA 5.3,"Profile (, list ListOfAllocationProfiles), requestFA type 2",no test
+rule,FA 5.4,"Aliases (, list ListOfAccountAliases), requestFA type 3",no test
+rule,FA 6,"reqSoftDollarTiers (API 79, protobuf 279; answer SOFT_DOLLAR_TIERS 77)",no test
+rule,FA 6.1,Decode and checks,no test
+rule,FA 6.2,"Answer (, protobuf )",no test
+rule,FA 6.3,Source: CCP logon tag **6522** (not 6560),no test
+rule,FA 6.4,Soft dollar tier on orders,no test
+rule,FA 7,FA allocation on orders (placeOrder),no test
+rule,FA 7.1,Decode,no test
+rule,FA 7.2,Wire (35=D ),no test
+rule,FA 7.3,Methods and local refusals,no test
+rule,FA 7.4,Inbound 35=8 and openOrder,no test
+rule,FA 8,Model portfolios (modelCode),no test
+rule,FA 9,Multi-account session: what changes for FA,no test
+rule,FA 9.1,Session flags (names from the diagnostics page ),no test
+rule,FA 9.2,MANAGED_ACCTS (15),no test
+rule,FA 9.3,"FA vs single account, per request",no test
+rule,FA 10,FA error codes,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 0,Entry points and how refusals reach the client,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 1,reqFundamentalData (52) / cancelFundamentalData (53),no test
+rule,FUNDAMENTALS-WSH-OPTCALC 1.1,Decode,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 1.2,Report types,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 1.3,Local refusals,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 1.4,Cache (no wire request),no test
+rule,FUNDAMENTALS-WSH-OPTCALC 1.5,Wire request,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 1.6,Response and API message,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 1.7,cancelFundamentalData (53),no test
+rule,FUNDAMENTALS-WSH-OPTCALC 2,"calculateImpliedVolatility (54) / calculateOptionPrice (55) and their cancels (56, 57)",no test
+rule,FUNDAMENTALS-WSH-OPTCALC 2.1,Decode,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 2.2,Local refusals,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 2.3,calculateImpliedVolatility: local computation,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 2.4,calculateOptionPrice: local computation,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 2.5,"Cancels (56, 57)",no test
+rule,FUNDAMENTALS-WSH-OPTCALC 2.6,Wire traffic and connection,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 3,"WSH: reqWshMetaData (100), reqWshEventData (102) and cancels (101, 103)",no test
+rule,FUNDAMENTALS-WSH-OPTCALC 3.1,Classes and manager,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 3.2,Decode,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 3.3,Local refusals,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 3.4,Wire request,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 3.5,Response and API messages,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 3.6,Cancels,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 4,exerciseOptions (21),no test
+rule,FUNDAMENTALS-WSH-OPTCALC 4.1,Decode,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 4.2,Local refusals,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 4.3,Order and wire message,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 4.4,Answers,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 4.5,"""Option Exercise Suggestion 6040=114, tag 8030""",no test
+rule,HIST-BARS 0,How to read this code,no test
+rule,HIST-BARS 1,Entry path and local refusals,no test
+rule,HIST-BARS 1.1,"Decode (text API, message id 20)",no test
+rule,HIST-BARS 1.2,"Validation (all refusals are API 321, see 0)",no test
+rule,HIST-BARS 1.3,whatToShow,no test
+rule,HIST-BARS 1.4,Bar size,no test
+rule,HIST-BARS 1.5,Processing and contract resolution,no test
+rule,HIST-BARS 2,HMDS query framing (shared by all HMDS requests),no test
+rule,HIST-BARS 2.1,Outbound message,no test
+rule,HIST-BARS 2.2,XML of,no test
+rule,HIST-BARS 2.3,Query id and allocation,no test
+rule,HIST-BARS 2.4,Which connection,no test
+rule,HIST-BARS 2.5,Inbound response,no test
+rule,HIST-BARS 2.6,Multi-frame replies and <eoq>,no test
+rule,HIST-BARS 2.7,QueryError → API error,no test
+rule,HIST-BARS 2.8,Cancel (35=Z),no test
+rule,HIST-BARS 2.9,Pacing (local),no test
+rule,HIST-BARS 3,Bars,no test
+rule,HIST-BARS 3.1,From bM to the HMDS query,no test
+rule,HIST-BARS 3.2,Response → API historicalData,no test
+rule,HIST-BARS 3.3,historicalDataEnd,no test
+rule,HIST-BARS 3.4,keepUpToDate,no test
+rule,HIST-BARS 3.5,Other whatToShow values,no test
+rule,HIST-BARS 3.6,cancelHistoricalData (message 25),no test
+rule,HIST-BARS 4,reqHeadTimestamp (message 87),no test
+rule,HIST-BARS 4.1,Request and local refusals,no test
+rule,HIST-BARS 4.2,HMDS query,no test
+rule,HIST-BARS 4.3,"Reply, cache and API string",no test
+rule,HIST-BARS 4.4,cancelHeadTimestamp (message 90),no test
+rule,HIST-TICKS-HISTOGRAM 0,How to read this code,no test
+rule,HIST-TICKS-HISTOGRAM 1,reqHistoricalTicks,no test
+rule,HIST-TICKS-HISTOGRAM 1.1,Entry path,no test
+rule,HIST-TICKS-HISTOGRAM 1.2,Local refusals (no 35=W sent),no test
+rule,HIST-TICKS-HISTOGRAM 1.2.1,"Time-zone rule (, )",no test
+rule,HIST-TICKS-HISTOGRAM 1.3,The 35=W query,no test
+rule,HIST-TICKS-HISTOGRAM 1.3.1,Settings built in,no test
+rule,HIST-TICKS-HISTOGRAM 1.3.2,Tick-specific query fields,no test
+rule,HIST-TICKS-HISTOGRAM 1.3.3,How many queries (paging),no test
+rule,HIST-TICKS-HISTOGRAM 1.4,Server answer,no test
+rule,HIST-TICKS-HISTOGRAM 1.5,Decode to the API,no test
+rule,HIST-TICKS-HISTOGRAM 1.6,Errors after send,no test
+rule,HIST-TICKS-HISTOGRAM 2,reqHistogramData and cancelHistogramData,no test
+rule,HIST-TICKS-HISTOGRAM 2.1,Entry path and local refusals,no test
+rule,HIST-TICKS-HISTOGRAM 2.2,The 35=W query,no test
+rule,HIST-TICKS-HISTOGRAM 2.3,Server answer (capture),no test
+rule,HIST-TICKS-HISTOGRAM 2.4,Gateway aggregation and API output,no test
+rule,HIST-TICKS-HISTOGRAM 2.5,cancelHistogramData,no test
+rule,LOGON-REPLY 1,"Messages, classes and paths",no test
+rule,LOGON-REPLY 1.1,Classes,no test
+rule,LOGON-REPLY 1.2,Reply handling order,no test
+rule,LOGON-REPLY 1.3,Hot restart,no test
+rule,LOGON-REPLY 1.4,Captures used,no test
+rule,LOGON-REPLY 2,Logon sent (client → auth host),no test
+rule,LOGON-REPLY 3,Logon reply: tag dictionary,no test
+rule,LOGON-REPLY 3.1,Header and session,no test
+rule,LOGON-REPLY 3.2,Identity and accounts,no test
+rule,LOGON-REPLY 3.3,"Session flags, identity and limits",no test
+rule,LOGON-REPLY 3.4,Routing and farms,no test
+rule,LOGON-REPLY 3.5,Market data,no test
+rule,LOGON-REPLY 3.6,Orders,no test
+rule,LOGON-REPLY 3.7,Feature and permission carriers,no test
+rule,LOGON-REPLY 4,Feature tokens,no test
+rule,LOGON-REPLY 4.1,Parsing,no test
+rule,LOGON-REPLY 4.2,Tokens with an API effect or asked for,no test
+rule,LOGON-REPLY 4.3,Per-account features,no test
+rule,LOGON-REPLY 4.4,Full token table,no test
+rule,LOGON-REPLY 4.5,Other tags read by,no test
+rule,LOGON-REPLY 5,Logon update and cache stamps,no test
+rule,LOGON-REPLY 5.1,Unsolicited logon update,no test
+rule,LOGON-REPLY 5.2,Config stamps 8263 and 8264,no test
+rule,LOGON-REPLY 6,"Account addition (35=U|6040=187 → 6040=188, )",no test
+rule,LOGON-REPLY 7,What reaches an API client,no test
+rule,LOGON-REPLY 8,Differences in ibx main (87cfd98),no test
+rule,MKTDATA-DEPTH 1,Entry path,no test
+rule,MKTDATA-DEPTH 1.1,Steps,no test
+rule,MKTDATA-DEPTH 1.2,API fields,no test
+rule,MKTDATA-DEPTH 1.3,Local refusals (no 35=V sent),no test
+rule,MKTDATA-DEPTH 1.4,Depth slot limit (309),no test
+rule,MKTDATA-DEPTH 1.5,"SmartDepth or single exchange, and which farm",no test
+rule,MKTDATA-DEPTH 2,The 35=V depth body and the cancel,no test
+rule,MKTDATA-DEPTH 2.1,Subscribe,no test
+rule,MKTDATA-DEPTH 2.2,When the 35=V is sent,no test
+rule,MKTDATA-DEPTH 2.3,Cancel body,no test
+rule,MKTDATA-DEPTH 2.4,The 264=626 entry is not depth,no test
+rule,MKTDATA-DEPTH 3,Inbound: 35=Y to the book to updateMktDepth / updateMktDepthL2,no test
+rule,MKTDATA-DEPTH 3.1,Dispatch by message type,no test
+rule,MKTDATA-DEPTH 3.2,35=Y / 35=Z bit layout,no test
+rule,MKTDATA-DEPTH 3.3,Level index and delete (ibx#274),no test
+rule,MKTDATA-DEPTH 3.4,Book model,no test
+rule,MKTDATA-DEPTH 3.4a,"User book merge (settled 25/09/2026, STATIC-FOLLOWUPS.md S-10)",no test
+rule,MKTDATA-DEPTH 3.5,Single-exchange depth to the API,no test
+rule,MKTDATA-DEPTH 3.6,"SmartDepth to the API (, )",no test
+rule,MKTDATA-DEPTH 3.7,Summary,no test
+rule,MKTDATA-DEPTH 4,reqMktDepthExchanges,no test
+rule,MKTDATA-L1 1,Entry path: API reqMktData to the subscription objects,no test
+rule,MKTDATA-L1 1.1,Steps,no test
+rule,MKTDATA-L1 1.2,Local refusals and API errors on the reqMktData path,no test
+rule,MKTDATA-L1 2,conId resolution before 35=V,no test
+rule,MKTDATA-L1 3,The 35=V message,no test
+rule,MKTDATA-L1 3.0,Header,no test
+rule,MKTDATA-L1 3.1,"Tags per entry, in wire order",no test
+rule,MKTDATA-L1 3.2,Tag 264 and,no test
+rule,MKTDATA-L1 3.3,Tag 207 (exchange),no test
+rule,MKTDATA-L1 3.4,Tag 9887 (delayed / frozen) and reqMarketDataType,no test
+rule,MKTDATA-L1 3.5,Tag 9830,no test
+rule,MKTDATA-L1 3.6,Generic ticks,no test
+rule,MKTDATA-L1 3.7,Cancel,no test
+rule,MKTDATA-L1 4,Farm selection and send,no test
+rule,MKTDATA-L1 4.1,Which farm,no test
+rule,MKTDATA-L1 4.2,Send and farm connection,no test
+rule,MKTDATA-L1 5,Inbound: 35=Q / 35=L / 35=P / 35=G to the API tick callbacks,no test
+rule,MKTDATA-L1 5.1,35=Q subscription ack,no test
+rule,MKTDATA-L1 5.2,35=L: the trade stream tag,no test
+rule,MKTDATA-L1 5.3,35=P decoder,no test
+rule,MKTDATA-L1 5.4,Wire type → gateway field → API tick,no test
+rule,MKTDATA-L1 5.5,Prices,no test
+rule,MKTDATA-L1 5.6,Sizes (x40 for US stocks),no test
+rule,MKTDATA-L1 5.7,"tickReqParams (81), marketDataType (58), snapshot end (57)",no test
+rule,MKTDATA-L1 5.8,Send rules,no test
+rule,MKTDATA-L1 5.9,"Plain snapshot (snapshot = true, regulatory = false)",no test
+rule,MKTDATA-L1 5.10,"Callback order, halted (49) and canAutoExecute (read 02/10/2026)",no test
+rule,MKTDATA-REGSNAPSHOT 1,Entry,no test
+rule,MKTDATA-REGSNAPSHOT 2,"Steps and timers (executor ; one-shot timers, no retry)",no test
+rule,MKTDATA-REGSNAPSHOT 3,What the API client receives,no test
+rule,MKTDATA-REGSNAPSHOT 4,Wire,no test
+rule,MKTDATA-REGSNAPSHOT 5,Not established,no test
+rule,MKTDATA-REGSNAPSHOT 6,What a live capture should confirm,no test
+rule,MKTDATA-TBT-RTBARS 0,How to read this code,no test
+rule,MKTDATA-TBT-RTBARS 1,Tick-by-tick request (reqTickByTickData),no test
+rule,MKTDATA-TBT-RTBARS 1.1,Entry path,no test
+rule,MKTDATA-TBT-RTBARS 1.2,The 35=W query text,no test
+rule,MKTDATA-TBT-RTBARS 1.3,Which HMDS connection,no test
+rule,MKTDATA-TBT-RTBARS 1.4,Ack and rtTickerId,no test
+rule,MKTDATA-TBT-RTBARS 1.5,Limits,no test
+rule,MKTDATA-TBT-RTBARS 1.6,Local refusals (no 35=W sent),no test
+rule,MKTDATA-TBT-RTBARS 1.7,Cancel,no test
+rule,MKTDATA-TBT-RTBARS 2,Tick-by-tick inbound: 35=E,no test
+rule,MKTDATA-TBT-RTBARS 2.1,Frame and dispatch,no test
+rule,MKTDATA-TBT-RTBARS 2.2,"Number formats (, MSB-first reader)",no test
+rule,MKTDATA-TBT-RTBARS 2.3,Entry layout,no test
+rule,MKTDATA-TBT-RTBARS 2.4,API output,no test
+rule,MKTDATA-TBT-RTBARS 3,Real-time bars (reqRealTimeBars),no test
+rule,MKTDATA-TBT-RTBARS 3.1,Request,no test
+rule,MKTDATA-TBT-RTBARS 3.2,Ack,no test
+rule,MKTDATA-TBT-RTBARS 3.3,Inbound 35=G bar,no test
+rule,MKTDATA-TBT-RTBARS 3.4,Limit and cancel,no test
+rule,NEWS 0,How to read this code,no test
+rule,NEWS 1,API entry points,no test
+rule,NEWS 2,"reqNewsProviders (85): local answer, no wire request",no test
+rule,NEWS 2.1,Decode and checks,no test
+rule,NEWS 2.2,Answer,no test
+rule,NEWS 2.3,API message,no test
+rule,NEWS 3,reqNewsArticle (84),no test
+rule,NEWS 3.1,Decode,no test
+rule,NEWS 3.2,"Local refusals (, all **321**)",no test
+rule,NEWS 3.3,Request,no test
+rule,NEWS 3.4,Response → API,no test
+rule,NEWS 4,reqHistoricalNews (86),no test
+rule,NEWS 4.0,Decode,no test
+rule,NEWS 4.1,"Local refusals (, all **321**)",no test
+rule,NEWS 4.2,Request,no test
+rule,NEWS 4.3,Inbound,no test
+rule,NEWS 4.4,Tag 96 payload,no test
+rule,NEWS 4.5,Response → API,no test
+rule,NEWS 5,"News ticks through reqMktData (generic tick 292, NEWS / BroadTape contracts)",no test
+rule,NEWS 5.1,Local checks,no test
+rule,NEWS 5.2,Wire request (35=V entry),no test
+rule,NEWS 5.3,NEWS secType (BroadTape) contracts,no test
+rule,NEWS 5.4,Inbound,no test
+rule,NEWS 5.5,API message (tickNews),no test
+rule,NEWS 5.6,News and L1 on the same contract (ibx#291),no test
+rule,NEWS 6,reqNewsBulletins (12) / cancelNewsBulletins (13) and inbound 35=B,no test
+rule,NEWS 6.1,Decode and checks,no test
+rule,NEWS 6.2,Subscribe and cancel: local state only,no test
+rule,NEWS 6.3,Inbound 35=B (CCP only),no test
+rule,NEWS 6.4,"API message (updateNewsBulletin, out id 14)",no test
+rule,NEWS 6.5,Outbound acknowledge (not triggered by the API),no test
+rule,NEWS 7,newline-escape codec and the tag 96 payload,no test
+rule,NEWS 7.1,Codec,no test
+rule,NEWS 7.2,Full decode order,no test
+rule,NEWS 7.3,Properties keys,no test
+rule,NEWS 8,Which connection,no test
+rule,OPTCALC-MODEL 1,Model choice,no test
+rule,OPTCALC-MODEL 2,Model fields,no test
+rule,OPTCALC-MODEL 3,Time to expiry,no test
+rule,OPTCALC-MODEL 4,Interest rate,no test
+rule,OPTCALC-MODEL 5,Dividends,no test
+rule,OPTCALC-MODEL 6,"Closed form (, model o)",no test
+rule,OPTCALC-MODEL 7,"Binomial tree (, model k)",no test
+rule,OPTCALC-MODEL 8,Implied volatility,no test
+rule,OPTCALC-MODEL 9,Check against capture #40,no test
+rule,OPTCALC-MODEL 10,Not established,no test
+rule,ORDER-CANCEL 1,API cancelOrder: local decisions,no test
+rule,ORDER-CANCEL 2,Sending 35=F,no test
+rule,ORDER-CANCEL 3,"35=F body (, 797 bytes)",no test
+rule,ORDER-CANCEL 4,Inbound 35=9 (OrderCancelReject),no test
+rule,ORDER-CANCEL 5,"Captures C2: ""No such order"" pair explained",no test
+rule,ORDER-CANCEL 6,Global cancel (API msg 58),no test
+rule,ORDER-CANCEL 7,Cancel-related API errors,no test
+rule,ORDER-COMBO 0,Summary,no test
+rule,ORDER-COMBO 1,Objects and names,no test
+rule,ORDER-COMBO 2,API decode,no test
+rule,ORDER-COMBO 2.1,Text placeOrder,no test
+rule,ORDER-COMBO 2.2,Protobuf placeOrder,no test
+rule,ORDER-COMBO 2.3,"smartComboRoutingParams: names, attributes, tags",no test
+rule,ORDER-COMBO 2.4,deltaNeutralContract,no test
+rule,ORDER-COMBO 3,Local checks and refusals,no test
+rule,ORDER-COMBO 3.1,"Decode stage (, 320)",no test
+rule,ORDER-COMBO 3.2,(321),no test
+rule,ORDER-COMBO 3.3,Leg rules (321),no test
+rule,ORDER-COMBO 3.4,"Contract-build stage (code itself, after the combo lookups of section 4)",no test
+rule,ORDER-COMBO 3.5,Order rules (code itself),no test
+rule,ORDER-COMBO 3.6,Modify,no test
+rule,ORDER-COMBO 4,Building the combo contract,no test
+rule,ORDER-COMBO 4.1,Entry and caches,no test
+rule,ORDER-COMBO 4.2,the BAG reply and the legs,no test
+rule,ORDER-COMBO 4.3,Leg confirm: 35=U 6040=7 (FixComboLegConfirmRequest),no test
+rule,ORDER-COMBO 4.4,Combo contract and order,no test
+rule,ORDER-COMBO 5,The 35=D for a combo,no test
+rule,ORDER-COMBO 5.1,"Top-level tags (same writer , ORDER-SUBMIT.md 2.2)",no test
+rule,ORDER-COMBO 5.2,Combo block (emission order),no test
+rule,ORDER-COMBO 5.3,Leg sub-block (per leg),no test
+rule,ORDER-COMBO 5.4,Per-leg short sale block,no test
+rule,ORDER-COMBO 6,35=G modify and 35=F cancel,no test
+rule,ORDER-COMBO 7,Inbound 35=8 for combos,no test
+rule,ORDER-COMBO 8,API output: openOrder / completedOrder combo fields,no test
+rule,ORDER-COMBO 9,Market data on a BAG (short),no test
+rule,ORDER-COMBO 11,Captures,no test
+rule,ORDER-COMBO 11.1,"Captured 28/09/2026 : the build sequence, then 460",no test
+rule,ORDER-COMBO 11.2,"Captured 30/09/2026 (, backlog B-17): a combo fill",no test
+rule,ORDER-COMBO 12,Differences in ibx main (87cfd98),no test
+rule,ORDER-LOCAL-VALIDATION 1,Where the checks run,no test
+rule,ORDER-LOCAL-VALIDATION 2,"Codes asked for, with the rule",no test
+rule,ORDER-LOCAL-VALIDATION 3,Other refusals on the submit path,no test
+rule,ORDER-LOCAL-VALIDATION 3.1,"Decode stage (error kept, thrown after the whole message; only the last one reaches the client)",no test
+rule,ORDER-LOCAL-VALIDATION 3.2,First checks and (hedge),no test
+rule,ORDER-LOCAL-VALIDATION 3.3,API order build and,no test
+rule,ORDER-LOCAL-VALIDATION 3.4,Order rules,no test
+rule,ORDER-LOCAL-VALIDATION 4,"Where the algo rules come from (441, 443, 145, 439)",no test
+rule,ORDER-MODIFY 1,Who writes 35=G,no test
+rule,ORDER-MODIFY 2,"ClOrdID versioning (tags 11, 41)",no test
+rule,ORDER-MODIFY 3,"35=G body, tag by tag",no test
+rule,ORDER-MODIFY 4,"Price and attribute block (, shared with 35=D)",no test
+rule,ORDER-MODIFY 6205,and 6433: where the value comes from,no test
+rule,ORDER-MODIFY 6107,on a new child (35=D only),no test
+rule,ORDER-MODIFY 5,Local modify refusals (no 35=G sent),src/api/client/tests.rs::modify_of_side_or_oca_is_refused_before_sending
+rule,ORDER-MODIFY 6,After the send,no test
+rule,ORDER-MODIFY 7,Summary for a client (IBX),no test
+rule,ORDER-OUTSIDERTH 0,Opaque flags (obfuscation),no test
+rule,ORDER-OUTSIDERTH 1,Where 2109 is raised and where 6433 is written,no test
+rule,ORDER-OUTSIDERTH 2,The rule: (384 bytes),no test
+rule,ORDER-OUTSIDERTH 2.1,Market-type rule (A4),no test
+rule,ORDER-OUTSIDERTH 2.2,TIF and list rule (A6),no test
+rule,ORDER-OUTSIDERTH 3,The IBTypes list,no test
+rule,ORDER-OUTSIDERTH 4,"Result for a US stock on SMART (AAPL, non-combo, no algo, account without the 8200 flag)",no test
+rule,ORDER-OUTSIDERTH 5,Modify (35=G),no test
+rule,ORDER-OUTSIDERTH 6,"2109 without removal, removal without 2109",no test
+rule,ORDER-OUTSIDERTH 7,Capture check,no test
+rule,ORDER-PRICEMGMT 1,Summary for a client that builds the 35=D itself,no test
+rule,ORDER-PRICEMGMT 2,Where the value comes from,no test
+rule,ORDER-PRICEMGMT 3,Wire write,no test
+rule,ORDER-PRICEMGMT 4,The eligibility rule: (76 bytes),no test
+rule,ORDER-PRICEMGMT 4.1,PRICECHK rule: (114 bytes),src/engine/hot_loop/order_builder.rs::the_flag_needs_the_feature_the_list_and_the_price_check_key
+rule,ORDER-PRICEMGMT 4.2,Order types: (71 bytes),src/engine/hot_loop/order_builder.rs::the_flag_skips_market_stop_and_trailing_types ; src/engine/price_mgmt.rs::excluded_order_types
+rule,ORDER-PRICEMGMT 4.3,Logon rule: (60 bytes),no test
+rule,ORDER-PRICEMGMT 5,"Modify, report and openOrder",src/engine/hot_loop/ccp.rs::reports_give_the_price_management_flag_and_the_bracket_key
+rule,ORDER-PRICEMGMT 6,Capture check (28/09/2026),no test
+rule,ORDER-PRICEMGMT 7,"Server answer (observed, not in the gateway code)",no test
+rule,ORDER-PRICEMGMT 8,Captures of 01/10/2026 and the preset code read,no test
+rule,ORDER-STATUS 1,Path of an inbound 35=8,no test
+rule,ORDER-STATUS 2,Tags read by,no test
+rule,ORDER-STATUS 3,Mapping to FixOrderState and the API status string,no test
+rule,ORDER-STATUS 4,"Server reject (150=8, 39=8, 20=0) and error 201",no test
+rule,ORDER-STATUS 5,Cancel confirmation (150=4) and error 202,no test
+rule,ORDER-STATUS 6,Dropped or ignored reports,no test
+rule,ORDER-STATUS 7,API socket side (gateway to the reference API client),no test
+rule,ORDER-STATUS 8,Parent and permId,no test
+rule,ORDER-SUBMIT 1,Entry path: API placeOrder to,no test
+rule,ORDER-SUBMIT 2,The 35=D body,no test
+rule,ORDER-SUBMIT 2.1,How to read the obfuscated code,no test
+rule,ORDER-SUBMIT 2.2,Emission order,no test
+rule,ORDER-SUBMIT 2.3,"Sub-block (price, account, GTD, short sale, attributes, algo)",no test
+rule,ORDER-SUBMIT 2.4,Attribute block,no test
+rule,ORDER-SUBMIT 3,Order type rules,no test
+rule,ORDER-SUBMIT 3.1,Order type objects and tag 40,no test
+rule,ORDER-SUBMIT 3.2,Tag 18 ExecInst,no test
+rule,ORDER-SUBMIT 3.3,Tag 59 TimeInForce,no test
+rule,ORDER-SUBMIT 3.4,Where the prices go,no test
+rule,ORDER-SUBMIT 3.5,Per order type,src/engine/hot_loop/order_builder.rs::peg_mkt_is_written_like_the_reference
+rule,ORDER-SUBMIT 3.6,Short sale (SSHORT),no test
+rule,ORDER-SUBMIT 3.7,Algo block,no test
+rule,ORDER-SUBMIT 4,Order conditions block,no test
+rule,ORDER-SUBMIT 4.1,API side,no test
+rule,ORDER-SUBMIT 4.2,Wire layout,src/engine/hot_loop/order_builder.rs::time_condition_matches_the_reference_layout
+rule,ORDER-SUBMIT 4.3,Per condition type,no test
+rule,ORDER-SUBMIT 4.4,Time condition value (ibx#416),no test
+rule,ORDER-SUBMIT 4.5,Local refusals on conditions,no test
+rule,ORDER-WHATIF 0,Short answers,no test
+rule,ORDER-WHATIF 1,API decode,no test
+rule,ORDER-WHATIF 2,Local checks specific to what-if,no test
+rule,ORDER-WHATIF 3,Flow from placeOrder to the 35=D,no test
+rule,ORDER-WHATIF 4,The what-if 35=D,src/engine/hot_loop/order_builder.rs::what_if_drops_the_oca_fields
+rule,ORDER-WHATIF 5,Storage and ids,no test
+rule,ORDER-WHATIF 6,Server reply,no test
+rule,ORDER-WHATIF 6.1,Routing,no test
+rule,ORDER-WHATIF 6.2,Tags read,no test
+rule,ORDER-WHATIF 6.3,Frame kinds,no test
+rule,ORDER-WHATIF 7,API OPEN_ORDER for a what-if,no test
+rule,ORDER-WHATIF 7.1,Text encoding: (called at ),no test
+rule,ORDER-WHATIF 7.2,Protobuf,no test
+rule,ORDER-WHATIF 7.3,Captured API side,no test
+rule,ORDER-WHATIF 8,What the client gets when the what-if fails,no test
+rule,ORDER-WHATIF 9,What-if and modify,no test
+rule,ORDER-WHATIF 10,Reconciliation with existing docs,no test
+rule,ORDER-WHATIF 11,Differences in ibx main (87cfd98),no test
+rule,ORDER-WHATIF 12,My interpretation,no test
+rule,OTHER-MESSAGES 1,Summary,no test
+rule,OTHER-MESSAGES 2,Inbound 35=U routing (how a 6040 subtype finds its parser),no test
+rule,OTHER-MESSAGES 3,Groups that reach the API or change what the gateway sends or refuses,no test
+rule,OTHER-MESSAGES 3.1,Account config: 6040=209 → 6040=210jfix.bt → → ),no test
+rule,OTHER-MESSAGES 3.2,MiFID config: 6040=211 → 6040=212jfix.bW → → ),no test
+rule,OTHER-MESSAGES 3.3,Order presets: 6040=193 → 6040=194 (ORDER-SUBMIT.md 1 step 9 area),no test
+rule,OTHER-MESSAGES 3.4,API order bind: 6040=86 with 8192=5 → 6040=200,no test
+rule,OTHER-MESSAGES 3.5,Order attribute tags (ORDER-SUBMIT.md 2.4 area),no test
+rule,OTHER-MESSAGES 3.6,Execution report tags (ORDER-STATUS.md area),no test
+rule,OTHER-MESSAGES 3.7,Market data reject list (MKTDATA-L1.md 1.2 area),no test
+rule,OTHER-MESSAGES 3.8,Model list: 6040=91 → 6040=93 (FA.md 8 area),no test
+rule,OTHER-MESSAGES 3.9,XML reference query: 6040=27/28 → 6040=20jfix.cn),no test
+rule,OTHER-MESSAGES 3.10,Trading restrictions: 6040=82 → 6040=83jclient.lJ),no test
+rule,OTHER-MESSAGES 3.11,"Connection and farm level (gateway only, changes the connection)",no test
+rule,OTHER-MESSAGES 4,UI-only groups,no test
+rule,OTHER-MESSAGES 4.1,Option chain extras (CONTRACT-SEARCH.md 2 area),no test
+rule,OTHER-MESSAGES 4.2,Portfolio margin what-if / withdrawable funds: 6040=61 → 6040=62,no test
+rule,OTHER-MESSAGES 4.3,Post-expiration margin: 6040=121 → 6040=122,no test
+rule,OTHER-MESSAGES 4.4,CM account config: 6040=257 → 6040=258,no test
+rule,OTHER-MESSAGES 4.5,Option exercise suggestions: 6040=131jfix.aY),no test
+rule,OTHER-MESSAGES 4.6,Model portfolios and rebalancing,no test
+rule,OTHER-MESSAGES 4.7,Server storage: 6040=250 → 6040=251,no test
+rule,OTHER-MESSAGES 4.8,Other UI messages,no test
+rule,OTHER-MESSAGES 5,Not FIX tags (12 values of the list),no test
+rule,OTHER-MESSAGES 6,Captures,no test
+rule,OTHER-MESSAGES 8,My interpretation,no test
+rule,OTHER-MESSAGES 9,The 141 tags and where they are,no test
+rule,SCANNER 0,How to read this code,no test
+rule,SCANNER 1,reqScannerParameters,no test
+rule,SCANNER 1.1,Decode and local checks,no test
+rule,SCANNER 1.2,"Source: one wire request, then a cache",no test
+rule,SCANNER 1.3,API reply (SCANNER_PARAMETERS),no test
+rule,SCANNER 2,reqScannerSubscription,no test
+rule,SCANNER 2.0,Entry classes,no test
+rule,SCANNER 2.1,"Decode, text API (message 22)",no test
+rule,SCANNER 2.2,"Decode, protobuf (message 222)",no test
+rule,SCANNER 2.3,Local refusals and checks,no test
+rule,SCANNER 2.4,Session start,no test
+rule,SCANNER 2.5,Wire request,no test
+rule,SCANNER 2.6,maxItems,no test
+rule,SCANNER 2.7,Reply <ScanResponse> (6040=10005),no test
+rule,SCANNER 2.8,From <ScanResponse> to API rows,no test
+rule,SCANNER 2.9,API message SCANNER_DATA,no test
+rule,SCANNER 2.10,"Updates, cadence, disconnects",no test
+rule,SCANNER 3,cancelScannerSubscription (message 23),no test
+error,0,Warning: Approaching max rate of %s messages per second (%s),no test
+error,100,Max rate of messages per second has been exceeded,no test
+error,101,Max number of tickers has been reached,no test
+error,102,Duplicate ticker id,src/client_core.rs::pnl_request_checks ; src/engine/hot_loop/hmds.rs::historical_ticks_duplicate_and_zone_refusals
+error,103,Duplicate order id,src/api/client/tests.rs::what_if_on_an_unanswered_order_id_is_a_duplicate
+error,104,Can't modify a filled order,src/client_core.rs::place_on_a_cancelled_order_id_is_refused ; src/engine/hot_loop/order_builder.rs::modify_of_an_order_the_engine_no_longer_holds_is_refused
+error,105,Order being modified does not match original order,no test
+error,106,Can't transmit order id,no test
+error,107,Cannot transmit incomplete order,no test
+error,110,The price does not conform to the minimum price variation for this contract.,src/api/client/tests.rs::algo_refusals_of_20261002_through_place_order ; src/engine/hot_loop/order_builder.rs::a_price_off_the_grid_is_refused_with_110
+error,117,The block order size must be at least 50.,no test
+error,132,This order cannot be transmitted without a clearing account.,no test
+error,133,Submit new order failed,no test
+error,134,Modify order failed,no test
+error,135,Can't find order with id =,no test
+error,138,Could not parse ticker request,no test
+error,140,The size value should be an integer,no test
+error,141,The price value should be a double,no test
+error,142,Institutional customer account does not have account info,no test
+error,144,"Order size does not match total share allocation. To adjust the share allocation, right-click on the order and select ""Modify->Share Allocat",no test
+error,145,Error in validating entry fields,src/api/client/tests.rs::customer_account_needs_the_account_config
+error,146,Invalid trigger method,no test
+error,148,"Conditional submission of orders is supported for Limit, Market, MidPrice, Relative and Snap order types only. Conditional cancellation of o",no test
+error,151,This order cannot be transmitted without a user name.,no test
+error,152,The 'hidden' order attribute may not be specified for this order.,no test
+error,154,Orders cannot be transmitted for a halted security.,no test
+error,158,You must specify an offset amount or a percent offset value.,no test
+error,159,The percent offset value must be between 0% and 100%,no test
+error,160,The size value cannot be zero,no test
+error,161,Cancel attempted when order is not in a cancellable state. Order permId =,no test
+error,162,Historical Market Data Service error message,src/api/client/tests.rs::a_negative_request_id_round_trips_through_the_engine_queues ; src/engine/hot_loop/hmds.rs::bid_ask_each_failed_leg_reports_its_own_error_and_no_end ; src/engine/hot_loop/hmds.rs::query_error_releases_head_timestamp_without_sentinel
+error,163,n/a,no test
+error,165,Historical Market Data Service query message,no test
+error,166,HMDS Expired Contract Violation,no test
+error,168,Discretionary amount does not conform to the minimum price variation for this contract,no test
+error,200,No security definition has been found for the request,src/engine/hot_loop/ccp.rs::sweep_times_out_a_negative_request_id_as_the_callers ; src/engine/hot_loop/ccp.rs::empty_secdef_reply_gives_error_200_and_no_end ; src/engine/hot_loop/ccp.rs::empty_reply_to_a_strike_lookup_retries_once_then_gives_error_200
+error,201,Order rejected - reason,src/api/client/tests.rs::refused_what_if_gives_open_order_then_201 ; src/api/client/tests.rs::process_msgs_delivers_a_reject_error_before_the_status ; src/api/client/tests.rs::negative_ids_round_trip
+error,202,Order Canceled - reason,src/engine/hot_loop/ccp.rs::a_cancel_gives_202_with_the_reason
+error,203,The security (security) is not available or allowed for this account,no test
+error,300,Can't find EId with tickerId,src/api/client/tests.rs::market_data_duplicate_id_and_unknown_cancel ; src/api/client/tests.rs::regulatory_snapshot_delivers_one_batch_then_the_end ; src/api/client/tests.rs::plain_snapshot_sends_each_tick_type_once_then_the_end
+error,301,Invalid ticker action,no test
+error,303,Invalid action,no test
+error,307,Invalid request topic,no test
+error,309,Max number (%s) of market depth requests has been reached,no test
+error,310,Can't find the subscribed market depth with tickerId,no test
+error,311,The origin is invalid.,no test
+error,313,The combo details for leg '%s' are invalid.,no test
+error,314,Security type 'BAG' requires combo leg details.,no test
+error,317,Market depth data has been RESET. Please empty deep book contents before applying any new entries.,src/engine/hot_loop/mod.rs::refused_entry_resets_the_book
+error,318,Invalid ICS spread,no test
+error,319,Invalid Log level {%s}.,no test
+error,320,Error reading request,src/api/client/tests.rs::req_scanner_subscription_refusals
+error,321,Error validating request,src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals ; src/api/client/tests.rs::place_order_unknown_trigger_method_is_refused ; src/api/client/tests.rs::fa_requests_on_a_non_fa_session_are_refused
+error,322,Error processing request,src/api/client/tests.rs::market_data_duplicate_id_and_unknown_cancel ; src/api/client/tests.rs::req_market_rule_answers_known_rules_and_refuses_others ; src/api/client/tests.rs::account_summary_refusals_and_limit
+error,323,'%s' : cause - %s,no test
+error,326,Unable connect as the client id is already in use. Retry with a unique client id.,no test
+error,327,Only API connections with clientId set to 0 can set the auto bind orders property.,no test
+error,328,Trailing stop orders can be attached to limit or stop-limit orders only.,no test
+error,329,Order modify failed. Cannot change to the new order type,src/api/client/tests.rs::modify_type_change_error_keeps_a_large_order_id
+error,330,Only FA or STL customers can request managed accounts list.,no test
+error,331,Internal error. FA or STL does not have any managed accounts.,no test
+error,333,Invalid share allocation syntax.,no test
+error,336,The time entered is invalid. The correct format is hh:mm:ss E.g.: 15:59:00 Time zone associated with the financial instrument is assumed.,no test
+error,337,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",src/api/client/tests.rs::place_order_bad_good_after_time_is_refused
+error,341,"The delta is invalid. Valid values are from 1 to 100. You can set the delta from the ""Pegged to Stock"" section of the Order Ticket Panel, or",no test
+error,343,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",src/api/client/tests.rs::place_order_bad_good_till_date_is_refused ; src/client_core.rs::good_till_date_zone_rule
+error,346,"Not an institutional account, or an away clearing order",no test
+error,347,Short sale slot value must be 1 (broker holds shares) or 2 (delivered from elsewhere),no test
+error,348,Order not a short sale -- type must be SSHORT to specify short sale slot.,no test
+error,349,"Generic combo does not support ""Good After"" attribute.",no test
+error,350,Minimum quantity is not supported for best combo order.,no test
+error,352,Short sale slot value of 2 (delivered from elsewhere) requires location.,no test
+error,353,Short sale slot value of 1 requires no location be specified.,no test
+error,354,Requested market data is not subscribed.,src/api/client/tests.rs::market_data_rejects_are_reported ; src/api/client/tests.rs::a_top_reject_keeps_the_news_of_a_request
+error,355,Order size does not conform to market rule.,no test
+error,357,Your client version is too low for,no test
+error,359,Combo order only supports reduce on fill without block(OCA),no test
+error,360,No whatif check support for smart combo order.,no test
+error,361,Invalid Trigger Price,no test
+error,362,Invalid Adjusted Stop Price,no test
+error,363,Invalid Adjusted Stop Limit Price,no test
+error,364,Invalid Adjusted Trailing Amount,no test
+error,365,No scanner subscription found for ticker id,no test
+error,366,No historical data query found for ticker id,no test
+error,367,Volatility Type must be 1 or 2 for VOL orders. Do not set it for other order types.,no test
+error,368,Reference Price Type must be 1 or 2 for volatility order management. Do not set it for non-VOL orders.,no test
+error,371,VOL order requires non-negative floating point value for volatility. Do not set it for other order types.,no test
+error,372,Cannot set VOL attribute on non-VOL order.,no test
+error,373,Can only set stock range attribute on VOL or RELATIVE_TO_STOCK order.,no test
+error,374,"If both are set, lower stock range attribute must be less than high stock range attribute.",no test
+error,375,Stock range attributes cannot be negative.,no test
+error,376,The order is not eligible for continuous update. The option must trade on a cheap to re-route exchange.,no test
+error,378,Delta hedge order type requires delta hedge aux price be specified.,no test
+error,379,Delta hedge order type requires that no delta hedge aux price be specified.,no test
+error,380,Delta hedge order type is not allowed.,no test
+error,382,n/a,no test
+error,383,n/a,no test
+error,385,Duplicate ticker ID for API scanner subscription,no test
+error,386,Duplicate ticker ID for API historical data query,no test
+error,387,Unsupported order type for this exchange and security type.,src/engine/hot_loop/order_builder.rs::pegged_types_not_in_the_list_are_refused_with_387
+error,388,Order size %s is smaller than the minimum required size of %s.,no test
+error,391,The time entered is invalid. The correct format is hh:mm:ss E.g.: 15:59:00 Time zone associated with the financial instrument is assumed.,no test
+error,392,Invalid Order: contract expired,no test
+error,393,Short sale slot may be specified for delta hedge orders only.,no test
+error,394,Invalid Process Time: must be integer number of milliseconds between 100 and 2000. Found,no test
+error,398,Condition trigger error: %s,no test
+error,399,Order Message,no test
+error,400,Algorithmic Order Error,no test
+error,401,n/a,no test
+error,402,Conditions are not allowed for this financial instrument,no test
+error,403,Invalid Stop Price,no test
+error,404,Order held while securities are located.,no test
+error,406,Currency %s is not allowed,no test
+error,407,Symbol should contain valid non-unicode characters only,no test
+error,408,Invalid scale order increment,no test
+error,409,Invalid scale order. You should specify component order size.,no test
+error,410,Invalid scale subsequent component size.,no test
+error,411,"The ""Outside Regular Trading Hours"" flag is not valid for this order.",no test
+error,412,Contract is not available for trading,no test
+error,413,What-If order should have transmit flag set to TRUE,no test
+error,414,Snapshot market data subscription is not applicable to generic ticks,no test
+error,416,RFQ is not applicable for the contract. Order ID,no test
+error,417,Scale order component sizes must be smaller than the Maximum Position.,no test
+error,418,Invalid scale order profit offset,no test
+error,419,Missing required Scale order field.,no test
+error,420,Invalid Real-time Query,src/engine/hot_loop/hmds.rs::rtbar_ack_matches_the_exact_window_id_and_refuses_ticker_zero
+error,421,Invalid Route,src/engine/hot_loop/hmds.rs::rtbar_requests_share_a_router
+error,422,The account and clearing attributes on this order may not be changed.,no test
+error,424,FA Order requires allocation to be specified,no test
+error,425,FA Order requires per-account manual allocations because there is no common clearing instruction. Please use order dialog Adviser tab to ent,no test
+error,426,None of the accounts have enough securities.,no test
+error,427,Mutual Fund order requires monetary value to be specified.,no test
+error,428,Mutual Fund Sell order requires shares to be specified.,no test
+error,429,Delta neutral orders are only supported for combos (BAG security type),no test
+error,430,"We are sorry, but fundamentals data for the security specified is not available.",no test
+error,431,What to show field is missing or incorrect.,no test
+error,432,Commission must not be negative.,no test
+error,433,"""Restore size after taking profit"" option is currently not supported",no test
+error,434,The order size cannot be zero.,no test
+error,435,You must specify an account.,no test
+error,436,"You must specify an allocation (either a single account, group, or profile).",no test
+error,437,Order can have only one flag Outside RTH or Allow PreOpen,no test
+error,438,The application is now locked,no test
+error,439,Order processing failed. Algorithm definition not found,no test
+error,440,Order modify failed. Algorithm cannot be modified.,no test
+error,441,Algo attributes validation failed,src/control/algo.rs::refusals_follow_the_definitions
+error,442,Specified algorithm is not allowed for this order.,no test
+error,443,Order processing failed. Unknown algo attribute,src/control/algo.rs::refusals_follow_the_definitions ; src/control/algo.rs::overnight_and_number_rules
+error,444,Volatility Combo order is not yet acknowledged. Cannot submit changes at this time.,no test
+error,445,The RFQ for this order is no longer valid,no test
+error,446,Missing scale order profit offset,no test
+error,447,Missing scale price adjustment amount or interval.,no test
+error,448,Invalid scale price adjustment interval.,no test
+error,449,Unexpected scale price adjustment amount or interval.,no test
+error,451,n/a,no test
+error,452,Missing order exchange,no test
+error,453,Not enough data to check underlying price conditions,no test
+error,454,Underlying price is out of range,no test
+error,455,Volatility order price is required but cannot be calculated,no test
+error,456,Max number of real time requests has been reached,no test
+error,457,Individual account is required,no test
+error,458,Auto-routed blotter order '%s' can't be modified or canceled.,no test
+error,459,No clearing rule selected,no test
+error,460,No trading permissions,no test
+error,461,Order size is not correct; it must be a multiple of the lot size.,no test
+error,462,Order modify failed. Cannot change to the new Time in Force,src/api/client/tests.rs::modify_must_restate_the_held_overnight_time_in_force
+error,463,You must enter a valid price.,no test
+error,464,Invalid exchange,no test
+error,465,Order not confirmed,no test
+error,466,'PctChange' allocation is not allowed for Mutual Funds,no test
+error,467,Stage order completed already,no test
+error,468,You are not allowed to submit request with size more than %s,no test
+error,471,This Acc/Dist order is managed by different user,no test
+error,472,No per leg clearing rule selected,no test
+error,473,No Financial Instrument defined,no test
+error,474,Delta Hedging is supported for volatility orders only. Please change main order type or remove the hedging order.,no test
+error,475,Bond disclaimer not confirmed,no test
+error,476,Invalid leg ratio.,no test
+error,477,Pseudo FX destination is not allowed,no test
+error,478,Parameters in request conflicts with contract parameters received by contract id,no test
+error,479,Starting price can be only increased for buy scale order.,no test
+error,480,Starting price can be only decreased for sell scale order.,no test
+error,481,Order size was reduced.,no test
+error,482,Main and Hedging order accounts do not match,no test
+error,483,One-to-one combo order is not supported.,no test
+error,484,Your desk is not configured to create tickets for: %s. Please contact system administrator to upgrade your permissions.,no test
+error,485,Multiple account allocation scale order is currently not supported,no test
+error,486,"For non-guaranteed Combo Scale orders, the order type must be Market-if-Touched (MIT).",no test
+error,487,US Bond Ratings (Corporates and Municipals) service is required to place municipal bond order.,no test
+error,488,Only US STK/OPT legs are supported for smart guaranteed combo.,no test
+error,489,Trading for a Model in a specific account is not supported.,no test
+error,490,You must subscribe for additional permissions to run scanner,no test
+error,491,This order cannot be transmitted without a cross user name.,no test
+error,492,You must subscribe for additional permissions to obtain precise results for scanner,no test
+error,494,Order not a short sale exempt -- type must be SSHORTX to specify short sale slot.,no test
+error,495,Exempt reason specified is not valid for the current order,no test
+error,496,"The Post-Only attribute cannot be used with order type ""%s"".",no test
+error,497,Post-Only and Sweep-to-Fill attributes cannot be used together.,no test
+error,498,SSHORTX orders are not supported,no test
+error,499,'PctChange' allocation won't allow size modification,no test
+error,1100,Connectivity between %SHORT_COMPNAME% and %SHORT_PRODNAME% has been lost.,src/api/client/tests.rs::link_notices_are_errors_and_keep_the_client_connected ; src/engine/hot_loop/mod.rs::silent_auth_link_is_reset_after_the_send_pause ; src/engine/hot_loop/mod.rs::a_stalled_farm_does_not_block_the_other_links
+error,1101,Connectivity between %SHORT_COMPNAME% and %SHORT_PRODNAME% has been restored - data lost.,no test
+error,1102,Connectivity between %SHORT_COMPNAME% and %SHORT_PRODNAME% has been restored - data maintained.,src/api/client/tests.rs::link_notices_are_errors_and_keep_the_client_connected
+error,1103,FA data saved,no test
+error,1104,Pending to create %s orders: %s,no test
+error,1105,Pending to submit %s orders: %s,no test
+error,1106,Pending to create %s what-if orders: %s,no test
+error,1300,Socket port has been reset and this connection is being dropped. Please reconnect on the new port,no test
+error,2100,API client has been unsubscribed from account data.,src/api/client/tests.rs::an_unsubscribe_answers_2100_and_a_new_subscribe_gets_the_image_again
+error,2101,Unable subscribe to account as the following clients are subscribed to a different account.,no test
+error,2102,Unable to modify this order as its still being processed.,no test
+error,2103,Market data farm connection is broken,src/api/client/tests.rs::link_notices_are_errors_and_keep_the_client_connected ; src/engine/hot_loop/mod.rs::farm_test_request_every_minute_and_reset_without_answer
+error,2104,Market data farm connection is OK,no test
+error,2105,HMDS data farm connection is broken,src/engine/hot_loop/mod.rs::farm_test_request_every_minute_and_reset_without_answer
+error,2106,HMDS data farm connection is OK,no test
+error,2107,HMDS data farm connection is inactive but should be available upon demand.,no test
+error,2108,Market data farm connection is inactive but should be available upon demand.,no test
+error,2109,Order Event Warning,src/engine/hot_loop/order_builder.rs::outside_rth_waits_for_the_definition_then_follows_the_rule ; src/engine/hot_loop/order_builder.rs::outside_rth_without_a_definition_uses_the_empty_list
+error,2110,Connectivity between %SHORT_PRODNAME% and server is broken. It will be restored automatically.,no test
+error,2111,Warning: algo orders will be charged new commission minimum and maximum per %s of trade value.,no test
+error,2113,"Warning: the order size for Bonds (Bills) is entered as a nominal par value of the order, and must be a multiple of the Minimum Size Increme",no test
+error,2114,Calculation of Implied Volatility supported for option securities only,no test
+error,2116,Calculation of Option Price supported for option securities only,no test
+error,2117,Requested top market data is not subscribed. Subscription-independent ticks are still active.,src/api/client/tests.rs::a_top_reject_keeps_the_news_of_a_request
+error,2118,The Start and/or End Time for algo order %s were not adjusted for the following reason: the trading schedule is not available,no test
+error,2119,Market data farm is connecting,no test
+error,2120,HMDS data farm is connecting,no test
+error,2121,Warning: %s product is trading on the basis other than currency price,no test
+error,2122,Warning: %s order(s) are for products trading on the basis other than currency price,no test
+error,2123,Warning: %s trade(s) are for products trading on the basis other than currency price,no test
+error,2127,%s %s is not provided; please submit a %s request on the underlying %s: %s,no test
+error,2128,Warning: you are submitting an order for a halted security. Your order will be sent to the primary listing exchange for the participation in,no test
+error,2129,The product %s is provided on an indicative and informational basis only. %SHORT_COMPNAME% does not represent that the valuation for this in,no test
+error,2130,Warning: %s product is trading on the basis of currency price with factor,no test
+error,2131,Warning: %s order(s) are for products trading on the basis of currency price with factor,no test
+error,2132,Warning: %s trade(s) are for products trading on the basis of currency price with factor,no test
+error,2133,Warning: %s order(s) were excluded because they represent option exercise instructions,no test
+error,2134,Market Data subscription has been changed.,no test
+error,2135,Forex realtime subscription was cancelled due to changes in High Precision FX mode,no test
+error,2136,,no test
+error,2137,n/a,no test
+error,2138,The exercise instruction for this contract does not conform to the rule you defined in Global Configuration - Orders and can still be cancel,no test
+error,2139,Real paper-trading has not been acknowledged yet.,no test
+error,2140,"Warning: %s is NextShares exchange-traded managed fund. It is quoted in, and trades in, an offset from the future/today's closing Net Asset ",no test
+error,2141,"Warning: %s order(s) are for products of type NextShares exchange-traded managed fund. It is quoted in, and trades in, an offset from the fu",no test
+error,2142,"<html>Warning: %s trade(s) are for products of type NextShares exchange-traded managed fund.<br>It is quoted in, and trades in, an offset fr",no test
+error,2143,"Warning: %s position(s) are for products of type NextShares exchange-traded managed fund. It is quoted in, and trades in, an offset from the",no test
+error,2144,Warning: %s position(s) are for products trading on the basis other than currency price,no test
+error,2145,Warning: %s positions(s) are for products trading on the basis of currency price with factor,no test
+error,2146,"Warning: The order ID %s is too high. Please check your order ID assignment algorithm, or reset the ID sequence by clicking ""Reset API order",no test
+error,2147,Duplicated order ids are found: fix orders %s have same id %s,no test
+error,2148,n/a,no test
+error,2149,Number of accounts has changed. New tracked accounts: %s,no test
+error,2150,Invalid position trade derived value,no test
+error,2151,Positions info is not available yet,src/api/client/tests.rs::req_positions_gives_2151_when_the_data_never_comes
+error,2152,n/a,no test
+error,2153,"Warning: %s is a CFE TAS contract that trades at settlement. It is quoted in, and trades in, a premium equal to the daily settlement price p",no test
+error,2154,"Warning: %s position(s) are for CFE TAS contracts that trade at settlement. It is quoted in, and trades in, a premium equal to the daily set",no test
+error,2155,"Warning: %s order(s) is for a CFE TAS contract(s) that trade(s) at settlement. It is quoted in, and trades in, a premium equal to the daily ",no test
+error,2156,"Warning: %s trade(s) is for a CFE TAS contract(s) that trade(s) at settlement. It is quoted in, and trades in, a premium equal to the daily ",no test
+error,2157,Sec-def data farm connection is broken,no test
+error,2158,Sec-def data farm connection is OK,no test
+error,2159,Sec-def data farm connection is inactive but should be available upon demand.,no test
+error,2160,Sec-def data farm is connecting,no test
+error,2161,"In accordance with our regulatory obligations as a broker, we will initially cap (or limit) the price of your Limit Order to %s or a more ag",no test
+error,2162,"<html>The <b>Manual Order Time</b> field is required for, and becomes editable for, ""manual"" orders, which are orders that originate from a ",no test
+error,2163,API does not support trading in fractions for CashQty orders.,no test
+error,2164,Modify the order to provide the hedging clearing allocation,no test
+error,2165,This instrument does not support trading in fractions on %s outside of regular trading hours.,no test
+error,2166,Warning: Please select %s to trade using %s,no test
+error,2167,Warning: %s contains accounts: %s that require all other accounts to be added from: %s. Please use Advisor Setup to edit the list of account,no test
+error,2168,The 'EtradeOnly' order attribute is not supported.,no test
+error,2169,The 'FirmQuoteOnly' order attribute is not supported.,no test
+error,2170,The 'NbboPriceCap' order attribute is not supported.,no test
+error,2172,"<html>The version of the application you are running, %s, needs to be upgraded, as it will be desupported on %s.<br>The minimum supported ve",src/api/client/tests.rs::version_cutoff_warning_reaches_the_client ; src/gateway.rs::first_logon_values_reach_the_api
+error,2173,Precaution of type %sPrice Percentage Value was capped at 100% for %s,no test
+error,2174,You submitted request with date-time attributes without explicit time zone. Please switch to use yyyymmdd-hh:mm:ss in UTC or use instrument ,src/api/client/tests.rs::time_condition_through_place_order
+error,2175,Fixed Income size increment is now using multiples of $1K.,no test
+error,2176,Your API version does not support fractional share size rules. Please upgrade to a minimum version 163. Trimmed value %s to %s,no test
+error,2177,Round allocation to exchange board lot,no test
+error,2178,One or more accounts: %s are no longer managed. Refresh the groups using 'Replace FA' request from API client and then try again,no test
+error,2179,,no test
+error,2180,,no test
+error,2181,The 'OptOutFromSmartRouting' order attribute is not supported.,no test
+error,2182,Algorithm end time is in the past for order %s,no test
+error,2183,Algorithm end time precedes algorithm start time for %s,no test
+error,10000,Cross-currency combo order is not supported.,src/engine/combo.rs::non_guaranteed_needs_two_legs_and_one_currency
+error,10001,Cross-currency VOL order is not supported.,no test
+error,10002,Non-guaranteed order should only have two legs,src/engine/combo.rs::non_guaranteed_needs_two_legs_and_one_currency
+error,10005,You are not authorized to trade for a Model.,no test
+error,10006,Missing parent order,no test
+error,10007,"Invalid hedge type. Valid values are D, B, F, or P.",no test
+error,10008,Invalid beta value.,no test
+error,10009,Invalid hedge ratio,no test
+error,10010,"Invalid delta hedge order. The parent order has to be option order and hedge order can only be Stock, CFD or (in case of option on Index) Fu",no test
+error,10011,Currency %s isn't supported for smart combo.,no test
+error,10012,Invalid percentage,no test
+error,10013,Opting out of SMART routing attribute is required to place the directed order.,no test
+error,10014,"For PctChange orders, percent change must be between -200% and +1000% inclusive.",no test
+error,10015,n/a,no test
+error,10016,%s is not accessible through API because product is trading on the basis other than currency price,no test
+error,10020,Display Size should be positive and not greater than the order size.,no test
+error,10021,Invalid ChangeToMktOffset. It must be positive number for MIT non-guaranteed order with ibtype LEGTO enabled.,no test
+error,10022,"Invalid LeginPrio. Valid values are -1, 0, and 1 for non-guaranteed combo with ibtype LEGPRIO enabled.",no test
+error,10023,Invalid MaxSegSize. It must be positive number less or equal than the total combo size with ibtype LEGICE enabled.,no test
+error,10024,Invalid DontLeginNext value. Valid values are 0 or 1. It can only be set for LMT non-guaranteed order.,no test
+error,10025,Invalid ChangeToMktTime1. It must be positive integer for MIT non-guaranteed order with ibtype LEGTO enabled.,no test
+error,10026,Invalid ChangeToMktTime2. It must be positive integer for MIT non-guaranteed order with ibtype LEGTO enabled.,no test
+error,10027,"Invalid combo routing tag. Valid tags are LeginPrio, MaxSegSize, DontLeginNext, ChangeToMktTime1, ChangeToMktTime2, ChangeToMktOffset, Discr",no test
+error,10028,You must enter a Trailing Amount for %s.,no test
+error,10029,Invalid DiscretionaryPct. It must be a number between 0 and 100 for LMT or MIT order with ibtype DIS enabled.,no test
+error,10030,Cannot specify both DiscretionaryPct and Discretionary Amt.,no test
+error,10031,"Specifying limit price for hedge order is not allowed, send zero.",no test
+error,10032,"Specifying size for hedge order is not allowed, send zero.",no test
+error,10033,Invalid beta hedge order. Both parent and hedge can only be Stock orders.,no test
+error,10034,"A Delta Hedge order attached to a continuously updated VOL order with Reference Price Type ""Average"" must have order type MKT or REL.",no test
+error,10036,Scale order component sizes must be multiples of lot size.,no test
+error,10038,Display Size must be multiple of lot size.,no test
+error,10039,Display Size must not be less than lot size.,no test
+error,10040,Order cannot be transmitted because not all financial instrument details were available.,no test
+error,10041,Invalid NonGuaranteed value. Valid values are 0 (guaranteed) and 1 (non-guaranteed). Only smart and two-leg combo can be set as non-guarante,no test
+error,10042,Invalid NonGuaranteed value of 0. The order cannot be set as guaranteed.,no test
+error,10043,"Missing or invalid NonGuaranteed value. REL+MKT, LMT+MKT, and REL+LMT order of two legs can only be set as non-guaranteed.",no test
+error,10044,NonGuaranteed value cannot be modified after order submission.,no test
+error,10045,This combo order is not supported.,no test
+error,10046,Invalid PriceCondConid,no test
+error,10047,Missing CondPriceMin or CondPriceMax when sending PriceCondConid.,no test
+error,10048,Missing PriceCondConid when sending CondPriceMin or CondPriceMax.,no test
+error,10049,"PriceCondConid, CondPriceMin, or CondPriceMax are only valid for non-guaranteed combo.",no test
+error,10050,Invalid CondPriceMax or CondPriceMin. They should be positive numbers and CondPriceMin < CondPriceMax.,no test
+error,10051,Invalid order type,no test
+error,10052,Invalid time in force,no test
+error,10053,One-to-one combo order can only be REL+LMT or LMT+MKT order.,no test
+error,10054,Can't specify combo price when using per-leg prices.,no test
+error,10055,Only LMT or REL+LMT order allows using per-leg prices.,no test
+error,10056,All leg prices are needed when specifying per-leg prices.,no test
+error,10057,Mismatch per-leg price number with combo leg specification.,no test
+error,10058,"Combo per-leg prices are only supported for non-guaranteed smart combo with two legs and feature ""IECOMBOPERLEGPRICE"" enabled.",no test
+error,10059,Mismatch leg contract.,no test
+error,10060,Cannot specify Trailing Amount and Trailing Percent at the same time,no test
+error,10061,Invalid Trailing Percent value. Valid values are greater than 0 and less than 100.,no test
+error,10063,Invalid FX hedge order. Hedging contract can only be a currency pair where one of the currencies is the same as in parent order.,no test
+error,10064,Chameleon Inline profile order is not supported by the CCP.,no test
+error,10067,Stop price must be changed together with the trailing amount for a trailing order,no test
+error,10068,Percent Change orders must have size or percent change but not both,no test
+error,10070,Order Type %s is invalid for this order. Please adjust Order Type and try again.,no test
+error,10071,Invalid price change for peg-to-bench order. Requires positive number.,no test
+error,10072,"If both reference price high and low are specified, low should be smaller than high.",no test
+error,10073,Reference price cannot be negative.,no test
+error,10074,Missing starting reference price,no test
+error,10075,Missing reference financial instrument,no test
+error,10076,Invalid price change of the reference financial instrument for peg-to-bench-order. Requires positive number.,no test
+error,10077,Scale order for a model is currently not supported,no test
+error,10078,This order conflicts with the order preset value(s),no test
+error,10079,%s is not accessible through API because product is trading on the basis of currency price with factor,no test
+error,10080,Custom Smart Strategy is not supported,no test
+error,10081,The custom Smart strategy is invalid.,no test
+error,10082,Note that you are creating an order for a bond that has already been called.,no test
+error,10083,Display size is smaller than the minimum requirement.,no test
+error,10084,Min. quantity is smaller than the minimum requirement.,no test
+error,10086,Option Exercise can only be cancelled,no test
+error,10087,Manual scale orders are not supported.,no test
+error,10089,Requested market data requires additional subscription for API. || Requested market data requires additional subscription for API. See link ,no test
+error,10090,Part of requested market data is not subscribed. Subscription-independent ticks are still active.,no test
+error,10091,Part of requested market data requires additional subscription for API. || Part of requested market data requires additional subscription fo,no test
+error,10092,Deep market data is not supported for this combination of security type/exchange,no test
+error,10093,Order cannot be created because supported order types are not available for conid %s on %s.,no test
+error,10094,API News error,src/api/client/tests.rs::news_tick_refusals_of_a_known_contract ; src/api/client/tests.rs::news_refusal_after_the_lookup_is_reported
+error,10095,ApiVerify error,no test
+error,10096,Multiple account allocation scale order for combos is currently not supported,no test
+error,10097,Allocation details of the child scale order must match those of the parent.,no test
+error,10098,Negative offset amount is not allowed for SNAP orders.,no test
+error,10099,Parent order cannot be hedged using combination order,no test
+error,10100,Combo hedging strategy is not supported for non-cleared accounts,no test
+error,10101,<html>You are attempting to close a position that has open orders.<br><br>Would you like to cancel all open orders and then place new closin,no test
+error,10102,"Validation of the following Precautionary Settings will be bypassed when closing positions: Price Percentage, Size Limit, Total Value Limit,",no test
+error,10103,"<html>The position %s you are asking to close is a ""virtual"" position which treats FX as if it were a 'contract', like a future.<br>This is ",no test
+error,10104,Sell Long order is not supported for this account.,no test
+error,10105,Sell Long orders must have short sale slot with value -100,no test
+error,10106,Enabling '%s' via logon is not supported in the reference,no test
+error,10107,Capabilities check detected unknown capabilities: %s; restricted capabilities: %s,no test
+error,10108,Solicited order is not allowed,no test
+error,10109,Solicited attribute update is not supported,no test
+error,10110,Your mobile device has logged into Read-Only mode.,no test
+error,10111,Done-away orders for non-guaranteed combos are not supported.,no test
+error,10113,Value for the field %s is required,no test
+error,10114,Value for the field %s is required,no test
+error,10115,Invalid offset value,no test
+error,10116,Limit volatility is required.,no test
+error,10117,You need to select Away destination for a done-away-PTA order.,no test
+error,10118,Only Day orders are supported for Away PTA trade.,no test
+error,10119,The API interface is currently in Read-Only mode.,no test
+error,10121,Trading through this Gateway is not allowed.,no test
+error,10122,The the reference/Gateway process is running in Read-Only mode. Trading actions are not allowed.,no test
+error,10123,"For each leg in a combination order, the action (buy or sell) plus the open/close tag must ultimately impact the same type of position: long",no test
+error,10124,Open/Close flag is required,no test
+error,10125,Combos with STK legs are only supported on SMART. Please change the exchange for your BAG contract from '%s' to '%s'.,no test
+error,10126,<html>The entered offset leads to invalid volatility limit. <br>Please change offset and resubmit.</html>,no test
+error,10127,You can only submit this order by specifying IBALGO destination with an algorithm supporting SEC Rule 10b18. You can only trade through one ,no test
+error,10128,User-defined dividends or interest rates are not supported for PEGSURFVOL orders.,no test
+error,10129,Option Write order cannot be submitted since account information is missing. Please create new order and try again.,no test
+error,10130,The maximum length of %s characters has been exceeded,no test
+error,10131,"The ""Regular Trading Hours only"" and ""Trigger Outside RTH"" flags are not valid for this order.",no test
+error,10132,Cannot place an order using a readonly account,no test
+error,10136,Cannot submit trades until the application is finished and approved,no test
+error,10137,Real time exercise is not available. Please send TMS ticket to request this exercise.,no test
+error,10138,n/a,no test
+error,10139,ALL account is not supported,no test
+error,10140,"Your hedge order uses the same action as your parent order, i.e. buy/buy or sell/sell. This strategy is only sound if the instruments you pa",no test
+error,10141,Paper trading disclaimer must first be accepted for API connection.,no test
+error,10142,Real paper-trading has been rejected.,no test
+error,10144,Trading %s for a Model is not supported.,no test
+error,10145,No algorithm is selected. Please select a valid algorithm strategy from the list.,no test
+error,10147,OrderId %s that needs to be cancelled is not found.,src/engine/hot_loop/order_builder.rs::cancel_of_an_unknown_order_is_refused_with_10147
+error,10148,"OrderId %s that needs to be cancelled can not be cancelled, state: %s.",src/engine/hot_loop/order_builder.rs::cancel_of_an_order_with_a_pending_cancel_is_refused_with_10148
+error,10149,Invalid order id: %s,no test
+error,10150,Child orders stack is too big. New child orders can't be added.,no test
+error,10151,Market Order Confirmation,no test
+error,10152,Stop Variant Order Confirmation,no test
+error,10153,"<html>To avoid a trade of your order at a price that is not consistent with a fair and orderly<br>market, %s may set a cap (for a buy order)",no test
+error,10154,This contract cannot be part of the combo.,no test
+error,10155,Invalid soft dollar tier,no test
+error,10156,<html>Unable to transmit an order for contract: %s<br><br>Available position size cannot be validated because other orders for this security,no test
+error,10157,n/a,no test
+error,10158,Offset ammount should be zero,no test
+error,10159,Failed to request matching symbols,no test
+error,10160,"Balances shown includes cash in Sweep Bank Account. To compute the balances in your brokerage account, deduct any balances in the Sweep Bank",no test
+error,10161,"Balances shown includes cash in FDIC Sweep Bank Account. To compute the balances in your brokerage account, deduct any balances in the FDIC ",no test
+error,10162,"* Includes cash in Sweep Bank Account. To compute the balances in your brokerage account, deduct any balances in the Sweep Bank Account.",no test
+error,10163,"* Includes cash in FDIC Sweep Bank Account. To compute the balances in your brokerage account, deduct any balances in the FDIC Sweep Bank Ac",no test
+error,10164,Cash Quantity Order Warning,no test
+error,10166,No valid auto-routing destination was found for this ticket.,no test
+error,10167,Requested market data is not subscribed. Displaying delayed market data...,src/api/client/tests.rs::market_data_rejects_are_reported ; src/api/client/tests.rs::joining_a_delayed_subscription
+error,10168,Requested market data is not subscribed. Delayed market data is not enabled,src/api/client/tests.rs::joining_a_delayed_subscription
+error,10169,%s for %s is already being fetched in ticker id=%s,src/api/client/tests.rs::regulatory_snapshot_delivers_one_batch_then_the_end
+error,10170,No permissions on %s for %s,src/api/client/tests.rs::regulatory_snapshot_without_permission_and_cancel
+error,10171,Unable to fetch %: %s,no test
+error,10172,Failed to request news article,no test
+error,10173,Failed to request historical news,no test
+error,10174,You must submit all orders from either Manual Ticket Entry panel in Blotter or Create Ticket window.,no test
+error,10175,Duplicate histogram query for tickid,no test
+error,10176,Duplicate head time stamp query for tickid,no test
+error,10177,Live updates for combos are not supported,no test
+error,10178,End date not supported with live updates,no test
+error,10179,Source price not supported with live updates,no test
+error,10180,Failed to request live updates (contract expired),no test
+error,10181,Failed to request live updates (no listener),no test
+error,10182,Failed to request live updates (disconnected),no test
+error,10183,Failed to request PNL,no test
+error,10184,Failed to request PNL single,no test
+error,10185,Failed to cancel PNL (not subscribed),no test
+error,10186,Failed to cancel PNL single (not subscribed),no test
+error,10187,Failed to request historical ticks,src/engine/hot_loop/hmds.rs::historical_ticks_as_recorded
+error,10188,Failed to request histogram data,src/engine/hot_loop/hmds.rs::head_timestamp_and_histogram_time_out
+error,10189,Failed to request tick-by-tick data,src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals ; src/api/client/tests.rs::tick_by_tick_reports_by_request_type ; src/engine/hot_loop/mod.rs::a_refused_query_ends_only_its_request
+error,10190,Max number of tick-by-tick requests has been reached,no test
+error,10191,"Manual Order Time is not allowed for %s orders, but required for %s",no test
+error,10192,"Manual Route Time is not allowed for %s orders, but required for done-away orders for '%s'",no test
+error,10193,Chameleon Manual Order Time is not supported for %s orders,no test
+error,10194,Chameleon Manual Route Time is not supported for %s orders,no test
+error,10195,"Invalid order parameters supplied when trying to set ""Use parent trade price at the time of fill"" on an order",no test
+error,10196,"""Use parent trade price at the time of fill"" setting can not be changed on a live order",no test
+error,10197,No market data during competing live session,no test
+error,10198,Order bound is rejected,no test
+error,10199,This API request for All is not supported for Dynamic Account Addition,no test
+error,10200,This API request for All is not supported for Dynamic Account Addition,no test
+error,10201,This API request for All is not supported for Dynamic Account Addition,no test
+error,10202,Reference contract is not supported,no test
+error,10203,"A buy order for FUND must contain non-zero cashQty, and may not contain non-zero totalQuantity.",no test
+error,10204,"A sell order for FUND must contain non-zero totalQuantity, and may not contain non-zero cashQty.",no test
+error,10205,Cash Quantity cannot be send in monetaryValue field in Algo . Please try sending in Cash Quantity field.,no test
+error,10206,Non-zero cash quantity cannot contain more than 2 decimals.,no test
+error,10207,For funds non-zero Order Size cannot contain more than 3 decimals.,no test
+error,10208,For stocks non-zero Order Size cannot contain more than %s decimals.,no test
+error,10210,Midprice orders are not supported outside of regular trading hours.,no test
+error,10211,Order Preview,no test
+error,10212,Please review your Order parameters.,no test
+error,10213,API access is restricted on %s for %s,no test
+error,10214,Cash Quantity is not allowed for Clear Away or Sell Long orders,no test
+error,10215,n/a,no test
+error,10217,%s is not allowed,no test
+error,10218,%s is required,no test
+error,10219,%s invalid account(s) were removed from '%s' %s,no test
+error,10220,"Manual Cancel Order Time is not allowed for %s orders, but required for %s",no test
+error,10221,"Manual Cancel Route Time is not allowed for %s orders, but required for done-away orders for '%s'",no test
+error,10222,%s is not supported for %s orders,no test
+error,10223,Cash Quantity Order Confirmation,no test
+error,10224,n/a,no test
+error,10225,"Bust event occurred, current subscription is deactivated. Please resubscribe real-time bars immediately.",no test
+error,10226,Invalid FA method specified,no test
+error,10227,Requested market data is not allowed for API.,no test
+error,10228,Group|Profile saving error,no test
+error,10229,FA data saving error,no test
+error,10230,"You have unsaved FA changes. Please retry 'request FA' operation later, when 'replace FA' operation is complete",no test
+error,10231,The following Groups and/or Profiles contain invalid accounts,no test
+error,10232,Duplicate exercise id,no test
+error,10233,Defaults were inherited from CASH preset during the creation of this order.,no test
+error,10234,<html>The Decision Maker field is required and not set for this order. You can set default value for the Decision Maker in MiFIR settings of,no test
+error,10235,The Decision Maker field is required and not set for this order. You can set default value for the Decision Maker in MiFIR settings of deskt,no test
+error,10236,Child has to be AON if parent order is AON,no test
+error,10237,All or None ticket can route entire unfilled size only,no test
+error,10238,Some error occured during communication with Advisor Setup web-app,no test
+error,10239,This order will affect one or more accounts that are flagged because they do not fit the required risk score criteria prescribed by the grou,no test
+error,10240,You must enter a valid Price Cap.,no test
+error,10241,Order Quantity is expressed in monetary terms. Modification is not supported via API. Please use desktop version to revise this order.,no test
+error,10242,Fractional-sized order cannot be modified via API. Please use desktop version to revise this order.,no test
+error,10243,Fractional-sized order cannot be placed via API. Please use desktop version to place this order.,src/api/client/tests.rs::fractional_quantity_is_refused_before_sending ; src/api/client/tests.rs::fractional_quantity_on_a_modify_is_refused_and_keeps_the_order ; src/engine/hot_loop/order_builder.rs::fractional_quantity_is_refused_with_10243
+error,10244,Cash Quantity cannot be used for this order,no test
+error,10245,This financial instrument does not support fractional shares trading: %s,no test
+error,10246,This order doesn't support fractional shares trading,no test
+error,10247,Only SmartRouting supports fractional shares,no test
+error,10248,%s doesn't have permission to trade fractional shares,no test
+error,10249,%s order doesn't support fractional shares,no test
+error,10250,The size %s does not conform to the minimum variation of %s for this contract,no test
+error,10251,Fractional shares are not supported for allocation orders,no test
+error,10252,This non-close-position order doesn't support fractional shares trading,no test
+error,10253,Clear Away orders are not supported for multi-leg combo with attached hedge.,no test
+error,10254,Invalid Order: bond expired,no test
+error,10255,The 'Display Size' order attribute may not be specified for this order.,no test
+error,10256,The 'Minimum Quantity' order attribute may not be specified for this order.,no test
+error,10257,The 'All or None' order attribute may not be specified for this order.,no test
+error,10258,Please use new import format for unified Account Groups with User-specified allocation.,no test
+error,10259,The following unified group names are duplicated,no test
+error,10260,Group %s has unsupported method (%s),no test
+error,10261,Error parsing XML,no test
+error,10262,Replacing alias is not allowed. You can configure account aliases in the Account Management.,no test
+error,10263,Time-In-Force %s doesn't support fractional shares,no test
+error,10264,Time-In-Force %s doesn't support cash quantity,no test
+error,10265,Group '%s' cannot be used without method specified. Use Advisor Setup tool to correct its definition,no test
+error,10266,The 'BlockOrder' order attribute may not be specified for this order.,no test
+error,10267,The 'SweepToFill' order attribute may not be specified for this order.,no test
+error,10268,The 'EtradeOnly' order attribute is not supported.,no test
+error,10269,The 'FirmQuoteOnly' order attribute is not supported.,no test
+error,10270,The 'NbboPriceCap' order attribute is not supported.,no test
+error,10271,<html>The AD order of %s is in an invalid state.<br>Please review this order in the Accumulate/Distribute tool before transmitting.,no test
+error,10272,Duration field is only valid with time-in-force of GTD,no test
+error,10273,Expiration date and time and Duration cannot be set on the order at the same time.,no test
+error,10274,The 'PostToATS' order attribute may not be specified for this order or is invalid.,no test
+error,10275,Positions info is not available for account(s): %s until the application is finished and approved.,no test
+error,10276,News feed is not allowed.,no test
+error,10277,News Feed requires permissions. Please login to Portal to subscribe.,no test
+error,10278,Duplicate WSH meta data request.,no test
+error,10279,Failed to request WSH meta data.,no test
+error,10280,Failed to cancel WSH meta data.,no test
+error,10281,Duplicate WSH event data request.,no test
+error,10282,WSH meta data not requested.,no test
+error,10283,Failed to request WSH event data.,no test
+error,10284,Failed to cancel WSH event data.,no test
+error,10285,Your API version does not support fractional size rules. Please upgrade to a minimum version %s.,no test
+error,10286,%s field cannot contain more than %s decimals.,no test
+error,10287,Cryptocurrency order is not confirmed,no test
+error,10288,Cryptocurrency Market Order Confirmation,no test
+error,10289,You must set Cash Quantity for this order,no test
+error,10290,This order only supports CashQty trading.,no test
+error,10291,Orders to harvest Capital Loss must use the DAY time-in-force.,no test
+error,10292,%s %s order is not allowed for this instrument,no test
+error,10293,Cryptocurrency Cash Quantity order cannot specify size,no test
+error,10294,Cash quantity set on the order does not match total monetary amount of the Group.,no test
+error,10295,Only daily resolution supported for Schedule requests,no test
+error,10296,"<html>The Smart Routing features ""Seek Price Improvement"" (aka ""Route to Dark Pools"") and ""Do not route to Dark Pools"" are mutually exclusiv",no test
+error,10297,Not Held attribute is invalid for this order.,no test
+error,10298,Cannot trade an instrument with currency different from model currency,no test
+error,10299,"Expected what to show is %s, please use that instead of %s.",no test
+error,10300,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",no test
+error,10301,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",no test
+error,10302,Min trade trade quantity is not allowed for this order,no test
+error,10303,"<html>Invalid min trade quantity value (%s).<br>It must be a positive integer, not exceeding the total order size.</html>",no test
+error,10304,Minimum Competing Size value must be non-negative.,no test
+error,10305,"Compete against best bid or offer Offset dollar value must be positive, multiple of a cent.",no test
+error,10306,Mid offsets are not allowed,no test
+error,10307,Invalid MidOffsetAtWhole and/or MidOffsetAtHalf attribute values,no test
+error,10308,Revision to Post to ATS value presence is not allowed.,no test
+error,10309,Invalid WSH event data request.,no test
+error,10310,"The Solicited field should be used for orders initiated or recommended by the broker or advisor that were approved by the client (by phone, ",no test
+error,10311,This order will be directly routed to %s. Direct routed orders may result in higher trade fees.,no test
+error,10312,The order type Volatility is currently not supported for this combination of financial instrument and account type,no test
+error,10314,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",src/api/client/tests.rs::req_historical_data_refuses_unknown_what_to_show_and_format_date ; src/api/client/tests.rs::time_condition_through_place_order ; src/control/historical.rs::tick_request_checks_as_captured
+error,10315,"%s: The time entered is invalid. The correct format is hh:mm:ss. E.g.: 15:00:00 in UTC. No date should be specified, current date is assumed",no test
+error,10316,Trigger Outside RTH was deprecated. Please upgrade your API Client software to submit order with Outside RTH attribute instead.,no test
+error,10317,The Cash Quantity size of %s does not conform to minimum variation of %s for this contract,no test
+error,10318,This order doesn't support fractional quantity trading,no test
+error,10319,,no test
+error,10320,n/a,no test
+error,10321,Placing orders for Municipal Bonds is currently disabled for attached and OCA orders.,no test
+error,10322,This API request for All is not supported for Dynamic Account Addition,no test
+error,10323,This API request for All is not supported for Dynamic Account Addition,no test
+error,10324,Invalid parameters for OCA group for exchange %s. Overfill Protection is implied.,no test
+error,10325,OCA group is not supported,no test
+error,10326,OCA group revision is not allowed,no test
+error,10327,OCA group type revision is not allowed,no test
+error,10328,"Connection lost, order data could not be resolved",no test
+error,10329,This order will be directly routed to %s.,no test
+error,10330,"The expiry date/time format is invalid. The correct format is yyyyMM, yyyyMMdd HH:mm:ss <time-zone> (operator or instrument time zone) or yy",no test
+error,10331,Any stop warning,no test
+error,10332,Cryptocurrency volatility warning,no test
+error,10333,Option Exercise at-the-money warning,no test
+error,10334,,no test
+error,10335,,no test
+error,10336,Per-leg executing broker configuration is not supported,no test
+error,10337,Misc options key=%s is invalid in %s request. Valid keys are: %s,src/api/client/tests.rs::req_scanner_subscription_refusals
+error,10338,Misc options value=%s is invalid for key=%s in %s request. Valid values are: %s,src/api/client/tests.rs::req_scanner_subscription_refusals
+error,10339,Setting end date/time for continuous future security type is not allowed,no test
+error,10340,The following order attribute is not supported: %s,no test
+error,10341,Parent order id cannot be modified,no test
+error,10342,The 'ImbalanceOnly' order attribute may not be specified for this order.,no test
+error,10343,"Selling Event Contracts is neither allowed directly, nor as an attached profit taker.",no test
+error,10344,Price value must be between 0.02 and 0.99 with a maximum of two decimal places.,no test
+error,10345,You cannot trade a %s,no test
+error,10346,Market data for %s cannot be delivered because ticker for the same financial instrument is displayed on %s,no test
+error,10347,"<html>This security has limited liquidity. If you choose to trade this security,<br> there is a heightened risk that you may not be able to ",no test
+error,10348,The 'OptOutFromSmartRouting' order attribute is not supported.,no test
+error,2147483647,,no test
+writer,35=D 131,,no test
+writer,35=D 11,ClOrdID,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 8476,,no test
+writer,35=D 44,Price,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::overnight_orders_are_sent_like_the_reference
+writer,35=D 6879,,no test
+writer,35=D 8262,,no test
+writer,35=D 8019,,no test
+writer,35=D 99,StopPx,src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference ; src/engine/hot_loop/order_builder.rs::peg_bench_request_matches_the_reference_and_signs_a_decrease ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+writer,35=D 6700,ModelCode,no test
+writer,35=D 8065,PTA allocation flag,no test
+writer,35=D 6160,AccountGroup,no test
+writer,35=D 6159,,no test
+writer,35=D 6240,StrictCreditCheck,no test
+writer,35=D 6164,,no test
+writer,35=D 8303,FA proportional allocation,no test
+writer,35=D 6806,FA auto close off,no test
+writer,35=D 6894,,no test
+writer,35=D 6895,,no test
+writer,35=D 6834,,no test
+writer,35=D 6835,,no test
+writer,35=D 6836,,no test
+writer,35=D 6936,,no test
+writer,35=D 8291,,no test
+writer,35=D 126,ExpireTime,no test
+writer,35=D 432,ExpireDate,no test
+writer,35=D 114,,no test
+writer,35=D 5700,,no test
+writer,35=D 6086,,no test
+writer,35=D 1688,,no test
+writer,35=D 97,,no test
+writer,35=D 6257,AdjustableFlag,no test
+writer,35=D 6261,AdjOrderType,no test
+writer,35=D 6258,AdjTriggerPrice,no test
+writer,35=D 6259,AdjStopPrice,no test
+writer,35=D 6262,AdjStopLimitPrice,no test
+writer,35=D 6260,,no test
+writer,35=D 6117,TrailStopPrice,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame ; src/engine/hot_loop/order_builder.rs::new_stop_orders_are_the_captured_frames
+writer,35=D 8294,,no test
+writer,35=D 5960,AlgoParamValue,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame
+writer,35=D 5958,AlgoParamKey,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame
+writer,35=D 5957,AlgoParamCount,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame
+writer,35=D 9816,Volatility,no test
+writer,35=D 6516,,no test
+writer,35=D 6858,,no test
+writer,35=D 8425,,no test
+writer,35=D 6270,,no test
+writer,35=D 6271,,no test
+writer,35=D 6661,,no test
+writer,35=D 6121,OrderId,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 6119,ClientId,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 6981,,no test
+writer,35=D 6982,,no test
+writer,35=D 6989,,no test
+writer,35=D 38,OrderQty,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 40,OrdType,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 211,PegDifference,src/engine/hot_loop/order_builder.rs::peg_mid_matches_the_reference ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::new_stop_orders_are_the_captured_frames
+writer,35=D 18,ExecInst,src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference ; src/engine/hot_loop/order_builder.rs::peg_bench_request_matches_the_reference_and_signs_a_decrease ; src/engine/hot_loop/order_builder.rs::peg_mid_matches_the_reference
+writer,35=D 55,Symbol,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 200,MaturityMonthYear,no test
+writer,35=D 201,PutOrCall,no test
+writer,35=D 202,StrikePrice,no test
+writer,35=D 167,SecurityType,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 48,SecurityID,no test
+writer,35=D 22,SecurityIDSource,no test
+writer,35=D 231,ContractMultiplier,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 54,Side,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 59,TimeInForce,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 6436,,no test
+writer,35=D 47,,no test
+writer,35=D 8032,,no test
+writer,35=D 6287,,no test
+writer,35=D 100,ExDestination,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 6210,RoutingDest,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 6008,ConId,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 6147,,no test
+writer,35=D 6079,,no test
+writer,35=D 6080,,no test
+writer,35=D 6081,,no test
+writer,35=D 6082,,no test
+writer,35=D 6209,OcaType,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+writer,35=D 6088,Source,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 6091,WhatIf,src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6406,,no test
+writer,35=D 6107,ParentId,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+writer,35=D 6128,CondIgnoreRTH,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+writer,35=D 6151,CondCancelOrder,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+writer,35=D 6156,,no test
+writer,35=D 9823,,no test
+writer,35=D 15,Currency,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 6211,OrderRef,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 6238,,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
+writer,35=D 6251,,no test
+writer,35=D 207,SecurityExchange,no test
+writer,35=D 6899,,no test
+writer,35=D 6239,,no test
+writer,35=D 6407,,no test
+writer,35=D 6958,,no test
+writer,35=D 8441,,no test
+writer,35=D 8442,,no test
+writer,35=G 11,ClOrdID,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 41,OrigClOrdID,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 8476,,no test
+writer,35=G 44,Price,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_limit_moves_both_prices_like_reference
+writer,35=G 6879,,no test
+writer,35=G 8262,,no test
+writer,35=G 8019,,no test
+writer,35=G 99,StopPx,src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_limit_moves_both_prices_like_reference ; src/engine/hot_loop/order_builder.rs::replace_trailing_amount_matches_reference
+writer,35=G 6700,ModelCode,no test
+writer,35=G 8065,PTA allocation flag,no test
+writer,35=G 6160,AccountGroup,no test
+writer,35=G 6159,,no test
+writer,35=G 6240,StrictCreditCheck,no test
+writer,35=G 6164,,no test
+writer,35=G 8303,FA proportional allocation,no test
+writer,35=G 6806,FA auto close off,no test
+writer,35=G 6894,,no test
+writer,35=G 6895,,no test
+writer,35=G 6834,,no test
+writer,35=G 6835,,no test
+writer,35=G 6836,,no test
+writer,35=G 6936,,no test
+writer,35=G 8291,,no test
+writer,35=G 126,ExpireTime,src/engine/hot_loop/order_builder.rs::replace_good_till_stop_matches_reference ; src/test_support/normalise.rs::order_times_are_kept
+writer,35=G 432,ExpireDate,no test
+writer,35=G 114,,no test
+writer,35=G 5700,,no test
+writer,35=G 6086,,no test
+writer,35=G 1688,,no test
+writer,35=G 97,,no test
+writer,35=G 6257,AdjustableFlag,no test
+writer,35=G 6261,AdjOrderType,no test
+writer,35=G 6258,AdjTriggerPrice,no test
+writer,35=G 6259,AdjStopPrice,no test
+writer,35=G 6262,AdjStopLimitPrice,no test
+writer,35=G 6260,,no test
+writer,35=G 6117,TrailStopPrice,src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_limit_moves_both_prices_like_reference ; src/engine/hot_loop/order_builder.rs::replace_good_till_stop_matches_reference
+writer,35=G 8294,,no test
+writer,35=G 5960,AlgoParamValue,no test
+writer,35=G 5958,AlgoParamKey,no test
+writer,35=G 5957,AlgoParamCount,no test
+writer,35=G 9816,Volatility,no test
+writer,35=G 6516,,no test
+writer,35=G 6858,,no test
+writer,35=G 8425,,no test
+writer,35=G 6121,OrderId,no test
+writer,35=G 6119,ClientId,no test
+writer,35=G 6981,,no test
+writer,35=G 6982,,no test
+writer,35=G 6989,,no test
+writer,35=G 38,OrderQty,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 54,Side,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 40,OrdType,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 211,PegDifference,src/engine/hot_loop/order_builder.rs::replace_trailing_amount_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_trailing_limit_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_trailing_percent_matches_reference
+writer,35=G 18,ExecInst,src/engine/hot_loop/order_builder.rs::replace_trailing_amount_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_trailing_percent_matches_reference ; src/engine/hot_loop/order_builder.rs::peg_bench_replace_restates_the_starting_price
+writer,35=G 55,Symbol,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 200,MaturityMonthYear,no test
+writer,35=G 201,PutOrCall,no test
+writer,35=G 202,StrikePrice,no test
+writer,35=G 167,SecurityType,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 6035,Underlying,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 59,TimeInForce,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 6436,,no test
+writer,35=G 6008,ConId,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 6147,,no test
+writer,35=G 6079,,no test
+writer,35=G 6080,,no test
+writer,35=G 6081,,no test
+writer,35=G 6082,,no test
+writer,35=G 6088,Source,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 6211,OrderRef,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 6238,,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
+writer,35=G 8441,,no test
+writer,35=G 8442,,no test
+writer,35=F 11,ClOrdID,no test
+writer,35=F 41,OrigClOrdID,no test
+writer,35=F 8476,,no test
+writer,35=F 38,OrderQty,no test
+writer,35=F 54,Side,no test
+writer,35=F 1,Account,no test
+writer,35=F 6700,ModelCode,no test
+writer,35=F 6008,ConId,no test
+writer,35=F 6088,Source,no test
+writer,35=F 97,,no test
+writer,35=F 6516,,no test
+writer,35=F 6901,NoLegPriceChange,no test
+writer,35=F 6944,CancelSource,no test
+writer,35=F 8187,,no test
+order_request,SubmitLimit,,src/api/client/tests.rs::place_order_limit ; src/engine/context.rs::submit_limit_drains_correctly ; src/engine/context.rs::submit_limit_uses_current_bid
+order_request,SubmitMarket,,src/api/client/tests.rs::place_order_market ; src/api/client/tests.rs::place_order_sell_side ; src/api/client/tests.rs::place_order_short_sell_side
+order_request,SubmitStop,,src/api/client/tests.rs::place_order_empty_tif_stays_plain ; src/api/client/tests.rs::place_order_stop ; src/api/client/tests.rs::stp_order_with_valid_aux_price_succeeds
+order_request,SubmitStopLimit,,src/api/client/tests.rs::place_order_stop_limit ; src/engine/hot_loop/order_builder.rs::stop_orders_carry_the_stop_trigger ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLimitGtc,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference ; src/engine/hot_loop/order_builder.rs::option_orders_carry_the_option_terms
+order_request,SubmitStopGtc,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitStopLimitGtc,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLimitIoc,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLimitFok,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitTrailingStop,,src/api/client/tests.rs::place_order_trailing_stop_carries_initial_trigger ; src/api/client/tests.rs::place_order_trailing_stop_without_trigger_is_unset ; src/api/client/tests.rs::place_order_trailing_stop_amount
+order_request,SubmitTrailingStopLimit,,src/api/client/tests.rs::place_order_trailing_stop_limit ; src/engine/hot_loop/order_builder.rs::trail_limit_with_a_limit_price_sends_44_and_no_offset ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitTrailingStopPct,,src/api/client/tests.rs::place_order_trailing_stop_percent ; src/api/client/tests.rs::trail_order_with_trailing_percent_succeeds ; src/api/client/tests.rs::percent_trail_rounds_to_basis_points
+order_request,SubmitTrailingStopPctEx,,no test
+order_request,SubmitMoc,,src/api/client/tests.rs::place_order_moc ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLoc,,src/api/client/tests.rs::place_order_loc ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitMit,,src/api/client/tests.rs::place_order_mit ; src/engine/hot_loop/order_builder.rs::stop_orders_carry_the_stop_trigger ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLit,,src/api/client/tests.rs::place_order_lit ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitBracket,,src/engine/hot_loop/order_builder.rs::bracket_children_link_to_the_parent_like_the_reference ; src/engine/hot_loop/order_builder.rs::new_orders_carry_the_contract_id_after_the_routing_field ; src/engine/hot_loop/order_builder.rs::bracket_stop_child_carries_the_stop_trigger
+order_request,SubmitLimitEx,,src/api/client/tests.rs::place_order_limit_gtc_uses_limit_ex ; src/api/client/tests.rs::place_order_limit_hidden_uses_limit_ex ; src/api/client/tests.rs::customer_account_is_sent_when_the_account_config_allows_it
+order_request,SubmitEx,,src/api/client/tests.rs::place_order_adjustable_stop_child_keeps_parent_oca_and_tif ; src/api/client/tests.rs::place_order_stop_with_parent_and_gtc_uses_submit_ex ; src/api/client/tests.rs::place_order_market_outside_rth_uses_submit_ex
+order_request,SubmitRel,,src/api/client/tests.rs::place_order_rel ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLimitOpg,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitAdaptive,,src/engine/hot_loop/order_builder.rs::adaptive_bracket_child_carries_parent_oca_and_gtc
+order_request,SubmitMtl,,src/api/client/tests.rs::place_order_mtl ; src/api/client/tests.rs::place_order_box_top ; src/engine/context.rs::submit_box_top_reuses_mtl
+order_request,SubmitMktPrt,,src/api/client/tests.rs::place_order_mkt_prt ; src/engine/hot_loop/order_builder.rs::pegged_types_not_in_the_list_are_refused_with_387 ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitStpPrt,,src/api/client/tests.rs::place_order_stp_prt ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitMidPrice,,src/api/client/tests.rs::place_order_midprice ; src/engine/hot_loop/order_builder.rs::midprice_keeps_the_contract_routing ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitSnapMkt,,src/api/client/tests.rs::place_order_snap_mkt ; src/client_core.rs::snap_orders_take_the_offset_from_aux_price ; src/engine/hot_loop/order_builder.rs::snap_orders_carry_the_offset_in_both_price_fields_like_the_reference
+order_request,SubmitSnapMid,,src/api/client/tests.rs::place_order_snap_mid ; src/engine/hot_loop/order_builder.rs::snap_orders_carry_the_offset_in_both_price_fields_like_the_reference ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitSnapPri,,src/api/client/tests.rs::place_order_snap_pri ; src/engine/hot_loop/order_builder.rs::snap_orders_carry_the_offset_in_both_price_fields_like_the_reference ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitPegMkt,,src/api/client/tests.rs::place_order_peg_mkt ; src/engine/hot_loop/order_builder.rs::peg_mkt_is_written_like_the_reference ; src/engine/hot_loop/order_builder.rs::pegged_types_not_in_the_list_are_refused_with_387
+order_request,SubmitPegMid,,src/api/client/tests.rs::place_order_peg_mid ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitAlgo,,src/engine/hot_loop/order_builder.rs::algo_bracket_child_carries_parent_oca_and_gtc ; src/engine/hot_loop/order_builder.rs::plain_algo_order_sends_no_attribute_fields ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+order_request,SubmitPegBench,,src/engine/context.rs::submit_peg_bench_drains_correctly ; src/engine/hot_loop/order_builder.rs::peg_bench_request_matches_the_reference_and_signs_a_decrease ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLimitAuc,,src/engine/context.rs::submit_limit_auc_drains_correctly ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitMtlAuc,,src/engine/context.rs::submit_mtl_auc_drains_correctly ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitWhatIf,,src/api/client/tests.rs::place_order_what_if ; src/api/client/tests.rs::what_if_on_a_working_order_id_is_a_preview_not_a_modify ; src/api/client/tests.rs::algo_what_if_is_a_preview
+order_request,SubmitLimitFractional,,src/engine/context.rs::submit_limit_fractional_drains_correctly ; src/engine/hot_loop/order_builder.rs::fractional_quantity_is_refused_with_10243
+order_request,SubmitAdjustableStop,,src/api/client/tests.rs::place_order_adjustable_trail_carries_trailing_amount_and_unit ; src/api/client/tests.rs::place_order_adjustable_trail_percent_unit_passes_through ; src/engine/context.rs::submit_adjustable_stop_drains_correctly
+order_request,Cancel,,src/api/client/tests.rs::cancel_order_sends_cancel_command ; src/api/client/tests.rs::cancel_during_modify_no_panic ; src/api/client/tests.rs::negative_ids_round_trip
+order_request,CancelAll,,src/api/client/tests.rs::req_global_cancel_sends_cancel_all_for_each_instrument ; src/engine/context.rs::cancel_all_drains_correctly ; src/engine/hot_loop/ccp.rs::recovered_order_is_inside_the_global_cancel_range
+order_request,Modify,,src/api/client/tests.rs::place_order_type_aliases ; src/api/client/tests.rs::what_if_on_a_working_order_id_is_a_preview_not_a_modify ; src/api/client/tests.rs::modify_limit_order_price_via_resubmit
+eclient,req_positions,,src/api/client/tests.rs::req_positions_delivers_via_wrapper ; src/api/client/tests.rs::req_positions_empty_still_calls_position_end ; src/api/client/tests.rs::req_positions_sends_a_row_on_each_change
+eclient,req_pnl,,src/api/client/tests.rs::a_pnl_request_subscribes_the_quotes_it_needs_and_cancels_them_after ; src/api/client/tests.rs::a_pnl_quote_becomes_the_callers_subscription ; src/api/client/tests.rs::no_internal_quote_when_the_caller_has_one
+eclient,cancel_pnl,,src/api/client/tests.rs::a_pnl_request_subscribes_the_quotes_it_needs_and_cancels_them_after ; src/api/client/tests.rs::a_pnl_quote_becomes_the_callers_subscription ; tests/scenarios.rs::cancel_pnl_stops_dispatch
+eclient,req_pnl_single,,tests/scenarios.rs::pnl_single_dispatches_position_info
+eclient,cancel_pnl_single,,tests/scenarios.rs::pnl_single_dispatches_position_info
+eclient,req_account_summary,,src/api/client/tests.rs::account_summary_is_a_server_subscription ; src/api/client/tests.rs::account_summary_refusals_and_limit ; tests/scenarios.rs::account_summary_delivers_each_server_batch
+eclient,cancel_account_summary,,src/api/client/tests.rs::account_summary_is_a_server_subscription ; tests/scenarios.rs::cancel_account_summary_prevents_delivery
+eclient,req_account_updates,,src/api/client/tests.rs::process_msgs_delivers_update_portfolio ; src/api/client/tests.rs::account_updates_send_the_image_then_the_end_once ; src/api/client/tests.rs::a_second_subscribe_sends_nothing
+eclient,cancel_positions,,src/api/client/tests.rs::req_positions_sends_a_row_on_each_change
+eclient,req_managed_accts,,no test
+eclient,req_account_updates_multi,,src/api/client/tests.rs::a_key_also_in_the_ledger_is_a_ledger_key ; src/api/client/tests.rs::account_updates_multi_carries_its_request_id_and_model_code
+eclient,cancel_account_updates_multi,,src/api/client/tests.rs::account_updates_multi_carries_its_request_id_and_model_code
+eclient,req_positions_multi,,src/api/client/tests.rs::positions_multi_carries_its_request_id_and_updates
+eclient,cancel_positions_multi,,src/api/client/tests.rs::positions_multi_carries_its_request_id_and_updates
+eclient,account,,src/api/client/tests.rs::account_reads_shared_state ; tests/scenarios.rs::account_state_via_eclient
+eclient,process_msgs,,src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals ; src/api/client/tests.rs::tick_by_tick_reports_by_request_type ; src/api/client/tests.rs::place_order_unknown_trigger_method_is_refused
+eclient,req_mkt_data,,src/api/client/tests.rs::req_mkt_data_sends_register_and_subscribe ; src/api/client/tests.rs::symbol_only_requests_are_looked_up_not_keyed_on_con_id_0 ; src/api/client/tests.rs::req_mkt_data_defaults_to_realtime_mode
+eclient,req_mkt_data_ex,,src/api/client/tests.rs::req_mkt_data_ex_propagates_mode_9887
+eclient,calculate_implied_volatility,,no test
+eclient,calculate_option_price,,no test
+eclient,cancel_calculate_implied_volatility,,no test
+eclient,cancel_calculate_option_price,,no test
+eclient,cancel_mkt_data,,src/api/client/tests.rs::cancel_mkt_data_sends_unsubscribe ; src/api/client/tests.rs::cancel_mkt_data_unknown_req_id_no_panic ; src/api/client/tests.rs::market_data_duplicate_id_and_unknown_cancel
+eclient,req_tick_by_tick_data,,src/api/client/tests.rs::req_tick_by_tick_data_sends_subscribe_tbt ; src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals
+eclient,cancel_tick_by_tick_data,,src/api/client/tests.rs::tick_by_tick_reports_by_request_type ; src/api/client/tests.rs::cancel_tick_by_tick_data_sends_unsubscribe_tbt ; src/api/client/tests.rs::cancel_tick_by_tick_unknown_req_id_no_panic
+eclient,req_mkt_depth,,src/api/client/tests.rs::ids_outside_the_reference_range_drop_the_request
+eclient,cancel_mkt_depth,,src/api/client/tests.rs::a_negative_request_id_round_trips_through_the_engine_queues
+eclient,req_real_time_bars,,src/api/client/tests.rs::historical_requests_carry_contract_sec_type_and_exchange ; src/api/client/tests.rs::req_real_time_bars_sends_subscribe
+eclient,cancel_real_time_bars,,src/api/client/tests.rs::cancel_real_time_bars_sends_cancel
+eclient,req_ping,,src/api/client/tests.rs::rtt_none_until_measured_and_ping_sends_command
+eclient,last_rtt,,src/api/client/tests.rs::rtt_none_until_measured_and_ping_sends_command
+eclient,req_market_data_type,,src/api/client/tests.rs::market_data_type_outside_one_to_four_is_refused ; src/api/client/tests.rs::negative_ids_round_trip ; src/api/client/tests.rs::joining_a_delayed_subscription
+eclient,quote,,src/api/client/tests.rs::quote_escape_hatch
+eclient,quote_by_instrument,,src/api/client/tests.rs::quote_by_instrument_direct ; tests/error_edge_concurrency.rs::concurrent_quote_by_instrument
+eclient,connect,,no test
+eclient,connect_with_events,,no test
+eclient,server_version,,src/api/client/tests.rs::server_version_and_connection_time
+eclient,tws_connection_time,,src/api/client/tests.rs::server_version_and_connection_time
+eclient,is_connected,,src/api/client/tests.rs::is_connected_after_construction ; src/api/client/tests.rs::disconnect_sends_shutdown_and_clears_connected ; src/api/client/tests.rs::disconnect_idempotent
+eclient,disconnect,,src/api/client/tests.rs::disconnect_sends_shutdown_and_clears_connected ; src/api/client/tests.rs::disconnect_idempotent ; src/api/client/tests.rs::disconnect_joins_thread
+eclient,ccp_session_id,,src/api/client/tests.rs::ccp_session_id_matches_shared_reference
+eclient,misc_url,,src/api/client/tests.rs::misc_url_lookup_delegates_to_shared
+eclient,session_token_bytes,,src/api/client/tests.rs::session_token_bytes_roundtrip_through_biguint
+eclient,token_type,,src/api/client/tests.rs::token_type_default_is_empty
+eclient,place_order,,src/api/client/tests.rs::place_order_market ; src/api/client/tests.rs::place_order_limit ; src/api/client/tests.rs::place_order_trailing_stop_carries_initial_trigger
+eclient,cancel_order,,src/api/client/tests.rs::cancel_order_sends_cancel_command ; src/api/client/tests.rs::cancel_during_modify_no_panic ; src/api/client/tests.rs::negative_ids_round_trip
+eclient,cancel_order_by_perm_id,,no test
+eclient,req_global_cancel,,src/api/client/tests.rs::req_global_cancel_sends_cancel_all_for_each_instrument ; src/api/client/tests.rs::req_global_cancel_no_instruments_no_commands ; tests/error_edge_concurrency.rs::req_global_cancel_no_instruments_no_commands
+eclient,req_ids,,src/api/client/tests.rs::req_ids_calls_wrapper
+eclient,next_order_id,,src/api/client/tests.rs::next_order_id_monotonic
+eclient,req_open_orders,,src/api/client/tests.rs::open_order_requests_wait_for_the_order_replay
+eclient,req_all_open_orders,,src/api/client/tests.rs::open_order_requests_wait_for_the_order_replay
+eclient,req_completed_orders,,tests/scenarios.rs::req_completed_orders_drains_and_dispatches ; tests/scenarios.rs::req_completed_orders_empty_still_fires_end
+eclient,req_auto_open_orders,,no test
+eclient,req_executions,,src/api/client/tests.rs::commission_report_comes_from_the_commission_frame ; src/api/client/tests.rs::an_untracked_execution_is_returned_by_req_executions_only ; src/api/client/tests.rs::req_executions_without_a_commission_report_sends_the_execution_only
+eclient,parse_algo_params,,no test
+eclient,req_historical_data,,src/api/client/tests.rs::req_historical_data_sends_fetch_historical ; src/api/client/tests.rs::req_historical_data_refuses_unknown_bar_size_with_321 ; src/api/client/tests.rs::req_historical_data_accepts_reference_bar_size_in_any_case
+eclient,cancel_historical_data,,src/api/client/tests.rs::cancel_historical_data_sends_cancel ; src/api/client/tests.rs::a_negative_request_id_round_trips_through_the_engine_queues ; src/api/client/tests.rs::ids_outside_the_reference_range_drop_the_request
+eclient,req_head_time_stamp,,src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::req_head_time_stamp_sends_fetch ; src/api/client/tests.rs::historical_requests_carry_contract_sec_type_and_exchange
+eclient,req_contract_details,,src/api/client/tests.rs::req_contract_details_sends_fetch ; src/api/client/tests.rs::req_contract_details_forwards_filter_fields ; src/api/client/tests.rs::req_contract_details_forwards_identifier_lookup
+eclient,req_mkt_depth_exchanges,,no test
+eclient,req_matching_symbols,,src/api/client/tests.rs::req_matching_symbols_sends_fetch ; src/api/client/tests.rs::req_matching_symbols_checks_and_trims_the_pattern ; src/api/client/tests.rs::req_matching_symbols_refused_without_the_feature
+eclient,req_sec_def_opt_params,,src/api/client/tests.rs::req_sec_def_opt_params_checks_then_sends
+eclient,cancel_head_time_stamp,,no test
+eclient,req_market_rule,,src/api/client/tests.rs::req_market_rule_answers_known_rules_and_refuses_others
+eclient,req_news_bulletins,,src/api/client/tests.rs::process_msgs_dispatches_news_bulletin ; src/api/client/tests.rs::news_bulletin_delivery_modes ; tests/scenarios.rs::news_bulletins_gated_by_subscription
+eclient,cancel_news_bulletins,,src/api/client/tests.rs::news_bulletin_delivery_modes ; tests/scenarios.rs::news_bulletins_gated_by_subscription
+eclient,req_scanner_parameters,,src/api/client/tests.rs::req_scanner_parameters_sends_fetch
+eclient,req_scanner_subscription,,src/api/client/tests.rs::req_scanner_subscription_sends_subscribe ; src/api/client/tests.rs::req_scanner_subscription_filters ; src/api/client/tests.rs::req_scanner_subscription_refusals
+eclient,cancel_scanner_subscription,,src/api/client/tests.rs::cancel_scanner_subscription_sends_cancel
+eclient,req_historical_news,,src/api/client/tests.rs::req_historical_news_sends_fetch ; src/api/client/tests.rs::news_request_refusals
+eclient,req_news_article,,src/api/client/tests.rs::req_news_article_sends_fetch ; src/api/client/tests.rs::news_request_refusals
+eclient,req_fundamental_data,,src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::req_fundamental_data_sends_fetch
+eclient,cancel_fundamental_data,,src/api/client/tests.rs::cancel_fundamental_data_sends_cancel
+eclient,req_histogram_data,,src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::historical_requests_carry_contract_sec_type_and_exchange ; src/api/client/tests.rs::req_histogram_data_sends_fetch
+eclient,cancel_histogram_data,,src/api/client/tests.rs::cancel_histogram_data_sends_cancel
+eclient,req_historical_ticks,,src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::historical_requests_carry_contract_sec_type_and_exchange ; src/api/client/tests.rs::req_historical_ticks_sends_fetch
+eclient,req_historical_schedule,,src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::historical_requests_carry_contract_sec_type_and_exchange ; src/api/client/tests.rs::req_historical_schedule_sends_fetch
+eclient,req_smart_components,,live:tests/rust_api_gt.rs::api_gt_suite
+eclient,req_news_providers,,live:tests/rust_api_gt.rs::api_gt_suite
+eclient,req_current_time,,src/api/client/tests.rs::req_current_time_adds_the_logon_clock_offset
+eclient,request_fa,,src/api/client/tests.rs::fa_requests_on_a_non_fa_session_are_refused
+eclient,replace_fa,,src/api/client/tests.rs::fa_requests_on_a_non_fa_session_are_refused
+eclient,query_display_groups,,no test
+eclient,subscribe_to_group_events,,no test
+eclient,unsubscribe_from_group_events,,no test
+eclient,update_display_group,,no test
+eclient,req_soft_dollar_tiers,,live:tests/rust_api_gt.rs::api_gt_suite
+eclient,req_family_codes,,live:tests/rust_api_gt.rs::api_gt_suite
+eclient,set_server_log_level,,no test
+eclient,req_user_info,,live:tests/rust_api_gt.rs::api_gt_suite
+eclient,req_wsh_meta_data,,no test
+eclient,req_wsh_event_data,,no test
