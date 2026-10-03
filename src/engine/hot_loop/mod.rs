@@ -3869,9 +3869,9 @@ mod tests {
         engine.hmds.scanner_connect_failed(&shared);
         engine.hmds.scanner_link_restored(&mut engine.hmds_conn, &mut engine.hb, &shared);
         assert_eq!(errors(&shared), [
-            "4:165:HMDS server disconnect occurred.  Attempting reconnection...",
-            "4:165:HMDS connection attempt failed.  Connection will be re-attempted...",
-            "4:165:HMDS server connection was successful.",
+            "4:165:Historical Market Data Service query message:HMDS server disconnect occurred.  Attempting reconnection...",
+            "4:165:Historical Market Data Service query message:HMDS connection attempt failed.  Connection will be re-attempted...",
+            "4:165:Historical Market Data Service query message:HMDS server connection was successful.",
         ]);
         let sent = plain_messages_sent(&mut server);
         assert_eq!(sent.len(), 1);

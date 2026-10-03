@@ -381,10 +381,14 @@ pub(crate) struct NewsQuery {
 }
 
 /// Scanner notices of the historical data link, as the reference words
-/// them (ibx#457).
-const SCANNER_LINK_LOST: &str = "HMDS server disconnect occurred.  Attempting reconnection...";
-const SCANNER_LINK_RESTORED: &str = "HMDS server connection was successful.";
-const SCANNER_CONNECT_FAILED: &str = "HMDS connection attempt failed.  Connection will be re-attempted...";
+/// them (ibx#457): the text of 165 with the notice after its colon
+/// (`jextend.dt.e(String)` gives `d7.I.c(text)`, joined by
+/// `jextend.ac.a(String,String)`; ibx#485).
+const SCANNER_LINK_LOST: &str =
+    "Historical Market Data Service query message:HMDS server disconnect occurred.  Attempting reconnection...";
+const SCANNER_LINK_RESTORED: &str = "Historical Market Data Service query message:HMDS server connection was successful.";
+const SCANNER_CONNECT_FAILED: &str =
+    "Historical Market Data Service query message:HMDS connection attempt failed.  Connection will be re-attempted...";
 
 /// State of one leg of a multi-query bar request (ibx#408).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
