@@ -169,10 +169,15 @@ pub(crate) fn drain_and_send_orders(
         // nothing sent, as the reference; it does not round it (ibx#263,
         // replacing the snapping of ibx#216). The tick comes from the
         // market-data subscription ack; without one only a negative price
-        // is refused.
+        // is refused. A combo (BAG) is checked with its own rule, which
+        // allows a price at or below 0 (`jclient.dy.cP()`); its tick is the
+        // combo's, which ibx does not have, so only the sign rule applies
+        // and a combo passes (ibx#470).
+        let combo = order_req.combo().is_some()
+            || matches!(&order_req, OrderRequest::Modify { order_id, .. } if context.combos.orders.contains_key(order_id));
         let instrument = order_req.instrument().or_else(|| context.order(oid).map(|o| o.instrument));
-        let tick = instrument.map_or(0, |i| context.market.min_tick_scaled(i));
-        if let Some(id) = order_req.off_grid_order(tick) {
+        let tick = if combo { 0 } else { instrument.map_or(0, |i| context.market.min_tick_scaled(i)) };
+        if let Some(id) = order_req.off_grid_order(tick, combo) {
             let (code, message) = crate::client_core::PRICE_VARIATION;
             log::warn!("Order {} refused: a price off the price grid", id);
             shared.orders.push_order_error(id, code, message.into());

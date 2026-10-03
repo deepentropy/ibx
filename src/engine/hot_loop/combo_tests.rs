@@ -78,7 +78,6 @@ fn assert_same(ours: &[(u32, String)], theirs: &[(u32, String)]) {
             let v = match *t {
                 320 => label(v).to_string(),
                 11 | 41 => String::new(),
-                44 => format!("{}", v.parse::<f64>().unwrap()),
                 _ => v.clone(),
             };
             if is_attribute(*t) { attrs.push((*t, v)); } else { plain.push((*t, v)); }

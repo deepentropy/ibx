@@ -23,14 +23,18 @@ pub const PRICE_SCALE: i64 = 100_000_000; // 10^8
 pub const QTY_SCALE: i64 = 10_000; // 10^4
 
 /// Whether a price the reference checks is off the contract's price grid
-/// (ibx#263, reversing the snapping of ibx#216): negative (ib-agent#192 B5,
-/// a REL offset of -0.50 refused with 110), or not a multiple of `tick`
-/// when the tick is known (a non-positive tick: unknown, not checked).
+/// (ibx#263, reversing the snapping of ibx#216): negative where the rule
+/// does not allow it (ib-agent#192 B5, a REL offset of -0.50 refused with
+/// 110), or not a multiple of `tick` when the tick is known (a
+/// non-positive tick: unknown, not checked). The rule allows a price at or
+/// below 0 only when it says so (`jmarketrules.o.o(double)`: above 0, or
+/// its flag `ak`): a combo's rule does (`jclient.dy.cP()`, captured BAG
+/// limit prices of -73.15 and -50.10, ibx#470), a stock's does not.
 /// The reference refuses such an order with 110 and sends nothing
 /// (`jextend.dx.a(dy, boolean)@1886-1961`, `trader.common.b9.a(OrderCreator,
 /// o)`); it does not round it.
-pub fn off_grid(price: Price, tick: i64) -> bool {
-    price < 0 || (tick > 0 && price % tick != 0)
+pub fn off_grid(price: Price, tick: i64, signed: bool) -> bool {
+    (price < 0 && !signed) || (tick > 0 && price % tick != 0)
 }
 
 /// Maximum number of concurrently tracked instruments.
@@ -1435,18 +1439,19 @@ impl OrderRequest {
     }
 
     /// The order of this request with a price off the contract's price
-    /// grid (`off_grid`), as the reference checks it (ibx#263): None when
+    /// grid (`off_grid`, `signed` for a rule that allows prices at or
+    /// below 0), as the reference checks it (ibx#263): None when
     /// every checked price is on the grid. A bracket answers for the first
     /// leg found.
-    pub fn off_grid_order(&self, tick: i64) -> Option<OrderId> {
-        let off = |prices: &[Price]| prices.iter().any(|&p| off_grid(p, tick));
+    pub fn off_grid_order(&self, tick: i64, signed: bool) -> Option<OrderId> {
+        let off = |prices: &[Price]| prices.iter().any(|&p| off_grid(p, tick, signed));
         let checked: (OrderId, [Price; 2]) = match self {
             Self::Cancel { .. } | Self::CancelAll { .. }
             | Self::SubmitMarket { .. } | Self::SubmitMoc { .. }
             | Self::SubmitMtl { .. } | Self::SubmitMktPrt { .. }
             | Self::SubmitMtlAuc { .. }
             | Self::SubmitTrailingStopPct { .. } | Self::SubmitTrailingStopPctEx { .. } => return None,
-            Self::SubmitWhatIf { request } => return request.off_grid_order(tick),
+            Self::SubmitWhatIf { request } => return request.off_grid_order(tick, signed),
             Self::Modify { order_id, kind, .. } | Self::SubmitEx { order_id, kind, .. } => (*order_id, kind.grid_prices()),
             Self::SubmitLimit { order_id, price, .. }
             | Self::SubmitLimitGtc { order_id, price, .. }
@@ -2521,17 +2526,22 @@ mod tests {
 
     #[test]
     fn off_grid_is_a_negative_price_or_one_off_the_tick() {
-        assert!(!off_grid(15_012_000_000, TICK_CENT));
-        assert!(off_grid(15_012_300_000, TICK_CENT));
-        assert!(!off_grid(0, TICK_CENT));
+        assert!(!off_grid(15_012_000_000, TICK_CENT, false));
+        assert!(off_grid(15_012_300_000, TICK_CENT, false));
+        assert!(!off_grid(0, TICK_CENT, false));
         let nickel = 5 * TICK_CENT;
-        assert!(off_grid(10_02_000_000, nickel));
-        assert!(!off_grid(10_05_000_000, nickel));
+        assert!(off_grid(10_02_000_000, nickel, false));
+        assert!(!off_grid(10_05_000_000, nickel, false));
         // Unknown tick: only a negative price is refused (ib-agent#192 B5:
         // a REL offset of -0.50).
-        assert!(!off_grid(15_012_345_678, 0));
-        assert!(off_grid(-50_000_000, 0));
-        assert!(off_grid(-50_000_000, TICK_CENT));
+        assert!(!off_grid(15_012_345_678, 0, false));
+        assert!(off_grid(-50_000_000, 0, false));
+        assert!(off_grid(-50_000_000, TICK_CENT, false));
+        // A combo's rule allows a price at or below 0 (`jclient.dy.cP()`;
+        // captured BAG limits -73.15 and -50.10, ibx#470), on its tick.
+        assert!(!off_grid(-7_315_000_000, 0, true));
+        assert!(!off_grid(-5_010_000_000, TICK_CENT, true));
+        assert!(off_grid(-5_010_500_000, TICK_CENT, true));
     }
 
     #[test]
@@ -2539,30 +2549,30 @@ mod tests {
         let stop_limit = |price, stop_price| OrderRequest::SubmitStopLimit {
             order_id: 3, instrument: 0, side: Side::Buy, qty: 1, price, stop_price,
         };
-        assert_eq!(stop_limit(15_012_000_000, 15_100_000_000).off_grid_order(TICK_CENT), None);
-        assert_eq!(stop_limit(15_012_345_678, 15_100_000_000).off_grid_order(TICK_CENT), Some(3));
-        assert_eq!(stop_limit(15_012_000_000, 15_099_999_999).off_grid_order(TICK_CENT), Some(3));
+        assert_eq!(stop_limit(15_012_000_000, 15_100_000_000).off_grid_order(TICK_CENT, false), None);
+        assert_eq!(stop_limit(15_012_345_678, 15_100_000_000).off_grid_order(TICK_CENT, false), Some(3));
+        assert_eq!(stop_limit(15_012_000_000, 15_099_999_999).off_grid_order(TICK_CENT, false), Some(3));
         let ex = |kind| OrderRequest::SubmitEx {
             order_id: 4, instrument: 0, side: Side::Sell, qty: 1, kind, tif: b'1', attrs: OrderAttrs::default(),
         };
-        assert_eq!(ex(OrderKind::Stop { stop_price: 24_000_123_456 }).off_grid_order(TICK_CENT), Some(4));
-        assert_eq!(ex(OrderKind::Rel { price: 0, offset: -50_000_000 }).off_grid_order(TICK_CENT), Some(4));
+        assert_eq!(ex(OrderKind::Stop { stop_price: 24_000_123_456 }).off_grid_order(TICK_CENT, false), Some(4));
+        assert_eq!(ex(OrderKind::Rel { price: 0, offset: -50_000_000 }).off_grid_order(TICK_CENT, false), Some(4));
         // Not checked: a percent, a trailing stop price, a TRAIL LIMIT offset.
-        assert_eq!(ex(OrderKind::TrailPct { trail_percent: 123_900_000, trail_stop_price: 1 }).off_grid_order(TICK_CENT), None);
-        assert_eq!(ex(OrderKind::TrailingStop { trail_amt: TICK_CENT, trail_stop_price: 1 }).off_grid_order(TICK_CENT), None);
+        assert_eq!(ex(OrderKind::TrailPct { trail_percent: 123_900_000, trail_stop_price: 1 }).off_grid_order(TICK_CENT, false), None);
+        assert_eq!(ex(OrderKind::TrailingStop { trail_amt: TICK_CENT, trail_stop_price: 1 }).off_grid_order(TICK_CENT, false), None);
         assert_eq!(ex(OrderKind::TrailingStopLimit { lmt_offset: 1, lmt_price: None, trail_amt: TICK_CENT, trail_stop_price: 0 })
-            .off_grid_order(TICK_CENT), None);
-        assert_eq!(ex(OrderKind::TrailingStop { trail_amt: 1, trail_stop_price: 0 }).off_grid_order(TICK_CENT), Some(4));
+            .off_grid_order(TICK_CENT, false), None);
+        assert_eq!(ex(OrderKind::TrailingStop { trail_amt: 1, trail_stop_price: 0 }).off_grid_order(TICK_CENT, false), Some(4));
         // A what-if is checked as its order; a bracket answers for its leg.
         let what_if = OrderRequest::SubmitWhatIf { request: Box::new(stop_limit(15_012_345_678, 0)) };
-        assert_eq!(what_if.off_grid_order(TICK_CENT), Some(3));
+        assert_eq!(what_if.off_grid_order(TICK_CENT, false), Some(3));
         let bracket = OrderRequest::SubmitBracket {
             parent_id: 10, tp_id: 11, sl_id: 12, instrument: 0, side: Side::Buy, qty: 1,
             entry_price: 100 * PRICE_SCALE, take_profit: 110 * PRICE_SCALE, stop_loss: 90 * PRICE_SCALE + 1,
         };
-        assert_eq!(bracket.off_grid_order(TICK_CENT), Some(12));
+        assert_eq!(bracket.off_grid_order(TICK_CENT, false), Some(12));
         // Unknown tick: nothing off the grid but a negative price.
-        assert_eq!(stop_limit(15_012_345_678, 0).off_grid_order(0), None);
+        assert_eq!(stop_limit(15_012_345_678, 0).off_grid_order(0, false), None);
     }
 
     #[test]
