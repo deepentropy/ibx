@@ -5797,7 +5797,7 @@ mod depth_tests {
     }
 
     /// The definition lookups sent on the CCP link: (name, exchange).
-    fn ccp_lookups(server: &mut std::net::TcpStream) -> Vec<(String, String)> {
+    fn ccp_lookups(server: &mut crate::protocol::connection::MemTransport) -> Vec<(String, String)> {
         use std::io::Read;
         server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let mut buf = Vec::new();
