@@ -154,6 +154,13 @@ impl EClient {
         o.trail_stop_price = src.trail_stop_price;
         o.algo_strategy = src.algo_strategy.clone();
         o.what_if = src.what_if;
+        // As the Rust client's openOrder (ibx#487: found by the scenario
+        // replay of the Python client, 26/09/2026 lmt_cancel and oca_group).
+        o.client_id = src.client_id;
+        o.oca_group = src.oca_group.clone();
+        o.good_after_time = src.good_after_time.clone();
+        o.good_till_date = src.good_till_date.clone();
+        o.trailing_percent = src.trailing_percent;
         // A combo's per-leg prices and routing (ibx#470).
         for price in &src.order_combo_legs {
             o.order_combo_legs.push(Py::new(py, super::super::contract::OrderComboLeg { price: *price })?.into_any());
